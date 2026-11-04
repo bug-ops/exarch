@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-02
+updated: 2026-11-04
 status: draft
 related:
   - "[[constitution]]"
@@ -150,6 +150,9 @@ THEN extraction respects those settings
 | FR-100 | A progress callback that throws SHALL surface as the rejection or throw with `code` `PROGRESS_CALLBACK_ERROR`, the exception as `cause` (the `\| progressCallbackError` message marker is removed), and, when the operation itself succeeded, the counters: `filesExtracted`/`bytesWritten`/`filesSkipped`/`warnings` for an extraction (`writes: 'kept'`), `filesAdded` and `bytesWritten` for a creation, `writes: 'discarded'` for an in-memory extraction; if the operation failed, the core error stays primary with the callback's exception as `cause` (v0.8.0, #760, #768, #783, #790) | must |
 | FR-101 | THE SYSTEM SHALL expose in-memory functions on `Uint8Array` input: `listArchiveBytes(data, config?, format?)`, `verifyArchiveBytes(data, config?, options?, format?)`, `extractArchiveToMemory(data, config?, options?, maxBytes?, pathModel?, format?)` resolving `MemoryExtraction { report, entries }` of `MemoryEntry { path, kind, data?, mode?, target? }`, and `createArchiveToBytes(sources, format, config?)` resolving `CreatedArchive { data, report }`, each with a `Sync` counterpart; `listArchiveBytesWithProgress`, `verifyArchiveBytesWithProgress` and `extractArchiveToMemoryWithProgress` take the same `(err, [path, total, current, bytesWritten])` callback as the path-based progress functions. `data` is copied before the call returns; `maxBytes` must be a positive whole number (default the config's `maxTotalSize`); `pathModel` is `'host'` or `'portable'`; `atomic` is unsupported; `format` is detected from the leading bytes when omitted; `'SevenZ'` cannot be created (`INVALID_CONFIGURATION`); a `MemoryEntry.data` is a plain `Uint8Array`, not a `Buffer` ([[020-reader-sink-and-in-memory-api/spec]]; v0.8.0, #776, #787, #790) | must |
 | FR-102 | Quota errors for a single oversized file SHALL use the core wording `single file size` (v0.8.0, #760, #768) | should |
+| FR-103 | THE SYSTEM SHALL expose `extractArchiveToCallback(data, onEntry, config?, options?, pathModel?, format?, signal?)` (Promise) and `extractArchiveToCallbackSync`, delivering each verified entry to `onEntry` (which may return a promise in the async form; the sync form fails with a `TypeError` for a promise) through `extract_reader_to_callback`; `data` MAY be an `AsyncIterable<Uint8Array>` (TAR family) in the async in-memory functions, read on a worker thread and closed with `return()` however the call ends; a throw or rejection of `onEntry` rejects with `ENTRY_CALLBACK_ERROR`, an iterable that throws with `STREAM_ERROR`, and the abort reason is kept when the abort is raised from `onEntry`; `index.d.ts` uses `AsyncIterable` and needs the `es2018` lib (v0.8.0, #842, #860, #884) | must |
+| FR-104 | The seven async in-memory functions that take an `AsyncIterable` SHALL accept an optional trailing `signal` (`AbortSignalLike`); aborting rejects with `ABORT_ERR` and frees the blocking worker, the abort being noticed when the job starts, while it waits for JavaScript, at every read of a `Uint8Array` archive and at each progress callback; a pending `onEntry` call is abandoned, not cancelled; a `signal` that is not an `AbortSignal` throws a `TypeError` synchronously (v0.8.0, #848, #856) | must |
+| FR-105 | THE SYSTEM SHALL expose `extractArchiveToMemoryWithProgressSync`, `listArchiveBytesWithProgressSync` and `verifyArchiveBytesWithProgressSync`, and every error SHALL carry `subCode` and `setting` as properties with typings when core supplies them (v0.8.0, #842, #865, #870) | should |
 
 ## 4. Non-Functional Requirements
 
@@ -300,14 +303,17 @@ Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.
 | `ZipInconsistency` | `ZIP_INCONSISTENCY` (v0.7.0, #671) |
 | `InvalidPermissions` | `INVALID_PERMISSIONS` |
 | `QuotaExceeded` | `QUOTA_EXCEEDED` |
-| `SecurityViolation` | `SECURITY_VIOLATION`, with `relaxableBy` set only when a setting relaxes the refusal (v0.7.0, #741, #757); a path rejected at the JS boundary (null byte, too long) is also `SECURITY_VIOLATION` |
+| `SecurityViolation` | `SECURITY_VIOLATION`, with `relaxableBy` set only when a setting relaxes the refusal (v0.7.0, #741, #757) and `subCode` always set to a `SecurityViolationSubCode` (v0.8.0, #865); a path rejected at the JS boundary (null byte, too long) is also `SECURITY_VIOLATION` |
 | `UnknownFormat`, `ReaderFormat(Unrecognized)` | `UNKNOWN_FORMAT` |
-| `InvalidConfiguration`, `ReaderFormat(NeedsSeek \| NotAtStart)` | `INVALID_CONFIGURATION` (also a rejected setter value) |
-| `InvalidArchive` | `INVALID_ARCHIVE`, with `subCode` set when the failure is classified, for example `ZIP_READER` for a ZIP reader failure (#889, #946; see [[001-security-pipeline/spec]] FR-028) |
+| `InvalidConfiguration`, `ReaderFormat(NeedsSeek \| NotAtStart)` | `INVALID_CONFIGURATION` (also a rejected setter value), with `setting` naming the `ConfigSetting` when it names one (v0.8.0, #870, #894) |
+| `InvalidArchive` | `INVALID_ARCHIVE`, with `subCode` (an `InvalidArchiveSubCode`) set when the failure is classified: `TAR_AMBIGUITY`, `TAR_TRAILER`, `LINK_TARGET`, `DUPLICATE_ENTRY`, `ENTRY_NAME`, `DECLARED_SIZE`, `INTEGRITY` or `ZIP_READER` (#865, #887, #889, #894, #946; see [[001-security-pipeline/spec]] FR-028) |
 | `Io` | `IO_ERROR` |
 | `SourceNotFound`, `SourceNotAccessible`, `OutputExists`, `InvalidCompressionLevel` | `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`, `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL` |
 | `PartialExtraction` | The inner error's `code`; `writes` is `'kept'` with `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` set, `'rolled_back'` after an atomic rollback, or `'discarded'` after an in-memory extraction, the last two without counters (v0.6.0, #508; v0.7.0, #735, #747; v0.8.0, #760, #800) |
 | progress callback threw | `PROGRESS_CALLBACK_ERROR` (Node-only), the throw as `cause` (FR-100) |
+| entry callback threw or rejected | `ENTRY_CALLBACK_ERROR` (Node-only), the thrown value as `cause` (FR-103, v0.8.0, #842) |
+| `AsyncIterable` input threw | `STREAM_ERROR` (Node-only), the throw as `cause` (FR-103, v0.8.0, #842) |
+| `signal` aborted | `ABORT_ERR` (Node-only, an `AbortError`), `signal.reason` as `cause` (FR-104, v0.8.0, #848) |
 | error raised by the binding itself (negative size, internal panic, failed argument conversion) | napi status string such as `GenericFailure` or `InvalidArg` (`ExarchNativeError`) |
 
 > [!note] PartialExtraction fix in v0.4.0 and v0.4.1 (#210, #251)

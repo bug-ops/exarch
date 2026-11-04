@@ -10,7 +10,7 @@ tags:
   - cli
   - rust
 created: 2026-08-04
-updated: 2026-10-26
+updated: 2026-11-04
 status: implemented
 related:
   - "[[constitution]]"
@@ -163,6 +163,7 @@ THEN the error output includes the directory's actual current path, resolved via
 | FR-010 | THE SYSTEM SHALL NOT pre-delete a pre-existing destination directory before extraction is known to succeed; `--atomic --force` SHALL extract into a temp directory first and perform the swap only after extraction fully succeeds, with a failed final rename restoring the backup and reporting its path if that restore itself fails (#519, precursor to the swap-hardening in this spec) | must |
 | FR-011 | A pre-existing destination that exists but is not a directory (e.g. a regular file) SHALL be rejected with an explicit error, not silently replaced | must |
 | FR-012 | WHEN `--atomic --force` extraction fails inside the temp directory, THE SYSTEM SHALL report the failure as `ArchiveError::PartialExtraction` with `writes` set to `PartialWrites::RolledBack` (`err.rolled_back()`), and the `--json` `error.partial_report.writes` SHALL be `rolled_back`, so the counters are not presented as leftovers on disk (v0.7.0, #725, #728); since v0.8.0 the CLI takes the same atomic path implicitly, with the same `rolled_back` outcome, for a TAR extracted into a destination that does not exist (see [[005-cli/spec]] FR-097, #799, #808) | must |
+| FR-013 | THE SYSTEM SHALL compare directory identities through a typed `FileIdentity` (`Known { dev, ino }` or an explicit `Unknown`, deliberately without `PartialEq`), so a platform with no stable identity cannot make a comparison succeed vacuously and each caller decides what an unverifiable identity means (v0.8.0, #878, #888) | must |
 
 ## 4. Non-Functional Requirements
 

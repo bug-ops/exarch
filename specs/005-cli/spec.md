@@ -8,7 +8,7 @@ tags:
   - cli
   - rust
 created: 2026-05-20
-updated: 2026-11-02
+updated: 2026-11-04
 status: draft
 related:
   - "[[constitution]]"
@@ -183,6 +183,10 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-099 | WHEN `extract --force` would replace an existing directory or symlink with a file, THE CLI SHALL fail naming the entry (`refusing to replace the existing directory at d`) for TAR, ZIP and 7z (v0.8.0, #765, #768) | must |
 | FR-100 | WHEN `create` writes a ZIP, THE CLI SHALL surface the core warning for entries that default extraction would refuse as a zip bomb, naming the entry count and the `--max-compression-ratio` value that admits them, and `create --help` SHALL say so (v0.8.0, #801, #808) | should |
 | FR-101 | THE CLI SHALL build for `wasm32-wasip1` and pass a wasmtime smoke test in CI (v0.8.0, #755, #771) | should |
+| FR-102 | THE `--json` error envelope SHALL carry `error.sub_code` (the stable `SubCode` id, e.g. `TAR_AMBIGUITY`, `PATH_NAME`) always for a `SecurityViolation` and for an `InvalidArchive` that has a family (a `Malformation` with a sub-code, a TAR ambiguity or trailer refusal, a ZIP reader failure), and `error.setting` (the stable `ConfigSetting` id) for an `InvalidConfiguration` that names one; both are absent otherwise (v0.8.0, #865, #870, #887, #889, #894, #946) | must |
+| FR-103 | `extract` SHALL accept `--decode-reuse <off\|memory\|temp-file>` choosing where the ZIP structure check keeps what it decodes so compressed entries are not decoded twice; the default is memory up to 256 MiB, never more than `--max-total-size` or the decoder memory limit, it has no effect under `--zip-consistency ignore`, `temp-file` keeps the plaintext in an unnamed file in the temporary directory until extraction ends, and entries that do not fit are decoded again (v0.8.0, #857, #884) | should |
+| FR-104 | WHEN `extract` writes into an existing destination, THE CLI SHALL list a gz, bz2 or xz TAR and extract it from one decode (`ListedArchive`); `--atomic` SHALL decode a TAR once, so a refusal arrives as a `rolled_back` partial report and the progress bar has no total (v0.8.0, #828, #842) | should |
+| FR-105 | THE CLI SHALL compare the identity of the swap directories in `--atomic --force` through a typed `FileIdentity` (`Known { dev, ino }` or `Unknown`, with no `PartialEq`), so a platform that offers no stable identity cannot make a comparison succeed vacuously; `--force` SHALL replace an existing regular file through a sibling temp file and rename (see [[002-format-handlers/spec]] FR-052) (v0.8.0, #819, #878, #888) | must |
 
 ## 4. Non-Functional Requirements
 

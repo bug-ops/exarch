@@ -8,7 +8,7 @@ tags:
   - archive
   - rust
 created: 2026-05-20
-updated: 2026-11-02
+updated: 2026-11-04
 status: draft
 related:
   - "[[constitution]]"
@@ -191,6 +191,12 @@ THEN magic bytes take precedence over the extension
 | FR-048 | THE SYSTEM SHALL provide reader-based `list_reader`, `verify_reader` and `extract_to_sink` for TAR, ZIP and 7z (7z in `list_reader` and `verify_reader` since #771, in `extract_to_sink` since #787), and `verify` SHALL create no temporary directory (v0.8.0, #754, #771, #772, #787) | must |
 | FR-049 | WHEN a TAR's first member name starts with `BZh` but the leading bytes are not a complete bzip2 stream header, THE SYSTEM SHALL detect it as TAR rather than bzip2-compressed TAR; magic-byte detection reads 512 bytes and a ZIP, 7z, gzip, xz or zstd magic at offset 0 always wins over the `ustar` marker (v0.8.0, #781, #790) | must |
 | FR-050 | THE SYSTEM SHALL build `exarch-core` and `exarch-cli` for `wasm32-wasip1` (CI job `wasm`, wasmtime smoke test) (v0.8.0, #755, #771) | must |
+| FR-051 | WHEN `extract`, `list` or `verify` reads a TAR, THE SYSTEM SHALL refuse with `ArchiveError::TarAmbiguity(TarAmbiguity)` (`InvalidArchive`, sub-code `TAR_AMBIGUITY`) every construct that `bsdtar` or Python `tarfile` parse differently from the `tar` crate: a malformed, empty-key, over-long (above 999999 bytes), duplicate or `GNU.sparse.*`/`SCHILY.realsize` PAX record; a PAX `size` that is not decimal; a global PAX header that carries `path`, `linkpath` or `size`, exceeds the metadata limit, or follows a local PAX header or a GNU long record; a PAX `path`/`linkpath` stacked with a GNU long name/link record; an `x`, `L` or `K` header without a ustar or GNU magic; a GNU sparse entry; a `prefix` field without a ustar magic; a size or checksum field that is not a canonical octal or base-256 number (signed, space- or control-padded); a checksum mismatch; two extension headers of one kind before an entry; non-zero padding after an `x`, `g`, `L` or `K` body; an `L`/`K` body that is not one NUL-terminated string; and a directory, symlink or hardlink entry that declares a payload (`NonRegularPayload` with `TarNonRegularKind`) (v0.8.0, #820, #829, #837, #846, #848) | must |
+| FR-052 | WHEN `extract` replaces an existing regular file (`--force`) in TAR, ZIP or 7z, THE SYSTEM SHALL write a sibling temporary file whose name length does not depend on the entry name and rename it over the destination, instead of writing through the existing inode; the replacement succeeds for a read-only file, needs a writable parent directory, does not keep the previous owner, ACLs or extended attributes, and takes `0666 & ~umask` when the entry carries no mode, and 7z SHALL NOT delete the existing file before the replacement is decoded (v0.8.0, #819, #822, #828) | must |
+| FR-053 | WHEN a compressed TAR is read, THE SYSTEM SHALL bound the decode of entries it skips (allowlist or duplicate): their decoded bytes SHALL NOT exceed `max_compression_ratio` times the compressed input read so far, else `ArchiveError::ZipBomb` with `ZipBombScope::SkippedEntries`; an entry refused by quota SHALL NOT be decoded to its end, and `verify` with the integrity check applies the same bound as `extract` and `list` (v0.8.0, #863, #868, #884, #894) | must |
+| FR-054 | THE SYSTEM SHALL apply the extension allowlist after path validation and before quota in TAR, ZIP, 7z and `list`: a skipped entry is not charged to `max_total_size` (the list pass charges it to `max_file_count` only), a skipped entry with an invalid path or below an existing file or dangling symlink is refused rather than skipped, and the same files are extracted from every format whatever the destination state, leaving no directory behind for a skipped entry (v0.8.0, #831, #846) | must |
+| FR-055 | WHEN a TAR is extracted, listed or verified, THE SYSTEM SHALL read a source read error as `ArchiveError::Io` keeping its errno, not as `InvalidArchive` (v0.8.0, #858, #882, #884) | must |
+| FR-056 | THE SYSTEM SHALL make `ArchiveFormat::{extract, list, verify}` consume `self`, so the trait is not dyn-usable, has no `format_name`, and a second operation on one `TarArchive` is a compile error (v0.8.0, #875, #881, #888) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -374,6 +380,9 @@ FormatCreator:
 | 7z solid block with a stream-less entry between files | Listed, verified and extracted (v0.8.0, FR-046; previously refused) |
 | 7z block whose file sizes do not add up to its decoded size, or a block with data and no sub-streams | Refused before any byte is decoded (v0.8.0, FR-046) |
 | TAR whose first member name begins with `BZh` but is not a complete bzip2 header | Detected as TAR, not bzip2 (v0.8.0, FR-049) |
+| TAR header or extension-header construct that readers parse differently | `TarAmbiguity` (`InvalidArchive`, sub-code `TAR_AMBIGUITY`), message prefix `ambiguous TAR header: ` (v0.8.0, FR-051) |
+| Overwrite of a read-only or foreign-owned file | Replaced through temp file and rename (v0.8.0, FR-052) |
+| Compressed TAR whose skipped entries decode beyond the ratio limit | `ArchiveError::ZipBomb` with scope `skipped entries` (v0.8.0, FR-053) |
 | xz stream needing more decoder memory than `max_decoder_memory`, or a zstd frame (TAR) or zstd ZIP entry declaring a window above the largest power of two within it | `QuotaExceeded { resource: DecoderMemory { max } }` in `extract`, `list` and `verify` (FR-045, v0.8.0, #849) |
 | ZIP whose zstd frame walk exceeds the archive extent (defensive; the declared-size budget of the open bounds the ranges to the same extent, so it is not reachable from an archive that opens) | `InvalidArchive` (v0.8.0, #849) |
 | gzip or bzip2 stream with more members than its allowance | `QuotaExceeded { resource: CompressedMembers { members, allowance } }` (FR-039, v0.8.0, #851) |

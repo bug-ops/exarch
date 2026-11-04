@@ -22,6 +22,7 @@ const {
   createArchiveSync,
   SecurityConfig,
   ExtractionOptions,
+  SinkOptions,
 } = require('../index.js');
 
 function tarEntry(name, { type = '0', data = Buffer.alloc(0), link = '' } = {}) {
@@ -175,16 +176,28 @@ describe('extractArchiveToCallback', () => {
     assert.deepStrictEqual(seen, []);
   });
 
-  it('refuses atomic options', async () => {
-    await assert.rejects(
-      extractArchiveToCallback(
-        tar([file('a', '1')]),
-        () => {},
-        null,
-        new ExtractionOptions().withAtomic(true)
-      ),
-      { code: 'INVALID_CONFIGURATION' }
+  it('does not accept path extraction options, so atomic cannot be requested', () => {
+    assert.throws(
+      () =>
+        extractArchiveToCallback(
+          tar([file('a', '1')]),
+          () => {},
+          null,
+          new ExtractionOptions().withAtomic(true)
+        ),
+      { code: 'InvalidArg' }
     );
+  });
+
+  it('accepts SinkOptions', async () => {
+    const seen = [];
+    await extractArchiveToCallback(
+      tar([file('a', '1')]),
+      (entry) => seen.push(entry.path),
+      null,
+      new SinkOptions().setSkipDuplicates(false)
+    );
+    assert.deepStrictEqual(seen, ['a']);
   });
 });
 

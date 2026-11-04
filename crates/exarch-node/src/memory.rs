@@ -1,7 +1,6 @@
 //! Extraction of an archive held in memory into memory.
 
 use std::path::Path;
-use std::path::PathBuf;
 
 use exarch_core::CallbackEntry;
 use exarch_core::MemoryEntry as CoreMemoryEntry;
@@ -10,11 +9,12 @@ use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PathModel as CorePathModel;
 use exarch_core::SanitizedMode;
-use exarch_core::SinkOptions;
 use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::detect::ArchiveType as CoreArchiveType;
 use exarch_core::formats::detect::CreatableFormat;
 use napi::Env;
+use napi::bindgen_prelude::Either3;
+use napi::bindgen_prelude::Either4;
 use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::Result;
 use napi::bindgen_prelude::Uint8Array;
@@ -26,8 +26,8 @@ use crate::ProgressCallback;
 use crate::ProgressDispatch;
 use crate::abort::AbortBinding;
 use crate::config::CreationConfig;
-use crate::config::ExtractionOptions;
 use crate::config::SecurityConfig;
+use crate::config::SinkOptions;
 use crate::error::Failure;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
@@ -65,43 +65,96 @@ impl From<PathModel> for CorePathModel {
     }
 }
 
-/// What a `MemoryEntry` holds.
+/// The `kind` of a [`MemoryFileEntry`].
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryEntryKind {
+pub enum MemoryFileKind {
     /// A regular file.
     #[napi(value = "file")]
     File,
+}
+
+/// The `kind` of a [`MemoryDirectoryEntry`].
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryDirectoryKind {
     /// A directory the archive names explicitly.
     #[napi(value = "directory")]
     Directory,
+}
+
+/// The `kind` of a [`MemorySymlinkEntry`].
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemorySymlinkKind {
     /// A symbolic link, stored as data.
     #[napi(value = "symlink")]
     Symlink,
-    /// A hard link to an already delivered file, by reference; only
-    /// `extractArchiveToCallback` delivers it.
+}
+
+/// The `kind` of a [`MemoryHardlinkEntry`].
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryHardlinkKind {
+    /// A hard link to an already delivered entry, by reference.
     #[napi(value = "hardlink")]
     Hardlink,
 }
 
-/// An entry extracted into memory.
+/// A regular file extracted into memory.
 #[napi(object)]
-pub struct MemoryEntry {
+pub struct MemoryFileEntry {
     /// Entry path, relative, as delivered by extraction.
     pub path: String,
-    /// What the entry is.
-    pub kind: MemoryEntryKind,
+    /// Always `'file'`.
+    pub kind: MemoryFileKind,
     /// The file's bytes as a `Uint8Array` (a plain `Uint8Array`, not a
-    /// `Buffer`; input parameters accept both); only for a file.
-    pub data: Option<Uint8Array>,
-    /// Permission bits after setuid and setgid were stripped; only for a file
-    /// whose archive carries a mode.
+    /// `Buffer`; input parameters accept both).
+    pub data: Uint8Array,
+    /// Permission bits after setuid and setgid were stripped; absent when the
+    /// archive carries no mode.
     pub mode: Option<u32>,
-    /// For a symlink, the target as the archive spells it, relative to the
-    /// link; for a hardlink, the root-relative resolved path of an already
-    /// delivered entry, a file or an earlier hardlink. Absent for other kinds.
-    pub target: Option<String>,
 }
+
+/// A directory the archive names explicitly.
+#[napi(object)]
+pub struct MemoryDirectoryEntry {
+    /// Entry path, relative, as delivered by extraction.
+    pub path: String,
+    /// Always `'directory'`.
+    pub kind: MemoryDirectoryKind,
+}
+
+/// A symbolic link extracted into memory as data.
+#[napi(object)]
+pub struct MemorySymlinkEntry {
+    /// Entry path, relative, as delivered by extraction.
+    pub path: String,
+    /// Always `'symlink'`.
+    pub kind: MemorySymlinkKind,
+    /// The target as the archive spells it, relative to the link.
+    pub target: String,
+}
+
+/// A hard link delivered by reference; only `extractArchiveToCallback`
+/// delivers it.
+#[napi(object)]
+pub struct MemoryHardlinkEntry {
+    /// Entry path, relative, as delivered by extraction.
+    pub path: String,
+    /// Always `'hardlink'`.
+    pub kind: MemoryHardlinkKind,
+    /// The root-relative resolved path of an already delivered entry, a file
+    /// or an earlier hardlink.
+    pub target: String,
+}
+
+/// An entry held in the result of an extraction into memory.
+pub type StoredEntry = Either3<MemoryFileEntry, MemoryDirectoryEntry, MemorySymlinkEntry>;
+
+/// An entry delivered to an `onEntry` callback: a stored entry or a hardlink.
+pub type MemoryEntry =
+    Either4<MemoryFileEntry, MemoryDirectoryEntry, MemorySymlinkEntry, MemoryHardlinkEntry>;
 
 /// The text of `path`, or an error: a lossy conversion could merge two
 /// distinct entries into one name.
@@ -114,42 +167,42 @@ fn utf8(path: &Path) -> CoreResult<String> {
     })
 }
 
-impl TryFrom<(PathBuf, CallbackEntry)> for MemoryEntry {
-    type Error = Failure;
+fn stored_entry(path: &Path, entry: CoreMemoryEntry) -> CoreResult<StoredEntry> {
+    let path = utf8(path)?;
+    Ok(match entry {
+        CoreMemoryEntry::File { data, mode } => Either3::A(MemoryFileEntry {
+            path,
+            kind: MemoryFileKind::File,
+            data: Uint8Array::from(data),
+            mode: mode.map(SanitizedMode::as_u32),
+        }),
+        CoreMemoryEntry::Directory => Either3::B(MemoryDirectoryEntry {
+            path,
+            kind: MemoryDirectoryKind::Directory,
+        }),
+        CoreMemoryEntry::Symlink { target } => Either3::C(MemorySymlinkEntry {
+            path,
+            kind: MemorySymlinkKind::Symlink,
+            target: utf8(&target)?,
+        }),
+        _ => return Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
+    })
+}
 
-    fn try_from((path, entry): (PathBuf, CallbackEntry)) -> CoreResult<Self> {
-        let path = utf8(&path)?;
-        Ok(match entry {
-            CallbackEntry::Stored(CoreMemoryEntry::File { data, mode }) => Self {
-                path,
-                kind: MemoryEntryKind::File,
-                data: Some(Uint8Array::from(data)),
-                mode: mode.map(SanitizedMode::as_u32),
-                target: None,
-            },
-            CallbackEntry::Stored(CoreMemoryEntry::Symlink { target }) => Self {
-                path,
-                kind: MemoryEntryKind::Symlink,
-                data: None,
-                mode: None,
-                target: Some(utf8(&target)?),
-            },
-            CallbackEntry::Hardlink { target } => Self {
-                path,
-                kind: MemoryEntryKind::Hardlink,
-                data: None,
-                mode: None,
-                target: Some(utf8(target.as_path())?),
-            },
-            CallbackEntry::Stored(CoreMemoryEntry::Directory) => Self {
-                path,
-                kind: MemoryEntryKind::Directory,
-                data: None,
-                mode: None,
-                target: None,
-            },
-            _ => return Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
-        })
+/// Converts what the extraction delivered at `path` for a callback.
+pub fn callback_entry(path: &Path, entry: CallbackEntry) -> CoreResult<MemoryEntry> {
+    match entry {
+        CallbackEntry::Stored(stored) => Ok(match stored_entry(path, stored)? {
+            Either3::A(file) => Either4::A(file),
+            Either3::B(directory) => Either4::B(directory),
+            Either3::C(symlink) => Either4::C(symlink),
+        }),
+        CallbackEntry::Hardlink { target } => Ok(Either4::D(MemoryHardlinkEntry {
+            path: utf8(path)?,
+            kind: MemoryHardlinkKind::Hardlink,
+            target: utf8(target.as_path())?,
+        })),
+        _ => Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
     }
 }
 
@@ -159,14 +212,15 @@ pub struct MemoryExtraction {
     /// Extraction statistics.
     pub report: ExtractionReport,
     /// The extracted entries in path order.
-    pub entries: Vec<MemoryEntry>,
+    #[napi(ts_type = "Array<StoredMemoryEntry>")]
+    pub entries: Vec<StoredEntry>,
 }
 
 /// The inputs of an extraction into memory, owned so they can cross threads.
 struct MemoryJob<S> {
     data: S,
     config: exarch_core::SecurityConfig,
-    options: exarch_core::ExtractionOptions,
+    options: exarch_core::SinkOptions,
     max_bytes: Option<f64>,
     path_model: CorePathModel,
     format: Option<ArchiveType>,
@@ -176,7 +230,7 @@ impl<S: IntoSource> MemoryJob<S> {
     fn new(
         data: S,
         config: Option<&SecurityConfig>,
-        options: Option<&ExtractionOptions>,
+        options: Option<&SinkOptions>,
         max_bytes: Option<f64>,
         path_model: Option<PathModel>,
         format: Option<ArchiveType>,
@@ -184,7 +238,7 @@ impl<S: IntoSource> MemoryJob<S> {
         Self {
             data,
             config: config.map_or_default(|c| c.as_core().clone()),
-            options: options.map_or_default(|o| o.as_core().clone()),
+            options: options.map_or_default(SinkOptions::to_core),
             max_bytes,
             path_model: path_model.map_or(CorePathModel::Host, Into::into),
             format,
@@ -226,10 +280,9 @@ impl<S: IntoSource> MemoryJob<S> {
                     .map(MemoryLimit::new)
                     .map_err(Failure::Core)
             })
-            .transpose()
-            .and_then(|limit| Ok((limit, SinkOptions::try_from(&self.options)?)));
-        let (limit, options) = match prepared {
-            Ok(prepared) => prepared,
+            .transpose();
+        let limit = match prepared {
+            Ok(limit) => limit,
             Err(failure) => {
                 self.data.abandon();
                 return Err(failure);
@@ -237,7 +290,7 @@ impl<S: IntoSource> MemoryJob<S> {
         };
         let mut request = MemoryExtractRequest::default()
             .with_config(self.config.clone())
-            .with_options(options)
+            .with_options(self.options)
             .with_path_model(self.path_model);
         if let Some(limit) = limit {
             request = request.with_limit(limit);
@@ -257,7 +310,7 @@ fn into_memory_extraction(
         entries: sink
             .into_entries()
             .into_iter()
-            .map(|(path, entry)| MemoryEntry::try_from((path, CallbackEntry::from(entry))))
+            .map(|(path, entry)| stored_entry(&path, entry))
             .collect::<CoreResult<_>>()?,
     })
 }
@@ -307,7 +360,7 @@ pub fn extract_archive_to_memory_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
-    options: Option<&ExtractionOptions>,
+    options: Option<&SinkOptions>,
     max_bytes: Option<f64>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
@@ -449,7 +502,7 @@ pub fn create_archive_to_bytes_sync(
 ///   `AsyncIterable<Uint8Array>` (TAR family only), read from a worker thread
 ///   and closed (`return()`) however the call ends
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
-/// * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+/// * `options` - Optional `SinkOptions`
 /// * `maxBytes` - The most bytes to keep: payload (file data, hardlink copies
 ///   and symlink targets) plus path bytes plus 256 per entry; defaults to the
 ///   config's `maxTotalSize`
@@ -488,7 +541,7 @@ pub fn extract_archive_to_memory<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
-    options: Option<&ExtractionOptions>,
+    options: Option<&SinkOptions>,
     max_bytes: Option<f64>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
@@ -534,7 +587,7 @@ pub fn extract_archive_to_memory_sync(
     env: Env,
     data: Uint8Array,
     config: Option<&SecurityConfig>,
-    options: Option<&ExtractionOptions>,
+    options: Option<&SinkOptions>,
     max_bytes: Option<f64>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
@@ -583,7 +636,7 @@ pub fn extract_archive_to_memory_with_progress_sync(
     env: Env,
     data: Uint8Array,
     config: Option<&SecurityConfig>,
-    options: Option<&ExtractionOptions>,
+    options: Option<&SinkOptions>,
     max_bytes: Option<f64>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,

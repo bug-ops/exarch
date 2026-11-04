@@ -24,19 +24,6 @@ export interface AbortSignalLike {
  */
 export interface ExarchErrorBase extends Error {
   code: ErrorCode
-  /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
-  relaxableBy?: PolicySetting
-  /**
-   * Finer classification of an `INVALID_ARCHIVE` (`InvalidArchiveSubCode`)
-   * failure, when it has one, and of every core `SECURITY_VIOLATION`
-   * (`SecurityViolationSubCode`). The interfaces are discriminated by `writes`,
-   * not `code`, so the pairing is not narrowed per code: `INVALID_ARCHIVE`
-   * carries one of the `InvalidArchiveSubCode` values, `SECURITY_VIOLATION` carries
-   * one of the `SecurityViolationSubCode` values.
-   */
-  subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
-  /** The configuration setting or input an `INVALID_CONFIGURATION` error refused. */
-  setting?: ConfigSetting
   /**
    * The exception thrown by a progress callback, an `onEntry` callback or an
    * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
@@ -119,6 +106,7 @@ export interface ExarchNativeError extends Error {
   relaxableBy?: undefined
   subCode?: undefined
   setting?: undefined
+  ioKind?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
@@ -127,19 +115,109 @@ export interface ExarchNativeError extends Error {
   filesAdded?: undefined
 }
 
-/**
- * Every error exarch rejects or throws with.
- *
- * Promises reject with, and sync functions throw, an object of this shape;
- * narrow an `unknown` catch value with `err as ExarchError`. Discriminate on
- * `writes`; `code` is an `ErrorCode` for every member except
- * `ExarchNativeError`, so a `switch (err.code)` is exhaustive only after
- * excluding it.
- */
-export type ExarchError =
+/** A malformed archive; `subCode` classifies it when core can. */
+export interface ExarchInvalidArchiveDetail {
+  code: 'INVALID_ARCHIVE'
+  subCode?: InvalidArchiveSubCode
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+}
+
+/** A refusal by policy; core always classifies it and may name the setting that relaxes it. */
+export interface ExarchSecurityViolationDetail {
+  code: 'SECURITY_VIOLATION'
+  subCode: SecurityViolationSubCode
+  relaxableBy?: PolicySetting
+  setting?: undefined
+  ioKind?: undefined
+}
+
+/** A rejected setting or input. */
+export interface ExarchInvalidConfigurationDetail {
+  code: 'INVALID_CONFIGURATION'
+  setting?: ConfigSetting
+  subCode?: undefined
+  relaxableBy?: undefined
+  ioKind?: undefined
+}
+
+/** An I/O failure, with the kind core reported. */
+export interface ExarchIoDetail {
+  code: 'IO_ERROR'
+  ioKind: IoKind
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+}
+
+/** Every other code carries no detail property. */
+export interface ExarchPlainCodeDetail {
+  code: Exclude<
+    ErrorCode,
+    'INVALID_ARCHIVE' | 'SECURITY_VIOLATION' | 'INVALID_CONFIGURATION' | 'IO_ERROR'
+  >
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+}
+
+/** The pairing of a `code` with the properties it can carry. */
+export type ExarchErrorCodeDetail =
+  | ExarchInvalidArchiveDetail
+  | ExarchSecurityViolationDetail
+  | ExarchInvalidConfigurationDetail
+  | ExarchIoDetail
+  | ExarchPlainCodeDetail
+
+/** The partial-extraction shapes, discriminated by `writes`. */
+export type ExarchErrorOutcome =
   | ExarchErrorPlain
   | ExarchErrorWritesKept
   | ExarchErrorRolledBack
   | ExarchErrorDiscarded
   | ExarchErrorCreationCallback
-  | ExarchNativeError
+
+/**
+ * An error raised by exarch-core or by one of the binding's callbacks.
+ *
+ * Discriminate on `writes` for the partial-extraction outcome and on `code`
+ * for the detail properties: `code === 'INVALID_ARCHIVE'` narrows `subCode` to
+ * `InvalidArchiveSubCode`, `'SECURITY_VIOLATION'` to a required
+ * `SecurityViolationSubCode`, `'INVALID_CONFIGURATION'` exposes `setting` and
+ * `'IO_ERROR'` a required `ioKind`. `code` is an `ErrorCode`, so a
+ * `switch (err.code)` is exhaustive.
+ */
+export type ExarchCoreError = ExarchErrorOutcome & ExarchErrorCodeDetail
+
+/**
+ * Every error exarch rejects or throws with.
+ *
+ * Promises reject with, and sync functions throw, an object of this shape;
+ * narrow an `unknown` catch value with `err as ExarchError`. Its `code` is an
+ * `ErrorCode` for every member except `ExarchNativeError`, whose `code` is a
+ * plain string and which therefore also matches every `code` comparison: to
+ * use the pairings of `ExarchCoreError`, exclude the native member first
+ * (`err as ExarchCoreError` once `err.code` is known to be an `ErrorCode`).
+ */
+export type ExarchError = ExarchCoreError | ExarchNativeError
+
+/**
+ * An entry delivered to an `onEntry` callback. Discriminate on `kind`: a file
+ * always has `data`, a symlink or hardlink always has `target`.
+ */
+export type MemoryEntry =
+  | MemoryFileEntry
+  | MemoryDirectoryEntry
+  | MemorySymlinkEntry
+  | MemoryHardlinkEntry
+
+/**
+ * An entry held in the result of `extractArchiveToMemory`: a `MemoryEntry`
+ * without the hardlink, which only a callback receives.
+ */
+export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
+
+/** What a `MemoryEntry` holds. */
+export type MemoryEntryKind = MemoryEntry['kind']

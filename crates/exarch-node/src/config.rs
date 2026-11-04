@@ -907,6 +907,56 @@ impl ExtractionOptions {
     }
 }
 
+/// Options for extraction into memory or into a callback.
+///
+/// A sink has no directory to rename, so unlike `ExtractionOptions` there is
+/// no `atomic` setting: only the duplicate policy carries over.
+///
+/// # Defaults
+///
+/// | Setting | Default Value |
+/// |---------|--------------|
+/// | `skipDuplicates` | `true` |
+#[napi]
+#[derive(Debug, Clone)]
+pub struct SinkOptions {
+    inner: exarch_core::SinkOptions,
+}
+
+#[napi]
+impl SinkOptions {
+    /// Creates a new `SinkOptions` with defaults.
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: exarch_core::SinkOptions::default(),
+        }
+    }
+
+    /// Sets whether duplicate archive entries are skipped silently.
+    ///
+    /// When `true` (default), a duplicate entry is skipped and counted. When
+    /// `false`, a duplicate entry causes an error.
+    #[napi(js_name = "setSkipDuplicates")]
+    pub fn set_skip_duplicates(&mut self, skip: bool) -> &Self {
+        self.inner = self.inner.with_skip_duplicates(skip);
+        self
+    }
+
+    /// Whether duplicate entries are skipped silently.
+    #[napi(getter)]
+    pub fn get_skip_duplicates(&self) -> bool {
+        self.inner.skip_duplicates
+    }
+}
+
+impl SinkOptions {
+    /// Returns the inner `CoreSinkOptions`.
+    pub fn to_core(&self) -> exarch_core::SinkOptions {
+        self.inner
+    }
+}
+
 /// Options controlling verification behavior (non-security).
 ///
 /// By default `verifyArchive` checks metadata only and reports

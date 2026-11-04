@@ -15,6 +15,7 @@
 //! - `subCode`: an [`InvalidArchiveSubCode`] on an `INVALID_ARCHIVE`, when the
 //!   failure has a finer classification, and a [`SecurityViolationSubCode`] on
 //!   every core `SECURITY_VIOLATION`.
+//! - `ioKind`: the [`IoKind`] of an `IO_ERROR`.
 //! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
 //!   the fate of a partial extraction.
 //! - `cause`: the exception thrown by a JS progress callback.
@@ -30,6 +31,7 @@ use exarch_core::ArchiveError as CoreError;
 use exarch_core::ErrorCode as CoreErrorCode;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::FfiErrorMessage;
+use exarch_core::FfiKind;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting as CorePolicySetting;
 use exarch_core::SubCode;
@@ -267,6 +269,227 @@ pub enum ConfigSetting {
     /// `max_bytes`.
     #[napi(value = "max_bytes")]
     MaxBytes,
+    /// `parallel_decode_memory`.
+    #[napi(value = "parallel_decode_memory")]
+    ParallelDecodeMemory,
+    /// `exclude_pattern`.
+    #[napi(value = "exclude_pattern")]
+    ExcludePattern,
+}
+
+/// Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
+/// core reported, so a caller can tell "not found" from "permission denied"
+/// without parsing the message.
+///
+/// A kind with no entry here, and `ErrorKind::Other`, is `Other`.
+// Generates the TypeScript union only; the runtime spelling is `as_str`,
+// guarded by a unit test that maps every value back to its core kind.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoKind {
+    /// `ErrorKind::NotFound`.
+    #[napi(value = "NotFound")]
+    NotFound,
+    /// `ErrorKind::PermissionDenied`.
+    #[napi(value = "PermissionDenied")]
+    PermissionDenied,
+    /// `ErrorKind::AlreadyExists`.
+    #[napi(value = "AlreadyExists")]
+    AlreadyExists,
+    /// `ErrorKind::NotADirectory`.
+    #[napi(value = "NotADirectory")]
+    NotADirectory,
+    /// `ErrorKind::IsADirectory`.
+    #[napi(value = "IsADirectory")]
+    IsADirectory,
+    /// `ErrorKind::DirectoryNotEmpty`.
+    #[napi(value = "DirectoryNotEmpty")]
+    DirectoryNotEmpty,
+    /// `ErrorKind::ReadOnlyFilesystem`.
+    #[napi(value = "ReadOnlyFilesystem")]
+    ReadOnlyFilesystem,
+    /// `ErrorKind::StorageFull`.
+    #[napi(value = "StorageFull")]
+    StorageFull,
+    /// `ErrorKind::QuotaExceeded`.
+    #[napi(value = "QuotaExceeded")]
+    QuotaExceeded,
+    /// `ErrorKind::FileTooLarge`.
+    #[napi(value = "FileTooLarge")]
+    FileTooLarge,
+    /// `ErrorKind::InvalidInput`.
+    #[napi(value = "InvalidInput")]
+    InvalidInput,
+    /// `ErrorKind::InvalidData`.
+    #[napi(value = "InvalidData")]
+    InvalidData,
+    /// `ErrorKind::InvalidFilename`.
+    #[napi(value = "InvalidFilename")]
+    InvalidFilename,
+    /// `ErrorKind::TimedOut`.
+    #[napi(value = "TimedOut")]
+    TimedOut,
+    /// `ErrorKind::Interrupted`.
+    #[napi(value = "Interrupted")]
+    Interrupted,
+    /// `ErrorKind::UnexpectedEof`.
+    #[napi(value = "UnexpectedEof")]
+    UnexpectedEof,
+    /// `ErrorKind::WriteZero`.
+    #[napi(value = "WriteZero")]
+    WriteZero,
+    /// `ErrorKind::Unsupported`.
+    #[napi(value = "Unsupported")]
+    Unsupported,
+    /// `ErrorKind::CrossesDevices`.
+    #[napi(value = "CrossesDevices")]
+    CrossesDevices,
+    /// `ErrorKind::TooManyLinks`.
+    #[napi(value = "TooManyLinks")]
+    TooManyLinks,
+    /// `ErrorKind::ResourceBusy`.
+    #[napi(value = "ResourceBusy")]
+    ResourceBusy,
+    /// `ErrorKind::BrokenPipe`.
+    #[napi(value = "BrokenPipe")]
+    BrokenPipe,
+    /// `ErrorKind::OutOfMemory`.
+    #[napi(value = "OutOfMemory")]
+    OutOfMemory,
+    /// `ErrorKind::WouldBlock`.
+    #[napi(value = "WouldBlock")]
+    WouldBlock,
+    /// `ErrorKind::Other`.
+    #[napi(value = "Other")]
+    Other,
+}
+
+impl IoKind {
+    /// Every value, in declaration order.
+    pub const ALL: [Self; 25] = [
+        Self::NotFound,
+        Self::PermissionDenied,
+        Self::AlreadyExists,
+        Self::NotADirectory,
+        Self::IsADirectory,
+        Self::DirectoryNotEmpty,
+        Self::ReadOnlyFilesystem,
+        Self::StorageFull,
+        Self::QuotaExceeded,
+        Self::FileTooLarge,
+        Self::InvalidInput,
+        Self::InvalidData,
+        Self::InvalidFilename,
+        Self::TimedOut,
+        Self::Interrupted,
+        Self::UnexpectedEof,
+        Self::WriteZero,
+        Self::Unsupported,
+        Self::CrossesDevices,
+        Self::TooManyLinks,
+        Self::ResourceBusy,
+        Self::BrokenPipe,
+        Self::OutOfMemory,
+        Self::WouldBlock,
+        Self::Other,
+    ];
+
+    /// The spelling JavaScript sees.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "NotFound",
+            Self::PermissionDenied => "PermissionDenied",
+            Self::AlreadyExists => "AlreadyExists",
+            Self::NotADirectory => "NotADirectory",
+            Self::IsADirectory => "IsADirectory",
+            Self::DirectoryNotEmpty => "DirectoryNotEmpty",
+            Self::ReadOnlyFilesystem => "ReadOnlyFilesystem",
+            Self::StorageFull => "StorageFull",
+            Self::QuotaExceeded => "QuotaExceeded",
+            Self::FileTooLarge => "FileTooLarge",
+            Self::InvalidInput => "InvalidInput",
+            Self::InvalidData => "InvalidData",
+            Self::InvalidFilename => "InvalidFilename",
+            Self::TimedOut => "TimedOut",
+            Self::Interrupted => "Interrupted",
+            Self::UnexpectedEof => "UnexpectedEof",
+            Self::WriteZero => "WriteZero",
+            Self::Unsupported => "Unsupported",
+            Self::CrossesDevices => "CrossesDevices",
+            Self::TooManyLinks => "TooManyLinks",
+            Self::ResourceBusy => "ResourceBusy",
+            Self::BrokenPipe => "BrokenPipe",
+            Self::OutOfMemory => "OutOfMemory",
+            Self::WouldBlock => "WouldBlock",
+            Self::Other => "Other",
+        }
+    }
+
+    /// The core kind this value mirrors.
+    #[cfg(test)]
+    const fn to_core(self) -> std::io::ErrorKind {
+        use std::io::ErrorKind as K;
+        match self {
+            Self::NotFound => K::NotFound,
+            Self::PermissionDenied => K::PermissionDenied,
+            Self::AlreadyExists => K::AlreadyExists,
+            Self::NotADirectory => K::NotADirectory,
+            Self::IsADirectory => K::IsADirectory,
+            Self::DirectoryNotEmpty => K::DirectoryNotEmpty,
+            Self::ReadOnlyFilesystem => K::ReadOnlyFilesystem,
+            Self::StorageFull => K::StorageFull,
+            Self::QuotaExceeded => K::QuotaExceeded,
+            Self::FileTooLarge => K::FileTooLarge,
+            Self::InvalidInput => K::InvalidInput,
+            Self::InvalidData => K::InvalidData,
+            Self::InvalidFilename => K::InvalidFilename,
+            Self::TimedOut => K::TimedOut,
+            Self::Interrupted => K::Interrupted,
+            Self::UnexpectedEof => K::UnexpectedEof,
+            Self::WriteZero => K::WriteZero,
+            Self::Unsupported => K::Unsupported,
+            Self::CrossesDevices => K::CrossesDevices,
+            Self::TooManyLinks => K::TooManyLinks,
+            Self::ResourceBusy => K::ResourceBusy,
+            Self::BrokenPipe => K::BrokenPipe,
+            Self::OutOfMemory => K::OutOfMemory,
+            Self::WouldBlock => K::WouldBlock,
+            Self::Other => K::Other,
+        }
+    }
+}
+
+impl From<std::io::ErrorKind> for IoKind {
+    fn from(kind: std::io::ErrorKind) -> Self {
+        use std::io::ErrorKind as K;
+        match kind {
+            K::NotFound => Self::NotFound,
+            K::PermissionDenied => Self::PermissionDenied,
+            K::AlreadyExists => Self::AlreadyExists,
+            K::NotADirectory => Self::NotADirectory,
+            K::IsADirectory => Self::IsADirectory,
+            K::DirectoryNotEmpty => Self::DirectoryNotEmpty,
+            K::ReadOnlyFilesystem => Self::ReadOnlyFilesystem,
+            K::StorageFull => Self::StorageFull,
+            K::QuotaExceeded => Self::QuotaExceeded,
+            K::FileTooLarge => Self::FileTooLarge,
+            K::InvalidInput => Self::InvalidInput,
+            K::InvalidData => Self::InvalidData,
+            K::InvalidFilename => Self::InvalidFilename,
+            K::TimedOut => Self::TimedOut,
+            K::Interrupted => Self::Interrupted,
+            K::UnexpectedEof => Self::UnexpectedEof,
+            K::WriteZero => Self::WriteZero,
+            K::Unsupported => Self::Unsupported,
+            K::CrossesDevices => Self::CrossesDevices,
+            K::TooManyLinks => Self::TooManyLinks,
+            K::ResourceBusy => Self::ResourceBusy,
+            K::BrokenPipe => Self::BrokenPipe,
+            K::OutOfMemory => Self::OutOfMemory,
+            K::WouldBlock => Self::WouldBlock,
+            _ => Self::Other,
+        }
+    }
 }
 
 /// Value of the `subCode` property of a `SECURITY_VIOLATION` error.
@@ -486,6 +709,7 @@ struct ErrorProps {
     relaxable_by: Option<CorePolicySetting>,
     sub_code: Option<SubCode>,
     setting: Option<exarch_core::ConfigSetting>,
+    io_kind: Option<IoKind>,
     details: Details,
     cause: Option<Error>,
 }
@@ -511,6 +735,10 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
             relaxable_by: kind.relaxable_by(),
             sub_code: kind.sub_code(),
             setting: kind.setting(),
+            io_kind: match kind {
+                FfiKind::Io(io_kind) => Some(IoKind::from(io_kind)),
+                _ => None,
+            },
             details: partial.map_or(Details::None, Details::Extraction),
             cause,
         },
@@ -525,6 +753,7 @@ fn describe_callback_over_success(operation: &str, details: Details, source: Err
             relaxable_by: None,
             sub_code: None,
             setting: None,
+            io_kind: None,
             details,
             cause: Some(source),
         },
@@ -539,6 +768,7 @@ fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Descri
             relaxable_by: None,
             sub_code: None,
             setting: None,
+            io_kind: None,
             details: Details::None,
             cause: Some(source),
         },
@@ -593,6 +823,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     relaxable_by: None,
                     sub_code: None,
                     setting: None,
+                    io_kind: None,
                     details: Details::None,
                     cause: reason,
                 },
@@ -617,6 +848,9 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     }
     if let Some(setting) = props.setting {
         obj.set("setting", setting.as_str())?;
+    }
+    if let Some(io_kind) = props.io_kind {
+        obj.set("ioKind", io_kind.as_str())?;
     }
     match props.details {
         Details::None => {}
@@ -952,6 +1186,130 @@ mod tests {
         assert_eq!(dts_union("SecurityViolationSubCode"), expected);
     }
 
+    /// Every Rust mirror variant names a core variant of the same name. The
+    /// exhaustive `match` fails to compile when the mirror gains a variant
+    /// that is not listed, and the core path fails when core lacks one; the
+    /// spellings must also equal the generated TypeScript union.
+    macro_rules! mirror_maps_to_core {
+        ($test:ident, $mirror:ty, $core:ty, $union:literal, [$($variant:ident),+ $(,)?]) => {
+            #[test]
+            fn $test() {
+                fn core_of(mirror: $mirror) -> $core {
+                    match mirror {
+                        $(<$mirror>::$variant => <$core>::$variant),+
+                    }
+                }
+                let mirrors = [$(<$mirror>::$variant),+];
+                let spellings: BTreeSet<String> = mirrors
+                    .iter()
+                    .map(|mirror| core_of(*mirror).as_str().to_string())
+                    .collect();
+                assert_eq!(spellings.len(), mirrors.len(), "two mirror values share a core variant");
+                assert_eq!(spellings, dts_union($union));
+            }
+        };
+    }
+
+    mirror_maps_to_core!(
+        test_every_policy_setting_mirror_value_is_a_core_variant,
+        PolicySetting,
+        CorePolicySetting,
+        "PolicySetting",
+        [
+            Symlinks,
+            Hardlinks,
+            SolidArchives,
+            BannedComponents,
+            MaxPathDepth,
+            WindowsReservedNames,
+            MaxTarMetadataBytes
+        ]
+    );
+
+    mirror_maps_to_core!(
+        test_every_partial_writes_mirror_value_is_a_core_variant,
+        PartialWrites,
+        CorePartialWrites,
+        "PartialWrites",
+        [Kept, RolledBack, Discarded]
+    );
+
+    mirror_maps_to_core!(
+        test_every_invalid_archive_sub_code_mirror_value_is_a_core_variant,
+        InvalidArchiveSubCode,
+        CoreInvalidArchiveSubCode,
+        "InvalidArchiveSubCode",
+        [
+            TarAmbiguity,
+            TarTrailer,
+            LinkTarget,
+            DuplicateEntry,
+            EntryName,
+            DeclaredSize,
+            Integrity,
+            ZipReader
+        ]
+    );
+
+    mirror_maps_to_core!(
+        test_every_security_violation_sub_code_mirror_value_is_a_core_variant,
+        SecurityViolationSubCode,
+        CoreSecurityViolationSubCode,
+        "SecurityViolationSubCode",
+        [
+            PathName,
+            PathDepth,
+            LinkTarget,
+            LinkPolicy,
+            ExistingSymlink,
+            EntryType,
+            RootEntry,
+            Encrypted,
+            CompressionMethod,
+            SolidArchive,
+            DeclaredSize,
+            ConcurrentChange,
+            TarMetadata,
+            TarTrailer,
+            Platform,
+            OutputConflict,
+            SourcePath
+        ]
+    );
+
+    mirror_maps_to_core!(
+        test_every_config_setting_mirror_value_is_a_core_variant,
+        ConfigSetting,
+        exarch_core::ConfigSetting,
+        "ConfigSetting",
+        [
+            MaxFileSize,
+            MaxTotalSize,
+            MaxFileCount,
+            MaxPathDepth,
+            MaxCompressionRatio,
+            MaxSolidCompressionRatio,
+            MaxSolidBlockMemory,
+            MaxTarMetadataBytes,
+            MaxDecoderMemory,
+            DecompressionBudget,
+            AllowedExtension,
+            BannedPathComponent,
+            ArchivePath,
+            OutputDirectory,
+            OutputPath,
+            SourcePaths,
+            StripPrefix,
+            CreationFormat,
+            AtomicExtraction,
+            ZipArchive,
+            ZipOutputWriter,
+            MaxBytes,
+            ParallelDecodeMemory,
+            ExcludePattern
+        ]
+    );
+
     fn described(err: CoreError) -> Described {
         describe(Failure::Core(err)).expect("core errors are always described")
     }
@@ -1041,6 +1399,42 @@ mod tests {
             problem: exarch_core::ConfigProblem::NotSet,
         });
         assert_eq!(d.props.code.as_str(), "INVALID_CONFIGURATION");
+    }
+
+    #[test]
+    fn test_io_kind_union_matches_mirror() {
+        let expected: BTreeSet<String> = IoKind::ALL
+            .iter()
+            .map(|kind| kind.as_str().to_string())
+            .collect();
+        assert_eq!(dts_union("IoKind"), expected);
+    }
+
+    #[test]
+    fn test_every_io_kind_maps_to_a_core_kind_and_back() {
+        for kind in IoKind::ALL {
+            assert_eq!(IoKind::from(kind.to_core()), kind, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn test_unlisted_core_kind_is_other() {
+        assert_eq!(
+            IoKind::from(std::io::ErrorKind::ConnectionReset),
+            IoKind::Other
+        );
+    }
+
+    #[test]
+    fn test_io_error_sets_io_kind_and_other_errors_do_not() {
+        let d = described(CoreError::Io(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )));
+        assert_eq!(d.props.io_kind, Some(IoKind::NotFound));
+        let d = described(CoreError::PathTraversal {
+            path: PathBuf::from("../x"),
+        });
+        assert_eq!(d.props.io_kind, None);
     }
 
     #[cfg(debug_assertions)]

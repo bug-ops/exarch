@@ -248,3 +248,17 @@ describe('subCode', () => {
     assert.strictEqual(violation.subCode, 'PATH_NAME');
   });
 });
+
+describe('ioKind', () => {
+  it('an IO_ERROR keeps the kind core reported', async () => {
+    const missing = path.join(os.tmpdir(), 'exarch-node-missing', 'a.tar');
+    const err = await listArchive(missing).catch((e) => e);
+    assert.strictEqual(err.code, 'IO_ERROR');
+    assert.strictEqual(err.ioKind, 'NotFound');
+  });
+
+  it('an error that is not an IO_ERROR carries no ioKind', async () => {
+    const err = await extractArchive('/tmp/a\0.tar', '/tmp/out').catch((e) => e);
+    assert.strictEqual(err.ioKind, undefined);
+  });
+});

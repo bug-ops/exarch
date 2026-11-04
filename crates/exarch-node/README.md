@@ -166,6 +166,11 @@ for (const entry of result.entries) {
 }
 ```
 
+`MemoryEntry` is a union discriminated by `kind`: a file always has `data`, a
+symlink or hardlink always has `target`. The in-memory and callback functions
+take `SinkOptions` (`setSkipDuplicates`) as `options`, not `ExtractionOptions`:
+a sink has no directory to rename, so `atomic` cannot be requested.
+
 **Note:** `maxBytes` caps payload plus path bytes plus 256 per entry and
 defaults to the config's `maxTotalSize`; exceeding it rejects with
 `QUOTA_EXCEEDED`. `pathModel: 'portable'` validates names against the strictest
@@ -278,13 +283,14 @@ try {
 }
 ```
 
-`error.message` is the human-readable description only. The generated `index.d.ts` names `AsyncIterable` and carries a `lib="es2018.asynciterable"` reference. Everything machine-readable is a property, typed as `ExarchError` in `index.d.ts`: a union you can narrow on `writes`, whose `code` is an `ErrorCode` for every member except `ExarchNativeError`, so exclude that member before an exhaustive `switch (error.code)`.
+`error.message` is the human-readable description only. The generated `index.d.ts` names `AsyncIterable` and carries a `lib="es2018.asynciterable"` reference. Everything machine-readable is a property, typed as `ExarchError` in `index.d.ts`: a union you can narrow on `writes`, whose `code` is an `ErrorCode` for every member except `ExarchNativeError`. Cast to `ExarchCoreError` (every member but the native one) to narrow on `code`: `'INVALID_ARCHIVE'` pairs with `InvalidArchiveSubCode`, `'SECURITY_VIOLATION'` with a required `SecurityViolationSubCode`, `'IO_ERROR'` with a required `ioKind`, so `code === 'PATH_TRAVERSAL' && subCode === 'INTEGRITY'` does not type-check.
 
 | Property | Set when | Value |
 |----------|----------|-------|
 | `code` | always | An `ErrorCode` such as `'PATH_TRAVERSAL'`, `'QUOTA_EXCEEDED'` or `'SECURITY_VIOLATION'`. A path rejected at the boundary (null byte, too long) is `'SECURITY_VIOLATION'` and a rejected setter value (a zero or negative limit, a non-positive ratio, an unusable list entry) is `'INVALID_CONFIGURATION'` with a `setting` naming it. Errors raised by the binding itself (an internal panic, a failed argument conversion) are `ExarchNativeError`: `code` is napi's status string (`'GenericFailure'`, `'InvalidArg'`, ...), not an `ErrorCode`, and no other property is set. |
 | `relaxableBy` | a `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit | The `PolicySetting` id, for example `'symlinks'` |
 | `subCode` | an `INVALID_ARCHIVE` with a finer classification, and every core `SECURITY_VIOLATION` | on `INVALID_ARCHIVE`, `'TAR_AMBIGUITY'` (a TAR header read differently by different tools), `'TAR_TRAILER'` (the stream after the TAR end-of-archive marker is corrupt or truncated), `'ZIP_READER'` (a failure of the ZIP reader or of the structural check built on it), `'LINK_TARGET'`, `'DUPLICATE_ENTRY'`, `'ENTRY_NAME'`, `'DECLARED_SIZE'` or `'INTEGRITY'` (the refusal of that family); on `SECURITY_VIOLATION`, the family of the refusal, one of `'PATH_NAME'`, `'PATH_DEPTH'`, `'LINK_TARGET'`, `'LINK_POLICY'`, `'EXISTING_SYMLINK'`, `'ENTRY_TYPE'`, `'ROOT_ENTRY'`, `'ENCRYPTED'`, `'COMPRESSION_METHOD'`, `'SOLID_ARCHIVE'`, `'DECLARED_SIZE'`, `'CONCURRENT_CHANGE'`, `'TAR_METADATA'`, `'TAR_TRAILER'`, `'PLATFORM'`, `'OUTPUT_CONFLICT'`, `'SOURCE_PATH'`; typed `InvalidArchiveSubCode` or `SecurityViolationSubCode` |
+| `ioKind` | an `IO_ERROR` | The `IoKind` core reported, for example `'NotFound'`, `'PermissionDenied'` or `'StorageFull'`; `'Other'` for a kind with no entry in `IoKind` |
 | `writes` | an extraction failed after producing output | `'kept'`, `'rolled_back'` (atomic extraction discarded the output) or `'discarded'` (an in-memory extraction wrote nothing to disk and dropped its entries) |
 | `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` | `writes === 'kept'` | Counters and a `string[]` |
 | `cause` | a progress callback, an `onEntry` callback or an `AsyncIterable` archive threw | The exception it threw (a thrown primitive is wrapped in an `Error` whose `cause` is the primitive) |

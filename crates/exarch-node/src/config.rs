@@ -52,6 +52,32 @@ fn count_value(setting: ConfigSetting, count: f64) -> std::result::Result<NonZer
     })
 }
 
+/// A byte limit as the JavaScript number it is held in, `None` when unbounded.
+fn bounded_bytes(limit: Limit<NonZeroU64>) -> Option<i64> {
+    match limit {
+        Limit::Bounded(bytes) => Some(saturating_i64(bytes.get())),
+        Limit::Unbounded => None,
+    }
+}
+
+/// Parses a JavaScript compression level: only a whole number from 1 to 9 is
+/// accepted, whatever `napi` would make of it as an integer.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a whole number in 0..=u32::MAX is converted; the saturating cast only feeds the error"
+)]
+fn compression_level(level: f64) -> std::result::Result<CompressionLevel, CoreError> {
+    let whole =
+        level.is_finite() && level.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&level);
+    if whole {
+        return CompressionLevel::try_from(level as u32);
+    }
+    Err(CoreError::InvalidCompressionLevel {
+        level: level as u32,
+    })
+}
+
 /// A count as the JavaScript number it is held in, clamped to the largest
 /// integer a number holds exactly (2^53 - 1).
 #[expect(
@@ -163,7 +189,8 @@ impl SecurityConfig {
     /// # Errors
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
-    /// negative or zero.
+    /// not a positive whole number up to 2^53 - 1 (zero, negative, fractional,
+    /// `NaN` and infinite values are refused, never wrapped).
     #[napi(js_name = "setMaxFileSize")]
     pub fn set_max_file_size(&mut self, env: Env, size: f64) -> Result<&Self> {
         self.try_set_max_file_size(size)
@@ -208,7 +235,7 @@ impl SecurityConfig {
     /// # Errors
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_count`) if count
-    /// is zero.
+    /// is not a positive whole number up to 2^53 - 1.
     #[napi(js_name = "setMaxFileCount")]
     pub fn set_max_file_count(&mut self, env: Env, count: f64) -> Result<&Self> {
         self.try_set_max_file_count(count)
@@ -221,7 +248,7 @@ impl SecurityConfig {
     /// # Errors
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_path_depth`) if depth
-    /// is zero.
+    /// is not a positive whole number up to 2^53 - 1.
     #[napi(js_name = "setMaxPathDepth")]
     pub fn set_max_path_depth(&mut self, env: Env, depth: f64) -> Result<&Self> {
         self.try_set_max_path_depth(depth)
@@ -382,16 +409,16 @@ impl SecurityConfig {
 
     // Property getters
 
-    /// Maximum file size in bytes.
+    /// Maximum file size in bytes, or `null` when unbounded.
     #[napi(getter)]
-    pub fn get_max_file_size(&self) -> i64 {
-        saturating_i64(self.inner.max_file_size.ceiling())
+    pub fn get_max_file_size(&self) -> Option<i64> {
+        bounded_bytes(self.inner.max_file_size)
     }
 
-    /// Maximum total size in bytes.
+    /// Maximum total size in bytes, or `null` when unbounded.
     #[napi(getter)]
-    pub fn get_max_total_size(&self) -> i64 {
-        saturating_i64(self.inner.max_total_size.ceiling())
+    pub fn get_max_total_size(&self) -> Option<i64> {
+        bounded_bytes(self.inner.max_total_size)
     }
 
     /// Maximum compression ratio.
@@ -668,9 +695,11 @@ impl CreationConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if level is not in range 1-9.
+    /// Throws `INVALID_COMPRESSION_LEVEL` if level is not a whole number from 1
+    /// to 9 (a fraction, `NaN`, a negative or an out-of-range number is
+    /// refused, never wrapped).
     #[napi(js_name = "setCompressionLevel")]
-    pub fn set_compression_level(&mut self, env: Env, level: u32) -> Result<&Self> {
+    pub fn set_compression_level(&mut self, env: Env, level: f64) -> Result<&Self> {
         self.try_set_compression_level(level)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -815,8 +844,8 @@ impl CreationConfig {
 
     /// Env-free core of `setCompressionLevel`, so the validation is testable
     /// without a JS environment.
-    fn try_set_compression_level(&mut self, level: u32) -> std::result::Result<(), CoreError> {
-        self.inner.compression_level = CompressionLevel::try_from(level)?;
+    fn try_set_compression_level(&mut self, level: f64) -> std::result::Result<(), CoreError> {
+        self.inner.compression_level = compression_level(level)?;
         Ok(())
     }
 
@@ -1077,8 +1106,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = SecurityConfig::new();
-        assert_eq!(config.get_max_file_size(), 50 * 1024 * 1024);
-        assert_eq!(config.get_max_total_size(), 500 * 1024 * 1024);
+        assert_eq!(config.get_max_file_size(), Some(50 * 1024 * 1024));
+        assert_eq!(config.get_max_total_size(), Some(500 * 1024 * 1024));
         assert_eq!(config.get_max_file_count(), Some(10_000.0));
         assert!(!config.get_preserve_permissions());
     }
@@ -1091,8 +1120,8 @@ mod tests {
         config.inner.solid_archives = exarch_core::SolidArchives::Allow(
             exarch_core::SolidLimits::DEFAULT.with_max_block_memory(NonZeroU64::MAX),
         );
-        assert_eq!(config.get_max_file_size(), i64::MAX);
-        assert_eq!(config.get_max_total_size(), i64::MAX);
+        assert_eq!(config.get_max_file_size(), None);
+        assert_eq!(config.get_max_total_size(), None);
         assert_eq!(config.get_max_solid_block_memory(), Some(i64::MAX));
 
         let mut creation = CreationConfig::new();
@@ -1103,7 +1132,7 @@ mod tests {
     #[test]
     fn test_default_static_method() {
         let config = SecurityConfig::default();
-        assert_eq!(config.get_max_file_size(), 50 * 1024 * 1024);
+        assert_eq!(config.get_max_file_size(), Some(50 * 1024 * 1024));
     }
 
     #[test]
@@ -1122,8 +1151,8 @@ mod tests {
         config.try_set_max_total_size(1_000_000_000.0).unwrap();
         config.try_set_max_file_count(50_000.0).unwrap();
 
-        assert_eq!(config.get_max_file_size(), 100_000_000);
-        assert_eq!(config.get_max_total_size(), 1_000_000_000);
+        assert_eq!(config.get_max_file_size(), Some(100_000_000));
+        assert_eq!(config.get_max_total_size(), Some(1_000_000_000));
         assert_eq!(config.get_max_file_count(), Some(50_000.0));
     }
 
@@ -1284,7 +1313,7 @@ mod tests {
         assert!(result.is_ok(), "2^53 - 1 should be accepted");
         assert_eq!(
             config.get_max_file_size(),
-            MAX_SAFE_INT,
+            Some(MAX_SAFE_INT),
             "value should be stored correctly"
         );
     }
@@ -1307,7 +1336,7 @@ mod tests {
         assert!(result.is_ok(), "2^53 - 1 should be accepted");
         assert_eq!(
             config.get_max_total_size(),
-            MAX_SAFE_INT,
+            Some(MAX_SAFE_INT),
             "value should be stored correctly"
         );
     }
@@ -1342,7 +1371,7 @@ mod tests {
             err.to_string(),
             "invalid configuration: max_file_size must not be zero"
         );
-        assert_eq!(config.get_max_file_size(), 50 * 1024 * 1024);
+        assert_eq!(config.get_max_file_size(), Some(50 * 1024 * 1024));
     }
 
     // Property getter tests
@@ -1358,12 +1387,12 @@ mod tests {
 
         assert_eq!(
             config.get_max_file_size(),
-            100_000_000,
+            Some(100_000_000),
             "max_file_size getter should return set value"
         );
         assert_eq!(
             config.get_max_total_size(),
-            1_000_000_000,
+            Some(1_000_000_000),
             "max_total_size getter should return set value"
         );
         assert_eq!(
@@ -1631,10 +1660,10 @@ mod tests {
 
         assert_eq!(
             result.get_max_file_size(),
-            100_000_000,
+            Some(100_000_000),
             "build() should work in builder chain"
         );
-        assert_eq!(result.get_max_total_size(), 1_000_000_000);
+        assert_eq!(result.get_max_total_size(), Some(1_000_000_000));
     }
 
     // Float edge case tests
@@ -1673,7 +1702,7 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(
             cloned.get_max_file_size(),
-            100_000_000,
+            Some(100_000_000),
             "cloned config should have same values"
         );
     }
@@ -1775,7 +1804,7 @@ mod tests {
     #[test]
     fn test_creation_config_builder() {
         let mut config = CreationConfig::new();
-        config.try_set_compression_level(9).unwrap();
+        config.try_set_compression_level(9.0).unwrap();
         config.set_preserve_permissions(false);
         config.set_follow_symlinks(true);
         config.set_include_hidden(true);
@@ -1791,15 +1820,15 @@ mod tests {
     #[test]
     fn test_creation_config_compression_level_rejects_invalid() {
         let mut config = CreationConfig::new();
-        assert!(config.try_set_compression_level(0).is_err());
-        assert!(config.try_set_compression_level(10).is_err());
+        assert!(config.try_set_compression_level(0.0).is_err());
+        assert!(config.try_set_compression_level(10.0).is_err());
     }
 
     #[test]
     fn test_creation_config_compression_level_accepts_valid() {
         let mut config = CreationConfig::new();
-        assert!(config.try_set_compression_level(1).is_ok());
-        assert!(config.try_set_compression_level(9).is_ok());
+        assert!(config.try_set_compression_level(1.0).is_ok());
+        assert!(config.try_set_compression_level(9.0).is_ok());
     }
 
     #[test]

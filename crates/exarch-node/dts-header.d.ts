@@ -59,6 +59,7 @@ export interface ExarchErrorPlain extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -69,6 +70,7 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   filesExtracted: number
   bytesWritten: number
   filesSkipped: number
+  skipped: SkippedSummary
   warnings: Array<string>
   filesAdded?: undefined
 }
@@ -80,6 +82,7 @@ export interface ExarchErrorRolledBack extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -94,6 +97,22 @@ export interface ExarchErrorDiscarded extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
+  warnings?: undefined
+  filesAdded?: undefined
+}
+
+/**
+ * A progress callback threw while a listing or a verification succeeded; the
+ * result was discarded.
+ */
+export interface ExarchErrorReadCallback extends ExarchErrorBase {
+  code: 'PROGRESS_CALLBACK_ERROR'
+  writes?: undefined
+  filesExtracted?: undefined
+  bytesWritten?: undefined
+  filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -104,6 +123,7 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
   writes?: undefined
   filesExtracted?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded: number
   bytesWritten: number
@@ -125,6 +145,7 @@ export interface ExarchNativeError extends Error {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -217,6 +238,7 @@ export type ExarchErrorOutcome =
   | ExarchErrorRolledBack
   | ExarchErrorDiscarded
   | ExarchErrorCreationCallback
+  | ExarchErrorReadCallback
 
 /**
  * An error raised by exarch-core or by one of the binding's callbacks.

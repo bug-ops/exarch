@@ -133,6 +133,7 @@ describe('extraction error properties', () => {
       assert.strictEqual(typeof err.filesExtracted, 'number');
       assert.strictEqual(typeof err.bytesWritten, 'number');
       assert.strictEqual(typeof err.filesSkipped, 'number');
+      assert.deepStrictEqual(Object.keys(err.skipped).sort(), ['counts', 'sample']);
       assert.ok(Array.isArray(err.warnings));
       assertDescriptionOnly(err);
       return true;

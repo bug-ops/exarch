@@ -192,4 +192,36 @@ describe('createArchive output handling', () => {
     createArchiveSync(outputPath, [sourceDir]);
     assert.ok(listArchiveSync(outputPath).entries.length > 0);
   });
+
+  it('overwrite: false refuses an existing output with OUTPUT_EXISTS', async () => {
+    const outputPath = path.join(tempDir, 'exists.tar.gz');
+    fs.writeFileSync(outputPath, 'previous');
+    assert.throws(() => createArchiveSync(outputPath, [sourceDir], null, { overwrite: false }), {
+      code: 'OUTPUT_EXISTS',
+    });
+    await assert.rejects(createArchive(outputPath, [sourceDir], null, { overwrite: false }), {
+      code: 'OUTPUT_EXISTS',
+    });
+    assert.strictEqual(fs.readFileSync(outputPath, 'utf8'), 'previous');
+  });
+
+  it('overwrite: false creates a new output', () => {
+    const outputPath = path.join(tempDir, 'fresh.tar.gz');
+    createArchiveSync(outputPath, [sourceDir], null, { overwrite: false });
+    assert.ok(listArchiveSync(outputPath).entries.length > 0);
+  });
+
+  it('format overrides the extension, so a ZIP-based name is written as a plain ZIP', () => {
+    const outputPath = path.join(tempDir, 'bundle.apk');
+    assert.throws(() => createArchiveSync(outputPath, [sourceDir]));
+    createArchiveSync(outputPath, [sourceDir], null, { format: 'Zip' });
+    assert.strictEqual(listArchiveSync(outputPath).format, 'Zip');
+  });
+
+  it('format SevenZ cannot be created', () => {
+    assert.throws(
+      () => createArchiveSync(path.join(tempDir, 'a.7z'), [sourceDir], null, { format: 'SevenZ' }),
+      (err) => typeof err.code === 'string' && err.code !== 'GenericFailure'
+    );
+  });
 });

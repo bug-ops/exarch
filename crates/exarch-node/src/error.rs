@@ -13,11 +13,13 @@
 //! - `relaxableBy`: the [`PolicySetting`] that relaxes a refusal, when one
 //!   does.
 //! - `subCode`: an [`InvalidArchiveSubCode`] on an `INVALID_ARCHIVE`, when the
-//!   failure has a finer classification, and a [`SecurityViolationSubCode`] on
-//!   every core `SECURITY_VIOLATION`.
+//!   failure has a finer classification, a [`SecurityViolationSubCode`] on
+//!   every core `SECURITY_VIOLATION`, a [`QuotaSubCode`] on every
+//!   `QUOTA_EXCEEDED` and a [`ZipBombSubCode`] on every `ZIP_BOMB`.
+//! - `setting`: the [`ConfigSetting`] an `INVALID_CONFIGURATION` refused.
 //! - `ioKind`: the [`IoKind`] of an `IO_ERROR`.
-//! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
-//!   the fate of a partial extraction.
+//! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`,
+//!   `warnings`: the fate of a partial extraction.
 //! - `cause`: the exception thrown by a JS progress callback.
 //!
 //! Errors raised by the binding itself (a Rust panic, a join
@@ -44,6 +46,7 @@ use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::ToNapiValue;
 use napi_derive::napi;
 
+use crate::report::SkippedSummary;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
 
@@ -929,6 +932,7 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
                 obj.set("filesExtracted", saturating_u32(report.files_extracted))?;
                 obj.set("bytesWritten", saturating_i64(report.bytes_written))?;
                 obj.set("filesSkipped", saturating_u32(report.files_skipped()))?;
+                obj.set("skipped", SkippedSummary::from(&report.skipped))?;
                 obj.set(
                     "warnings",
                     report

@@ -59,6 +59,7 @@ export interface ExarchErrorPlain extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -69,6 +70,7 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   filesExtracted: number
   bytesWritten: number
   filesSkipped: number
+  skipped: SkippedSummary
   warnings: Array<string>
   filesAdded?: undefined
 }
@@ -80,6 +82,7 @@ export interface ExarchErrorRolledBack extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -94,6 +97,22 @@ export interface ExarchErrorDiscarded extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
+  warnings?: undefined
+  filesAdded?: undefined
+}
+
+/**
+ * A progress callback threw while a listing or a verification succeeded; the
+ * result was discarded.
+ */
+export interface ExarchErrorReadCallback extends ExarchErrorBase {
+  code: 'PROGRESS_CALLBACK_ERROR'
+  writes?: undefined
+  filesExtracted?: undefined
+  bytesWritten?: undefined
+  filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -104,6 +123,7 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
   writes?: undefined
   filesExtracted?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded: number
   bytesWritten: number
@@ -125,6 +145,7 @@ export interface ExarchNativeError extends Error {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -217,6 +238,7 @@ export type ExarchErrorOutcome =
   | ExarchErrorRolledBack
   | ExarchErrorDiscarded
   | ExarchErrorCreationCallback
+  | ExarchErrorReadCallback
 
 /**
  * An error raised by exarch-core or by one of the binding's callbacks.
@@ -342,7 +364,9 @@ export declare class CreationConfig {
    *
    * # Errors
    *
-   * Returns error if level is not in range 1-9.
+   * Throws `INVALID_COMPRESSION_LEVEL` if level is not a whole number from 1
+   * to 9 (a fraction, `NaN`, a negative or an out-of-range number is
+   * refused, never wrapped).
    */
   setCompressionLevel(level: number): this
   /**
@@ -499,7 +523,8 @@ export declare class SecurityConfig {
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
-   * negative or zero.
+   * not a positive whole number up to 2^53 - 1 (zero, negative, fractional,
+   * `NaN` and infinite values are refused, never wrapped).
    */
   setMaxFileSize(size: number): this
   /**
@@ -532,7 +557,7 @@ export declare class SecurityConfig {
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_file_count`) if count
-   * is zero.
+   * is not a positive whole number up to 2^53 - 1.
    */
   setMaxFileCount(count: number): this
   /**
@@ -541,7 +566,7 @@ export declare class SecurityConfig {
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_path_depth`) if depth
-   * is zero.
+   * is not a positive whole number up to 2^53 - 1.
    */
   setMaxPathDepth(depth: number): this
   /** Allows or denies symlinks. */
@@ -624,10 +649,10 @@ export declare class SecurityConfig {
   isPathComponentAllowed(component: string): boolean
   /** Checks if a file extension is allowed. */
   isExtensionAllowed(extension: string): boolean
-  /** Maximum file size in bytes. */
-  get maxFileSize(): number
-  /** Maximum total size in bytes. */
-  get maxTotalSize(): number
+  /** Maximum file size in bytes, or `null` when unbounded. */
+  get maxFileSize(): number | null
+  /** Maximum total size in bytes, or `null` when unbounded. */
+  get maxTotalSize(): number | null
   /** Maximum compression ratio. */
   get maxCompressionRatio(): number
   /** Maximum file count, or `null` when unbounded. */
@@ -813,7 +838,7 @@ export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count
  * const report = await createArchive('output.tar.gz', ['src/'], config);
  * ```
  */
-export declare function createArchive(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null): Promise<CreationReport>
+export declare function createArchive(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, options?: CreateOptions | undefined | null): Promise<CreationReport>
 
 /**
  * Create an archive from source files and directories (sync).
@@ -844,7 +869,7 @@ export declare function createArchive(outputPath: string, sources: Array<string>
  * console.log(`Created archive with ${report.filesAdded} files`);
  * ```
  */
-export declare function createArchiveSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null): CreationReport
+export declare function createArchiveSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, options?: CreateOptions | undefined | null): CreationReport
 
 /**
  * Create an archive from source files and directories into memory (async).
@@ -911,7 +936,8 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * function calling convention: `err` is always `null`, the entry data
  * arrives as a single array argument) where:
  * - `path` — entry path being added to the archive
- * - `total` — total number of entries as `number`
+ * - `total` — total number of entries as `number`, or `null` while the count
+ *   is not known
  * - `current` — 1-based index of the current entry as `number`
  * - `bytesWritten` — always `0`. The callback only fires from the entry-start
  *   event, which resets the running per-entry byte counter immediately before
@@ -983,7 +1009,7 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * console.log(`Created archive with ${report.filesAdded} files`);
  * ```
  */
-export declare function createArchiveWithProgress(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<CreationReport>
+export declare function createArchiveWithProgress(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, options?: CreateOptions | undefined | null): Promise<CreationReport>
 
 /**
  * Create an archive from source files and directories with a progress
@@ -1056,7 +1082,7 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * console.log(`Created archive with ${report.filesAdded} files`);
  * ```
  */
-export declare function createArchiveWithProgressSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): CreationReport
+export declare function createArchiveWithProgressSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, options?: CreateOptions | undefined | null): CreationReport
 
 /** An archive created in memory. */
 export interface CreatedArchive {
@@ -1064,6 +1090,25 @@ export interface CreatedArchive {
   data: Uint8Array
   /** Creation statistics. */
   report: CreationReport
+}
+
+/**
+ * Options of `createArchive` and its variants.
+ *
+ * `overwrite` follows the same default as the Python binding: `true`
+ * replaces an existing output when creation succeeds (a failed creation
+ * leaves the previous output untouched); `false` refuses an existing output
+ * with `OUTPUT_EXISTS`.
+ */
+export interface CreateOptions {
+  /**
+   * The archive format, instead of the one the output extension names (how
+   * a `.apk` or `.whl` is written as a plain ZIP). `'SevenZ'` cannot be
+   * created.
+   */
+  format?: ArchiveType
+  /** Whether an existing output may be replaced. Defaults to `true`. */
+  overwrite?: boolean
 }
 
 /**
@@ -1164,8 +1209,10 @@ export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' 
  *   Changing the setting removes that refusal only; the entry can still fail a
  *   later check. `windows_reserved_names` and `max_tar_metadata_bytes` have no
  *   setter in this binding (Rust API only).
- * - `subCode`: the family of an `INVALID_ARCHIVE` or `SECURITY_VIOLATION`
- *   refusal, when it has one.
+ * - `subCode`: the finer classification of an `INVALID_ARCHIVE` (when it has
+ *   one), the family of every `SECURITY_VIOLATION`, the quota of every
+ *   `QUOTA_EXCEEDED` and the scope of every `ZIP_BOMB`.
+ * - `ioKind`: the kind of an `IO_ERROR`, such as `NotFound`.
  * - `setting`: set on an `INVALID_CONFIGURATION` that names the refused
  *   setting or input, as a `snake_case` id such as `max_file_count`.
  * - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
@@ -1422,7 +1469,7 @@ export declare function extractArchiveToMemorySync(data: Uint8Array, config?: Se
  * still completes:
  *
  * - When extraction succeeded, the promise rejects with
- *   `PROGRESS_CALLBACK_ERROR`, the throw as `cause`, and the report counters;
+ *   `PROGRESS_CALLBACK_ERROR`, the throw as `cause` and `writes: 'discarded'`;
  *   the extracted entries are discarded, as nothing was written to disk.
  * - When extraction failed, the core error keeps its `code` and the throw is
  *   attached as `cause`.
@@ -1437,7 +1484,7 @@ export declare function extractArchiveToMemorySync(data: Uint8Array, config?: Se
  * );
  * ```
  */
-export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
+export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
 
 /**
  * Extract an archive held in memory into memory with a progress callback
@@ -1571,7 +1618,7 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * console.log(`Extracted ${report.filesExtracted} files`);
  * ```
  */
-export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<ExtractionReport>
+export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): Promise<ExtractionReport>
 
 /**
  * Report of an archive extraction operation.
@@ -1772,7 +1819,7 @@ export declare function listArchiveBytesSync(data: Uint8Array, config?: Security
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory with a progress callback
@@ -2283,7 +2330,7 @@ export declare function verifyArchiveBytesSync(data: Uint8Array, config?: Securi
  * );
  * ```
  */
-export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<VerificationReport>
+export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory with a progress callback

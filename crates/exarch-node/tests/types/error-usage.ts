@@ -1,4 +1,15 @@
-import { listArchiveBytes } from '../../index'
+import {
+  createArchive,
+  extractArchiveToMemoryWithProgress,
+  extractArchiveWithProgress,
+  listArchiveBytes,
+  listArchiveBytesWithProgress,
+  verifyArchiveBytesWithProgress,
+} from '../../index'
+import type {
+  CreateOptions,
+  ExarchErrorReadCallback,
+} from '../../index'
 import type {
   AbortSignalLike,
   ErrorCode,
@@ -145,6 +156,48 @@ export const plainCode: ExarchErrorPlain['code'] = 'PROGRESS_CALLBACK_ERROR'
 
 // @ts-expect-error a rolled-back error never carries PROGRESS_CALLBACK_ERROR
 export const rolledBackCode: ExarchErrorRolledBack['code'] = 'PROGRESS_CALLBACK_ERROR'
+
+export function readCallbackFailure(err: ExarchError): number | undefined {
+  if (err.code === 'PROGRESS_CALLBACK_ERROR' && err.writes === undefined) {
+    return err.filesAdded
+  }
+  return undefined
+}
+
+export const readCallbackShape: ExarchErrorReadCallback = {
+  name: 'Error',
+  message: 'threw',
+  code: 'PROGRESS_CALLBACK_ERROR',
+}
+
+// An unknown total is null at runtime, so the progress argument must not allow
+// number methods on it, in every progress variant.
+export function progressTotals(data: Uint8Array): Promise<unknown>[] {
+  return [
+    extractArchiveWithProgress('a', 'b', null, null, (_err, [, total]) => {
+      // @ts-expect-error total is number | null
+      total.toFixed(0)
+    }),
+    extractArchiveToMemoryWithProgress(data, null, null, null, null, null, (_err, [, total]) => {
+      // @ts-expect-error total is number | null
+      total.toFixed(0)
+    }),
+    listArchiveBytesWithProgress(data, null, null, (_err, [, total]) => {
+      // @ts-expect-error total is number | null
+      total.toFixed(0)
+    }),
+    verifyArchiveBytesWithProgress(data, null, null, null, (_err, [, total]) => {
+      // @ts-expect-error total is number | null
+      total.toFixed(0)
+    }),
+  ]
+}
+
+export const createOptions: CreateOptions = { format: 'TarGz', overwrite: false }
+
+export function createWithOptions(): Promise<unknown> {
+  return createArchive('out.tar.gz', ['src'], null, createOptions)
+}
 
 export const quotaCode: ExarchErrorPlain['code'] = 'QUOTA_EXCEEDED'
 

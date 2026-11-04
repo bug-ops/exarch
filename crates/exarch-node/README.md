@@ -389,6 +389,17 @@ const result = await extractArchiveWithProgress(
 
 **Returns:** `Promise<ExtractionReport>`
 
+### Create options
+
+`createArchive`, `createArchiveSync` and the `WithProgress` variants take an
+optional trailing `CreateOptions` argument: `{ format?: ArchiveType; overwrite?: boolean }`.
+`overwrite` defaults to `true`: an existing output is replaced when creation
+succeeds, and a failed creation leaves it untouched; `overwrite: false`
+refuses an existing output with `OUTPUT_EXISTS`. `format` overrides the format
+the output extension names, which is how a `.apk` or `.whl` is written as a
+plain ZIP (`'SevenZ'` cannot be created). `createArchiveToBytes` takes its
+format as an argument and has no output file.
+
 ### `createArchiveWithProgress(outputPath, sources, config?, progress?)`
 
 Async archive creation with an optional progress callback, invoked once per entry.

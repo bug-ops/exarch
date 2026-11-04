@@ -106,6 +106,7 @@ use error::run_sync;
 use error::spawn_blocking_promise;
 use exarch_core::BoundaryPath;
 use report::ArchiveManifest;
+use report::ArchiveType;
 use report::CreationReport;
 use report::ExtractionReport;
 use report::VerificationReport;
@@ -183,8 +184,10 @@ const _: () = assert!(
 ///   Changing the setting removes that refusal only; the entry can still fail a
 ///   later check. `windows_reserved_names` and `max_tar_metadata_bytes` have no
 ///   setter in this binding (Rust API only).
-/// - `subCode`: the family of an `INVALID_ARCHIVE` or `SECURITY_VIOLATION`
-///   refusal, when it has one.
+/// - `subCode`: the finer classification of an `INVALID_ARCHIVE` (when it has
+///   one), the family of every `SECURITY_VIOLATION`, the quota of every
+///   `QUOTA_EXCEEDED` and the scope of every `ZIP_BOMB`.
+/// - `ioKind`: the kind of an `IO_ERROR`, such as `NotFound`.
 /// - `setting`: set on an `INVALID_CONFIGURATION` that names the refused
 ///   setting or input, as a `snake_case` id such as `max_file_count`.
 /// - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
@@ -305,6 +308,41 @@ pub fn extract_archive_sync(
     .map(ExtractionReport::from)
 }
 
+/// Options of `createArchive` and its variants.
+///
+/// `overwrite` follows the same default as the Python binding: `true`
+/// replaces an existing output when creation succeeds (a failed creation
+/// leaves the previous output untouched); `false` refuses an existing output
+/// with `OUTPUT_EXISTS`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct CreateOptions {
+    /// The archive format, instead of the one the output extension names (how
+    /// a `.apk` or `.whl` is written as a plain ZIP). `'SevenZ'` cannot be
+    /// created.
+    pub format: Option<ArchiveType>,
+    /// Whether an existing output may be replaced. Defaults to `true`.
+    pub overwrite: Option<bool>,
+}
+
+/// The output of a creation as the core request takes it.
+fn output_file(
+    output_path: &BoundaryPath,
+    options: &CreateOptions,
+) -> CoreResult<exarch_core::OutputFile> {
+    let file = if options.overwrite.unwrap_or(true) {
+        exarch_core::OutputFile::replace(output_path.as_str())
+    } else {
+        exarch_core::OutputFile::create_new(output_path.as_str())
+    };
+    Ok(match options.format {
+        Some(format) => file.with_format(exarch_core::formats::detect::CreatableFormat::try_from(
+            exarch_core::formats::detect::ArchiveType::from(format),
+        )?),
+        None => file,
+    })
+}
+
 /// Create an archive from source files and directories (async).
 ///
 /// # Arguments
@@ -340,14 +378,16 @@ pub fn create_archive<'env>(
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
+    options: Option<CreateOptions>,
 ) -> Result<PromiseRaw<'env, CreationReport>> {
     let config_owned: exarch_core::creation::CreationConfig =
         config.map_or_default(|c| c.as_core().clone());
+    let options = options.unwrap_or_default();
 
     spawn_blocking_promise(
         env,
         "archive creation",
-        move || create_core(&output_path, &sources, &config_owned),
+        move || create_core(&output_path, &sources, &config_owned, &options),
         |report| Ok(CreationReport::from(report)),
     )
 }
@@ -363,12 +403,11 @@ fn create_core(
     output_path: &str,
     sources: &[String],
     config: &exarch_core::creation::CreationConfig,
+    options: &CreateOptions,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
-    Ok(exarch_core::CreateRequest::new(config).create(
-        &exarch_core::OutputFile::replace(output_path.as_str()),
-        &sources,
-    )?)
+    let output = output_file(&output_path, options)?;
+    Ok(exarch_core::CreateRequest::new(config).create(&output, &sources)?)
 }
 
 /// Create an archive from source files and directories (sync).
@@ -405,12 +444,14 @@ pub fn create_archive_sync(
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
+    options: Option<CreateOptions>,
 ) -> Result<CreationReport> {
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let options = options.unwrap_or_default();
 
     run_sync(env, "archive creation", || {
-        create_core(&output_path, &sources, config_ref)
+        create_core(&output_path, &sources, config_ref, &options)
     })
     .map(CreationReport::from)
 }
@@ -525,7 +566,8 @@ impl FromNapiValue for ProgressCallback {
 /// function calling convention: `err` is always `null`, the entry data
 /// arrives as a single array argument) where:
 /// - `path` — entry path being added to the archive
-/// - `total` — total number of entries as `number`
+/// - `total` — total number of entries as `number`, or `null` while the count
+///   is not known
 /// - `current` — 1-based index of the current entry as `number`
 /// - `bytesWritten` — always `0`. The callback only fires from the entry-start
 ///   event, which resets the running per-entry byte counter immediately before
@@ -603,14 +645,14 @@ pub fn create_archive_with_progress<'env>(
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
-    #[napi(
-        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
-    )]
+    #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
+    options: Option<CreateOptions>,
 ) -> Result<PromiseRaw<'env, CreationReport>> {
     let config_owned: exarch_core::creation::CreationConfig =
         config.map_or_default(|c| c.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
+    let options = options.unwrap_or_default();
 
     spawn_blocking_promise(
         env,
@@ -620,6 +662,7 @@ pub fn create_archive_with_progress<'env>(
                 &output_path,
                 &sources,
                 &config_owned,
+                &options,
                 progress,
                 ProgressDispatch::Awaited,
             )
@@ -632,19 +675,14 @@ fn create_with_progress_core(
     output_path: &str,
     sources: &[String],
     config: &exarch_core::creation::CreationConfig,
+    options: &CreateOptions,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
-    let sources_refs: Vec<&str> = sources.iter().map(BoundaryPath::as_str).collect();
-    run_create_with_optional_progress(
-        output_path.as_str(),
-        &sources_refs,
-        config,
-        progress,
-        dispatch,
-    )
-    .map_err(Failure::Callback)
+    let output = output_file(&output_path, options)?;
+    run_create_with_optional_progress(&output, &sources, config, progress, dispatch)
+        .map_err(Failure::Callback)
 }
 
 /// Create an archive from source files and directories with a progress
@@ -724,15 +762,18 @@ pub fn create_archive_with_progress_sync(
     sources: Vec<String>,
     config: Option<&CreationConfig>,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
+    options: Option<CreateOptions>,
 ) -> Result<CreationReport> {
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let options = options.unwrap_or_default();
 
     run_sync(env, "archive creation with progress", || {
         create_with_progress_core(
             &output_path,
             &sources,
             config_ref,
+            &options,
             progress,
             ProgressDispatch::Deferred,
         )
@@ -749,8 +790,8 @@ pub fn create_archive_with_progress_sync(
 /// [`ProgressDispatch::Deferred`] no throw is ever observable here — the
 /// callback runs only after the caller has returned.
 fn run_create_with_optional_progress(
-    output_path: &str,
-    sources: &[&str],
+    output: &exarch_core::OutputFile,
+    sources: &[BoundaryPath],
     config: &exarch_core::creation::CreationConfig,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
@@ -760,7 +801,7 @@ fn run_create_with_optional_progress(
             let mut noop = exarch_core::NoopProgress;
             exarch_core::CreateRequest::new(config)
                 .with_progress(&mut noop)
-                .create(&exarch_core::OutputFile::replace(output_path), sources)
+                .create(output, sources)
                 .map_err(|source| {
                     Box::new(ProgressCallbackError::Core {
                         source,
@@ -772,7 +813,7 @@ fn run_create_with_optional_progress(
             let mut callback = NodeProgressAdapter::new(tsfn, dispatch, AbortHandle::NONE);
             let result = exarch_core::CreateRequest::new(config)
                 .with_progress(&mut callback)
-                .create(&exarch_core::OutputFile::replace(output_path), sources);
+                .create(output, sources);
             match (result, callback.into_callback_error()) {
                 (Ok(report), None) => Ok(report),
                 (Ok(report), Some(source)) => {
@@ -1093,9 +1134,7 @@ pub fn extract_archive_with_progress<'env>(
     output_dir: String,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
-    #[napi(
-        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
-    )]
+    #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
 ) -> Result<PromiseRaw<'env, ExtractionReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
@@ -1110,8 +1149,8 @@ pub fn extract_archive_with_progress<'env>(
             let archive_path = boundary_path(&archive_path)?;
             let output_dir = boundary_path(&output_dir)?;
             run_extract_with_optional_progress(
-                archive_path.as_str(),
-                output_dir.as_str(),
+                &archive_path,
+                &output_dir,
                 &config_owned,
                 &options_owned,
                 progress,
@@ -1129,8 +1168,8 @@ pub fn extract_archive_with_progress<'env>(
 /// run; both are carried out of here so neither is silently dropped (see the
 /// `From<ProgressCallbackError>` impl for how they merge into one rejection).
 fn run_extract_with_optional_progress(
-    archive_path: &str,
-    output_dir: &str,
+    archive_path: &BoundaryPath,
+    output_dir: &BoundaryPath,
     config: &exarch_core::SecurityConfig,
     options: &exarch_core::ExtractionOptions,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
@@ -1395,12 +1434,22 @@ mod tests {
     fn test_create_rejects_null_byte_in_output_and_sources() {
         let sources = vec!["source/".to_string()];
         assert_boundary_violation(
-            create_core("/tmp/out\0x.tar", &sources, &creation()),
+            create_core(
+                "/tmp/out\0x.tar",
+                &sources,
+                &creation(),
+                &CreateOptions::default(),
+            ),
             "null bytes",
         );
         let bad_sources = vec!["ok/".to_string(), "src\0x".to_string()];
         assert_boundary_violation(
-            create_core("/tmp/out.tar", &bad_sources, &creation()),
+            create_core(
+                "/tmp/out.tar",
+                &bad_sources,
+                &creation(),
+                &CreateOptions::default(),
+            ),
             "null bytes",
         );
     }
@@ -1409,11 +1458,21 @@ mod tests {
     fn test_create_rejects_excessively_long_paths() {
         let long = long_path();
         assert_boundary_violation(
-            create_core(&long, &["source/".to_string()], &creation()),
+            create_core(
+                &long,
+                &["source/".to_string()],
+                &creation(),
+                &CreateOptions::default(),
+            ),
             "maximum length",
         );
         assert_boundary_violation(
-            create_core("/tmp/out.tar", &[long], &creation()),
+            create_core(
+                "/tmp/out.tar",
+                &[long],
+                &creation(),
+                &CreateOptions::default(),
+            ),
             "maximum length",
         );
     }
@@ -1424,6 +1483,7 @@ mod tests {
             "/tmp/exarch-empty-sources.tar",
             &[],
             &creation(),
+            &CreateOptions::default(),
         ));
     }
 
@@ -1433,6 +1493,7 @@ mod tests {
             "/tmp/out\0x.tar",
             &[],
             &creation(),
+            &CreateOptions::default(),
             None,
             ProgressDispatch::Deferred,
         );

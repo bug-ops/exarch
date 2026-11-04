@@ -253,8 +253,8 @@ impl<S: IntoSource> MemoryJob<S> {
 
     /// Runs with the JS callback `progress`, merging a core failure and a
     /// callback throw the way `extractArchiveWithProgress` does. A throw after
-    /// a successful run discards the entries: the rejection carries only the
-    /// report counters.
+    /// a successful run discards the entries: the rejection reports
+    /// `writes: 'discarded'` and no counters.
     fn run_with_progress(
         self,
         progress: Option<ThreadsafeFunction<ProgressArgs>>,
@@ -340,7 +340,7 @@ fn into_memory_extraction(
 /// still completes:
 ///
 /// - When extraction succeeded, the promise rejects with
-///   `PROGRESS_CALLBACK_ERROR`, the throw as `cause`, and the report counters;
+///   `PROGRESS_CALLBACK_ERROR`, the throw as `cause` and `writes: 'discarded'`;
 ///   the extracted entries are discarded, as nothing was written to disk.
 /// - When extraction failed, the core error keeps its `code` and the throw is
 ///   attached as `cause`.
@@ -365,9 +365,7 @@ pub fn extract_archive_to_memory_with_progress<'env>(
     max_bytes: Option<f64>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
-    #[napi(
-        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
-    )]
+    #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, MemoryExtraction>> {

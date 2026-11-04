@@ -195,5 +195,15 @@ describe('CreationConfig', () => {
         config.setCompressionLevel(10);
       }, /1.*9|invalid/i);
     });
+
+    it('refuses fractions and out-of-range numbers instead of wrapping them', () => {
+      for (const bad of [6.7, 4294967302, -1, NaN, Infinity, 2 ** 40]) {
+        const config = new CreationConfig();
+        assert.throws(() => config.setCompressionLevel(bad), {
+          code: 'INVALID_COMPRESSION_LEVEL',
+        });
+        assert.strictEqual(config.compressionLevel, 6);
+      }
+    });
   });
 });

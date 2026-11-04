@@ -324,9 +324,7 @@ pub fn list_archive_bytes_with_progress<'env>(
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
     format: Option<ArchiveType>,
-    #[napi(
-        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
-    )]
+    #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
@@ -396,9 +394,7 @@ pub fn verify_archive_bytes_with_progress<'env>(
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
     format: Option<ArchiveType>,
-    #[napi(
-        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
-    )]
+    #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, VerificationReport>> {

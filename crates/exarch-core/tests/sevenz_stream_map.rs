@@ -15,10 +15,10 @@ use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationOptions;
+use exarch_core::VerifyRequest;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
-use exarch_core::verify_archive_with_options;
 use tempfile::TempDir;
 
 fn vector() -> PathBuf {
@@ -46,11 +46,11 @@ fn verify_rejects_streams_without_files_info() {
 fn verify_with_integrity_rejects_streams_without_files_info() {
     let options = VerificationOptions::default()
         .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT));
-    assert_invalid_archive(&verify_archive_with_options(
-        vector(),
-        &SecurityConfig::default(),
-        &options,
-    ));
+    assert_invalid_archive(
+        &VerifyRequest::new(&SecurityConfig::default())
+            .with_options(options)
+            .verify(vector()),
+    );
 }
 
 #[test]

@@ -25,7 +25,6 @@ use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
 use exarch_core::formats::detect::CreatableFormat;
 use exarch_core::list_archive;
-use exarch_core::list_reader;
 use exarch_core::verify_archive;
 use sink_support::tar_archive;
 use sink_support::tar_file;
@@ -128,22 +127,15 @@ fn a_path_based_verify_reports_progress() {
 }
 
 #[test]
-fn reader_requests_match_the_plain_reader_functions() {
+fn reader_requests_list_and_verify_with_progress() {
     let config = SecurityConfig::default();
     let bytes = archives().remove(0).1;
     let mut progress = Count::default();
 
-    let manifest = ListRequest::new(&config)
+    let _manifest = ListRequest::new(&config)
         .with_progress(&mut progress)
         .list_reader(ArchiveReader::tar(Cursor::new(bytes.clone()), None))
         .unwrap();
-    let plain = list_reader(
-        ArchiveReader::tar(Cursor::new(bytes.clone()), None),
-        &config,
-        &ListOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(manifest.total_entries(), plain.total_entries());
     assert_eq!(progress.dones, 1);
 
     let mut progress = Count::default();

@@ -2,7 +2,7 @@
 
 use std::io::Write as _;
 
-use exarch_core::extract_archive_with_options;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use libfuzzer_sys::fuzz_target;
 use tempfile::NamedTempFile;
@@ -40,7 +40,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let output = iteration_root.path().join("out");
 
-    let _ = extract_archive_with_options(input.path(), &output, config, &options);
+    let _ = ExtractRequest::new(config).with_options(options.clone()).extract(input.path(), &output);
 
     let mut entries = std::fs::read_dir(iteration_root.path())
         .into_iter()

@@ -30,9 +30,9 @@ use exarch_core::EntrySink;
 use exarch_core::SafePath;
 use exarch_core::SanitizedMode;
 use exarch_core::SecurityConfig;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
 use exarch_core::Uncompressed;
-use exarch_core::extract_to_sink;
 use exarch_core::security::HardlinkTracker;
 use exarch_core::security::validate_compression_ratio;
 use exarch_core::security::validate_symlink;
@@ -412,13 +412,13 @@ impl TarSpec {
 }
 
 fn run_pipeline(archive: &[u8], config: &SecurityConfig) {
-    extract_to_sink(
-        ArchiveReader::tar(Cursor::new(archive), None),
-        &mut NullSink,
-        config,
-        &SinkOptions::default(),
-    )
-    .unwrap();
+    SinkExtractRequest::new(config)
+        .with_options(SinkOptions::default())
+        .extract(
+            ArchiveReader::tar(Cursor::new(archive), None),
+            &mut NullSink,
+        )
+        .unwrap();
 }
 
 /// The whole entry pipeline, driven by in-memory archives.

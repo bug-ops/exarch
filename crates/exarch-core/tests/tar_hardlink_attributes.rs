@@ -17,8 +17,8 @@ use std::path::Path;
 
 use exarch_core::ArchiveReader;
 use exarch_core::SecurityConfig;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
-use exarch_core::extract_to_sink;
 use sink_support::RecordingSink;
 
 const TARGET_MODE: u32 = 0o644;
@@ -129,7 +129,10 @@ fn sink_hardlink_attributes_do_not_reach_the_symlink_target() {
     let reader = ArchiveReader::tar(Cursor::new(hardlink_through_symlink_tar()), None);
     let mut sink = RecordingSink::default();
 
-    extract_to_sink(reader, &mut sink, &links_config(), &SinkOptions::default()).unwrap();
+    SinkExtractRequest::new(&links_config())
+        .with_options(SinkOptions::default())
+        .extract(reader, &mut sink)
+        .unwrap();
 
     assert_eq!(sink.tree.files[Path::new("h")], b"data");
     assert_eq!(

@@ -9,11 +9,11 @@
 #![allow(clippy::disallowed_methods)]
 
 use exarch_core::ArchiveError;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::PartialWrites;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
-use exarch_core::extract_archive_with_options;
 use std::assert_matches;
 use tempfile::TempDir;
 
@@ -143,9 +143,11 @@ fn atomic_failure_reports_writes_rolled_back() {
     let config = SecurityConfig::default().with_allow_symlinks(true);
     let options = ExtractionOptions::default().with_atomic(true);
 
-    let writes = partial_writes_of(extract_archive_with_options(
-        &archive, &dest, &config, &options,
-    ));
+    let writes = partial_writes_of(
+        ExtractRequest::new(&config)
+            .with_options(options)
+            .extract(&archive, &dest),
+    );
 
     assert_eq!(writes, PartialWrites::RolledBack);
     assert!(!dest.exists());

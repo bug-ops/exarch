@@ -12,12 +12,12 @@ use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
 use exarch_core::TarAmbiguity;
 use exarch_core::extract_archive;
-use exarch_core::extract_archive_with_options;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use flate2::Compression;
@@ -192,8 +192,10 @@ fn root_symlink_with_overwrite_is_rejected_and_leaves_the_destination_alone() {
     let options = ExtractionOptions::default().with_skip_duplicates(false);
     std::fs::write(out.path().join("keep"), b"k").unwrap();
 
-    let error =
-        extract_archive_with_options(&archive, out.path(), &link_config(), &options).unwrap_err();
+    let error = ExtractRequest::new(&link_config())
+        .with_options(options)
+        .extract(&archive, out.path())
+        .unwrap_err();
 
     assert_eq!(error.error_code(), ErrorCode::SecurityViolation, "{error}");
     assert_eq!(std::fs::read(out.path().join("keep")).unwrap(), b"k");

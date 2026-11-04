@@ -22,13 +22,13 @@ use std::path::PathBuf;
 use common::RawEntry as SevenZEntry;
 use common::solid_copy_7z;
 use exarch_core::DecodeReuse;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ListRequest;
 use exarch_core::ListedExtractOptions;
 use exarch_core::NoopProgress;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options;
 use exarch_testkit::raw_zip::RawEntry as ZipEntry;
 use sink_support::tar_archive;
 use sink_support::tar_entry_mode;
@@ -118,7 +118,9 @@ fn plain(archive: &Path, config: &SecurityConfig, reuse: DecodeReuse) -> Outcome
     let dest = out.path().join("out");
     let options = ExtractionOptions::default().with_decode_reuse(reuse);
     outcome(
-        extract_archive_with_options(archive, &dest, config, &options),
+        ExtractRequest::new(config)
+            .with_options(options)
+            .extract(archive, &dest),
         &dest,
     )
 }

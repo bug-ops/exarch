@@ -374,13 +374,10 @@ mod landing {
                     std::io::Cursor::new(std::fs::read(&archive).unwrap()),
                     None,
                 );
-                let sunk = exarch_core::extract_to_sink(
-                    reader,
-                    &mut exarch_core::MemorySink::default(),
-                    &config,
-                    &exarch_core::SinkOptions::default(),
-                )
-                .is_ok();
+                let sunk = exarch_core::SinkExtractRequest::new(&config)
+                    .with_options(exarch_core::SinkOptions::default())
+                    .extract(reader, &mut exarch_core::MemorySink::default())
+                    .is_ok();
                 assert_eq!(
                     (extracted, verified, sunk),
                     (accepted, accepted, accepted),

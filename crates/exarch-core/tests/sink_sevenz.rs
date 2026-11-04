@@ -15,6 +15,7 @@ use std::path::Path;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
 use exarch_core::EntrySink;
+use exarch_core::ExtractRequest;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PathModel;
@@ -22,9 +23,8 @@ use exarch_core::ProgressCallback;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
-use exarch_core::extract_archive_with_progress;
-use exarch_core::extract_to_sink_with_progress;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
 use sevenz_rust2::EncoderConfiguration;
@@ -78,21 +78,20 @@ fn host_events(file_name: &str, bytes: &[u8]) -> Vec<String> {
     let archive = dir.path().join(file_name);
     std::fs::write(&archive, bytes).unwrap();
     let mut events = Events::default();
-    extract_archive_with_progress(&archive, dir.path().join("out"), &config(), &mut events)
+    ExtractRequest::new(&config())
+        .with_progress(&mut events)
+        .extract(&archive, dir.path().join("out"))
         .unwrap();
     events.0
 }
 
 fn sink_events(reader: ArchiveReader<'_>) -> Vec<String> {
     let mut events = Events::default();
-    extract_to_sink_with_progress(
-        reader,
-        &mut RecordingSink::default(),
-        &config(),
-        &SinkOptions::default(),
-        &mut events,
-    )
-    .unwrap();
+    SinkExtractRequest::new(&config())
+        .with_options(SinkOptions::default())
+        .with_progress(&mut events)
+        .extract(reader, &mut RecordingSink::default())
+        .unwrap();
     events.0
 }
 
@@ -162,28 +161,28 @@ fn a_memory_sink_with_room_receives_every_file() {
 #[test]
 fn the_empty_archive_extracts_nothing_and_never_completes() {
     let mut events = Events::default();
-    let report = extract_to_sink_with_progress(
-        ArchiveReader::seekable(Cursor::new(fixture("empty.7z")), SeekableFormat::SevenZ),
-        &mut RecordingSink::default(),
-        &config(),
-        &SinkOptions::default(),
-        &mut events,
-    )
-    .unwrap();
+    let report = SinkExtractRequest::new(&config())
+        .with_options(SinkOptions::default())
+        .with_progress(&mut events)
+        .extract(
+            ArchiveReader::seekable(Cursor::new(fixture("empty.7z")), SeekableFormat::SevenZ),
+            &mut RecordingSink::default(),
+        )
+        .unwrap();
     assert_eq!(report.files_extracted, 0);
     assert!(events.0.is_empty(), "{:?}", events.0);
 }
 
 #[test]
 fn a_source_that_is_not_a_7z_is_rejected() {
-    let error = extract_to_sink_with_progress(
-        ArchiveReader::seekable(Cursor::new(vec![0; 64]), SeekableFormat::SevenZ),
-        &mut RecordingSink::default(),
-        &config(),
-        &SinkOptions::default(),
-        &mut Events::default(),
-    )
-    .unwrap_err();
+    let error = SinkExtractRequest::new(&config())
+        .with_options(SinkOptions::default())
+        .with_progress(&mut Events::default())
+        .extract(
+            ArchiveReader::seekable(Cursor::new(vec![0; 64]), SeekableFormat::SevenZ),
+            &mut RecordingSink::default(),
+        )
+        .unwrap_err();
     assert_matches!(error, ArchiveError::InvalidArchive(_), "{error:?}");
 }
 
@@ -191,34 +190,34 @@ fn a_source_that_is_not_a_7z_is_rejected() {
 fn symlinks_are_delivered_where_the_archive_allows_them() {
     let mut sink = RecordingSink::default();
     let config = config().with_allow_symlinks(true);
-    let report = extract_to_sink_with_progress(
-        ArchiveReader::seekable(
-            Cursor::new(fixture("symlink-mode.7z")),
-            SeekableFormat::SevenZ,
-        ),
-        &mut sink,
-        &config,
-        &SinkOptions::default(),
-        &mut Events::default(),
-    )
-    .unwrap();
+    let report = SinkExtractRequest::new(&config)
+        .with_options(SinkOptions::default())
+        .with_progress(&mut Events::default())
+        .extract(
+            ArchiveReader::seekable(
+                Cursor::new(fixture("symlink-mode.7z")),
+                SeekableFormat::SevenZ,
+            ),
+            &mut sink,
+        )
+        .unwrap();
     assert!(report.symlinks_created >= 1, "{report:?}");
     assert_eq!(sink.tree.symlinks.len(), report.symlinks_created);
 }
 
 #[test]
 fn symlinks_are_refused_unless_allowed() {
-    let error = extract_to_sink_with_progress(
-        ArchiveReader::seekable(
-            Cursor::new(fixture("symlink-mode.7z")),
-            SeekableFormat::SevenZ,
-        ),
-        &mut RecordingSink::default(),
-        &config(),
-        &SinkOptions::default(),
-        &mut Events::default(),
-    )
-    .unwrap_err();
+    let error = SinkExtractRequest::new(&config())
+        .with_options(SinkOptions::default())
+        .with_progress(&mut Events::default())
+        .extract(
+            ArchiveReader::seekable(
+                Cursor::new(fixture("symlink-mode.7z")),
+                SeekableFormat::SevenZ,
+            ),
+            &mut RecordingSink::default(),
+        )
+        .unwrap_err();
     assert_matches!(error, ArchiveError::SecurityViolation { .. }, "{error:?}");
 }
 
@@ -277,13 +276,13 @@ fn extract_bytes<S: EntrySink>(
     config: &SecurityConfig,
     sink: &mut S,
 ) -> Result<exarch_core::ExtractionReport, ArchiveError> {
-    extract_to_sink_with_progress(
-        ArchiveReader::seekable(Cursor::new(bytes), SeekableFormat::SevenZ),
-        sink,
-        config,
-        &SinkOptions::default(),
-        &mut Events::default(),
-    )
+    SinkExtractRequest::new(config)
+        .with_options(SinkOptions::default())
+        .with_progress(&mut Events::default())
+        .extract(
+            ArchiveReader::seekable(Cursor::new(bytes), SeekableFormat::SevenZ),
+            sink,
+        )
 }
 
 fn cause(error: &ArchiveError) -> &ArchiveError {
@@ -460,11 +459,11 @@ fn extract(
     sink: &mut MemorySink,
     name: &str,
 ) -> Result<exarch_core::ExtractionReport, ArchiveError> {
-    extract_to_sink_with_progress(
-        ArchiveReader::seekable(Cursor::new(fixture(name)), SeekableFormat::SevenZ),
-        sink,
-        &config(),
-        &SinkOptions::default(),
-        &mut Events::default(),
-    )
+    SinkExtractRequest::new(&config())
+        .with_options(SinkOptions::default())
+        .with_progress(&mut Events::default())
+        .extract(
+            ArchiveReader::seekable(Cursor::new(fixture(name)), SeekableFormat::SevenZ),
+            sink,
+        )
 }

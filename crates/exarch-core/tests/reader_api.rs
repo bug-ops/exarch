@@ -15,15 +15,14 @@ use exarch_core::ArchiveReader;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
+use exarch_core::VerifyRequest;
 use exarch_core::formats::compression::CompressionCodec;
 use exarch_core::list_archive;
-use exarch_core::list_reader;
-use exarch_core::verify_archive_with_options;
-use exarch_core::verify_reader;
 use sink_support::tar_archive;
 use sink_support::tar_dir;
 use sink_support::tar_file;
@@ -145,12 +144,10 @@ fn list_reader_matches_list_archive() {
         let dir = TempDir::new().unwrap();
         let path = write(&dir, &case);
         let expected = list_archive(&path, &config).unwrap();
-        let actual = list_reader(
-            (case.make)(case.bytes.clone()),
-            &config,
-            &ListOptions::default(),
-        )
-        .unwrap();
+        let actual = ListRequest::new(&config)
+            .with_options(ListOptions::default())
+            .list_reader((case.make)(case.bytes.clone()))
+            .unwrap();
         assert_eq!(
             format!("{actual:?}"),
             format!("{expected:?}"),
@@ -170,8 +167,14 @@ fn verify_reader_matches_verify_archive_for_skip_and_decode_to_eof() {
         let dir = TempDir::new().unwrap();
         let path = write(&dir, &case);
         for options in [skip, decode] {
-            let expected = verify_archive_with_options(&path, &config, &options).unwrap();
-            let actual = verify_reader((case.make)(case.bytes.clone()), &config, &options).unwrap();
+            let expected = VerifyRequest::new(&config)
+                .with_options(options)
+                .verify(&path)
+                .unwrap();
+            let actual = VerifyRequest::new(&config)
+                .with_options(options)
+                .verify_reader((case.make)(case.bytes.clone()))
+                .unwrap();
             assert_eq!(
                 format!("{actual:?}"),
                 format!("{expected:?}"),
@@ -213,8 +216,10 @@ fn reader_format_reports_the_declared_type() {
 fn list_reader_rejects_a_traversal_name_like_the_path_api() {
     let bytes = tar_archive(&[tar_file("../evil", b"x")]);
     let reader = ArchiveReader::tar(Cursor::new(bytes), None);
-    let error =
-        list_reader(reader, &SecurityConfig::default(), &ListOptions::default()).unwrap_err();
+    let error = ListRequest::new(&SecurityConfig::default())
+        .with_options(ListOptions::default())
+        .list_reader(reader)
+        .unwrap_err();
     assert_matches!(
         error,
         exarch_core::ArchiveError::PathTraversal { .. },

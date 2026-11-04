@@ -13,9 +13,9 @@ use std::path::PathBuf;
 
 use exarch_core::CheckStatus;
 use exarch_core::ErrorCode;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options;
 use exarch_core::verify_archive;
 use tempfile::TempDir;
 use zip::CompressionMethod;
@@ -125,7 +125,9 @@ impl Fixture {
             .with_allow_symlinks(true)
             .with_allow_hardlinks(true);
         let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
-        extract_archive_with_options(&self.archive, self.out(), &config, &options)
+        ExtractRequest::new(&config)
+            .with_options(options)
+            .extract(&self.archive, self.out())
     }
 
     fn verify_report(&self) -> Option<exarch_core::VerificationReport> {

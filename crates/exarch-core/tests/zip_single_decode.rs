@@ -13,13 +13,13 @@ use std::path::Path;
 use std::process::Command;
 
 use exarch_core::DecodeReuse;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ListOptions;
 use exarch_core::NoopProgress;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::ZipConsistencyPolicy;
-use exarch_core::extract_archive_with_options;
 use exarch_core::list_archive_for_extraction;
 use tempfile::TempDir;
 
@@ -55,7 +55,10 @@ fn every_mode_extracts_the_same_files_and_report() {
     for mode in MODES {
         let out = TempDir::new().unwrap();
         let options = ExtractionOptions::default().with_decode_reuse(mode);
-        let report = extract_archive_with_options(&archive, out.path(), &config, &options).unwrap();
+        let report = ExtractRequest::new(&config)
+            .with_options(options.clone())
+            .extract(&archive, out.path())
+            .unwrap();
         assert_eq!(report.files_extracted, ENTRIES, "{mode:?}");
         assert_eq!(
             report.bytes_written,
@@ -75,7 +78,10 @@ fn mixed_methods_and_empty_entries_extract_the_same_in_every_mode() {
     for mode in MODES {
         let direct = TempDir::new().unwrap();
         let options = ExtractionOptions::default().with_decode_reuse(mode);
-        extract_archive_with_options(&archive, direct.path(), &config, &options).unwrap();
+        ExtractRequest::new(&config)
+            .with_options(options.clone())
+            .extract(&archive, direct.path())
+            .unwrap();
 
         let listed =
             list_archive_for_extraction(&archive, &config, &ListOptions::default(), mode).unwrap();
@@ -167,7 +173,9 @@ fn a_corrupt_entry_is_refused_in_every_mode() {
         .map(|&mode| {
             let out = TempDir::new().unwrap();
             let options = ExtractionOptions::default().with_decode_reuse(mode);
-            extract_archive_with_options(&archive, out.path(), &config, &options)
+            ExtractRequest::new(&config)
+                .with_options(options)
+                .extract(&archive, out.path())
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         })
@@ -190,9 +198,10 @@ fn an_unwritable_temp_dir_falls_back_to_decoding_from_the_archive() {
         let out = archive.parent().unwrap().join("out");
         let options =
             ExtractionOptions::default().with_decode_reuse(DecodeReuse::TempFile(ReuseLimit::MAX));
-        let report =
-            extract_archive_with_options(&archive, &out, &SecurityConfig::default(), &options)
-                .unwrap();
+        let report = ExtractRequest::new(&SecurityConfig::default())
+            .with_options(options)
+            .extract(&archive, &out)
+            .unwrap();
         assert_eq!(report.files_extracted, ENTRIES);
         assert_tree(&out);
         return;

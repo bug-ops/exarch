@@ -17,10 +17,10 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 
 use exarch_core::DecodeReuse;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options;
 use exarch_testkit::raw_zip::RawEntry;
 use exarch_testkit::raw_zip::RawZip;
 use exarch_testkit::raw_zip::deflate_zeros;
@@ -40,7 +40,10 @@ fn peak_heap(archive: &Path, reuse: DecodeReuse) -> u64 {
     let config = SecurityConfig::default();
 
     let _profiler = dhat::Profiler::builder().testing().build();
-    let report = extract_archive_with_options(archive, dest.path(), &config, &options).unwrap();
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive, dest.path())
+        .unwrap();
     let peak = dhat::HeapStats::get().max_bytes;
 
     assert_eq!(report.files_extracted, ENTRIES);
@@ -102,7 +105,9 @@ fn refused_peak(archive: &Path, reuse: DecodeReuse) -> u64 {
     let config = SecurityConfig::default();
 
     let _profiler = dhat::Profiler::builder().testing().build();
-    let result = extract_archive_with_options(archive, dest.path(), &config, &options);
+    let result = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive, dest.path());
     let peak = dhat::HeapStats::get().max_bytes;
 
     assert!(result.is_err(), "the extraction must be refused");

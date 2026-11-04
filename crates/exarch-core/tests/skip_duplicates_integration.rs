@@ -13,9 +13,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::disallowed_methods)]
 
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
 use std::io::Write as _;
@@ -72,7 +72,9 @@ fn tar_skip_duplicates_true_keeps_first_entry() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default(); // skip_duplicates = true
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=true must succeed");
 
     assert_eq!(
@@ -103,7 +105,9 @@ fn tar_skip_duplicates_false_overwrites_with_last_entry() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=false must succeed");
 
     assert_eq!(
@@ -184,7 +188,9 @@ fn sevenz_skip_duplicates_true_keeps_first_entry() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default(); // skip_duplicates = true
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=true must succeed");
 
     assert_eq!(
@@ -213,7 +219,9 @@ fn sevenz_skip_duplicates_false_overwrites_with_last_entry() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=false must succeed");
 
     assert_eq!(
@@ -240,7 +248,9 @@ fn tar_skip_duplicates_false_overwrites_nested_path() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=false must succeed for nested paths");
 
     assert_eq!(report.files_extracted, 2);
@@ -289,7 +299,9 @@ fn tar_dangling_symlink_at_destination_skipped_not_followed() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default(); // skip_duplicates = true (default)
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("skip_duplicates=true must skip the symlinked path, not error");
 
     assert_eq!(
@@ -335,7 +347,9 @@ fn tar_dangling_symlink_at_destination_rejected_when_overwrite_requested() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let result = extract_archive_with_options(archive.path(), dest.path(), &config, &options);
+    let result = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path());
 
     assert!(
         result.is_err(),
@@ -384,7 +398,9 @@ fn sevenz_dangling_symlink_at_destination_rejected_when_overwrite_requested() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let result = extract_archive_with_options(archive.path(), dest.path(), &config, &options);
+    let result = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path());
 
     assert!(
         result.is_err(),
@@ -430,7 +446,9 @@ fn sevenz_dangling_symlink_at_destination_quota_not_consumed_when_skipped() {
     let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(1));
     let options = ExtractionOptions::default(); // skip_duplicates = true (default)
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("a skipped duplicate must not permanently consume the file-count quota");
 
     assert_eq!(
@@ -463,7 +481,9 @@ fn sevenz_regular_file_at_destination_still_overwritten_when_overwrite_requested
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("overwriting a pre-existing regular file must still succeed");
 
     assert_eq!(report.files_extracted, 1);
@@ -491,7 +511,9 @@ fn sevenz_live_symlink_at_destination_rejected_when_overwrite_requested() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let result = extract_archive_with_options(archive.path(), dest.path(), &config, &options);
+    let result = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path());
 
     assert!(
         result.is_err(),

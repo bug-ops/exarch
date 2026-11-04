@@ -17,10 +17,10 @@ use exarch_core::IssueCategory;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationOptions;
+use exarch_core::VerifyRequest;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
-use exarch_core::verify_archive_with_options;
 use tempfile::TempDir;
 
 const BLOCK: usize = 512;
@@ -164,9 +164,10 @@ fn zero_padding_after_last_member_is_accepted() {
         let archive = write(&temp, name, &bytes);
 
         assert_eq!(listed(&archive), ["one.txt", "two.txt"], "{name}");
-        let report =
-            verify_archive_with_options(&archive, &SecurityConfig::default(), &integrity_options())
-                .unwrap();
+        let report = VerifyRequest::new(&SecurityConfig::default())
+            .with_options(integrity_options())
+            .verify(&archive)
+            .unwrap();
         assert_eq!(report.integrity_status(), IntegrityStatus::Pass, "{name}");
     }
 }
@@ -179,9 +180,10 @@ fn trailing_garbage_after_last_member_fails_integrity_check() {
         bytes.extend_from_slice(b"NOT-A-MEMBER");
         let archive = write(&temp, name, &bytes);
 
-        let report =
-            verify_archive_with_options(&archive, &SecurityConfig::default(), &integrity_options())
-                .unwrap();
+        let report = VerifyRequest::new(&SecurityConfig::default())
+            .with_options(integrity_options())
+            .verify(&archive)
+            .unwrap();
 
         assert_eq!(report.integrity_status(), IntegrityStatus::Fail, "{name}");
         assert!(
@@ -274,7 +276,9 @@ fn empty_members_after_the_end_marker_stop_at_the_base_allowance() {
             let out = TempDir::new().unwrap();
             let listed = list_archive(&archive, &config);
             let extracted = extract_archive(&archive, out.path(), &config);
-            let verified = verify_archive_with_options(&archive, &config, &integrity_options());
+            let verified = VerifyRequest::new(&config)
+                .with_options(integrity_options())
+                .verify(&archive);
             if refused {
                 assert_member_cap(listed.unwrap_err(), 6, 5, &label);
                 assert_member_cap(extracted.unwrap_err(), 6, 5, &label);

@@ -12,13 +12,13 @@ use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::IssueSeverity;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationStatus;
 use exarch_core::extract_archive;
-use exarch_core::extract_archive_with_options;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use sevenz_rust2::ArchiveEntry;
@@ -189,7 +189,9 @@ fn anti_item_never_truncates_an_existing_file_even_with_overwrite() {
     std::fs::write(out.path().join("gone.txt"), b"precious").unwrap();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    extract_archive_with_options(&archive, out.path(), &SecurityConfig::default(), &options)
+    ExtractRequest::new(&SecurityConfig::default())
+        .with_options(options)
+        .extract(&archive, out.path())
         .unwrap();
 
     assert_eq!(
@@ -295,9 +297,10 @@ fn anti_item_warning_survives_a_failing_extract() {
     std::fs::create_dir(out.path().join("b.txt")).unwrap();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let err =
-        extract_archive_with_options(&archive, out.path(), &SecurityConfig::default(), &options)
-            .unwrap_err();
+    let err = ExtractRequest::new(&SecurityConfig::default())
+        .with_options(options)
+        .extract(&archive, out.path())
+        .unwrap_err();
 
     let ArchiveError::PartialExtraction(partial) = &err else {
         panic!("expected a partial extraction, got {err}");
@@ -374,13 +377,10 @@ fn progress_total_excludes_anti_items_and_indexes_are_contiguous() {
     let out = TempDir::new().unwrap();
     let mut recorder = Recorder::default();
 
-    exarch_core::extract_archive_with_progress(
-        &archive,
-        out.path(),
-        &SecurityConfig::default(),
-        &mut recorder,
-    )
-    .unwrap();
+    exarch_core::ExtractRequest::new(&SecurityConfig::default())
+        .with_progress(&mut recorder)
+        .extract(&archive, out.path())
+        .unwrap();
 
     assert_eq!(recorder.starts, [(2, 1), (2, 2)]);
 }

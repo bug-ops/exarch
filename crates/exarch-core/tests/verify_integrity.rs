@@ -24,10 +24,10 @@ use exarch_core::UnverifiedReason;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
+use exarch_core::VerifyRequest;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use exarch_core::verify_archive;
-use exarch_core::verify_archive_with_options;
 use sevenz_rust2::EncoderConfiguration;
 use sevenz_rust2::EncoderMethod;
 use tempfile::TempDir;
@@ -47,11 +47,17 @@ fn default_integrity() -> VerificationOptions {
 }
 
 fn verify(path: &Path, options: VerificationOptions) -> VerificationReport {
-    verify_archive_with_options(path, &SecurityConfig::default(), &options).unwrap()
+    VerifyRequest::new(&SecurityConfig::default())
+        .with_options(options)
+        .verify(path)
+        .unwrap()
 }
 
 fn verify_err(path: &Path, options: VerificationOptions) -> ArchiveError {
-    verify_archive_with_options(path, &SecurityConfig::default(), &options).unwrap_err()
+    VerifyRequest::new(&SecurityConfig::default())
+        .with_options(options)
+        .verify(path)
+        .unwrap_err()
 }
 
 fn write(dir: &TempDir, name: &str, bytes: &[u8]) -> PathBuf {
@@ -234,7 +240,10 @@ fn zip_corrupt_symlink_target_fails_while_default_verify_errors() {
     let path = write(&dir, "a.zip", &bytes);
     let config = SecurityConfig::default().with_allow_symlinks(true);
 
-    let report = verify_archive_with_options(&path, &config, &default_integrity()).unwrap();
+    let report = VerifyRequest::new(&config)
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
     assert_eq!(corrupt_paths(&report), ["link"]);
 
@@ -372,7 +381,9 @@ fn tar_gz_truncated_is_a_hard_error() {
     let path = write(&dir, "a.tar.gz", &gz[..gz.len() / 2]);
 
     assert!(
-        verify_archive_with_options(&path, &SecurityConfig::default(), &default_integrity())
+        VerifyRequest::new(&SecurityConfig::default())
+            .with_options(default_integrity())
+            .verify(&path)
             .is_err()
     );
 }
@@ -484,7 +495,10 @@ fn tar_xz_over_decoder_memory_is_a_quota_error_not_corruption() {
     let path = write(&dir, "a.tar.xz", &tar_fixtures::xz(&three_entries()));
     let config = SecurityConfig::default().with_max_decoder_memory(exarch_core::non_zero!(1024));
 
-    let err = verify_archive_with_options(&path, &config, &default_integrity()).unwrap_err();
+    let err = VerifyRequest::new(&config)
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap_err();
     assert_matches!(
         err,
         ArchiveError::QuotaExceeded {
@@ -562,8 +576,10 @@ fn sevenz_solid_fixture_is_incomplete_with_defaults() {
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_eq!(count(&report, IssueCategory::SecurityPolicy), 1);
 
-    let allowed =
-        verify_archive_with_options(&path, &solid_config(), &default_integrity()).unwrap();
+    let allowed = VerifyRequest::new(&solid_config())
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap();
     assert_eq!(allowed.integrity_status(), IntegrityStatus::Pass);
 }
 
@@ -578,7 +594,10 @@ fn sevenz_corrupt_solid_block_fails_and_checks_later_entries() {
     flip_first(&mut bytes, OTHER);
     let path = write(&dir, "a.7z", &bytes);
 
-    let report = verify_archive_with_options(&path, &solid_config(), &default_integrity()).unwrap();
+    let report = VerifyRequest::new(&solid_config())
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
     assert_eq!(corrupt_paths(&report), ["a", "b"]);
 }
@@ -589,7 +608,10 @@ fn sevenz_over_budget_block_is_incomplete() {
     let bytes = sevenz_fixtures::solid(&[("a", GOOD), ("b", OTHER)], vec![sevenz_fixtures::copy()]);
     let path = write(&dir, "a.7z", &bytes);
 
-    let report = verify_archive_with_options(&path, &solid_config(), &integrity(1)).unwrap();
+    let report = VerifyRequest::new(&solid_config())
+        .with_options(integrity(1))
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
 }
 
@@ -603,7 +625,10 @@ fn sevenz_ppmd_over_decoder_memory_is_not_decoded() {
     let config =
         SecurityConfig::default().with_max_decoder_memory(exarch_core::non_zero!(1024 * 1024));
 
-    let report = verify_archive_with_options(&path, &config, &default_integrity()).unwrap();
+    let report = VerifyRequest::new(&config)
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
     assert!(count(&report, IssueCategory::QuotaExceeded) >= 1);
 }
@@ -633,7 +658,10 @@ fn sevenz_lzma2_over_decoder_memory_is_not_decoded() {
     let config =
         SecurityConfig::default().with_max_decoder_memory(exarch_core::non_zero!(256 * 1024));
 
-    let report = verify_archive_with_options(&path, &config, &default_integrity()).unwrap();
+    let report = VerifyRequest::new(&config)
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
     assert!(count(&report, IssueCategory::QuotaExceeded) >= 1);
 }
@@ -664,21 +692,17 @@ fn sevenz_size_preserving_filter_is_not_charged_twice() {
 /// passes and a wrong CRC on that last file is reported, never hidden.
 #[test]
 fn sevenz_interleaved_empty_file_cannot_hide_a_payload_file() {
-    let report = verify_archive_with_options(
-        fixture("interleaved-empty.7z"),
-        &solid_config(),
-        &default_integrity(),
-    )
-    .unwrap();
+    let report = VerifyRequest::new(&solid_config())
+        .with_options(default_integrity())
+        .verify(fixture("interleaved-empty.7z"))
+        .unwrap();
     assert_eq!(report.status(), VerificationStatus::Pass);
     assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
 
-    let report = verify_archive_with_options(
-        fixture("interleaved-empty-badcrc.7z"),
-        &solid_config(),
-        &default_integrity(),
-    )
-    .unwrap();
+    let report = VerifyRequest::new(&solid_config())
+        .with_options(default_integrity())
+        .verify(fixture("interleaved-empty-badcrc.7z"))
+        .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
     assert_eq!(corrupt_paths(&report), ["c.txt"]);
@@ -807,7 +831,10 @@ fn sevenz_unknown_coder_is_not_decodable() {
     });
     let path = write(&dir, "a.7z", &bytes);
 
-    let report = verify_archive_with_options(&path, &solid_config(), &default_integrity()).unwrap();
+    let report = VerifyRequest::new(&solid_config())
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
     assert!(
         report
@@ -865,7 +892,10 @@ fn sevenz_block_crc_mismatch_is_attributed_to_the_last_entry() {
     });
     let path = write(&dir, "a.7z", &bytes);
 
-    let report = verify_archive_with_options(&path, &solid_config(), &default_integrity()).unwrap();
+    let report = VerifyRequest::new(&solid_config())
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
     assert_eq!(corrupt_paths(&report), ["c"]);
     assert_eq!(count(&report, IssueCategory::IntegrityIncomplete), 0);
@@ -930,7 +960,10 @@ fn sevenz_verify_and_extract_agree_on_every_refusal() {
         let path = fixture(name);
         extract_refusal(&path, &config);
         for options in [VerificationOptions::default(), default_integrity()] {
-            let report = verify_archive_with_options(&path, &config, &options).unwrap();
+            let report = VerifyRequest::new(&config)
+                .with_options(options)
+                .verify(&path)
+                .unwrap();
             assert_eq!(report.status(), VerificationStatus::Fail, "{name}");
         }
     }
@@ -940,19 +973,18 @@ fn sevenz_verify_and_extract_agree_on_every_refusal() {
 fn sevenz_plain_verify_fails_a_solid_archive_with_one_policy_issue() {
     let path = fixture("solid.7z");
 
-    let report = verify_archive_with_options(
-        &path,
-        &SecurityConfig::default(),
-        &VerificationOptions::default(),
-    )
-    .unwrap();
+    let report = VerifyRequest::new(&SecurityConfig::default())
+        .with_options(VerificationOptions::default())
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_eq!(report.issues().len(), 1);
     assert_eq!(count(&report, IssueCategory::SecurityPolicy), 1);
 
-    let allowed =
-        verify_archive_with_options(&path, &solid_config(), &VerificationOptions::default())
-            .unwrap();
+    let allowed = VerifyRequest::new(&solid_config())
+        .with_options(VerificationOptions::default())
+        .verify(&path)
+        .unwrap();
     assert_eq!(allowed.status(), VerificationStatus::Pass);
 }
 
@@ -1084,7 +1116,10 @@ fn sevenz_directory_between_the_files_of_a_solid_block_is_listed_verified_and_ex
     let manifest = exarch_core::list_archive(&path, &solid_config()).unwrap();
     assert_eq!(manifest.total_entries(), 3);
 
-    let report = verify_archive_with_options(&path, &solid_config(), &default_integrity()).unwrap();
+    let report = VerifyRequest::new(&solid_config())
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.status(), VerificationStatus::Pass);
     assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
 
@@ -1105,7 +1140,10 @@ fn sevenz_dropped_oversized_entry_does_not_misalign_its_solid_block() {
     );
     let path = write(&dir, "long.7z", &bytes);
 
-    let report = verify_archive_with_options(&path, &solid_config(), &default_integrity()).unwrap();
+    let report = VerifyRequest::new(&solid_config())
+        .with_options(default_integrity())
+        .verify(&path)
+        .unwrap();
 
     assert!(corrupt_paths(&report).is_empty(), "{:?}", report.issues());
     assert_eq!(report.status(), VerificationStatus::Fail);

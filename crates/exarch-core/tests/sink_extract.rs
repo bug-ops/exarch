@@ -23,9 +23,9 @@ use exarch_core::SafePath;
 use exarch_core::SanitizedMode;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkFull;
 use exarch_core::SinkOptions;
-use exarch_core::extract_to_sink;
 use exarch_core::formats::compression::CompressionCodec;
 use exarch_testkit::raw_zip::RawEntry;
 use sink_support::RecordingSink;
@@ -54,12 +54,9 @@ fn extract(
     reader: ArchiveReader<'_>,
     sink: &mut impl EntrySink,
 ) -> Result<exarch_core::ExtractionReport, ArchiveError> {
-    extract_to_sink(
-        reader,
-        sink,
-        &SecurityConfig::default(),
-        &SinkOptions::default(),
-    )
+    SinkExtractRequest::new(&SecurityConfig::default())
+        .with_options(SinkOptions::default())
+        .extract(reader, sink)
 }
 
 /// A sink whose methods can be made to fail.
@@ -253,7 +250,9 @@ fn extract_links(
     sink: &mut impl EntrySink,
     options: SinkOptions,
 ) -> Result<exarch_core::ExtractionReport, ArchiveError> {
-    extract_to_sink(tar_reader(entries), sink, &links_config(), &options)
+    SinkExtractRequest::new(&links_config())
+        .with_options(options)
+        .extract(tar_reader(entries), sink)
 }
 
 fn is_io(error: &ArchiveError) -> bool {
@@ -369,13 +368,10 @@ fn a_flood_of_directory_entries_exhausts_the_node_budget() {
     let entries: Vec<_> = (0..16)
         .map(|i| sink_support::tar_dir(&format!("d{i}/")))
         .collect();
-    let error = extract_to_sink(
-        tar_reader(&entries),
-        &mut sink,
-        &small_tree_config(),
-        &SinkOptions::default(),
-    )
-    .unwrap_err();
+    let error = SinkExtractRequest::new(&small_tree_config())
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap_err();
     assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
 }
 
@@ -389,13 +385,10 @@ fn case_variant_directories_charge_the_node_budget() {
     .into_iter()
     .map(sink_support::tar_dir)
     .collect();
-    let error = extract_to_sink(
-        tar_reader(&entries),
-        &mut sink,
-        &small_tree_config(),
-        &SinkOptions::default(),
-    )
-    .unwrap_err();
+    let error = SinkExtractRequest::new(&small_tree_config())
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap_err();
     assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
 }
 
@@ -410,13 +403,10 @@ fn case_variant_directories_do_not_alias_on_a_case_sensitive_host() {
     let config = SecurityConfig::default()
         .with_max_file_count(exarch_core::non_zero!(2))
         .with_max_path_depth(exarch_core::non_zero!(2));
-    extract_to_sink(
-        tar_reader(&entries),
-        &mut sink,
-        &config,
-        &SinkOptions::default(),
-    )
-    .unwrap();
+    SinkExtractRequest::new(&config)
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap();
     assert_eq!(sink.tree.dirs.len(), 4);
 }
 
@@ -424,13 +414,10 @@ fn case_variant_directories_do_not_alias_on_a_case_sensitive_host() {
 fn an_archive_within_the_node_budget_extracts() {
     let mut sink = RecordingSink::default();
     let entries = [sink_support::tar_dir("a/"), tar_file("a/f", b"x")];
-    extract_to_sink(
-        tar_reader(&entries),
-        &mut sink,
-        &small_tree_config(),
-        &SinkOptions::default(),
-    )
-    .unwrap();
+    SinkExtractRequest::new(&small_tree_config())
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap();
 }
 
 /// Keeps what the pipeline proves about a file's size and a link's target.
@@ -480,13 +467,10 @@ fn a_sink_receives_the_admitted_size_and_the_validated_link_target() {
         sink_support::tar_symlink("l", "a"),
         tar_file("empty", b""),
     ];
-    extract_to_sink(
-        tar_reader(&entries),
-        &mut sink,
-        &config,
-        &SinkOptions::default(),
-    )
-    .unwrap();
+    SinkExtractRequest::new(&config)
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap();
     assert_eq!(sink.sizes, [5, 0]);
     assert_eq!(sink.targets, [PathBuf::from("a")]);
 }

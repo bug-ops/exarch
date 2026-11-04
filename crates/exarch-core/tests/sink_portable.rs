@@ -14,8 +14,8 @@ use exarch_core::ExtractionReport;
 use exarch_core::MemorySink;
 use exarch_core::PathModel;
 use exarch_core::SecurityConfig;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
-use exarch_core::extract_to_sink;
 use sink_support::tar_archive;
 use sink_support::tar_file;
 use sink_support::tar_symlink;
@@ -26,12 +26,9 @@ fn run(
     config: &SecurityConfig,
 ) -> (Result<ExtractionReport, ArchiveError>, MemorySink) {
     let mut sink = MemorySink::default().with_path_model(model);
-    let result = extract_to_sink(
-        ArchiveReader::tar(Cursor::new(archive), None),
-        &mut sink,
-        config,
-        &SinkOptions::default(),
-    );
+    let result = SinkExtractRequest::new(config)
+        .with_options(SinkOptions::default())
+        .extract(ArchiveReader::tar(Cursor::new(archive), None), &mut sink);
     (result, sink)
 }
 

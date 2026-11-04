@@ -7,8 +7,9 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
+use exarch_core::CreateRequest;
+use exarch_core::OutputFile;
 use exarch_core::ProgressCallback;
-use exarch_core::create_archive_with_progress;
 use exarch_core::creation::CreationConfig;
 use tempfile::TempDir;
 
@@ -46,13 +47,10 @@ fn root_directory_is_not_reported_as_an_entry() {
         let out = TempDir::new().unwrap();
         let mut progress = Recorder::default();
 
-        create_archive_with_progress(
-            out.path().join(name),
-            &[src.path()],
-            &CreationConfig::default(),
-            &mut progress,
-        )
-        .unwrap();
+        CreateRequest::new(&CreationConfig::default())
+            .with_progress(&mut progress)
+            .create(&OutputFile::replace(out.path().join(name)), &[src.path()])
+            .unwrap();
 
         assert_eq!(progress.starts.len(), 1, "{name}");
         assert_eq!(progress.starts[0].1, 1, "{name}: total");
@@ -71,7 +69,9 @@ fn directory_emptied_by_strip_prefix_is_dropped() {
         let mut progress = Recorder::default();
         let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from("sub")));
 
-        create_archive_with_progress(out.path().join(name), &[src.path()], &config, &mut progress)
+        CreateRequest::new(&config)
+            .with_progress(&mut progress)
+            .create(&OutputFile::replace(out.path().join(name)), &[src.path()])
             .unwrap();
 
         let started: Vec<_> = progress
@@ -93,13 +93,13 @@ fn file_emptied_by_strip_prefix_is_refused() {
     let mut progress = Recorder::default();
     let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from("a.txt")));
 
-    let err = create_archive_with_progress(
-        out.path().join("out.tar.gz"),
-        &[file.as_path()],
-        &config,
-        &mut progress,
-    )
-    .unwrap_err();
+    let err = CreateRequest::new(&config)
+        .with_progress(&mut progress)
+        .create(
+            &OutputFile::replace(out.path().join("out.tar.gz")),
+            &[file.as_path()],
+        )
+        .unwrap_err();
 
     assert_matches!(err, ArchiveError::InvalidConfiguration { .. }, "{err:?}");
     assert!(progress.starts.is_empty());
@@ -115,13 +115,13 @@ fn symlink_emptied_by_strip_prefix_is_refused() {
     let mut progress = Recorder::default();
     let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from("link")));
 
-    let err = create_archive_with_progress(
-        out.path().join("out.zip"),
-        &[link.as_path()],
-        &config,
-        &mut progress,
-    )
-    .unwrap_err();
+    let err = CreateRequest::new(&config)
+        .with_progress(&mut progress)
+        .create(
+            &OutputFile::replace(out.path().join("out.zip")),
+            &[link.as_path()],
+        )
+        .unwrap_err();
 
     assert_matches!(err, ArchiveError::InvalidConfiguration { .. }, "{err:?}");
 }
@@ -138,12 +138,9 @@ fn failing_entry_is_still_completed() {
         let out = TempDir::new().unwrap();
         let mut progress = Recorder::default();
 
-        let result = create_archive_with_progress(
-            out.path().join(name),
-            &[src.path()],
-            &CreationConfig::default(),
-            &mut progress,
-        );
+        let result = CreateRequest::new(&CreationConfig::default())
+            .with_progress(&mut progress)
+            .create(&OutputFile::replace(out.path().join(name)), &[src.path()]);
 
         assert!(result.is_err(), "{name}");
         assert!(!progress.starts.is_empty(), "{name}");

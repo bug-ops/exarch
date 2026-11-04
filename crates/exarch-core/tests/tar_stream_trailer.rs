@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
 use exarch_core::DecompressionBudget;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::IntegrityStatus;
@@ -26,15 +27,14 @@ use exarch_core::SecurityConfig;
 use exarch_core::TarTrailerRefusal;
 use exarch_core::TrailerCorruption;
 use exarch_core::VerificationOptions;
+use exarch_core::VerifyRequest;
 use exarch_core::extract_archive;
-use exarch_core::extract_archive_with_options;
 use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use exarch_core::list_archive;
 use exarch_core::list_archive_for_extraction;
 use exarch_core::verify_archive;
-use exarch_core::verify_archive_with_options;
 use tempfile::TempDir;
 
 const MIB: usize = 1024 * 1024;
@@ -349,10 +349,18 @@ fn integrity_check_refuses_an_over_cap_tail_and_fails_a_bad_crc() {
     let cap = usize::try_from(config.max_tar_metadata_bytes.get()).unwrap();
 
     let over = write(&dir, "over.tar.gz", &gzip_with_zero_member(cap + 1));
-    assert_over_cap(&verify_archive_with_options(&over, &config, &options).unwrap_err());
+    assert_over_cap(
+        &VerifyRequest::new(&config)
+            .with_options(options)
+            .verify(&over)
+            .unwrap_err(),
+    );
 
     let bad = write(&dir, "bad.tar.gz", &flip_crc(gzip(&tar_bytes())));
-    let report = verify_archive_with_options(&bad, &config, &options).unwrap();
+    let report = VerifyRequest::new(&config)
+        .with_options(options)
+        .verify(&bad)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
 }
 
@@ -387,13 +395,10 @@ fn extraction_options_variant_reports_the_same_refusal() {
     let archive = write(&dir, "a.tar.gz", &flip_crc(gzip(&tar_bytes())));
     let out = TempDir::new().unwrap();
 
-    let error = extract_archive_with_options(
-        &archive,
-        out.path(),
-        &SecurityConfig::default(),
-        &ExtractionOptions::default(),
-    )
-    .unwrap_err();
+    let error = ExtractRequest::new(&SecurityConfig::default())
+        .with_options(ExtractionOptions::default())
+        .extract(&archive, out.path())
+        .unwrap_err();
 
     assert_trailer_failure(&error);
 }

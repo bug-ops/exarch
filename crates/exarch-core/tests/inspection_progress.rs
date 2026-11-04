@@ -15,15 +15,13 @@ use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::IntegrityStatus;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
+use exarch_core::VerifyRequest;
 use exarch_core::formats::detect::ArchiveType;
-use exarch_core::list_archive_with_progress;
-use exarch_core::list_reader_with_progress;
-use exarch_core::verify_archive_with_progress;
-use exarch_core::verify_reader_with_progress;
 use sink_support::tar_archive;
 use sink_support::tar_file;
 use sink_support::zip_archive;
@@ -188,20 +186,20 @@ fn list_reports_every_entry_once_through_path_and_reader() {
     for (format, name, bytes, entries) in formats() {
         let (_dir, path) = write(name, &bytes);
         let mut by_path = Recorder::default();
-        let manifest =
-            list_archive_with_progress(&path, &config, &ListOptions::default(), &mut by_path)
-                .unwrap();
+        let manifest = ListRequest::new(&config)
+            .with_options(ListOptions::default())
+            .with_progress(&mut by_path)
+            .list(&path)
+            .unwrap();
         assert_eq!(manifest.total_entries(), entries, "{format}");
         by_path.assert_balanced(entries, 1);
 
         let mut by_reader = Recorder::default();
-        list_reader_with_progress(
-            reader(&bytes, format),
-            &config,
-            &ListOptions::default(),
-            &mut by_reader,
-        )
-        .unwrap();
+        ListRequest::new(&config)
+            .with_options(ListOptions::default())
+            .with_progress(&mut by_reader)
+            .list_reader(reader(&bytes, format))
+            .unwrap();
         by_reader.assert_balanced(entries, 1);
         assert_eq!(
             by_reader.started_paths(),
@@ -218,11 +216,18 @@ fn verify_reports_every_entry_once_with_and_without_integrity() {
         let (_dir, path) = write(name, &bytes);
         for options in [VerificationOptions::default(), integrity()] {
             let mut by_path = Recorder::default();
-            verify_archive_with_progress(&path, &config, &options, &mut by_path).unwrap();
+            VerifyRequest::new(&config)
+                .with_options(options)
+                .with_progress(&mut by_path)
+                .verify(&path)
+                .unwrap();
             by_path.assert_balanced(entries, 1);
 
             let mut by_reader = Recorder::default();
-            verify_reader_with_progress(reader(&bytes, format), &config, &options, &mut by_reader)
+            VerifyRequest::new(&config)
+                .with_options(options)
+                .with_progress(&mut by_reader)
+                .verify_reader(reader(&bytes, format))
                 .unwrap();
             by_reader.assert_balanced(entries, 1);
         }
@@ -235,7 +240,11 @@ fn entry_numbers_are_one_based_and_totals_follow_the_format() {
     for (format, name, bytes, entries) in formats() {
         let (_dir, path) = write(name, &bytes);
         let mut recorder = Recorder::default();
-        list_archive_with_progress(&path, &config, &ListOptions::default(), &mut recorder).unwrap();
+        ListRequest::new(&config)
+            .with_options(ListOptions::default())
+            .with_progress(&mut recorder)
+            .list(&path)
+            .unwrap();
         let expected_total = if format == ArchiveType::TarGz {
             exarch_core::EntryTotal::Unknown
         } else {
@@ -261,17 +270,19 @@ fn a_7z_payload_is_announced_while_its_block_is_decoded() {
     let (_dir, path) = write("x.7z", &seven_z());
 
     let mut metadata_only = Recorder::default();
-    verify_archive_with_progress(
-        &path,
-        &config,
-        &VerificationOptions::default(),
-        &mut metadata_only,
-    )
-    .unwrap();
+    VerifyRequest::new(&config)
+        .with_options(VerificationOptions::default())
+        .with_progress(&mut metadata_only)
+        .verify(&path)
+        .unwrap();
     assert_eq!(metadata_only.started_paths(), ["a.txt", "b.txt", "d"]);
 
     let mut decoding = Recorder::default();
-    verify_archive_with_progress(&path, &config, &integrity(), &mut decoding).unwrap();
+    VerifyRequest::new(&config)
+        .with_options(integrity())
+        .with_progress(&mut decoding)
+        .verify(&path)
+        .unwrap();
     assert_eq!(
         decoding.started_paths(),
         ["d", "a.txt", "b.txt"],
@@ -287,12 +298,10 @@ fn a_tar_entry_that_fails_to_decode_still_closes_its_event() {
     let (_dir, path) = write("x.tar", &bytes);
 
     let mut recorder = Recorder::default();
-    let result = verify_archive_with_progress(
-        &path,
-        &SecurityConfig::default(),
-        &integrity(),
-        &mut recorder,
-    );
+    let result = VerifyRequest::new(&SecurityConfig::default())
+        .with_options(integrity())
+        .with_progress(&mut recorder)
+        .verify(&path);
     assert!(result.is_err());
     assert_eq!(recorder.started_paths(), ["a.txt", "b.txt"]);
     assert_eq!(recorder.starts(), recorder.completes());
@@ -304,13 +313,11 @@ fn a_failing_verify_report_still_signals_completion() {
     let bytes = tar_archive(&[sink_support::tar_symlink("link", "../../etc/passwd")]);
     let (_dir, path) = write("x.tar", &bytes);
     let mut recorder = Recorder::default();
-    let report = verify_archive_with_progress(
-        &path,
-        &SecurityConfig::default(),
-        &VerificationOptions::default(),
-        &mut recorder,
-    )
-    .unwrap();
+    let report = VerifyRequest::new(&SecurityConfig::default())
+        .with_options(VerificationOptions::default())
+        .with_progress(&mut recorder)
+        .verify(&path)
+        .unwrap();
     assert_ne!(report.status(), exarch_core::VerificationStatus::Pass);
     recorder.assert_balanced(1, 1);
 }
@@ -319,12 +326,10 @@ fn a_failing_verify_report_still_signals_completion() {
 fn a_failed_listing_never_signals_completion() {
     let (_dir, path) = write("x.zip", b"not an archive");
     let mut recorder = Recorder::default();
-    let result = list_archive_with_progress(
-        &path,
-        &SecurityConfig::default(),
-        &ListOptions::default(),
-        &mut recorder,
-    );
+    let result = ListRequest::new(&SecurityConfig::default())
+        .with_options(ListOptions::default())
+        .with_progress(&mut recorder)
+        .list(&path);
     assert!(result.is_err());
     assert_eq!(recorder.dones(), 0);
 }
@@ -366,7 +371,11 @@ fn verify_solid(
 ) -> (Recorder, IntegrityStatus) {
     let (_dir, path) = write("x.7z", &solid_7z());
     let mut recorder = Recorder::default();
-    let report = verify_archive_with_progress(&path, config, &options, &mut recorder).unwrap();
+    let report = VerifyRequest::new(config)
+        .with_options(options)
+        .with_progress(&mut recorder)
+        .verify(&path)
+        .unwrap();
     (recorder, report.integrity_status())
 }
 
@@ -400,13 +409,11 @@ fn a_decoded_solid_7z_block_announces_each_file_in_decode_order() {
 
 fn assert_failed_integrity(path: &Path) {
     let mut recorder = Recorder::default();
-    let report = verify_archive_with_progress(
-        path,
-        &SecurityConfig::default().with_allow_solid_archives(true),
-        &integrity(),
-        &mut recorder,
-    )
-    .unwrap();
+    let report = VerifyRequest::new(&SecurityConfig::default().with_allow_solid_archives(true))
+        .with_options(integrity())
+        .with_progress(&mut recorder)
+        .verify(path)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
     assert_eq!(recorder.starts(), recorder.completes());
     assert_eq!(recorder.dones(), 1);
@@ -431,13 +438,11 @@ fn a_security_problem_mid_archive_keeps_the_scan_going() {
     ]);
     let (_dir, path) = write("x.tar", &bytes);
     let mut recorder = Recorder::default();
-    let report = verify_archive_with_progress(
-        &path,
-        &SecurityConfig::default(),
-        &VerificationOptions::default(),
-        &mut recorder,
-    )
-    .unwrap();
+    let report = VerifyRequest::new(&SecurityConfig::default())
+        .with_options(VerificationOptions::default())
+        .with_progress(&mut recorder)
+        .verify(&path)
+        .unwrap();
     assert_ne!(report.status(), VerificationStatus::Pass);
     recorder.assert_balanced(3, 1);
     assert_eq!(recorder.started_paths(), ["a.txt", "link", "c.txt"]);

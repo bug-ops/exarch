@@ -14,9 +14,9 @@ use std::io::Cursor;
 use std::io::Seek as _;
 use std::io::SeekFrom;
 
-use exarch_core::list_reader;
 use exarch_core::ArchiveReader;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use libfuzzer_sys::fuzz_target;
 
 #[path = "common.rs"]
@@ -54,12 +54,8 @@ fn check_stream_replay(bytes: &[u8]) {
     let config = common::config();
     let options = ListOptions::default();
 
-    let via_stream = list_reader(streamed, config, &options);
-    let via_format = list_reader(
-        ArchiveReader::of_type(Cursor::new(bytes), format),
-        config,
-        &options,
-    );
+    let via_stream = ListRequest::new(config).with_options(options).list_reader(streamed);
+    let via_format = ListRequest::new(config).with_options(options).list_reader(ArchiveReader::of_type(Cursor::new(bytes), format));
 
     assert_eq!(
         format!("{via_stream:?}"),

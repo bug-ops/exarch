@@ -21,6 +21,12 @@
 //! so an attacker who removes and re-creates entries cannot make the walk
 //! retry forever.
 
+#[cfg(unix)]
+use std::collections::VecDeque;
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -31,11 +37,16 @@ use crate::Violation;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
+#[cfg(not(unix))]
 use crate::security::fs_view::HostFs;
+#[cfg(not(unix))]
 use crate::security::fs_view::LinkClass;
+#[cfg(unix)]
+use crate::security::fs_view::MAX_SYMLINK_HOPS;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::PathModel;
+#[cfg(not(unix))]
 use crate::security::fs_view::classify_link;
 use crate::security::fs_view::joined;
 use crate::security::fs_view::name_too_long;
@@ -259,7 +270,11 @@ impl DirWalker {
             };
             walked.push(leaf.as_os_str());
             let parent = current.as_deref().unwrap_or_else(|| root.dir());
-            let hop = self.step(root, parent, leaf, &walked, entry, missing, links)?;
+            let here = landing
+                .as_deref()
+                .unwrap_or_else(|| walked.parent().unwrap_or_else(|| Path::new("")));
+            let site = LinkSite { parent, leaf, here };
+            let hop = self.step(root, &site, &walked, entry, missing, links)?;
             let redirected = hop.resolved.is_some();
             match (hop.resolved, landing.as_mut()) {
                 (Some(resolved), _) => landing = Some(resolved),
@@ -310,20 +325,16 @@ impl DirWalker {
         true
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the walk state is threaded through unchanged; a parameter struct adds indirection"
-    )]
     fn step<'r>(
         self,
         root: &'r PinnedRoot,
-        parent: &VettedDir,
-        leaf: Leaf<'_>,
+        site: &LinkSite<'_>,
         walked: &Path,
         entry: &Path,
         missing: Missing,
         links: Links,
     ) -> Result<Hop<'r>> {
+        let LinkSite { parent, leaf, .. } = *site;
         let mut err = match parent.open_dir(leaf) {
             Ok(dir) => return Ok(Hop::plain(dir)),
             Err(e) => e,
@@ -340,7 +351,7 @@ impl DirWalker {
             };
         }
         match parent.probe(leaf) {
-            Ok(Some(Occupant::Symlink)) => self.follow(root, walked, entry, links),
+            Ok(Some(Occupant::Symlink)) => self.follow(root, site, walked, entry, links),
             Ok(Some(Occupant::File)) => Err(ParentBlocker::File.error(entry, walked)),
             Ok(Some(Occupant::Directory) | None) | Err(_) => Err(err.into()),
         }
@@ -354,6 +365,7 @@ impl DirWalker {
     fn follow<'r>(
         self,
         root: &'r PinnedRoot,
+        site: &LinkSite<'_>,
         walked: &Path,
         entry: &Path,
         links: Links,
@@ -361,28 +373,211 @@ impl DirWalker {
         if links == Links::Strict {
             return Err(ParentBlocker::Symlink.error(entry, walked));
         }
-        let dest = root.dest();
-        // TODO(#895): resolve handle-relatively; realpath makes acceptance
-        // depend on absolute length
-        match (
-            classify_link(&HostFs, &dest.as_path().join(walked), dest),
-            self.links,
-        ) {
-            (LinkClass::Blocked(blocker), _) => Err(blocker.error(entry, walked)),
-            (LinkClass::InsideDir(_), LinkPolicy::Refuse) => {
+        match (Followed::of(root, site, walked), self.links) {
+            (Followed::Blocked(blocker), _) => Err(blocker.error(entry, walked)),
+            (Followed::Inside(_), LinkPolicy::Refuse) => {
                 Err(ArchiveError::from(Violation::SymlinkComponent {
                     walked: walked.display().to_string().into(),
                 }))
             }
-            (LinkClass::InsideDir(resolved), LinkPolicy::ContainedOnly) => {
-                let inside = resolved.strip_prefix(dest.as_path()).unwrap_or(&resolved);
-                let (dir, _) = self.walk(root, inside, entry, Missing::Fail, Links::Strict)?;
+            (Followed::Inside(inside), LinkPolicy::ContainedOnly) => {
+                let (dir, _) = self.walk(root, &inside, entry, Missing::Fail, Links::Strict)?;
                 Ok(Hop {
                     dir,
-                    resolved: Some(inside.to_path_buf()),
+                    resolved: Some(inside),
                 })
             }
         }
+    }
+}
+
+/// Where a symlink component sits: the handle of the directory that holds it,
+/// its name, and that directory's symlink-free position below the destination.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(
+    not(unix),
+    expect(dead_code, reason = "only the Unix resolver reads the link site")
+)]
+struct LinkSite<'a> {
+    parent: &'a VettedDir,
+    leaf: Leaf<'a>,
+    here: &'a Path,
+}
+
+/// What a pre-existing symlink among the parent components turns out to be.
+#[derive(Debug, PartialEq, Eq)]
+enum Followed {
+    /// A directory inside the destination, at this symlink-free path relative
+    /// to it.
+    Inside(PathBuf),
+    /// Nothing may be written through the link.
+    Blocked(ParentBlocker),
+}
+
+#[cfg(unix)]
+impl Followed {
+    /// Resolves the link hop by hop with `readlinkat` and `openat` on the
+    /// handles the walk holds, so the verdict never depends on how long the
+    /// destination's own absolute path is.
+    fn of(root: &PinnedRoot, site: &LinkSite<'_>, _walked: &Path) -> Self {
+        match HandleResolution::resolve(root, site) {
+            Ok(inside) => Self::Inside(inside),
+            Err(blocker) => Self::Blocked(blocker),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl Followed {
+    /// Resolves the link by its absolute path: there is no pinned
+    /// `readlinkat` on this platform.
+    // TODO(#895): resolve handle-relatively on Windows and WASI too; realpath
+    // makes acceptance depend on the destination's absolute length there.
+    fn of(root: &PinnedRoot, _site: &LinkSite<'_>, walked: &Path) -> Self {
+        let dest = root.dest();
+        match classify_link(&HostFs, &dest.as_path().join(walked), dest) {
+            LinkClass::InsideDir(resolved) => Self::Inside(
+                resolved
+                    .strip_prefix(dest.as_path())
+                    .unwrap_or(&resolved)
+                    .to_path_buf(),
+            ),
+            LinkClass::Blocked(blocker) => Self::Blocked(blocker),
+        }
+    }
+}
+
+/// One component still to resolve below the current directory.
+#[cfg(unix)]
+enum Pending {
+    Parent,
+    Name(OsString),
+}
+
+/// Resolves a symlink the way the kernel would, but one handle-relative step at
+/// a time, tracking the symlink-free position it reaches below the root.
+///
+/// Every file-system operation is relative to a handle the walk already holds
+/// (`readlinkat`, `fstatat` with no-follow, `openat` with `O_NOFOLLOW`), so a
+/// swap of an already-vetted component cannot redirect it, and no absolute path
+/// is ever formed. Anything the resolution cannot prove stays inside the
+/// destination fails closed:
+///
+/// - a `..` above the root is an escape;
+/// - an absolute target is mapped only through the destination's canonical
+///   root; any other spelling of the same place (a bind mount, another
+///   `/private` alias) is an escape, where `realpath` used to accept it;
+/// - more than [`MAX_SYMLINK_HOPS`] links, a dangling link or a non-directory
+///   result blocks the walk.
+#[cfg(unix)]
+struct HandleResolution<'r> {
+    root: &'r PinnedRoot,
+    position: PathBuf,
+    dir: VettedDir,
+    hops: usize,
+    pending: VecDeque<Pending>,
+}
+
+#[cfg(unix)]
+impl<'r> HandleResolution<'r> {
+    fn resolve(
+        root: &'r PinnedRoot,
+        site: &LinkSite<'_>,
+    ) -> std::result::Result<PathBuf, ParentBlocker> {
+        let mut state = Self {
+            root,
+            position: site.here.to_path_buf(),
+            dir: site.parent.reopen().map_err(|_| ParentBlocker::Symlink)?,
+            hops: 0,
+            pending: VecDeque::new(),
+        };
+        state.follow_link(site.leaf)?;
+        while let Some(next) = state.pending.pop_front() {
+            match next {
+                Pending::Parent => state.ascend()?,
+                Pending::Name(name) => state.enter(&name)?,
+            }
+        }
+        Ok(state.position)
+    }
+
+    /// Reads the symlink `name` in the current directory and queues its target.
+    fn follow_link(&mut self, name: Leaf<'_>) -> std::result::Result<(), ParentBlocker> {
+        self.hops += 1;
+        if self.hops > MAX_SYMLINK_HOPS {
+            return Err(ParentBlocker::Symlink);
+        }
+        let target = self
+            .dir
+            .read_link(name)
+            .map_err(|_| ParentBlocker::Symlink)?;
+        let relative = if target.is_absolute() {
+            let inside = target
+                .strip_prefix(self.root.dest().as_path())
+                .map_err(|_| ParentBlocker::Escape)?
+                .to_path_buf();
+            self.position.clear();
+            self.dir = self
+                .root
+                .dir()
+                .reopen()
+                .map_err(|_| ParentBlocker::Symlink)?;
+            inside
+        } else {
+            target
+        };
+        let mut steps = Vec::new();
+        for component in relative.components() {
+            match component {
+                Component::Normal(part) => steps.push(Pending::Name(part.to_os_string())),
+                Component::ParentDir => steps.push(Pending::Parent),
+                Component::CurDir => {}
+                Component::RootDir | Component::Prefix(_) => return Err(ParentBlocker::Escape),
+            }
+        }
+        for step in steps.into_iter().rev() {
+            self.pending.push_front(step);
+        }
+        Ok(())
+    }
+
+    /// Moves into `name`, following it when it is itself a symlink.
+    fn enter(&mut self, name: &OsString) -> std::result::Result<(), ParentBlocker> {
+        let Some(leaf) = Leaf::from_component(Component::Normal(name)) else {
+            return Err(ParentBlocker::Symlink);
+        };
+        match self.dir.probe(leaf) {
+            Ok(Some(Occupant::Directory)) => {
+                self.dir = self
+                    .dir
+                    .open_dir(leaf)
+                    .map_err(|_| ParentBlocker::Symlink)?;
+                self.position.push(name);
+                Ok(())
+            }
+            Ok(Some(Occupant::Symlink)) => self.follow_link(leaf),
+            Ok(Some(Occupant::File) | None) | Err(_) => Err(ParentBlocker::Symlink),
+        }
+    }
+
+    /// Moves to the parent directory; above the root is an escape.
+    fn ascend(&mut self) -> std::result::Result<(), ParentBlocker> {
+        if !self.position.pop() {
+            return Err(ParentBlocker::Escape);
+        }
+        let mut dir = self
+            .root
+            .dir()
+            .reopen()
+            .map_err(|_| ParentBlocker::Symlink)?;
+        for component in self.position.components() {
+            let Some(leaf) = Leaf::from_component(component) else {
+                return Err(ParentBlocker::Symlink);
+            };
+            dir = dir.open_dir(leaf).map_err(|_| ParentBlocker::Symlink)?;
+        }
+        self.dir = dir;
+        Ok(())
     }
 }
 
@@ -583,6 +778,92 @@ mod tests {
         walker(true).ensure_dir(&dest, &sp("alias/sub")).unwrap();
 
         assert!(dest.dest().as_path().join("real/sub").is_dir());
+    }
+
+    #[test]
+    fn an_absolute_target_through_the_canonical_root_is_accepted() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        fs::create_dir(base.join("real")).unwrap();
+        symlink(base.join("real"), base.join("alias")).unwrap();
+
+        walker(true).ensure_dir(&dest, &sp("alias/sub")).unwrap();
+
+        assert!(base.join("real/sub").is_dir());
+    }
+
+    // The absolute spelling is mapped only through the canonical root; another
+    // spelling of the same place is refused where `realpath` accepted it.
+    #[test]
+    fn an_absolute_target_spelled_through_another_alias_of_the_root_is_refused() {
+        let (root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        fs::create_dir(base.join("real")).unwrap();
+        let alias_of_root = root.path().join("alias_of_dest");
+        symlink(&base, &alias_of_root).unwrap();
+        symlink(alias_of_root.join("real"), base.join("alias")).unwrap();
+
+        let err = walker(true)
+            .ensure_dir(&dest, &sp("alias/sub"))
+            .unwrap_err();
+
+        assert_matches!(err, ArchiveError::SymlinkEscape { .. }, "{err}");
+        assert!(!base.join("real/sub").exists());
+    }
+
+    #[test]
+    fn a_target_that_leaves_the_root_and_reenters_it_is_refused() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        fs::create_dir(base.join("real")).unwrap();
+        symlink("../dest/real", base.join("up")).unwrap();
+
+        let err = walker(true).ensure_dir(&dest, &sp("up/sub")).unwrap_err();
+
+        assert_matches!(err, ArchiveError::SymlinkEscape { .. }, "{err}");
+        assert!(!base.join("real/sub").exists());
+    }
+
+    #[test]
+    fn a_link_to_the_parent_directory_resolves_to_it() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        fs::create_dir(base.join("x")).unwrap();
+        symlink("..", base.join("x/up")).unwrap();
+
+        walker(true).ensure_dir(&dest, &sp("x/up/y")).unwrap();
+
+        assert!(base.join("y").is_dir());
+    }
+
+    #[test]
+    fn a_loop_of_links_is_refused_and_creates_nothing() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        symlink("b", base.join("a")).unwrap();
+        symlink("a", base.join("b")).unwrap();
+
+        assert!(walker(true).ensure_dir(&dest, &sp("a/x")).is_err());
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn the_hop_limit_is_exact_and_shared_with_the_virtual_tree() {
+        use crate::security::fs_view::MAX_SYMLINK_HOPS;
+
+        for (hops, accepted) in [(MAX_SYMLINK_HOPS, true), (MAX_SYMLINK_HOPS + 1, false)] {
+            let (_root, dest, _) = dest_with_outside();
+            let base = dest.dest().as_path().to_path_buf();
+            fs::create_dir(base.join("real")).unwrap();
+            for i in 1..hops {
+                symlink(format!("l{}", i + 1), base.join(format!("l{i}"))).unwrap();
+            }
+            symlink("real", base.join(format!("l{hops}"))).unwrap();
+
+            let result = walker(true).ensure_dir(&dest, &sp("l1/x"));
+
+            assert_eq!(result.is_ok(), accepted, "{hops} hops");
+        }
     }
 
     fn name_of_len(len: usize) -> String {

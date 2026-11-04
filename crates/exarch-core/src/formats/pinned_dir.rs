@@ -55,7 +55,8 @@
 //!   server resolves the names. Third-party filesystem drivers are unverified.
 //! - Only NTFS is exercised in CI; `ReFS` and Dev Drive are untested.
 //! - Following a pre-existing symlink under `ContainedOnly` stays path-based
-//!   through `classify_link`, as on Unix.
+//!   through `classify_link` on Windows. On Unix it is resolved with
+//!   `readlinkat` and `openat` on the held handles instead.
 
 use std::ffi::OsStr;
 use std::ffi::OsString;

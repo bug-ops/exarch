@@ -415,12 +415,12 @@ mod landing {
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 
-    // Pins the refusal of #895: the link `d -> chain` resolves by absolute
-    // path, so a chain within the relative limit but past the absolute one
-    // is refused as a symlink parent. Flip this when #895 lands.
+    // #895: the link `d -> chain` is resolved handle-relatively, so a chain
+    // within the relative limit is accepted whatever the destination's own
+    // absolute length is.
     #[cfg(unix)]
     #[test]
-    fn a_link_to_a_chain_past_the_absolute_limit_is_refused_as_a_symlink_parent() {
+    fn a_link_to_a_chain_past_the_absolute_limit_is_followed_handle_relatively() {
         let chain = name_of_len(HOST_PATH_LIMIT - 8);
         let mut builder = tar::Builder::new(Vec::new());
         builder
@@ -442,15 +442,12 @@ mod landing {
 
         let config = SecurityConfig::default().with_allow_symlinks(true);
         let out = TempDir::new().unwrap();
-        let err = extract_archive(&archive, out.path(), &config).unwrap_err();
+        let report = extract_archive(&archive, out.path(), &config).unwrap();
 
-        std::assert_matches!(
-            err.ffi_kind(),
-            exarch_core::FfiKind::SecurityViolation {
-                sub_code: exarch_core::SecurityViolationSubCode::ExistingSymlink,
-                ..
-            },
-            "{err}"
+        assert_eq!(
+            (report.files_extracted, report.symlinks_created),
+            (2, 1),
+            "{report:?}"
         );
     }
 }

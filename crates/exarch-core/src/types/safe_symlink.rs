@@ -435,18 +435,22 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
     Ok(current)
 }
 
-/// Canonicalizes `current` in `view`; a failure or a result outside `root` is
-/// a symlink escape.
+/// Canonicalizes `current` in `view`; a result outside `root`, or a failure to
+/// resolve it, is a symlink escape.
+///
+/// A path the host cannot name at all (past its length limit) is not an escape:
+/// it is the same name-too-long refusal every other length check reports.
 fn canonical_within<V: FsView>(
     view: &V,
     current: &Path,
     root: &V::Root,
     link_path: &Path,
 ) -> Result<PathBuf> {
-    // TODO(#895): resolve handle-relatively; realpath makes acceptance depend
-    // on absolute length
     match view.canonicalize(current, root) {
         Ok(Containment::Within(canonical)) => Ok(canonical),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidFilename => {
+            Err(ArchiveError::Io(error))
+        }
         Ok(Containment::Escapes) | Err(_) => Err(ArchiveError::SymlinkEscape {
             path: link_path.to_path_buf(),
         }),
@@ -492,6 +496,33 @@ mod tests {
         let symlink = result.expect("symlink should be valid");
         assert_eq!(symlink.link().as_path(), Path::new("dir/link"));
         assert_eq!(symlink.target_path(), Path::new("../file.txt"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_target_through_a_link_past_the_host_path_limit_is_a_length_refusal_not_an_escape() {
+        use crate::formats::dir_walker::DirWalker;
+        use crate::formats::pinned_dir::PinnedRoot;
+        use crate::security::fs_view::MAX_SYMLINK_TARGET_LEN;
+
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+        let chain = crate::test_utils::path_of_len(MAX_SYMLINK_TARGET_LEN);
+        let root = PinnedRoot::open_for_test(dest.as_path()).expect("pin the destination");
+        DirWalker::new(&config)
+            .ensure_dir(&root, &SafePath::for_test(&chain))
+            .expect("create the chain handle-relatively");
+        std::os::unix::fs::symlink(&chain, dest.as_path().join("s")).expect("create the link");
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
+            .expect("link path should be valid");
+
+        let result = SafeSymlink::validate(&link, Path::new("s/x"), &dest, &config);
+
+        assert_matches!(
+            result,
+            Err(ArchiveError::Io(ref error)) if error.kind() == std::io::ErrorKind::InvalidFilename,
+            "{result:?}"
+        );
     }
 
     #[test]

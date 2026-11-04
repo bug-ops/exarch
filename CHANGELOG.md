@@ -73,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** `TarNonRegularKind` displays lowercase and `with_compressed_member_allowance` takes a `NonZeroU64` (#862, #884).
 - **BREAKING:** a compressed TAR whose entries skipped by the allowlist or as duplicates decode beyond `max_compression_ratio` times the input read is refused with `ZipBomb` (`SkippedEntries`) (#863, #884).
 - CI: the release-profile test job runs on `main` only (#886).
+- **BREAKING:** `ArchiveFormat::{extract,list,verify}` take `self`, the trait is no longer dyn-usable and `format_name` is removed; a second operation on one `TarArchive` is a compile error (#875, #881, #PR).
+- **BREAKING:** sizes are typed: `validate_compression_ratio(Compressed, Uncompressed, ..)`, `EntryValidator::validate_entry(path, &EntryType, EntrySize, Option<RawMode>)`, `sanitize_permissions(RawMode, ..)`, `ZipBombDetails::new`; `ExtractTarget::file` loses `size`, and `QuotaPermit` carries the reserved bytes (#869, #879, #881, #PR).
+- **BREAKING:** `ValidatedEntryType::Hardlink.target` is a `HardlinkTarget`, `SafeSymlink::link_path()` is `link()`, and the `exarch_core::validate_config_entry` re-export is removed (#873, #PR).
+- **BREAKING:** allowed extensions and banned path components are typed (`Extension`, `PathComponentName`): a leading dot is normalized (`.txt` matches `txt`), and values with edge whitespace or control characters, an inner dot in an extension or a separator in a component are refused in core, Python, Node and CLI (#871, #PR).
+- **BREAKING:** `CreationConfig::compression_level` is a `CompressionLevel`, the builders are infallible, Python `None` resets it to 6 and the getters return a number; `compression_level_to_*` helpers are removed (#876, #PR).
+- **BREAKING:** `ArchiveError::SecurityViolation` carries a typed `Violation` kind instead of a reason string, with `security_violation()`, `context() -> Option<Cow<str>>`, and sub-code and relaxability derived from the kind; the `InvalidArchive` half stays free-form (#872, #887, #PR).
+- **BREAKING:** archive creation no longer reports the source root as an entry, so progress and `total_entries` drop by one per source directory; a file or symlink emptied by `strip_prefix` is `InvalidConfiguration` and an emptied directory is skipped; `ProgressTracker::{on_entry_start,on_entry_complete,callback}` are replaced by a guard that always pairs the callbacks (#874, #880, #PR).
+- Core, Python, Node and CLI: `QuotaKind`, `SubCode` and `FfiKind::{relaxable_by,sub_code}` drive front end error mapping, with drift tests, and the CLI quota hint names the right option (#877, #PR).
+- CLI: `--banned-component` takes comma-separated values, `""` disables the list, and a value naming no component or `--allowed-extensions` naming no extension is an error (#871, #PR).
+- CLI: the atomic swap compares a typed `FileIdentity` with an explicit unknown case on non-Unix (#878, #PR).
+- Core: `ArchiveFormat` internals use `Option<RawMode>` and a private duplicate policy instead of `Option<u32>` and a bool (#881, #PR).
 
 ### Fixed
 
@@ -89,6 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `extract` refuses an entry name above the host limit as `list` and `verify` do (#864, #884).
 - Core: compressed TAR entries refused by quota are no longer decoded to their end (#863, #884).
 - Node: `extractArchiveToCallback` keeps the `AbortSignal` reason when the abort is raised from `onEntry` (#860, #884).
+- Core: `exarch extract` of a compressed TAR into an existing directory no longer panics on WASI (#867, #PR).
+- Core: `on_entry_complete` fires for every started archive entry on creation, including failures (#874, #PR).
 
 ## [0.8.0] - 2026-11-02
 

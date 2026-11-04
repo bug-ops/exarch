@@ -91,15 +91,17 @@ THEN it returns ArchiveError::InvalidConfiguration before extraction begins
 ```
 
 ```
-GIVEN SecurityConfig::default().with_allowed_extensions(vec!["\0evil"])
-WHEN validate() is called
-THEN it returns ArchiveError::InvalidConfiguration (entry contains a null byte)
+GIVEN the string "\0evil"
+WHEN Extension::try_from("\0evil") is called
+THEN it returns ArchiveError::InvalidConfiguration (entry contains a null byte); an invalid entry cannot be stored in SecurityConfig
 ```
 
 > [!note] v0.6.0: entry-level validation for allowlist/banlist fields (#449)
-> A new `validate_config_entry` helper (`exarch-core::security::boundary`, re-exported as
-> `exarch_core::validate_config_entry` alongside `MAX_CONFIG_ENTRY_LENGTH`) is called per-entry
-> from `SecurityConfig::validate()` for both `allowed_extensions` and `banned_path_components`.
+> Entry validation is encoded in types (v0.8.0): `allowed_extensions` holds `Extension` values and
+> `banned_path_components` holds `PathComponentName` values (`types::config_entry`), each built only
+> through `TryFrom<&str>`, which rejects invalid entries (`MAX_CONFIG_ENTRY_LENGTH` is re-exported
+> from `exarch_core`). `Extension` is normalized: one leading dot is stripped and the value is
+> ASCII-lowercased, so it never carries a leading dot.
 > An entry that is empty, contains a null byte, or exceeds 255 bytes now fails validation —
 > configs that previously passed with such entries now return `InvalidConfiguration`. Python's
 > `add_allowed_extension`/`add_banned_component` and Node's `addAllowedExtension`/
@@ -131,14 +133,14 @@ SO THAT I can produce well-formed archives without manual format handling
 
 **Acceptance criteria:**
 ```
-GIVEN CreationConfig::default().with_compression_level(9)?.with_exclude_patterns(vec!["*.log"])
+GIVEN CreationConfig::default().with_compression_level(CompressionLevel::try_from(9u8)?).with_exclude_patterns(vec!["*.log"])
 WHEN create_archive() is called
 THEN all .log files are excluded and maximum compression is applied
 ```
 
-> [!note] `with_compression_level` returns `Result`
-> Since v0.4.1 / v0.5.0, `with_compression_level` returns `Result<Self, ArchiveError>`.
-> Builder chains must propagate the error with `?` before chaining further methods.
+> [!note] `with_compression_level` takes a `CompressionLevel`
+> Since v0.8.0 `with_compression_level` takes a validated `CompressionLevel` and returns `Self`;
+> construct the level with `CompressionLevel::try_from(9u8)?`.
 
 ### US-005: Atomic Extraction
 
@@ -160,7 +162,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | FR-030 | `SecurityConfig` SHALL expose 22 fluent builder methods: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_solid_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_allow_windows_reserved_names`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_parallel_decode`, `with_zip_consistency`; each returns `Self` | must |
 | FR-031 | `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` SHALL be annotated `#[non_exhaustive]`; external crates must use `Default::default()` plus builder methods — struct literal construction is a compile error | must |
 | FR-032 | `SecurityConfig::validate()` SHALL return `InvalidConfiguration` if: any numeric limit is zero (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`, `max_tar_metadata_bytes`, `max_decoder_memory`, `compressed_member_allowance`), or `max_compression_ratio` or `max_solid_compression_ratio` is zero, negative, or non-finite | must |
-| FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns` (glob), `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format: Option<CreatableFormat>` override (`CreatableFormat` has no 7z variant, so a 7z creation request is unrepresentable; v0.8.0, #794, #808); `with_compression_level` returns `Result<Self, ArchiveError>` — callers must propagate the error with `?`; passing a level outside 1–9 returns `ArchiveError::InvalidCompressionLevel` instead of panicking | must |
+| FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns` (glob), `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format: Option<CreatableFormat>` override (`CreatableFormat` has no 7z variant, so a 7z creation request is unrepresentable; v0.8.0, #794, #808); `compression_level` is a `CompressionLevel` newtype (default 6) obtained via `CompressionLevel::try_from(u8)`, and `with_compression_level` takes it and returns `Self`; a level outside 1–9 is rejected at `CompressionLevel` construction with `ArchiveError::InvalidCompressionLevel` | must |
 | FR-034 | `ExtractionOptions` SHALL support: `atomic` (temp-dir + rename) via `with_atomic`, `skip_duplicates` (default true) via `with_skip_duplicates` | must |
 | FR-035 | WHEN `ExtractionOptions::atomic` is true, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and atomically rename on success | must |
 | FR-036 | WHEN atomic extraction fails, THE SYSTEM SHALL delete the temp dir before returning the error | must |
@@ -168,7 +170,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | FR-038 | `AllowedFeatures` SHALL be a separate struct with boolean flags: `symlinks`, `hardlinks`, `absolute_paths`, `world_writable`, `windows_reserved_names`; all default to false (`permissive()` leaves `windows_reserved_names` false). `windows_reserved_names` is consulted only on Windows and has no CLI or binding opt-out | must |
 | FR-039 | `CreationConfig::validate()` SHALL be called inside `create_archive_with_progress` before any I/O; invalid configurations SHALL be rejected early | must |
 | FR-040 | `SecurityConfig` and `CreationConfig` SHALL be two-state typestates over `Unvalidated`/`Validated` phantom markers; fluent `with_*` builders SHALL exist only on `T<Unvalidated>`; `validate()` SHALL consume `self` and return `Result<T<Validated>>` instead of `Result<()>` (v0.6.0, see [[014-config-typestate-validation/spec]]) | must |
-| FR-041 | `SecurityConfig::validate()` SHALL reject any `allowed_extensions` or `banned_path_components` entry that is empty, contains a null byte, or exceeds 255 bytes, via the shared `validate_config_entry` helper | must |
+| FR-041 | `SecurityConfig::validate()` SHALL admit only `Extension` (normalized, no leading dot) and `PathComponentName` entries in `allowed_extensions` / `banned_path_components`; their `TryFrom<&str>` constructors reject an entry that is empty, contains a null byte or edge whitespace, or exceeds 255 bytes, so an invalid entry is unrepresentable | must |
 | FR-042 | `T<Validated>` SHALL be reachable read-only via `Deref` for both typestates, but mutable (`DerefMut`) only for `T<Unvalidated>`, so a validated config cannot be mutated back into an unvalidated-equivalent state after the fact | must |
 | FR-043 | Top-level `extract_archive*`, `list_archive`, `verify_archive`, and `create_archive*` functions SHALL continue to accept a plain `&SecurityConfig`/`CreationConfig` (defaulting to `Unvalidated`) and validate internally, so bindings and CLI callers require no changes | must |
 | FR-044 | `SecurityConfig` SHALL expose `zip_consistency: ZipConsistencyPolicy` (`#[non_exhaustive]`: `Enforce`, the default also for `permissive()`; `Ignore`) deciding whether structurally ambiguous ZIP archives are rejected in `extract`/`list` and reported in `verify` (see [[017-zip-header-consistency/spec]]); the CLI exposes it as `--zip-consistency`, Python and Node as a config option | must |
@@ -235,9 +237,9 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | `SecurityConfig` with zero `max_file_size`, `max_total_size`, `max_path_depth`, `max_file_count`, `max_solid_block_memory`, `max_tar_metadata_bytes`, `max_decoder_memory`, or `compressed_member_allowance` | `validate()` returns `InvalidConfiguration` |
 | `SecurityConfig` with `max_compression_ratio` or `max_solid_compression_ratio` of 0.0, negative, or non-finite | `validate()` returns `InvalidConfiguration` |
 | `DecompressionBudget::try_from_bytes(0)` | `InvalidConfiguration`; `ParallelDecode::Bounded` takes a `NonZeroU64`, so a zero lookahead is unrepresentable |
-| `SecurityConfig` with an empty, null-byte-containing, or >255-byte `allowed_extensions`/`banned_path_components` entry | `validate()` returns `InvalidConfiguration` (v0.6.0, #449) |
-| `compression_level` outside 1–9 (0 or > 9) | `ArchiveCreator::compression_level` (and `CreationConfig::with_compression_level`) returns `Err(ArchiveError::InvalidCompressionLevel)`; callers must handle with `?` or explicit match |
-| A hand-built `CreationConfig` with `compression_level: Some(200)` reaches `flate2`/`liblzma` directly (bypassing the high-level `with_compression_level` contract) | No longer possible: `creation::tar::*`/`creation::zip::*` and `FormatCreator::create` require `&CreationConfig<Validated>`, so an invalid compression level cannot compile its way past validation (v0.6.0, #443 — previously an `assert!`/`unwrap()` panic inside the compression backend, a panic-based DoS) |
+| `SecurityConfig` with an empty, null-byte-containing, or >255-byte `allowed_extensions`/`banned_path_components` entry | `Extension::try_from` / `PathComponentName::try_from` return `InvalidConfiguration` (v0.6.0, #449; moved into the entry types in v0.8.0) |
+| `compression_level` outside 1–9 (0 or > 9) | `CompressionLevel::try_from` returns `Err(ArchiveError::InvalidCompressionLevel)`; `ArchiveCreator::compression_level` and `CreationConfig::with_compression_level` take the already-validated `CompressionLevel` |
+| A hand-built `CreationConfig` with a compression level of 200 reaches `flate2`/`liblzma` directly (bypassing the high-level `with_compression_level` contract) | No longer possible: `creation::tar::*`/`creation::zip::*` and `FormatCreator::create` require `&CreationConfig<Validated>`, so an invalid compression level cannot compile its way past validation (v0.6.0, #443 — previously an `assert!`/`unwrap()` panic inside the compression backend, a panic-based DoS) |
 | `atomic = true` and output on a different filesystem than temp dir | `fs::rename` may fail; caller receives `ArchiveError::Io` |
 | `skip_duplicates = false` and duplicate entry | `ArchiveError::InvalidArchive` (duplicate entry) |
 | Atomic extraction fails mid-archive | Temp dir deleted; `ArchiveError` returned; no files in output dir |
@@ -273,9 +275,10 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 - [NEEDS CLARIFICATION: Should `ExtractionOptions` include a `max_concurrency` field for future parallel extraction?]
 
 > [!note] Resolved in v0.4.1 and v0.5.0
-> `CreationConfig::with_compression_level` (and `ArchiveCreator::compression_level`) now returns
-> `Result<Self, ArchiveError>` rather than `Self`. Passing a level of 0 or > 9 returns
+> `CreationConfig::with_compression_level` (and `ArchiveCreator::compression_level`) take a
+> `CompressionLevel` newtype; passing a level of 0 or > 9 to `CompressionLevel::try_from` returns
 > `ArchiveError::InvalidCompressionLevel`; the panic at the former call site is eliminated (#257, #308).
+> (Between v0.4.1 and v0.8.0 the setters returned `Result<Self, ArchiveError>`.)
 
 ## 10. See Also
 

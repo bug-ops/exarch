@@ -287,7 +287,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | `ExtractionOptions` | Operational options for extraction (non-security) | `atomic`, `skip_duplicates` |
 | `SafePath` | Newtype for a validated archive entry path | Wraps `PathBuf`; can only be constructed after traversal/depth/component checks pass |
 | `ValidatedEntry` | Validated archive entry ready for extraction | `safe_path: SafePath`, `entry_type: ValidatedEntryType`, `mode: Option<u32>` |
-| `ValidatedEntryType` | Enum of validated entry types | `File`, `Directory`, `Symlink(SafeSymlink)`, `Hardlink { target: SafePath }` |
+| `ValidatedEntryType` | Enum of validated entry types | `File`, `Directory`, `Symlink(SafeSymlink)`, `Hardlink { target: HardlinkTarget }` |
 | `EntryValidator` | Stateful validator orchestrating all security checks per entry | Holds `QuotaTracker`, `HardlinkTracker`, `symlink_seen` flag |
 | `ExtractionReport` | Result of an extraction operation | `files_extracted`, `directories_created`, `symlinks_created`, `bytes_written`, `duration`, `files_skipped`, `warnings` |
 | `CreationReport` | Result of an archive creation | `files_added`, `bytes_written`, `duration` |
@@ -296,8 +296,8 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | `VerificationReport` | Security and integrity check results | `status()`, `security_status()`, `integrity_status()`, `issues()`, `total_entries()` (fields private) |
 | `VerificationIssue` | A single identified security or integrity issue | `severity: IssueSeverity`, `category: IssueCategory`, `message`, `entry_path`, `context` |
 | `ArchiveType` | Enum of supported archive formats | `Tar`, `TarGz`, `TarBz2`, `TarXz`, `TarZst`, `Zip`, `SevenZ` |
-| `ArchiveFormat` | Trait for read-side format dispatch | Methods: `extract`, `list`, `verify`, `format_name` |
-| `FormatCreator` | Trait for write-side format dispatch | Methods: `create`, `format_name`; implemented by `TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator` via `creator_for_format()` helper |
+| `ArchiveFormat` | Trait for read-side format dispatch | Methods: `extract`, `list`, `verify` (each takes `self`; the trait is not dyn-usable) |
+| `FormatCreator` | Trait for write-side format dispatch | Methods: `create`; implemented by `TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator` via `creator_for_format()` helper |
 | `ExtractionContext` | Private TAR helper struct grouping six shared extraction parameters | `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates` |
 
 ## 6. Edge Cases and Error Handling

@@ -140,7 +140,7 @@ THEN the downstream crate's build breaks with "non-exhaustive patterns" only if 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
 | `SanitizedMode` | Newtype wrapping a Unix permission mode that has already passed through `sanitize_permissions`; sole producer is `sanitize_permissions` | Single private `u32` field; not constructible via tuple-struct syntax outside `exarch-core` (verified by a `trybuild` UI test); `as_u32(self) -> u32` accessor |
-| `ArchiveError` | Top-level error enum for extraction/creation/listing/verification failures | Now `#[non_exhaustive]`; since v0.7.0 its `SecurityViolation` variant is `#[non_exhaustive]` too (build it with `violation`/`relaxable_violation`) |
+| `ArchiveError` | Top-level error enum for extraction/creation/listing/verification failures | Now `#[non_exhaustive]`; since v0.7.0 its `SecurityViolation` variant is `#[non_exhaustive]` too (it carries a typed `Violation` kind) |
 | `QuotaResource` | Enum identifying which quota dimension was exceeded (`FileCount`, `TotalSize`, `FileSize`, `IntegerOverflow`, and `DecoderMemory` since v0.7.0) | Now `#[non_exhaustive]` |
 | `formats::detect::ArchiveType` | Enum of supported archive formats | Now `#[non_exhaustive]` |
 | `formats::compression::CompressionCodec` | Enum of supported compression codecs | Now `#[non_exhaustive]` |

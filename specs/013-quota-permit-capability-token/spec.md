@@ -135,7 +135,7 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 
 | ID | Category | Requirement |
 |----|----------|-------------|
-| NFR-001 | Performance | `QuotaPermit` is zero-sized (`PhantomData`-based); wrapping it in `Result` costs nothing over `Result<()>` — no runtime overhead vs. the pre-v0.6.0 `Result<()>`-returning `record_file` |
+| NFR-001 | Performance | `QuotaPermit` is a single `Uncompressed` byte count (one `u64`); wrapping it in `Result` costs a word over `Result<()>` — negligible vs. the pre-v0.6.0 `Result<()>`-returning `record_file` |
 | NFR-002 | Safety | No `unsafe` code is required or used to implement the capability-token pattern — it relies entirely on visibility (`pub(crate)` fields) and the absence of `Clone`/`Copy`/`Default` impls |
 | NFR-003 | Reliability | The pattern closes the *same class* of gap #428 demonstrated (an unguarded quota-charge path), at the type level, for every current and future write path — not just the one instance that was reported |
 | NFR-004 | API stability | This is a `pub` API surface change (`QuotaTracker::record_file` → `reserve`, `EntryValidator::record_hardlink` → `reserve_hardlink` → `charge_hardlink`, `ValidatedEntryType::Hardlink` gaining `counted`); documented as BREAKING in `CHANGELOG.md` under the project's pre-1.0 no-backward-compatibility policy |
@@ -144,7 +144,7 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
-| `QuotaPermit` | Capability token proving a file's size was reserved against a `QuotaTracker` | `PhantomData<()>`-based (zero-sized); not `Clone`, not `Copy`, no `Default`; sole producer is `QuotaTracker::reserve` |
+| `QuotaPermit` | Capability token proving a file's size was reserved against a `QuotaTracker` | carries the reserved `bytes: Uncompressed` (private; spent by crate-private `into_bytes(self)`, the write ceiling); not `Clone`, not `Copy`, no `Default`; sole producer is `QuotaTracker::reserve` |
 | `QuotaTracker::reserve` | Renamed from `record_file`; charges a file's size against `max_file_size`/`max_total_size`/`max_file_count` and, on success, returns a `QuotaPermit` | `fn reserve(&mut self, size: u64, config: &SecurityConfig<Validated>) -> Result<QuotaPermit>` |
 | `EntryCount` | Capability token proving an entry was counted against `max_file_count` while its bytes are not yet charged (hardlinks); exported ungated at `security::EntryCount` | `PhantomData`-based; only producer is `QuotaTracker::reserve_count`; consumed by `QuotaTracker::charge` |
 | `EntryValidator::charge_hardlink` | Renamed from `reserve_hardlink` (itself renamed from `record_hardlink`); standalone permit issuance for hardlink targets (size known only in TAR's second pass), spending the `EntryCount` from the first pass | `pub(crate) fn charge_hardlink(&mut self, counted: EntryCount, size: u64) -> Result<QuotaPermit>` |
@@ -152,7 +152,7 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 | `ValidatorCore::reserve_file` | `pub(crate)` method mirroring `charge_hardlink`'s decoupling, for 7z's post-duplicate-check reservation | `pub(crate) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit>` |
 | `ValidatorCore::validate_entry_path_in` | Method splitting path validation out of per-kind validation, for callers needing the destination path before committing to a quota charge | `pub(crate)`; takes a `NodeKind`, returns `EntryPath<SafePath>` (`Root` or `Child`) without reserving quota |
 | `ValidatedEntryType::File(QuotaPermit)` | `#[non_exhaustive]` enum variant now carrying the capability token as its payload | Constructible only by code already holding a `QuotaPermit` |
-| `ValidatedEntryType::Hardlink { target, counted }` | `#[non_exhaustive]` variant carrying the first-pass `EntryCount` | The second pass spends `counted` through `charge_hardlink` |
+| `ValidatedEntryType::Hardlink { target, counted }` | `#[non_exhaustive]` variant carrying the `HardlinkTarget` and the first-pass `EntryCount` | The second pass spends `counted` through `charge_hardlink` |
 | `ValidatedFile` | Typed proof returned by `ValidatorCore::validate_file_in` (v0.8.0): `path`, `permit`, `mode` | Replaces `ValidatedEntry::into_parts()` as the way a target takes the permit by value |
 
 ## 6. Edge Cases and Error Handling
@@ -171,7 +171,7 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 | ID | Metric | Target |
 |----|--------|--------|
 | SC-001 | #428-class bugs (unguarded quota charge) | Impossible to reintroduce without a compile error, for any current or future write path |
-| SC-002 | Zero runtime overhead vs. pre-v0.6.0 `Result<()>` | Confirmed by `QuotaPermit`'s zero-sized `PhantomData` representation |
+| SC-002 | Negligible runtime overhead vs. pre-v0.6.0 `Result<()>` | Confirmed by `QuotaPermit`'s single-`u64` representation |
 | SC-003 | All three format handlers (TAR, ZIP, 7z) consume `QuotaPermit` by value at their write sites | Verified by code review + existing extraction test suite (no quota arithmetic changed) |
 | SC-004 | No double-spend of a single reservation | Enforced by move semantics (`QuotaPermit` not `Clone`/`Copy`); no explicit test needed beyond normal compilation |
 

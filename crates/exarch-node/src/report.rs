@@ -593,9 +593,9 @@ impl From<exarch_core::inspection::ArchiveEntry> for ArchiveEntry {
         Self {
             path: entry.path.to_string_lossy().into_owned(),
             entry_type: entry.kind.entry_type().into(),
-            size: saturating_i64(entry.size),
+            size: saturating_i64(entry.size()),
             compressed_size: entry.compressed_size().map(saturating_i64),
-            mode: entry.mode,
+            mode: entry.mode.map(exarch_core::RawMode::get),
             modified: entry.modified.and_then(|t| {
                 t.duration_since(std::time::UNIX_EPOCH)
                     .ok()
@@ -695,11 +695,11 @@ impl TryFrom<exarch_core::inspection::VerificationIssue> for VerificationIssue {
 
     fn try_from(issue: exarch_core::inspection::VerificationIssue) -> Result<Self> {
         Ok(Self {
-            severity: issue.severity.into(),
-            category: issue.category.try_into()?,
-            entry_path: issue.entry_path.map(|p| p.to_string_lossy().into_owned()),
-            message: issue.message,
-            context: issue.context,
+            severity: issue.severity().into(),
+            category: issue.category().try_into()?,
+            entry_path: issue.entry_path().map(|p| p.to_string_lossy().into_owned()),
+            message: issue.message(),
+            context: issue.context(),
         })
     }
 }
@@ -886,9 +886,15 @@ mod tests {
     fn sized_entry(name: &str, size: u64) -> exarch_core::inspection::ArchiveEntry {
         exarch_core::inspection::ArchiveEntry::new(
             std::path::PathBuf::from(name),
-            exarch_core::inspection::ManifestEntryKind::File,
-            size,
+            exarch_core::inspection::ManifestEntryKind::File {
+                size: exarch_core::Uncompressed(size),
+            },
         )
+    }
+
+    fn policy_issue() -> exarch_core::inspection::VerificationIssue {
+        let error = exarch_core::ArchiveError::from(exarch_core::Violation::EncryptedArchive);
+        exarch_core::inspection::VerificationIssue::from_error(&error, None)
     }
 
     // ArchiveEntry tests
@@ -899,11 +905,12 @@ mod tests {
 
         let mut core_entry = exarch_core::inspection::ArchiveEntry::new(
             PathBuf::from("test/file.txt"),
-            exarch_core::inspection::ManifestEntryKind::File,
-            1024,
+            exarch_core::inspection::ManifestEntryKind::File {
+                size: exarch_core::Uncompressed(1024),
+            },
         );
         core_entry.compression = exarch_core::EntryCompression::Entry(Compressed(512));
-        core_entry.mode = Some(0o644);
+        core_entry.mode = Some(exarch_core::RawMode::new(0o644));
         core_entry.modified = Some(UNIX_EPOCH + std::time::Duration::from_secs(1000));
 
         let entry = ArchiveEntry::from(core_entry);
@@ -963,11 +970,7 @@ mod tests {
 
     #[test]
     fn test_security_policy_issue_conversion_and_status() {
-        let core_issue = exarch_core::inspection::VerificationIssue::new(
-            CoreIssueSeverity::High,
-            CoreIssueCategory::SecurityPolicy,
-            "Security violation: symlinks not allowed".to_string(),
-        );
+        let core_issue = policy_issue();
 
         let issue = VerificationIssue::try_from(core_issue).unwrap();
         assert_eq!(issue.category, IssueCategory::SecurityPolicy);
@@ -978,17 +981,14 @@ mod tests {
         manifest
             .add_entry(exarch_core::inspection::ArchiveEntry::new(
                 std::path::PathBuf::from("link"),
-                exarch_core::inspection::ManifestEntryKind::File,
-                0,
+                exarch_core::inspection::ManifestEntryKind::File {
+                    size: exarch_core::Uncompressed(0),
+                },
             ))
             .unwrap();
         let core_report =
             exarch_core::inspection::VerificationReport::from_entry_issues(&manifest, |_| {
-                vec![exarch_core::inspection::VerificationIssue::new(
-                    CoreIssueSeverity::High,
-                    CoreIssueCategory::SecurityPolicy,
-                    "Security violation: symlinks not allowed".to_string(),
-                )]
+                vec![policy_issue()]
             });
         let report = VerificationReport::try_from(core_report).unwrap();
         assert_eq!(report.security_status, CheckStatus::Fail);
@@ -999,24 +999,21 @@ mod tests {
     fn test_verification_issue_conversion() {
         use std::path::PathBuf;
 
-        let mut core_issue = exarch_core::inspection::VerificationIssue::new(
-            CoreIssueSeverity::Critical,
-            CoreIssueCategory::PathTraversal,
-            "Path traversal detected".to_string(),
+        let error = exarch_core::ArchiveError::PathTraversal {
+            path: PathBuf::from("../etc/passwd"),
+        };
+        let core_issue = exarch_core::inspection::VerificationIssue::from_error(
+            &error,
+            Some(PathBuf::from("../etc/passwd")),
         );
-        core_issue.entry_path = Some(PathBuf::from("../etc/passwd"));
-        core_issue.context = Some("Attempt to escape directory".to_string());
 
         let issue = VerificationIssue::try_from(core_issue).unwrap();
 
         assert_eq!(issue.severity, IssueSeverity::Critical);
         assert_eq!(issue.category, IssueCategory::PathTraversal);
         assert_eq!(issue.entry_path, Some("../etc/passwd".to_string()));
-        assert_eq!(issue.message, "Path traversal detected");
-        assert_eq!(
-            issue.context,
-            Some("Attempt to escape directory".to_string())
-        );
+        assert_eq!(issue.message, "Path traversal detected: ../etc/passwd");
+        assert_eq!(issue.context, None);
     }
 
     // CR-004: Overflow/saturating conversion tests

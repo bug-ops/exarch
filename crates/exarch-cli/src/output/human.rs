@@ -351,14 +351,14 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
 
         for entry in manifest.entries() {
             let size_str = if human_readable {
-                humanize_bytes(entry.size)
+                humanize_bytes(entry.size())
             } else {
-                entry.size.to_string()
+                entry.size().to_string()
             };
 
             let mode_str = entry
                 .mode
-                .map_or_else(|| "-".to_string(), |m| format!("{m:o}"));
+                .map_or_else(|| "-".to_string(), |m| format!("{:o}", m.get()));
 
             let type_char = match entry.kind.entry_type() {
                 exarch_core::ManifestEntryType::File => "-",
@@ -447,7 +447,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
 
             for issue in report.issues() {
                 let severity_str = if self.use_colors {
-                    match issue.severity {
+                    match issue.severity() {
                         IssueSeverity::Critical => style("CRITICAL").red().bold().to_string(),
                         IssueSeverity::High => style("HIGH").red().to_string(),
                         IssueSeverity::Medium => style("MEDIUM").yellow().to_string(),
@@ -455,23 +455,23 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                         IssueSeverity::Info => style("INFO").cyan().to_string(),
                     }
                 } else {
-                    format!("[{}]", issue.severity)
+                    format!("[{}]", issue.severity())
                 };
 
-                if let Some(ref path) = issue.entry_path {
+                if let Some(path) = issue.entry_path() {
                     emit_line(
                         &mut self.out,
                         format_args!(
                             "  {} {}: {}",
                             severity_str,
                             TerminalPath::new(path),
-                            TerminalText::new(&issue.message)
+                            TerminalText::new(&issue.message())
                         ),
                     );
                 } else {
                     emit_line(
                         &mut self.out,
-                        format_args!("  {} {}", severity_str, TerminalText::new(&issue.message)),
+                        format_args!("  {} {}", severity_str, TerminalText::new(&issue.message())),
                     );
                 }
             }
@@ -757,18 +757,18 @@ mod tests {
 
         let mut file = ArchiveEntry::new(
             std::path::PathBuf::from("file.txt"),
-            ManifestEntryKind::File,
-            1024,
+            ManifestEntryKind::File {
+                size: exarch_core::Uncompressed(1024),
+            },
         );
-        file.mode = Some(0o644);
+        file.mode = Some(exarch_core::RawMode::new(0o644));
         let mut link = ArchiveEntry::new(
             std::path::PathBuf::from("link.txt"),
             ManifestEntryKind::Symlink {
                 target: exarch_core::LinkTarget::Recorded(std::path::PathBuf::from("file.txt")),
             },
-            512,
         );
-        link.mode = Some(0o777);
+        link.mode = Some(exarch_core::RawMode::new(0o777));
 
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         manifest.add_entry(file).unwrap();
@@ -799,8 +799,8 @@ mod tests {
         f.format_manifest_long(&sample_manifest(), true).unwrap();
         let text = out_text(&f);
         assert!(text.contains("1.0 KB"));
-        assert!(text.contains("512 B"));
-        assert!(text.contains("Total: 2 files, 1.5 KB"));
+        assert!(text.contains("0 B"));
+        assert!(text.contains("Total: 2 files, 1.0 KB"));
     }
 
     #[test]
@@ -809,7 +809,7 @@ mod tests {
         f.format_manifest_long(&sample_manifest(), false).unwrap();
         let text = out_text(&f);
         assert!(text.contains("1024"));
-        assert!(text.contains("512"));
+        assert!(!text.contains("512"));
     }
 
     #[test]
@@ -839,7 +839,6 @@ mod tests {
                 .add_entry(ArchiveEntry::new(
                     std::path::PathBuf::from(path),
                     ManifestEntryKind::Symlink { target },
-                    0,
                 ))
                 .unwrap();
         }
@@ -863,9 +862,8 @@ mod tests {
             ManifestEntryKind::Hardlink {
                 target: exarch_core::LinkTarget::Recorded(std::path::PathBuf::from("original.txt")),
             },
-            256,
         );
-        hard.mode = Some(0o644);
+        hard.mode = Some(exarch_core::RawMode::new(0o644));
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         manifest.add_entry(hard).unwrap();
 
@@ -890,7 +888,12 @@ mod tests {
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         for i in 0..5 {
             let path = std::path::PathBuf::from(format!("f{i}.txt"));
-            let entry = ArchiveEntry::new(path, ManifestEntryKind::File, 0);
+            let entry = ArchiveEntry::new(
+                path,
+                ManifestEntryKind::File {
+                    size: exarch_core::Uncompressed(0),
+                },
+            );
             manifest.add_entry(entry).unwrap();
         }
         VerificationReport::from_entry_issues(&manifest, |_| Vec::new())
@@ -947,7 +950,6 @@ mod tests {
                 ManifestEntryKind::Symlink {
                     target: exarch_core::LinkTarget::Recorded(std::path::PathBuf::from(HOSTILE)),
                 },
-                0,
             ))
             .unwrap();
         manifest
@@ -975,23 +977,21 @@ mod tests {
 
     #[test]
     fn format_verification_report_escapes_issue_path_and_message() {
-        use exarch_core::IssueCategory;
+        use exarch_core::ArchiveError;
         use exarch_core::VerificationIssue;
 
         let mut f = formatter(Verbosity::Normal, false);
         let report = VerificationReport::from_entry_issues(&hostile_manifest(), |entry| {
-            let mut issue = VerificationIssue::new(
-                IssueSeverity::Low,
-                IssueCategory::InvalidArchive,
-                HOSTILE.to_string(),
-            );
-            issue.entry_path = Some(entry.path.clone());
-            vec![issue]
+            let error = ArchiveError::Io(std::io::Error::other(HOSTILE));
+            vec![VerificationIssue::from_error(
+                &error,
+                Some(entry.path.clone()),
+            )]
         });
         f.format_verification_report(&report).unwrap();
         let text = out_text(&f);
         assert!(
-            text.contains(&format!("{HOSTILE_ESCAPED}: {HOSTILE_ESCAPED}")),
+            text.contains(&format!("{HOSTILE_ESCAPED}: I/O error: {HOSTILE_ESCAPED}")),
             "{text:?}"
         );
         assert!(!text.contains('\x1b') && !text.contains('\u{9b}'));

@@ -894,7 +894,7 @@ fn list_config_for(config: &SecurityConfig) -> SecurityConfig {
 /// Whether extraction will write `entry` as a file: a file whose extension the
 /// allowlist admits is written, any other is skipped.
 fn is_extracted_file(entry: &ArchiveEntry, config: &SecurityConfig) -> bool {
-    entry.kind == ManifestEntryKind::File
+    matches!(entry.kind, ManifestEntryKind::File { .. })
         && config.is_extension_allowed(entry.path.extension().and_then(|s| s.to_str()))
 }
 
@@ -907,7 +907,7 @@ fn listed_entry_count(manifest: &ArchiveManifest, config: &SecurityConfig) -> us
         manifest
             .entries()
             .iter()
-            .filter(|e| e.kind == ManifestEntryKind::File)
+            .filter(|e| matches!(e.kind, ManifestEntryKind::File { .. }))
             .filter(|e| is_extracted_file(e, config))
             .count()
     }

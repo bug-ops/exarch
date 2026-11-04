@@ -250,7 +250,7 @@ impl PyArchiveEntry {
 
     #[getter]
     fn size(&self) -> u64 {
-        self.inner.size
+        self.inner.size()
     }
 
     #[getter]
@@ -275,7 +275,7 @@ impl PyArchiveEntry {
 
     #[getter]
     fn mode(&self) -> Option<u32> {
-        self.inner.mode
+        self.inner.mode.map(exarch_core::RawMode::get)
     }
 
     #[getter]
@@ -303,7 +303,7 @@ impl PyArchiveEntry {
             "ArchiveEntry(path='{}', type={}, size={})",
             self.inner.path.display(),
             self.inner.kind.entry_type(),
-            self.inner.size
+            self.inner.size()
         )
     }
 
@@ -395,34 +395,33 @@ pub struct PyVerificationIssue {
 impl PyVerificationIssue {
     #[getter]
     fn severity(&self) -> String {
-        self.inner.severity.as_str().to_owned()
+        self.inner.severity().as_str().to_owned()
     }
 
     #[getter]
     fn message(&self) -> String {
-        self.inner.message.clone()
+        self.inner.message()
     }
 
     #[getter]
     fn path(&self) -> Option<String> {
         self.inner
-            .entry_path
-            .as_ref()
+            .entry_path()
             .map(|p| p.to_string_lossy().into_owned())
     }
 
     #[getter]
     fn category(&self) -> String {
-        self.inner.category.as_str().to_owned()
+        self.inner.category().as_str().to_owned()
     }
 
     #[getter]
     fn context(&self) -> Option<String> {
-        self.inner.context.clone()
+        self.inner.context()
     }
 
     fn __str__(&self) -> String {
-        format!("[{}] {}", self.inner.severity, self.inner.message)
+        format!("[{}] {}", self.inner.severity(), self.inner.message())
     }
 
     fn __repr__(&self) -> String {
@@ -852,10 +851,14 @@ mod tests {
     fn test_archive_entry_properties() {
         use std::path::PathBuf;
 
-        let mut entry =
-            ArchiveEntry::new(PathBuf::from("test/file.txt"), ManifestEntryKind::File, 512);
+        let mut entry = ArchiveEntry::new(
+            PathBuf::from("test/file.txt"),
+            ManifestEntryKind::File {
+                size: exarch_core::Uncompressed(512),
+            },
+        );
         entry.compression = exarch_core::EntryCompression::Entry(Compressed(256));
-        entry.mode = Some(0o644);
+        entry.mode = Some(exarch_core::RawMode::new(0o644));
 
         let py_entry = PyArchiveEntry::from(entry);
 
@@ -886,7 +889,6 @@ mod tests {
             ManifestEntryKind::Symlink {
                 target: exarch_core::LinkTarget::Recorded(PathBuf::from("target/file.txt")),
             },
-            0,
         );
 
         let py_entry = PyArchiveEntry::from(entry);
@@ -909,7 +911,6 @@ mod tests {
             ManifestEntryKind::Hardlink {
                 target: exarch_core::LinkTarget::Recorded(PathBuf::from("original/file.txt")),
             },
-            0,
         );
 
         let py_entry = PyArchiveEntry::from(entry);
@@ -930,7 +931,12 @@ mod tests {
 
         let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
         for (name, size) in [("file1.txt", 100), ("file2.txt", 200)] {
-            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryKind::File, size);
+            let entry = ArchiveEntry::new(
+                PathBuf::from(name),
+                ManifestEntryKind::File {
+                    size: exarch_core::Uncompressed(size),
+                },
+            );
             manifest.add_entry(entry).unwrap();
         }
 
@@ -952,14 +958,8 @@ mod tests {
 
     #[test]
     fn test_verification_issue_security_policy_category() {
-        use exarch_core::inspection::report::IssueCategory;
-        use exarch_core::inspection::report::IssueSeverity;
-
-        let issue = VerificationIssue::new(
-            IssueSeverity::High,
-            IssueCategory::SecurityPolicy,
-            "Security violation: symlinks not allowed".to_string(),
-        );
+        let error = exarch_core::ArchiveError::from(exarch_core::Violation::EncryptedArchive);
+        let issue = VerificationIssue::from_error(&error, None);
 
         assert_eq!(
             PyVerificationIssue::from(issue).category(),
@@ -969,17 +969,13 @@ mod tests {
 
     #[test]
     fn test_verification_issue_properties() {
-        use exarch_core::inspection::report::IssueCategory;
-        use exarch_core::inspection::report::IssueSeverity;
+        use exarch_core::ArchiveError;
         use std::path::PathBuf;
 
-        let mut issue = VerificationIssue::new(
-            IssueSeverity::Critical,
-            IssueCategory::PathTraversal,
-            "Path traversal detected".to_string(),
-        );
-        issue.entry_path = Some(PathBuf::from("../etc/passwd"));
-        issue.context = Some("Entry attempts to escape extraction directory".to_string());
+        let error = ArchiveError::PathTraversal {
+            path: PathBuf::from("../etc/passwd"),
+        };
+        let issue = VerificationIssue::from_error(&error, Some(PathBuf::from("../etc/passwd")));
 
         let py_issue = PyVerificationIssue::from(issue);
 
@@ -991,7 +987,7 @@ mod tests {
         );
         assert_eq!(
             py_issue.message(),
-            "Path traversal detected",
+            "Path traversal detected: ../etc/passwd",
             "message should match"
         );
         assert_eq!(
@@ -1005,7 +1001,7 @@ mod tests {
             "category() forwards IssueCategory's Display impl (matches exarch-cli's JSON output \
              and exarch-node's own convention)"
         );
-        assert!(py_issue.context().is_some(), "context should be Some");
+        assert!(py_issue.context().is_none(), "a refusal carries no context");
     }
 
     /// One alias per line: drops trailing comments, joins the lines of a

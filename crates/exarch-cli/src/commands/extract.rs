@@ -801,17 +801,24 @@ fn conflict_error(conflicts: &[std::path::PathBuf]) -> anyhow::Error {
 /// # Errors
 ///
 /// Returns the core refusal, naming the offending value, for a component that
-/// can never equal a single path component (for example `a/b` or `..`).
+/// can never equal a single path component (for example `a/b` or `..`), and
+/// an error for a non-empty value that names no component (`,` or a blank):
+/// only the exact empty string disables the list.
 fn filter_banned_components(raw: &[String]) -> Result<Vec<PathComponentName>> {
-    raw.iter()
-        .flat_map(|s| s.split(','))
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .map(|c| {
-            PathComponentName::try_from(c)
-                .with_context(|| format!("invalid --banned-component value {c:?}"))
-        })
-        .collect()
+    let mut components = Vec::new();
+    for value in raw {
+        let before = components.len();
+        for component in value.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+            components.push(
+                PathComponentName::try_from(component)
+                    .with_context(|| format!("invalid --banned-component value {component:?}"))?,
+            );
+        }
+        if components.len() == before && !value.is_empty() {
+            anyhow::bail!("--banned-component {value:?} names no component");
+        }
+    }
+    Ok(components)
 }
 
 /// Lists the archive before extraction: for conflict detection and the entry
@@ -1444,6 +1451,16 @@ mod tests {
         for raw in ["a/b", ".."] {
             let err = filter_banned_components(&[raw.to_string()]).unwrap_err();
             assert!(format!("{err:#}").contains("--banned-component"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn filter_banned_components_refuses_a_value_without_any_component() {
+        for raw in [",", " ", " , "] {
+            assert!(
+                filter_banned_components(&[raw.to_string()]).is_err(),
+                "{raw:?}"
+            );
         }
     }
 

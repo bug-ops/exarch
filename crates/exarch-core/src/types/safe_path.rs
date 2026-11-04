@@ -5,6 +5,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::config::Validated;
+use crate::error::PortableHazard;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
@@ -411,41 +412,18 @@ pub(crate) enum WindowsComponentHazard {
     TrailingDotOrSpace,
 }
 
-/// Why a path component is hazardous on some supported platform but not
-/// necessarily on the host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PortableComponentHazard {
-    /// Not valid UTF-8, so UTF-16 and UTF-8 filesystems would read it
-    /// differently.
-    NotUtf8,
-    /// `\` separates components on Windows.
-    Backslash,
-    /// One of `<>"|?*` or a control character, which Windows refuses.
-    ForbiddenCharacter,
-}
-
-impl std::fmt::Display for PortableComponentHazard {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::NotUtf8 => "not valid UTF-8",
-            Self::Backslash => "contains a backslash",
-            Self::ForbiddenCharacter => "contains a character Windows refuses",
-        })
-    }
-}
-
 /// Classifies `comp` against the hazards that [`PathModel::Portable`] adds to
 /// the Windows ones. Pure and platform-independent.
-pub(crate) fn portable_component_hazard(comp: &OsStr) -> Option<PortableComponentHazard> {
+pub(crate) fn portable_component_hazard(comp: &OsStr) -> Option<PortableHazard> {
     let Some(text) = comp.to_str() else {
-        return Some(PortableComponentHazard::NotUtf8);
+        return Some(PortableHazard::NotUtf8);
     };
     if text.contains('\\') {
-        Some(PortableComponentHazard::Backslash)
+        Some(PortableHazard::Backslash)
     } else if text
         .contains(|c: char| matches!(c, '<' | '>' | '"' | '|' | '?' | '*') || c <= '\u{1f}')
     {
-        Some(PortableComponentHazard::ForbiddenCharacter)
+        Some(PortableHazard::ForbiddenCharacter)
     } else {
         None
     }
@@ -485,13 +463,10 @@ pub(crate) fn check_component_on(
         return Ok(());
     }
     if let Some(hazard) = portable_component_hazard(comp) {
-        let name = escaped_component(comp);
-        let message = match model {
-            PathModel::Portable => format!("path component is not portable ({hazard}): {name}"),
-            PathModel::Host => format!("path component {hazard}: {name}"),
-        };
         return Err(Violation::UnsafeComponent {
-            detail: message.into(),
+            hazard,
+            model,
+            component: escaped_component(comp).into(),
         }
         .into());
     }

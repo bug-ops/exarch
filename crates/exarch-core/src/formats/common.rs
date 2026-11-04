@@ -62,6 +62,17 @@ use crate::types::SafeSymlink;
 use crate::types::dest_dir::ProbePath;
 use crate::types::safe_path::ParentCheck;
 
+/// Opens the anonymous spool file, or `None` where none can be created.
+///
+/// WASI has no temporary directory and `std::env::temp_dir` panics there, so
+/// no temporary file is attempted on that target.
+pub fn open_spool() -> Option<File> {
+    cfg_select! {
+        target_os = "wasi" => None,
+        _ => tempfile::tempfile().ok(),
+    }
+}
+
 /// RAII guard that calls `on_entry_complete` when dropped.
 ///
 /// The only way to build one is [`EntryCompleteGuard::start`], which fires

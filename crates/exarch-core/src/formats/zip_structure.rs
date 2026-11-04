@@ -141,6 +141,7 @@ use crate::error::ZipNonRegularKind;
 use crate::error::ZipStreamUndecided;
 use crate::error::ZipUncomparable;
 use crate::security::zipbomb::DeclaredCompressedBudget;
+use crate::security::zipbomb::Uncompressed;
 use resume::DESCRIPTOR_LOOKAHEAD;
 use resume::DescriptorExit;
 use resume::DescriptorWidth;
@@ -646,8 +647,8 @@ struct EntryLayout {
 fn retain_key(layout: &EntryLayout) -> RetainKey {
     RetainKey {
         data_start: layout.data_start,
-        compressed: layout.compressed,
-        size: layout.size,
+        compressed: crate::security::zipbomb::Compressed(layout.compressed),
+        size: Uncompressed(layout.size),
         crc32: layout.crc32,
     }
 }

@@ -324,8 +324,12 @@ impl SecurityConfig {
     /// Returns error if the extension is empty, exceeds maximum length, or
     /// contains a null byte, whitespace, a path separator or an inner dot.
     #[napi]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi cannot take a JavaScript string by reference"
+    )]
     pub fn add_allowed_extension(&mut self, env: Env, ext: String) -> Result<&Self> {
-        self.try_add_allowed_extension(ext)
+        self.try_add_allowed_extension(&ext)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
@@ -337,8 +341,12 @@ impl SecurityConfig {
     /// Returns error if the component is empty, exceeds maximum length, or
     /// contains a null byte, a path separator, `.` or `..`.
     #[napi]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi cannot take a JavaScript string by reference"
+    )]
     pub fn add_banned_component(&mut self, env: Env, component: String) -> Result<&Self> {
-        self.try_add_banned_component(component)
+        self.try_add_banned_component(&component)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
@@ -537,20 +545,15 @@ impl SecurityConfig {
 
     /// Env-free core of `addAllowedExtension`, so the validation is testable
     /// without a JS environment.
-    #[allow(clippy::needless_pass_by_value)]
-    fn try_add_allowed_extension(&mut self, ext: String) -> std::result::Result<(), CoreError> {
-        let ext = Extension::try_from(ext.as_str())?;
+    fn try_add_allowed_extension(&mut self, ext: &str) -> std::result::Result<(), CoreError> {
+        let ext = Extension::try_from(ext)?;
         self.inner.allowed_extensions.push(ext);
         Ok(())
     }
 
     /// Env-free core of `addBannedComponent`.
-    #[allow(clippy::needless_pass_by_value)]
-    fn try_add_banned_component(
-        &mut self,
-        component: String,
-    ) -> std::result::Result<(), CoreError> {
-        let component = PathComponentName::try_from(component.as_str())?;
+    fn try_add_banned_component(&mut self, component: &str) -> std::result::Result<(), CoreError> {
+        let component = PathComponentName::try_from(component)?;
         self.inner.banned_path_components.push(component);
         Ok(())
     }
@@ -1022,7 +1025,7 @@ mod tests {
     #[test]
     fn test_add_allowed_extension_valid() {
         let mut config = SecurityConfig::new();
-        let result = config.try_add_allowed_extension(".txt".to_string());
+        let result = config.try_add_allowed_extension(".txt");
         assert!(result.is_ok());
         assert!(config.get_allowed_extensions().contains(&"txt".to_string()));
         assert!(config.has_allowed_extension(".TXT".to_string()));
@@ -1032,10 +1035,7 @@ mod tests {
     fn test_add_allowed_extension_rejects_unusable_values() {
         for raw in [" gz", "tar.gz", "a/b", "..txt"] {
             let mut config = SecurityConfig::new();
-            assert!(
-                config.try_add_allowed_extension(raw.to_string()).is_err(),
-                "{raw:?}"
-            );
+            assert!(config.try_add_allowed_extension(raw).is_err(), "{raw:?}");
         }
     }
 
@@ -1043,17 +1043,14 @@ mod tests {
     fn test_add_banned_component_rejects_separators_and_dots() {
         for raw in ["a/b", "a\\b", ".", ".."] {
             let mut config = SecurityConfig::new();
-            assert!(
-                config.try_add_banned_component(raw.to_string()).is_err(),
-                "{raw:?}"
-            );
+            assert!(config.try_add_banned_component(raw).is_err(), "{raw:?}");
         }
     }
 
     #[test]
     fn test_add_allowed_extension_rejects_null_bytes() {
         let mut config = SecurityConfig::new();
-        let result = config.try_add_allowed_extension(".txt\0".to_string());
+        let result = config.try_add_allowed_extension(".txt\0");
         assert!(result.is_err());
     }
 
@@ -1061,21 +1058,21 @@ mod tests {
     fn test_add_allowed_extension_rejects_too_long() {
         let mut config = SecurityConfig::new();
         let long_ext = "x".repeat(MAX_CONFIG_ENTRY_LENGTH + 1);
-        let result = config.try_add_allowed_extension(long_ext);
+        let result = config.try_add_allowed_extension(&long_ext);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_add_allowed_extension_rejects_empty() {
         let mut config = SecurityConfig::new();
-        let result = config.try_add_allowed_extension(String::new());
+        let result = config.try_add_allowed_extension("");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_add_banned_component_valid() {
         let mut config = SecurityConfig::new();
-        let result = config.try_add_banned_component("node_modules".to_string());
+        let result = config.try_add_banned_component("node_modules");
         assert!(result.is_ok());
         assert!(
             config
@@ -1087,7 +1084,7 @@ mod tests {
     #[test]
     fn test_add_banned_component_rejects_null_bytes() {
         let mut config = SecurityConfig::new();
-        let result = config.try_add_banned_component("bad\0".to_string());
+        let result = config.try_add_banned_component("bad\0");
         assert!(result.is_err());
     }
 
@@ -1095,14 +1092,14 @@ mod tests {
     fn test_add_banned_component_rejects_too_long() {
         let mut config = SecurityConfig::new();
         let long_component = "x".repeat(MAX_CONFIG_ENTRY_LENGTH + 1);
-        let result = config.try_add_banned_component(long_component);
+        let result = config.try_add_banned_component(&long_component);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_add_banned_component_rejects_empty() {
         let mut config = SecurityConfig::new();
-        let result = config.try_add_banned_component(String::new());
+        let result = config.try_add_banned_component("");
         assert!(result.is_err());
     }
 
@@ -1313,10 +1310,8 @@ mod tests {
     #[test]
     fn test_allowed_extensions_getter_after_add() {
         let mut config = SecurityConfig::new();
-        config
-            .try_add_allowed_extension(".txt".to_string())
-            .unwrap();
-        config.try_add_allowed_extension(".md".to_string()).unwrap();
+        config.try_add_allowed_extension(".txt").unwrap();
+        config.try_add_allowed_extension(".md").unwrap();
 
         let extensions = config.get_allowed_extensions();
         assert_eq!(extensions.len(), 2, "should have 2 allowed extensions");
@@ -1333,12 +1328,8 @@ mod tests {
         // Default config already has 7 banned components
         let initial_count = config.get_banned_path_components().len();
 
-        config
-            .try_add_banned_component("node_modules".to_string())
-            .unwrap();
-        config
-            .try_add_banned_component("test_component".to_string())
-            .unwrap();
+        config.try_add_banned_component("node_modules").unwrap();
+        config.try_add_banned_component("test_component").unwrap();
 
         let components = config.get_banned_path_components();
         assert_eq!(
@@ -1400,10 +1391,8 @@ mod tests {
     #[test]
     fn test_is_extension_allowed_with_allowed_list() {
         let mut config = SecurityConfig::new();
-        config
-            .try_add_allowed_extension(".txt".to_string())
-            .unwrap();
-        config.try_add_allowed_extension(".md".to_string()).unwrap();
+        config.try_add_allowed_extension(".txt").unwrap();
+        config.try_add_allowed_extension(".md").unwrap();
 
         assert!(
             config.is_extension_allowed("txt".to_string()),
@@ -1431,9 +1420,7 @@ mod tests {
     #[test]
     fn test_is_extension_allowed_case_sensitive() {
         let mut config = SecurityConfig::new();
-        config
-            .try_add_allowed_extension(".txt".to_string())
-            .unwrap();
+        config.try_add_allowed_extension(".txt").unwrap();
 
         assert!(
             config.is_extension_allowed("txt".to_string()),
@@ -1536,10 +1523,8 @@ mod tests {
             "initial count should be 0"
         );
 
-        config
-            .try_add_allowed_extension(".txt".to_string())
-            .unwrap();
-        config.try_add_allowed_extension(".md".to_string()).unwrap();
+        config.try_add_allowed_extension(".txt").unwrap();
+        config.try_add_allowed_extension(".md").unwrap();
 
         assert_eq!(
             config.get_allowed_extensions_count(),
@@ -1551,9 +1536,7 @@ mod tests {
     #[test]
     fn test_has_allowed_extension() {
         let mut config = SecurityConfig::new();
-        config
-            .try_add_allowed_extension(".txt".to_string())
-            .unwrap();
+        config.try_add_allowed_extension(".txt").unwrap();
 
         assert!(
             config.has_allowed_extension(".txt".to_string()),
@@ -1571,12 +1554,8 @@ mod tests {
         // Default config already has 7 banned components
         let initial_count = config.get_banned_path_components_count();
 
-        config
-            .try_add_banned_component("node_modules".to_string())
-            .unwrap();
-        config
-            .try_add_banned_component("custom_dir".to_string())
-            .unwrap();
+        config.try_add_banned_component("node_modules").unwrap();
+        config.try_add_banned_component("custom_dir").unwrap();
 
         assert_eq!(
             config.get_banned_path_components_count(),
@@ -1588,9 +1567,7 @@ mod tests {
     #[test]
     fn test_has_banned_path_component() {
         let mut config = SecurityConfig::new();
-        config
-            .try_add_banned_component("node_modules".to_string())
-            .unwrap();
+        config.try_add_banned_component("node_modules").unwrap();
 
         assert!(
             config.has_banned_path_component("node_modules".to_string()),

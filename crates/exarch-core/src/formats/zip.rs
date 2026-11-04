@@ -954,6 +954,10 @@ impl<R: Read + Seek> ZipArchive<R> {
 impl<R: Read + Seek> ZipArchive<R> {
     /// Extracts without consuming the handle, so a caller can inspect what the
     /// archive kept (such as the decode-reuse store) afterwards.
+    ///
+    /// The consuming [`ArchiveFormat::extract`] is the production entry point;
+    /// extracting twice from one handle is not supported, and this method
+    /// exists only so crate tests can look at the handle afterwards.
     pub(crate) fn extract_in_place(
         &mut self,
         output_dir: &Path,
@@ -1041,8 +1045,8 @@ fn replay_key<R: Read>(zip_file: &zip::read::ZipFile<'_, R>) -> Option<RetainKey
     }
     Some(RetainKey {
         data_start: zip_file.data_start()?,
-        compressed: zip_file.compressed_size(),
-        size: zip_file.size(),
+        compressed: crate::security::zipbomb::Compressed(zip_file.compressed_size()),
+        size: crate::security::zipbomb::Uncompressed(zip_file.size()),
         crc32: zip_file.crc32(),
     })
 }

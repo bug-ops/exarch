@@ -5,8 +5,6 @@ use super::admit::RefusalScope;
 use super::admit::SevenZRefusal;
 use super::admit::sevenz_entry_compression;
 use super::admit::sevenz_refusals;
-use super::classify::KindSource;
-use super::classify::NativeKind;
 use super::classify::SevenZClass;
 use super::classify::SevenZKind;
 use super::classify::UnsupportedEntry;
@@ -36,6 +34,8 @@ use crate::SolidBlock;
 use crate::UnverifiedReason;
 #[cfg(unix)]
 use crate::copy::CopyBuffer;
+use crate::error::KindSource;
+use crate::error::NativeKind;
 #[cfg(unix)]
 use crate::formats::common::MAX_TEMP_FILE_CREATE_ATTEMPTS;
 #[cfg(unix)]

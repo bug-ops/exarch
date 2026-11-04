@@ -111,7 +111,7 @@ Key flags (all optional):
 | `--parallel-decode-memory <SIZE\|off>` | 128M | 7z only. Memory for decoding independent LZMA2 runs ahead on worker threads (K, M, G, T suffixes); `off` decodes on one thread; `0` exits 2 ("greater than zero"). |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. `enforce` rejects an archive whose structure different ZIP readers interpret differently (see "ZIP structure" under `verify`); `ignore` keeps the central-directory interpretation and raises no structural finding. Relax it only for archives from a producer you trust. |
 | `--decode-reuse <off\|memory\|temp-file>` | memory | ZIP only. Where the structural check keeps the deflate output it decodes, so extraction writes it instead of decoding the entry a second time. `memory` keeps up to 256 MiB in RAM (peak RSS about 265 MiB on a 300 MiB deflate ZIP against 5 MiB with `off`); `temp-file` keeps up to 256 MiB in an unnamed temporary file (plaintext in the temp directory until extraction ends; RAM on a tmpfs, often no faster than `off` on a disk); `off` keeps nothing. The kept size never exceeds `--max-total-size` or the decoder memory limit, and entries over `--max-file-size` or `--max-compression-ratio` are never kept. No effect under `--zip-consistency ignore`; bzip2 and zstd entries are decoded twice. A kept entry is checked against its CRC-32 again when written. Invalid value: exit `2`. Verified live on the release binary: each of the three values extracts the same ZIP, and `--decode-reuse disk` lists the possible values `off, memory, temp-file`. |
-| `--banned-component <COMPONENT>` | see below | Block entries whose path contains this component. **Replaces** the default list — see warning below. Repeatable, and a value may be comma-separated (`.git,.ssh`); tokens are trimmed. A token containing `/` or `\`, or equal to `.` or `..` is an error. |
+| `--banned-component <COMPONENT>` | see below | Block entries whose path contains this component. **Replaces** the default list — see warning below. Repeatable, and a value may be comma-separated (`.git,.ssh`); tokens are trimmed. A token containing `/` or `\`, or equal to `.` or `..` is an error, and so is a non-empty value with no token (`,`, a blank). |
 
 > [!WARNING]
 > **`--banned-component` REPLACES the default ban list, it does not append to it.** The default
@@ -120,7 +120,7 @@ Key flags (all optional):
 > `.ssh`, `.aws`, etc. through. If you need one extra banned component, repeat the flag with the
 > full desired set, not just the addition: `--banned-component .git --banned-component .ssh
 > --banned-component .gnupg --banned-component .aws --banned-component .kube --banned-component
-> .docker --banned-component .env --banned-component foo`. Passing an empty value disables all
+> .docker --banned-component .env --banned-component foo`. Passing an exactly empty value (`""`) disables all
 > banning.
 
 ### `create <OUTPUT> <SOURCE>...`

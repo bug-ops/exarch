@@ -216,8 +216,8 @@ pub struct ExtractArgs {
     /// Banned path component; can be repeated or comma-separated.
     ///
     /// When specified, replaces the default ban list (.git, .ssh, .gnupg,
-    /// .aws, .kube, .docker, .env). Use an empty value to allow all
-    /// components.
+    /// .aws, .kube, .docker, .env). Use an exactly empty value ("") to allow
+    /// all components; a value that is only commas or blanks is an error.
     #[arg(long = "banned-component", value_name = "COMPONENT")]
     pub banned_components: Vec<String>,
 

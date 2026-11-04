@@ -391,7 +391,7 @@ struct SpoolTee<R> {
 impl<R: Read> SpoolTee<R> {
     fn new(inner: R, limit: u64) -> Self {
         // Without a temporary file the only loss is the optimisation.
-        let spool = crate::formats::zip_reuse::open_spool()
+        let spool = crate::formats::common::open_spool()
             .map(|file| BufWriter::with_capacity(SPOOL_BUFFER, file));
         Self {
             inner,

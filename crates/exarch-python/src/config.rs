@@ -18,6 +18,16 @@ use std::num::NonZeroU64;
 
 use crate::error::convert_error;
 
+/// Parses a Python integer of any size into a [`CompressionLevel`], so every
+/// out-of-range value is a `ValueError` rather than an `OverflowError`.
+fn compression_level(level: i64) -> PyResult<CompressionLevel> {
+    u32::try_from(level)
+        .map_err(|_| {
+            PyValueError::new_err(format!("invalid compression level {level}, must be 1-9"))
+        })
+        .and_then(|level| CompressionLevel::try_from(level).map_err(convert_error))
+}
+
 /// Security configuration for archive extraction.
 ///
 /// All security features default to deny (secure-by-default policy).
@@ -252,12 +262,11 @@ impl PySecurityConfig {
     /// Returns `ValueError` if the extension is empty, exceeds maximum
     /// length, or holds a null byte, whitespace, a separator or an inner dot.
     /// A leading dot is accepted and removed, and the value is lowercased.
-    #[allow(clippy::needless_pass_by_value)]
-    fn add_allowed_extension(
-        mut slf: PyRefMut<'_, Self>,
-        ext: String,
-    ) -> PyResult<PyRefMut<'_, Self>> {
-        let ext = Extension::try_from(ext.as_str()).map_err(convert_error)?;
+    fn add_allowed_extension<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        ext: &str,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        let ext = Extension::try_from(ext).map_err(convert_error)?;
         slf.inner.allowed_extensions.push(ext);
         Ok(slf)
     }
@@ -268,12 +277,11 @@ impl PySecurityConfig {
     ///
     /// Returns `ValueError` if the component is empty, exceeds maximum
     /// length, or holds a null byte, a path separator, `.` or `..`.
-    #[allow(clippy::needless_pass_by_value)]
-    fn add_banned_component(
-        mut slf: PyRefMut<'_, Self>,
-        component: String,
-    ) -> PyResult<PyRefMut<'_, Self>> {
-        let component = PathComponentName::try_from(component.as_str()).map_err(convert_error)?;
+    fn add_banned_component<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        component: &str,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        let component = PathComponentName::try_from(component).map_err(convert_error)?;
         slf.inner.banned_path_components.push(component);
         Ok(slf)
     }
@@ -454,7 +462,10 @@ impl PySecurityConfig {
     }
 
     #[setter]
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 setters receive the extracted list by value"
+    )]
     fn set_allowed_extensions(&mut self, value: Vec<String>) -> PyResult<()> {
         self.inner.allowed_extensions = value
             .iter()
@@ -480,7 +491,10 @@ impl PySecurityConfig {
     }
 
     #[setter]
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 setters receive the extracted list by value"
+    )]
     fn set_banned_path_components(&mut self, value: Vec<String>) -> PyResult<()> {
         self.inner.banned_path_components = value
             .iter()
@@ -610,9 +624,9 @@ impl PyCreationConfig {
     /// Returns `ValueError` if level is not in range 1-9.
     fn with_compression_level(
         mut slf: PyRefMut<'_, Self>,
-        level: u8,
+        level: i64,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        slf.inner.compression_level = CompressionLevel::try_from(level).map_err(convert_error)?;
+        slf.inner.compression_level = compression_level(level)?;
         Ok(slf)
     }
 
@@ -669,11 +683,10 @@ impl PyCreationConfig {
 
     /// Sets the level; `None` resets it to the default, 6.
     #[setter]
-    fn set_compression_level(&mut self, value: Option<u8>) -> PyResult<()> {
+    fn set_compression_level(&mut self, value: Option<i64>) -> PyResult<()> {
         self.inner.compression_level = value
-            .map(CompressionLevel::try_from)
-            .transpose()
-            .map_err(convert_error)?
+            .map(compression_level)
+            .transpose()?
             .unwrap_or_default();
         Ok(())
     }

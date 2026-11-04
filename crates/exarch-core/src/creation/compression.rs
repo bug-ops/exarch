@@ -15,7 +15,8 @@
 use crate::creation::CompressionLevel;
 
 impl CompressionLevel {
-    /// The flate2 level: fast for 1-3, best for 7-9, the default for 4-6.
+    /// The flate2 level: fast for 1-3, best for 7-9, and `4..=6` map to flate2
+    /// levels 4-6 as given.
     pub(crate) fn to_flate2(self) -> flate2::Compression {
         match self.get() {
             1..=3 => flate2::Compression::fast(),

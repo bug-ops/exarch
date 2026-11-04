@@ -12,6 +12,7 @@ use std::fmt;
 use super::messages::SecurityViolationSubCode;
 use super::types::PolicySetting;
 use crate::security::fs_view::LinkKind;
+use crate::security::fs_view::PathModel;
 
 /// A Unix file type that exarch never creates.
 ///
@@ -44,6 +45,87 @@ impl SpecialFile {
             Self::CharDevice => "character device",
             Self::BlockDevice => "block device",
             Self::Socket => "socket",
+        }
+    }
+}
+
+/// Why a path component is hazardous on some supported platform but not
+/// necessarily on the host.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::PortableHazard;
+///
+/// assert_eq!(
+///     PortableHazard::Backslash.to_string(),
+///     "contains a backslash"
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PortableHazard {
+    /// Not valid UTF-8, so UTF-16 and UTF-8 filesystems would read it
+    /// differently.
+    NotUtf8,
+    /// `\` separates components on Windows.
+    Backslash,
+    /// One of `<>"|?*` or a control character, which Windows refuses.
+    ForbiddenCharacter,
+}
+
+impl fmt::Display for PortableHazard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotUtf8 => "not valid UTF-8",
+            Self::Backslash => "contains a backslash",
+            Self::ForbiddenCharacter => "contains a character Windows refuses",
+        })
+    }
+}
+
+/// What a 7z header itself says an entry is: a directory has no stream and is
+/// not flagged as an empty file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeKind {
+    /// Holds data or is an empty file.
+    File,
+    /// Has no stream and is not an empty file.
+    Directory,
+}
+
+impl NativeKind {
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+        }
+    }
+
+    const fn opposite(self) -> &'static str {
+        match self {
+            Self::File => "directory",
+            Self::Directory => "regular file",
+        }
+    }
+}
+
+/// Where a claim about a 7z entry's kind was recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KindSource {
+    /// The Unix mode in the high 16 bits of the attributes.
+    UnixMode,
+    /// The Windows `FILE_ATTRIBUTE_DIRECTORY` bit.
+    WindowsAttribute,
+}
+
+impl KindSource {
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::UnixMode => "Unix mode",
+            Self::WindowsAttribute => "Windows attributes",
         }
     }
 }
@@ -98,8 +180,12 @@ pub enum Violation {
     },
     /// A path component holds a character no supported platform accepts.
     UnsafeComponent {
-        /// The complete refusal text.
-        detail: Box<str>,
+        /// What makes the component hazardous.
+        hazard: PortableHazard,
+        /// The rule set that found it.
+        model: PathModel,
+        /// The component, escaped.
+        component: Box<str>,
     },
     /// A path component is a Windows reserved device name.
     ReservedDeviceName {
@@ -198,8 +284,12 @@ pub enum Violation {
     },
     /// A 7z entry whose recorded kind contradicts its native kind.
     KindContradiction {
-        /// The complete refusal text.
-        detail: Box<str>,
+        /// What the 7z header says.
+        native: NativeKind,
+        /// Where the contradicting claim was recorded.
+        claimed_by: KindSource,
+        /// The entry name.
+        name: Box<str>,
     },
     /// A root entry that is not a directory.
     RootEntryNotDirectory,
@@ -406,9 +496,25 @@ impl fmt::Display for Violation {
             Self::BannedComponent { component } => {
                 write!(f, "banned path component: {component}")
             }
-            Self::UnsafeComponent { detail } | Self::KindContradiction { detail } => {
-                f.write_str(detail)
-            }
+            Self::UnsafeComponent {
+                hazard,
+                model: PathModel::Portable,
+                component,
+            } => write!(f, "path component is not portable ({hazard}): {component}"),
+            Self::UnsafeComponent {
+                hazard, component, ..
+            } => write!(f, "path component {hazard}: {component}"),
+            Self::KindContradiction {
+                native,
+                claimed_by,
+                name,
+            } => write!(
+                f,
+                "7z entry is a {} but its {} says {}: {name}",
+                native.noun(),
+                claimed_by.noun(),
+                native.opposite()
+            ),
             Self::ReservedDeviceName { component } => {
                 write!(f, "Windows reserved device name: {component}")
             }
@@ -542,7 +648,11 @@ mod tests {
                 Some(PolicySetting::BannedComponents),
             ),
             (
-                Violation::UnsafeComponent { detail: text("d") },
+                Violation::UnsafeComponent {
+                    hazard: PortableHazard::Backslash,
+                    model: PathModel::Portable,
+                    component: text("c"),
+                },
                 C::PathName,
                 None,
             ),
@@ -649,7 +759,11 @@ mod tests {
                 None,
             ),
             (
-                Violation::KindContradiction { detail: text("d") },
+                Violation::KindContradiction {
+                    native: NativeKind::File,
+                    claimed_by: KindSource::UnixMode,
+                    name: text("n"),
+                },
                 C::EntryType,
                 None,
             ),
@@ -736,15 +850,16 @@ mod tests {
         }
     }
 
-    /// The text of each `one_of_each` row, in order; callers match on these
-    /// strings, so a wording change must be a deliberate edit here.
+    /// The text of each `one_of_each` row, in order; byte-identical to the
+    /// pre-typing messages (verified by the security audit), and callers match
+    /// on them, so a wording change must be a deliberate edit here.
     const EXPECTED_TEXT: [&str; 43] = [
         "empty path not allowed",
         "path contains null bytes: p",
         "path contains null bytes - potential security issue",
         "path exceeds maximum length of 1 bytes (got 2 bytes)",
         "banned path component: c",
-        "d",
+        "path component is not portable (contains a backslash): c",
         "Windows reserved device name: c",
         "path component ends with '.' or ' ': c",
         "path component contains ':': c",
@@ -766,7 +881,7 @@ mod tests {
         "FIFO entries not supported",
         "unsupported entry type: k",
         "7z entry has an undefined Unix file type (0x1): n",
-        "d",
+        "7z entry is a file but its Unix mode says directory: n",
         "archive root entry '.' must be a directory",
         "archive root entry '.' must be a directory or an empty regular file",
         "archive is encrypted (password-protected). Encrypted archives are not supported; decrypt the archive externally and try again.",

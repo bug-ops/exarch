@@ -17,7 +17,7 @@ class TestCompressionLevel:
             config.compression_level = level
             assert config.compression_level == level
 
-    @pytest.mark.parametrize("level", [0, 10, 200])
+    @pytest.mark.parametrize("level", [0, 10, 200, 256, -1, 2**40])
     def test_out_of_range_is_a_value_error(self, level):
         with pytest.raises(ValueError):
             CreationConfig().with_compression_level(level)

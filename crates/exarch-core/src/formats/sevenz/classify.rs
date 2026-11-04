@@ -2,6 +2,8 @@
 //! reparse point and anti item.
 
 use crate::ArchiveError;
+use crate::KindSource;
+use crate::NativeKind;
 use crate::Result;
 use crate::SpecialFile;
 use crate::Violation;
@@ -48,50 +50,6 @@ pub enum SevenZKind {
     UnixSymlink,
 }
 
-/// What the 7z header itself says an entry is: a directory has no stream and
-/// is not flagged as an empty file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeKind {
-    /// Holds data or is an empty file.
-    File,
-    /// Has no stream and is not an empty file.
-    Directory,
-}
-
-impl NativeKind {
-    const fn noun(self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::Directory => "directory",
-        }
-    }
-
-    const fn opposite(self) -> &'static str {
-        match self {
-            Self::File => "directory",
-            Self::Directory => "regular file",
-        }
-    }
-}
-
-/// Where a claim about an entry's kind was recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KindSource {
-    /// The Unix mode in the high 16 bits of the attributes.
-    UnixMode,
-    /// The Windows `FILE_ATTRIBUTE_DIRECTORY` bit.
-    WindowsAttribute,
-}
-
-impl KindSource {
-    const fn noun(self) -> &'static str {
-        match self {
-            Self::UnixMode => "Unix mode",
-            Self::WindowsAttribute => "Windows attributes",
-        }
-    }
-}
-
 /// Why a 7z entry is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsupportedEntry {
@@ -122,13 +80,9 @@ impl UnsupportedEntry {
                 name: name.into(),
             },
             Self::KindContradiction { native, claimed_by } => Violation::KindContradiction {
-                detail: format!(
-                    "7z entry is a {} but its {} says {}: {name}",
-                    native.noun(),
-                    claimed_by.noun(),
-                    native.opposite()
-                )
-                .into(),
+                native,
+                claimed_by,
+                name: name.into(),
             },
         };
         violation.into()

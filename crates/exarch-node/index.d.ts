@@ -418,12 +418,21 @@ export declare class CreationConfig {
   /**
    * Adds an exclude pattern.
    *
-   * Files matching this pattern will be skipped.
+   * Files matching this pattern will be skipped. Four shapes exist: `name`
+   * (a path component equal to it), `name*` (a component starting with it),
+   * `*name` (a component ending with it) and `dir/sub` (that path and its
+   * subtree). A pattern matches the entry's archive path, never the
+   * ancestors of a source directory, so write `build`, not `src/build`, for
+   * a source `src`.
    *
    * # Errors
    *
-   * Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) if the
-   * pattern contains null bytes.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
+   * other shape instead of silently excluding nothing: an empty pattern,
+   * one with a null byte, leading or trailing whitespace, a comma, any of
+   * `?`, `[`, `]`, `{`, `}` and `!`, a `*` elsewhere than first or last,
+   * `.` or `..` as a component, an absolute path or one over 255 bytes. A
+   * name holding such a character cannot be excluded by pattern.
    */
   addExcludePattern(pattern: string): this
   /** Finalizes the configuration (for API consistency). */

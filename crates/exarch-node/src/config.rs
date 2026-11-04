@@ -756,12 +756,21 @@ impl CreationConfig {
 
     /// Adds an exclude pattern.
     ///
-    /// Files matching this pattern will be skipped.
+    /// Files matching this pattern will be skipped. Four shapes exist: `name`
+    /// (a path component equal to it), `name*` (a component starting with it),
+    /// `*name` (a component ending with it) and `dir/sub` (that path and its
+    /// subtree). A pattern matches the entry's archive path, never the
+    /// ancestors of a source directory, so write `build`, not `src/build`, for
+    /// a source `src`.
     ///
     /// # Errors
     ///
-    /// Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) if the
-    /// pattern contains null bytes.
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
+    /// other shape instead of silently excluding nothing: an empty pattern,
+    /// one with a null byte, leading or trailing whitespace, a comma, any of
+    /// `?`, `[`, `]`, `{`, `}` and `!`, a `*` elsewhere than first or last,
+    /// `.` or `..` as a component, an absolute path or one over 255 bytes. A
+    /// name holding such a character cannot be excluded by pattern.
     #[napi]
     #[allow(
         clippy::needless_pass_by_value,
@@ -1873,9 +1882,35 @@ mod tests {
             err,
             CoreError::InvalidConfiguration {
                 setting: ConfigSetting::ExcludePattern,
-                problem: ConfigProblem::ContainsNul
+                problem: ConfigProblem::ExcludePatternRefused {
+                    reason: exarch_core::ExcludeRefusal::ContainsNul,
+                    ..
+                }
             }
         );
+    }
+
+    #[test]
+    fn test_creation_config_add_exclude_pattern_refuses_glob_look_alikes() {
+        for (shape, reason) in [
+            ("?.txt", exarch_core::ExcludeRefusal::GlobMetacharacter),
+            ("[a", exarch_core::ExcludeRefusal::GlobMetacharacter),
+            ("{a,b}", exarch_core::ExcludeRefusal::ContainsComma),
+            ("!a.txt", exarch_core::ExcludeRefusal::GlobMetacharacter),
+            (" .env", exarch_core::ExcludeRefusal::PaddedWithBlank),
+            ("a,b", exarch_core::ExcludeRefusal::ContainsComma),
+        ] {
+            let mut config = CreationConfig::new();
+            let err = config.try_add_exclude_pattern(shape).unwrap_err();
+            assert_matches!(
+                err,
+                CoreError::InvalidConfiguration {
+                    setting: ConfigSetting::ExcludePattern,
+                    problem: ConfigProblem::ExcludePatternRefused { reason: got, .. }
+                } if got == reason,
+                "{shape}"
+            );
+        }
     }
 
     #[test]

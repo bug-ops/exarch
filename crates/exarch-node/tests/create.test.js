@@ -178,12 +178,24 @@ describe('createArchive output handling', () => {
     );
   });
 
-  it('refuses an unsupported exclude pattern shape', () => {
-    const config = new CreationConfig();
-    assert.throws(() => config.addExcludePattern('*.m*'), {
-      code: 'INVALID_CONFIGURATION',
-      setting: 'exclude_pattern',
+  for (const shape of ['*.m*', '?.txt', '[a', '{a,b}', '!a.txt', ' .env', 'a,b', '', '../x']) {
+    it(`refuses the exclude pattern ${JSON.stringify(shape)} instead of silently excluding nothing`, () => {
+      const config = new CreationConfig();
+      const before = config.excludePatterns;
+      assert.throws(() => config.addExcludePattern(shape), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'exclude_pattern',
+      });
+      assert.deepStrictEqual(config.excludePatterns, before);
     });
+  }
+
+  it('accepts the documented exclude pattern shapes', () => {
+    const config = new CreationConfig();
+    for (const shape of ['.git', 'temp*', '*.tmp', 'build/out']) {
+      config.addExcludePattern(shape);
+    }
+    assert.ok(config.excludePatterns.includes('build/out'));
   });
 
   it('replaces an existing archive on success', () => {

@@ -391,6 +391,17 @@ const result = await extractArchiveWithProgress(
 
 **Returns:** `Promise<ExtractionReport>`
 
+### Exclude patterns
+
+`CreationConfig.addExcludePattern(pattern)` accepts four shapes: `name` (a path
+component equal to it), `name*`, `*name` and `dir/sub` (that path and its
+subtree). Patterns match the entry's archive path, never the ancestors of a
+source directory, so for a source `src` write `build`, not `src/build`. Any
+other shape, such as `*.m*`, `?.txt`, `[a`, `{a,b}`, `!a.txt`, `a,b`, a pattern
+with leading or trailing whitespace, an empty one, `..` or an absolute path,
+throws `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'` instead of
+silently excluding nothing.
+
 ### Create options
 
 `createArchive`, `createArchiveSync` and the `WithProgress` variants take an

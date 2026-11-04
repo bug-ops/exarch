@@ -22,10 +22,7 @@ use tempfile::TempDir;
 fn test_symlink_absolute_target() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_symlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -45,10 +42,7 @@ fn test_symlink_absolute_target() {
 fn test_symlink_parent_traversal() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_symlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -68,7 +62,7 @@ fn test_symlink_parent_traversal() {
 fn test_symlink_disabled_by_default() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -88,10 +82,7 @@ fn test_symlink_disabled_by_default() {
 fn test_symlink_relative_safe() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_symlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -111,10 +102,7 @@ fn test_symlink_relative_safe() {
 fn test_symlink_same_directory() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_symlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -134,10 +122,7 @@ fn test_symlink_same_directory() {
 fn test_symlink_chain_escape() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_symlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 

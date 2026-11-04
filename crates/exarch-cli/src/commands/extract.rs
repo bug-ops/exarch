@@ -883,9 +883,9 @@ fn is_tar_archive(archive: &Path) -> bool {
 /// reset to their deny-by-default values.
 fn list_config_for(config: &SecurityConfig) -> SecurityConfig {
     let mut list_config = config.clone();
-    list_config.allowed.symlinks = false;
-    list_config.allowed.hardlinks = false;
-    list_config.allowed.world_writable = false;
+    list_config.allowed.symlinks = exarch_core::Admit::Refuse;
+    list_config.allowed.hardlinks = exarch_core::Admit::Refuse;
+    list_config.allowed.world_writable = exarch_core::Admit::Refuse;
     list_config.preserve_permissions = false;
     list_config
 }

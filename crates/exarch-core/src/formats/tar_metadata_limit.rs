@@ -169,7 +169,6 @@ use crate::SecurityConfig;
 use crate::Violation;
 use crate::ZipBombDetails;
 use crate::ZipBombScope;
-use crate::config::Validated;
 use crate::error::violation::fmt_tar_read_budget;
 use crate::error::violation::fmt_tar_synthetic_budget;
 use crate::security::Compressed;
@@ -890,7 +889,7 @@ impl SkipLimits {
     const SLACK_BYTES: u64 = 1024 * 1024;
 
     /// Takes the limits from a validated config.
-    pub(crate) fn of(config: &SecurityConfig<Validated>) -> Self {
+    pub(crate) fn of(config: &SecurityConfig) -> Self {
         Self {
             per_file: config.max_file_size,
             total: config.max_total_size,

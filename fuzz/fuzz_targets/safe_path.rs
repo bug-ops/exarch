@@ -22,7 +22,7 @@ fn dest() -> &'static DestDir {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let config = common::validated();
+    let config = common::config();
 
     #[cfg(unix)]
     let path = {

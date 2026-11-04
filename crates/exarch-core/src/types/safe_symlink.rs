@@ -4,7 +4,6 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
-use crate::config::Validated;
 use crate::security::fs_view::LinkKind;
 use std::path::Path;
 use std::path::PathBuf;
@@ -46,8 +45,8 @@ use crate::security::fs_view::ModelRoot as _;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
 /// let mut config = SecurityConfig::default();
-/// config.allowed.symlinks = true;
-/// let config = config.validate()?;
+/// config.allowed.symlinks = exarch_core::Admit::Allow;
+/// let config = config;
 ///
 /// let link = SafePath::validate(&PathBuf::from("mylink"), &dest, &config)?;
 /// let target = PathBuf::from("../target.txt");
@@ -107,8 +106,8 @@ impl SafeSymlink {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
     /// let mut config = SecurityConfig::default();
-    /// config.allowed.symlinks = true;
-    /// let config = config.validate()?;
+    /// config.allowed.symlinks = exarch_core::Admit::Allow;
+    /// let config = config;
     ///
     /// let link = SafePath::validate(&PathBuf::from("dir/link"), &dest, &config)?;
     /// let target = PathBuf::from("../file.txt");
@@ -121,7 +120,7 @@ impl SafeSymlink {
         link: &SafePath,
         target: &Path,
         dest: &DestDir,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<Self> {
         Self::validate_in(link, target, dest, config, &HostFs)
     }
@@ -133,7 +132,7 @@ impl<P: ParentCheck> SafeSymlink<P> {
         link: &SafePath<P>,
         target: &Path,
         root: &V::Root,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         view: &V,
     ) -> Result<Self> {
         let dest = root.as_path();
@@ -252,10 +251,11 @@ impl<P: ParentCheck> SafeSymlink<P> {
 ///
 /// Returns `SecurityViolation` ("symlinks not allowed") when symlinks are
 /// disabled.
-pub(crate) fn require_symlinks_allowed(config: &SecurityConfig<Validated>) -> Result<()> {
+pub(crate) fn require_symlinks_allowed(config: &SecurityConfig) -> Result<()> {
     config
         .allowed
         .symlinks
+        .is_allowed()
         .ok_or_else(|| Violation::LinksNotAllowed(LinkKind::Symlink).into())
 }
 
@@ -435,10 +435,10 @@ mod tests {
     }
 
     /// Creates a `SecurityConfig` with symlinks enabled for testing.
-    fn create_config_with_symlinks() -> SecurityConfig<Validated> {
+    fn create_config_with_symlinks() -> SecurityConfig {
         let mut config = SecurityConfig::default();
-        config.allowed.symlinks = true;
-        config.validate().expect("valid config")
+        config.allowed.symlinks = crate::Admit::Allow;
+        config
     }
 
     #[test]
@@ -462,8 +462,7 @@ mod tests {
     fn test_safe_symlink_reject_when_disabled() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.symlinks = false;
-        let config = config.validate().expect("valid config");
+        config.allowed.symlinks = crate::Admit::Refuse;
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
             .expect("link path should be valid");

@@ -17,7 +17,6 @@ use crate::QuotaResource;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::ZipConsistencyPolicy;
-use crate::config::Validated;
 use crate::formats::ZipArchive;
 use crate::formats::traits::ArchiveFormat;
 use crate::inspection::report::VerificationStatus;
@@ -36,11 +35,8 @@ mod streaming;
 mod xl_type;
 mod zstd_bzip2_descriptor;
 
-fn config(policy: ZipConsistencyPolicy) -> SecurityConfig<Validated> {
-    SecurityConfig::default()
-        .with_zip_consistency(policy)
-        .validate()
-        .unwrap()
+fn config(policy: ZipConsistencyPolicy) -> SecurityConfig {
+    SecurityConfig::default().with_zip_consistency(policy)
 }
 
 fn open_bytes(bytes: Vec<u8>) -> ZipArchive<Cursor<Vec<u8>>> {

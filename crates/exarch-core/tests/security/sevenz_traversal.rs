@@ -57,7 +57,7 @@ fn test_ghsa_qh76_sevenz_relative_traversal_rejected() {
 
     let result = archive.extract(
         &dest,
-        &SecurityConfig::default().validate().unwrap(),
+        &SecurityConfig::default(),
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
@@ -89,7 +89,7 @@ fn test_ghsa_qh76_sevenz_absolute_path_rejected() {
 
     let result = archive.extract(
         &dest,
-        &SecurityConfig::default().validate().unwrap(),
+        &SecurityConfig::default(),
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );

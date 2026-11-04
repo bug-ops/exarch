@@ -204,6 +204,7 @@ dependencies = [
  "typed-path",
  "unicode-normalization",
  "walkdir",
+ "windows-sys",
  "zip",
  "zstd",
 ]

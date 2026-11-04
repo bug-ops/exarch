@@ -13,7 +13,6 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::config::ExtractionOptions;
-use crate::config::Validated;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
 use crate::formats::SevenZArchive;
@@ -132,15 +131,14 @@ fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
-    let config = config.clone().validate()?;
-    extract_validated(archive_path, output_dir, &config, options, progress)
+    extract_validated(archive_path, output_dir, config, options, progress)
 }
 
 /// Extracts `archive_path` under a config that is already validated.
 pub(crate) fn extract_validated<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
     output_dir: Q,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
@@ -353,7 +351,7 @@ fn extract_atomic(
 fn extract_tar(
     archive_path: &Path,
     output_dir: &Path,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
     codec: Option<CompressionCodec>,
@@ -382,7 +380,7 @@ pub(crate) fn extract_tar_stream<R: std::io::Read>(
     source: TapSource,
     trailer: TarTrailer,
     output_dir: &Path,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
@@ -395,7 +393,7 @@ pub(crate) fn extract_tar_stream<R: std::io::Read>(
 fn extract_zip(
     archive_path: &Path,
     output_dir: &Path,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
@@ -411,7 +409,7 @@ fn extract_zip(
 fn extract_7z(
     archive_path: &Path,
     output_dir: &Path,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
@@ -511,9 +509,6 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
-    let config = config.clone().validate()?;
-    let config = &config;
-
     let output = output_path.as_ref();
 
     // Block creation for the ZIP-family extensions (mirrors the 7z block
@@ -802,9 +797,8 @@ pub fn list_reader_with_progress(
     options: &ListOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ArchiveManifest> {
-    let config = config.clone().validate()?;
     let manifest = reader.list(
-        &config,
+        config,
         &mut ListPass::strict_with(options.stored_targets).with_progress(progress),
     )?;
     progress.on_complete();
@@ -903,8 +897,7 @@ pub fn verify_reader_with_progress(
     options: &VerificationOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<VerificationReport> {
-    let config = config.clone().validate()?;
-    let report = reader.verify(&config, *options, progress)?;
+    let report = reader.verify(config, *options, progress)?;
     progress.on_complete();
     Ok(report)
 }
@@ -1070,22 +1063,21 @@ pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
     progress: &mut dyn ProgressCallback,
     reuse: Option<SinkReuse>,
 ) -> Result<ExtractionReport> {
-    let config = config.clone().validate()?;
     match reader.into_source() {
         Source::Tar { stream, codec } => {
-            let archive = tar_archive(stream, codec, DecoderLimits::of(&config))?;
-            let mut target = SinkTarget::new(sink, &config);
-            archive.extract_into(&mut target, &config, options, progress)
+            let archive = tar_archive(stream, codec, DecoderLimits::of(config))?;
+            let mut target = SinkTarget::new(sink, config);
+            archive.extract_into(&mut target, config, options, progress)
         }
         Source::Seekable {
             reader,
             format: SeekableFormat::Zip,
         } => {
             let mut archive = match reuse {
-                Some(reuse) => ZipArchive::for_sink(reader, &config, &reuse)?,
-                None => ZipArchive::for_extraction(reader, &config, options.decode_reuse)?,
+                Some(reuse) => ZipArchive::for_sink(reader, config, &reuse)?,
+                None => ZipArchive::for_extraction(reader, config, options.decode_reuse)?,
             };
-            archive.check_structure(&config)?.extract_with(
+            archive.check_structure(config)?.extract_with(
                 |config| Ok(SinkTarget::new(sink, config)),
                 options,
                 progress,
@@ -1096,7 +1088,7 @@ pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
             format: SeekableFormat::SevenZ,
         } => {
             let mut archive = SevenZArchive::new(reader)?;
-            archive.admit(&config)?.extract_with(
+            archive.admit(config)?.extract_with(
                 |config| Ok(SinkTarget::new(sink, config)),
                 options,
                 progress,
@@ -1131,10 +1123,7 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
 /// Uses extension-only detection; magic-byte detection is intentionally
 /// excluded so that a pre-existing output file with stale bytes cannot
 /// override the caller's intended format.
-fn determine_creation_format<State>(
-    output: &Path,
-    config: &CreationConfig<State>,
-) -> Result<CreatableFormat> {
+fn determine_creation_format(output: &Path, config: &CreationConfig) -> Result<CreatableFormat> {
     // If format explicitly set in config, use it
     if let Some(format) = config.format {
         return Ok(format);
@@ -1827,8 +1816,7 @@ mod tests {
 
         let temp = tempfile::TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().unwrap();
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         let archive = TarArchive::new(Cursor::new(tar_data));
         let mut progress = ByteTracker { total: 0 };
@@ -1893,7 +1881,7 @@ mod tests {
         };
         let result = archive.extract(
             temp.path(),
-            &SecurityConfig::default().validate().unwrap(),
+            &SecurityConfig::default(),
             &ExtractionOptions::default(),
             &mut progress,
         );
@@ -1947,7 +1935,7 @@ mod tests {
         };
         let result = archive.extract(
             temp.path(),
-            &SecurityConfig::default().validate().unwrap(),
+            &SecurityConfig::default(),
             &ExtractionOptions::default(),
             &mut progress,
         );

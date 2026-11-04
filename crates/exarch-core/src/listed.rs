@@ -50,7 +50,6 @@ use crate::api::extract_staged;
 use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
 use crate::config::ExtractionOptions;
-use crate::config::Validated;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::FormatFamily;
@@ -214,25 +213,21 @@ impl ListedArchive {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let Self { archive, kept, .. } = self;
-        let validated = config.clone().validate()?;
         let spool = match kept {
-            Kept::Zip(zip) if zip.serves(&validated) => {
+            Kept::Zip(zip) if zip.serves(config) => {
                 return extract_staged(output_dir.as_ref(), options, |dir| {
-                    zip.extract(dir, &validated, options, progress)
+                    zip.extract(dir, config, options, progress)
                 });
             }
-            Kept::TarSpool(spool) if DecoderLimits::of(&validated).covers(spool.decoded_with) => {
-                spool
-            }
+            Kept::TarSpool(spool) if DecoderLimits::of(config).covers(spool.decoded_with) => spool,
             Kept::Nothing | Kept::TarSpool(_) | Kept::Zip(_) => {
                 return extract_staged(output_dir.as_ref(), options, |dir| {
-                    extract_validated(&archive, dir, &validated, options, progress)
+                    extract_validated(&archive, dir, config, options, progress)
                 });
             }
         };
-        let config = validated;
         extract_staged(output_dir.as_ref(), options, |dir| {
-            replay_spool(spool.file, dir, &config, options, progress)
+            replay_spool(spool.file, dir, config, options, progress)
         })
     }
 }
@@ -242,7 +237,7 @@ impl ListedArchive {
 fn replay_spool<R: Read>(
     spool: R,
     dir: &Path,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
@@ -322,28 +317,27 @@ fn list_with_limit(
     limit: u64,
     reuse: DecodeReuse,
 ) -> Result<ListedArchive> {
-    let config = config.clone().validate()?;
     let format = detect_format(archive)?;
     let mut pass = ListPass::strict_with(options.stored_targets);
     let (manifest, kept) = match format.family() {
         FormatFamily::Tar(Some(codec)) if replays(codec) && fits(archive, codec, limit) => {
-            let decoded = open_tar_stream(archive, Some(codec), DecoderLimits::of(&config))?;
+            let decoded = open_tar_stream(archive, Some(codec), DecoderLimits::of(config))?;
             let source = decoded.source();
             let mut tee = SpoolTee::new(decoded.stream, limit);
             let manifest =
-                list_tar_stream(&mut tee, source, Some(codec), format, &config, &mut pass)?;
+                list_tar_stream(&mut tee, source, Some(codec), format, config, &mut pass)?;
             let kept = tee
-                .finish_spool(&config)
+                .finish_spool(config)
                 .map_or(Kept::Nothing, Kept::TarSpool);
             (manifest, kept)
         }
         FormatFamily::Seekable(SeekableFormat::Zip) => {
-            let mut zip = ZipArchive::for_extraction(File::open(archive)?, &config, reuse)?;
-            let manifest = zip.list_with(&config, &mut pass)?;
+            let mut zip = ZipArchive::for_extraction(File::open(archive)?, config, reuse)?;
+            let manifest = zip.list_with(config, &mut pass)?;
             (manifest, Kept::Zip(Box::new(zip)))
         }
         _ => (
-            list_detected(archive, format, &config, &mut pass)?,
+            list_detected(archive, format, config, &mut pass)?,
             Kept::Nothing,
         ),
     };
@@ -440,7 +434,7 @@ impl<R: Read> SpoolTee<R> {
 
     /// Drains the decoder and returns the spool, rewound, if it holds the
     /// complete decoder output.
-    fn finish_spool(mut self, config: &SecurityConfig<Validated>) -> Option<Spool> {
+    fn finish_spool(mut self, config: &SecurityConfig) -> Option<Spool> {
         self.drain();
         if self.decoding != Decoding::Finished {
             return None;
@@ -853,7 +847,7 @@ mod tests {
         let mut tee = SpoolTee::new(Scripted(script), limit);
         let mut sink = [0; 8];
         while tee.read(&mut sink).is_ok_and(|n| n > 0) {}
-        tee.finish_spool(&SecurityConfig::default().validate().unwrap())
+        tee.finish_spool(&SecurityConfig::default())
     }
 
     const EIO: i32 = 5;
@@ -882,7 +876,7 @@ mod tests {
             inner: io::Cursor::new(bytes.to_vec()),
             remaining: budget,
         };
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         replay_spool(
             spool,
             dir.path(),

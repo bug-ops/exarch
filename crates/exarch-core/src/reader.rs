@@ -22,7 +22,6 @@ use crate::ReaderFormatError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
-use crate::config::Validated;
 use crate::formats::SevenZArchive;
 use crate::formats::TarArchive;
 use crate::formats::ZipArchive;
@@ -346,7 +345,7 @@ impl<'a> ArchiveReader<'a> {
 
     pub(crate) fn list(
         self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         listing: &mut ListPass<'_, '_>,
     ) -> Result<ArchiveManifest> {
         let format = self.format();
@@ -369,7 +368,7 @@ impl<'a> ArchiveReader<'a> {
 
     pub(crate) fn verify(
         self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: VerificationOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<VerificationReport> {

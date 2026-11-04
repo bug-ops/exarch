@@ -242,7 +242,7 @@ fn corrupt_gzip_crc_is_refused_by_the_in_memory_api() {
 fn corrupt_gzip_crc_is_refused_by_tar_archive_over_a_decoder() {
     let bytes = flip_crc(gzip(&tar_bytes()));
     let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let out = TempDir::new().unwrap();
 
     let error = TarArchive::new(decoder)

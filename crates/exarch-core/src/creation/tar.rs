@@ -5,7 +5,6 @@
 
 use crate::ProgressCallback;
 use crate::Result;
-use crate::config::Validated;
 use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressReader;
 use crate::creation::progress::ProgressTracker;
@@ -79,7 +78,7 @@ use tar::Header;
 ///     }
 /// }
 ///
-/// let config = CreationConfig::default().validate()?;
+/// let config = CreationConfig::default();
 /// let mut progress = SimpleProgress;
 /// let report = create_tar_with_progress(
 ///     Path::new("output.tar"),
@@ -106,7 +105,7 @@ pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     codec: Option<CompressionCodec>,
     sources: &[Q],
-    config: &CreationConfig<Validated>,
+    config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
@@ -121,7 +120,7 @@ pub(crate) fn write_tar<W: Write, P: AsRef<Path>>(
     out: W,
     codec: Option<CompressionCodec>,
     sources: &[P],
-    config: &CreationConfig<Validated>,
+    config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let counter = CountingWriter::new(out);
@@ -145,7 +144,7 @@ pub(crate) fn write_tar<W: Write, P: AsRef<Path>>(
 fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     writer: W,
     sources: &[P],
-    config: &CreationConfig<Validated>,
+    config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<(CreationReport, W)> {
     let mut builder = Builder::new(writer);
@@ -212,7 +211,7 @@ fn add_directory_to_tar<W: Write>(
     builder: &mut Builder<W>,
     dir_path: &Path,
     archive_path: &Path,
-    config: &CreationConfig<Validated>,
+    config: &CreationConfig,
     report: &mut CreationReport,
 ) -> Result<()> {
     let mut header = Header::new_gnu();
@@ -247,7 +246,7 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
     builder: &mut Builder<W>,
     file_path: &Path,
     archive_path: &Path,
-    config: &CreationConfig<Validated>,
+    config: &CreationConfig,
     report: &mut CreationReport,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
@@ -351,7 +350,7 @@ impl crate::formats::traits::FormatCreator for TarCreator {
         &self,
         output: &Path,
         sources: &[&Path],
-        config: &CreationConfig<Validated>,
+        config: &CreationConfig,
         progress: &mut dyn ProgressCallback,
     ) -> crate::Result<crate::creation::CreationReport> {
         create_tar_with_progress(output, self.0, sources, config, progress)
@@ -763,9 +762,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_format(Some(CreatableFormat::TarZst))
-            .validate()
-            .unwrap();
+            .with_format(Some(CreatableFormat::TarZst));
 
         // Allow enough bytes for the zstd header but fail mid-stream so that
         // encoder.finish() must flush remaining data and hits the limit.
@@ -833,9 +830,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .validate()
-            .unwrap();
+            .with_include_hidden(true);
 
         let mut progress = TestProgress::default();
 
@@ -899,10 +894,7 @@ mod tests {
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "zstd progress finish").unwrap();
 
-        let config = CreationConfig::default()
-            .with_exclude_patterns(vec![])
-            .validate()
-            .unwrap();
+        let config = CreationConfig::default().with_exclude_patterns(vec![]);
         let mut noop = crate::NoopProgress;
         let report = create_tar_with_progress(
             &output,

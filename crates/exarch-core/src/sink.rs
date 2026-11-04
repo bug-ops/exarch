@@ -176,7 +176,6 @@ use crate::Malformation;
 use crate::QuotaResource;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::formats::common;
@@ -584,7 +583,7 @@ struct StagedFile {
 /// destination and delivers to an [`EntrySink`].
 pub(crate) struct SinkTarget<'a, S: EntrySink> {
     sink: &'a mut S,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
     root: VirtualRoot,
     model: PathModel,
     tree: VirtualTree,
@@ -595,7 +594,7 @@ pub(crate) struct SinkTarget<'a, S: EntrySink> {
 }
 
 impl<'a, S: EntrySink> SinkTarget<'a, S> {
-    pub(crate) fn new(sink: &'a mut S, config: &'a SecurityConfig<Validated>) -> Self {
+    pub(crate) fn new(sink: &'a mut S, config: &'a SecurityConfig) -> Self {
         let root = VirtualRoot::new();
         let model = sink.path_model();
         let tree = VirtualTree::new(

@@ -742,7 +742,7 @@ mod tests {
     fn create_new_applies_the_exact_mode_and_refuses_an_existing_name() {
         let temp = TempDir::new().unwrap();
         let dir = pinned(&temp);
-        let config = crate::SecurityConfig::default().validate().unwrap();
+        let config = crate::SecurityConfig::default();
         let mode = crate::security::permissions::sanitize_permissions(RawMode::new(0o640), &config);
 
         dir.create_new(leaf("f"), Some(mode)).unwrap();

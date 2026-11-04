@@ -34,7 +34,6 @@ use flate2::Crc;
 use super::zip::ZIP_INVALID_CHECKSUM;
 use crate::DecodeReuse;
 use crate::SecurityConfig;
-use crate::config::Validated;
 use crate::formats::zip::ZipMethod;
 use crate::security::zipbomb::Compressed;
 use crate::security::zipbomb::Uncompressed;
@@ -66,7 +65,7 @@ impl ReusePlan {
     };
 
     /// `mode` under the limits of `config`.
-    pub(crate) fn of(mode: DecodeReuse, config: &SecurityConfig<Validated>) -> Self {
+    pub(crate) fn of(mode: DecodeReuse, config: &SecurityConfig) -> Self {
         let configured = match mode {
             DecodeReuse::Off => 0,
             DecodeReuse::Memory(limit) | DecodeReuse::TempFile(limit) => limit.get(),

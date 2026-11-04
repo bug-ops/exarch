@@ -28,7 +28,6 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
-use crate::config::Validated;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
@@ -89,8 +88,8 @@ pub enum LinkPolicy {
 }
 
 impl LinkPolicy {
-    fn of(config: &SecurityConfig<Validated>) -> Self {
-        if config.allowed.symlinks {
+    fn of(config: &SecurityConfig) -> Self {
+        if config.allowed.symlinks.is_allowed() {
             Self::ContainedOnly
         } else {
             Self::Refuse
@@ -139,7 +138,7 @@ pub struct DirWalker {
 
 impl DirWalker {
     /// Builds a walker that applies the symlink policy of `config`.
-    pub fn new(config: &SecurityConfig<Validated>) -> Self {
+    pub fn new(config: &SecurityConfig) -> Self {
         Self {
             links: LinkPolicy::of(config),
         }
@@ -407,10 +406,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn walker(allow_symlinks: bool) -> DirWalker {
-        let config = SecurityConfig::default()
-            .with_allow_symlinks(allow_symlinks)
-            .validate()
-            .unwrap();
+        let config = SecurityConfig::default().with_allow_symlinks(allow_symlinks);
         DirWalker::new(&config)
     }
 

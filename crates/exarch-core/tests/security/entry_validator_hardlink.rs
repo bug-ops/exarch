@@ -23,10 +23,7 @@ use tempfile::TempDir;
 fn test_hardlink_absolute_target() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_hardlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -46,10 +43,7 @@ fn test_hardlink_absolute_target() {
 fn test_hardlink_parent_traversal() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_hardlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -69,7 +63,7 @@ fn test_hardlink_parent_traversal() {
 fn test_hardlink_disabled_by_default() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -89,10 +83,7 @@ fn test_hardlink_disabled_by_default() {
 fn test_hardlink_relative_safe() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_hardlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -112,10 +103,7 @@ fn test_hardlink_relative_safe() {
 fn test_hardlink_same_directory() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_hardlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -135,10 +123,7 @@ fn test_hardlink_same_directory() {
 fn test_multiple_hardlinks_tracked() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_hardlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -172,10 +157,7 @@ fn test_multiple_hardlinks_tracked() {
 fn test_hardlink_chain_escape() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_hardlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
 
     let mut validator = EntryValidator::new(&config, &dest);
 

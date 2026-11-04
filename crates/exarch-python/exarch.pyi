@@ -173,11 +173,12 @@ class SecurityConfig:
 
     def with_max_solid_block_memory(self, size: int) -> SecurityConfig:
         """
-        Sets the maximum memory budget in bytes for decompressing a solid 7z block.
+        Sets the maximum decoded size in bytes of a solid 7z block.
 
-        Only enforced when ``with_allow_solid_archives`` is called with ``True``. Raises
-        ``ValueError`` if *size* is zero. Its ``setting`` attribute
-        is ``"max_solid_block_memory"``.
+        The limit bounds decoded volume per block, not resident memory, and exists only
+        while solid archives are allowed: call ``with_allow_solid_archives`` first. Raises
+        ``ValueError`` if *size* is zero or solid archives are not allowed. Its ``setting``
+        attribute is ``"max_solid_block_memory"``.
         """
         ...
 
@@ -265,8 +266,8 @@ class SecurityConfig:
     @preserve_permissions.setter
     def preserve_permissions(self, value: bool) -> None: ...
     @property
-    def max_solid_block_memory(self) -> int:
-        """Maximum memory budget in bytes for decompressing a solid 7z block (default: 512 MB)."""
+    def max_solid_block_memory(self) -> int | None:
+        """Maximum decoded size in bytes of a solid 7z block (default: 512 MB once solid archives are allowed, ``None`` while they are not)."""
         ...
 
     @max_solid_block_memory.setter

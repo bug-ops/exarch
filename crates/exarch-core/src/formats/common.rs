@@ -37,7 +37,6 @@ use crate::SecurityConfig;
 use crate::SinkOptions;
 pub use crate::SpecialFile;
 use crate::Violation;
-use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
 use crate::copy::copy_bounded;
@@ -291,7 +290,7 @@ pub fn checked_increment_files_skipped(report: &mut ExtractionReport) -> Result<
 /// The one definition of the rule, applied by the validator's file screen and
 /// by the passes that must agree with it on which files are skipped.
 #[must_use]
-pub fn is_extension_allowed(path: &Path, config: &SecurityConfig<Validated>) -> bool {
+pub fn is_extension_allowed(path: &Path, config: &SecurityConfig) -> bool {
     config.is_path_extension_allowed(path.extension().and_then(|e| e.to_str()))
 }
 
@@ -309,7 +308,7 @@ pub fn check_entry_name_limits(
     model: PathModel,
     path: &Path,
     regular_file: bool,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
 ) -> std::io::Result<()> {
     if regular_file && !is_extension_allowed(path, config) {
         return Ok(());
@@ -1043,12 +1042,12 @@ mod tests {
     /// carry setuid/setgid/world-writable bits, so sanitizing with the
     /// default config never changes the value.
     fn sanitized(mode: u32) -> SanitizedMode {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         sanitize_permissions(RawMode::new(mode), &config)
     }
 
     fn test_walker() -> DirWalker {
-        DirWalker::new(&SecurityConfig::default().validate().expect("valid config"))
+        DirWalker::new(&SecurityConfig::default())
     }
 
     fn pinned(dest: &DestDir) -> PinnedRoot {
@@ -1129,10 +1128,7 @@ mod tests {
         name: &str,
         allow_symlinks: bool,
     ) -> crate::Result<ExtractionReport> {
-        let config = SecurityConfig::default()
-            .with_allow_symlinks(allow_symlinks)
-            .validate()
-            .expect("valid config");
+        let config = SecurityConfig::default().with_allow_symlinks(allow_symlinks);
         let safe_path = SafePath::validate(&PathBuf::from(name), dest, &config).expect("safe path");
         let mut report = ExtractionReport::default();
         create_directory(
@@ -1214,7 +1210,7 @@ mod tests {
 
         // Try to extract a file with size that would overflow
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         // A 200-byte reservation would overflow when added to bytes_written
         let permit = QuotaTracker::new()
             .reserve(200, &config)
@@ -1273,7 +1269,7 @@ mod tests {
         // increment would overflow.
         report.files_skipped = usize::MAX;
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         // A 200-byte reservation would overflow when added to bytes_written
         let permit = QuotaTracker::new()
             .reserve(200, &config)
@@ -1324,7 +1320,7 @@ mod tests {
         let mut copy_buffer = CopyBuffer::new();
         let dirs = test_walker();
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         // Declares 50 bytes, mirroring the PoC's forged uncompressed_size.
         let permit = QuotaTracker::new()
             .reserve(50, &config)
@@ -1372,7 +1368,7 @@ mod tests {
         let mut copy_buffer = CopyBuffer::new();
         let dirs = test_walker();
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         let permit = QuotaTracker::new()
             .reserve(1000, &config)
             .expect("reservation should succeed");
@@ -1421,7 +1417,7 @@ mod tests {
         std::fs::write(temp.path().join("target.txt"), b"pre-existing content")
             .expect("failed to seed file");
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         let permit = QuotaTracker::new()
             .reserve(50, &config)
             .expect("reservation should succeed");
@@ -1482,7 +1478,7 @@ mod tests {
     #[test]
     fn hardlink_copy_fails_closed_when_the_target_changes_size() {
         let temp = TempDir::new().expect("temp dir");
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         let source = temp.path().join("source");
         std::fs::write(&source, vec![b'x'; 100_000]).expect("seed source");
 
@@ -1660,7 +1656,7 @@ mod tests {
         let mut copy_buffer = CopyBuffer::new();
         let dirs = test_walker();
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         // Mode 0o777 in archive, sanitized to 0o775 (world-writable stripped)
         let sanitized_mode = sanitize_permissions(RawMode::new(0o777), &config);
@@ -1747,10 +1743,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default()
-            .with_allow_symlinks(true)
-            .validate()
-            .expect("valid config");
+        let config = SecurityConfig::default().with_allow_symlinks(true);
 
         std::fs::write(temp.path().join("target.txt"), b"data").expect("write target");
 
@@ -1820,10 +1813,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default()
-            .with_allow_symlinks(true)
-            .validate()
-            .expect("valid config");
+        let config = SecurityConfig::default().with_allow_symlinks(true);
 
         std::fs::write(temp.path().join("target.txt"), b"data").expect("write target");
         std::fs::write(temp.path().join("link.txt"), b"old").expect("write file");

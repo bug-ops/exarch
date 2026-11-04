@@ -224,7 +224,7 @@ impl DestDir {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-    /// let config = SecurityConfig::default().validate()?;
+    /// let config = SecurityConfig::default();
     /// let safe = SafePath::validate(&PathBuf::from("foo/bar.txt"), &dest, &config)?;
     ///
     /// let final_path = dest.join(&safe);
@@ -446,7 +446,7 @@ mod tests {
         symlink(&real_dir, &link_path).expect("failed to create symlink");
 
         let dest = DestDir::new(link_path).expect("should create from symlink");
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         // Positive case: a legitimate path under the symlinked root resolves
         // successfully. With a non-canonical dest, the parent-canonicalize

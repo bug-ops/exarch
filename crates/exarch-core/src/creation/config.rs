@@ -3,13 +3,8 @@
 use crate::ArchiveError;
 use crate::Limit;
 use crate::Result;
-use crate::config::Unvalidated;
-use crate::config::Validated;
 use crate::formats::detect::CreatableFormat;
-use std::marker::PhantomData;
 use std::num::NonZeroU64;
-use std::ops::Deref;
-use std::ops::DerefMut;
 use std::path::PathBuf;
 
 /// A compression level on exarch's 1-9 scale; the default is 6.
@@ -79,17 +74,31 @@ impl TryFrom<u32> for CompressionLevel {
     }
 }
 
-/// The field data of a [`CreationConfig`], reachable via [`Deref`]/[`DerefMut`]
-/// regardless of (or gated by) validation state.
+/// Configuration for archive creation operations.
 ///
-/// Mirrors [`SecurityConfigFields`](crate::config::SecurityConfigFields): a
-/// plain `#[non_exhaustive]` data bag that blocks external struct-literal
-/// forging, while [`CreationConfig`]'s own private `fields` member blocks
-/// re-wrapping a mutated bag into a `Validated` config. See that type's docs
-/// for the full rationale — the same sealing boundary applies here.
+/// Controls how archives are created from filesystem sources, including
+/// security options, compression settings, and file filtering.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::creation::CompressionLevel;
+/// use exarch_core::creation::CreationConfig;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // Use secure defaults
+/// let config = CreationConfig::default();
+///
+/// // Customize for specific needs
+/// let custom = CreationConfig::default()
+///     .with_follow_symlinks(true)
+///     .with_compression_level(CompressionLevel::try_from(9u8)?);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct CreationConfigFields {
+pub struct CreationConfig {
     /// Follow symlinks when adding files to archive.
     ///
     /// Default: `false` (store symlinks as symlinks).
@@ -148,7 +157,18 @@ pub struct CreationConfigFields {
     pub format: Option<CreatableFormat>,
 }
 
-impl Default for CreationConfigFields {
+impl Default for CreationConfig {
+    /// Creates a `CreationConfig` with secure default settings.
+    ///
+    /// Default values:
+    /// - `follow_symlinks`: `false`
+    /// - `include_hidden`: `false`
+    /// - `max_file_size`: [`Limit::Unbounded`]
+    /// - `exclude_patterns`: `[".git", ".DS_Store", "*.tmp"]`
+    /// - `strip_prefix`: `None`
+    /// - `compression_level`: 6
+    /// - `preserve_permissions`: `true`
+    /// - `format`: `None`
     fn default() -> Self {
         Self {
             follow_symlinks: false,
@@ -167,98 +187,7 @@ impl Default for CreationConfigFields {
     }
 }
 
-/// Configuration for archive creation operations.
-///
-/// Controls how archives are created from filesystem sources, including
-/// security options, compression settings, and file filtering.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::creation::CompressionLevel;
-/// use exarch_core::creation::CreationConfig;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// // Use secure defaults
-/// let config = CreationConfig::default();
-///
-/// // Customize for specific needs
-/// let custom = CreationConfig::default()
-///     .with_follow_symlinks(true)
-///     .with_compression_level(CompressionLevel::try_from(9u8)?);
-/// # Ok(())
-/// # }
-/// ```
-///
-/// # Typestate
-///
-/// `CreationConfig` carries a phantom `State` type parameter —
-/// [`Unvalidated`] (the default) or [`Validated`] — that tracks whether
-/// [`validate`](CreationConfig::validate) has been called. Builder methods
-/// are only available in the `Unvalidated` state; the low-level
-/// `creation::tar::*` / `creation::zip::*` functions and
-/// [`FormatCreator::create`](crate::formats::traits::FormatCreator::create)
-/// require `CreationConfig<Validated>`. This makes skipping validation a
-/// compile error instead of a runtime gap — a forged or hand-mutated
-/// `compression_level` can no longer reach the `flate2`/`liblzma` backends,
-/// which panic on out-of-range values instead of returning an error.
-///
-/// # Sealing
-///
-/// Fields are private and reachable only through
-/// <code>[Deref]<Target = [CreationConfigFields]></code>, so
-/// `config.compression_level` continues to work as plain field access for
-/// both states. [`DerefMut`] is implemented only for
-/// `CreationConfig<Unvalidated>`, so a `CreationConfig<Validated>`'s fields
-/// cannot be reassigned after the fact — the only way to produce one is
-/// [`validate`](CreationConfig::validate) itself, and it stays that way for
-/// its entire lifetime.
-#[derive(Debug, Clone)]
-pub struct CreationConfig<State = Unvalidated> {
-    fields: CreationConfigFields,
-
-    /// Typestate marker — see the "Typestate" section on the type-level docs.
-    _marker: PhantomData<State>,
-}
-
-impl<State> Deref for CreationConfig<State> {
-    type Target = CreationConfigFields;
-
-    fn deref(&self) -> &CreationConfigFields {
-        &self.fields
-    }
-}
-
-/// Only `Unvalidated` configs are mutable — see the "Sealing" section on
-/// [`CreationConfig`]'s type-level docs for why this is the crux of the
-/// typestate guarantee.
-impl DerefMut for CreationConfig<Unvalidated> {
-    fn deref_mut(&mut self) -> &mut CreationConfigFields {
-        &mut self.fields
-    }
-}
-
-impl Default for CreationConfig<Unvalidated> {
-    /// Creates a `CreationConfig` with secure default settings.
-    ///
-    /// Default values:
-    /// - `follow_symlinks`: `false`
-    /// - `include_hidden`: `false`
-    /// - `max_file_size`: [`Limit::Unbounded`]
-    /// - `exclude_patterns`: `[".git", ".DS_Store", "*.tmp"]`
-    /// - `strip_prefix`: `None`
-    /// - `compression_level`: 6
-    /// - `preserve_permissions`: `true`
-    /// - `format`: `None`
-    fn default() -> Self {
-        Self {
-            fields: CreationConfigFields::default(),
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl CreationConfig<Unvalidated> {
+impl CreationConfig {
     /// Creates a new `CreationConfig` with default settings.
     #[must_use]
     pub fn new() -> Self {
@@ -277,7 +206,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_follow_symlinks(mut self, follow: bool) -> Self {
-        self.fields.follow_symlinks = follow;
+        self.follow_symlinks = follow;
         self
     }
 
@@ -293,7 +222,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_include_hidden(mut self, include: bool) -> Self {
-        self.fields.include_hidden = include;
+        self.include_hidden = include;
         self
     }
 
@@ -316,7 +245,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_max_file_size(mut self, max_size: impl Into<Limit<NonZeroU64>>) -> Self {
-        self.fields.max_file_size = max_size.into();
+        self.max_file_size = max_size.into();
         self
     }
 
@@ -332,7 +261,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_exclude_patterns(mut self, patterns: Vec<String>) -> Self {
-        self.fields.exclude_patterns = patterns;
+        self.exclude_patterns = patterns;
         self
     }
 
@@ -349,7 +278,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_strip_prefix(mut self, prefix: Option<PathBuf>) -> Self {
-        self.fields.strip_prefix = prefix;
+        self.strip_prefix = prefix;
         self
     }
 
@@ -368,7 +297,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_compression_level(mut self, level: CompressionLevel) -> Self {
-        self.fields.compression_level = level;
+        self.compression_level = level;
         self
     }
 
@@ -384,7 +313,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_preserve_permissions(mut self, preserve: bool) -> Self {
-        self.fields.preserve_permissions = preserve;
+        self.preserve_permissions = preserve;
         self
     }
 
@@ -401,40 +330,8 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_format(mut self, format: Option<CreatableFormat>) -> Self {
-        self.fields.format = format;
+        self.format = format;
         self
-    }
-
-    /// Validates the configuration, transitioning to the [`Validated`]
-    /// typestate on success.
-    ///
-    /// Consumes `self`: the only way to obtain a `CreationConfig<Validated>`,
-    /// which is what the low-level `creation::tar::*` / `creation::zip::*`
-    /// functions and
-    /// [`FormatCreator::create`](crate::formats::traits::FormatCreator::create)
-    /// require. Once returned, the `Validated` config's fields can no longer
-    /// be reassigned (see the "Sealing" section on the type-level docs), so
-    /// this check can never be silently invalidated afterward.
-    ///
-    /// # Errors
-    ///
-    /// Currently never fails: every field is already typed to a valid range.
-    /// The `Result` keeps the signature stable for checks that need the whole
-    /// configuration.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::creation::CreationConfig;
-    ///
-    /// let config = CreationConfig::default();
-    /// assert!(config.validate().is_ok());
-    /// ```
-    pub fn validate(self) -> Result<CreationConfig<Validated>> {
-        Ok(CreationConfig {
-            fields: self.fields,
-            _marker: PhantomData,
-        })
     }
 }
 
@@ -484,16 +381,6 @@ mod tests {
         assert_eq!(config.compression_level, level);
         assert!(!config.preserve_permissions);
         assert_eq!(config.format, Some(CreatableFormat::TarGz));
-    }
-
-    #[test]
-    fn test_creation_config_validate_valid() {
-        assert!(CreationConfig::default().validate().is_ok());
-        for level in [1u8, 9] {
-            let config = CreationConfig::default()
-                .with_compression_level(CompressionLevel::try_from(level).unwrap());
-            assert!(config.validate().is_ok());
-        }
     }
 
     #[test]

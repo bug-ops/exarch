@@ -234,28 +234,28 @@ impl SecurityConfig {
     /// Allows or denies symlinks.
     #[napi(js_name = "setAllowSymlinks")]
     pub fn set_allow_symlinks(&mut self, allow: bool) -> &Self {
-        self.inner.allowed.symlinks = allow;
+        self.inner.allowed.symlinks = exarch_core::Admit::from_allowed(allow);
         self
     }
 
     /// Allows or denies hardlinks.
     #[napi(js_name = "setAllowHardlinks")]
     pub fn set_allow_hardlinks(&mut self, allow: bool) -> &Self {
-        self.inner.allowed.hardlinks = allow;
+        self.inner.allowed.hardlinks = exarch_core::Admit::from_allowed(allow);
         self
     }
 
     /// Allows or denies absolute paths.
     #[napi(js_name = "setAllowAbsolutePaths")]
     pub fn set_allow_absolute_paths(&mut self, allow: bool) -> &Self {
-        self.inner.allowed.absolute_paths = allow;
+        self.inner.allowed.absolute_paths = exarch_core::Admit::from_allowed(allow);
         self
     }
 
     /// Allows or denies world-writable files.
     #[napi(js_name = "setAllowWorldWritable")]
     pub fn set_allow_world_writable(&mut self, allow: bool) -> &Self {
-        self.inner.allowed.world_writable = allow;
+        self.inner.allowed.world_writable = exarch_core::Admit::from_allowed(allow);
         self
     }
 
@@ -266,7 +266,7 @@ impl SecurityConfig {
     /// memory. Disabled by default.
     #[napi(js_name = "setAllowSolidArchives")]
     pub fn set_allow_solid_archives(&mut self, allow: bool) -> &Self {
-        self.inner.allow_solid_archives = allow;
+        self.inner.solid_archives = self.inner.solid_archives.with_allowed(allow);
         self
     }
 
@@ -304,16 +304,16 @@ impl SecurityConfig {
         Ok(self)
     }
 
-    /// Sets the maximum memory that may be used to decompress a solid 7z block.
+    /// Sets the maximum decoded size of a solid 7z block, in bytes.
     ///
-    /// Solid archives decompress entire blocks into memory before individual
-    /// entries can be read. This limit caps that allocation to prevent
-    /// memory exhaustion from crafted archives. Default: 512 MB.
+    /// The limit bounds the decoded volume of each solid block, not resident
+    /// memory. It exists only while solid archives are allowed, so call
+    /// `setAllowSolidArchives(true)` first. Default: 512 MB.
     ///
     /// # Errors
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_solid_block_memory`)
-    /// if size is negative or zero.
+    /// if size is negative or zero, or while solid archives are not allowed.
     #[napi(js_name = "setMaxSolidBlockMemory")]
     pub fn set_max_solid_block_memory(&mut self, env: Env, size: i64) -> Result<&Self> {
         self.try_set_max_solid_block_memory(size)
@@ -432,31 +432,31 @@ impl SecurityConfig {
     /// Whether symlinks are allowed.
     #[napi(getter)]
     pub fn get_allow_symlinks(&self) -> bool {
-        self.inner.allowed.symlinks
+        self.inner.allowed.symlinks.is_allowed()
     }
 
     /// Whether hardlinks are allowed.
     #[napi(getter)]
     pub fn get_allow_hardlinks(&self) -> bool {
-        self.inner.allowed.hardlinks
+        self.inner.allowed.hardlinks.is_allowed()
     }
 
     /// Whether absolute paths are allowed.
     #[napi(getter)]
     pub fn get_allow_absolute_paths(&self) -> bool {
-        self.inner.allowed.absolute_paths
+        self.inner.allowed.absolute_paths.is_allowed()
     }
 
     /// Whether world-writable files are allowed.
     #[napi(getter)]
     pub fn get_allow_world_writable(&self) -> bool {
-        self.inner.allowed.world_writable
+        self.inner.allowed.world_writable.is_allowed()
     }
 
     /// Whether solid 7z archives are allowed.
     #[napi(getter)]
     pub fn get_allow_solid_archives(&self) -> bool {
-        self.inner.allow_solid_archives
+        self.inner.solid_archives.is_allowed()
     }
 
     /// How ZIP archives with ambiguous structure are handled.
@@ -480,10 +480,14 @@ impl SecurityConfig {
             .map(|bytes| saturating_i64(bytes.get()))
     }
 
-    /// Maximum memory in bytes for decompressing a solid 7z block.
+    /// Maximum decoded size in bytes of a solid 7z block, or `null` while
+    /// solid archives are not allowed.
     #[napi(getter)]
-    pub fn get_max_solid_block_memory(&self) -> i64 {
-        saturating_i64(self.inner.max_solid_block_memory.get())
+    pub fn get_max_solid_block_memory(&self) -> Option<i64> {
+        self.inner
+            .solid_archives
+            .limits()
+            .map(|limits| saturating_i64(limits.max_block_memory.get()))
     }
 
     /// List of allowed file extensions.
@@ -590,7 +594,11 @@ impl SecurityConfig {
 
     /// Env-free core of `setMaxSolidBlockMemory`.
     fn try_set_max_solid_block_memory(&mut self, size: i64) -> std::result::Result<(), CoreError> {
-        self.inner.max_solid_block_memory = byte_count(ConfigSetting::MaxSolidBlockMemory, size)?;
+        let max_block_memory = byte_count(ConfigSetting::MaxSolidBlockMemory, size)?;
+        self.inner.solid_archives = self
+            .inner
+            .solid_archives
+            .with_max_block_memory(max_block_memory)?;
         Ok(())
     }
 
@@ -1010,10 +1018,12 @@ mod tests {
         let mut config = SecurityConfig::new();
         config.inner.max_file_size = exarch_core::Limit::Unbounded;
         config.inner.max_total_size = exarch_core::Limit::Unbounded;
-        config.inner.max_solid_block_memory = NonZeroU64::MAX;
+        config.inner.solid_archives = exarch_core::SolidArchives::Allow(
+            exarch_core::SolidLimits::DEFAULT.with_max_block_memory(NonZeroU64::MAX),
+        );
         assert_eq!(config.get_max_file_size(), i64::MAX);
         assert_eq!(config.get_max_total_size(), i64::MAX);
-        assert_eq!(config.get_max_solid_block_memory(), i64::MAX);
+        assert_eq!(config.get_max_solid_block_memory(), Some(i64::MAX));
 
         let mut creation = CreationConfig::new();
         creation.inner.max_file_size = exarch_core::Limit::Bounded(NonZeroU64::MAX);
@@ -1029,9 +1039,9 @@ mod tests {
     #[test]
     fn test_permissive_config() {
         let config = SecurityConfig::permissive();
-        assert!(config.inner.allowed.symlinks);
-        assert!(config.inner.allowed.hardlinks);
-        assert!(config.inner.allowed.absolute_paths);
+        assert!(config.inner.allowed.symlinks.is_allowed());
+        assert!(config.inner.allowed.hardlinks.is_allowed());
+        assert!(config.inner.allowed.absolute_paths.is_allowed());
         assert!(config.get_preserve_permissions());
     }
 
@@ -1325,22 +1335,53 @@ mod tests {
 
     #[test]
     fn test_max_solid_block_memory_default() {
-        let config = SecurityConfig::new();
+        let mut config = SecurityConfig::new();
         assert_eq!(
             config.get_max_solid_block_memory(),
-            512 * 1024 * 1024,
-            "max_solid_block_memory should default to 512 MB"
+            None,
+            "no limit is reported while solid archives are refused"
         );
+        config.set_allow_solid_archives(true);
+        assert_eq!(
+            config.get_max_solid_block_memory(),
+            Some(512 * 1024 * 1024),
+            "max_solid_block_memory should default to 512 MB once allowed"
+        );
+    }
+
+    #[test]
+    fn test_max_solid_block_memory_refused_while_solid_archives_are_refused() {
+        let mut config = SecurityConfig::new();
+        let err = config
+            .try_set_max_solid_block_memory(256 * 1024 * 1024)
+            .unwrap_err();
+        assert_eq!(
+            err.ffi_kind().setting(),
+            Some(ConfigSetting::MaxSolidBlockMemory)
+        );
+        assert_eq!(config.get_max_solid_block_memory(), None);
+    }
+
+    #[test]
+    fn test_disallowing_solid_archives_drops_the_limit() {
+        let mut config = SecurityConfig::new();
+        config.set_allow_solid_archives(true);
+        config.try_set_max_solid_block_memory(1024).unwrap();
+        config.set_allow_solid_archives(true);
+        assert_eq!(config.get_max_solid_block_memory(), Some(1024));
+        config.set_allow_solid_archives(false);
+        assert_eq!(config.get_max_solid_block_memory(), None);
     }
 
     #[test]
     fn test_max_solid_block_memory_round_trip() {
         let mut config = SecurityConfig::new();
+        config.set_allow_solid_archives(true);
         let result = config.try_set_max_solid_block_memory(256 * 1024 * 1024);
         assert!(result.is_ok());
         assert_eq!(
             config.get_max_solid_block_memory(),
-            256 * 1024 * 1024,
+            Some(256 * 1024 * 1024),
             "getter should reflect set value"
         );
     }
@@ -1366,9 +1407,10 @@ mod tests {
     #[test]
     fn test_max_solid_block_memory_accepts_one_byte() {
         let mut config = SecurityConfig::new();
+        config.set_allow_solid_archives(true);
         let result = config.try_set_max_solid_block_memory(1);
         assert!(result.is_ok(), "1 byte should be accepted");
-        assert_eq!(config.get_max_solid_block_memory(), 1);
+        assert_eq!(config.get_max_solid_block_memory(), Some(1));
     }
 
     #[test]

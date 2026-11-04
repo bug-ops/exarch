@@ -195,8 +195,8 @@ fn zip_archive_handles_apply_the_limit_of_the_config_they_operate_under() {
     let at = 1u64 << 16;
     for policy in POLICIES {
         let open = || ZipArchive::new(Cursor::new(zip_bytes(16, 0))).unwrap();
-        let strict = config(at - 1, policy).validate().unwrap();
-        let loose = config(at, policy).validate().unwrap();
+        let strict = config(at - 1, policy);
+        let loose = config(at, policy);
         let out = TempDir::new().unwrap();
 
         assert_decoder_memory(

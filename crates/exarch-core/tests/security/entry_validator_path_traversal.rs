@@ -24,7 +24,7 @@ fn test_cve_2025_4517_python_tarfile_traversal() {
     // CVE-2025-4517: Python tarfile path traversal.
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let mut validator = EntryValidator::new(&config, &dest);
 
     let malicious_paths = [
@@ -54,7 +54,7 @@ fn test_cve_2025_4517_python_tarfile_traversal() {
 fn test_absolute_path_attack() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let mut validator = EntryValidator::new(&config, &dest);
 
     #[cfg(unix)]
@@ -87,7 +87,7 @@ fn test_null_byte_injection() {
 
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let mut validator = EntryValidator::new(&config, &dest);
 
     let bytes = b"file\0.txt";
@@ -108,7 +108,7 @@ fn test_null_byte_injection() {
 fn test_deep_path_nesting() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let mut validator = EntryValidator::new(&config, &dest);
 
     // A path with depth exceeding max_path_depth (32 by default).
@@ -131,7 +131,7 @@ fn test_deep_path_nesting() {
 fn test_banned_path_components() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let mut validator = EntryValidator::new(&config, &dest);
 
     let banned_paths = [
@@ -163,7 +163,7 @@ fn test_banned_path_components() {
 fn test_case_insensitive_banned_components() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let mut validator = EntryValidator::new(&config, &dest);
 
     // Try to bypass ban with case variations.
@@ -190,7 +190,7 @@ fn test_case_insensitive_banned_components() {
 fn test_safe_paths_allowed() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let mut validator = EntryValidator::new(&config, &dest);
 
     let safe_paths = [

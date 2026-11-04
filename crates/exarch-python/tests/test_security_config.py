@@ -18,7 +18,8 @@ class TestSecurityConfig:
         assert config.max_file_count == 10_000
         assert config.max_path_depth == 32
         assert config.preserve_permissions is False
-        assert config.max_solid_block_memory == 512 * 1024 * 1024
+        assert config.max_solid_block_memory is None
+        assert config.with_allow_solid_archives().max_solid_block_memory == 512 * 1024 * 1024
 
     def test_allow_getters_default_deny(self):
         """Test that allow_* getters return False by default (secure-by-default)."""
@@ -68,7 +69,8 @@ class TestSecurityConfig:
         assert config.max_file_count == 10_000
         assert config.max_path_depth == 32
         assert config.preserve_permissions is False
-        assert config.max_solid_block_memory == 512 * 1024 * 1024
+        assert config.max_solid_block_memory is None
+        assert config.with_allow_solid_archives().max_solid_block_memory == 512 * 1024 * 1024
 
     def test_numeric_property_setters(self):
         """Test that numeric property setters update values correctly."""
@@ -85,6 +87,10 @@ class TestSecurityConfig:
         assert config.max_path_depth == 64
         config.preserve_permissions = True
         assert config.preserve_permissions is True
+        with pytest.raises(ValueError) as excinfo:
+            config.max_solid_block_memory = 256 * 1024 * 1024
+        assert excinfo.value.setting == "max_solid_block_memory"
+        config.with_allow_solid_archives()
         config.max_solid_block_memory = 256 * 1024 * 1024
         assert config.max_solid_block_memory == 256 * 1024 * 1024
 

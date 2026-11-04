@@ -261,6 +261,14 @@ pub enum QuotaResource {
         /// Maximum number of payload bytes the sink accepts.
         max: u64,
     },
+    /// A solid 7z block declares more decoded bytes than the solid limit
+    /// admits.
+    SolidBlockMemory {
+        /// Declared decoded size of the refused block in bytes.
+        current: u64,
+        /// Maximum decoded size of a solid block in bytes.
+        max: u64,
+    },
 }
 
 closed_enum! {
@@ -299,6 +307,8 @@ closed_enum! {
         TreeNodes => "tree_nodes",
         /// [`QuotaResource::SinkCapacity`].
         SinkCapacity => "sink_capacity",
+        /// [`QuotaResource::SolidBlockMemory`].
+        SolidBlockMemory => "solid_block_memory",
     }
 }
 
@@ -315,6 +325,7 @@ impl QuotaResource {
             Self::CompressedMembers { .. } => QuotaKind::CompressedMembers,
             Self::TreeNodes { .. } => QuotaKind::TreeNodes,
             Self::SinkCapacity { .. } => QuotaKind::SinkCapacity,
+            Self::SolidBlockMemory { .. } => QuotaKind::SolidBlockMemory,
         }
     }
 }
@@ -352,6 +363,9 @@ impl std::fmt::Display for QuotaResource {
             }
             Self::SinkCapacity { max } => {
                 write!(f, "quota exceeded: sink capacity (> {max} bytes)")
+            }
+            Self::SolidBlockMemory { current, max } => {
+                write!(f, "quota exceeded: solid block size ({current} > {max})")
             }
         }
     }

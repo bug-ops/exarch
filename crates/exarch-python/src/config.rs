@@ -168,28 +168,28 @@ impl PySecurityConfig {
     /// Allows or denies symlinks.
     #[pyo3(signature = (allow=true))]
     fn with_allow_symlinks(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
-        slf.inner.allowed.symlinks = allow;
+        slf.inner.allowed.symlinks = exarch_core::Admit::from_allowed(allow);
         slf
     }
 
     /// Allows or denies hardlinks.
     #[pyo3(signature = (allow=true))]
     fn with_allow_hardlinks(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
-        slf.inner.allowed.hardlinks = allow;
+        slf.inner.allowed.hardlinks = exarch_core::Admit::from_allowed(allow);
         slf
     }
 
     /// Allows or denies absolute paths.
     #[pyo3(signature = (allow=true))]
     fn with_allow_absolute_paths(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
-        slf.inner.allowed.absolute_paths = allow;
+        slf.inner.allowed.absolute_paths = exarch_core::Admit::from_allowed(allow);
         slf
     }
 
     /// Allows or denies world-writable files.
     #[pyo3(signature = (allow=true))]
     fn with_allow_world_writable(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
-        slf.inner.allowed.world_writable = allow;
+        slf.inner.allowed.world_writable = exarch_core::Admit::from_allowed(allow);
         slf
     }
 
@@ -200,7 +200,7 @@ impl PySecurityConfig {
     /// memory. Disabled by default.
     #[pyo3(signature = (allow=true))]
     fn with_allow_solid_archives(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
-        slf.inner.allow_solid_archives = allow;
+        slf.inner.solid_archives = slf.inner.solid_archives.with_allowed(allow);
         slf
     }
 
@@ -243,22 +243,20 @@ impl PySecurityConfig {
         Ok(slf)
     }
 
-    /// Sets the maximum memory budget in bytes for decompressing a solid 7z
-    /// block.
+    /// Sets the maximum decoded size in bytes of a solid 7z block.
     ///
-    /// Only enforced when `allow_solid_archives` is `True`. A crafted solid
-    /// archive can force the decompressor to buffer many preceding entries in
-    /// memory before reaching the target entry; this limit caps that buffer.
+    /// The limit bounds the decoded volume of each solid block, not resident
+    /// memory, and exists only while `allow_solid_archives` is `True`.
     ///
     /// # Errors
     ///
-    /// Returns `ValueError` if `size` is zero.
+    /// Returns `ValueError` if `size` is zero or solid archives are not
+    /// allowed.
     fn with_max_solid_block_memory(
         mut slf: PyRefMut<'_, Self>,
         size: u64,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        slf.inner.max_solid_block_memory =
-            non_zero_u64(ConfigSetting::MaxSolidBlockMemory, size).map_err(convert_error)?;
+        slf.try_set_max_solid_block_memory(size)?;
         Ok(slf)
     }
 
@@ -395,31 +393,31 @@ impl PySecurityConfig {
     /// Returns whether symlinks are allowed.
     #[getter]
     fn get_allow_symlinks(&self) -> bool {
-        self.inner.allowed.symlinks
+        self.inner.allowed.symlinks.is_allowed()
     }
 
     /// Returns whether hardlinks are allowed.
     #[getter]
     fn get_allow_hardlinks(&self) -> bool {
-        self.inner.allowed.hardlinks
+        self.inner.allowed.hardlinks.is_allowed()
     }
 
     /// Returns whether absolute paths are allowed.
     #[getter]
     fn get_allow_absolute_paths(&self) -> bool {
-        self.inner.allowed.absolute_paths
+        self.inner.allowed.absolute_paths.is_allowed()
     }
 
     /// Returns whether world-writable files are allowed.
     #[getter]
     fn get_allow_world_writable(&self) -> bool {
-        self.inner.allowed.world_writable
+        self.inner.allowed.world_writable.is_allowed()
     }
 
     /// Returns whether solid 7z archives are allowed.
     #[getter]
     fn get_allow_solid_archives(&self) -> bool {
-        self.inner.allow_solid_archives
+        self.inner.solid_archives.is_allowed()
     }
 
     /// Returns how ZIP archives with ambiguous structure are handled
@@ -448,16 +446,19 @@ impl PySecurityConfig {
         Ok(())
     }
 
+    /// Returns the maximum decoded size in bytes of a solid 7z block, or
+    /// `None` while solid archives are not allowed.
     #[getter]
-    fn get_max_solid_block_memory(&self) -> u64 {
-        self.inner.max_solid_block_memory.get()
+    fn get_max_solid_block_memory(&self) -> Option<u64> {
+        self.inner
+            .solid_archives
+            .limits()
+            .map(|limits| limits.max_block_memory.get())
     }
 
     #[setter]
     fn set_max_solid_block_memory(&mut self, value: u64) -> PyResult<()> {
-        self.inner.max_solid_block_memory =
-            non_zero_u64(ConfigSetting::MaxSolidBlockMemory, value).map_err(convert_error)?;
-        Ok(())
+        self.try_set_max_solid_block_memory(value)
     }
 
     /// Returns a copy of the allowed extensions list.
@@ -582,6 +583,19 @@ impl PySecurityConfig {
     /// API.
     pub fn as_core(&self) -> &CoreSecurityConfig {
         &self.inner
+    }
+
+    /// Shared by the builder and the property setter of
+    /// `max_solid_block_memory`.
+    fn try_set_max_solid_block_memory(&mut self, size: u64) -> PyResult<()> {
+        let max_block_memory =
+            non_zero_u64(ConfigSetting::MaxSolidBlockMemory, size).map_err(convert_error)?;
+        self.inner.solid_archives = self
+            .inner
+            .solid_archives
+            .with_max_block_memory(max_block_memory)
+            .map_err(convert_error)?;
+        Ok(())
     }
 }
 
@@ -1067,15 +1081,15 @@ mod tests {
     fn test_permissive_config() {
         let config = PySecurityConfig::permissive();
         assert!(
-            config.inner.allowed.symlinks,
+            config.inner.allowed.symlinks.is_allowed(),
             "Permissive config should allow symlinks"
         );
         assert!(
-            config.inner.allowed.hardlinks,
+            config.inner.allowed.hardlinks.is_allowed(),
             "Permissive config should allow hardlinks"
         );
         assert!(
-            config.inner.allowed.absolute_paths,
+            config.inner.allowed.absolute_paths.is_allowed(),
             "Permissive config should allow absolute paths"
         );
         assert!(
@@ -1470,19 +1484,36 @@ mod tests {
 
     #[test]
     fn test_default_max_solid_block_memory() {
-        let config = PySecurityConfig::new();
+        let mut config = PySecurityConfig::new();
         assert_eq!(
             config.get_max_solid_block_memory(),
-            512 * 1024 * 1024,
-            "Default max_solid_block_memory should be 512 MB"
+            None,
+            "No limit is reported while solid archives are refused"
         );
+        config.inner.solid_archives = config.inner.solid_archives.with_allowed(true);
+        assert_eq!(
+            config.get_max_solid_block_memory(),
+            Some(512 * 1024 * 1024),
+            "Default max_solid_block_memory should be 512 MB once allowed"
+        );
+    }
+
+    #[test]
+    fn test_max_solid_block_memory_refused_while_solid_archives_are_refused() {
+        let mut config = PySecurityConfig::new();
+        assert!(
+            config.set_max_solid_block_memory(1024).is_err(),
+            "Should refuse a limit that would be ignored"
+        );
+        assert_eq!(config.get_max_solid_block_memory(), None);
     }
 
     #[test]
     fn test_builder_max_solid_block_memory_valid() {
         pyo3::Python::initialize();
         Python::attach(|py| {
-            let config = PySecurityConfig::new();
+            let mut config = PySecurityConfig::new();
+            config.inner.solid_archives = config.inner.solid_archives.with_allowed(true);
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
@@ -1490,7 +1521,7 @@ mod tests {
             assert!(result.is_ok(), "Should accept valid memory size");
             assert_eq!(
                 py_config.borrow(py).get_max_solid_block_memory(),
-                256 * 1024 * 1024,
+                Some(256 * 1024 * 1024),
                 "with_max_solid_block_memory should be updated"
             );
         });
@@ -1512,11 +1543,12 @@ mod tests {
     #[test]
     fn test_property_setter_max_solid_block_memory_valid() {
         let mut config = PySecurityConfig::new();
+        config.inner.solid_archives = config.inner.solid_archives.with_allowed(true);
         let result = config.set_max_solid_block_memory(128 * 1024 * 1024);
         assert!(result.is_ok(), "Should accept valid memory size");
         assert_eq!(
             config.get_max_solid_block_memory(),
-            128 * 1024 * 1024,
+            Some(128 * 1024 * 1024),
             "Property setter should update max_solid_block_memory"
         );
     }

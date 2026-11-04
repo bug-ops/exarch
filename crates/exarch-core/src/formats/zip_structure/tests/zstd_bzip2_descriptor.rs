@@ -296,12 +296,10 @@ fn a_hidden_header_is_refused_when_the_recheck_allowance_is_spent() {
     }
 }
 
-fn config_with_memory(policy: ZipConsistencyPolicy, memory: u64) -> SecurityConfig<Validated> {
+fn config_with_memory(policy: ZipConsistencyPolicy, memory: u64) -> SecurityConfig {
     SecurityConfig::default()
         .with_zip_consistency(policy)
         .with_max_decoder_memory(std::num::NonZeroU64::new(memory).unwrap())
-        .validate()
-        .unwrap()
 }
 
 fn zstd_entry_with_window(log: u32) -> BuiltZip {
@@ -311,7 +309,7 @@ fn zstd_entry_with_window(log: u32) -> BuiltZip {
 
 fn extract_with(
     archive: ZipArchive<Cursor<Vec<u8>>>,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
 ) -> crate::Result<()> {
     let temp = TempDir::new().unwrap();
     archive

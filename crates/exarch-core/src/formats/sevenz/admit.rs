@@ -6,12 +6,13 @@ use super::header::BlockIndex;
 use super::header::SevenZHeader;
 use crate::ArchiveError;
 use crate::EntryCompression;
+use crate::Limit;
 use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::SolidArchives;
 use crate::SolidBlock;
 use crate::Violation;
-use crate::config::Validated;
 use crate::error::QuotaResource;
 use crate::formats::common;
 use crate::inspection::report::IssueCategory;
@@ -43,6 +44,50 @@ pub(super) fn packed_stream_count(block: &sevenz_rust2::Block) -> usize {
         .filter(|coder| coder.encoder_method_id() == EncoderMethod::ID_BCJ2)
         .count();
     1 + 3 * bcj2
+}
+
+/// The declared decoded size of one block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlockTotal {
+    /// The checked sum of the declared sizes of the block's files.
+    Bytes(u64),
+    /// The sum does not fit a `u64`.
+    Overflow,
+}
+
+impl BlockTotal {
+    fn add(self, size: u64) -> Self {
+        match self {
+            Self::Bytes(total) => total.checked_add(size).map_or(Self::Overflow, Self::Bytes),
+            Self::Overflow => Self::Overflow,
+        }
+    }
+}
+
+/// File count and declared decoded size of one block.
+struct BlockTally {
+    files: usize,
+    uncompressed: BlockTotal,
+}
+
+/// Tallies the files that have data in each block, 1:1 with the header's
+/// blocks.
+fn tally_blocks(header: &SevenZHeader) -> Vec<BlockTally> {
+    let mut tallies: Vec<BlockTally> = header
+        .block_indices()
+        .map(|_| BlockTally {
+            files: 0,
+            uncompressed: BlockTotal::Bytes(0),
+        })
+        .collect();
+    for (index, file) in header.files().iter().enumerate() {
+        if let Some(block) = header.file_block(index) {
+            let tally = &mut tallies[block.get()];
+            tally.files += 1;
+            tally.uncompressed = tally.uncompressed.add(file.size);
+        }
+    }
+    tallies
 }
 
 /// Derives how each file's data is compressed for ratio checks, after
@@ -97,17 +142,17 @@ pub fn sevenz_entry_compression(
             .ok_or_else(|| ArchiveError::from(Malformation::PackSizesOverflow))
     };
 
-    let mut block_uncompressed = vec![0u64; header.block_count()];
-    let mut block_files = vec![0usize; header.block_count()];
-    for (index, file) in header.files().iter().enumerate() {
-        if let Some(block) = header.file_block(index) {
-            block_files[block.get()] += 1;
-            block_uncompressed[block.get()] = block_uncompressed[block.get()]
-                .checked_add(file.size)
-                .ok_or(ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::IntegerOverflow,
-                })?;
-        }
+    let tallies = tally_blocks(header);
+    let mut block_uncompressed = Vec::with_capacity(tallies.len());
+    let mut block_files = Vec::with_capacity(tallies.len());
+    for tally in &tallies {
+        let BlockTotal::Bytes(bytes) = tally.uncompressed else {
+            return Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::IntegerOverflow,
+            });
+        };
+        block_uncompressed.push(bytes);
+        block_files.push(tally.files);
     }
 
     header
@@ -153,54 +198,63 @@ impl Refused {
 
 /// Enforces the solid-archive policy shared by extraction and verification.
 ///
-/// A solid archive needs `allow_solid_archives`, and its total uncompressed
-/// size must fit `max_solid_block_memory`. The size check is a heuristic that
-/// sums every entry as if the archive were one solid block, with checked
-/// arithmetic.
+/// A solid archive needs [`SolidArchives::Allow`], and the declared decoded
+/// size of every one of its blocks, single-file blocks included, must fit
+/// [`SolidLimits::max_block_memory`]. The limit bounds decoded volume per
+/// block, not resident memory: decoding streams, and the memory of parallel
+/// decoding is bounded by `parallel_decode`. While `max_total_size` is
+/// [`Limit::Unbounded`] the archive-wide sum of the blocks is also held to the
+/// same limit, so an unbounded total never removes the cap on a solid archive.
 ///
 /// # Errors
 ///
 /// Refuses with [`UnverifiedReason::SolidPolicy`] and
 /// [`ArchiveError::SecurityViolation`] when solid archives are not allowed, and
 /// with [`UnverifiedReason::ResourceLimit`] and
-/// [`QuotaResource::IntegerOverflow`] or [`QuotaResource::TotalSize`] when the
-/// size check fails.
+/// [`QuotaResource::IntegerOverflow`], [`QuotaResource::SolidBlockMemory`] or
+/// [`QuotaResource::TotalSize`] when a size check fails.
 pub(super) fn check_solid_policy(
     is_solid: bool,
-    sizes: impl IntoIterator<Item = u64>,
-    config: &SecurityConfig<Validated>,
+    blocks: impl IntoIterator<Item = BlockTotal>,
+    config: &SecurityConfig,
 ) -> std::result::Result<(), Refused> {
     if !is_solid {
         return Ok(());
     }
-    if !config.allow_solid_archives {
+    let SolidArchives::Allow(limits) = config.solid_archives else {
         return Err(Refused::new(
             UnverifiedReason::SolidPolicy,
             Violation::SolidArchive.into(),
         ));
-    }
-
-    let total_uncompressed = sizes
-        .into_iter()
-        .try_fold(0u64, u64::checked_add)
-        .ok_or_else(|| {
-            Refused::new(
-                UnverifiedReason::ResourceLimit,
-                ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::IntegerOverflow,
-                },
-            )
-        })?;
-    if total_uncompressed > config.max_solid_block_memory.get() {
-        return Err(Refused::new(
+    };
+    let max = limits.max_block_memory.get();
+    let resource_limit = |resource| {
+        Refused::new(
             UnverifiedReason::ResourceLimit,
-            ArchiveError::QuotaExceeded {
-                resource: QuotaResource::TotalSize {
-                    current: total_uncompressed,
-                    max: config.max_solid_block_memory.get(),
-                },
-            },
-        ));
+            ArchiveError::QuotaExceeded { resource },
+        )
+    };
+
+    let mut archive_total = 0u64;
+    for block in blocks {
+        let BlockTotal::Bytes(current) = block else {
+            return Err(resource_limit(QuotaResource::IntegerOverflow));
+        };
+        if current > max {
+            return Err(resource_limit(QuotaResource::SolidBlockMemory {
+                current,
+                max,
+            }));
+        }
+        archive_total = archive_total
+            .checked_add(current)
+            .ok_or_else(|| resource_limit(QuotaResource::IntegerOverflow))?;
+    }
+    if config.max_total_size == Limit::Unbounded && archive_total > max {
+        return Err(resource_limit(QuotaResource::TotalSize {
+            current: archive_total,
+            max,
+        }));
     }
     Ok(())
 }
@@ -315,7 +369,7 @@ pub(super) fn block_charge(block: &sevenz_rust2::Block) -> u64 {
 pub(super) fn admit_sevenz_block(
     block: &sevenz_rust2::Block,
     declared_size: Option<u64>,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
 ) -> std::result::Result<(), Refused> {
     let not_decodable = |error| Refused::new(UnverifiedReason::NotDecodable, error);
     let output = block_charge(block).max(declared_size.unwrap_or_default());
@@ -399,11 +453,13 @@ impl SevenZRefusal {
 /// checking blocks there.
 pub fn iter_sevenz_refusals<'a>(
     header: &'a SevenZHeader,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
 ) -> impl Iterator<Item = SevenZRefusal> + 'a {
     let solid = check_solid_policy(
         header.is_solid(),
-        header.files().iter().map(|f| f.size),
+        tally_blocks(header)
+            .into_iter()
+            .map(|tally| tally.uncompressed),
         config,
     )
     .err()
@@ -420,10 +476,7 @@ pub fn iter_sevenz_refusals<'a>(
 }
 
 /// Every refusal of [`iter_sevenz_refusals`], for `verify` to report.
-pub fn sevenz_refusals(
-    header: &SevenZHeader,
-    config: &SecurityConfig<Validated>,
-) -> Vec<SevenZRefusal> {
+pub fn sevenz_refusals(header: &SevenZHeader, config: &SecurityConfig) -> Vec<SevenZRefusal> {
     iter_sevenz_refusals(header, config).collect()
 }
 
@@ -454,26 +507,31 @@ pub fn refusal_issues(refusals: &[SevenZRefusal]) -> Vec<VerificationIssue> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::SolidLimits;
     use std::assert_matches;
 
-    fn config(allow_solid: bool, max_solid_memory: u64) -> SecurityConfig<Validated> {
-        SecurityConfig::default()
-            .with_allow_solid_archives(allow_solid)
-            .with_max_solid_block_memory(std::num::NonZeroU64::new(max_solid_memory).unwrap())
-            .validate()
-            .unwrap()
+    fn config(max_solid_memory: u64) -> SecurityConfig {
+        SecurityConfig::default().with_solid_archives(SolidArchives::Allow(
+            SolidLimits::DEFAULT
+                .with_max_block_memory(std::num::NonZeroU64::new(max_solid_memory).unwrap()),
+        ))
+    }
+
+    fn bytes(sizes: &[u64]) -> Vec<BlockTotal> {
+        sizes.iter().copied().map(BlockTotal::Bytes).collect()
     }
 
     #[test]
     fn solid_policy_refusal_carries_its_own_reason() {
-        let refused = check_solid_policy(true, [1], &config(false, 100)).unwrap_err();
+        let refused =
+            check_solid_policy(true, bytes(&[1]), &SecurityConfig::default()).unwrap_err();
         assert_eq!(refused.reason, UnverifiedReason::SolidPolicy);
         assert_matches!(refused.error, ArchiveError::SecurityViolation { .. });
     }
 
     #[test]
     fn solid_size_overflow_is_an_integer_overflow() {
-        let refused = check_solid_policy(true, [u64::MAX, 1], &config(true, 100)).unwrap_err();
+        let refused = check_solid_policy(true, [BlockTotal::Overflow], &config(100)).unwrap_err();
         assert_eq!(refused.reason, UnverifiedReason::ResourceLimit);
         assert_matches!(
             refused.error,
@@ -484,8 +542,53 @@ mod tests {
     }
 
     #[test]
-    fn solid_size_over_the_limit_is_a_resource_limit() {
-        let refused = check_solid_policy(true, [60, 60], &config(true, 100)).unwrap_err();
+    fn block_totals_that_overflow_together_are_an_integer_overflow() {
+        let unbounded = config(u64::MAX).with_max_total_size(Limit::Unbounded);
+        let refused = check_solid_policy(true, bytes(&[u64::MAX, 1]), &unbounded).unwrap_err();
+        assert_matches!(
+            refused.error,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::IntegerOverflow
+            }
+        );
+    }
+
+    #[test]
+    fn a_block_over_the_limit_is_a_solid_block_memory_refusal() {
+        let refused = check_solid_policy(true, bytes(&[120]), &config(100)).unwrap_err();
+        assert_eq!(refused.reason, UnverifiedReason::ResourceLimit);
+        assert_matches!(
+            refused.error,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::SolidBlockMemory {
+                    current: 120,
+                    max: 100
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn every_block_is_checked_not_only_the_first() {
+        let refused = check_solid_policy(true, bytes(&[10, 1, 101]), &config(100)).unwrap_err();
+        assert_matches!(
+            refused.error,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::SolidBlockMemory { current: 101, .. }
+            }
+        );
+    }
+
+    #[test]
+    fn blocks_each_within_the_limit_pass_while_the_total_is_bounded() {
+        let bounded = config(100).with_max_total_size(crate::non_zero!(1000));
+        assert!(check_solid_policy(true, bytes(&[60, 60, 60]), &bounded).is_ok());
+    }
+
+    #[test]
+    fn an_unbounded_total_keeps_the_archive_wide_cap() {
+        let unbounded = config(100).with_max_total_size(Limit::Unbounded);
+        let refused = check_solid_policy(true, bytes(&[60, 60]), &unbounded).unwrap_err();
         assert_eq!(refused.reason, UnverifiedReason::ResourceLimit);
         assert_matches!(
             refused.error,
@@ -500,6 +603,8 @@ mod tests {
 
     #[test]
     fn non_solid_archive_passes_the_policy() {
-        assert!(check_solid_policy(false, [u64::MAX, 1], &config(false, 100)).is_ok());
+        assert!(
+            check_solid_policy(false, bytes(&[u64::MAX, 1]), &SecurityConfig::default()).is_ok()
+        );
     }
 }

@@ -44,7 +44,7 @@
 //! pass (no extra decode), and `extract` decodes each block once, reading a
 //! target as it creates the link. Reading targets in `list` decodes the blocks
 //! that hold links, bounded by the solid policy, the admission checks and
-//! `max_solid_block_memory`.
+//! the solid block limit.
 //!
 //! **Security Impact**: `extract` validates a symlink target against the disk
 //! as it creates the link, so a refusal for the target's content (escape,
@@ -60,14 +60,16 @@
 //! as a single block. While this provides better compression ratios, it has
 //! security implications:
 //!
-//! - **Memory exhaustion**: Extracting a single file requires decompressing the
-//!   entire solid block into memory
-//! - **Denial of service**: Malicious archives can create large solid blocks
-//!   that exhaust available memory
+//! - **Wasted work**: Extracting a single file requires decoding the entire
+//!   solid block up to that file
+//! - **Denial of service**: Malicious archives can declare very large solid
+//!   blocks that exhaust CPU time and disk space
 //!
 //! **Default Policy**: Solid archives are **rejected** by default.
-//! Use `SecurityConfig::allow_solid_archives = true` to enable extraction with
-//! memory limits enforced via `max_solid_block_memory`.
+//! Use `SecurityConfig::with_allow_solid_archives(true)` to enable extraction
+//! with the declared decoded size of every block bounded by
+//! `SolidLimits::max_block_memory`. The limit bounds decoded volume per block,
+//! not resident memory.
 //!
 //! # Decoder Memory and Block Layout
 //!
@@ -114,7 +116,7 @@
 //! # fn main() -> Result<(), exarch_core::ArchiveError> {
 //! let file = File::open("archive.7z")?;
 //! let mut archive = SevenZArchive::new(file)?;
-//! let config = SecurityConfig::default().validate()?;
+//! let config = SecurityConfig::default();
 //! let report = archive.extract(
 //!     Path::new("/output"),
 //!     &config,
@@ -126,16 +128,16 @@
 //! # }
 //! ```
 //!
-//! Allow solid archives with memory limit:
+//! Allow solid archives with a block limit:
 //!
 //! ```no_run
-//! use exarch_core::ExtractionOptions;
 //! use exarch_core::SecurityConfig;
+//! use exarch_core::SolidArchives;
+//! use exarch_core::SolidLimits;
 //! use exarch_core::non_zero;
 //!
-//! let mut config = SecurityConfig::default();
-//! config.allow_solid_archives = true;
-//! config.max_solid_block_memory = non_zero!(512 * 1024 * 1024); // 512 MB
+//! let limits = SolidLimits::DEFAULT.with_max_block_memory(non_zero!(512 * 1024 * 1024));
+//! let config = SecurityConfig::default().with_solid_archives(SolidArchives::Allow(limits));
 //! // ... extract with config
 //! ```
 
@@ -150,7 +152,6 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::VerificationOptions;
-use crate::config::Validated;
 use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
@@ -190,7 +191,7 @@ const SIGNATURE_HEADER_SIZE: u64 = 32;
 /// exhaustion attacks.
 ///
 /// **Security Policy**: Solid archives are rejected by default.
-/// Use `SecurityConfig::allow_solid_archives` to enable with memory limits.
+/// Use `SecurityConfig::with_allow_solid_archives` to enable with block limits.
 ///
 /// # Examples
 ///
@@ -204,7 +205,7 @@ const SIGNATURE_HEADER_SIZE: u64 = 32;
 ///
 /// let file = File::open("archive.7z")?;
 /// let mut archive = SevenZArchive::new(file)?;
-/// let config = SecurityConfig::default().validate()?;
+/// let config = SecurityConfig::default();
 /// let report = archive.extract(
 ///     Path::new("/output"),
 ///     &config,
@@ -337,7 +338,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     fn extract(
         mut self,
         output_dir: &Path,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
@@ -348,10 +349,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         )
     }
 
-    fn list(
-        mut self,
-        config: &SecurityConfig<Validated>,
-    ) -> Result<crate::inspection::ArchiveManifest> {
+    fn list(mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::ListPass;
         use crate::inspection::list::list_sevenz_parsed;
         list_sevenz_parsed(
@@ -364,7 +362,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 
     fn verify(
         mut self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
         self.verify_with_progress(config, *options, &mut crate::NoopProgress)
@@ -375,7 +373,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// Verifies the archive, reporting each scanned entry to `progress`.
     pub(crate) fn verify_with_progress(
         &mut self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: VerificationOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<crate::inspection::VerificationReport> {

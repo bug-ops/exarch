@@ -97,7 +97,7 @@
 //!
 //! let file = File::open("archive.zip")?;
 //! let mut archive = ZipArchive::new(file)?;
-//! let config = SecurityConfig::default().validate()?;
+//! let config = SecurityConfig::default();
 //! let report = archive.extract(
 //!     Path::new("/output"),
 //!     &config,
@@ -118,7 +118,7 @@
 //! use exarch_core::ratio_limit;
 //!
 //! let mut config = SecurityConfig::default();
-//! config.allowed.symlinks = true; // Allow symlinks
+//! config.allowed.symlinks = exarch_core::Admit::Allow; // Allow symlinks
 //! config.max_file_size = Limit::Bounded(non_zero!(100 * 1024 * 1024)); // 100 MB per file
 //! config.max_compression_ratio = ratio_limit!(100.0); // Allow 100:1 compression
 //! // ... extract with config
@@ -149,7 +149,6 @@ use crate::SinkOptions;
 use crate::VerificationOptions;
 use crate::Violation;
 use crate::ZipConsistencyPolicy;
-use crate::config::Validated;
 use crate::security::Compressed;
 use crate::security::RawMode;
 use crate::security::Uncompressed;
@@ -202,7 +201,7 @@ pub(crate) const ZIP_INVALID_CHECKSUM: &str = "Invalid checksum";
 /// function call individually.
 struct ZipExtractionContext<'a> {
     tally: Tally<'a>,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
 }
 
 /// How a raw ZIP entry name starts, as far as absolute-path policy cares.
@@ -269,10 +268,7 @@ impl ZipEntryName {
 /// Besides the errors listed on [`parse_zip_entry_name`], returns
 /// `SecurityViolation` for a NUL byte and, on Windows, for a `:` in any
 /// component.
-pub(crate) fn resolve_zip_entry_path(
-    raw: &str,
-    config: &SecurityConfig<Validated>,
-) -> Result<PathBuf> {
+pub(crate) fn resolve_zip_entry_path(raw: &str, config: &SecurityConfig) -> Result<PathBuf> {
     parse_zip_entry_name(raw, config)?.into_strict()
 }
 
@@ -304,10 +300,7 @@ pub(crate) fn resolve_zip_entry_path(
 /// the path is the raw name), and on Windows a `:` in any component (stream
 /// separator `SecurityViolation`; the path is the name left after prefix
 /// stripping).
-pub(crate) fn parse_zip_entry_name(
-    raw: &str,
-    config: &SecurityConfig<Validated>,
-) -> Result<ZipEntryName> {
+pub(crate) fn parse_zip_entry_name(raw: &str, config: &SecurityConfig) -> Result<ZipEntryName> {
     let traversal = || ArchiveError::PathTraversal {
         path: PathBuf::from(raw),
     };
@@ -327,7 +320,7 @@ pub(crate) fn parse_zip_entry_name(
     let prefix = classify_name_prefix(raw);
     let absolute =
         prefix == NamePrefix::Rooted || (prefix == NamePrefix::DriveRelative && cfg!(windows));
-    if absolute && !config.allowed.absolute_paths {
+    if absolute && !config.allowed.absolute_paths.is_allowed() {
         return Err(traversal());
     }
     if has_parent_component(raw) {
@@ -468,7 +461,7 @@ impl<R: Read + Seek> AdmittedZip<'_, R> {
 /// cannot be redeemed against another archive.
 pub(crate) struct CheckedZip<'a, R: Read + Seek> {
     admitted: AdmittedZip<'a, R>,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for CheckedZip<'_, R> {
@@ -486,7 +479,7 @@ impl<'a, R: Read + Seek> CheckedZip<'a, R> {
     /// refusal.
     pub(crate) fn extract_with<T: ExtractTarget>(
         self,
-        make_target: impl FnOnce(&'a SecurityConfig<Validated>) -> Result<T>,
+        make_target: impl FnOnce(&'a SecurityConfig) -> Result<T>,
         options: SinkOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
@@ -529,7 +522,7 @@ impl<'a, R: Read + Seek> CheckedZip<'a, R> {
 ///
 /// let file = File::open("archive.zip")?;
 /// let mut archive = ZipArchive::new(file)?;
-/// let config = SecurityConfig::default().validate()?;
+/// let config = SecurityConfig::default();
 /// let report = archive.extract(
 ///     Path::new("/output"),
 ///     &config,
@@ -599,7 +592,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// # Errors
     ///
     /// Same as [`ZipArchive::new`].
-    pub(crate) fn for_config(reader: R, config: &SecurityConfig<Validated>) -> Result<Self> {
+    pub(crate) fn for_config(reader: R, config: &SecurityConfig) -> Result<Self> {
         Self::open_for(reader, config, DecodeReuse::Off)
     }
 
@@ -612,7 +605,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// Same as [`ZipArchive::new`].
     pub(crate) fn for_extraction(
         reader: R,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         reuse: DecodeReuse,
     ) -> Result<Self> {
         Self::open_for(reader, config, reuse)
@@ -627,11 +620,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// # Errors
     ///
     /// Same as [`ZipArchive::new`].
-    pub(crate) fn for_sink(
-        reader: R,
-        config: &SecurityConfig<Validated>,
-        reuse: &SinkReuse,
-    ) -> Result<Self> {
+    pub(crate) fn for_sink(reader: R, config: &SecurityConfig, reuse: &SinkReuse) -> Result<Self> {
         let limit = ReuseLimit::new(reuse.limit.bytes());
         let mut archive = Self::open_for(reader, config, DecodeReuse::Memory(limit))?;
         if let Some(store) = archive.structure.reuse_mut() {
@@ -640,7 +629,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         Ok(archive)
     }
 
-    fn open_for(reader: R, config: &SecurityConfig<Validated>, reuse: DecodeReuse) -> Result<Self> {
+    fn open_for(reader: R, config: &SecurityConfig, reuse: DecodeReuse) -> Result<Self> {
         let checks = zip_structure::StreamChecks::of(config.zip_consistency);
         let (inner, structure) = zip_structure::open_with(
             reader,
@@ -658,7 +647,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// entries were decoded under a window the config admits, and the
     /// allowance for checking entries again was not smaller than the
     /// config's.
-    pub(crate) fn serves(&self, config: &SecurityConfig<Validated>) -> bool {
+    pub(crate) fn serves(&self, config: &SecurityConfig) -> bool {
         let streams = config.zip_consistency != ZipConsistencyPolicy::Enforce
             || self.structure.checks() == zip_structure::StreamChecks::Run;
         let window = match self.structure.zstd_windows() {
@@ -698,7 +687,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// The count is the raw central directory count, so duplicate records and
     /// records past the end record's count cannot be used to dodge
     /// `max_file_count`.
-    fn check_count(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+    fn check_count(&self, config: &SecurityConfig) -> Result<()> {
         let found = self.structure.central_entries();
         if !config.max_file_count.admits(found) {
             return Err(ArchiveError::QuotaExceeded {
@@ -715,7 +704,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// `listing` carries an integrity pass.
     pub(crate) fn list_with(
         &mut self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         listing: &mut crate::inspection::list::ListPass<'_, '_>,
     ) -> Result<crate::inspection::ArchiveManifest> {
         let mut admitted = self.admit_structure(config)?;
@@ -724,7 +713,7 @@ impl<R: Read + Seek> ZipArchive<R> {
 
     /// Fails closed when the archive was opened without the checks that read
     /// entry data but the policy enforces their findings.
-    fn check_stream_checks(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+    fn check_stream_checks(&self, config: &SecurityConfig) -> Result<()> {
         if config.zip_consistency == ZipConsistencyPolicy::Enforce
             && self.structure.checks() == zip_structure::StreamChecks::Skip
         {
@@ -745,7 +734,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// skipped decoding for, because its windows exceeded the limit the census
     /// ran under, cannot be admitted by a looser config: the findings of those
     /// decodes are missing.
-    fn check_zstd_windows(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+    fn check_zstd_windows(&self, config: &SecurityConfig) -> Result<()> {
         // ASSUMPTION: a refused window is `QuotaExceeded` even if the census
         // skipped it.
         let limit = ZstdWindowLog::of(config);
@@ -775,7 +764,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// returns the token that lets the entries be read.
     pub(crate) fn check_admission(
         &mut self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<AdmittedZip<'_, R>> {
         self.check_count(config)?;
         self.check_stream_checks(config)?;
@@ -784,10 +773,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     }
 
     /// Admits the archive and applies the structural policy.
-    fn admit_structure(
-        &mut self,
-        config: &SecurityConfig<Validated>,
-    ) -> Result<AdmittedZip<'_, R>> {
+    fn admit_structure(&mut self, config: &SecurityConfig) -> Result<AdmittedZip<'_, R>> {
         let admitted = self.check_admission(config)?;
         if config.zip_consistency == ZipConsistencyPolicy::Enforce
             && let Some(finding) = admitted.archive.structure.findings().first()
@@ -801,7 +787,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// for extraction.
     pub(crate) fn check_structure<'a>(
         &'a mut self,
-        config: &'a SecurityConfig<Validated>,
+        config: &'a SecurityConfig,
     ) -> Result<CheckedZip<'a, R>> {
         let admitted = self.admit_structure(config)?;
         Ok(CheckedZip { admitted, config })
@@ -811,7 +797,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     fn resolve_entry_path(
         zip_file: &zip::read::ZipFile<'_, Shared<R>>,
         index: usize,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<PathBuf> {
         let raw_name = zip_file.name().map_err(|e| {
             ArchiveError::from(Malformation::EntryNameUnreadable {
@@ -913,7 +899,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     fn extract_entries<T: ExtractTarget>(
         &mut self,
         target: &mut T,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: SinkOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
@@ -1009,7 +995,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     pub(crate) fn extract_in_place(
         &mut self,
         output_dir: &Path,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
@@ -1025,24 +1011,21 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
     fn extract(
         mut self,
         output_dir: &Path,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         self.extract_in_place(output_dir, config, options, progress)
     }
 
-    fn list(
-        mut self,
-        config: &SecurityConfig<Validated>,
-    ) -> Result<crate::inspection::ArchiveManifest> {
+    fn list(mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::ListPass;
         self.list_with(config, &mut ListPass::strict())
     }
 
     fn verify(
         mut self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
         self.verify_with_progress(config, *options, &mut crate::NoopProgress)
@@ -1053,7 +1036,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// Verifies the archive, reporting each scanned entry to `progress`.
     pub(crate) fn verify_with_progress(
         &mut self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: VerificationOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<crate::inspection::VerificationReport> {
@@ -1309,7 +1292,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1331,7 +1314,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1360,7 +1343,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1381,7 +1364,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1413,7 +1396,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1447,7 +1430,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1477,7 +1460,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1505,7 +1488,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1527,7 +1510,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1554,7 +1537,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(100)); // Only allow 100 bytes
-        let config = config.validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1579,7 +1561,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2)); // Only allow 2 files
-        let config = config.validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1598,7 +1579,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
@@ -1617,7 +1598,7 @@ mod tests {
         let archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
@@ -1636,10 +1617,7 @@ mod tests {
         let archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default()
-            .with_allow_absolute_paths(true)
-            .validate()
-            .expect("valid config");
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
 
         let report = archive
             .extract(
@@ -1677,7 +1655,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.max_compression_ratio = crate::ratio_limit!(10.0); // Low threshold for testing
-        let config = config.validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1707,7 +1684,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1742,7 +1719,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let _report = archive
             .extract(
@@ -1777,7 +1754,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let _report = archive
             .extract(
@@ -1812,7 +1789,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let _report = archive
             .extract(
@@ -1841,8 +1818,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
-        config.allowed.symlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.symlinks = crate::Admit::Allow;
 
         let report = archive
             .extract(
@@ -1868,7 +1844,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config"); // symlinks disabled by default
+        let config = SecurityConfig::default(); // symlinks disabled by default
 
         let result = archive.extract(
             temp.path(),
@@ -1900,7 +1876,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1936,7 +1912,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1960,7 +1936,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -1981,7 +1957,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -2012,7 +1988,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -2041,7 +2017,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -2065,7 +2041,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let _report = archive
             .extract(
@@ -2091,7 +2067,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -2129,7 +2105,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -2155,7 +2131,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.max_total_size = crate::Limit::Bounded(crate::non_zero!(1000)); // Total limit 1000 bytes
-        let config = config.validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -2178,7 +2153,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
@@ -2259,7 +2234,7 @@ mod tests {
         let result = ZipArchive::new(cursor);
         if let Ok(archive) = result {
             let temp = TempDir::new().unwrap();
-            let config = SecurityConfig::default().validate().expect("valid config");
+            let config = SecurityConfig::default();
             let err = archive
                 .extract(
                     temp.path(),
@@ -2292,8 +2267,7 @@ mod tests {
         if let Ok(archive) = result {
             let temp = TempDir::new().unwrap();
             let mut config = SecurityConfig::default();
-            config.allowed.symlinks = true;
-            let config = config.validate().expect("valid config");
+            config.allowed.symlinks = crate::Admit::Allow;
             let err = archive
                 .extract(
                     temp.path(),
@@ -2319,8 +2293,7 @@ mod tests {
         let archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
-        config.allowed.symlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.symlinks = crate::Admit::Allow;
         let err = archive
             .extract(
                 temp.path(),
@@ -2347,8 +2320,7 @@ mod tests {
         if let Ok(archive) = result {
             let temp = TempDir::new().unwrap();
             let mut config = SecurityConfig::default();
-            config.allowed.symlinks = true;
-            let config = config.validate().expect("valid config");
+            config.allowed.symlinks = crate::Admit::Allow;
             let err = archive
                 .extract(
                     temp.path(),
@@ -2552,7 +2524,7 @@ mod tests {
         let archive = ZipArchive::new(Cursor::new(zip_data.clone())).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let enforcing = SecurityConfig::default().validate().expect("valid config");
+        let enforcing = SecurityConfig::default();
         let options = ExtractionOptions::default(); // skip_duplicates = true
 
         let rejected = archive
@@ -2564,10 +2536,7 @@ mod tests {
         );
         assert!(!temp.path().join("legit.txt").exists());
 
-        let config = SecurityConfig::default()
-            .with_zip_consistency(ZipConsistencyPolicy::Ignore)
-            .validate()
-            .expect("valid config");
+        let config = SecurityConfig::default().with_zip_consistency(ZipConsistencyPolicy::Ignore);
         let report = ZipArchive::new(Cursor::new(zip_data))
             .unwrap()
             .extract(temp.path(), &config, &options, &mut crate::NoopProgress)
@@ -2603,7 +2572,7 @@ mod tests {
             std::fs::write(temp.path().join(name), b"already here").unwrap();
         }
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         let report = archive
             .extract(
                 temp.path(),
@@ -2709,7 +2678,7 @@ mod tests {
     fn test_list_returns_manifest_with_entries() {
         let zip_data = create_test_zip(vec![("a.txt", b"hello"), ("b.txt", b"world")]);
         let archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let manifest = archive.list(&config).unwrap();
 
@@ -2721,7 +2690,7 @@ mod tests {
     fn test_list_empty_zip_returns_empty_manifest() {
         let zip_data = create_test_zip(vec![]);
         let archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let manifest = archive.list(&config).unwrap();
 
@@ -2733,7 +2702,7 @@ mod tests {
     fn test_verify_clean_zip_is_safe() {
         let zip_data = create_test_zip(vec![("safe.txt", b"data")]);
         let archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = archive
             .verify(&config, &crate::VerificationOptions::default())
@@ -2750,8 +2719,6 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default()
             .try_add_allowed_extension("txt")
-            .unwrap()
-            .validate()
             .unwrap();
 
         let report = ZipArchive::new(Cursor::new(zip_data))
@@ -2793,9 +2760,7 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default()
             .try_add_allowed_extension("txt")
-            .unwrap()
-            .validate()
-            .expect("valid config");
+            .unwrap();
 
         let report = ZipArchive::new(Cursor::new(zip_data))
             .unwrap()
@@ -2846,9 +2811,7 @@ mod tests {
 
         let config = SecurityConfig::default()
             .try_add_allowed_extension("txt")
-            .unwrap()
-            .validate()
-            .expect("valid config");
+            .unwrap();
 
         let report = ZipArchive::new(Cursor::new(zip_data))
             .unwrap()
@@ -2930,9 +2893,7 @@ mod tests {
 
         let config = SecurityConfig::default()
             .try_add_allowed_extension("txt")
-            .unwrap()
-            .validate()
-            .expect("valid config");
+            .unwrap();
         let temp = TempDir::new().unwrap();
 
         let err = archive
@@ -2965,7 +2926,7 @@ mod tests {
         use crate::NoopProgress;
         let zip_data = create_test_zip(vec![("a.txt", b"a"), ("b.exe", b"b")]);
         let dest = tempfile::tempdir().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let report = ZipArchive::new(Cursor::new(zip_data))
             .unwrap()
@@ -2988,8 +2949,6 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default()
             .try_add_allowed_extension("txt")
-            .unwrap()
-            .validate()
             .unwrap();
 
         let report = ZipArchive::new(Cursor::new(zip_data))
@@ -3022,7 +2981,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
@@ -3045,10 +3004,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default()
-            .with_allow_absolute_paths(true)
-            .validate()
-            .unwrap();
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
 
         let result = archive.extract(
             temp.path(),
@@ -3072,10 +3028,7 @@ mod tests {
         let archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default()
-            .with_allow_absolute_paths(true)
-            .validate()
-            .unwrap();
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
 
         let report = archive
             .extract(
@@ -3095,24 +3048,18 @@ mod tests {
 
     // --- resolve_entry_path unit tests ---
 
-    fn strict_config() -> SecurityConfig<Validated> {
-        SecurityConfig::default().validate().unwrap()
+    fn strict_config() -> SecurityConfig {
+        SecurityConfig::default()
     }
 
-    fn absolute_config() -> SecurityConfig<Validated> {
-        SecurityConfig::default()
-            .with_allow_absolute_paths(true)
-            .validate()
-            .unwrap()
+    fn absolute_config() -> SecurityConfig {
+        SecurityConfig::default().with_allow_absolute_paths(true)
     }
 
     /// Builds a minimal in-memory ZIP with a single entry named `entry_name`
     /// and empty content, then opens it and calls `resolve_entry_path` on the
     /// first entry, returning the result.
-    fn call_resolve_entry_path(
-        entry_name: &str,
-        config: &SecurityConfig<Validated>,
-    ) -> Result<PathBuf> {
+    fn call_resolve_entry_path(entry_name: &str, config: &SecurityConfig) -> Result<PathBuf> {
         let zip_data = create_raw_zip_entry(entry_name, b"");
         let cursor = Cursor::new(zip_data);
         let mut reader = zip::ZipArchive::new(Shared::new(cursor)).unwrap();

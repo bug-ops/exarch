@@ -32,7 +32,7 @@ fn test_42_zip_bomb_rejected_by_default_file_size_quota() {
     // silently rely on the ratio check alone.
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -64,9 +64,7 @@ fn test_42_zip_bomb_simulation() {
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let config = SecurityConfig::default()
         .with_max_file_size(exarch_core::Limit::Unbounded)
-        .with_max_total_size(exarch_core::Limit::Unbounded)
-        .validate()
-        .unwrap();
+        .with_max_total_size(exarch_core::Limit::Unbounded);
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -87,7 +85,7 @@ fn test_42_zip_bomb_simulation() {
 fn test_high_compression_ratio_individual() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap(); // max_compression_ratio = 100.0
+    let config = SecurityConfig::default(); // max_compression_ratio = 100.0
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -106,7 +104,7 @@ fn test_high_compression_ratio_individual() {
 fn test_normal_compression_allowed() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -125,7 +123,7 @@ fn test_normal_compression_allowed() {
 fn test_boundary_compression_ratio() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap(); // max = 100.0
+    let config = SecurityConfig::default(); // max = 100.0
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -147,7 +145,7 @@ fn test_boundary_compression_ratio() {
 fn test_just_over_compression_ratio() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap(); // max = 100.0
+    let config = SecurityConfig::default(); // max = 100.0
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -166,7 +164,7 @@ fn test_just_over_compression_ratio() {
 fn test_zero_compressed_nonzero_uncompressed_rejected() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -192,7 +190,7 @@ fn test_zero_compressed_nonzero_uncompressed_rejected() {
 fn test_both_sizes_zero_allowed() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -211,7 +209,7 @@ fn test_both_sizes_zero_allowed() {
 fn test_uncompressed_archive() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     let mut validator = EntryValidator::new(&config, &dest);
 
@@ -233,10 +231,8 @@ fn test_uncompressed_archive() {
 fn test_permissive_compression_ratio() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::permissive()
-        .with_max_compression_ratio(exarch_core::ratio_limit!(1000.0))
-        .validate()
-        .unwrap();
+    let config =
+        SecurityConfig::permissive().with_max_compression_ratio(exarch_core::ratio_limit!(1000.0));
 
     let mut validator = EntryValidator::new(&config, &dest);
 

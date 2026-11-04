@@ -763,7 +763,7 @@ impl NodeBudget {
     /// `max_file_count` is [`Limit::Unbounded`](crate::Limit::Unbounded); a
     /// product that overflows saturates at `usize::MAX`.
     #[must_use]
-    pub fn from_config<State>(config: &SecurityConfig<State>) -> Self {
+    pub fn from_config(config: &SecurityConfig) -> Self {
         let max = match config.max_file_count {
             crate::Limit::Bounded(count) => count
                 .get()

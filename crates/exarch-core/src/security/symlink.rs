@@ -4,7 +4,6 @@ use std::path::Path;
 
 use crate::Result;
 use crate::SecurityConfig;
-use crate::config::Validated;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -42,7 +41,7 @@ use crate::types::SafeSymlink;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
 /// let mut config = SecurityConfig::default();
-/// config.allowed.symlinks = true;
+/// config.allowed.symlinks = exarch_core::Admit::Allow;
 ///
 /// let link_path = SafePath::validate(&PathBuf::from("link"), &dest, &config)?;
 /// let target = Path::new("target.txt");
@@ -55,7 +54,7 @@ pub fn validate_symlink(
     link_path: &SafePath,
     target: &Path,
     dest: &DestDir,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
 ) -> Result<SafeSymlink> {
     SafeSymlink::validate(link_path, target, dest, config)
 }
@@ -81,8 +80,7 @@ mod tests {
     fn test_validate_symlink_allowed() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.symlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.symlinks = crate::Admit::Allow;
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
         let target = PathBuf::from("target.txt");
@@ -92,7 +90,7 @@ mod tests {
     #[test]
     fn test_validate_symlink_disabled() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default().validate().expect("valid config"); // symlinks disabled by default
+        let config = SecurityConfig::default(); // symlinks disabled by default
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
         let target = PathBuf::from("target.txt");
@@ -103,8 +101,7 @@ mod tests {
     fn test_validate_symlink_escape() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.symlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.symlinks = crate::Admit::Allow;
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
         let target = PathBuf::from("../../etc/passwd");
@@ -115,8 +112,7 @@ mod tests {
     fn test_validate_symlink_relative_safe() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.symlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.symlinks = crate::Admit::Allow;
 
         let link = SafePath::validate(&PathBuf::from("foo/link"), &dest, &config).unwrap();
         let target = PathBuf::from("../bar/target.txt");

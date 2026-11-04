@@ -5,7 +5,6 @@ use super::links::LinkStorage;
 use super::links::link_storage;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::formats::common;
@@ -240,7 +239,7 @@ pub(super) fn refuse_undecoded_target_in<V: FsView>(
     link: &SafePath,
     file: &sevenz_rust2::ArchiveEntry,
     root: &V::Root,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     view: &V,
 ) -> Result<()> {
     match link_storage(file) {

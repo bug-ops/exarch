@@ -11,7 +11,6 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::Violation;
-use crate::config::Validated;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::common::check_entry_name_limits;
@@ -72,7 +71,7 @@ use crate::types::safe_symlink::require_symlinks_allowed;
 /// validated against the final tree.
 pub(crate) fn verify_manifest(
     manifest: &ArchiveManifest,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     integrity: Option<IntegrityOutcome>,
 ) -> VerificationReport {
     verify_manifest_with_structure(
@@ -87,7 +86,7 @@ pub(crate) fn verify_manifest(
 /// findings and a record count of its own.
 pub(crate) fn verify_manifest_with_structure(
     manifest: &ArchiveManifest,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     structure: &ArchiveStructure<'_>,
     integrity: Option<IntegrityOutcome>,
 ) -> VerificationReport {
@@ -105,7 +104,7 @@ pub(crate) fn verify_manifest_with_structure(
 /// names are folded instead of taking the host's rule.
 fn verify_with_tree(
     manifest: &ArchiveManifest,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     structure: &ArchiveStructure<'_>,
     integrity: Option<IntegrityOutcome>,
     make_tree: impl FnOnce(&VirtualRoot) -> VirtualTree,
@@ -181,7 +180,7 @@ pub(crate) struct ListedForVerify {
 /// `list` is the only format-specific part of verification, so
 /// `verify_archive` and every `ArchiveFormat::verify` share the rest.
 pub(crate) fn list_for_verify<F>(
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: VerificationOptions,
     progress: &mut dyn ProgressCallback,
     list: F,
@@ -208,7 +207,7 @@ where
 /// Lists with `list` and verifies the manifest, for formats whose manifest is
 /// their whole content.
 pub(crate) fn verify_with<F>(
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: VerificationOptions,
     progress: &mut dyn ProgressCallback,
     list: F,
@@ -456,24 +455,20 @@ pub fn verify_archive_with_progress<P: AsRef<Path>>(
     options: &VerificationOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<VerificationReport> {
-    let validated_config = config.clone().validate()?;
     let archive_path = archive_path.as_ref();
     let format = detect_format(archive_path)?;
     let report = match format.family() {
         FormatFamily::Seekable(SeekableFormat::Zip) => {
             let file = std::fs::File::open(archive_path)?;
-            ZipArchive::for_config(file, &validated_config)?.verify_with_progress(
-                &validated_config,
-                *options,
-                progress,
-            )?
+            ZipArchive::for_config(file, config)?
+                .verify_with_progress(config, *options, progress)?
         }
         FormatFamily::Seekable(SeekableFormat::SevenZ) => {
             let file = std::fs::File::open(archive_path)?;
-            SevenZArchive::new(file)?.verify_with_progress(&validated_config, *options, progress)?
+            SevenZArchive::new(file)?.verify_with_progress(config, *options, progress)?
         }
-        FormatFamily::Tar(_) => verify_with(&validated_config, *options, progress, |listing| {
-            list_detected(archive_path, format, &validated_config, listing)
+        FormatFamily::Tar(_) => verify_with(config, *options, progress, |listing| {
+            list_detected(archive_path, format, config, listing)
         })?,
     };
     progress.on_complete();
@@ -488,7 +483,7 @@ struct EntryOutcome {
 
 fn verify_entry(
     entry: &ArchiveEntry,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     dest: &VirtualRoot,
     tree: &mut VirtualTree,
     quota_tracker: &mut QuotaTracker,
@@ -700,7 +695,7 @@ fn record_entry(
 /// final tree, requires the target to exist, then materializes the link.
 fn verify_deferred_hardlink(
     entry: &ArchiveEntry,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     dest: &VirtualRoot,
     tree: &mut VirtualTree,
     hardlink_tracker: &mut HardlinkTracker,
@@ -843,9 +838,9 @@ fn placement_issue(
 /// symlinks are allowed, which `verify_entry` could not validate.
 fn unread_targets_issue(
     manifest: &ArchiveManifest,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
 ) -> Option<VerificationIssue> {
-    if !config.allowed.symlinks {
+    if !config.allowed.symlinks.is_allowed() {
         return None;
     }
     let unread = manifest
@@ -876,7 +871,7 @@ fn unread_targets_issue(
     ))
 }
 
-fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig<Validated>) -> Result<()> {
+fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig) -> Result<()> {
     let sanitized = sanitize_permissions(RawMode::new(mode), config);
     (sanitized.as_u32() == mode).ok_or_else(|| ArchiveError::InvalidPermissions {
         path: path.to_path_buf(),
@@ -968,12 +963,10 @@ mod tests {
         manifest
     }
 
-    fn link_config() -> SecurityConfig<Validated> {
+    fn link_config() -> SecurityConfig {
         SecurityConfig::default()
             .with_allow_symlinks(true)
             .with_allow_hardlinks(true)
-            .validate()
-            .unwrap()
     }
 
     fn symlink_to(target: &str) -> ManifestEntryKind {
@@ -1243,7 +1236,7 @@ mod tests {
     #[test]
     fn unread_symlinks_are_a_policy_failure_when_symlinks_are_disallowed() {
         let manifest = manifest_of(vec![("d", unread_symlink())]);
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let report = verify_manifest(&manifest, &config, None);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
@@ -1827,7 +1820,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
+        config.allowed.hardlinks = crate::Admit::Allow;
         let report = verify_archive(temp_file.path(), &config)
             .expect("verify_archive must report a missing hardlink target, not error out");
 
@@ -1871,7 +1864,7 @@ mod tests {
 
     fn hardlink_config(allowed: bool) -> SecurityConfig {
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = allowed;
+        config.allowed.hardlinks = crate::Admit::from_allowed(allowed);
         config
     }
 
@@ -1948,7 +1941,7 @@ mod tests {
         for allowed in [false, true] {
             let archive = link_tar(tar::EntryType::Symlink, &[("link", None)]);
             let mut config = SecurityConfig::default();
-            config.allowed.symlinks = allowed;
+            config.allowed.symlinks = crate::Admit::from_allowed(allowed);
             let report = verify_archive(archive.path(), &config).unwrap();
 
             assert_eq!(report.status(), VerificationStatus::Fail);

@@ -271,6 +271,11 @@ fn dedicated_quota_context(kind: QuotaKind, archive: TerminalPath<'_>) -> Option
             "In-memory sink capacity exceeded for '{archive}'\n\
              No CLI flag relaxes this. Rust API only: the sink's capacity limit."
         ),
+        QuotaKind::SolidBlockMemory => format!(
+            "Solid block size limit exceeded for '{archive}'\n\
+             A solid 7z block declares more decoded data than the limit admits. No CLI flag \
+             relaxes this. Rust API only: SecurityConfig::with_solid_limits."
+        ),
         _ => return None,
     };
     Some(context)

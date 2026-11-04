@@ -72,6 +72,11 @@ closed_enum! {
         ZipOutputWriter => "zip_output_writer",
         /// The byte cap of an in-memory extraction.
         MaxBytes => "max_bytes",
+        /// `SecurityConfig::parallel_decode`, the lookahead memory of parallel
+        /// 7z decoding.
+        ParallelDecodeMemory => "parallel_decode_memory",
+        /// An entry of the creation exclude patterns.
+        ExcludePattern => "exclude_pattern",
     }
 }
 
@@ -111,6 +116,8 @@ impl ConfigSetting {
             Self::AtomicExtraction => "atomic extraction",
             Self::ZipArchive => "ZIP archive",
             Self::ZipOutputWriter => "ZIP output writer",
+            Self::ParallelDecodeMemory => "parallel decode memory",
+            Self::ExcludePattern => "exclude pattern",
             other => other.as_str(),
         }
     }
@@ -138,6 +145,15 @@ pub enum ConfigProblem {
     NotGreaterThanZero,
     /// A byte count is not a positive whole number.
     NotPositiveWholeNumber,
+    /// A number is NaN or infinite.
+    NotFinite,
+    /// A number has a fractional part.
+    NotWholeNumber,
+    /// A number is above the largest accepted value.
+    TooLarge {
+        /// The largest accepted value.
+        max: u64,
+    },
     /// A required input is missing.
     NotSet,
     /// No input of this kind was given.
@@ -190,6 +206,9 @@ impl fmt::Display for ConfigProblem {
             Self::Negative => f.write_str("must not be negative"),
             Self::NotGreaterThanZero => f.write_str("must be greater than zero"),
             Self::NotPositiveWholeNumber => f.write_str("must be a positive whole number of bytes"),
+            Self::NotFinite => f.write_str("must be a finite number"),
+            Self::NotWholeNumber => f.write_str("must be a whole number"),
+            Self::TooLarge { max } => write!(f, "must not exceed {max}"),
             Self::NotSet => f.write_str("not set"),
             Self::NoneProvided => f.write_str("none provided"),
             Self::NoParent => f.write_str("has no parent"),

@@ -666,7 +666,7 @@ mod tests {
             compressed,
             size: payload.len() as u64 - 1,
         };
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(0, &crate::EntryCompression::Unknown);
         tail.check(&mut archive, 0, &mut pass, slot, Path::new("a.txt"), &[])

@@ -1,7 +1,0 @@
-error[E0594]: cannot assign to data in dereference of `SecurityConfig<Validated>`
-  --> tests/ui/validated_config_field_mutation.rs:15:5
-   |
-15 |     cfg.max_compression_ratio = exarch_core::ratio_limit!(1.0);
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot assign
-   |
-   = help: trait `DerefMut` is required to modify through a dereference, but it is not implemented for `SecurityConfig<Validated>`

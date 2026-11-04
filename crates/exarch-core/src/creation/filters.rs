@@ -32,7 +32,7 @@ use std::path::PathBuf;
 /// assert!(!filters::should_skip(normal_file, &config));
 /// ```
 #[must_use]
-pub fn should_skip<State>(path: &Path, config: &CreationConfig<State>) -> bool {
+pub fn should_skip(path: &Path, config: &CreationConfig) -> bool {
     // Skip hidden files unless configured to include them
     if !config.include_hidden && is_hidden(path) {
         return true;
@@ -166,10 +166,10 @@ fn pattern_matches(s: &str, pattern: &str) -> bool {
 /// let archive_path = filters::compute_archive_path(source, root, &config).unwrap();
 /// assert_eq!(archive_path, Path::new("src/main.rs"));
 /// ```
-pub fn compute_archive_path<State>(
+pub fn compute_archive_path(
     source_path: &Path,
     root: &Path,
-    config: &CreationConfig<State>,
+    config: &CreationConfig,
 ) -> Result<PathBuf> {
     // Compute relative path from root
     let relative = source_path.strip_prefix(root).map_err(|_| {

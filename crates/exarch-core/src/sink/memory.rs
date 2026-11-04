@@ -76,7 +76,7 @@ impl MemoryLimit {
     /// assert_eq!(MemoryLimit::from_config(&config).bytes().get(), 4096);
     /// ```
     #[must_use]
-    pub fn from_config<State>(config: &SecurityConfig<State>) -> Self {
+    pub fn from_config(config: &SecurityConfig) -> Self {
         Self(match config.max_total_size {
             crate::Limit::Bounded(bytes) => bytes,
             crate::Limit::Unbounded => NonZeroU64::MAX,

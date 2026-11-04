@@ -30,7 +30,6 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
-use crate::config::Validated;
 use crate::formats::common;
 use crate::formats::common::EntryCompleteGuard;
 use crate::formats::target::ExtractTarget;
@@ -54,7 +53,7 @@ use crate::types::safe_symlink::require_symlinks_allowed;
 /// be redeemed against another archive.
 pub struct AdmittedSevenZ<'a, R: Read + Seek> {
     archive: &'a mut SevenZArchive<R>,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
 }
 
 impl<'a, R: Read + Seek> AdmittedSevenZ<'a, R> {
@@ -67,7 +66,7 @@ impl<'a, R: Read + Seek> AdmittedSevenZ<'a, R> {
     /// refusal.
     pub(crate) fn extract_with<T: SevenZTarget>(
         self,
-        make_target: impl FnOnce(&'a SecurityConfig<Validated>) -> Result<T>,
+        make_target: impl FnOnce(&'a SecurityConfig) -> Result<T>,
         options: SinkOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
@@ -124,7 +123,7 @@ pub trait SevenZTarget: ExtractTarget {
     /// not count an entry twice.
     fn with_pre_pass(
         &self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: SinkOptions,
         run: &mut dyn FnMut(&mut dyn PrePass) -> Result<()>,
     ) -> Result<()>;
@@ -138,7 +137,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// Returns the first admission refusal.
     pub(crate) fn admit<'a>(
         &'a mut self,
-        config: &'a SecurityConfig<Validated>,
+        config: &'a SecurityConfig,
     ) -> Result<AdmittedSevenZ<'a, R>> {
         if let Some(refusal) = iter_sevenz_refusals(&self.header, config).next() {
             return Err(refusal.into_error());
@@ -155,7 +154,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// quotas, link policy, paths) is refused before the target sees an entry.
     fn extract_admitted<T: SevenZTarget>(
         &mut self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         target: &mut T,
         options: SinkOptions,
         progress: &mut dyn ProgressCallback,
@@ -181,11 +180,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
     /// The checks that need only the file table, in the order every
     /// destination applies them.
-    fn run_pre_pass(
-        &self,
-        config: &SecurityConfig<Validated>,
-        pre: &mut dyn PrePass,
-    ) -> Result<()> {
+    fn run_pre_pass(&self, config: &SecurityConfig, pre: &mut dyn PrePass) -> Result<()> {
         for (index, entry) in self.entries.iter().enumerate() {
             let Some(kind) = entry.class.present(&entry.name)? else {
                 continue;
@@ -232,7 +227,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     fn decode_into<T: SevenZTarget>(
         &mut self,
         target: &mut T,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: SinkOptions,
         progress: &mut dyn ProgressCallback,
         total: usize,

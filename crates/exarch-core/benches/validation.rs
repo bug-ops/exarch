@@ -44,7 +44,7 @@ fn benchmark_path_validation(c: &mut Criterion) {
 
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     // Simple path (most common case)
     group.bench_function("simple_nonexistent", |b| {
@@ -74,7 +74,7 @@ fn benchmark_path_validation(c: &mut Criterion) {
     group.bench_function("no_banned_components", |b| {
         let mut config_no_banned = SecurityConfig::default();
         config_no_banned.banned_path_components.clear();
-        let config_no_banned = config_no_banned.validate().unwrap();
+        let config_no_banned = config_no_banned;
         let path = PathBuf::from("foo/bar/baz.txt");
         b.iter(|| {
             SafePath::validate(
@@ -94,7 +94,7 @@ fn benchmark_normalization(c: &mut Criterion) {
 
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     // Path without . components (should use Cow::Borrowed)
     group.bench_function("no_normalization_needed", |b| {
@@ -118,8 +118,7 @@ fn benchmark_symlink_validation(c: &mut Criterion) {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let mut config = SecurityConfig::default();
-    config.allowed.symlinks = true;
-    let config = config.validate().unwrap();
+    config.allowed.symlinks = exarch_core::Admit::Allow;
 
     // Valid relative symlink
     group.bench_function("valid_relative", |b| {
@@ -165,7 +164,7 @@ fn benchmark_symlink_validation(c: &mut Criterion) {
 
     // Disabled symlinks (should fail very fast)
     group.bench_function("disabled_reject", |b| {
-        let disabled_config = SecurityConfig::default().validate().unwrap(); // symlinks disabled
+        let disabled_config = SecurityConfig::default(); // symlinks disabled
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &disabled_config).unwrap();
         let target = PathBuf::from("target.txt");
         b.iter(|| {
@@ -188,8 +187,7 @@ fn benchmark_hardlink_validation(c: &mut Criterion) {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let mut config = SecurityConfig::default();
-    config.allowed.hardlinks = true;
-    let config = config.validate().unwrap();
+    config.allowed.hardlinks = exarch_core::Admit::Allow;
 
     // Valid hardlink
     group.bench_function("valid_target", |b| {
@@ -256,7 +254,7 @@ fn benchmark_hardlink_validation(c: &mut Criterion) {
 fn benchmark_compression_ratio(c: &mut Criterion) {
     let mut group = c.benchmark_group("compression_ratio");
 
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     // Normal ratio (should pass quickly)
     group.bench_function("normal_ratio", |b| {
@@ -306,7 +304,7 @@ fn benchmark_entry_validator(c: &mut Criterion) {
 
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     // Single file entry
     group.bench_function("single_file", |b| {
@@ -368,9 +366,7 @@ fn benchmark_entry_validator(c: &mut Criterion) {
     group.bench_function("mixed_entries", |b| {
         let config_with_links = SecurityConfig::default()
             .with_allow_symlinks(true)
-            .with_allow_hardlinks(true)
-            .validate()
-            .unwrap();
+            .with_allow_hardlinks(true);
 
         b.iter(|| {
             let mut validator = EntryValidator::new(&config_with_links, &dest);
@@ -436,7 +432,7 @@ fn benchmark_validation_throughput(c: &mut Criterion) {
 
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     // Pre-generate paths for consistent timing
     let paths: Vec<PathBuf> = (0..1000)

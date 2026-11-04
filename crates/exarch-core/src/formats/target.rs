@@ -19,7 +19,6 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
-use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::security::RawMode;
 use crate::security::admitted::EntrySize;
@@ -245,12 +244,12 @@ pub struct HostTarget<'a> {
     dirs: DirWalker,
     copy_buffer: CopyBuffer,
     core: ValidatorCore<'a>,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
 }
 
 impl<'a> HostTarget<'a> {
     /// Creates `output_dir` if needed and a target writing into it.
-    pub(crate) fn create(output_dir: &Path, config: &'a SecurityConfig<Validated>) -> Result<Self> {
+    pub(crate) fn create(output_dir: &Path, config: &'a SecurityConfig) -> Result<Self> {
         Ok(Self {
             root: PinnedRoot::open(DestDir::new_or_create(output_dir.to_path_buf())?)?,
             dirs: DirWalker::new(config),

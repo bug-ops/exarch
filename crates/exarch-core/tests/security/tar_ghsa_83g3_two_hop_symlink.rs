@@ -99,9 +99,7 @@ fn two_hop_symlink_chain_is_rejected() {
     let dest = TempDir::new().expect("temp dir");
     let config = SecurityConfig::default()
         .with_allow_symlinks(true)
-        .with_allow_hardlinks(true)
-        .validate()
-        .expect("valid config");
+        .with_allow_hardlinks(true);
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);
@@ -146,7 +144,7 @@ fn two_hop_symlink_chain_is_rejected() {
 #[test]
 fn two_hop_chain_rejected_when_symlinks_disabled() {
     let dest = TempDir::new().expect("temp dir");
-    let config = SecurityConfig::default().validate().expect("valid config"); // symlinks = false
+    let config = SecurityConfig::default(); // symlinks = false
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);

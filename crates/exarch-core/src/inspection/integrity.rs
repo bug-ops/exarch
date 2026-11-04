@@ -22,7 +22,6 @@ use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::TarTrailerRefusal;
-use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
 use crate::copy::copy_bounded;
@@ -216,7 +215,7 @@ pub struct TrailerCap(u64);
 impl TrailerCap {
     /// `max_tar_metadata_bytes`, raised to [`MIN_TRAILER_CAP`].
     #[must_use]
-    pub fn of(config: &SecurityConfig<Validated>) -> Self {
+    pub fn of(config: &SecurityConfig) -> Self {
         Self(config.max_tar_metadata_bytes.get().max(MIN_TRAILER_CAP))
     }
 
@@ -306,11 +305,7 @@ impl TarTrailer {
     /// # Errors
     ///
     /// The refusal from [`TrailerFault::into_error`].
-    pub fn enforce<R: Read>(
-        self,
-        reader: &mut R,
-        config: &SecurityConfig<Validated>,
-    ) -> Result<()> {
+    pub fn enforce<R: Read>(self, reader: &mut R, config: &SecurityConfig) -> Result<()> {
         if self == Self::Probe {
             return Ok(());
         }
@@ -343,7 +338,7 @@ pub struct IntegrityOutcome {
 
 /// Decodes payloads during listing and collects the integrity issues.
 pub struct IntegrityPass<'c> {
-    config: &'c SecurityConfig<Validated>,
+    config: &'c SecurityConfig,
     quota: QuotaTracker,
     budget_remaining: u64,
     buffer: Box<CopyBuffer>,
@@ -353,7 +348,7 @@ pub struct IntegrityPass<'c> {
 }
 
 impl<'c> IntegrityPass<'c> {
-    pub fn new(config: &'c SecurityConfig<Validated>, budget: DecompressionBudget) -> Self {
+    pub fn new(config: &'c SecurityConfig, budget: DecompressionBudget) -> Self {
         Self {
             config,
             quota: QuotaTracker::new(),
@@ -365,7 +360,7 @@ impl<'c> IntegrityPass<'c> {
         }
     }
 
-    pub const fn config(&self) -> &'c SecurityConfig<Validated> {
+    pub const fn config(&self) -> &'c SecurityConfig {
         self.config
     }
 
@@ -581,7 +576,7 @@ mod tests {
         DecodeFailure::from_copy(CopyError::Read(e), 10)
     }
 
-    fn pass_with_budget(config: &SecurityConfig<Validated>, bytes: u64) -> IntegrityPass<'_> {
+    fn pass_with_budget(config: &SecurityConfig, bytes: u64) -> IntegrityPass<'_> {
         IntegrityPass::new(config, DecompressionBudget::try_from_bytes(bytes).unwrap())
     }
 
@@ -598,7 +593,7 @@ mod tests {
 
         let mut archive = zip::ZipArchive::new(io::Cursor::new(bytes)).unwrap();
         let mut entry = archive.by_index(0).unwrap();
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(6, &EntryCompression::Unknown);
 
@@ -706,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_budget_is_first_fit_and_never_overdrawn() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = pass_with_budget(&config, 10);
 
         assert!(!pass.try_charge(11));
@@ -718,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_finish_without_unverified_items_adds_no_issue() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
 
         assert!(pass.finish().archive_issues.is_empty());
@@ -726,7 +721,7 @@ mod tests {
 
     #[test]
     fn test_finish_reports_one_medium_issue_listing_every_reason() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         pass.count_unverified(UnverifiedReason::OverBudget, 2);
         pass.count_unverified(UnverifiedReason::SolidPolicy, 1);
@@ -744,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_gaps_list_marked_entries_and_count_the_rest() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         pass.mark_unverified(UnverifiedReason::SolidPolicy, Path::new("a"));
         pass.mark_unverified(UnverifiedReason::OverBudget, Path::new("b"));
@@ -773,7 +768,7 @@ mod tests {
 
     #[test]
     fn test_gaps_cap_listed_entries_and_count_the_overflow() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let over = 5;
         for i in 0..MAX_LISTED_UNVERIFIED + over {
@@ -791,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_recorded_unverified_outcome_lists_the_entry() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(1, &EntryCompression::Unknown);
 
@@ -808,7 +803,7 @@ mod tests {
 
     #[test]
     fn test_trailer_probe_requires_one_byte() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
 
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         pass.check_tar_trailer(&mut io::Cursor::new(vec![0u8; 512]), TarTrailer::Probe)
@@ -823,7 +818,7 @@ mod tests {
 
     #[test]
     fn test_trailer_drain_is_bounded_by_the_trailer_cap() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let cap = usize::try_from(TrailerCap::of(&config).get()).unwrap();
 
         let mut pass = pass_with_budget(&config, 10);
@@ -847,25 +842,18 @@ mod tests {
 
     #[test]
     fn test_trailer_cap_has_a_floor_and_follows_a_larger_limit() {
-        let small = SecurityConfig::default()
-            .with_max_tar_metadata_bytes(crate::non_zero!(512))
-            .validate()
-            .unwrap();
+        let small = SecurityConfig::default().with_max_tar_metadata_bytes(crate::non_zero!(512));
         assert_eq!(TrailerCap::of(&small).get(), MIN_TRAILER_CAP);
 
-        let large = SecurityConfig::default()
-            .with_max_tar_metadata_bytes(crate::non_zero!(u64::MAX - 1))
-            .validate()
-            .unwrap();
+        let large =
+            SecurityConfig::default().with_max_tar_metadata_bytes(crate::non_zero!(u64::MAX - 1));
         assert_eq!(TrailerCap::of(&large).get(), u64::MAX - 1);
     }
 
     #[test]
     fn test_trailer_drain_with_a_maximal_cap_does_not_overflow() {
-        let config = SecurityConfig::default()
-            .with_max_tar_metadata_bytes(crate::non_zero!(u64::MAX - 1))
-            .validate()
-            .unwrap();
+        let config =
+            SecurityConfig::default().with_max_tar_metadata_bytes(crate::non_zero!(u64::MAX - 1));
         let mut buffer = Box::new(CopyBuffer::new());
 
         let drained = TarTrailer::DrainToDecoderEof.drain(
@@ -878,7 +866,7 @@ mod tests {
 
     #[test]
     fn test_over_cap_trailer_is_a_relaxable_violation_naming_the_cap() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let error = TrailerFault::OverCap(TrailerCap::of(&config)).into_error();
 
         assert_eq!(
@@ -890,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_trailer_drain_without_bytes_is_a_missing_end_marker() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
 
         pass.check_tar_trailer(
@@ -908,10 +896,7 @@ mod tests {
 
     #[test]
     fn test_rejected_entry_is_not_decoded() {
-        let config = SecurityConfig::default()
-            .with_max_file_size(crate::non_zero!(4))
-            .validate()
-            .unwrap();
+        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(4));
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(8, &EntryCompression::Unknown);
 
@@ -924,7 +909,7 @@ mod tests {
 
     #[test]
     fn test_decode_enforces_the_declared_size() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(4, &EntryCompression::Unknown);
 
@@ -947,7 +932,7 @@ mod tests {
 
     #[test]
     fn test_record_maps_failures_to_issues() {
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(1, &EntryCompression::Unknown);
         let path = Path::new("a");

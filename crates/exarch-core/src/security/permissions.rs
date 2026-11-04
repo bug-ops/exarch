@@ -1,7 +1,6 @@
 //! File permission validation and sanitization.
 
 use crate::SecurityConfig;
-use crate::config::Validated;
 
 /// A Unix permission mode exactly as an archive header records it.
 ///
@@ -53,7 +52,7 @@ impl RawMode {
 /// use exarch_core::security::RawMode;
 /// use exarch_core::security::sanitize_permissions;
 ///
-/// let config = SecurityConfig::default().validate()?;
+/// let config = SecurityConfig::default();
 ///
 /// // Setuid bit is stripped
 /// let sanitized = sanitize_permissions(RawMode::new(0o4755), &config);
@@ -102,7 +101,7 @@ impl SanitizedMode {
 /// use exarch_core::security::RawMode;
 /// use exarch_core::security::sanitize_permissions;
 ///
-/// let config = SecurityConfig::default().validate()?;
+/// let config = SecurityConfig::default();
 ///
 /// // Setuid bit is stripped
 /// let sanitized = sanitize_permissions(RawMode::new(0o4755), &config);
@@ -125,7 +124,7 @@ impl SanitizedMode {
 /// # fn main() {}
 /// ```
 #[must_use]
-pub fn sanitize_permissions(mode: RawMode, config: &SecurityConfig<Validated>) -> SanitizedMode {
+pub fn sanitize_permissions(mode: RawMode, config: &SecurityConfig) -> SanitizedMode {
     let mut sanitized = mode.get();
 
     // Strip setuid bit (04000)
@@ -135,7 +134,7 @@ pub fn sanitize_permissions(mode: RawMode, config: &SecurityConfig<Validated>) -
     sanitized &= !0o2000;
 
     // M-CODE-1: Strip world-writable bit (0002) unless explicitly allowed
-    if !config.allowed.world_writable {
+    if !config.allowed.world_writable.is_allowed() {
         sanitized &= !0o002;
     }
 
@@ -149,7 +148,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_normal() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o644), &config).as_u32(),
             0o644
@@ -158,7 +157,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_executable() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o755), &config).as_u32(),
             0o755
@@ -167,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_strip_setuid() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o4755), &config).as_u32(),
             0o755
@@ -176,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_strip_setgid() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o2755), &config).as_u32(),
             0o755
@@ -185,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_strip_both() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o6755), &config).as_u32(),
             0o755
@@ -194,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_strip_world_writable() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o777), &config).as_u32(),
             0o775
@@ -203,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_world_readable_ok() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o644), &config).as_u32(),
             0o644
@@ -212,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_owner_writable_ok() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o600), &config).as_u32(),
             0o600
@@ -221,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_group_writable_ok() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o664), &config).as_u32(),
             0o664
@@ -230,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_edge_case_zero() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o000), &config).as_u32(),
             0o000
@@ -239,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_sticky_bit_preservation() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         let sanitized = sanitize_permissions(RawMode::new(0o1755), &config).as_u32();
         assert_eq!(sanitized & 0o1000, 0o1000, "sticky bit should be preserved");
         assert_eq!(sanitized, 0o1755, "full mode should be preserved");
@@ -247,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_sticky_bit_with_setuid_stripped() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         let sanitized = sanitize_permissions(RawMode::new(0o7755), &config).as_u32();
         assert_eq!(sanitized & 0o1000, 0o1000, "sticky bit should remain");
         assert_eq!(sanitized & 0o4000, 0, "setuid should be stripped");
@@ -259,8 +258,7 @@ mod tests {
     #[test]
     fn test_world_writable_allowed_with_config() {
         let mut config = SecurityConfig::default();
-        config.allowed.world_writable = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.world_writable = crate::Admit::Allow;
         let sanitized = sanitize_permissions(RawMode::new(0o777), &config).as_u32();
         assert_eq!(
             sanitized & 0o002,
@@ -274,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_world_writable_stripped_by_default() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         assert_eq!(
             sanitize_permissions(RawMode::new(0o777), &config).as_u32(),
             0o775,
@@ -284,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_world_writable_bit_only_stripped() {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         // 0o666 = rw-rw-rw-, only other-write (0o002) should be stripped ->
         // 0o664
         assert_eq!(

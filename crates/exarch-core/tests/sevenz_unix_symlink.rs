@@ -810,9 +810,10 @@ fn solid_block_with_a_link_follows_the_solid_policy() {
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(extract_archive(&path, TempDir::new().unwrap().path(), &refused).is_err());
 
-    let allowed = allow_symlinks()
-        .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024));
+    let allowed = allow_symlinks().with_solid_archives(exarch_core::SolidArchives::Allow(
+        exarch_core::SolidLimits::DEFAULT
+            .with_max_block_memory(exarch_core::non_zero!(100 * 1024 * 1024)),
+    ));
     assert_eq!(
         link_target(&path, &allowed),
         LinkTarget::Recorded(PathBuf::from("a.txt"))
@@ -950,9 +951,10 @@ fn links_count_against_the_entry_limit_in_list_and_verify() {
 }
 
 fn solid_config() -> SecurityConfig {
-    allow_symlinks()
-        .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024))
+    allow_symlinks().with_solid_archives(exarch_core::SolidArchives::Allow(
+        exarch_core::SolidLimits::DEFAULT
+            .with_max_block_memory(exarch_core::non_zero!(100 * 1024 * 1024)),
+    ))
 }
 
 #[cfg(unix)]

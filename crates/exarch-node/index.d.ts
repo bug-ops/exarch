@@ -421,16 +421,16 @@ export declare class SecurityConfig {
    */
   setParallelDecodeMemory(size?: number | undefined | null): this
   /**
-   * Sets the maximum memory that may be used to decompress a solid 7z block.
+   * Sets the maximum decoded size of a solid 7z block, in bytes.
    *
-   * Solid archives decompress entire blocks into memory before individual
-   * entries can be read. This limit caps that allocation to prevent
-   * memory exhaustion from crafted archives. Default: 512 MB.
+   * The limit bounds the decoded volume of each solid block, not resident
+   * memory. It exists only while solid archives are allowed, so call
+   * `setAllowSolidArchives(true)` first. Default: 512 MB.
    *
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_solid_block_memory`)
-   * if size is negative or zero.
+   * if size is negative or zero, or while solid archives are not allowed.
    */
   setMaxSolidBlockMemory(size: number): this
   /** Sets whether to preserve permissions from archive. */
@@ -502,8 +502,11 @@ export declare class SecurityConfig {
    * `null` when decoding runs on one thread.
    */
   get parallelDecodeMemory(): number | null
-  /** Maximum memory in bytes for decompressing a solid 7z block. */
-  get maxSolidBlockMemory(): number
+  /**
+   * Maximum decoded size in bytes of a solid 7z block, or `null` while
+   * solid archives are not allowed.
+   */
+  get maxSolidBlockMemory(): number | null
   /**
    * List of allowed file extensions.
    *

@@ -161,9 +161,7 @@ fn measure_extract_peak_bytes(bytes: &[u8], budget: u64) -> usize {
     {
         let temp = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default()
-            .with_max_tar_metadata_bytes(std::num::NonZeroU64::new(budget).unwrap())
-            .validate()
-            .unwrap();
+            .with_max_tar_metadata_bytes(std::num::NonZeroU64::new(budget).unwrap());
         let archive = TarArchive::new(Cursor::new(bytes));
         // Outcome (Ok or Err) is irrelevant here — only peak memory matters.
         let _ = archive.extract(

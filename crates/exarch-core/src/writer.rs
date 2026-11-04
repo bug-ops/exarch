@@ -249,12 +249,10 @@ pub fn create_to_writer_with_progress<P: AsRef<Path>>(
     config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
-    let config = config.clone().validate()?;
-
     match writer.destination {
-        Destination::Tar { stream, codec } => write_tar(stream, codec, sources, &config, progress),
+        Destination::Tar { stream, codec } => write_tar(stream, codec, sources, config, progress),
         Destination::Zip { stream } => {
-            write_zip(stream, sources, &config, progress).map(|(report, _)| report)
+            write_zip(stream, sources, config, progress).map(|(report, _)| report)
         }
     }
 }

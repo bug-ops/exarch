@@ -10,7 +10,9 @@ use super::redaction::sanitize_io_error_for_error;
 use super::types::ArchiveError;
 use super::types::PartialWrites;
 use super::types::PolicySetting;
+use super::types::QuotaKind;
 use super::types::ReaderFormatError;
+use super::types::ZipBombScope;
 use crate::ExtractionReport;
 use crate::closed_enum::closed_enum;
 
@@ -240,11 +242,19 @@ pub enum FfiKind {
     /// Hardlink target escapes the destination.
     HardlinkEscape,
     /// Compression ratio limit exceeded.
-    ZipBomb,
+    #[non_exhaustive]
+    ZipBomb {
+        /// What the refused ratio was measured over.
+        scope: ZipBombScope,
+    },
     /// ZIP structure is ambiguous or self-contradictory.
     ZipInconsistency,
     /// A quota was exceeded.
-    QuotaExceeded,
+    #[non_exhaustive]
+    QuotaExceeded {
+        /// The quota dimension that was exceeded.
+        kind: QuotaKind,
+    },
     /// Denied by security policy.
     #[non_exhaustive]
     SecurityViolation {
@@ -293,9 +303,9 @@ impl FfiKind {
             Self::PathTraversal
             | Self::SymlinkEscape
             | Self::HardlinkEscape
-            | Self::ZipBomb
+            | Self::ZipBomb { .. }
             | Self::ZipInconsistency
-            | Self::QuotaExceeded
+            | Self::QuotaExceeded { .. }
             | Self::InvalidArchive { .. }
             | Self::Io(_)
             | Self::InvalidPermissions
@@ -330,9 +340,9 @@ impl FfiKind {
             | Self::PathTraversal
             | Self::SymlinkEscape
             | Self::HardlinkEscape
-            | Self::ZipBomb
+            | Self::ZipBomb { .. }
             | Self::ZipInconsistency
-            | Self::QuotaExceeded
+            | Self::QuotaExceeded { .. }
             | Self::Io(_)
             | Self::InvalidPermissions
             | Self::SourceNotFound
@@ -351,9 +361,9 @@ impl FfiKind {
             Self::PathTraversal => ErrorCode::PathTraversal,
             Self::SymlinkEscape => ErrorCode::SymlinkEscape,
             Self::HardlinkEscape => ErrorCode::HardlinkEscape,
-            Self::ZipBomb => ErrorCode::ZipBomb,
+            Self::ZipBomb { .. } => ErrorCode::ZipBomb,
             Self::ZipInconsistency => ErrorCode::ZipInconsistency,
-            Self::QuotaExceeded => ErrorCode::QuotaExceeded,
+            Self::QuotaExceeded { .. } => ErrorCode::QuotaExceeded,
             Self::SecurityViolation { .. } => ErrorCode::SecurityViolation,
             Self::InvalidArchive { .. } => ErrorCode::InvalidArchive,
             Self::Io(_) => ErrorCode::IoError,
@@ -498,9 +508,13 @@ impl ArchiveError {
             Self::PathTraversal { .. } => FfiKind::PathTraversal,
             Self::SymlinkEscape { .. } => FfiKind::SymlinkEscape,
             Self::HardlinkEscape { .. } => FfiKind::HardlinkEscape,
-            Self::ZipBomb(_) => FfiKind::ZipBomb,
+            Self::ZipBomb(details) => FfiKind::ZipBomb {
+                scope: details.scope(),
+            },
             Self::ZipInconsistency(_) => FfiKind::ZipInconsistency,
-            Self::QuotaExceeded { .. } => FfiKind::QuotaExceeded,
+            Self::QuotaExceeded { resource } => FfiKind::QuotaExceeded {
+                kind: resource.kind(),
+            },
             Self::SecurityViolation { kind } => FfiKind::SecurityViolation {
                 relaxable_by: kind.relaxable_by(),
                 sub_code: kind.sub_code(),
@@ -636,7 +650,13 @@ mod tests {
         };
         assert_eq!(kind.relaxable_by(), None);
         assert_eq!(kind.sub_code().map(SubCode::as_str), Some("TAR_AMBIGUITY"));
-        assert_eq!(FfiKind::ZipBomb.sub_code(), None);
+        assert_eq!(
+            FfiKind::ZipBomb {
+                scope: ZipBombScope::Entry
+            }
+            .sub_code(),
+            None
+        );
     }
 
     /// Regression test for #462: `PathTraversal` carries an

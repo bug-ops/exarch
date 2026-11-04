@@ -36,7 +36,7 @@ mod common;
 const MAX_HOPS: usize = 40;
 
 fuzz_target!(|data: &[u8]| {
-    let config = common::unvalidated();
+    let config = common::config();
     for model in [PathModel::Host, PathModel::Portable] {
         for skip_duplicates in [true, false] {
             let Ok(reader) = ArchiveReader::from_bytes(data, None) else {

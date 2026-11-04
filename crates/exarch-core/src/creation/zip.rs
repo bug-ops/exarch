@@ -12,7 +12,6 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::ZipBombDetails;
 use crate::ZipBombScope;
-use crate::config::Validated;
 use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
@@ -39,7 +38,7 @@ use zip::write::SimpleFileOptions;
 /// use exarch_core::creation::zip::create_zip;
 /// use std::path::Path;
 ///
-/// let config = CreationConfig::default().validate()?;
+/// let config = CreationConfig::default();
 /// let report = create_zip(Path::new("output.zip"), &[Path::new("src")], &config)?;
 /// println!("Added {} files", report.files_added);
 /// # Ok::<(), exarch_core::ArchiveError>(())
@@ -54,7 +53,7 @@ use zip::write::SimpleFileOptions;
 pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
-    config: &CreationConfig<Validated>,
+    config: &CreationConfig,
 ) -> Result<CreationReport> {
     create_zip_with_progress(output, sources, config, &mut NoopProgress)
 }
@@ -114,7 +113,7 @@ pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
 ///     }
 /// }
 ///
-/// let config = CreationConfig::default().validate()?;
+/// let config = CreationConfig::default();
 /// let mut progress = SimpleProgress;
 /// let report = create_zip_with_progress(
 ///     Path::new("output.zip"),
@@ -135,7 +134,7 @@ pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
 pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
-    config: &CreationConfig<Validated>,
+    config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     #[expect(
@@ -172,7 +171,7 @@ pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
     mut out: W,
     sources: &[P],
-    config: &CreationConfig<Validated>,
+    config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<(CreationReport, W)> {
     if out.stream_position()? != 0 {
@@ -324,7 +323,7 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     zip: &mut ZipWriter<W>,
     file_path: &Path,
     archive_path: &Path,
-    config: &CreationConfig<Validated>,
+    config: &CreationConfig,
     report: &mut CreationReport,
     options: &SimpleFileOptions,
     progress: &mut dyn ProgressCallback,
@@ -418,7 +417,7 @@ impl crate::formats::traits::FormatCreator for ZipCreator {
         &self,
         output: &std::path::Path,
         sources: &[&std::path::Path],
-        config: &CreationConfig<Validated>,
+        config: &CreationConfig,
         progress: &mut dyn ProgressCallback,
     ) -> crate::Result<crate::creation::CreationReport> {
         create_zip_with_progress(output, sources, config, progress)
@@ -445,9 +444,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .validate()
-            .unwrap();
+            .with_include_hidden(true);
 
         let report = create_zip(&output, &[source_dir.path().join("test.txt")], &config).unwrap();
 
@@ -460,7 +457,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("data"), content).unwrap();
-        let config = CreationConfig::default().validate().unwrap();
+        let config = CreationConfig::default();
         create_zip(
             temp.path().join("out.zip"),
             &[source_dir.path().join("data")],
@@ -491,7 +488,7 @@ mod tests {
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("data"), [b'B'; 5000]).unwrap();
         let output = temp.path().join("out.zip");
-        let config = CreationConfig::default().validate().unwrap();
+        let config = CreationConfig::default();
         let report = create_zip(&output, &[source_dir.path().join("data")], &config).unwrap();
         let needed = needed_ratio(&report.warnings[0]);
 
@@ -534,9 +531,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .validate()
-            .unwrap();
+            .with_include_hidden(true);
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
@@ -559,9 +554,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_compression_level(CompressionLevel::try_from(9u8).unwrap())
-            .validate()
-            .unwrap();
+            .with_compression_level(CompressionLevel::try_from(9u8).unwrap());
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
@@ -586,9 +579,7 @@ mod tests {
             let output = temp.path().join(format!("output_{level}.zip"));
             let config = CreationConfig::default()
                 .with_exclude_patterns(vec![])
-                .with_compression_level(CompressionLevel::try_from(level).unwrap())
-                .validate()
-                .unwrap();
+                .with_compression_level(CompressionLevel::try_from(level).unwrap());
 
             let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
             assert_eq!(report.files_added, 1);
@@ -609,9 +600,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .validate()
-            .unwrap();
+            .with_include_hidden(true);
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
@@ -652,9 +641,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_preserve_permissions(true)
-            .validate()
-            .unwrap();
+            .with_preserve_permissions(true);
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
         assert_eq!(report.files_added, 1);
@@ -687,9 +674,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .validate()
-            .unwrap();
+            .with_include_hidden(true);
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
@@ -713,9 +698,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .validate()
-            .unwrap();
+            .with_include_hidden(true);
 
         // Create archive
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
@@ -762,9 +745,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .validate()
-            .unwrap();
+            .with_include_hidden(true);
 
         create_zip(&output, &[source_dir.path()], &config).unwrap();
 
@@ -792,7 +773,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.zip");
 
-        let config = CreationConfig::default().validate().unwrap();
+        let config = CreationConfig::default();
         let result = create_zip(&output, &[Path::new("/nonexistent/path")], &config);
 
         assert!(result.is_err());
@@ -844,9 +825,7 @@ mod tests {
         // Set max file size to 100 bytes
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_max_file_size(crate::non_zero!(100))
-            .validate()
-            .unwrap();
+            .with_max_file_size(crate::non_zero!(100));
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
@@ -874,9 +853,7 @@ mod tests {
         // Don't follow symlinks (default)
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .validate()
-            .unwrap();
+            .with_include_hidden(true);
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
@@ -906,9 +883,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
             .with_include_hidden(true)
-            .with_follow_symlinks(true)
-            .validate()
-            .unwrap();
+            .with_follow_symlinks(true);
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
@@ -968,9 +943,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .validate()
-            .unwrap();
+            .with_include_hidden(true);
 
         let mut progress = TestProgress::default();
 

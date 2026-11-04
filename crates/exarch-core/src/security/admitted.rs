@@ -8,7 +8,6 @@
 
 use crate::Result;
 use crate::SecurityConfig;
-use crate::config::Validated;
 use crate::security::hardlink::HardlinkTarget;
 use crate::security::permissions::RawMode;
 use crate::security::permissions::SanitizedMode;
@@ -45,7 +44,7 @@ impl EntrySize {
 
     /// Checks the declared sizes against the configured compression-ratio
     /// limit; a no-op when the format records no compressed size.
-    pub(crate) fn check_ratio(self, config: &SecurityConfig<Validated>) -> Result<()> {
+    pub(crate) fn check_ratio(self, config: &SecurityConfig) -> Result<()> {
         if let Some(compressed) = self.compressed {
             validate_compression_ratio(compressed, self.uncompressed, config)?;
         }
@@ -81,7 +80,7 @@ impl<P: ParentCheck> PendingFile<P> {
     pub(super) fn admit(
         self,
         quota: &mut QuotaTracker,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<ValidatedFile<P>> {
         let permit = quota.reserve(self.size.uncompressed.0, config)?;
         self.size.check_ratio(config)?;
@@ -152,7 +151,7 @@ mod tests {
     fn a_file_carries_its_path_and_sanitized_mode() {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut core = ValidatorCore::new(&config);
         let ctx = core.context::<HostFs>();
 
@@ -176,7 +175,7 @@ mod tests {
     fn a_refused_file_yields_no_proof() {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let mut core = ValidatorCore::new(&config);
         let ctx = core.context::<HostFs>();
 
@@ -192,9 +191,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let config = SecurityConfig::default()
             .with_allow_symlinks(true)
-            .with_allow_hardlinks(true)
-            .validate()
-            .unwrap();
+            .with_allow_hardlinks(true);
         let mut core = ValidatorCore::new(&config);
 
         let ctx = core.context::<HostFs>();

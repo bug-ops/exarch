@@ -35,7 +35,7 @@ fn expect_err<T>(result: Result<T, ArchiveError>, setting: PolicySetting) -> Arc
 fn refusal(setting: PolicySetting) -> ArchiveError {
     let temp = TempDir::new().expect("temp dir");
     let dest = DestDir::new(temp.path()).expect("dest dir");
-    let config = SecurityConfig::default().validate().expect("valid config");
+    let config = SecurityConfig::default();
     match setting {
         PolicySetting::Symlinks => expect_err(require_symlinks_allowed(&config), setting),
         PolicySetting::Hardlinks => expect_err(require_hardlinks_allowed(&config), setting),
@@ -86,10 +86,7 @@ fn every_policy_setting_has_a_refusal_that_reports_it() {
 fn symlink_target_checks_report_their_settings() {
     let temp = TempDir::new().expect("temp dir");
     let dest = DestDir::new(temp.path()).expect("dest dir");
-    let config = SecurityConfig::default()
-        .with_allow_symlinks(true)
-        .validate()
-        .expect("valid config");
+    let config = SecurityConfig::default().with_allow_symlinks(true);
     let link = SafePath::validate(Path::new("link"), &dest, &config).expect("link path");
 
     let banned = SafeSymlink::validate(&link, Path::new("sub/.git/x"), &dest, &config);
@@ -110,7 +107,7 @@ fn symlink_target_checks_report_their_settings() {
 fn constant_refusals_carry_no_setting() {
     let temp = TempDir::new().expect("temp dir");
     let dest = DestDir::new(temp.path()).expect("dest dir");
-    let config = SecurityConfig::default().validate().expect("valid config");
+    let config = SecurityConfig::default();
     let err = expect_err(
         SafePath::validate(Path::new("a\0b"), &dest, &config),
         PolicySetting::BannedComponents,

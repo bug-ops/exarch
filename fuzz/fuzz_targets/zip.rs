@@ -11,8 +11,8 @@ mod common;
 
 fuzz_target!(|data: &[u8]| {
     for config in [
-        common::validated(),
-        common::validated_ignoring_zip_structure(),
+        common::config(),
+        common::config_ignoring_zip_structure(),
     ] {
         if let Ok(mut archive) = ZipArchive::new(Cursor::new(data)) {
             let _ = archive.list(config);

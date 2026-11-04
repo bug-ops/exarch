@@ -47,7 +47,7 @@ fn ghsa_wcmx_sibling_reached_via_symlink_is_rejected() {
     let escape_link = dest_root.join("escape");
     symlink(&sibling, &escape_link).unwrap();
 
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let entry_path = PathBuf::from("escape/secret.txt");
 
     let result = SafePath::validate(&entry_path, &dest, &config);

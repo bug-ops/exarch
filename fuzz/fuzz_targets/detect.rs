@@ -51,7 +51,7 @@ fn check_stream_replay(bytes: &[u8]) {
         return;
     };
     let format = streamed.format();
-    let config = common::unvalidated();
+    let config = common::config();
     let options = ListOptions::default();
 
     let via_stream = list_reader(streamed, config, &options);

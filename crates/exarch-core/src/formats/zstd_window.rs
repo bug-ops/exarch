@@ -13,7 +13,6 @@ use std::io::Read;
 use std::io::Seek;
 use std::num::NonZeroU64;
 
-use crate::Validated;
 use crate::config::SecurityConfig;
 
 const FRAME_MAGIC: u32 = 0xFD2F_B528;
@@ -42,7 +41,7 @@ impl ZstdWindowLog {
     const MIN: u32 = 10;
 
     /// The limit `config.max_decoder_memory` implies.
-    pub fn of(config: &SecurityConfig<Validated>) -> Self {
+    pub fn of(config: &SecurityConfig) -> Self {
         Self::for_memory(config.max_decoder_memory)
     }
 

@@ -10,7 +10,7 @@ use libfuzzer_sys::fuzz_target;
 mod common;
 
 fuzz_target!(|data: &[u8]| {
-    let config = common::validated();
+    let config = common::config();
 
     let mut archive = TarArchive::new(Cursor::new(data));
     let _ = archive.list(config);

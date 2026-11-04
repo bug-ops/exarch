@@ -390,7 +390,7 @@ fn a_caller_decoded_stream_is_not_bounded_by_ratio() {
     let decoder = flate2::read::GzDecoder::new(Cursor::new(gz));
     let work = TempDir::new().unwrap();
 
-    let config = tight_config().validate().unwrap();
+    let config = tight_config();
     let report = TarArchive::new(decoder)
         .extract(
             &work.path().join("out"),

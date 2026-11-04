@@ -12,7 +12,7 @@ use tempfile::TempDir;
 mod common;
 
 fuzz_target!(|data: &[u8]| {
-    let config = common::unvalidated();
+    let config = common::config();
     // Atomic extraction (rename-into-place) is also this pipeline's default
     // in most callers and was the path GHSA-x8wr lived in; exercise it here
     // rather than only the non-atomic write-in-place path.

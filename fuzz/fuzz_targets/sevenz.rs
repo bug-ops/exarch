@@ -10,7 +10,7 @@ use libfuzzer_sys::fuzz_target;
 mod common;
 
 fuzz_target!(|data: &[u8]| {
-    let config = common::validated();
+    let config = common::config();
 
     if let Ok(mut archive) = SevenZArchive::new(Cursor::new(data)) {
         let _ = archive.list(config);

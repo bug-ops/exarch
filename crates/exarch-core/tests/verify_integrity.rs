@@ -541,9 +541,10 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn solid_config() -> SecurityConfig {
-    SecurityConfig::default()
-        .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024))
+    SecurityConfig::default().with_solid_archives(exarch_core::SolidArchives::Allow(
+        exarch_core::SolidLimits::DEFAULT
+            .with_max_block_memory(exarch_core::non_zero!(100 * 1024 * 1024)),
+    ))
 }
 
 #[test]
@@ -716,7 +717,7 @@ fn tar_gnu_sparse_entry_is_refused() {
 
 #[test]
 fn tar_archive_trait_verify_reads_the_trailer_within_the_cap() {
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let cap = usize::try_from(config.max_tar_metadata_bytes.get()).unwrap();
     let mut tar = three_entries();
     tar.extend(std::iter::repeat_n(0x55u8, 4096));

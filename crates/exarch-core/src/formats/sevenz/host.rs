@@ -17,7 +17,6 @@ use super::write::write_file_with_permit;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
-use crate::config::Validated;
 use crate::formats::common;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
@@ -127,7 +126,7 @@ pub(super) struct SevenZHostTarget<'a> {
 
 impl<'a> SevenZHostTarget<'a> {
     /// Creates `output_dir` if needed and a target writing into it.
-    pub(super) fn create(output_dir: &Path, config: &'a SecurityConfig<Validated>) -> Result<Self> {
+    pub(super) fn create(output_dir: &Path, config: &'a SecurityConfig) -> Result<Self> {
         Ok(Self {
             inner: HostTarget::create(output_dir, config)?,
         })
@@ -244,7 +243,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
 struct HostPrePass<'a> {
     core: ValidatorCore<'a>,
     dest: &'a DestDir,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
     options: SinkOptions,
 }
 
@@ -293,7 +292,7 @@ impl PrePass for HostPrePass<'_> {
 impl SevenZTarget for SevenZHostTarget<'_> {
     fn with_pre_pass(
         &self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: SinkOptions,
         run: &mut dyn FnMut(&mut dyn PrePass) -> Result<()>,
     ) -> Result<()> {

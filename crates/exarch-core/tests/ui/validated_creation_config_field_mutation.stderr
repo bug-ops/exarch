@@ -1,7 +1,0 @@
-error[E0594]: cannot assign to data in dereference of `CreationConfig<Validated>`
-  --> tests/ui/validated_creation_config_field_mutation.rs:14:5
-   |
-14 |     cfg.compression_level = Default::default();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot assign
-   |
-   = help: trait `DerefMut` is required to modify through a dereference, but it is not implemented for `CreationConfig<Validated>`

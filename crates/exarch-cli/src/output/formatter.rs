@@ -153,6 +153,31 @@ impl Serialize for JsonKind {
     }
 }
 
+/// The typed discriminants of the refusal behind a verify issue: the same
+/// code, sub-code and policy setting a failed extraction reports, so a script
+/// need not parse the message.
+#[derive(Debug, Serialize)]
+pub struct JsonRefusal {
+    pub code: JsonKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_code: Option<JsonId<SubCode>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relaxable_by: Option<JsonId<PolicySetting>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting: Option<JsonId<ConfigSetting>>,
+}
+
+impl From<&FfiKind> for JsonRefusal {
+    fn from(kind: &FfiKind) -> Self {
+        Self {
+            code: JsonKind::Code(kind.code()),
+            sub_code: kind.sub_code().map(JsonId),
+            relaxable_by: kind.relaxable_by().map(JsonId),
+            setting: kind.setting().map(JsonId),
+        }
+    }
+}
+
 /// One skipped entry in a report's bounded sample.
 #[derive(Debug, Serialize)]
 pub struct JsonSkip {

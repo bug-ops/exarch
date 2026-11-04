@@ -263,6 +263,8 @@ document to stdout — a `status: "success"` envelope carrying the full report (
 entry: a single valid JSON document, parseable with a plain `json.loads(stdout)`. The process
 still exits `1` for a FAIL status.
 
+A refusal issue (everything `extract` would also refuse) carries the typed fields of the error extraction raises: `code` (the `error.kind` names, such as `SecurityViolation`), `sub_code` and, where a policy flag relaxes it, `relaxable_by` and `setting`, so no script needs to parse `message`; an observation `verify` makes on its own has none of them. An executable file reports its raw mode as a numeric `mode` (the old `context` string is gone). Verified live: a TAR symlink without `--allow-symlinks` gives `code` `SecurityViolation`, `sub_code` `LINK_POLICY`, `relaxable_by` `symlinks`.
+
 `data.issues[].category` is one of `"Path Traversal"`, `"Symlink Escape"`, `"Hardlink Escape"`,
 `"Zip Bomb"`, `"Invalid Permissions"`, `"Quota Exceeded"`, `"Security Policy"`,
 `"Invalid Archive"`, `"Suspicious Path"`, `"Executable File"`, `"Corrupt Data"`,
@@ -560,6 +562,8 @@ into a destination that does not exist yet, or with `--atomic`, the atomic singl
 Only the Rust, Node and Python extract entry points, which do not run that pass, report a partial
 extraction with the entries before it kept. A failed `extract --atomic` reports
 `writes: "rolled_back"` and leaves the destination unchanged.
+
+The conflict check asks the library where each entry would land (absolute and Windows-prefixed names, `./` components and paths through earlier links resolved as extraction resolves them, entries extraction would not create left out). Anything already at the landing of a file, link or hardlink is a conflict, and so is a non-directory at the landing of a directory; an existing directory under a directory entry is not. Verified live on a `./a.txt` entry, a symlink entry over a file, a file entry over a dangling symlink and a directory over a directory. `list -l` sizes now count regular files only (a link or directory shows size `0`).
 
 Note: `extract` lists the archive first (`list_archive()`, sharing `--max-file-count`,
 `--max-total-size`, and `--max-file-size` with the extraction config) to detect output

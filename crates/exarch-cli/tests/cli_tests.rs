@@ -1880,6 +1880,77 @@ fn test_create_refuses_unsupported_exclude_patterns() {
     }
 }
 
+/// The conflict pre-check asks the core where each entry lands, so `./` names,
+/// links, dangling-link occupants and directories are all judged by what
+/// extraction would do (#933).
+#[cfg(unix)]
+#[test]
+fn test_conflict_precheck_follows_the_landing_of_every_entry_kind() {
+    type TarEntries<'a> = Vec<(&'a str, tar::EntryType, &'a str)>;
+    let cases: Vec<(TarEntries<'_>, &str, bool)> = vec![
+        (
+            vec![("./a.txt", tar::EntryType::Regular, "x")],
+            "a.txt",
+            true,
+        ),
+        (vec![("l", tar::EntryType::Symlink, "t")], "l", true),
+        (vec![("d/", tar::EntryType::Directory, "")], "d", false),
+        (vec![("f", tar::EntryType::Regular, "x")], "f", true),
+    ];
+    for (entries, occupant, conflicts) in cases {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let archive = temp.path().join("c.tar");
+        tar_entries_archive(&archive, &entries);
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("create destination");
+        if occupant == "d" {
+            std::fs::create_dir(out.join(occupant)).expect("occupant dir");
+        } else if occupant == "f" {
+            std::os::unix::fs::symlink("nowhere", out.join(occupant)).expect("dangling occupant");
+        } else {
+            std::fs::write(out.join(occupant), "old").expect("occupant file");
+        }
+
+        let mut cmd = exarch_cmd();
+        cmd.arg("extract")
+            .arg("--allow-symlinks")
+            .arg(&archive)
+            .arg(&out);
+        if conflicts {
+            cmd.assert()
+                .code(1)
+                .stderr(predicates::str::contains("already exist"));
+        } else {
+            cmd.assert().success();
+        }
+    }
+}
+
+/// A verify issue carries the same code, sub-code and policy setting a failed
+/// extraction reports (#899).
+#[test]
+fn test_verify_issues_carry_typed_refusal_fields() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("l.tar");
+    tar_entries_archive(&archive, &[("l", tar::EntryType::Symlink, "t")]);
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("verify")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    let issue = &json["data"]["issues"][0];
+    assert_eq!(issue["code"], "SecurityViolation");
+    assert_eq!(issue["sub_code"], "LINK_POLICY");
+    assert_eq!(issue["relaxable_by"], "symlinks");
+    assert!(issue.get("context").is_none());
+}
+
 #[test]
 fn test_fractional_compression_ratio_is_accepted() {
     exarch_cmd()
@@ -6054,7 +6125,8 @@ fn test_extract_directory_over_file_names_the_entry() {
 }
 
 /// Regression test for #802: the occupant may be a file the destination
-/// already held.
+/// already held. The pre-check names it, since a non-directory at the landing
+/// of a directory entry is a conflict (#933).
 #[test]
 fn test_extract_directory_over_preexisting_file_names_the_entry() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -6071,7 +6143,8 @@ fn test_extract_directory_over_preexisting_file_names_the_entry() {
         .assert()
         .code(1)
         .stderr(
-            predicate::str::contains("refusing to replace the existing file at x")
+            predicate::str::contains("already exists")
+                .and(predicate::str::contains("out/x"))
                 .and(predicate::str::contains("os error").not()),
         );
 }

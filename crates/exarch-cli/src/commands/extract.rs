@@ -1049,29 +1049,32 @@ impl ConflictsChecked {
     /// Fails with the conflicting paths in [`WriteMode::Safe`]; passes in
     /// every other mode, where files are overwritten or the extraction is
     /// staged and refuses on its own.
+    ///
+    /// Where each entry lands comes from the core, which resolves absolute and
+    /// Windows-prefixed names, `.` components and paths through earlier links
+    /// the way extraction does and leaves out the entries it would not create.
+    /// Anything already at the landing of a file, link or hardlink conflicts,
+    /// and so does a non-directory at the landing of a directory.
     fn check(
         mode: WriteMode,
         manifest: &ArchiveManifest,
         config: &SecurityConfig,
-        allow_absolute_paths: bool,
         output_dir: &Path,
     ) -> Result<Self> {
         if mode != WriteMode::Safe {
             return Ok(Self(()));
         }
         let conflicts: Vec<_> = manifest
-            .entries()
-            .iter()
-            .filter(|e| is_extracted_file(e, config))
-            .map(|e| {
-                let relative = if allow_absolute_paths && e.path.is_absolute() {
-                    e.path.strip_prefix("/").unwrap_or(&e.path)
-                } else {
-                    &e.path
+            .landing_paths(config)
+            .filter_map(|(entry, landing)| {
+                let target = output_dir.join(landing.as_path());
+                let occupant = target.symlink_metadata().ok()?;
+                let conflicts = match entry.kind {
+                    ManifestEntryKind::Directory => !occupant.is_dir(),
+                    _ => true,
                 };
-                output_dir.join(relative)
+                conflicts.then_some(target)
             })
-            .filter(|p| p.exists())
             .collect();
 
         if conflicts.is_empty() {
@@ -1177,13 +1180,7 @@ fn plan_extraction(
         None
     } else {
         let listed = list_for_extract(&args.archive, config, reuse)?;
-        let conflicts = ConflictsChecked::check(
-            mode,
-            listed.manifest(),
-            config,
-            args.allow_absolute_paths,
-            output_dir,
-        )?;
+        let conflicts = ConflictsChecked::check(mode, listed.manifest(), config, output_dir)?;
         Some((listed, conflicts))
     };
 

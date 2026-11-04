@@ -1927,6 +1927,8 @@ mod tests {
         (tag, t.occupant(Path::new(rel)))
     }
 
+    type Setup = fn(&mut VirtualTree);
+
     const KELVIN: &str = "\u{212A}";
 
     fn components(spelling: &str, count: usize) -> String {
@@ -1942,7 +1944,6 @@ mod tests {
         let alias = components(KELVIN, count);
         assert!(stored.len() <= MAX_PATH_LEN && alias.len() > MAX_PATH_LEN);
         let long = "n".repeat(MAX_PATH_LEN);
-        type Setup = fn(&mut VirtualTree);
         let cases: Vec<(&str, Setup, String)> = vec![
             ("no link, short", |_| {}, "a/b".to_owned()),
             ("no link, long", |_| {}, format!("a/{long}")),

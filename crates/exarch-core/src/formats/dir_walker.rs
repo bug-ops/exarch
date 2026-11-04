@@ -431,9 +431,8 @@ impl Followed {
 impl Followed {
     /// Resolves the link by its absolute path: there is no pinned
     /// `readlinkat` on this platform.
-    // TODO(#895-followup: Windows/WASI handle-relative walk, canonical_within):
-    // realpath makes acceptance depend on the destination's absolute length
-    // there.
+    // TODO(#949): resolve handle-relatively on Windows and WASI; realpath makes
+    // acceptance depend on the destination's absolute length there.
     fn of(root: &PinnedRoot, _site: &LinkSite<'_>, walked: &Path) -> Self {
         let dest = root.dest();
         match classify_link(&HostFs, &dest.as_path().join(walked), dest) {

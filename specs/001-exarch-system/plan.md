@@ -462,7 +462,7 @@ heuristic: assumes single solid block (actual block boundaries not exposed by
 | Unit | `cargo test` / nextest | Individual security checks, config validation, path parsing | Per-module in `#[cfg(test)]` blocks |
 | Property | `proptest` | Path traversal variants, arbitrary archive entry paths | In `security/path.rs`, `security/symlink.rs` |
 | Integration | nextest + fixture archives | Full extract/create/list/verify cycles per format | `tests/` directory; fixture archives in `tests/fixtures/` |
-| Benchmark | `criterion` | Extraction throughput, creation throughput, validation overhead, progress overhead | `exarch-core/benches/`; run with `cargo bench -p exarch-core` |
+| Benchmark | `criterion` | Extraction throughput, creation throughput, validation overhead, progress overhead | `exarch-core/benches/`; run with `cargo bench -p exarch-core --features testing` |
 | Memory profiling | `dhat` | Heap allocation patterns during extraction | `exarch-core/benches/` |
 | Python | `pytest` + `maturin develop` | Python API, GIL behavior, error mapping | `exarch-python/tests/` |
 | Node.js | `npm test` | Async Promise API, error mapping | `exarch-node/` |

@@ -226,7 +226,7 @@ fn test_cve_xxxx_description() {
 ./benches/run_all.sh --quick
 
 # Rust only
-cargo bench -p exarch-core
+cargo bench -p exarch-core --features testing
 ```
 
 ## Pull Request Process

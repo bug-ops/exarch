@@ -81,7 +81,7 @@ status: permanent
 ## VI. Performance
 
 - Extraction throughput regressions > 10% vs baseline require a `rust-performance-engineer` review
-- Benchmarks in `exarch-core/benches/` (creation, extraction, validation, progress); run with `cargo bench -p exarch-core`
+- Benchmarks in `exarch-core/benches/` (creation, extraction, validation, progress); run with `cargo bench -p exarch-core --features testing`
 - `BufReader` wraps file handles for all TAR format handlers
 
 ## VII. Simplicity

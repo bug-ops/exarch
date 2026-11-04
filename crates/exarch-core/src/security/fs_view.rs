@@ -991,6 +991,11 @@ pub struct VirtualTree {
     collisions: Vec<NameCollision>,
     /// Directories holding at least one empty merge.
     empty_merge_nodes: Vec<usize>,
+    /// Whether any symlink was ever stored: until one is, no path can land
+    /// anywhere but where it is spelled.
+    links_seen: bool,
+    /// Whether any name was ever found under another spelling.
+    aliases_seen: bool,
 }
 
 impl VirtualTree {
@@ -1040,6 +1045,8 @@ impl VirtualTree {
             recording,
             collisions: Vec::new(),
             empty_merge_nodes: Vec::new(),
+            links_seen: false,
+            aliases_seen: false,
         }
     }
 
@@ -1105,21 +1112,60 @@ impl VirtualTree {
         node: Node,
         limits: LandingLimits,
     ) -> Result<SafePath, PlaceError> {
-        if limits == LandingLimits::Enforced
-            && self
-                .projected_landing(rel.as_path())
-                .is_some_and(|landing| {
-                    projected_landing_within_limits(self.model, &landing, Path::new("")).is_err()
-                })
-        {
-            return Err(PlaceError::LandingTooLong);
-        }
+        self.guard_landing(rel.as_path(), limits)?;
         let landed = self.place_path(rel.as_path(), node)?;
         if limits == LandingLimits::Enforced {
-            projected_landing_within_limits(self.model, &landed, Path::new(""))
+            self.model
+                .check_name_lengths(&landed)
                 .map_err(|_| PlaceError::LandingTooLong)?;
         }
         Ok(SafePath::from_normalized(landed)?)
+    }
+
+    /// [`project_landing`](Self::project_landing) for a caller that only needs
+    /// the verdict, such as `verify`.
+    ///
+    /// While no symlink was ever stored and no name was found under another
+    /// spelling, every path lands where it is spelled, so the one walk of the
+    /// path by the length check before the insert settles it and the landing is
+    /// never built. Any symlink or alias in the tree takes the full projection.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`project_landing`](Self::project_landing).
+    pub(crate) fn check_landing<P: ParentCheck>(
+        &mut self,
+        rel: &SafePath<P>,
+        node: Node,
+        limits: LandingLimits,
+    ) -> Result<(), PlaceError> {
+        let links_before = self.links_seen;
+        self.guard_landing(rel.as_path(), limits)?;
+        let landed = self.insert_node(rel.as_path(), node)?;
+        if limits == LandingLimits::Enforced && (links_before || self.aliases_seen) {
+            let landing = self.landing_path(rel.as_path(), landed);
+            self.model
+                .check_name_lengths(&landing)
+                .map_err(|_| PlaceError::LandingTooLong)?;
+        }
+        Ok(())
+    }
+
+    /// Refuses, before anything is inserted, a landing the model cannot hold.
+    fn guard_landing(&self, rel: &Path, limits: LandingLimits) -> Result<(), PlaceError> {
+        if limits != LandingLimits::Enforced {
+            return Ok(());
+        }
+        let too_long = if self.links_seen {
+            self.projected_landing(rel)
+                .is_some_and(|landing| self.model.check_name_lengths(&landing).is_err())
+        } else {
+            self.model.check_name_lengths(rel).is_err()
+        };
+        if too_long {
+            return Err(PlaceError::LandingTooLong);
+        }
+        Ok(())
     }
 
     /// Where `rel` would land, read from the tree without inserting anything:
@@ -1152,17 +1198,21 @@ impl VirtualTree {
     }
 
     fn place_path(&mut self, rel: &Path, node: Node) -> Result<PathBuf, PlaceError> {
-        Ok(self
-            .insert_node(rel, node)?
-            .map_or_else(PathBuf::new, |landed| {
-                let leaf = landed.existing.map_or_else(
-                    || rel.file_name(),
-                    |id| Some(self.node(id).name.as_os_str()),
-                );
-                let mut resolved = self.path_of(landed.parent);
-                resolved.extend(leaf);
-                resolved
-            }))
+        let landed = self.insert_node(rel, node)?;
+        Ok(self.landing_path(rel, landed))
+    }
+
+    /// The path an insert landed at, spelled by the stored names.
+    fn landing_path(&self, rel: &Path, landed: Option<Landed>) -> PathBuf {
+        landed.map_or_else(PathBuf::new, |landed| {
+            let leaf = landed.existing.map_or_else(
+                || rel.file_name(),
+                |id| Some(self.node(id).name.as_os_str()),
+            );
+            let mut resolved = self.path_of(landed.parent);
+            resolved.extend(leaf);
+            resolved
+        })
     }
 
     /// The path of node `id` relative to the root, spelled by the stored names.
@@ -1203,6 +1253,7 @@ impl VirtualTree {
                 match self.node(id).kind {
                     Node::File => {
                         self.node_mut(id).kind = node;
+                        self.links_seen = true;
                         Err(Conflict::already_exists(Occupant::File))
                     }
                     Node::Dir => Err(Conflict::already_exists(Occupant::Directory)),
@@ -1302,6 +1353,7 @@ impl VirtualTree {
         if !found.alias {
             return Ok(());
         }
+        self.aliases_seen = true;
         self.budget.charge()?;
         self.node_mut(parent)
             .children
@@ -1362,6 +1414,7 @@ impl VirtualTree {
         kind: Node,
     ) -> Result<usize, NodeBudgetExceeded> {
         self.budget.charge()?;
+        self.links_seen |= matches!(kind, Node::Symlink(_) | Node::OpaqueSymlink);
         let id = self.nodes.len();
         self.nodes.push(TreeNode::new(kind, name, parent));
         let key = match (self.fold)(name) {
@@ -1837,6 +1890,32 @@ mod tests {
         put(&mut t, "f", Node::File);
         assert!(t.place_path(Path::new("f"), Node::Dir).is_err());
         assert!(t.place_path(Path::new("f/g"), Node::File).is_err());
+    }
+
+    #[test]
+    fn a_tree_without_links_checks_the_spelled_path_before_inserting() {
+        let mut t = tree();
+        put(&mut t, "dir", Node::Dir);
+        let name = format!("dir/{}", "n".repeat(MAX_PATH_LEN));
+        let long = SafePath::for_test(&name);
+
+        let refused = t.check_landing(&long, Node::File, LandingLimits::Enforced);
+
+        assert!(matches!(refused, Err(PlaceError::LandingTooLong)));
+        assert_eq!(t.occupant(Path::new(&name)), None);
+        let fits = SafePath::for_test("dir/ok");
+        assert!(
+            t.check_landing(&fits, Node::File, LandingLimits::Enforced)
+                .is_ok()
+        );
+        assert_eq!(t.occupant(Path::new("dir/ok")), Some(Occupant::File));
+        // Once a link is stored, the landing is projected through it.
+        put(&mut t, "alias", sym("dir"));
+        let through = SafePath::for_test(&format!("alias/{}", "n".repeat(MAX_PATH_LEN)));
+        assert!(matches!(
+            t.check_landing(&through, Node::File, LandingLimits::Enforced),
+            Err(PlaceError::LandingTooLong)
+        ));
     }
 
     #[test]

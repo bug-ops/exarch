@@ -595,7 +595,7 @@ fn record_entry(
     } else {
         LandingLimits::Enforced
     };
-    tree.project_landing(path, node, limits).map(drop)
+    tree.check_landing(path, node, limits)
 }
 
 /// Phase two for a hardlink: re-validates its link path and target against the
@@ -633,11 +633,11 @@ fn verify_deferred_hardlink(
     // A file over a file is accepted by the tree, but a hardlink cannot
     // replace one: it is created exclusively.
     let occupant = tree.occupant(link_path.as_path());
-    let landed = tree.project_landing(&link_path, Node::File, LandingLimits::Enforced);
+    let landed = tree.check_landing(&link_path, Node::File, LandingLimits::Enforced);
     let error = match (landed, occupant) {
         (Err(error), _) => error,
-        (Ok(_), Some(occupant)) => PlaceError::Conflict(Conflict::already_exists(occupant)),
-        (Ok(_), None) => return Ok(()),
+        (Ok(()), Some(occupant)) => PlaceError::Conflict(Conflict::already_exists(occupant)),
+        (Ok(()), None) => return Ok(()),
     };
     Err(place_error_issue(
         tree,

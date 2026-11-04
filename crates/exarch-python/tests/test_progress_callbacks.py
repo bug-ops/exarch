@@ -109,9 +109,8 @@ def test_create_archive_with_progress_callback_error_propagates(temp_dir):
     assert len(calls) == 1, "progress must not be invoked again after it raised"
 
     err = exc_info.value
-    assert err.files_added >= 1
-    assert err.bytes_written >= 0
     assert err.progress_callback_error is True
-    # Creation ran to completion despite the callback raising (no cancellation
-    # signal exists in the progress-callback contract) — the archive exists.
-    assert archive.exists()
+    # The raising callback cancels creation: nothing is committed and no
+    # counters describe a finished archive.
+    assert not hasattr(err, "files_added")
+    assert not archive.exists()

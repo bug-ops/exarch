@@ -88,3 +88,30 @@ def test_explicit_format_overrides_the_extension(tmp_path, source):
 def test_unknown_format_is_a_value_error(tmp_path, source):
     with pytest.raises(ValueError, match="format must be one of"):
         exarch.create_archive(tmp_path / "o.tar", [source], format="rar")
+
+
+@pytest.mark.parametrize("error", [RuntimeError("boom"), KeyboardInterrupt()])
+def test_raising_progress_callback_does_not_commit(tmp_path, source, error):
+    out = tmp_path / "out.tar"
+    out.write_bytes(b"previous archive")
+
+    def progress(*args):
+        raise error
+
+    with pytest.raises(type(error)) as info:
+        exarch.create_archive_with_progress(out, [source], None, progress)
+
+    assert info.value is error
+    assert info.value.progress_callback_error is True
+    assert out.read_bytes() == b"previous archive"
+    assert sorted(os.listdir(tmp_path)) == ["out.tar", "src"]
+
+
+def test_working_progress_callback_still_commits(tmp_path, source):
+    out = tmp_path / "out.tar"
+    seen = []
+
+    exarch.create_archive_with_progress(out, [source], None, lambda *args: seen.append(args))
+
+    assert seen
+    assert tarfile.is_tarfile(out)

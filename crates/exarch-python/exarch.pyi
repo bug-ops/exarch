@@ -1366,20 +1366,15 @@ def create_archive_with_progress(
         UnsupportedFormatError: Archive format not supported
 
     Note:
-        If ``progress`` itself raises, creation is **not** aborted early — the
-        underlying progress-callback contract has no cancellation signal, so
-        creation always runs to completion first, and ``progress`` is not
-        called again for the remaining entries once it has raised:
-
-        - If creation otherwise succeeds, ``progress``'s own exception is what
-          propagates (unchanged — the same type, message, and traceback), with
-          ``files_added`` and ``bytes_written`` attributes attached describing
-          what was written, plus a ``progress_callback_error = True`` marker
-          attribute.
-        - If creation also fails, the creation error takes priority (a raising
-          ``progress`` can never mask a security error such as
-          ``SymlinkEscapeError``) and ``progress``'s exception is attached as
-          ``__cause__`` rather than being dropped.
+        If ``progress`` raises (``KeyboardInterrupt`` included), creation is
+        cancelled at the next entry: the staged archive is discarded, a previous
+        archive at ``output_path`` stays untouched and no temporary file is
+        left. ``progress`` is not called again, and its own exception propagates
+        unchanged with a ``progress_callback_error = True`` marker attribute.
+        If creation fails for its own reason first, that error takes priority (a
+        raising ``progress`` can never mask a security error such as
+        ``SymlinkEscapeError``) and ``progress``'s exception is attached as
+        ``__cause__``.
 
     Example:
         >>> def progress(path: str, total: int, current: int, bytes: int):

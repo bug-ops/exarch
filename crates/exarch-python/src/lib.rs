@@ -450,29 +450,18 @@ fn verify_archive(
 /// * `UnsupportedFormatError` - Archive format not supported
 /// * Whatever `progress` itself raises - see the note below
 ///
-/// # A raising `progress` propagates instead of being swallowed
+/// # A raising `progress` cancels the creation
 ///
-/// Creation has already run to completion (or failure) by the time the
-/// exception is observed: the underlying `ProgressCallback` contract has no
-/// cancellation signal, so a raising `progress` cannot abort creation early
-/// (the same constraint documented on the Node binding's
-/// `createArchiveWithProgress`, see issues #465/#485/#489). Once `progress`
-/// raises, it is no longer called for the remaining entries.
+/// If `progress` raises (`KeyboardInterrupt` included), creation stops at the
+/// next entry: the staged archive is discarded, a previous archive at
+/// `output_path` stays untouched and no temporary file is left. `progress` is
+/// not called again, and its own exception is what propagates, unchanged, with
+/// a `progress_callback_error = True` marker attribute.
 ///
-/// - If creation otherwise succeeds, the callback's exception is what
-///   propagates. `files_added` and `bytes_written` attributes describing what
-///   was written are attached on a best-effort basis (`setattr` can fail, e.g.
-///   for an exception class using `__slots__`), together with a
-///   `progress_callback_error = True` marker attribute — check it before
-///   assuming the mere presence of `files_added` means creation failed partway
-///   through, matching the equivalent `extract_archive_with_progress` guidance
-///   (`exarch_core` has no partial-creation error variant today, but the marker
-///   keeps this call site consistent with the extraction side and correct if
-///   that changes).
-/// - If creation also fails, the core error takes priority (a raising callback
-///   can never mask a security error such as `SymlinkEscapeError`) and the
-///   callback's exception is chained onto it via `__cause__`. This error does
-///   not carry the `progress_callback_error` marker.
+/// If creation fails for its own reason first, the core error takes priority (a
+/// raising callback can never mask a security error such as
+/// `SymlinkEscapeError`) and the callback's exception is chained onto it via
+/// `__cause__`. This error does not carry the `progress_callback_error` marker.
 ///
 /// # Examples
 ///
@@ -590,6 +579,15 @@ fn merge_progress_result<T>(
             attach_report_attrs(exc_value, &report);
             let _ = exc_value.setattr("progress_callback_error", true);
             Err(err)
+        }
+        (Err(exarch_core::ArchiveError::Io(io)), Some(cb_err))
+            if io.kind() == std::io::ErrorKind::Interrupted =>
+        {
+            // The core stopped because the callback asked it to (see
+            // `PyProgressAdapter::is_cancelled`); the callback's own exception
+            // wins.
+            let _ = cb_err.value(py).setattr("progress_callback_error", true);
+            Err(cb_err)
         }
         (Err(core_err), callback_err) => {
             let converted = convert_error(core_err);
@@ -819,6 +817,14 @@ impl exarch_core::ProgressCallback for PyProgressAdapter {
 
     fn on_complete(&mut self) {
         // No-op: Python can detect completion when function returns
+    }
+
+    /// A callback that raised (`KeyboardInterrupt` included) cancels the
+    /// operation, so a creation does not commit its staged archive. The
+    /// recorded exception, not the core's `Interrupted` error, is what the
+    /// caller sees (see `merge_progress_result`).
+    fn is_cancelled(&mut self) -> bool {
+        self.callback_error.is_some()
     }
 }
 

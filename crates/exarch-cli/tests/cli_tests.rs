@@ -910,7 +910,7 @@ fn test_create_skips_hidden_directories_whole_and_counts_each_once() {
     ] {
         let path = src.join(file);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
-        std::fs::write(path, "secret").expect("write file");
+        std::fs::write(path, "payload").expect("write file");
     }
 
     let archive = temp.path().join("default.tar.gz");
@@ -929,19 +929,21 @@ fn test_create_skips_hidden_directories_whole_and_counts_each_once() {
     assert_eq!(json["data"]["skipped_by_kind"]["hidden"], 2, "{json}");
     let names = listed_files(&archive);
     assert!(names.contains(&"visible.txt".to_owned()), "{names:?}");
-    for secret in [
+    let skipped_parts = [
         ".ssh",
         ".aws",
         "id_rsa",
         "credentials",
         "visible_inside",
         "more",
-    ] {
-        assert!(
-            !names.iter().any(|n| n.contains(secret)),
-            "{secret} in {names:?}"
-        );
-    }
+    ];
+    let archived = skipped_parts
+        .iter()
+        .position(|part| names.iter().any(|n| n.contains(part)));
+    assert!(
+        archived.is_none(),
+        "an entry below a skipped hidden directory was archived (part {archived:?}): {names:?}"
+    );
 
     let included = temp.path().join("included.tar.gz");
     exarch_cmd()
@@ -2511,7 +2513,7 @@ fn test_exclude_pattern_matches_a_non_utf8_name() {
     let src = temp.path().join("src");
     std::fs::create_dir(&src).expect("source dir");
     std::fs::write(src.join("ok.txt"), "x").expect("source file");
-    if std::fs::write(src.join(OsStr::from_bytes(b"\xff.key")), "secret").is_err() {
+    if std::fs::write(src.join(OsStr::from_bytes(b"\xff.key")), "payload").is_err() {
         eprintln!("skipping: this filesystem refuses non-UTF-8 names");
         return;
     }

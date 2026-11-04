@@ -18,7 +18,7 @@ use tempfile::TempDir;
 fn write(root: &Path, relative: &str) {
     let path = root.join(relative);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, b"secret").unwrap();
+    std::fs::write(path, b"payload").unwrap();
 }
 
 fn tree() -> TempDir {
@@ -59,7 +59,7 @@ fn hidden_directories_are_never_entered() {
         let src = tree();
         let (names, report) = create(src.path(), name, &CreationConfig::default());
 
-        for leaked in [
+        let skipped_parts = [
             ".ssh",
             ".config",
             ".gnupg",
@@ -67,14 +67,17 @@ fn hidden_directories_are_never_entered() {
             "id_rsa",
             "secret",
             "credentials",
-        ] {
-            assert!(
-                !names.iter().any(|n| n
-                    .components()
-                    .any(|c| c.as_os_str().to_string_lossy().contains(leaked))),
-                "{name}: {leaked} leaked into {names:?}"
-            );
-        }
+        ];
+        let archived = skipped_parts.iter().position(|part| {
+            names.iter().any(|n| {
+                n.components()
+                    .any(|c| c.as_os_str().to_string_lossy().contains(part))
+            })
+        });
+        assert!(
+            archived.is_none(),
+            "{name}: an entry below a skipped hidden directory was archived (part {archived:?}): {names:?}"
+        );
         assert!(names.contains(&PathBuf::from("visible.txt")), "{name}");
         assert!(names.contains(&PathBuf::from("src/main.rs")), "{name}");
         assert!(
@@ -285,7 +288,7 @@ fn a_non_utf8_hidden_directory_name_is_skipped() {
     if std::fs::create_dir(&hidden).is_err() {
         return;
     }
-    std::fs::write(hidden.join("secret.txt"), b"secret").unwrap();
+    std::fs::write(hidden.join("secret.txt"), b"payload").unwrap();
 
     let (names, report) = create_many(&[src.path()], &CreationConfig::default());
 

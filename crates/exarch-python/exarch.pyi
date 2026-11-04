@@ -1043,7 +1043,9 @@ class VerificationIssue:
 
     @property
     def mode(self) -> int | None:
-        """The permission bits of an executable-file finding; None otherwise."""
+        """The permission bits of an invalid-permissions refusal or an
+        executable-file finding; None otherwise.
+        """
         ...
 
 @final

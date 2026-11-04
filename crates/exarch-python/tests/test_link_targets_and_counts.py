@@ -128,3 +128,18 @@ def _dir_info(name):
     info = tarfile.TarInfo(name=name)
     info.type = tarfile.DIRTYPE
     return info
+
+
+@pytest.mark.parametrize("mode", [0o666, 0o4755])
+def test_verify_invalid_permissions_issue_carries_its_mode(temp_dir, mode):
+    archive = temp_dir / "perm.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("f.txt")
+        info.size = 1
+        info.mode = mode
+        tar.addfile(info, io.BytesIO(b"x"))
+
+    report = exarch.verify_archive(str(archive))
+
+    issue = next(i for i in report.issues if i.code == "INVALID_PERMISSIONS")
+    assert issue.mode == mode

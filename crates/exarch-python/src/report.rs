@@ -11,8 +11,6 @@ use exarch_core::creation::CreationReport as CoreCreationReport;
 use exarch_core::inspection::IntegrityGaps;
 use exarch_core::inspection::manifest::ArchiveEntry;
 use exarch_core::inspection::manifest::ArchiveManifest;
-use exarch_core::inspection::report::Finding;
-use exarch_core::inspection::report::Heuristic;
 use exarch_core::inspection::report::VerificationIssue;
 use exarch_core::inspection::report::VerificationReport;
 use pyo3::exceptions::PyRuntimeError;
@@ -780,13 +778,11 @@ impl PyVerificationIssue {
             .map(exarch_core::ConfigSetting::as_str)
     }
 
-    /// The permission bits of an executable-file finding, else `None`.
+    /// The permission bits the finding is about (an invalid-permissions
+    /// refusal or an executable file), else `None`.
     #[getter]
     fn mode(&self) -> Option<u32> {
-        match self.inner.finding() {
-            Finding::Heuristic(Heuristic::ExecutableFile { mode }) => Some(mode.get()),
-            _ => None,
-        }
+        self.inner.mode().map(exarch_core::RawMode::get)
     }
 
     fn __str__(&self) -> String {

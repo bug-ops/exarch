@@ -44,7 +44,9 @@ fuzz_target!(|data: &[u8]| {
             };
             let mut sink = MemorySink::new(MemoryLimit::from_config(config)).with_path_model(model);
             let options = SinkOptions::default().with_skip_duplicates(skip_duplicates);
-            let _ = SinkExtractRequest::new(config).with_options(options).extract(reader, &mut sink);
+            let _ = SinkExtractRequest::new(config)
+                .with_options(options)
+                .extract(reader, &mut sink);
             check_invariants(&sink, model);
         }
     }

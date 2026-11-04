@@ -54,8 +54,12 @@ fn check_stream_replay(bytes: &[u8]) {
     let config = common::config();
     let options = ListOptions::default();
 
-    let via_stream = ListRequest::new(config).with_options(options).list_reader(streamed);
-    let via_format = ListRequest::new(config).with_options(options).list_reader(ArchiveReader::of_type(Cursor::new(bytes), format));
+    let via_stream = ListRequest::new(config)
+        .with_options(options)
+        .list_reader(streamed);
+    let via_format = ListRequest::new(config)
+        .with_options(options)
+        .list_reader(ArchiveReader::of_type(Cursor::new(bytes), format));
 
     assert_eq!(
         format!("{via_stream:?}"),

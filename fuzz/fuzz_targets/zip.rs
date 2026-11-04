@@ -10,10 +10,7 @@ use libfuzzer_sys::fuzz_target;
 mod common;
 
 fuzz_target!(|data: &[u8]| {
-    for config in [
-        common::config(),
-        common::config_ignoring_zip_structure(),
-    ] {
+    for config in [common::config(), common::config_ignoring_zip_structure()] {
         if let Ok(archive) = ZipArchive::new(Cursor::new(data), config) {
             let _ = archive.list();
         }

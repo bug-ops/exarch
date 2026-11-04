@@ -158,6 +158,36 @@ impl SafePath {
         let ctx = ValidationContext::<V>::new(config.allowed.symlinks.is_allowed());
         Self::validate_with_context_in(path, root, config, &ctx, view)
     }
+
+    /// A `SafePath` over a literal, for tests that need no validation.
+    #[cfg(test)]
+    pub(crate) fn for_test(path: &str) -> Self {
+        Self::new_unchecked(PathBuf::from(path))
+    }
+
+    /// Rebuilds a path the virtual tree assembled from names it stored from
+    /// validated entries, re-checking its shape: only normal components, so it
+    /// is relative, normalized and free of `..`.
+    ///
+    /// It carries no claim about depth or containment beyond what the stored
+    /// names were validated for.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when a component is not a normal name.
+    pub(crate) fn from_normalized(path: PathBuf) -> std::io::Result<Self> {
+        if path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        {
+            Ok(Self::new_unchecked(path))
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "landing path is not a normalized relative path",
+            ))
+        }
+    }
 }
 
 impl<P: ParentCheck> SafePath<P> {
@@ -365,19 +395,9 @@ impl<P: ParentCheck> SafePath<P> {
         Ok(Self::new_unchecked(final_path.into_owned()))
     }
 
-    /// Creates a `SafePath` without validation (INTERNAL USE ONLY).
-    ///
-    /// # Safety
-    ///
-    /// This bypasses all validation checks. The caller MUST ensure that:
-    /// - The path has been validated by equivalent checks elsewhere
-    /// - The path is relative (not absolute)
-    /// - The path contains no `..` components
-    /// - The path resolves within the destination directory
-    ///
-    /// This is only used internally when a path is rebuilt from components of
-    /// already-validated `SafePath`s (e.g., the sink tree).
-    pub(crate) const fn new_unchecked(path: PathBuf) -> Self {
+    /// The result of this module's own validation; no other module builds a
+    /// `SafePath` without it.
+    const fn new_unchecked(path: PathBuf) -> Self {
         Self(path, PhantomData)
     }
 
@@ -607,6 +627,19 @@ mod tests {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         (temp, dest)
+    }
+
+    #[test]
+    fn from_normalized_accepts_only_normal_components() {
+        for ok in ["", "a", "a/b/c.txt"] {
+            assert!(SafePath::from_normalized(PathBuf::from(ok)).is_ok(), "{ok}");
+        }
+        for bad in ["/a", "../a", "a/../b", "./a"] {
+            assert!(
+                SafePath::from_normalized(PathBuf::from(bad)).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     // Empty path handling test (MED-004)

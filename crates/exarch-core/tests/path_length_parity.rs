@@ -358,6 +358,38 @@ mod landing {
         }
     }
 
+    // #945: verify must judge the projected landing like extract does.
+    #[cfg(unix)]
+    #[test]
+    fn verify_and_extract_agree_on_the_projected_landing_limit() {
+        let config = deep_config();
+        for shape in Shape::ALL {
+            for (entry_len, accepted) in [(HOST_PATH_LIMIT - 1, true), (HOST_PATH_LIMIT, false)] {
+                let (_dir, archive) = archive_below_short_chain(shape, entry_len);
+                let out = TempDir::new().unwrap();
+                let extracted = extract_archive(&archive, out.path(), &config).is_ok();
+                let verified = verify_archive(&archive, &config)
+                    .is_ok_and(|report| report.status() == VerificationStatus::Pass);
+                let reader = exarch_core::ArchiveReader::tar(
+                    std::io::Cursor::new(std::fs::read(&archive).unwrap()),
+                    None,
+                );
+                let sunk = exarch_core::extract_to_sink(
+                    reader,
+                    &mut exarch_core::MemorySink::default(),
+                    &config,
+                    &exarch_core::SinkOptions::default(),
+                )
+                .is_ok();
+                assert_eq!(
+                    (extracted, verified, sunk),
+                    (accepted, accepted, accepted),
+                    "{shape:?} entry of {entry_len} bytes"
+                );
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_preexisting_symlink_out_of_the_root_still_refuses_a_long_tail() {

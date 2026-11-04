@@ -57,6 +57,8 @@ use crate::SecurityConfig;
 use crate::Violation;
 use crate::closed_enum::closed_enum;
 use crate::types::DestDir;
+use crate::types::SafePath;
+use crate::types::safe_path::ParentCheck;
 
 /// Maximum number of symlinks followed while resolving a single path, as the
 /// host's `realpath` allows it.
@@ -266,6 +268,34 @@ impl PathModel {
             LinkKind::Hardlink => self.check_name_lengths(target),
         }
     }
+}
+
+/// `base` extended by `tail`; an empty `tail` adds no trailing separator, which
+/// would count one byte against the host path limit.
+pub fn joined(base: &Path, tail: &Path) -> PathBuf {
+    if tail.as_os_str().is_empty() {
+        base.to_path_buf()
+    } else {
+        base.join(tail)
+    }
+}
+
+/// Refuses a landing that `model` cannot hold once `tail` is appended.
+///
+/// The single length rule for a projected landing, shared by the virtual tree
+/// and the directory walker so `verify`, the sinks and host extraction cannot
+/// disagree.
+///
+/// # Errors
+///
+/// Returns the name-too-long error when the joined path or a component exceeds
+/// the model's limits.
+pub fn projected_landing_within_limits(
+    model: PathModel,
+    landing: &Path,
+    tail: &Path,
+) -> io::Result<()> {
+    model.check_name_lengths(&joined(landing, tail))
 }
 
 /// A name's length in UTF-8 bytes, which is never below its length in UTF-16
@@ -675,7 +705,17 @@ pub fn blocked_parent_error<V: FsView>(
     first_blocking_ancestor(view, root, rel).map(|(parent, blocker)| blocker.error(rel, &parent))
 }
 
-/// A failed [`VirtualTree::try_insert`].
+/// Whether a projected landing is held to the model's name limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LandingLimits {
+    /// The landing must fit the model.
+    Enforced,
+    /// The entry is never created (a regular file the extension allowlist
+    /// skips), so its name cannot be refused.
+    Exempt,
+}
+
+/// A failed [`VirtualTree::project_landing`].
 #[derive(Debug)]
 pub struct Conflict {
     /// The error `insert` would report.
@@ -830,6 +870,8 @@ pub enum PlaceError {
     Conflict(Conflict),
     /// The tree is full.
     Budget(NodeBudgetExceeded),
+    /// The node landed at a path the model cannot hold.
+    LandingTooLong,
 }
 
 impl PlaceError {
@@ -837,7 +879,7 @@ impl PlaceError {
     pub(crate) fn into_conflict(self) -> Conflict {
         match self {
             Self::Conflict(conflict) => conflict,
-            Self::Budget(exceeded) => panic!("unexpected budget error: {exceeded:?}"),
+            other => panic!("unexpected placement error: {other:?}"),
         }
     }
 }
@@ -1029,15 +1071,48 @@ impl VirtualTree {
     /// A failure also names what already occupies the path, so a caller can
     /// tell what overwriting would do. A tree that is out of budget refuses
     /// with [`PlaceError::Budget`].
+    #[cfg(test)]
     pub(crate) fn try_insert(&mut self, rel: &Path, node: Node) -> Result<(), PlaceError> {
         self.insert_node(rel, node).map(drop)
     }
 
-    /// [`try_insert`](Self::try_insert) that also returns where the node
-    /// landed: the path relative to the root with every symlinked parent
-    /// resolved and every component spelled as the tree first stored it, so two
-    /// spellings of one name give one path.
-    pub(crate) fn place(&mut self, rel: &Path, node: Node) -> Result<PathBuf, PlaceError> {
+    /// Places `node` at `rel` and returns where it landed, with every symlinked
+    /// parent resolved and every component spelled as the tree first stored it,
+    /// so two spellings of one name give one path.
+    ///
+    /// The one projection of a landing: the sink and `verify` both judge an
+    /// entry by it. The entry's own name was checked before it was resolved
+    /// through earlier symlinks, and the path it lands at can be longer, so the
+    /// landing is checked against the model's name limits here.
+    ///
+    /// The returned path is relative, normalized and built only from names the
+    /// tree stored from validated entries. It is not re-checked against
+    /// `max_path_depth`: a landing reached through a link can be deeper than
+    /// the entry's own path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict where extraction can fail (a parent that is a file or
+    /// a dangling symlink, a chain that loops or leaves the root, or an
+    /// occupant the node cannot replace; the failure names what occupies the
+    /// path), [`PlaceError::Budget`] when the tree is full, or
+    /// [`PlaceError::LandingTooLong`] when the landing exceeds the model's
+    /// limits and `limits` is [`LandingLimits::Enforced`].
+    pub(crate) fn project_landing<P: ParentCheck>(
+        &mut self,
+        rel: &SafePath<P>,
+        node: Node,
+        limits: LandingLimits,
+    ) -> Result<SafePath, PlaceError> {
+        let landed = self.place_path(rel.as_path(), node)?;
+        if limits == LandingLimits::Enforced {
+            projected_landing_within_limits(self.model, &landed, Path::new(""))
+                .map_err(|_| PlaceError::LandingTooLong)?;
+        }
+        Ok(SafePath::from_normalized(landed)?)
+    }
+
+    fn place_path(&mut self, rel: &Path, node: Node) -> Result<PathBuf, PlaceError> {
         Ok(self
             .insert_node(rel, node)?
             .map_or_else(PathBuf::new, |landed| {
@@ -1667,7 +1742,7 @@ mod tests {
         let mut t = tree();
         put(&mut t, "real", Node::Dir);
         put(&mut t, "alias", sym("real"));
-        let placed = t.place(Path::new("alias/f"), Node::File).unwrap();
+        let placed = t.place_path(Path::new("alias/f"), Node::File).unwrap();
         assert_eq!(placed, PathBuf::from("real/f"));
     }
 
@@ -1675,11 +1750,11 @@ mod tests {
     fn place_spells_a_folded_name_as_first_stored() {
         let mut t = folding_tree();
         assert_eq!(
-            t.place(Path::new("a/x"), Node::File).unwrap(),
+            t.place_path(Path::new("a/x"), Node::File).unwrap(),
             PathBuf::from("a/x")
         );
         assert_eq!(
-            t.place(Path::new("A/x"), Node::File).unwrap(),
+            t.place_path(Path::new("A/x"), Node::File).unwrap(),
             PathBuf::from("a/x")
         );
         assert_eq!(within(&t, "/dest/A/X"), PathBuf::from("/dest/a/x"));
@@ -1688,10 +1763,53 @@ mod tests {
     #[test]
     fn place_of_the_root_is_empty_and_conflicts_leave_no_path() {
         let mut t = tree();
-        assert_eq!(t.place(Path::new(""), Node::Dir).unwrap(), PathBuf::new());
+        assert_eq!(
+            t.place_path(Path::new(""), Node::Dir).unwrap(),
+            PathBuf::new()
+        );
         put(&mut t, "f", Node::File);
-        assert!(t.place(Path::new("f"), Node::Dir).is_err());
-        assert!(t.place(Path::new("f/g"), Node::File).is_err());
+        assert!(t.place_path(Path::new("f"), Node::Dir).is_err());
+        assert!(t.place_path(Path::new("f/g"), Node::File).is_err());
+    }
+
+    #[test]
+    fn project_landing_resolves_through_a_link_and_enforces_the_name_limits() {
+        let mut t = tree();
+        put(&mut t, "real", Node::Dir);
+        put(&mut t, "alias", sym("real"));
+
+        let landed = t
+            .project_landing(
+                &SafePath::for_test("alias/f"),
+                Node::File,
+                LandingLimits::Enforced,
+            )
+            .unwrap();
+        assert_eq!(landed.as_path(), Path::new("real/f"));
+
+        let long = SafePath::for_test(&format!("alias/{}", "n".repeat(MAX_PATH_LEN)));
+        let refused = t.project_landing(&long, Node::File, LandingLimits::Enforced);
+        assert!(matches!(refused, Err(PlaceError::LandingTooLong)));
+        let exempt = t.project_landing(
+            &SafePath::for_test(&format!("alias/{}", "m".repeat(MAX_PATH_LEN))),
+            Node::File,
+            LandingLimits::Exempt,
+        );
+        assert!(exempt.is_ok());
+    }
+
+    #[test]
+    fn projected_landing_limit_is_exact_and_an_empty_tail_adds_no_separator() {
+        let at_limit = crate::test_utils::path_of_len(MAX_PATH_LEN);
+        let landing = Path::new(&at_limit);
+        let check = |landing: &Path, tail: &str| {
+            projected_landing_within_limits(PathModel::Host, landing, Path::new(tail))
+        };
+        assert!(check(landing, "").is_ok());
+        assert!(check(landing, "x").is_err());
+        let shorter = crate::test_utils::path_of_len(MAX_PATH_LEN - 2);
+        assert!(check(Path::new(&shorter), "x").is_ok());
+        assert!(check(Path::new(&shorter), "xx").is_err());
     }
 
     fn budgeted(max: usize, recording: CollisionRecording) -> VirtualTree {

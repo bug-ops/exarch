@@ -37,7 +37,9 @@ use crate::security::fs_view::Occupant;
 use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::classify_link;
+use crate::security::fs_view::joined;
 use crate::security::fs_view::name_too_long;
+use crate::security::fs_view::projected_landing_within_limits;
 use crate::types::SafePath;
 use crate::types::safe_path::ParentCheck;
 
@@ -226,7 +228,7 @@ impl DirWalker {
         let (dir_ref, landing) = self.walk(root, dir, entry, missing, links)?;
         if let Some(landing) = landing {
             let tail = entry.strip_prefix(dir).unwrap_or_else(|_| Path::new(""));
-            PathModel::Host.check_name_lengths(&joined(&landing, tail))?;
+            projected_landing_within_limits(PathModel::Host, &landing, tail)?;
         }
         Ok(dir_ref)
     }
@@ -278,8 +280,10 @@ impl DirWalker {
     /// The rest of the path may still cross another symlink, which resets the
     /// landing; only when it provably ends here is the projected length final.
     fn ensure_fits(at: &VettedDir, landing: &Path, rest: &Path, tail: &Path) -> Result<()> {
-        let projected = joined(&joined(landing, rest), tail);
-        if PathModel::Host.check_name_lengths(&projected).is_ok() || !Self::ends_here(at, rest) {
+        let projected = joined(landing, rest);
+        if projected_landing_within_limits(PathModel::Host, &projected, tail).is_ok()
+            || !Self::ends_here(at, rest)
+        {
             return Ok(());
         }
         Err(ArchiveError::Io(name_too_long()))
@@ -382,16 +386,6 @@ impl DirWalker {
     }
 }
 
-/// `base` extended by `tail`; an empty `tail` adds no trailing separator, which
-/// would count one byte against the host path limit.
-fn joined(base: &Path, tail: &Path) -> PathBuf {
-    if tail.as_os_str().is_empty() {
-        base.to_path_buf()
-    } else {
-        base.join(tail)
-    }
-}
-
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -411,7 +405,7 @@ mod tests {
     }
 
     fn sp(path: &str) -> SafePath {
-        SafePath::<Resolved>::new_unchecked(PathBuf::from(path))
+        SafePath::<Resolved>::for_test(path)
     }
 
     fn dest_with_outside() -> (TempDir, PinnedRoot, PathBuf) {

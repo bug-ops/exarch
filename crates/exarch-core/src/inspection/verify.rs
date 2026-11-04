@@ -14,6 +14,7 @@ use crate::Violation;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::common::check_entry_name_limits;
+use crate::formats::common::is_extension_allowed;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::inspection::integrity::IntegrityOutcome;
@@ -38,6 +39,7 @@ use crate::security::fs_view::CollisionKind;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::Conflict;
 use crate::security::fs_view::FsView;
+use crate::security::fs_view::LandingLimits;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::ModelRoot as _;
 use crate::security::fs_view::NameCollision;
@@ -555,7 +557,7 @@ fn verify_entry(
                 hardlink_pending = true;
             }
             _ => {
-                let recorded = record_entry(tree, safe_path.as_path(), &entry.kind);
+                let recorded = record_entry(tree, safe_path, &entry.kind, config);
                 issues.extend(collision_issues(tree));
                 if let Err(error) = recorded {
                     issues.push(place_error_issue(
@@ -672,8 +674,9 @@ fn collision_issue(collision: NameCollision) -> VerificationIssue {
 /// Records a successfully validated non-hardlink entry in the tree.
 fn record_entry(
     tree: &mut VirtualTree,
-    path: &Path,
+    path: &SafePath,
     kind: &ManifestEntryKind,
+    config: &SecurityConfig,
 ) -> std::result::Result<(), PlaceError> {
     let node = match kind {
         ManifestEntryKind::File => Node::File,
@@ -688,7 +691,14 @@ fn record_entry(
             return Ok(());
         }
     };
-    tree.try_insert(path, node)
+    let limits = if matches!(kind, ManifestEntryKind::File)
+        && !is_extension_allowed(path.as_path(), config)
+    {
+        LandingLimits::Exempt
+    } else {
+        LandingLimits::Enforced
+    };
+    tree.project_landing(path, node, limits).map(drop)
 }
 
 /// Phase two for a hardlink: re-validates its link path and target against the
@@ -726,10 +736,11 @@ fn verify_deferred_hardlink(
     // A file over a file is accepted by the tree, but a hardlink cannot
     // replace one: it is created exclusively.
     let occupant = tree.occupant(link_path.as_path());
-    let error = match (tree.try_insert(link_path.as_path(), Node::File), occupant) {
+    let landed = tree.project_landing(&link_path, Node::File, LandingLimits::Enforced);
+    let error = match (landed, occupant) {
         (Err(error), _) => error,
-        (Ok(()), Some(occupant)) => PlaceError::Conflict(Conflict::already_exists(occupant)),
-        (Ok(()), None) => return Ok(()),
+        (Ok(_), Some(occupant)) => PlaceError::Conflict(Conflict::already_exists(occupant)),
+        (Ok(_), None) => return Ok(()),
     };
     Err(place_error_issue(
         tree,
@@ -752,6 +763,10 @@ fn place_error_issue(
         PlaceError::Budget(exceeded) => {
             VerificationIssue::from_error(&exceeded.into(), Some(entry.path.clone()))
         }
+        PlaceError::LandingTooLong => VerificationIssue::from_error(
+            &ArchiveError::Io(name_too_long()),
+            Some(entry.path.clone()),
+        ),
     }
 }
 

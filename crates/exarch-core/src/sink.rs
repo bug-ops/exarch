@@ -190,6 +190,7 @@ use crate::security::admitted::ValidatedHardlink;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView as _;
+use crate::security::fs_view::LandingLimits;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::ModelRoot as _;
 use crate::security::fs_view::Node;
@@ -199,6 +200,7 @@ use crate::security::fs_view::PathModel;
 use crate::security::fs_view::PlaceError;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
+use crate::security::fs_view::name_too_long;
 use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
@@ -642,7 +644,7 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
             (Some(Occupant::File) | None, _) => {}
         }
 
-        let path = self.place(rel, Node::File)?;
+        let path = self.place(&path, Node::File)?;
         Ok(Some(StagedFile { path, mode, size }))
     }
 
@@ -675,19 +677,10 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
     }
 
     /// Places `node` at `rel`, returning where it landed.
-    fn place(&mut self, rel: &Path, node: Node) -> Result<SafePath> {
-        let resolved = self.tree.place(rel, node).map_err(place_error)?;
-        self.landed_within_limits(resolved)
-    }
-
-    /// The path an entry landed at, checked against the model's name limits:
-    /// the entry's own name was checked before it was resolved through earlier
-    /// symlinks, and the path it lands at can be longer.
-    fn landed_within_limits(&self, resolved: PathBuf) -> Result<SafePath> {
-        self.model
-            .check_name_lengths(&resolved)
-            .map_err(ArchiveError::Io)?;
-        Ok(landed(resolved))
+    fn place(&mut self, rel: &SafePath, node: Node) -> Result<SafePath> {
+        self.tree
+            .project_landing(rel, node, LandingLimits::Enforced)
+            .map_err(place_error)
     }
 
     /// The path model entries are validated against.
@@ -717,6 +710,7 @@ fn place_error(error: PlaceError) -> ArchiveError {
     match error {
         PlaceError::Conflict(conflict) => conflict.into_archive_error(),
         PlaceError::Budget(exceeded) => exceeded.into(),
+        PlaceError::LandingTooLong => ArchiveError::Io(name_too_long()),
     }
 }
 
@@ -732,13 +726,6 @@ fn sink_error(error: io::Error) -> ArchiveError {
             resource: QuotaResource::SinkCapacity { max },
         },
     )
-}
-
-fn landed(resolved: PathBuf) -> SafePath {
-    // SAFETY: the tree builds the path from components of entries that passed
-    // `SafePath` validation and from nothing else, so it is relative and
-    // normalized.
-    SafePath::new_unchecked(resolved)
 }
 
 impl<S: EntrySink> SinkTarget<'_, S> {
@@ -826,7 +813,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {
         let rel = path.as_path();
         let occupied = self.tree.occupant(rel).is_some();
-        let resolved = self.place(rel, Node::Dir)?;
+        let resolved = self.place(path, Node::Dir)?;
         if !occupied && !rel.is_empty() {
             self.sink.create_directory(&resolved).map_err(sink_error)?;
         }
@@ -870,7 +857,8 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     }
 
     fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()> {
-        let rel = symlink.link().as_path();
+        let link = symlink.link();
+        let rel = link.as_path();
         let target = symlink.target_path();
         let occupant = self.tree.occupant(rel);
         match (occupant, tally.options.duplicate_policy()) {
@@ -881,26 +869,33 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             (Some(Occupant::Symlink), DuplicatePolicy::Overwrite) => {
                 // An unchanged link re-points nothing; any other target is
                 // refused by the tree.
-                let unchanged = self.tree.place(rel, Node::Symlink(target.to_path_buf()));
+                let unchanged = self.tree.project_landing(
+                    link,
+                    Node::Symlink(target.to_path_buf()),
+                    LandingLimits::Enforced,
+                );
                 return match unchanged {
                     Ok(_) => common::checked_increment_files_skipped(tally.report),
-                    Err(PlaceError::Budget(exceeded)) => Err(exceeded.into()),
                     Err(PlaceError::Conflict(_)) => {
                         Err(common::occupant_at_dest_error(rel, Occupant::Symlink).into())
                     }
+                    Err(error) => Err(place_error(error)),
                 };
             }
             (Some(Occupant::File) | None, _) => {}
         }
 
         let node = Node::Symlink(target.to_path_buf());
-        let resolved = match self.tree.place(rel, node.clone()) {
-            Ok(resolved) => self.landed_within_limits(resolved)?,
+        let resolved = match self
+            .tree
+            .project_landing(link, node.clone(), LandingLimits::Enforced)
+        {
+            Ok(resolved) => resolved,
             // The tree reports a symlink replacing a file as a conflict but
             // does replace it, as the host does; placing it again finds its
             // own unchanged duplicate and returns the path.
             Err(PlaceError::Conflict(conflict)) if conflict.occupant == Some(Occupant::File) => {
-                self.place(rel, node)?
+                self.place(link, node)?
             }
             Err(error) => return Err(place_error(error)),
         };
@@ -957,9 +952,11 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             .ok_or_else(|| hardlink_target_missing(target.as_path()))?;
         self.core.charge_hardlink(counted, size).map(drop)?;
 
-        let resolved = self.place(link.as_path(), Node::File)?;
+        let target_landing =
+            SafePath::from_normalized(resolved_target).map_err(ArchiveError::Io)?;
+        let resolved = self.place(&link, Node::File)?;
         self.sink
-            .create_hardlink(&resolved, &landed(resolved_target))
+            .create_hardlink(&resolved, &target_landing)
             .map_err(sink_error)?;
         self.sizes.insert(resolved.into_path_buf(), size);
 

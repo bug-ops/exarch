@@ -528,8 +528,12 @@ fn list_tar_entries<R: std::io::Read>(
                 .then_some(path.as_path());
             let reservation = reserve_entry(&mut quota, size, config, list_mode, file_at)?;
             // An integrity pass decodes the payload itself, below.
-            if reservation == Reservation::Skipped && listing.integrity().is_none() {
-                entry.drain_skipped(&skip_limits)?;
+            if reservation == Reservation::Skipped {
+                if listing.integrity().is_none() {
+                    entry.drain_skipped(&skip_limits)?;
+                } else {
+                    entry.mark_skipped(&skip_limits);
+                }
             }
 
             if list_mode == ListMode::Strict && has_null_bytes(&path) {

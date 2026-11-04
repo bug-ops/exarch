@@ -58,6 +58,7 @@ _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
 _DecodeReuse = Literal["off", "memory", "temp_file"]
+_LinkState = Literal["recorded", "missing", "unread", "unreadable", "oversized"]
 _SkipKind = Literal[
     "duplicate",
     "extension_not_allowed",
@@ -761,32 +762,82 @@ class CreationReport:
         """Returns the compression percentage (space saved)."""
         ...
 
+class LinkTarget:
+    """
+    What listing learned of a link's target; narrow with ``isinstance`` or on
+    ``state``. A 7z symlink is an ``UnreadLinkTarget``: listing does not decode
+    7z entry data.
+    """
+
+    @property
+    def state(self) -> _LinkState: ...
+
+class RecordedLinkTarget(LinkTarget):
+    """A target the archive records."""
+
+    @property
+    def state(self) -> Literal["recorded"]: ...
+    @property
+    def path(self) -> str:
+        """The target as the archive spells it."""
+        ...
+
+class MissingLinkTarget(LinkTarget):
+    """A link whose archive entry carries no target."""
+
+    @property
+    def state(self) -> Literal["missing"]: ...
+
+class UnreadLinkTarget(LinkTarget):
+    """A target listing did not read."""
+
+    @property
+    def state(self) -> Literal["unread"]: ...
+
+class UnreadableLinkTarget(LinkTarget):
+    """A target that could not be read."""
+
+    @property
+    def state(self) -> Literal["unreadable"]: ...
+
+class OversizedLinkTarget(LinkTarget):
+    """A target too long to keep."""
+
+    @property
+    def state(self) -> Literal["oversized"]: ...
+    @property
+    def bytes(self) -> int:
+        """The length of the target in bytes."""
+        ...
+
+AnyLinkTarget = (
+    RecordedLinkTarget
+    | MissingLinkTarget
+    | UnreadLinkTarget
+    | UnreadableLinkTarget
+    | OversizedLinkTarget
+)
+
 class ArchiveEntry:
-    """Single entry in archive manifest."""
+    """
+    Single entry in archive manifest.
+
+    The concrete class tells the kind; only ``ArchiveFile`` has a ``size``, and
+    the link kinds have a ``target``.
+    """
 
     @property
     def path(self) -> str:
-        """Entry path."""
-        ...
-
-    @property
-    def size(self) -> int:
-        """Uncompressed size in bytes."""
+        """
+        Entry path. A name that is not valid UTF-8 is decoded with
+        ``os.fsdecode`` (lossless on Unix), never replaced, so two entries never
+        share a listed name.
+        """
         ...
 
     @property
     def entry_type(self) -> _ManifestEntryType:
         """Entry type."""
-        ...
-
-    @property
-    def is_symlink(self) -> bool:
-        """Whether this is a symlink."""
-        ...
-
-    @property
-    def is_hardlink(self) -> bool:
-        """Whether this is a hardlink."""
         ...
 
     @property
@@ -804,28 +855,47 @@ class ArchiveEntry:
         """File permissions (Unix mode)."""
         ...
 
-    @property
-    def symlink_target(self) -> str | None:
-        """
-        Symlink target (if applicable).
-
-        None for a 7z symlink: listing does not decode 7z entry data to read it.
-        """
-        ...
-
-    @property
-    def hardlink_target(self) -> str | None:
-        """Hardlink target (if applicable)."""
-        ...
-
     def compression_ratio(self) -> float | None:
         """
         Returns the compression ratio if the entry owns its compressed data.
 
-        None for TAR, empty entries and solid 7z members (including the
-        block start, whose ratio is checked per block).
+        None for entries of a solid block, whose ratio is checked per block.
         """
         ...
+
+class ArchiveFile(ArchiveEntry):
+    """A regular file."""
+
+    @property
+    def entry_type(self) -> Literal["File"]: ...
+    @property
+    def size(self) -> int:
+        """Uncompressed size in bytes."""
+        ...
+
+class ArchiveDirectory(ArchiveEntry):
+    """A directory."""
+
+    @property
+    def entry_type(self) -> Literal["Directory"]: ...
+
+class ArchiveSymlink(ArchiveEntry):
+    """A symbolic link."""
+
+    @property
+    def entry_type(self) -> Literal["Symlink"]: ...
+    @property
+    def target(self) -> AnyLinkTarget: ...
+
+class ArchiveHardlink(ArchiveEntry):
+    """A hard link."""
+
+    @property
+    def entry_type(self) -> Literal["Hardlink"]: ...
+    @property
+    def target(self) -> AnyLinkTarget: ...
+
+AnyArchiveEntry = ArchiveFile | ArchiveDirectory | ArchiveSymlink | ArchiveHardlink
 
 class ArchiveManifest:
     """
@@ -846,7 +916,7 @@ class ArchiveManifest:
         ...
 
     @property
-    def entries(self) -> list[ArchiveEntry]:
+    def entries(self) -> list[AnyArchiveEntry]:
         """List of archive entries."""
         ...
 
@@ -879,8 +949,31 @@ class VerificationIssue:
         ...
 
     @property
-    def context(self) -> str | None:
-        """Optional context."""
+    def code(self) -> _ErrorCode | None:
+        """
+        The error code of a refusal, the same an exception of that refusal
+        carries; None for a heuristic finding.
+        """
+        ...
+
+    @property
+    def sub_code(self) -> str | None:
+        """The sub-code of the refusal (a security, invalid-archive, quota or zip bomb code)."""
+        ...
+
+    @property
+    def relaxable_by(self) -> _PolicySetting | None:
+        """The policy setting that would admit the refused entry, if one does."""
+        ...
+
+    @property
+    def setting(self) -> _ConfigSetting | None:
+        """The configuration setting the refusal concerns, if any."""
+        ...
+
+    @property
+    def mode(self) -> int | None:
+        """The permission bits of an executable-file finding; None otherwise."""
         ...
 
 class UnverifiedEntry:

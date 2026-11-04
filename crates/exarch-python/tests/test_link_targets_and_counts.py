@@ -2,6 +2,7 @@
 `max_file_count` in `extract_archive` (issues #718, #719)."""
 
 import io
+import sys
 import tarfile
 from pathlib import Path
 
@@ -23,12 +24,71 @@ def _tar_with_symlinks(path, count):
     return path
 
 
-def test_7z_list_archive_leaves_symlink_targets_unset():
+def test_7z_list_archive_leaves_symlink_targets_unread():
     manifest = exarch.list_archive(str(SYMLINK_7Z))
 
     link = next(e for e in manifest.entries if e.entry_type == "Symlink")
+    assert isinstance(link, exarch.ArchiveSymlink)
     assert link.path == "link"
-    assert link.symlink_target is None
+    assert isinstance(link.target, exarch.UnreadLinkTarget)
+    assert link.target.state == "unread"
+
+
+def test_tar_list_archive_records_link_targets_and_only_files_have_a_size(temp_dir):
+    archive = _tar_with_symlinks(temp_dir / "links.tar", 1)
+
+    entries = {e.path: e for e in exarch.list_archive(str(archive)).entries}
+
+    link = next(e for e in entries.values() if isinstance(e, exarch.ArchiveSymlink))
+    assert isinstance(link.target, exarch.RecordedLinkTarget)
+    assert (link.target.state, link.target.path) == ("recorded", "target")
+    assert not hasattr(link, "size")
+    assert not hasattr(link, "is_symlink")
+    for entry in entries.values():
+        assert isinstance(entry, exarch.ArchiveEntry)
+        assert hasattr(entry, "size") == isinstance(entry, exarch.ArchiveFile)
+
+
+def test_verify_issue_carries_the_typed_refusal(temp_dir):
+    archive = _tar_with_symlinks(temp_dir / "links.tar", 1)
+
+    report = exarch.verify_archive(str(archive))
+
+    issue = next(i for i in report.issues if i.code == "SECURITY_VIOLATION")
+    assert issue.sub_code == "LINK_POLICY"
+    assert issue.relaxable_by == "symlinks"
+    assert issue.mode is None
+    assert not hasattr(issue, "context")
+
+
+def test_verify_executable_finding_carries_its_mode(temp_dir):
+    archive = temp_dir / "exec.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("run.sh")
+        info.size = 1
+        info.mode = 0o755
+        tar.addfile(info, io.BytesIO(b"x"))
+
+    report = exarch.verify_archive(str(archive))
+
+    issue = next(i for i in report.issues if i.category == "Executable File")
+    assert issue.code is None
+    assert issue.mode == 0o755
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="non-UTF-8 names need a Unix filesystem")
+def test_non_utf8_entry_names_are_not_listed_lossily(temp_dir):
+    archive = temp_dir / "raw.tar"
+    with tarfile.open(archive, "w", encoding="utf-8", errors="surrogateescape") as tar:
+        for raw in ("a\udcff", "a\udcfe"):
+            info = tarfile.TarInfo(raw)
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+
+    names = [e.path for e in exarch.list_archive(str(archive)).entries]
+
+    assert len(set(names)) == len(names) == 2
+    assert all("\ufffd" not in name for name in names)
 
 
 def test_extract_counts_symlinks_against_max_file_count(temp_dir):

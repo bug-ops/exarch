@@ -783,11 +783,10 @@ impl exarch_core::ProgressCallback for PyProgressAdapter {
         }
         self.current_entry_bytes = 0;
         Python::attach(|py| {
-            let path_str = path.to_string_lossy().into_owned();
-            if let Err(err) = self
-                .callback
-                .call1(py, (path_str, total, current, self.current_entry_bytes))
-            {
+            if let Err(err) = self.callback.call1(
+                py,
+                (path.as_os_str(), total, current, self.current_entry_bytes),
+            ) {
                 self.callback_error = Some(err);
             }
         });
@@ -854,6 +853,16 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCreationReport>()?;
     m.add_class::<PyArchiveManifest>()?;
     m.add_class::<PyArchiveEntry>()?;
+    m.add_class::<report::PyArchiveFile>()?;
+    m.add_class::<report::PyArchiveDirectory>()?;
+    m.add_class::<report::PyArchiveSymlink>()?;
+    m.add_class::<report::PyArchiveHardlink>()?;
+    m.add_class::<report::PyLinkTarget>()?;
+    m.add_class::<report::PyRecordedLinkTarget>()?;
+    m.add_class::<report::PyMissingLinkTarget>()?;
+    m.add_class::<report::PyUnreadLinkTarget>()?;
+    m.add_class::<report::PyUnreadableLinkTarget>()?;
+    m.add_class::<report::PyOversizedLinkTarget>()?;
     m.add_class::<PyVerificationReport>()?;
     m.add_class::<PyVerificationIssue>()?;
     m.add_class::<PyIntegrityGaps>()?;

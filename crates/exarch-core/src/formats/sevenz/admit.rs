@@ -379,9 +379,7 @@ pub(super) fn admit_sevenz_block(
             return Err(not_decodable(common::encrypted_archive_error()));
         }
         let needed = coder_memory(coder, output).ok_or_else(|| {
-            not_decodable(ArchiveError::unclassified(
-                "7z block uses an unsupported coder or malformed coder properties",
-            ))
+            not_decodable(ArchiveError::from(Malformation::SevenZUnsupportedCoder))
         })?;
         memory = memory.saturating_add(needed);
     }

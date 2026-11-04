@@ -197,8 +197,8 @@ impl<T> LinkTable<T> {
             .last()
             .is_some_and(|&(last, _)| last >= file_index)
         {
-            return Err(ArchiveError::unclassified(
-                "7z link entries are out of order",
+            return Err(ArchiveError::from(
+                Malformation::SevenZLinkEntriesOutOfOrder,
             ));
         }
         self.entries.push((file_index, value));

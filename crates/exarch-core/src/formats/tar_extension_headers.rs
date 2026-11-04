@@ -27,6 +27,7 @@ use tar::Header;
 use tar::PaxExtensions;
 
 use crate::ArchiveError;
+use crate::Malformation;
 use crate::Result;
 use crate::TarAmbiguity;
 use crate::TarExtensionKind;
@@ -290,10 +291,16 @@ fn unrecognized(kind: TarExtensionKind) -> ArchiveError {
     TarAmbiguity::UnrecognizedHeader { kind }.into()
 }
 
+fn pax_header_unreadable(error: &std::io::Error) -> ArchiveError {
+    ArchiveError::InvalidArchive(Malformation::TarPaxHeaderUnreadable {
+        detail: error.to_string().into(),
+    })
+}
+
 fn check_local_headers<R: Read>(entry: &mut Entry<'_, R>) -> Result<()> {
     let overrides = match entry
         .pax_extensions()
-        .map_err(|e| ArchiveError::unclassified(format!("failed to read PAX header: {e}")))?
+        .map_err(|e| pax_header_unreadable(&e))?
     {
         Some(records) => scan_records(records, PaxScope::Local)?,
         None => return Ok(()),
@@ -333,13 +340,13 @@ fn check_global_header<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -
         .by_ref()
         .take(metadata_limit)
         .read_to_end(&mut body)
-        .map_err(|e| ArchiveError::unclassified(format!("failed to read PAX header: {e}")))?;
+        .map_err(|e| pax_header_unreadable(&e))?;
 
     // The body is already consumed, so only a local header the `tar` crate
     // attached to this entry is still visible here.
     let follows_local = entry
         .pax_extensions()
-        .map_err(|e| ArchiveError::unclassified(format!("failed to read PAX header: {e}")))?
+        .map_err(|e| pax_header_unreadable(&e))?
         .is_some_and(|mut records| records.next().is_some());
     if follows_local {
         return Err(TarAmbiguity::LocalBeforeGlobal.into());

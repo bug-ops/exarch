@@ -237,9 +237,9 @@ describe('subCode', () => {
     assert.strictEqual(err.relaxableBy, 'max_tar_metadata_bytes');
   });
 
-  it('a plain corrupt archive carries no subCode', async () => {
+  it('a corrupt TAR header is TAR_READER', async () => {
     const err = await failureOf(write('junk.tar', Buffer.alloc(2048, 0x41)));
-    assert.strictEqual(err.subCode, undefined);
+    assert.strictEqual(err.subCode, 'TAR_READER');
   });
 
   it('every core SECURITY_VIOLATION carries a subCode', async () => {

@@ -147,6 +147,7 @@ use crate::ArchiveError;
 use crate::EntryCompression;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::Malformation;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -423,7 +424,9 @@ impl From<sevenz_rust2::Error> for ArchiveError {
                 io_err.kind(),
                 format!("{path}: {io_err}"),
             )),
-            other => Self::unclassified(format!("7z error: {other}")),
+            other => Self::from(Malformation::SevenZLibraryError {
+                detail: other.to_string().into(),
+            }),
         }
     }
 }

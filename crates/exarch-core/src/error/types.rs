@@ -31,7 +31,7 @@ closed_enum! {
     ///
     /// assert_eq!(ZipBombScope::SolidBlock.to_string(), "solid block");
     /// ```
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     #[non_exhaustive]
     pub enum ZipBombScope {
         /// One archive entry, checked against `max_compression_ratio`.

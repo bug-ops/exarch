@@ -495,8 +495,11 @@ fn list_tar_entries<R: std::io::Read>(
     let mut quota = QuotaTracker::new();
     let skip_limits = SkipLimits::of(config);
 
-    let mut entries = budgeted_tar_entries(&mut archive, budget)
-        .map_err(|e| ArchiveError::unclassified(format!("failed to read TAR entries: {e}")))?;
+    let mut entries = budgeted_tar_entries(&mut archive, budget).map_err(|e| {
+        ArchiveError::InvalidArchive(Malformation::TarListEntriesUnreadable {
+            detail: e.to_string().into(),
+        })
+    })?;
 
     while let Some(entry_result) = entries.next_entry() {
         let mut entry = entry_result?.check(config.max_tar_metadata_bytes.get())?;

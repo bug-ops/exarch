@@ -402,9 +402,11 @@ impl TarReadBudget {
     /// Classifies an error `tar` raised while reading toward the next entry.
     fn classify(&self, e: &io::Error) -> crate::ArchiveError {
         budget_violation(e).unwrap_or_else(|| {
-            self.prefer_fault(crate::ArchiveError::unclassified(format!(
-                "failed to read TAR entry: {e}"
-            )))
+            self.prefer_fault(crate::ArchiveError::InvalidArchive(
+                crate::Malformation::TarEntryUnreadable {
+                    detail: e.to_string().into(),
+                },
+            ))
         })
     }
 
@@ -1116,8 +1118,8 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
         }
         if self.budget.0.abandoned.load(Ordering::Relaxed) {
             self.poisoned = true;
-            return Some(Err(crate::ArchiveError::unclassified(
-                "TAR read continued after an abandoned entry",
+            return Some(Err(crate::ArchiveError::InvalidArchive(
+                crate::Malformation::TarReadAfterAbandonedEntry,
             )));
         }
         if let Some(details) = self.budget.skip_trip() {

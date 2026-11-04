@@ -428,8 +428,11 @@ impl<R: Read> TarArchive<R> {
             self.source.clone(),
         );
         let mut inner_archive = Archive::new(budgeted);
-        let mut entries = budgeted_tar_entries(&mut inner_archive, budget)
-            .map_err(|e| ArchiveError::unclassified(format!("failed to read entries: {e}")))?;
+        let mut entries = budgeted_tar_entries(&mut inner_archive, budget).map_err(|e| {
+            ArchiveError::InvalidArchive(Malformation::TarEntriesUnreadable {
+                detail: e.to_string().into(),
+            })
+        })?;
 
         let skip_limits = SkipLimits::of(config);
         let mut ctx = ExtractionContext {

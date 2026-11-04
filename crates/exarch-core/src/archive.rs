@@ -117,17 +117,19 @@ impl ArchiveBuilder {
     /// Returns an error if `archive_path` or `output_dir` are not set,
     /// or if extraction fails.
     pub fn extract(self) -> Result<ExtractionReport> {
-        let archive_path =
-            self.archive_path
-                .ok_or_else(|| crate::ArchiveError::InvalidConfiguration {
-                    reason: "archive path not set".to_string(),
-                })?;
+        let archive_path = self
+            .archive_path
+            .ok_or(crate::ArchiveError::InvalidConfiguration {
+                setting: crate::ConfigSetting::ArchivePath,
+                problem: crate::ConfigProblem::NotSet,
+            })?;
 
-        let output_dir =
-            self.output_dir
-                .ok_or_else(|| crate::ArchiveError::InvalidConfiguration {
-                    reason: "output directory not set".to_string(),
-                })?;
+        let output_dir = self
+            .output_dir
+            .ok_or(crate::ArchiveError::InvalidConfiguration {
+                setting: crate::ConfigSetting::OutputDirectory,
+                problem: crate::ConfigProblem::NotSet,
+            })?;
 
         let config = self.config.unwrap_or_default();
 

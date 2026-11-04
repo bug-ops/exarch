@@ -354,9 +354,10 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
             "Invalid archive '{archive}'\n\
              HINT: The archive may be corrupted or malformed."
         ),
-        ArchiveError::InvalidConfiguration { reason } => format!(
-            "Invalid configuration: {reason}\n\
+        ArchiveError::InvalidConfiguration { setting, problem } => format!(
+            "Invalid configuration: {}\n\
              HINT: Check the flags you passed and their allowed value ranges.",
+            setting.describe(problem),
         ),
         ArchiveError::SourceNotFound { path } => format!(
             "Source path not found: {}\n\

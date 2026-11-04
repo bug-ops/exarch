@@ -35,6 +35,8 @@ export interface ExarchErrorBase extends Error {
    * one of the `SecurityViolationSubCode` values.
    */
   subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
+  /** The configuration setting or input an `INVALID_CONFIGURATION` error refused. */
+  setting?: ConfigSetting
   /**
    * The exception thrown by a progress callback, an `onEntry` callback or an
    * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
@@ -116,6 +118,7 @@ export interface ExarchNativeError extends Error {
   code: string
   relaxableBy?: undefined
   subCode?: undefined
+  setting?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined

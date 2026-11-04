@@ -297,8 +297,9 @@ fn extract_atomic(
 
     let parent = canonical_output
         .parent()
-        .ok_or_else(|| ArchiveError::InvalidConfiguration {
-            reason: "output directory has no parent".into(),
+        .ok_or(ArchiveError::InvalidConfiguration {
+            setting: crate::ConfigSetting::OutputDirectory,
+            problem: crate::ConfigProblem::NoParent,
         })?;
 
     std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;

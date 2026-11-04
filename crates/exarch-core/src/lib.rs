@@ -78,6 +78,8 @@ pub use config::ZipConsistencyPolicy;
 pub use error::ArchiveError;
 pub use error::CentralRecordOrdinal;
 pub use error::CompressionRatio;
+pub use error::ConfigProblem;
+pub use error::ConfigSetting;
 pub use error::EndRecordKind;
 pub use error::ErrorCode;
 pub use error::FfiErrorMessage;

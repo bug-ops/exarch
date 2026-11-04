@@ -1,5 +1,6 @@
 //! Error types for archive operations.
 
+pub mod config_error;
 pub mod io_context;
 pub mod malformation;
 pub mod messages;
@@ -10,6 +11,8 @@ pub mod types;
 pub mod violation;
 pub mod zip_inconsistency;
 
+pub use config_error::ConfigProblem;
+pub use config_error::ConfigSetting;
 pub use io_context::IoContext;
 pub use malformation::Malformation;
 pub use malformation::Unclassified;

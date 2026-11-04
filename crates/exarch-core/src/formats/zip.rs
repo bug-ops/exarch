@@ -724,7 +724,8 @@ impl<R: Read + Seek> ZipArchive<R> {
             && self.structure.checks() == zip_structure::StreamChecks::Skip
         {
             return Err(ArchiveError::InvalidConfiguration {
-                reason: "ZIP archive was opened for a policy that skips stream checks".into(),
+                setting: crate::ConfigSetting::ZipArchive,
+                problem: crate::ConfigProblem::OpenedForOtherPolicy,
             });
         }
         Ok(())
@@ -759,9 +760,8 @@ impl<R: Read + Seek> ZipArchive<R> {
                     && !self.structure.census_window().admits(window) =>
             {
                 Err(ArchiveError::InvalidConfiguration {
-                    reason: "ZIP archive was opened under a smaller zstd window limit than its \
-                             config allows"
-                        .into(),
+                    setting: crate::ConfigSetting::ZipArchive,
+                    problem: crate::ConfigProblem::OpenedUnderSmallerZstdWindow,
                 })
             }
             ZstdWindows::NoZstdEntries | ZstdWindows::Largest(_) => Ok(()),

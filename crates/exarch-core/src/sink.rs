@@ -293,7 +293,8 @@ impl TryFrom<&ExtractionOptions> for SinkOptions {
     fn try_from(options: &ExtractionOptions) -> Result<Self> {
         if options.atomic {
             return Err(ArchiveError::InvalidConfiguration {
-                reason: "atomic extraction renames a directory and cannot target a sink".into(),
+                setting: crate::ConfigSetting::AtomicExtraction,
+                problem: crate::ConfigProblem::CannotTargetSink,
             });
         }
         Ok(Self {

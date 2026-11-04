@@ -398,7 +398,8 @@ mod tests {
             ArchiveError::from(Violation::EncryptedArchive),
             ArchiveError::InvalidCompressionLevel { level: 0 },
             ArchiveError::InvalidConfiguration {
-                reason: "test".to_string(),
+                setting: crate::ConfigSetting::OutputPath,
+                problem: crate::ConfigProblem::NotSet,
             },
             ArchiveError::Io(std::io::Error::other("test")),
         ];

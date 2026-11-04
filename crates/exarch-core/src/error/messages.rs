@@ -5,6 +5,7 @@
 //! description and the fate of partial output. Python, Node.js and the CLI
 //! consume [`FfiErrorMessage`] instead of re-matching [`ArchiveError`].
 
+use super::config_error::ConfigSetting;
 use super::redaction::sanitize_io_error_for_error;
 use super::types::ArchiveError;
 use super::types::PartialWrites;
@@ -262,7 +263,12 @@ pub enum FfiKind {
     /// Archive format could not be determined.
     UnknownFormat,
     /// Configuration is invalid.
-    InvalidConfiguration,
+    #[non_exhaustive]
+    InvalidConfiguration {
+        /// The setting or input that was refused; `None` for a reader format
+        /// that cannot be used.
+        setting: Option<ConfigSetting>,
+    },
 }
 
 impl FfiKind {
@@ -286,7 +292,17 @@ impl FfiKind {
             | Self::OutputExists
             | Self::InvalidCompressionLevel
             | Self::UnknownFormat
-            | Self::InvalidConfiguration => None,
+            | Self::InvalidConfiguration { .. } => None,
+        }
+    }
+
+    /// The configuration setting or input that was refused, if this is a
+    /// [`FfiKind::InvalidConfiguration`] that names one.
+    #[must_use]
+    pub const fn setting(&self) -> Option<ConfigSetting> {
+        match self {
+            Self::InvalidConfiguration { setting } => *setting,
+            _ => None,
         }
     }
 
@@ -312,7 +328,7 @@ impl FfiKind {
             | Self::OutputExists
             | Self::InvalidCompressionLevel
             | Self::UnknownFormat
-            | Self::InvalidConfiguration => None,
+            | Self::InvalidConfiguration { .. } => None,
         }
     }
 
@@ -335,7 +351,7 @@ impl FfiKind {
             Self::OutputExists => ErrorCode::OutputExists,
             Self::InvalidCompressionLevel => ErrorCode::InvalidCompressionLevel,
             Self::UnknownFormat => ErrorCode::UnknownFormat,
-            Self::InvalidConfiguration => ErrorCode::InvalidConfiguration,
+            Self::InvalidConfiguration { .. } => ErrorCode::InvalidConfiguration,
         }
     }
 }
@@ -504,9 +520,10 @@ impl ArchiveError {
             Self::UnknownFormat { .. } | Self::ReaderFormat(ReaderFormatError::Unrecognized) => {
                 FfiKind::UnknownFormat
             }
-            Self::InvalidConfiguration { .. } | Self::ReaderFormat(_) => {
-                FfiKind::InvalidConfiguration
-            }
+            Self::InvalidConfiguration { setting, .. } => FfiKind::InvalidConfiguration {
+                setting: Some(*setting),
+            },
+            Self::ReaderFormat(_) => FfiKind::InvalidConfiguration { setting: None },
             Self::PartialExtraction { source, .. } => source.ffi_kind(),
         }
     }
@@ -546,7 +563,10 @@ impl ArchiveError {
             Self::UnknownFormat { .. } => {
                 format!("cannot determine archive format from: {path}")
             }
-            Self::InvalidConfiguration { reason } => format!("invalid configuration: {reason}"),
+            Self::InvalidConfiguration { setting, problem } => format!(
+                "invalid configuration: {}",
+                super::config_error::message(*setting, problem)
+            ),
             Self::ReaderFormat(reason) => reason.to_string(),
             Self::PartialExtraction { source, .. } => source.ffi_description(),
         }
@@ -575,6 +595,7 @@ impl ArchiveError {
 
 #[cfg(test)]
 mod tests {
+    use super::super::config_error::ConfigProblem;
     use super::super::types::QuotaResource;
     use super::super::types::ZipBombDetails;
     use super::super::types::ZipBombScope;
@@ -720,7 +741,8 @@ mod tests {
                 path: PathBuf::from("test"),
             },
             ArchiveError::InvalidConfiguration {
-                reason: "test".into(),
+                setting: ConfigSetting::OutputPath,
+                problem: ConfigProblem::NotSet,
             },
         ]
     }

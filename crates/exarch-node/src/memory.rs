@@ -175,7 +175,8 @@ struct MemoryJob<S> {
 
 fn invalid_max_bytes() -> Failure {
     Failure::Core(exarch_core::ArchiveError::InvalidConfiguration {
-        reason: "maxBytes must be a positive whole number of bytes".into(),
+        setting: exarch_core::ConfigSetting::MaxBytes,
+        problem: exarch_core::ConfigProblem::NotPositiveWholeNumber,
     })
 }
 

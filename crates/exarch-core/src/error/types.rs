@@ -4,6 +4,8 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use thiserror::Error;
 
+use super::config_error::ConfigProblem;
+use super::config_error::ConfigSetting;
 use super::malformation::Malformation;
 use super::tar_ambiguity::TarAmbiguity;
 use super::tar_trailer::TarTrailerRefusal;
@@ -526,10 +528,12 @@ pub enum ArchiveError {
     ReaderFormat(ReaderFormatError),
 
     /// Invalid configuration provided.
-    #[error("invalid configuration: {reason}")]
+    #[error("invalid configuration: {}", super::config_error::message(*setting, problem))]
     InvalidConfiguration {
-        /// Reason for the configuration error.
-        reason: String,
+        /// The setting or input that was refused.
+        setting: ConfigSetting,
+        /// Why it was refused.
+        problem: ConfigProblem,
     },
 
     /// Extraction stopped mid-archive after recording progress.
@@ -1252,7 +1256,8 @@ mod tests {
     #[test]
     fn test_invalid_configuration_error() {
         let err = ArchiveError::InvalidConfiguration {
-            reason: "output path not set".to_string(),
+            setting: ConfigSetting::OutputPath,
+            problem: ConfigProblem::NotSet,
         };
         let display = err.to_string();
         assert!(display.contains("invalid configuration"));

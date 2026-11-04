@@ -96,6 +96,11 @@ pub fn convert_error(err: CoreError) -> PyErr {
             kind.relaxable_by().map(PolicySetting::as_str),
         );
         set_optional_str(&err, "sub_code", kind.sub_code().map(SubCode::as_str));
+        set_optional_str(
+            &err,
+            "setting",
+            kind.setting().map(exarch_core::ConfigSetting::as_str),
+        );
         err
     };
     if let Some(outcome) = partial {

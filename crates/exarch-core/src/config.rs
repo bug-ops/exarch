@@ -5,6 +5,8 @@ use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
+use crate::ConfigProblem;
+use crate::ConfigSetting;
 use crate::closed_enum::closed_enum;
 use crate::types::Extension;
 use crate::types::PathComponentName;
@@ -640,53 +642,63 @@ impl SecurityConfig<Unvalidated> {
     pub fn validate(self) -> crate::Result<SecurityConfig<Validated>> {
         if !self.max_compression_ratio.is_finite() || self.max_compression_ratio <= 0.0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_compression_ratio must be positive".into(),
+                setting: ConfigSetting::MaxCompressionRatio,
+                problem: ConfigProblem::NotPositive,
             });
         }
         if !self.max_solid_compression_ratio.is_finite() || self.max_solid_compression_ratio <= 0.0
         {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_solid_compression_ratio must be positive".into(),
+                setting: ConfigSetting::MaxSolidCompressionRatio,
+                problem: ConfigProblem::NotPositive,
             });
         }
         if self.max_file_size == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_file_size must not be zero".into(),
+                setting: ConfigSetting::MaxFileSize,
+                problem: ConfigProblem::Zero,
             });
         }
         if self.max_total_size == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_total_size must not be zero".into(),
+                setting: ConfigSetting::MaxTotalSize,
+                problem: ConfigProblem::Zero,
             });
         }
         if self.max_path_depth == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_path_depth must not be zero".into(),
+                setting: ConfigSetting::MaxPathDepth,
+                problem: ConfigProblem::Zero,
             });
         }
         if self.max_file_count == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_file_count must not be zero".into(),
+                setting: ConfigSetting::MaxFileCount,
+                problem: ConfigProblem::Zero,
             });
         }
         if self.max_solid_block_memory == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_solid_block_memory must not be zero".into(),
+                setting: ConfigSetting::MaxSolidBlockMemory,
+                problem: ConfigProblem::Zero,
             });
         }
         if self.max_tar_metadata_bytes == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_tar_metadata_bytes must not be zero".into(),
+                setting: ConfigSetting::MaxTarMetadataBytes,
+                problem: ConfigProblem::Zero,
             });
         }
         if self.max_tar_metadata_bytes == u64::MAX {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_tar_metadata_bytes must be below u64::MAX".into(),
+                setting: ConfigSetting::MaxTarMetadataBytes,
+                problem: ConfigProblem::AtOrAboveU64Max,
             });
         }
         if self.max_decoder_memory == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_decoder_memory must not be zero".into(),
+                setting: ConfigSetting::MaxDecoderMemory,
+                problem: ConfigProblem::Zero,
             });
         }
         Ok(SecurityConfig {
@@ -1440,11 +1452,12 @@ impl DecompressionBudget {
     /// Returns [`ArchiveError::InvalidConfiguration`](crate::ArchiveError) when
     /// `bytes` is zero.
     pub fn try_from_bytes(bytes: u64) -> crate::Result<Self> {
-        std::num::NonZeroU64::new(bytes).map(Self).ok_or_else(|| {
+        std::num::NonZeroU64::new(bytes).map(Self).ok_or(
             crate::ArchiveError::InvalidConfiguration {
-                reason: "decompression budget must be greater than zero".into(),
-            }
-        })
+                setting: ConfigSetting::DecompressionBudget,
+                problem: ConfigProblem::NotGreaterThanZero,
+            },
+        )
     }
 
     /// Returns the budget in bytes.

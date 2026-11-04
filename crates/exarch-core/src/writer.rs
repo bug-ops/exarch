@@ -62,7 +62,8 @@ impl<W: Write> Write for CountingWriter<W> {
 
 pub(crate) fn sevenz_creation_unsupported() -> ArchiveError {
     ArchiveError::InvalidConfiguration {
-        reason: "7z archive creation is not supported".into(),
+        setting: crate::ConfigSetting::CreationFormat,
+        problem: crate::ConfigProblem::NotSupported,
     }
 }
 

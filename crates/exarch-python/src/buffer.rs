@@ -192,7 +192,8 @@ fn parse_max_bytes(max_bytes: Option<i128>) -> PyResult<Option<NonZeroU64>> {
                 .and_then(NonZeroU64::new)
                 .ok_or_else(|| {
                     convert_error(ArchiveError::InvalidConfiguration {
-                        reason: "max_bytes must be a positive whole number of bytes".into(),
+                        setting: exarch_core::ConfigSetting::MaxBytes,
+                        problem: exarch_core::ConfigProblem::NotPositiveWholeNumber,
                     })
                 })
         })

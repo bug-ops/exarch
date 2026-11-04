@@ -177,7 +177,8 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
 ) -> Result<(CreationReport, W)> {
     if out.stream_position()? != 0 {
         return Err(ArchiveError::InvalidConfiguration {
-            reason: "ZIP output writer must be positioned at offset 0".into(),
+            setting: crate::ConfigSetting::ZipOutputWriter,
+            problem: crate::ConfigProblem::NotAtStart,
         });
     }
     let mut zip = ZipWriter::new(out);

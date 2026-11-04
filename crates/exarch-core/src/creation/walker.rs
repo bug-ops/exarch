@@ -201,7 +201,10 @@ fn entry_name(path: &Path, relative: &Path, is_dir: bool) -> Result<Option<Archi
         (Some(name), _) => Ok(Some(name)),
         (None, true) => Ok(None),
         (None, false) => Err(ArchiveError::InvalidConfiguration {
-            reason: format!("strip_prefix removes the whole name of {}", path.display()),
+            setting: crate::ConfigSetting::StripPrefix,
+            problem: crate::ConfigProblem::RemovesWholeName {
+                path: path.to_path_buf(),
+            },
         }),
     }
 }

@@ -35,6 +35,8 @@ export interface ExarchErrorBase extends Error {
    * one of the `SecurityViolationSubCode` values.
    */
   subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
+  /** The configuration setting or input an `INVALID_CONFIGURATION` error refused. */
+  setting?: ConfigSetting
   /**
    * The exception thrown by a progress callback, an `onEntry` callback or an
    * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
@@ -116,6 +118,7 @@ export interface ExarchNativeError extends Error {
   code: string
   relaxableBy?: undefined
   subCode?: undefined
+  setting?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
@@ -600,6 +603,9 @@ export type ArchiveType = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip
 
 /** Status of a single check category. */
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
+
+/** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'archive_path' | 'output_directory' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_archive' | 'zip_output_writer' | 'max_bytes'
 
 /**
  * Create an archive from source files and directories (async).

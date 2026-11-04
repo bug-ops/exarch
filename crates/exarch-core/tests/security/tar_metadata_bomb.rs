@@ -176,7 +176,7 @@ fn extract_rejects_oversized_gnu_longname_metadata_entry() {
         .validate()
         .unwrap();
 
-    let mut archive = TarArchive::new(Cursor::new(bomb));
+    let archive = TarArchive::new(Cursor::new(bomb));
     let result = archive.extract(
         temp.path(),
         &config,
@@ -195,7 +195,7 @@ fn extract_rejects_oversized_gnu_longlink_metadata_entry() {
         .validate()
         .unwrap();
 
-    let mut archive = TarArchive::new(Cursor::new(bomb));
+    let archive = TarArchive::new(Cursor::new(bomb));
     let result = archive.extract(
         temp.path(),
         &config,
@@ -214,7 +214,7 @@ fn extract_rejects_oversized_pax_metadata_entry() {
         .validate()
         .unwrap();
 
-    let mut archive = TarArchive::new(Cursor::new(bomb));
+    let archive = TarArchive::new(Cursor::new(bomb));
     let result = archive.extract(
         temp.path(),
         &config,
@@ -246,7 +246,7 @@ fn extract_accepts_metadata_entry_within_the_configured_budget() {
         .with_max_tar_metadata_bytes(4096)
         .validate()
         .unwrap();
-    let mut archive = TarArchive::new(Cursor::new(t));
+    let archive = TarArchive::new(Cursor::new(t));
     let result = archive.extract(
         temp.path(),
         &config,
@@ -308,7 +308,7 @@ fn default_config_budget_rejects_a_moderately_oversized_metadata_entry() {
     let bomb = metadata_bomb(b'L', 4 * 1024 * 1024 + 4096);
     let temp = TempDir::new().unwrap();
 
-    let mut archive = TarArchive::new(Cursor::new(bomb));
+    let archive = TarArchive::new(Cursor::new(bomb));
     let result = archive.extract(
         temp.path(),
         &SecurityConfig::default().validate().unwrap(),
@@ -444,7 +444,7 @@ fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str, refusal: Refusal
     let validated_config = config.clone().validate().unwrap();
 
     let temp = TempDir::new().unwrap();
-    let mut archive = TarArchive::new(Cursor::new(bomb.to_owned()));
+    let archive = TarArchive::new(Cursor::new(bomb.to_owned()));
     let result = archive.extract(
         temp.path(),
         &validated_config,
@@ -511,7 +511,7 @@ fn legitimate_pax_global_header_does_not_false_positive() {
         .with_max_tar_metadata_bytes(4096)
         .validate()
         .unwrap();
-    let mut archive = TarArchive::new(Cursor::new(t));
+    let archive = TarArchive::new(Cursor::new(t));
     let result = archive.extract(
         temp.path(),
         &config,
@@ -784,10 +784,12 @@ fn extract_fully_skips_a_legitimate_large_disallowed_extension_entry_and_continu
     let big_size = 45 * 1024 * 1024;
     let data = skip_and_continue_fixture(big_size);
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+    let config = SecurityConfig::default()
+        .try_add_allowed_extension("txt")
+        .unwrap();
     let validated_config = config.clone().validate().unwrap();
 
-    let mut archive = TarArchive::new(Cursor::new(data.clone()));
+    let archive = TarArchive::new(Cursor::new(data.clone()));
     let result = archive.extract(
         temp.path(),
         &validated_config,
@@ -908,7 +910,8 @@ fn many_sparse_entries_are_refused_by_every_entry_point_without_draining() {
         .with_max_file_size(u64::MAX)
         .with_max_total_size(u64::MAX)
         .with_max_file_count(usize::MAX)
-        .with_allowed_extensions(vec!["txt".to_string()]);
+        .try_add_allowed_extension("txt")
+        .unwrap();
 
     let temp = TempDir::new().unwrap();
     let path = write_tar_file(&temp, "many_sparse.tar", &bomb);
@@ -931,7 +934,7 @@ fn budget_violation_is_not_confused_with_other_archive_errors() {
     // archive (not a budget trip) must not be misclassified.
     let garbage = vec![1u8, 2, 3, 4, 5];
     let temp = TempDir::new().unwrap();
-    let mut archive = TarArchive::new(Cursor::new(garbage));
+    let archive = TarArchive::new(Cursor::new(garbage));
     let result = archive.extract(
         temp.path(),
         &SecurityConfig::default().validate().unwrap(),

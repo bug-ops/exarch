@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::creation::config::CompressionLevel;
 use crate::creation::config::CreationConfig;
 use crate::creation::report::CreationReport;
 use crate::error::ArchiveError;
@@ -18,12 +19,13 @@ use crate::formats::detect::CreatableFormat;
 ///
 /// ```no_run
 /// use exarch_core::creation::ArchiveCreator;
+/// use exarch_core::creation::CompressionLevel;
 ///
 /// let report = ArchiveCreator::new()
 ///     .output("backup.tar.gz")
 ///     .add_source("src/")
 ///     .add_source("Cargo.toml")
-///     .compression_level(9)?
+///     .compression_level(CompressionLevel::try_from(9u8)?)
 ///     .create()?;
 ///
 /// println!("Created archive with {} files", report.files_added);
@@ -124,26 +126,21 @@ impl ArchiveCreator {
     ///
     /// Higher values provide better compression but slower speed.
     ///
-    /// # Errors
-    ///
-    /// Returns [`ArchiveError::InvalidCompressionLevel`] if `level` is not in
-    /// the range 1–9.
-    ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::creation::ArchiveCreator;
+    /// use exarch_core::creation::CompressionLevel;
     ///
-    /// let creator = ArchiveCreator::new().compression_level(9)?; // Maximum compression
+    /// // Maximum compression
+    /// let creator = ArchiveCreator::new().compression_level(CompressionLevel::try_from(9u8)?);
     ///
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
-    pub fn compression_level(mut self, level: u8) -> Result<Self> {
-        if !(1..=9).contains(&level) {
-            return Err(ArchiveError::InvalidCompressionLevel { level });
-        }
-        self.config.compression_level = Some(level);
-        Ok(self)
+    #[must_use]
+    pub fn compression_level(mut self, level: CompressionLevel) -> Self {
+        self.config.compression_level = level;
+        self
     }
 
     /// Sets whether to follow symlinks.
@@ -313,8 +310,7 @@ mod tests {
     #[test]
     fn test_builder_config_methods() {
         let creator = ArchiveCreator::new()
-            .compression_level(9)
-            .unwrap()
+            .compression_level(CompressionLevel::try_from(9u8).unwrap())
             .follow_symlinks(true)
             .include_hidden(true)
             .exclude("*.log")
@@ -322,7 +318,10 @@ mod tests {
             .strip_prefix("/base")
             .format(CreatableFormat::TarGz);
 
-        assert_eq!(creator.config.compression_level, Some(9));
+        assert_eq!(
+            creator.config.compression_level,
+            CompressionLevel::try_from(9u8).unwrap()
+        );
         assert!(creator.config.follow_symlinks);
         assert!(creator.config.include_hidden);
         assert!(
@@ -367,25 +366,21 @@ mod tests {
 
     #[test]
     fn test_builder_compression_level() {
-        let creator = ArchiveCreator::new().compression_level(9).unwrap();
-        assert_eq!(creator.config.compression_level, Some(9));
+        let creator =
+            ArchiveCreator::new().compression_level(CompressionLevel::try_from(9u8).unwrap());
+        assert_eq!(
+            creator.config.compression_level,
+            CompressionLevel::try_from(9u8).unwrap()
+        );
     }
 
     #[test]
     fn test_builder_compression_level_mid() {
-        let creator = ArchiveCreator::new().compression_level(5).unwrap();
-        assert_eq!(creator.config.compression_level, Some(5));
-    }
-
-    #[test]
-    fn test_builder_compression_level_invalid() {
-        assert_matches!(
-            ArchiveCreator::new().compression_level(0),
-            Err(ArchiveError::InvalidCompressionLevel { level: 0 })
-        );
-        assert_matches!(
-            ArchiveCreator::new().compression_level(10),
-            Err(ArchiveError::InvalidCompressionLevel { level: 10 })
+        let creator =
+            ArchiveCreator::new().compression_level(CompressionLevel::try_from(5u8).unwrap());
+        assert_eq!(
+            creator.config.compression_level,
+            CompressionLevel::try_from(5u8).unwrap()
         );
     }
 
@@ -428,8 +423,7 @@ mod tests {
     fn test_builder_full_config() {
         let config = CreationConfig::default()
             .with_follow_symlinks(true)
-            .with_compression_level(9)
-            .unwrap();
+            .with_compression_level(CompressionLevel::try_from(9u8).unwrap());
 
         let creator = ArchiveCreator::new()
             .output("test.tar.gz")
@@ -437,7 +431,10 @@ mod tests {
             .config(config);
 
         assert!(creator.config.follow_symlinks);
-        assert_eq!(creator.config.compression_level, Some(9));
+        assert_eq!(
+            creator.config.compression_level,
+            CompressionLevel::try_from(9u8).unwrap()
+        );
     }
 
     #[test]

@@ -407,7 +407,7 @@ fn an_overlong_name_of_a_skipped_extension_is_not_refused() {
         &[Member::File("ok.txt", b"hi"), Member::File(&long, b"hi")],
         false,
     );
-    let config = config().with_allowed_extensions(vec!["txt".to_string()]);
+    let config = config().try_add_allowed_extension("txt").unwrap();
     let mut sink = RecordingSink::default();
     let report = extract_bytes(bytes, &config, &mut sink).unwrap();
     assert_eq!(report.files_skipped, 1);
@@ -422,7 +422,7 @@ fn a_reparse_point_is_refused_before_any_delivery() {
     );
     let mut sink = RecordingSink::default();
     let error = extract_bytes(bytes, &config(), &mut sink).unwrap_err();
-    assert_matches!(&error, ArchiveError::SecurityViolation { reason, .. } if reason.contains("reparse point"),
+    assert_matches!(&error, ArchiveError::SecurityViolation { kind, .. } if kind.to_string().contains("reparse point"),
         "{error:?}"
     );
     assert!(sink.finished.is_empty());

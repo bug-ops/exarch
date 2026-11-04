@@ -636,6 +636,7 @@ mod tests {
     use super::support::pinned;
     use super::support::pinned_at;
     use super::*;
+    use crate::security::RawMode;
     use std::assert_matches;
     use std::fs;
     use std::io;
@@ -742,7 +743,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = pinned(&temp);
         let config = crate::SecurityConfig::default().validate().unwrap();
-        let mode = crate::security::permissions::sanitize_permissions(0o640, &config);
+        let mode = crate::security::permissions::sanitize_permissions(RawMode::new(0o640), &config);
 
         dir.create_new(leaf("f"), Some(mode)).unwrap();
 

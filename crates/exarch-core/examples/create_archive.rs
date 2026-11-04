@@ -6,6 +6,7 @@
 use exarch_core::ArchiveCreator;
 use exarch_core::CreationConfig;
 use exarch_core::create_archive;
+use exarch_core::creation::CompressionLevel;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Example 1: Simple creation with default config
@@ -30,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = ArchiveCreator::new()
         .output("example.zip")
         .add_source("example_file.txt")
-        .compression_level(9)?
+        .compression_level(CompressionLevel::try_from(9u8)?)
         .create()?;
     println!("  Created ZIP with {} files", report.files_added);
 

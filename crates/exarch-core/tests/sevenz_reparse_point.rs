@@ -90,7 +90,7 @@ fn extract_rejects_reparse_directory() {
 
     assert_matches!(
         extract_archive(&path, out.path(), &SecurityConfig::default()),
-        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("reparse point")
+        Err(ArchiveError::SecurityViolation { kind, .. }) if kind.to_string().contains("reparse point")
     );
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
 }
@@ -144,7 +144,7 @@ fn assert_listed_as_symlinks_and_refused(archive: &Path) {
     let out = TempDir::new().unwrap();
     assert_matches!(
         extract_archive(archive, out.path(), &config),
-        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("reparse point")
+        Err(ArchiveError::SecurityViolation { kind, .. }) if kind.to_string().contains("reparse point")
     );
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
 }

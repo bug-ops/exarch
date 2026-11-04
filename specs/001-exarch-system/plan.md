@@ -221,7 +221,7 @@ pub enum ValidatedEntryType {
     File,
     Directory,
     Symlink(SafeSymlink),
-    Hardlink { target: SafePath },
+    Hardlink { target: HardlinkTarget },
 }
 ```
 
@@ -314,19 +314,17 @@ pub trait ProgressCallback: Send {
 
 ```rust
 pub trait ArchiveFormat {
-    fn extract(&mut self, output_dir: &Path, config: &SecurityConfig,
+    fn extract(self, output_dir: &Path, config: &SecurityConfig<Validated>,
         options: &ExtractionOptions, progress: &mut dyn ProgressCallback)
         -> Result<ExtractionReport>;
-    fn list(&mut self, config: &SecurityConfig<Validated>) -> Result<ArchiveManifest>;
-    fn verify(&mut self, config: &SecurityConfig<Validated>, options: &VerificationOptions)
+    fn list(self, config: &SecurityConfig<Validated>) -> Result<ArchiveManifest>;
+    fn verify(self, config: &SecurityConfig<Validated>, options: &VerificationOptions)
         -> Result<VerificationReport>;
-    fn format_name(&self) -> &'static str;
 }
 
 pub trait FormatCreator {
-    fn create(&self, output: &Path, sources: &[&Path], config: &CreationConfig,
+    fn create(&self, output: &Path, sources: &[&Path], config: &CreationConfig<Validated>,
         progress: &mut dyn ProgressCallback) -> Result<CreationReport>;
-    fn format_name(&self) -> &'static str;
 }
 ```
 

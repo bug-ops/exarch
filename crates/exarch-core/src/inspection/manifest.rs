@@ -9,6 +9,8 @@ use crate::Result;
 use crate::ZipEntryIndex;
 use crate::closed_enum::closed_enum;
 use crate::formats::detect::ArchiveType;
+use crate::security::Compressed;
+use crate::security::Uncompressed;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::check_link_target_length;
 
@@ -274,26 +276,28 @@ impl ArchiveEntry {
 /// # Examples
 ///
 /// ```
+/// use exarch_core::Compressed;
 /// use exarch_core::SolidBlock;
+/// use exarch_core::Uncompressed;
 ///
-/// let block = SolidBlock::new(100, 13_800);
-/// assert_eq!(block.compressed, 100);
-/// assert_eq!(block.uncompressed, 13_800);
+/// let block = SolidBlock::new(Compressed(100), Uncompressed(13_800));
+/// assert_eq!(block.compressed, Compressed(100));
+/// assert_eq!(block.uncompressed, Uncompressed(13_800));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SolidBlock {
     /// Sum of the block's pack stream sizes in bytes
-    pub compressed: u64,
+    pub compressed: Compressed,
 
     /// Sum of the uncompressed sizes of every file in the block
-    pub uncompressed: u64,
+    pub uncompressed: Uncompressed,
 }
 
 impl SolidBlock {
     /// Creates a block from its compressed and uncompressed totals.
     #[must_use]
-    pub const fn new(compressed: u64, uncompressed: u64) -> Self {
+    pub const fn new(compressed: Compressed, uncompressed: Uncompressed) -> Self {
         Self {
             compressed,
             uncompressed,
@@ -310,9 +314,13 @@ impl SolidBlock {
 /// # Examples
 ///
 /// ```
+/// use exarch_core::Compressed;
 /// use exarch_core::EntryCompression;
 ///
-/// assert_eq!(EntryCompression::Entry(40).compressed_size(), Some(40));
+/// assert_eq!(
+///     EntryCompression::Entry(Compressed(40)).compressed_size(),
+///     Some(40)
+/// );
 /// assert_eq!(EntryCompression::Unknown.compressed_size(), None);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,7 +331,7 @@ pub enum EntryCompression {
     Unknown,
 
     /// The entry owns this many compressed bytes (ZIP, 7z single-file block)
-    Entry(u64),
+    Entry(Compressed),
 
     /// First file of a solid block; carries the totals of the whole block
     SolidBlockStart(SolidBlock),
@@ -338,8 +346,8 @@ impl EntryCompression {
     #[must_use]
     pub const fn compressed_size(&self) -> Option<u64> {
         match self {
-            Self::Entry(compressed) => Some(*compressed),
-            Self::SolidBlockStart(block) => Some(block.compressed),
+            Self::Entry(compressed) => Some(compressed.0),
+            Self::SolidBlockStart(block) => Some(block.compressed.0),
             Self::Unknown | Self::SolidBlockMember => None,
         }
     }
@@ -348,7 +356,7 @@ impl EntryCompression {
     #[must_use]
     pub const fn entry_compressed_size(&self) -> Option<u64> {
         match self {
-            Self::Entry(compressed) => Some(*compressed),
+            Self::Entry(compressed) => Some(compressed.0),
             Self::Unknown | Self::SolidBlockStart(_) | Self::SolidBlockMember => None,
         }
     }
@@ -589,7 +597,7 @@ mod tests {
             path: PathBuf::from("file.txt"),
             kind: ManifestEntryKind::File,
             size: 1024,
-            compression: EntryCompression::Entry(512),
+            compression: EntryCompression::Entry(Compressed(512)),
             mode: Some(0o644),
             modified: None,
         };
@@ -622,7 +630,7 @@ mod tests {
             path: PathBuf::from("file.txt"),
             kind: ManifestEntryKind::File,
             size: 1000,
-            compression: EntryCompression::Entry(100),
+            compression: EntryCompression::Entry(Compressed(100)),
             mode: None,
             modified: None,
         };
@@ -647,7 +655,8 @@ mod tests {
     #[test]
     fn test_solid_entries_have_no_per_file_ratio() {
         let mut entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryKind::File, 1000);
-        entry.compression = EntryCompression::SolidBlockStart(SolidBlock::new(10, 2000));
+        entry.compression =
+            EntryCompression::SolidBlockStart(SolidBlock::new(Compressed(10), Uncompressed(2000)));
         assert_eq!(entry.compression_ratio(), None);
         assert_eq!(entry.compressed_size(), Some(10));
 

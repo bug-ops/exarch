@@ -84,7 +84,9 @@ fn an_overlong_name_of_a_skipped_extension_is_not_refused_in_any_destination_sta
     let long = format!("{}.bin", entry_name(25));
     let dir = TempDir::new().unwrap();
     let archive = write_archive_of(&dir, &[("ok.txt", b"hi"), (&long, b"x")]);
-    let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+    let config = SecurityConfig::default()
+        .try_add_allowed_extension("txt")
+        .unwrap();
 
     assert!(list_archive(&archive, &config).is_ok());
     assert!(

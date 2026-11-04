@@ -485,6 +485,8 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use exarch_core::Compressed;
+    use exarch_core::Uncompressed;
 
     fn formatter(verbosity: Verbosity, use_colors: bool) -> HumanFormatter<Vec<u8>, Vec<u8>> {
         HumanFormatter::with_writers(Vec::new(), Vec::new(), verbosity, use_colors)
@@ -688,7 +690,11 @@ mod tests {
     fn format_error_writes_to_stderr_not_stdout() {
         let mut f = formatter(Verbosity::Normal, false);
         let err = anyhow::anyhow!(exarch_core::ArchiveError::ZipBomb(
-            exarch_core::ZipBombDetails::new(exarch_core::ZipBombScope::Entry, 1000, 1_000_000)
+            exarch_core::ZipBombDetails::new(
+                exarch_core::ZipBombScope::Entry,
+                Compressed(1000),
+                Uncompressed(1_000_000)
+            )
         ));
         f.format_error("extract", &err);
         assert!(out_text(&f).is_empty());

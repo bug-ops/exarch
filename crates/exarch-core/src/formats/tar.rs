@@ -132,12 +132,17 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
+use crate::SpecialFile;
 use crate::TarAmbiguity;
 use crate::TarNonRegularKind;
 use crate::VerificationOptions;
+use crate::Violation;
 use crate::config::Validated;
 use crate::inspection::integrity::TarTrailer;
 use crate::inspection::list::ListPass;
+use crate::security::HardlinkTarget;
+use crate::security::RawMode;
+use crate::security::Uncompressed;
 use crate::security::admitted::EntrySize;
 use crate::security::quota::EntryCount;
 use crate::security::validator::NodeKind;
@@ -195,12 +200,12 @@ use crate::reader::decode_tar_stream;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub struct TarArchive<R: Read> {
-    /// Raw underlying reader; `None` after `extract()`/`list()` consumes it.
+    /// Raw underlying reader, consumed by `extract()`/`list()`/`verify()`.
     ///
     /// Wrapped in a metadata-size-limiting reader (using the config supplied
     /// to `extract()`/`list()`) and only then handed to `tar::Archive`, so the
     /// cap is applied fresh with whatever `SecurityConfig` each call uses.
-    inner: Option<R>,
+    inner: R,
     /// The raw input behind `inner`, when core metered it.
     source: TapSource,
     /// How the bytes after the end-of-archive marker are checked.
@@ -267,7 +272,7 @@ impl<R: Read> TarArchive<R> {
     /// Creates a handler over `reader`, whose raw input `source` meters.
     pub(crate) fn with_source(reader: R, source: TapSource, trailer: TarTrailer) -> Self {
         Self {
-            inner: Some(reader),
+            inner: reader,
             source,
             trailer,
         }
@@ -275,20 +280,18 @@ impl<R: Read> TarArchive<R> {
 
     /// Lists the archive as `listing` asks, consuming the reader.
     fn list_with_pass(
-        &mut self,
+        self,
         config: &SecurityConfig<Validated>,
         listing: &mut ListPass<'_, '_>,
     ) -> Result<crate::inspection::ArchiveManifest> {
         use crate::formats::detect::ArchiveType;
         use crate::inspection::list::list_tar_reader;
 
-        // Consume the inner reader — TAR readers are forward-only streams.
-        // After list() returns, extract() will return an error if called.
-        let reader = self.inner.take().ok_or_else(|| {
-            crate::ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
-        })?;
-        let (budgeted, budget) =
-            budgeted_reader_with(reader, config.max_tar_metadata_bytes, self.source.clone());
+        let (budgeted, budget) = budgeted_reader_with(
+            self.inner,
+            config.max_tar_metadata_bytes,
+            self.source.clone(),
+        );
         list_tar_reader(
             budgeted,
             budget,
@@ -325,10 +328,7 @@ impl<R: Read> TarArchive<R> {
         let size = TarEntryAdapter::get_uncompressed_size(entry);
         let mode = tar_permission_bits(entry.header());
 
-        let entry_size = EntrySize {
-            uncompressed: size,
-            compressed: None,
-        };
+        let entry_size = EntrySize::new(size, None);
 
         match &entry_type {
             EntryType::File => {
@@ -339,7 +339,7 @@ impl<R: Read> TarArchive<R> {
                 };
                 match target.validate_file(request, &mut ctx.tally)? {
                     FileAdmission::Write(admitted) => {
-                        target.file(entry, admitted, entry.size(), &mut ctx.tally)?;
+                        target.file(entry, admitted, &mut ctx.tally)?;
                         Ok(EntryOutcome::Done)
                     }
                     FileAdmission::Skipped(_) => Ok(EntryOutcome::Skipped),
@@ -391,7 +391,7 @@ impl<R: Read> TarArchive<R> {
     /// Runs the extraction loop against `target`: the validation gates are the
     /// same whether it writes to the filesystem or to an entry sink.
     pub(crate) fn extract_into<T: ExtractTarget>(
-        &mut self,
+        self,
         target: &mut T,
         config: &SecurityConfig<Validated>,
         options: SinkOptions,
@@ -417,11 +417,11 @@ impl<R: Read> TarArchive<R> {
         // (issue #495).
         let mut extension_skips: u64 = 0;
 
-        let reader = self.inner.take().ok_or_else(|| {
-            ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
-        })?;
-        let (budgeted, budget) =
-            budgeted_reader_with(reader, config.max_tar_metadata_bytes, self.source.clone());
+        let (budgeted, budget) = budgeted_reader_with(
+            self.inner,
+            config.max_tar_metadata_bytes,
+            self.source.clone(),
+        );
         let mut inner_archive = Archive::new(budgeted);
         let mut entries = budgeted_tar_entries(&mut inner_archive, budget)
             .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read entries: {e}")))?;
@@ -459,23 +459,16 @@ impl<R: Read> TarArchive<R> {
                 .progress
                 .on_entry_start(&entry_path, 0, current_entry);
 
-            // INVARIANT: every branch below must call on_entry_complete exactly
-            // once.
             // `settle` abandons the entry on failure: no further
             // `next_entry()` calls follow, so the guard's usual drain is
             // pointless I/O (see `TarEntryGuard::abandon`).
             let settled =
                 guard.settle(|guard| Self::process_and_skip(guard, target, &mut ctx, &skip_limits));
+            ctx.tally.progress.on_entry_complete(&entry_path);
             match settled {
-                Ok(EntryOutcome::Hardlink(hardlink_info)) => {
-                    ctx.tally.progress.on_entry_complete(&entry_path);
-                    hardlinks.push(hardlink_info);
-                }
-                Ok(EntryOutcome::Done | EntryOutcome::Skipped) => {
-                    ctx.tally.progress.on_entry_complete(&entry_path);
-                }
+                Ok(EntryOutcome::Hardlink(hardlink_info)) => hardlinks.push(hardlink_info),
+                Ok(EntryOutcome::Done | EntryOutcome::Skipped) => {}
                 Err(e) => {
-                    ctx.tally.progress.on_entry_complete(&entry_path);
                     ctx.push_skip_warnings();
                     return Err(ArchiveError::partial_or(
                         std::mem::take(ctx.tally.report),
@@ -525,16 +518,8 @@ impl<R: Read> TarArchive<R> {
 }
 
 impl<R: Read> ArchiveFormat for TarArchive<R> {
-    /// Extracts the archive contents to `output_dir`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ArchiveError::InvalidArchive`] if [`list`](Self::list) was
-    /// called on this instance before `extract`. Because TAR is a forward-only
-    /// stream, `list` consumes the internal reader; calling `extract` afterward
-    /// is not possible. Open a fresh [`TarArchive`] instance instead.
     fn extract(
-        &mut self,
+        self,
         output_dir: &Path,
         config: &SecurityConfig<Validated>,
         options: &ExtractionOptions,
@@ -549,28 +534,8 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         )
     }
 
-    /// Lists the entries in the archive without extracting them.
-    ///
-    /// # Reader consumption
-    ///
-    /// TAR is a forward-only stream format. This method consumes the internal
-    /// reader via `self.inner.take()`. After `list()` returns, the reader is
-    /// gone and any subsequent call to [`extract`](Self::extract) on **the same
-    /// instance** will return `Err(ArchiveError::InvalidArchive(...))`.
-    ///
-    /// To extract after listing, open a **new** [`TarArchive`] from the
-    /// original source:
-    ///
-    /// ```ignore
-    /// // Correct: two independent instances
-    /// let mut archive1 = TarArchive::open(&path)?;
-    /// let manifest = archive1.list(&config)?;
-    ///
-    /// let mut archive2 = TarArchive::open(&path)?;
-    /// let report = archive2.extract(&dest, &config, &options, &mut NoopProgress)?;
-    /// ```
     fn list(
-        &mut self,
+        self,
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
         self.list_with_pass(config, &mut ListPass::strict())
@@ -580,7 +545,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     /// integrity requested the stream is read to decoder EOF within the budget
     /// after the end marker.
     fn verify(
-        &mut self,
+        self,
         config: &SecurityConfig<Validated>,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
@@ -590,10 +555,6 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             &mut crate::NoopProgress,
             |listing| self.list_with_pass(config, listing),
         )
-    }
-
-    fn format_name(&self) -> &'static str {
-        "tar"
     }
 }
 
@@ -645,7 +606,7 @@ enum EntryOutcome<P: ParentCheck> {
 #[allow(dead_code)] // Fields used only on Unix
 struct HardlinkInfo<P: ParentCheck> {
     link_path: SafePath<P>,
-    target_path: SafePath<P>,
+    target_path: HardlinkTarget,
     counted: EntryCount,
 }
 
@@ -693,8 +654,8 @@ impl TarEntryAdapter {
     }
 
     /// Gets uncompressed size from TAR entry.
-    fn get_uncompressed_size<R: Read>(tar_entry: &tar::Entry<'_, R>) -> u64 {
-        tar_entry.size()
+    fn get_uncompressed_size<R: Read>(tar_entry: &tar::Entry<'_, R>) -> Uncompressed {
+        Uncompressed(tar_entry.size())
     }
 }
 
@@ -725,6 +686,10 @@ pub(crate) const fn is_metadata_type(kind: tar::EntryType) -> bool {
     )
 }
 
+fn special_entry(kind: SpecialFile) -> ArchiveError {
+    ArchiveError::from(Violation::SpecialEntry { kind, name: None })
+}
+
 /// Classifies a non-metadata TAR entry type, refusing special files.
 ///
 /// # Errors
@@ -739,16 +704,12 @@ pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
         TarType::Directory => Ok(TarNode::Directory),
         TarType::Symlink => Ok(TarNode::Symlink),
         TarType::Link => Ok(TarNode::Hardlink),
-        TarType::Char => Err(ArchiveError::violation(
-            "character device entries not supported".into(),
-        )),
-        TarType::Block => Err(ArchiveError::violation(
-            "block device entries not supported".into(),
-        )),
-        TarType::Fifo => Err(ArchiveError::violation("FIFO entries not supported".into())),
-        _ => Err(ArchiveError::violation(format!(
-            "unsupported entry type: {kind:?}"
-        ))),
+        TarType::Char => Err(special_entry(SpecialFile::CharDevice)),
+        TarType::Block => Err(special_entry(SpecialFile::BlockDevice)),
+        TarType::Fifo => Err(special_entry(SpecialFile::Fifo)),
+        _ => Err(ArchiveError::from(Violation::UnsupportedTarType {
+            kind: format!("{kind:?}").into(),
+        })),
     }
 }
 
@@ -798,8 +759,8 @@ pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> Result
 /// Returns the permission bits (`0o7777`) of a TAR header's mode, dropping any
 /// file-type bits older writers stored there, so `list` and `extract` agree
 /// with ZIP and system `tar`.
-pub(crate) fn tar_permission_bits(header: &tar::Header) -> Option<u32> {
-    header.mode().ok().map(|mode| mode & 0o7777)
+pub(crate) fn tar_permission_bits(header: &tar::Header) -> Option<RawMode> {
+    header.mode().ok().map(|mode| RawMode::new(mode & 0o7777))
 }
 
 /// Opens `path` as a TAR byte stream, decoding it with `codec` when one is
@@ -999,21 +960,14 @@ mod tests {
         let mut header = tar::Header::new_gnu();
         for (raw, expected) in [(0o100_644, 0o644), (0o040_755, 0o755), (0o104_755, 0o4755)] {
             header.set_mode(raw);
-            assert_eq!(tar_permission_bits(&header), Some(expected));
+            assert_eq!(tar_permission_bits(&header), Some(RawMode::new(expected)));
         }
-    }
-
-    #[test]
-    fn test_tar_archive_new() {
-        let tar_data = create_test_tar(vec![]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
-        assert_eq!(archive.format_name(), "tar");
     }
 
     #[test]
     fn test_extract_simple_file() {
         let tar_data = create_test_tar(vec![("file.txt", b"hello world")]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1065,7 +1019,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1110,7 +1064,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
@@ -1157,7 +1111,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
@@ -1181,7 +1135,7 @@ mod tests {
     #[test]
     fn test_quota_file_size_exceeded() {
         let tar_data = create_test_tar(vec![("large.bin", &vec![0u8; 1000])]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
@@ -1211,7 +1165,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1238,7 +1192,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1265,7 +1219,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1313,7 +1267,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1355,7 +1309,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1397,7 +1351,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1428,7 +1382,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1459,7 +1413,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1492,7 +1446,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1525,7 +1479,7 @@ mod tests {
 
         // Extract
         let decoder = flate2::read::GzDecoder::new(Cursor::new(gz_data));
-        let mut archive = TarArchive::new(decoder);
+        let archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1558,7 +1512,7 @@ mod tests {
 
         // Extract
         let decoder = bzip2::read::BzDecoder::new(Cursor::new(bz2_data));
-        let mut archive = TarArchive::new(decoder);
+        let archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1590,7 +1544,7 @@ mod tests {
 
         // Extract
         let decoder = liblzma::read::XzDecoder::new(Cursor::new(xz_data));
-        let mut archive = TarArchive::new(decoder);
+        let archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1618,7 +1572,7 @@ mod tests {
 
         // Extract
         let decoder = zstd::Decoder::with_buffer(Cursor::new(zst_data)).unwrap();
-        let mut archive = TarArchive::new(decoder);
+        let archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1639,7 +1593,7 @@ mod tests {
     #[test]
     fn test_empty_tar_archive() {
         let tar_data = create_test_tar(vec![]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1660,7 +1614,7 @@ mod tests {
     #[test]
     fn test_extract_empty_file() {
         let tar_data = create_test_tar(vec![("empty.txt", b"")]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1691,7 +1645,7 @@ mod tests {
             ("file2.txt", b"content2"),
             ("file3.txt", b"content3"),
         ]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1718,7 +1672,7 @@ mod tests {
             ("file2.txt", b"b"),
             ("file3.txt", b"c"),
         ]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
@@ -1742,7 +1696,7 @@ mod tests {
             ("file1.txt", &vec![0u8; 500]),
             ("file2.txt", &vec![0u8; 600]),
         ]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
@@ -1775,7 +1729,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1811,7 +1765,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1836,7 +1790,7 @@ mod tests {
     #[test]
     fn test_bytes_written_tracking() {
         let tar_data = create_test_tar(vec![("file1.txt", b"12345"), ("file2.txt", b"67890")]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1866,7 +1820,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1900,7 +1854,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config"); // symlinks disabled by default
@@ -1930,7 +1884,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config"); // hardlinks disabled by default
@@ -1948,7 +1902,7 @@ mod tests {
     #[test]
     fn test_extraction_duration_recorded() {
         let tar_data = create_test_tar(vec![("file.txt", b"test")]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -1982,7 +1936,7 @@ mod tests {
         builder.append(&header, &b"evil\n"[..]).unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -2018,7 +1972,7 @@ mod tests {
         builder.append(&header, &b"evil\n"[..]).unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -2063,7 +2017,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
@@ -2105,7 +2059,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
@@ -2152,10 +2106,7 @@ mod tests {
                     .validate_hardlink(
                         Path::new("loot.txt"),
                         Path::new("pipe"),
-                        EntrySize {
-                            uncompressed: 0,
-                            compressed: None,
-                        },
+                        EntrySize::new(Uncompressed(0), None),
                     )
                     .map_err(|e| e.to_string())?;
                 let made = std::process::Command::new("mkfifo")
@@ -2358,7 +2309,7 @@ mod tests {
                     }
                 }
             });
-            let mut archive = TarArchive::new(Cursor::new(data.clone()));
+            let archive = TarArchive::new(Cursor::new(data.clone()));
             let _ = archive.extract(
                 &dest,
                 &config,
@@ -2419,7 +2370,7 @@ mod tests {
         assert!(!victim_path.exists());
 
         let tar_data = create_hardlink_tar(b"pwned!");
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
@@ -2460,7 +2411,7 @@ mod tests {
         std::os::unix::fs::symlink(&victim_path, &link_dest).unwrap();
 
         let tar_data = create_hardlink_tar(b"pwned!");
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
@@ -2534,10 +2485,7 @@ mod tests {
             .validate_hardlink(
                 Path::new("loot.txt"),
                 Path::new("target.txt"),
-                EntrySize {
-                    uncompressed: 0,
-                    compressed: None,
-                },
+                EntrySize::new(Uncompressed(0), None),
             )
             .unwrap();
         let info = HardlinkInfo {
@@ -2590,7 +2538,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         let tar_data = create_hardlink_tar(&[b'A'; 100]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
@@ -2669,7 +2617,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
@@ -2724,7 +2672,7 @@ mod tests {
         }
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
@@ -2777,7 +2725,7 @@ mod tests {
         }
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
@@ -2851,7 +2799,7 @@ mod tests {
         let data = vec![0u8; usize::try_from(PAX_SIZE).unwrap()];
         let tar_data = create_tar_with_pax_size_override("big.bin", PAX_SIZE, &data);
 
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
             .with_max_file_size(1024 * 1024)
@@ -2879,7 +2827,7 @@ mod tests {
         let data = vec![0u8; usize::try_from(PAX_SIZE).unwrap()];
         let tar_data = create_tar_with_pax_size_override("big.bin", PAX_SIZE, &data);
 
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
             .with_max_total_size(500 * 1024)
@@ -2928,7 +2876,7 @@ mod tests {
         }
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
@@ -2973,7 +2921,7 @@ mod tests {
     #[test]
     fn test_duplicate_entry_skip_default() {
         let tar_data = create_duplicate_entry_tar("legit.txt", b"first", b"second");
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -2997,7 +2945,7 @@ mod tests {
     #[test]
     fn test_duplicate_entry_overwrites_when_skip_disabled() {
         let tar_data = create_duplicate_entry_tar("legit.txt", b"first", b"second");
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -3033,7 +2981,7 @@ mod tests {
             .map(|n| (n.as_str(), b"payload".as_slice()))
             .collect();
         let tar_data = create_test_tar(entries);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         for name in &names {
@@ -3097,7 +3045,7 @@ mod tests {
         }
 
         let tar_data = builder.into_inner().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         for i in 0..LINK_COUNT {
@@ -3136,7 +3084,7 @@ mod tests {
     #[test]
     fn test_list_returns_manifest_with_entries() {
         let tar_data = create_test_tar(vec![("a.txt", b"hello"), ("b.txt", b"world")]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
         let config = SecurityConfig::default().validate().expect("valid config");
 
         let manifest = archive.list(&config).unwrap();
@@ -3148,7 +3096,7 @@ mod tests {
     #[test]
     fn test_list_empty_archive_returns_empty_manifest() {
         let tar_data = create_test_tar(vec![]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
         let config = SecurityConfig::default().validate().expect("valid config");
 
         let manifest = archive.list(&config).unwrap();
@@ -3160,7 +3108,7 @@ mod tests {
     #[test]
     fn test_verify_clean_archive_is_safe() {
         let tar_data = create_test_tar(vec![("safe.txt", b"data")]);
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
         let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
@@ -3188,7 +3136,7 @@ mod tests {
     #[test]
     fn test_tar_absolute_path_rejected_by_default() {
         let tar_data = create_tar_with_absolute_path(b"/etc/shadow", b"secret");
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
@@ -3210,7 +3158,7 @@ mod tests {
     #[test]
     fn test_tar_absolute_path_with_flag_writes_to_dest() {
         let tar_data = create_tar_with_absolute_path(b"/etc/shadow", b"content");
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
@@ -3239,7 +3187,7 @@ mod tests {
         // Even with allow_absolute_paths, `/../etc/passwd` contains `..` and
         // must be rejected regardless.
         let tar_data = create_tar_with_absolute_path(b"/../etc/passwd", b"secret");
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
@@ -3264,7 +3212,8 @@ mod tests {
         let tar_data = create_test_tar(vec![("keep.txt", b"keep"), ("skip.exe", b"skip")]);
         let dest = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default()
-            .with_allowed_extensions(vec!["txt".to_string()])
+            .try_add_allowed_extension("txt")
+            .unwrap()
             .validate()
             .unwrap();
 
@@ -3304,7 +3253,8 @@ mod tests {
         let tar_data = create_test_tar(entries);
         let dest = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default()
-            .with_allowed_extensions(vec!["txt".to_string()])
+            .try_add_allowed_extension("txt")
+            .unwrap()
             .validate()
             .expect("valid config");
 
@@ -3354,7 +3304,8 @@ mod tests {
         }
 
         let config = SecurityConfig::default()
-            .with_allowed_extensions(vec!["txt".to_string()])
+            .try_add_allowed_extension("txt")
+            .unwrap()
             .validate()
             .expect("valid config");
 
@@ -3420,7 +3371,8 @@ mod tests {
         let tar_data = create_test_tar(vec![("Makefile", b"all:"), ("keep.txt", b"ok")]);
         let dest = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default()
-            .with_allowed_extensions(vec!["txt".to_string()])
+            .try_add_allowed_extension("txt")
+            .unwrap()
             .validate()
             .unwrap();
 

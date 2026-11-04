@@ -164,7 +164,7 @@ fn measure_extract_peak_bytes(bytes: &[u8], budget: u64) -> usize {
             .with_max_tar_metadata_bytes(budget)
             .validate()
             .unwrap();
-        let mut archive = TarArchive::new(Cursor::new(bytes));
+        let archive = TarArchive::new(Cursor::new(bytes));
         // Outcome (Ok or Err) is irrelevant here — only peak memory matters.
         let _ = archive.extract(
             temp.path(),

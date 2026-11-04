@@ -9,6 +9,7 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
+use crate::Violation;
 use crate::config::Validated;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
@@ -23,7 +24,6 @@ use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
-use crate::inspection::manifest::ManifestEntryType;
 use crate::inspection::manifest::OversizedEntry;
 use crate::inspection::report::ArchiveStructure;
 use crate::inspection::report::IntegrityScope;
@@ -32,6 +32,8 @@ use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
 use crate::reader::SeekableFormat;
+use crate::security::RawMode;
+use crate::security::Uncompressed;
 use crate::security::fs_view::CollisionKind;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::Conflict;
@@ -514,7 +516,8 @@ fn verify_entry(
     }
 
     // Compression ratio validation (zip bomb detection)
-    if let Err(e) = validate_entry_compression(&entry.compression, entry.size, config) {
+    if let Err(e) = validate_entry_compression(&entry.compression, Uncompressed(entry.size), config)
+    {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
@@ -532,16 +535,18 @@ fn verify_entry(
                     // Counted once by `unread_targets_issue`; the tree keeps
                     // the link opaque.
                     LinkTarget::Unread => Ok(()),
-                    _ => usable_link_target(target, ManifestEntryType::Symlink).and_then(|t| {
+                    _ => usable_link_target(target, LinkKind::Symlink).and_then(|t| {
                         check_target_lengths(t, LinkKind::Symlink)?;
                         SafeSymlink::validate_in(safe_path, t, dest, config, tree).map(drop)
                     }),
                 }),
             ),
             ManifestEntryKind::Hardlink { target } => Some(
-                usable_link_target(target, ManifestEntryType::Hardlink).and_then(|t| {
+                usable_link_target(target, LinkKind::Hardlink).and_then(|t| {
                     check_target_lengths(t, LinkKind::Hardlink)?;
-                    hardlink_tracker.validate_hardlink_in(safe_path, t, dest, config, tree)
+                    hardlink_tracker
+                        .validate_hardlink_in(safe_path, t, dest, config, tree)
+                        .map(drop)
                 }),
             ),
             ManifestEntryKind::File | ManifestEntryKind::Directory => None,
@@ -620,12 +625,12 @@ fn check_target_lengths(target: &Path, kind: LinkKind) -> Result<()> {
 
 /// Returns the target to validate, or the error a missing or oversized
 /// target is reported as.
-fn usable_link_target(target: &LinkTarget, kind: ManifestEntryType) -> Result<&Path> {
+fn usable_link_target(target: &LinkTarget, kind: LinkKind) -> Result<&Path> {
     match target {
         LinkTarget::Recorded(path) => Ok(path),
-        LinkTarget::Missing => Err(missing_link_target(kind)),
-        LinkTarget::Unread => Err(unread_link_target(kind)),
-        LinkTarget::Unreadable => Err(unreadable_link_target(kind)),
+        LinkTarget::Missing => Err(Violation::LinkTargetMissing(kind).into()),
+        LinkTarget::Unread => Err(Violation::LinkTargetUnread(kind).into()),
+        LinkTarget::Unreadable => Err(Violation::LinkTargetUnreadable(kind).into()),
         LinkTarget::Oversized { .. } => Err(ArchiveError::Io(name_too_long())),
     }
 }
@@ -709,6 +714,7 @@ fn verify_deferred_hardlink(
     let link_path = SafePath::validate_in(&entry.path, dest, config, tree).map_err(issue)?;
     hardlink_tracker
         .validate_hardlink_in(&link_path, target, dest, config, tree)
+        .map(drop)
         .map_err(issue)?;
     let target_full = dest.as_path().join(target);
     if !tree.exists(&target_full) {
@@ -808,11 +814,10 @@ fn placement_issue(
             issue.entry_path = entry_path;
             return issue;
         }
-        Placement::ReplacesUnderOverwrite => ArchiveError::violation(format!(
-            "extraction can fail at {} unless duplicates are skipped: {}",
-            rel.display(),
-            conflict.error
-        )),
+        Placement::ReplacesUnderOverwrite => ArchiveError::from(Violation::ConflictUnlessSkipped {
+            rel: rel.display().to_string().into(),
+            cause: conflict.error.to_string().into(),
+        }),
         Placement::FailsAlways => {
             let crosses_link = || {
                 rel.ancestors()
@@ -820,38 +825,16 @@ fn placement_issue(
                     .any(|p| tree.is_symlink(&dest.as_path().join(p)).unwrap_or(false))
             };
             if kind.is_link() || crosses_link() {
-                ArchiveError::violation(format!(
-                    "extraction fails at {}: {}",
-                    rel.display(),
-                    conflict.error
-                ))
+                ArchiveError::from(Violation::ConflictFails {
+                    rel: rel.display().to_string().into(),
+                    cause: conflict.error.to_string().into(),
+                })
             } else {
                 ArchiveError::Io(conflict.error)
             }
         }
     };
     VerificationIssue::from_error(&error, entry_path)
-}
-
-fn missing_link_target(kind: ManifestEntryType) -> ArchiveError {
-    ArchiveError::violation(format!(
-        "{} target is missing",
-        kind.as_str().to_ascii_lowercase()
-    ))
-}
-
-fn unread_link_target(kind: ManifestEntryType) -> ArchiveError {
-    ArchiveError::violation(format!(
-        "{} target was not read, so it cannot be validated",
-        kind.as_str().to_ascii_lowercase()
-    ))
-}
-
-fn unreadable_link_target(kind: ManifestEntryType) -> ArchiveError {
-    ArchiveError::violation(format!(
-        "{} target could not be read, so it cannot be validated",
-        kind.as_str().to_ascii_lowercase()
-    ))
 }
 
 /// The one issue for the symlinks whose targets were not read although
@@ -892,7 +875,7 @@ fn unread_targets_issue(
 }
 
 fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig<Validated>) -> Result<()> {
-    let sanitized = sanitize_permissions(mode, config);
+    let sanitized = sanitize_permissions(RawMode::new(mode), config);
     (sanitized.as_u32() == mode).ok_or_else(|| ArchiveError::InvalidPermissions {
         path: path.to_path_buf(),
         mode,

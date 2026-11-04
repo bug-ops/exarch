@@ -208,7 +208,7 @@ THEN magic bytes take precedence over the extension
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
 | `ArchiveType` | Enum of supported archive formats | `Tar`, `TarGz`, `TarBz2`, `TarXz`, `TarZst`, `Zip`, `SevenZ` |
-| `ArchiveFormat` | Trait implemented by every format handler | Methods: `extract`, `list`, `verify`, `format_name` |
+| `ArchiveFormat` | Trait implemented by every format handler | Methods: `extract`, `list`, `verify` (each takes `self`; the trait is not dyn-usable) |
 | `FormatCreator` | Trait for archive creation; implemented by two crate-private structs (0.7.0, #652) | `TarCreator(Option<CompressionCodec>)` (`None` is plain `.tar`) and `ZipCreator`; dispatched via `creator_for_format()` over `CreationFamily` of a `CreatableFormat` (v0.8.0), so a 7z request cannot reach the dispatcher |
 | `TarArchive<R>` | TAR handler generic over decompressor type | Implements `ArchiveFormat`; `list()` consumes the internal reader (TAR is forward-only); do not call `extract()` on the same instance; `open_tar_gz`, `open_tar_bz2`, `open_tar_zst(path)` and `open_tar_xz(path, &SecurityConfig<Validated>)` return `TarArchive<Box<dyn Read + Send>>` (the xz decoder is bounded by `max_decoder_memory` fixed at open) |
 | `ZipArchive` | ZIP handler | Implements `ArchiveFormat`; creation is `ZipCreator`; `ZipFile::name()` returns `Result<Cow<str>, ZipError>` in zip 9.x |
@@ -243,12 +243,10 @@ THEN magic bytes take precedence over the extension
 ArchiveFormat:
   extract(output_dir, config, options, progress) -> Result<ExtractionReport>
   list(config) -> Result<ArchiveManifest>
-  verify(config, options) -> Result<VerificationReport>
-  format_name() -> &'static str
+  verify(config, options) -> Result<VerificationReport>   (extract/list/verify take self)
 
 FormatCreator:
   create(output, sources, config, progress) -> Result<CreationReport>
-  format_name() -> &'static str
 ```
 
 > [!note] v0.7.0: `verify` takes `&VerificationOptions` (#670)
@@ -394,7 +392,6 @@ FormatCreator:
 
 ### Always (without asking)
 - Route all entries through `EntryValidator` before any I/O
-- Implement `format_name()` returning a human-readable static string
 - Use `BufReader` for TAR file handles
 
 ### Ask First

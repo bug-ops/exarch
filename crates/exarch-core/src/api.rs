@@ -402,7 +402,7 @@ fn extract_zip(
     use std::fs::File;
 
     let file = File::open(archive_path)?;
-    let mut archive = ZipArchive::for_extraction(file, config, options.decode_reuse)?;
+    let archive = ZipArchive::for_extraction(file, config, options.decode_reuse)?;
     archive.extract(output_dir, config, options, progress)
 }
 
@@ -418,7 +418,7 @@ fn extract_7z(
     use std::fs::File;
 
     let file = File::open(archive_path)?;
-    let mut archive = SevenZArchive::new(file)?;
+    let archive = SevenZArchive::new(file)?;
     archive.extract(output_dir, config, options, progress)
 }
 
@@ -1058,7 +1058,7 @@ pub fn extract_to_sink_with_progress<S: EntrySink>(
     let config = config.clone().validate()?;
     match reader.into_source() {
         Source::Tar { stream, codec } => {
-            let mut archive = tar_archive(stream, codec, DecoderLimits::of(&config))?;
+            let archive = tar_archive(stream, codec, DecoderLimits::of(&config))?;
             let mut target = SinkTarget::new(sink, &config);
             archive.extract_into(&mut target, &config, *options, progress)
         }
@@ -1241,27 +1241,6 @@ mod tests {
         let result = extract_archive(&path, dest.path(), &SecurityConfig::default());
 
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_create_archive_invalid_compression_level_rejected_before_io() {
-        for ext in ["tar.gz", "tar.bz2", "tar.xz", "tar.zst"] {
-            let dest = tempfile::TempDir::new().unwrap();
-            let archive_path = dest.path().join(format!("output.{ext}"));
-            let mut config = CreationConfig::default();
-            config.compression_level = Some(200);
-            let result = create_archive(&archive_path, &[] as &[&str], &config);
-            assert_matches!(
-                result,
-                Err(ArchiveError::InvalidCompressionLevel { level: 200 }),
-                "{ext}: expected InvalidCompressionLevel, got {result:?}",
-            );
-            // Verify no I/O happened — output file must not exist
-            assert!(
-                !archive_path.exists(),
-                "{ext}: output file must not be created"
-            );
-        }
     }
 
     #[test]
@@ -1833,7 +1812,7 @@ mod tests {
         config.allowed.hardlinks = true;
         let config = config.validate().unwrap();
 
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
         let mut progress = ByteTracker { total: 0 };
         let report = archive
             .extract(
@@ -1889,7 +1868,7 @@ mod tests {
         let tar_data = make_raw_tar_single(b"../../etc/passwd", b"evil");
 
         let temp = tempfile::TempDir::new().unwrap();
-        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data));
         let mut progress = SymmetryTracker {
             started: 0,
             completed: 0,
@@ -1943,7 +1922,7 @@ mod tests {
         let zip_data = make_zip_with_traversal(b"../../etc/passwd", b"evil");
 
         let temp = tempfile::TempDir::new().unwrap();
-        let mut archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
+        let archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
         let mut progress = SymmetryTracker {
             started: 0,
             completed: 0,

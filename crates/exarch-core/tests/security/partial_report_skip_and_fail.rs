@@ -53,7 +53,8 @@ fn skip_only_report_still_wraps_as_partial_extraction_on_later_failure() {
 
     let dest = TempDir::new().expect("temp dir for extraction");
     let config = SecurityConfig::default()
-        .with_allowed_extensions(vec!["txt".to_string()])
+        .try_add_allowed_extension("txt")
+        .unwrap()
         .with_allow_symlinks(true);
 
     let result = extract_archive(&archive_path, dest.path(), &config);

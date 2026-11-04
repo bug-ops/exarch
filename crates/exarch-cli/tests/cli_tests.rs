@@ -3103,6 +3103,58 @@ fn test_extract_banned_component_empty_string_disables_default_ban_list() {
     );
 }
 
+/// Regression test for #871: a banned component that holds a path separator
+/// can never equal a single component, so the CLI refuses it instead of
+/// accepting an inert entry.
+#[test]
+fn test_extract_banned_component_with_separator_is_an_error() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("git.tar.gz");
+    create_tar_gz_with_component(&archive_path, ".git");
+    let out_dir = temp.path().join("out");
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .arg("--banned-component")
+        .arg("a/b")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--banned-component"));
+}
+
+/// Regression test for #871: an extension with an inner dot can never match
+/// `Path::extension`, so it is an error and not a silent skip-everything
+/// allowlist; a surrounding space is trimmed by the CLI.
+#[test]
+fn test_extract_allowed_extension_inner_dot_is_an_error_and_padding_is_trimmed() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("mixed.tar.gz");
+    make_mixed_extension_archive(&archive_path, 3, 2);
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allowed-extensions")
+        .arg("tar.gz")
+        .arg(&archive_path)
+        .arg(temp.path().join("out-bad"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--allowed-extensions"));
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allowed-extensions")
+        .arg(" txt , ")
+        .arg(&archive_path)
+        .arg(temp.path().join("out-ok"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Files skipped: 2"));
+}
+
 /// Encodes `n` as a classic octal numeric field of `width` bytes (including
 /// the trailing NUL), or `None` if it does not fit in `width - 1` digits.
 fn octal_field(n: u64, width: usize) -> Option<Vec<u8>> {

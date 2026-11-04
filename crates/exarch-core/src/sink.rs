@@ -195,6 +195,7 @@ use crate::security::fs_view::PathModel;
 use crate::security::fs_view::PlaceError;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
+use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
@@ -204,6 +205,16 @@ use crate::security::validator::ValidatorCore;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::Resolved;
+
+/// What extraction does with an entry whose destination an earlier entry
+/// already holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DuplicatePolicy {
+    /// Leave the earlier entry and count the skip.
+    Skip,
+    /// Replace the earlier entry where the kinds allow it, else fail.
+    Overwrite,
+}
 
 /// What a sink extraction honours of [`ExtractionOptions`].
 ///
@@ -248,6 +259,15 @@ impl SinkOptions {
 }
 
 impl SinkOptions {
+    /// The duplicate policy these options select.
+    pub(crate) const fn duplicate_policy(self) -> DuplicatePolicy {
+        if self.skip_duplicates {
+            DuplicatePolicy::Skip
+        } else {
+            DuplicatePolicy::Overwrite
+        }
+    }
+
     /// The duplicate policy of path-based options, for extraction paths that
     /// handle `atomic` themselves.
     pub(crate) const fn duplicates_of(options: &ExtractionOptions) -> Self {
@@ -609,17 +629,20 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         &mut self,
         reader: &mut R,
         admitted: ValidatedFile,
-        size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
+        let (path, permit, mode) = admitted.into_parts();
+        let size = permit.into_bytes();
         // Overflow guard only, as on the host: the sum is not stored.
         common::checked_add_bytes(tally.report.bytes_written, size)?;
 
-        let (path, _permit, mode) = admitted.into_parts();
         let rel = path.as_path();
-        match (self.tree.occupant(rel), tally.options.skip_duplicates) {
-            (Some(_), true) => return tally.record_duplicate_skip().map(drop),
-            (Some(occupant @ (Occupant::Directory | Occupant::Symlink)), false) => {
+        match (self.tree.occupant(rel), tally.options.duplicate_policy()) {
+            (Some(_), DuplicatePolicy::Skip) => return tally.record_duplicate_skip().map(drop),
+            (
+                Some(occupant @ (Occupant::Directory | Occupant::Symlink)),
+                DuplicatePolicy::Overwrite,
+            ) => {
                 return Err(common::occupant_at_dest_error(rel, occupant).into());
             }
             (Some(Occupant::File) | None, _) => {}
@@ -638,15 +661,15 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     }
 
     fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()> {
-        let rel = symlink.link_path();
+        let rel = symlink.link().as_path();
         let target = symlink.target_path();
         let occupant = self.tree.occupant(rel);
-        match (occupant, tally.options.skip_duplicates) {
-            (Some(_), true) => return tally.record_duplicate_skip().map(drop),
-            (Some(Occupant::Directory), false) => {
+        match (occupant, tally.options.duplicate_policy()) {
+            (Some(_), DuplicatePolicy::Skip) => return tally.record_duplicate_skip().map(drop),
+            (Some(Occupant::Directory), DuplicatePolicy::Overwrite) => {
                 return Err(common::occupant_at_dest_error(rel, Occupant::Directory).into());
             }
-            (Some(Occupant::Symlink), false) => {
+            (Some(Occupant::Symlink), DuplicatePolicy::Overwrite) => {
                 // An unchanged link re-points nothing; any other target is
                 // refused by the tree.
                 let unchanged = self.tree.place(rel, Node::Symlink(target.to_path_buf()));
@@ -682,14 +705,14 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     fn hardlink(
         &mut self,
         link: &SafePath,
-        target: &SafePath,
+        target: &HardlinkTarget,
         counted: EntryCount,
         tally: &mut Tally<'_>,
         hardlink_duplicate_skips: &mut u64,
     ) -> Result<()> {
         let config = self.config;
         let link = SafePath::validate_in(link.as_path(), &self.root, config, &self.tree)?;
-        HardlinkTracker::new().validate_hardlink_in(
+        let target = &HardlinkTracker::new().validate_hardlink_in(
             &link,
             target.as_path(),
             &self.root,
@@ -708,7 +731,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             )));
         }
         if self.tree.occupant(link.as_path()).is_some() {
-            if tally.options.skip_duplicates {
+            if tally.options.duplicate_policy() == DuplicatePolicy::Skip {
                 common::checked_increment_files_skipped(tally.report)?;
                 *hardlink_duplicate_skips = hardlink_duplicate_skips.saturating_add(1);
                 return Ok(());

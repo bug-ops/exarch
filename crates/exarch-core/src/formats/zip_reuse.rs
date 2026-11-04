@@ -33,6 +33,8 @@ use super::zip::ZIP_INVALID_CHECKSUM;
 use crate::DecodeReuse;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::security::zipbomb::Compressed;
+use crate::security::zipbomb::Uncompressed;
 use crate::security::zipbomb::ratio_admitted;
 
 const SPOOL_BUFFER: usize = 64 * 1024;
@@ -76,7 +78,7 @@ impl ReusePlan {
     }
 
     fn admits(&self, key: &RetainKey) -> bool {
-        key.size <= self.max_entry && ratio_admitted(key.compressed, key.size, self.max_ratio)
+        key.size.0 <= self.max_entry && ratio_admitted(key.compressed, key.size, self.max_ratio)
     }
 }
 
@@ -85,8 +87,8 @@ impl ReusePlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RetainKey {
     pub(crate) data_start: u64,
-    pub(crate) compressed: u64,
-    pub(crate) size: u64,
+    pub(crate) compressed: Compressed,
+    pub(crate) size: Uncompressed,
     pub(crate) crc32: u32,
 }
 
@@ -138,17 +140,6 @@ impl fmt::Debug for ReuseStore {
     }
 }
 
-#[cfg(not(target_os = "wasi"))]
-fn open_spool() -> Option<File> {
-    tempfile::tempfile().ok()
-}
-
-// std's `temp_dir` panics on WASI, so no temporary file is attempted there.
-#[cfg(target_os = "wasi")]
-const fn open_spool() -> Option<File> {
-    None
-}
-
 impl ReuseStore {
     /// A store for `mode`, or `None` when nothing is to be kept (`Off`, or a
     /// temporary file that cannot be had).
@@ -156,7 +147,7 @@ impl ReuseStore {
         let backend = match plan.mode {
             DecodeReuse::Memory(_) => Backend::Memory,
             DecodeReuse::TempFile(_) => {
-                let writer = BufWriter::with_capacity(SPOOL_BUFFER, open_spool()?);
+                let writer = BufWriter::with_capacity(SPOOL_BUFFER, super::common::open_spool()?);
                 Backend::Spool(SpoolFile { writer, len: 0 })
             }
             DecodeReuse::Off => return None,
@@ -181,10 +172,10 @@ impl ReuseStore {
     /// Starts keeping the output of the entry `key` names, or `None` when it
     /// cannot be kept: no store left, nothing to keep, or no room for it.
     pub(crate) fn capture(&mut self, key: RetainKey) -> Option<Capture<'_>> {
-        if key.size == 0
+        if key.size.0 == 0
             || !self.plan.admits(&key)
             || self.index.contains_key(&key)
-            || self.used.checked_add(key.size)? > self.limit
+            || self.used.checked_add(key.size.0)? > self.limit
         {
             return None;
         }
@@ -290,8 +281,8 @@ impl Capture<'_> {
     /// and checksum. `produced` is what the decoder yielded.
     pub(crate) fn finish(mut self, produced: u64) {
         let complete = self.open
-            && produced == self.key.size
-            && self.written == self.key.size
+            && produced == self.key.size.0
+            && self.written == self.key.size.0
             && self.crc.sum() == self.key.crc32;
         if !complete {
             return;
@@ -323,7 +314,7 @@ impl Write for Capture<'_> {
             return Ok(buf.len());
         }
         let n = buf.len() as u64;
-        if self.written.saturating_add(n) > self.key.size
+        if self.written.saturating_add(n) > self.key.size.0
             || self.store.used.saturating_add(n) > self.store.limit
         {
             self.release();
@@ -404,7 +395,7 @@ impl<S: Read> Read for ReplayReader<S> {
             self.crc.update(&buf[..n]);
             self.read += n as u64;
         } else if !buf.is_empty() {
-            if self.read != self.key.size {
+            if self.read != self.key.size.0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
             if self.crc.sum() != self.key.crc32 {

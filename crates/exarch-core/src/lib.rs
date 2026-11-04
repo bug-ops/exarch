@@ -85,13 +85,19 @@ pub use error::FfiKind;
 pub use error::HiddenRegion;
 pub use error::InvalidArchiveSubCode;
 pub use error::IoContext;
+pub use error::KindSource;
+pub use error::NativeKind;
 pub use error::PartialOutcome;
 pub use error::PartialWrites;
 pub use error::PolicySetting;
+pub use error::PortableHazard;
+pub use error::QuotaKind;
 pub use error::QuotaResource;
 pub use error::ReaderFormatError;
 pub use error::Result;
 pub use error::SecurityViolationSubCode;
+pub use error::SpecialFile;
+pub use error::SubCode;
 pub use error::TarAmbiguity;
 pub use error::TarExtensionKind;
 pub use error::TarHeaderField;
@@ -99,6 +105,7 @@ pub use error::TarNonRegularKind;
 pub use error::TarPathKey;
 pub use error::TarTrailerRefusal;
 pub use error::TrailerCorruption;
+pub use error::Violation;
 pub use error::ZipBombDetails;
 pub use error::ZipBombScope;
 pub use error::ZipEntryIndex;
@@ -158,7 +165,12 @@ pub use security::fs_view::LinkKind;
 // Re-export security types
 pub use listed::ListedArchive;
 pub use listed::list_archive_for_extraction;
+pub use security::Compressed;
+pub use security::EntrySize;
+pub use security::HardlinkTarget;
+pub use security::RawMode;
 pub use security::SanitizedMode;
+pub use security::Uncompressed;
 /// Summary statistics produced by the validation pipeline; see
 /// [`security::ValidationReport`].
 pub use security::ValidationReport;
@@ -169,9 +181,6 @@ pub use security::boundary::MAX_CONFIG_ENTRY_LENGTH;
 /// Maximum length, in bytes, of a raw path string accepted at the FFI
 /// boundary. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::MAX_PATH_LENGTH;
-/// Validates a single caller-supplied `SecurityConfig` entry string.
-/// Shared by `exarch-python` and `exarch-node`.
-pub use security::boundary::validate_config_entry;
 /// Validates a raw, caller-supplied path string before it enters the
 /// archive pipeline. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::validate_raw_path_str;
@@ -190,6 +199,8 @@ pub use sink::SinkFull;
 pub use sink::SinkOptions;
 pub use sink::extract_reader_to_callback;
 pub use sink::extract_reader_to_memory;
+pub use types::Extension;
+pub use types::PathComponentName;
 
 // Re-export types module for easier access
 pub use types::DestDir;

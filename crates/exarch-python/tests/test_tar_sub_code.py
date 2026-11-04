@@ -60,11 +60,11 @@ def test_plain_corrupt_archive_has_no_sub_code(temp_dir):
     assert error.sub_code is None
 
 
-def test_plain_violation_has_no_sub_code(temp_dir):
+def test_core_violation_always_has_a_sub_code(temp_dir):
     with pytest.raises(exarch.SecurityViolationError) as caught:
         exarch.extract_archive("bad\0name.tar", temp_dir)
 
-    assert caught.value.sub_code is None
+    assert caught.value.sub_code == "PATH_NAME"
 
 
 def test_class_defaults_are_none():

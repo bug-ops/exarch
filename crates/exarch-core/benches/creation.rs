@@ -20,6 +20,7 @@ use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
 use exarch_core::create_archive;
+use exarch_core::creation::CompressionLevel;
 use exarch_core::creation::CreationConfig;
 use exarch_core::creation::filters;
 use exarch_core::formats::detect::CreatableFormat;
@@ -187,7 +188,7 @@ fn benchmark_compression_levels(c: &mut Criterion) {
     let temp = TempDir::new().unwrap();
     let source_dir = create_test_directory(&temp, 50);
 
-    for level in [1, 3, 6, 9] {
+    for level in [1u8, 3, 6, 9] {
         group.bench_with_input(
             BenchmarkId::new("tar.gz_level", level),
             &level,
@@ -196,8 +197,7 @@ fn benchmark_compression_levels(c: &mut Criterion) {
                     let output = temp.path().join("output.tar.gz");
                     let config = CreationConfig::default()
                         .with_format(Some(CreatableFormat::TarGz))
-                        .with_compression_level(*level)
-                        .unwrap();
+                        .with_compression_level(CompressionLevel::try_from(*level).unwrap());
                     let _ = create_archive(
                         black_box(&output),
                         black_box(&[&source_dir]),

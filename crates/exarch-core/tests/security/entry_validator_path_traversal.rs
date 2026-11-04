@@ -8,7 +8,10 @@
 #![allow(clippy::unwrap_used)]
 
 use exarch_core::ArchiveError;
+use exarch_core::EntrySize;
+use exarch_core::RawMode;
 use exarch_core::SecurityConfig;
+use exarch_core::Uncompressed;
 use exarch_core::security::EntryValidator;
 use exarch_core::types::DestDir;
 use exarch_core::types::EntryType;
@@ -32,8 +35,12 @@ fn test_cve_2025_4517_python_tarfile_traversal() {
     ];
 
     for path in malicious_paths {
-        let result =
-            validator.validate_entry(Path::new(path), &EntryType::File, 1024, None, Some(0o644));
+        let result = validator.validate_entry(
+            Path::new(path),
+            &EntryType::File,
+            EntrySize::new(Uncompressed(1024), None),
+            Some(RawMode::new(0o644)),
+        );
 
         assert_matches!(
             result,
@@ -57,8 +64,12 @@ fn test_absolute_path_attack() {
     let paths = ["C:\\Windows\\System32", "\\\\server\\share"];
 
     for path in paths {
-        let result =
-            validator.validate_entry(Path::new(path), &EntryType::File, 1024, None, Some(0o644));
+        let result = validator.validate_entry(
+            Path::new(path),
+            &EntryType::File,
+            EntrySize::new(Uncompressed(1024), None),
+            Some(RawMode::new(0o644)),
+        );
 
         assert!(result.is_err(), "Absolute path should be rejected: {path}");
     }
@@ -83,7 +94,12 @@ fn test_null_byte_injection() {
     let os_str = OsStr::from_bytes(bytes);
     let path = PathBuf::from(os_str);
 
-    let result = validator.validate_entry(&path, &EntryType::File, 1024, None, Some(0o644));
+    let result = validator.validate_entry(
+        &path,
+        &EntryType::File,
+        EntrySize::new(Uncompressed(1024), None),
+        Some(RawMode::new(0o644)),
+    );
 
     assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
 }
@@ -104,9 +120,8 @@ fn test_deep_path_nesting() {
     let result = validator.validate_entry(
         Path::new(&deep_path),
         &EntryType::File,
-        1024,
-        None,
-        Some(0o644),
+        EntrySize::new(Uncompressed(1024), None),
+        Some(RawMode::new(0o644)),
     );
 
     assert!(result.is_err(), "Deep path should be rejected");
@@ -130,8 +145,12 @@ fn test_banned_path_components() {
     ];
 
     for path in banned_paths {
-        let result =
-            validator.validate_entry(Path::new(path), &EntryType::File, 1024, None, Some(0o644));
+        let result = validator.validate_entry(
+            Path::new(path),
+            &EntryType::File,
+            EntrySize::new(Uncompressed(1024), None),
+            Some(RawMode::new(0o644)),
+        );
 
         assert!(
             result.is_err(),
@@ -156,8 +175,12 @@ fn test_case_insensitive_banned_components() {
     ];
 
     for path in paths {
-        let result =
-            validator.validate_entry(Path::new(path), &EntryType::File, 1024, None, Some(0o644));
+        let result = validator.validate_entry(
+            Path::new(path),
+            &EntryType::File,
+            EntrySize::new(Uncompressed(1024), None),
+            Some(RawMode::new(0o644)),
+        );
 
         assert!(result.is_err(), "Case variation should be rejected: {path}");
     }
@@ -179,8 +202,12 @@ fn test_safe_paths_allowed() {
     ];
 
     for path in safe_paths {
-        let result =
-            validator.validate_entry(Path::new(path), &EntryType::File, 1024, None, Some(0o644));
+        let result = validator.validate_entry(
+            Path::new(path),
+            &EntryType::File,
+            EntrySize::new(Uncompressed(1024), None),
+            Some(RawMode::new(0o644)),
+        );
 
         assert!(result.is_ok(), "Safe path should be allowed: {path}");
     }

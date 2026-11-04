@@ -8,8 +8,12 @@
 #![allow(clippy::unwrap_used)]
 
 use exarch_core::ArchiveError;
+use exarch_core::Compressed;
+use exarch_core::EntrySize;
 use exarch_core::QuotaResource;
+use exarch_core::RawMode;
 use exarch_core::SecurityConfig;
+use exarch_core::Uncompressed;
 use exarch_core::security::EntryValidator;
 use exarch_core::types::DestDir;
 use exarch_core::types::EntryType;
@@ -35,9 +39,11 @@ fn test_42_zip_bomb_rejected_by_default_file_size_quota() {
     let result = validator.validate_entry(
         Path::new("42.zip"),
         &EntryType::File,
-        4_500_000_000_000_000, // 4.5 PB
-        Some(42_000),          // 42 KB
-        Some(0o644),
+        EntrySize::new(
+            Uncompressed(4_500_000_000_000_000),
+            Some(Compressed(42_000)),
+        ),
+        Some(RawMode::new(0o644)),
     );
 
     assert_matches!(
@@ -67,9 +73,11 @@ fn test_42_zip_bomb_simulation() {
     let result = validator.validate_entry(
         Path::new("42.zip"),
         &EntryType::File,
-        4_500_000_000_000_000, // 4.5 PB
-        Some(42_000),          // 42 KB
-        Some(0o644),
+        EntrySize::new(
+            Uncompressed(4_500_000_000_000_000),
+            Some(Compressed(42_000)),
+        ),
+        Some(RawMode::new(0o644)),
     );
 
     assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
@@ -87,9 +95,8 @@ fn test_high_compression_ratio_individual() {
     let result = validator.validate_entry(
         Path::new("highly_compressed.txt"),
         &EntryType::File,
-        1_000_000,
-        Some(1_000),
-        Some(0o644),
+        EntrySize::new(Uncompressed(1_000_000), Some(Compressed(1_000))),
+        Some(RawMode::new(0o644)),
     );
 
     assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
@@ -107,9 +114,8 @@ fn test_normal_compression_allowed() {
     let result = validator.validate_entry(
         Path::new("normal.txt"),
         &EntryType::File,
-        10_000,
-        Some(1_000),
-        Some(0o644),
+        EntrySize::new(Uncompressed(10_000), Some(Compressed(1_000))),
+        Some(RawMode::new(0o644)),
     );
 
     assert!(result.is_ok());
@@ -127,9 +133,8 @@ fn test_boundary_compression_ratio() {
     let result = validator.validate_entry(
         Path::new("boundary.txt"),
         &EntryType::File,
-        100_000,
-        Some(1_000),
-        Some(0o644),
+        EntrySize::new(Uncompressed(100_000), Some(Compressed(1_000))),
+        Some(RawMode::new(0o644)),
     );
 
     assert!(
@@ -150,9 +155,8 @@ fn test_just_over_compression_ratio() {
     let result = validator.validate_entry(
         Path::new("over_limit.txt"),
         &EntryType::File,
-        100_001,
-        Some(1_000),
-        Some(0o644),
+        EntrySize::new(Uncompressed(100_001), Some(Compressed(1_000))),
+        Some(RawMode::new(0o644)),
     );
 
     assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
@@ -173,9 +177,8 @@ fn test_zero_compressed_nonzero_uncompressed_rejected() {
     let result = validator.validate_entry(
         Path::new("empty.txt"),
         &EntryType::File,
-        1000,
-        Some(0),
-        Some(0o644),
+        EntrySize::new(Uncompressed(1000), Some(Compressed(0))),
+        Some(RawMode::new(0o644)),
     );
 
     assert_matches!(
@@ -197,9 +200,8 @@ fn test_both_sizes_zero_allowed() {
     let result = validator.validate_entry(
         Path::new("empty.txt"),
         &EntryType::File,
-        0,
-        Some(0),
-        Some(0o644),
+        EntrySize::new(Uncompressed(0), Some(Compressed(0))),
+        Some(RawMode::new(0o644)),
     );
 
     assert!(result.is_ok());
@@ -217,9 +219,8 @@ fn test_uncompressed_archive() {
     let result = validator.validate_entry(
         Path::new("file.txt"),
         &EntryType::File,
-        1_000_000,
-        None,
-        Some(0o644),
+        EntrySize::new(Uncompressed(1_000_000), None),
+        Some(RawMode::new(0o644)),
     );
 
     assert!(
@@ -243,9 +244,8 @@ fn test_permissive_compression_ratio() {
     let result = validator.validate_entry(
         Path::new("high_compression.txt"),
         &EntryType::File,
-        500_000,
-        Some(1_000),
-        Some(0o644),
+        EntrySize::new(Uncompressed(500_000), Some(Compressed(1_000))),
+        Some(RawMode::new(0o644)),
     );
 
     assert!(

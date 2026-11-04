@@ -10,6 +10,8 @@ use crate::Result;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
 use std::fs::Metadata;
+use std::ops::Deref;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -145,8 +147,11 @@ impl<'a, State> FilteredWalker<'a, State> {
             return Ok(None); // Filter out
         }
 
-        // Compute archive path
-        let archive_path = filters::compute_archive_path(&path, self.root, self.config)?;
+        let relative = filters::compute_archive_path(&path, self.root, self.config)?;
+        let Some(archive_path) = entry_name(&path, &relative, entry_type == EntryType::Directory)?
+        else {
+            return Ok(None);
+        };
 
         Ok(Some(FilteredEntry {
             path,
@@ -154,6 +159,50 @@ impl<'a, State> FilteredWalker<'a, State> {
             entry_type,
             size,
         }))
+    }
+}
+
+/// Name of an entry inside a created archive: relative, normalized and
+/// non-empty.
+///
+/// Built only by [`ArchiveEntryName::from_relative`], so a writer never has to
+/// re-check for the empty name of the walk root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveEntryName(PathBuf);
+
+impl ArchiveEntryName {
+    /// Returns the name for `path`, or `None` if it is empty, absolute or
+    /// holds anything other than plain components (`.`, `..`, a prefix).
+    #[must_use]
+    pub fn from_relative(path: &Path) -> Option<Self> {
+        let mut components = path.components().peekable();
+        components.peek()?;
+        components
+            .all(|component| matches!(component, Component::Normal(_)))
+            .then(|| Self(path.to_path_buf()))
+    }
+}
+
+impl Deref for ArchiveEntryName {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// Turns a computed relative path into an archive entry name.
+///
+/// A directory with no name left (the walk root, or one that `strip_prefix`
+/// emptied) is dropped. A file or symlink with no name left is refused, since
+/// it cannot be stored under any name.
+fn entry_name(path: &Path, relative: &Path, is_dir: bool) -> Result<Option<ArchiveEntryName>> {
+    match (ArchiveEntryName::from_relative(relative), is_dir) {
+        (Some(name), _) => Ok(Some(name)),
+        (None, true) => Ok(None),
+        (None, false) => Err(ArchiveError::InvalidConfiguration {
+            reason: format!("strip_prefix removes the whole name of {}", path.display()),
+        }),
     }
 }
 
@@ -167,7 +216,7 @@ pub struct FilteredEntry {
     pub path: PathBuf,
 
     /// Path to use in the archive (relative, with `strip_prefix` applied).
-    pub archive_path: PathBuf,
+    pub archive_path: ArchiveEntryName,
 
     /// Type of entry (file, directory, or symlink).
     pub entry_type: EntryType,
@@ -278,7 +327,7 @@ pub fn collect_entries<P: AsRef<Path>, State>(
                 EntryType::File
             };
 
-            let archive_path = if let Some(parent) = path.parent() {
+            let relative = if let Some(parent) = path.parent() {
                 filters::compute_archive_path(path, parent, config)?
             } else {
                 path.file_name()
@@ -291,12 +340,14 @@ pub fn collect_entries<P: AsRef<Path>, State>(
                     .into()
             };
 
-            entries.push(FilteredEntry {
-                path: path.to_path_buf(),
-                archive_path,
-                entry_type,
-                size,
-            });
+            if let Some(archive_path) = entry_name(path, &relative, false)? {
+                entries.push(FilteredEntry {
+                    path: path.to_path_buf(),
+                    archive_path,
+                    entry_type,
+                    size,
+                });
+            }
         }
     }
 
@@ -341,9 +392,9 @@ mod tests {
         let walker = FilteredWalker::new(root, &config);
         let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
 
-        // Should find exactly: root dir, file1, file2, subdir, file3 = 5
-        // entries
-        assert_eq!(entries.len(), 5, "expected exactly 5 entries");
+        // Should find exactly: file1, file2, subdir, file3; the root is not
+        // an entry.
+        assert_eq!(entries.len(), 4, "expected exactly 4 entries");
 
         let paths: Vec<_> = entries
             .iter()
@@ -522,7 +573,7 @@ mod tests {
 
         assert!(main_entry.is_some());
         if let Some(entry) = main_entry {
-            assert_eq!(entry.archive_path, Path::new("src/main.rs"));
+            assert_eq!(&*entry.archive_path, Path::new("src/main.rs"));
         }
     }
 
@@ -546,7 +597,7 @@ mod tests {
 
         assert!(main_entry.is_some());
         if let Some(entry) = main_entry {
-            assert_eq!(entry.archive_path, Path::new("src/main.rs"));
+            assert_eq!(&*entry.archive_path, Path::new("src/main.rs"));
         }
     }
 
@@ -554,13 +605,13 @@ mod tests {
     fn test_filtered_entry_file() {
         let entry = FilteredEntry {
             path: PathBuf::from("/tmp/file.txt"),
-            archive_path: PathBuf::from("file.txt"),
+            archive_path: ArchiveEntryName::from_relative(Path::new("file.txt")).unwrap(),
             entry_type: EntryType::File,
             size: 1024,
         };
 
         assert_eq!(entry.path, Path::new("/tmp/file.txt"));
-        assert_eq!(entry.archive_path, Path::new("file.txt"));
+        assert_eq!(&*entry.archive_path, Path::new("file.txt"));
         assert_matches!(entry.entry_type, EntryType::File);
         assert_eq!(entry.size, 1024);
     }
@@ -569,7 +620,7 @@ mod tests {
     fn test_filtered_entry_directory() {
         let entry = FilteredEntry {
             path: PathBuf::from("/tmp/dir"),
-            archive_path: PathBuf::from("dir"),
+            archive_path: ArchiveEntryName::from_relative(Path::new("dir")).unwrap(),
             entry_type: EntryType::Directory,
             size: 0,
         };
@@ -582,7 +633,7 @@ mod tests {
     fn test_filtered_entry_symlink() {
         let entry = FilteredEntry {
             path: PathBuf::from("/tmp/link"),
-            archive_path: PathBuf::from("link"),
+            archive_path: ArchiveEntryName::from_relative(Path::new("link")).unwrap(),
             entry_type: EntryType::Symlink {
                 target: PathBuf::from("target.txt"),
             },
@@ -663,13 +714,9 @@ mod tests {
 
         let entries = collect_entries(&sources, &config).unwrap();
 
-        // Should have: single_file.txt (1) + dir1 entries (2 files + 1 dir = 3)
-        // + dir2 entries (1 file + 1 dir = 2) = 6 total
-        assert!(
-            entries.len() >= 5,
-            "Expected at least 5 entries (files and dirs), got {}",
-            entries.len()
-        );
+        // single_file.txt + 2 files of dir1 + 1 file of dir2; the source
+        // directories themselves are walk roots and are not entries.
+        assert_eq!(entries.len(), 4);
 
         let paths: Vec<_> = entries
             .iter()

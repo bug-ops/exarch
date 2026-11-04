@@ -8,7 +8,9 @@
 #![allow(clippy::unwrap_used)]
 
 use exarch_core::ArchiveError;
+use exarch_core::EntrySize;
 use exarch_core::SecurityConfig;
+use exarch_core::Uncompressed;
 use exarch_core::security::EntryValidator;
 use exarch_core::types::DestDir;
 use exarch_core::types::EntryType;
@@ -33,8 +35,7 @@ fn test_hardlink_absolute_target() {
         &EntryType::Hardlink {
             target: PathBuf::from("/etc/passwd"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -57,8 +58,7 @@ fn test_hardlink_parent_traversal() {
         &EntryType::Hardlink {
             target: PathBuf::from("../../etc/passwd"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -78,8 +78,7 @@ fn test_hardlink_disabled_by_default() {
         &EntryType::Hardlink {
             target: PathBuf::from("target.txt"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -102,8 +101,7 @@ fn test_hardlink_relative_safe() {
         &EntryType::Hardlink {
             target: PathBuf::from("foo/target.txt"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -126,8 +124,7 @@ fn test_hardlink_same_directory() {
         &EntryType::Hardlink {
             target: PathBuf::from("target.txt"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -151,8 +148,7 @@ fn test_multiple_hardlinks_tracked() {
             &EntryType::Hardlink {
                 target: PathBuf::from("target1.txt"),
             },
-            0,
-            None,
+            EntrySize::new(Uncompressed(0), None),
             None,
         )
         .unwrap();
@@ -163,8 +159,7 @@ fn test_multiple_hardlinks_tracked() {
             &EntryType::Hardlink {
                 target: PathBuf::from("target2.txt"),
             },
-            0,
-            None,
+            EntrySize::new(Uncompressed(0), None),
             None,
         )
         .unwrap();
@@ -190,8 +185,7 @@ fn test_hardlink_chain_escape() {
         &EntryType::Hardlink {
             target: PathBuf::from("../../../../etc/passwd"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 

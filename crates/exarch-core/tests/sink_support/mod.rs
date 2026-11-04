@@ -178,11 +178,7 @@ pub fn zip_archive(entries: Vec<RawEntry>) -> Vec<u8> {
 pub fn signature(error: &ArchiveError) -> String {
     match error {
         ArchiveError::PartialExtraction { source, .. } => signature(source),
-        ArchiveError::SecurityViolation {
-            reason,
-            relaxable_by,
-            ..
-        } => format!("SecurityViolation({reason:?}, {relaxable_by:?})"),
+        ArchiveError::SecurityViolation { kind, .. } => format!("SecurityViolation({kind:?})"),
         ArchiveError::Io(_) => "Io".to_owned(),
         ArchiveError::QuotaExceeded { resource } => format!("QuotaExceeded({resource:?})"),
         other => format!("{:?}", std::mem::discriminant(other)),

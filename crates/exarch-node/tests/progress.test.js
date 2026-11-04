@@ -143,12 +143,12 @@ describe('createArchiveWithProgress (async)', () => {
 
     assert.ok(report.filesAdded >= 2);
     assert.ok(fs.existsSync(outputPath));
-    // Fixture has the 2 files from createTestFiles plus the source directory
-    // itself, which creation also emits an entry for (unlike extraction).
-    assert.strictEqual(calls.length, 3, 'expected exactly one callback per created entry');
+    // Fixture has the 2 files from createTestFiles; the source directory
+    // itself is the archive root and is not reported as an entry.
+    assert.strictEqual(calls.length, 2, 'expected exactly one callback per created entry');
 
     const currents = calls.map(([, , current]) => current);
-    assert.deepStrictEqual(currents, [1, 2, 3]);
+    assert.deepStrictEqual(currents, [1, 2]);
   });
 
   it('creates the archive normally when progress is null', async () => {
@@ -198,12 +198,12 @@ describe('createArchiveWithProgressSync', () => {
     // The ThreadsafeFunction is dispatched via NonBlocking mode, so queued
     // calls are only flushed on later event loop turns even though this
     // *Sync call has already returned. Same fixture as the async variant:
-    // the source directory plus its 2 files means 3 calls.
-    await waitUntil(() => calls.length >= 3);
-    assert.strictEqual(calls.length, 3, 'expected exactly one callback per created entry');
+    // its 2 files mean 2 calls; the source directory is not an entry.
+    await waitUntil(() => calls.length >= 2);
+    assert.strictEqual(calls.length, 2, 'expected exactly one callback per created entry');
 
     const currents = calls.map(([, , current]) => current);
-    assert.deepStrictEqual(currents, [1, 2, 3]);
+    assert.deepStrictEqual(currents, [1, 2]);
   });
 
   it('creates the archive normally when progress is null', () => {

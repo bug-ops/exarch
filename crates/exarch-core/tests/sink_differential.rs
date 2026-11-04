@@ -12,6 +12,7 @@ use std::io::Cursor;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::Extension;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::SecurityConfig;
@@ -485,7 +486,7 @@ fn tar_parent_that_is_a_file_is_rejected() {
 #[test]
 fn tar_extension_filter_skips_alike() {
     let mut config = default_config();
-    config.allowed_extensions = vec!["txt".to_owned()];
+    config.allowed_extensions = vec![Extension::try_from("txt").unwrap()];
     accepted(
         Kind::Tar,
         tar_archive(&[tar_file("a.txt", b"1"), tar_file("b.bin", b"2")]),
@@ -646,7 +647,7 @@ fn zip_duplicates_and_extension_filter() {
     for options in [ExtractionOptions::default(), overwrite()] {
         let _ = assert_parity(Kind::Zip, bytes.clone(), &config, &options);
     }
-    config.allowed_extensions = vec!["txt".to_owned()];
+    config.allowed_extensions = vec![Extension::try_from("txt").unwrap()];
     let _ = assert_parity(Kind::Zip, bytes, &config, &ExtractionOptions::default());
 }
 
@@ -737,7 +738,7 @@ fn sevenz_duplicates_links_and_filtered_files_match_the_path_based_extraction() 
     for config in [
         default_config(),
         links_config(),
-        links_config().with_allowed_extensions(vec!["txt".to_owned()]),
+        links_config().try_add_allowed_extension("txt").unwrap(),
     ] {
         for options in [ExtractionOptions::default(), overwrite()] {
             accepted += usize::from(assert_parity(

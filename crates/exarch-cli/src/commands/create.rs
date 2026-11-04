@@ -38,9 +38,7 @@ pub fn execute(
         .with_max_file_size(args.max_file_size)
         .with_preserve_permissions(args.preserve_permissions);
     if let Some(level) = args.compression_level {
-        config = config
-            .with_compression_level(level)
-            .with_context(|| format!("invalid compression level: {level}"))?;
+        config = config.with_compression_level(level);
     }
 
     // Add user exclude patterns to defaults

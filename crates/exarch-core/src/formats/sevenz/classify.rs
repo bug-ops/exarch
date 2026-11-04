@@ -2,7 +2,11 @@
 //! reparse point and anti item.
 
 use crate::ArchiveError;
+use crate::KindSource;
+use crate::NativeKind;
 use crate::Result;
+use crate::SpecialFile;
+use crate::Violation;
 use crate::formats::common;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::security::validator::NodeKind;
@@ -46,55 +50,11 @@ pub enum SevenZKind {
     UnixSymlink,
 }
 
-/// What the 7z header itself says an entry is: a directory has no stream and
-/// is not flagged as an empty file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeKind {
-    /// Holds data or is an empty file.
-    File,
-    /// Has no stream and is not an empty file.
-    Directory,
-}
-
-impl NativeKind {
-    const fn noun(self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::Directory => "directory",
-        }
-    }
-
-    const fn opposite(self) -> &'static str {
-        match self {
-            Self::File => "directory",
-            Self::Directory => "regular file",
-        }
-    }
-}
-
-/// Where a claim about an entry's kind was recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KindSource {
-    /// The Unix mode in the high 16 bits of the attributes.
-    UnixMode,
-    /// The Windows `FILE_ATTRIBUTE_DIRECTORY` bit.
-    WindowsAttribute,
-}
-
-impl KindSource {
-    const fn noun(self) -> &'static str {
-        match self {
-            Self::UnixMode => "Unix mode",
-            Self::WindowsAttribute => "Windows attributes",
-        }
-    }
-}
-
 /// Why a 7z entry is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsupportedEntry {
     /// A FIFO, device node or socket.
-    Special(common::SpecialFile),
+    Special(SpecialFile),
     /// A Unix mode whose type bits name no defined file type.
     UndefinedType(u8),
     /// A recorded kind that the entry's native kind contradicts: the claim is
@@ -110,21 +70,22 @@ pub enum UnsupportedEntry {
 impl UnsupportedEntry {
     /// The refusal for the entry named `name`.
     fn refusal(self, name: &str) -> ArchiveError {
-        let reason = match self {
-            Self::Special(special) => {
-                format!("{} entries not supported: {name}", special.noun())
-            }
-            Self::UndefinedType(bits) => {
-                format!("7z entry has an undefined Unix file type ({bits:#x}): {name}")
-            }
-            Self::KindContradiction { native, claimed_by } => format!(
-                "7z entry is a {} but its {} says {}: {name}",
-                native.noun(),
-                claimed_by.noun(),
-                native.opposite()
-            ),
+        let violation = match self {
+            Self::Special(kind) => Violation::SpecialEntry {
+                kind,
+                name: Some(name.into()),
+            },
+            Self::UndefinedType(bits) => Violation::UndefinedUnixType {
+                bits,
+                name: name.into(),
+            },
+            Self::KindContradiction { native, claimed_by } => Violation::KindContradiction {
+                native,
+                claimed_by,
+                name: name.into(),
+            },
         };
-        ArchiveError::violation(reason)
+        violation.into()
     }
 }
 
@@ -209,10 +170,7 @@ impl SevenZKind {
 
 /// The refusal for a Windows reparse point, which has no readable target.
 pub(super) fn reparse_point_refusal(name: &str) -> ArchiveError {
-    ArchiveError::violation(format!(
-        "symlink detected in 7z archive: {name} (Windows reparse point attribute set). \
-             Its target cannot be read due to sevenz-rust2 API limitations."
-    ))
+    Violation::ReparsePointTarget { name: name.into() }.into()
 }
 
 /// Stashes `error` for the caller to return as is and gives the error that ends

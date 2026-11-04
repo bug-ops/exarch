@@ -171,7 +171,7 @@ mod tests {
             over.into_ffi_message().kind,
             FfiKind::SecurityViolation {
                 relaxable_by: Some(PolicySetting::MaxTarMetadataBytes),
-                sub_code: Some(SecurityViolationSubCode::TarTrailer),
+                sub_code: SecurityViolationSubCode::TarTrailer,
             }
         );
         let issue = VerificationIssue::from_error(

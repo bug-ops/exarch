@@ -100,8 +100,8 @@ fn deflate_stream_holding_a_header_signature_is_not_a_hidden_header() {
     let stored_blocks = encoder.finish().unwrap();
     assert!(
         stored_blocks
-            .windows(4)
-            .any(|window| window == LFH_SIGNATURE)
+            .array_windows::<4>()
+            .any(|&window| window == LFH_SIGNATURE)
     );
     let mut entry = RawEntry::stored("a.txt", &inner).with_descriptor(true, false);
     entry.method = 8;

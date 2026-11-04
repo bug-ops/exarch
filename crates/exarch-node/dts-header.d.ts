@@ -27,11 +27,12 @@ export interface ExarchErrorBase extends Error {
   /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
   relaxableBy?: PolicySetting
   /**
-   * Finer classification of an `INVALID_ARCHIVE` (`InvalidArchiveSubCode`) or
-   * `SECURITY_VIOLATION` (`SecurityViolationSubCode`) refusal, when it has one.
-   * The interfaces are discriminated by `writes`, not `code`, so the pairing is
-   * not narrowed per code: `INVALID_ARCHIVE` carries `'TAR_AMBIGUITY'` or
-   * `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries `'TAR_TRAILER'`.
+   * Finer classification of an `INVALID_ARCHIVE` (`InvalidArchiveSubCode`)
+   * failure, when it has one, and of every core `SECURITY_VIOLATION`
+   * (`SecurityViolationSubCode`). The interfaces are discriminated by `writes`,
+   * not `code`, so the pairing is not narrowed per code: `INVALID_ARCHIVE`
+   * carries `'TAR_AMBIGUITY'` or `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries
+   * one of the `SecurityViolationSubCode` values.
    */
   subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
   /**

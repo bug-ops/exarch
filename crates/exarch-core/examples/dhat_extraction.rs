@@ -68,7 +68,7 @@ fn profile_zip_extraction(file_count: usize, file_size: usize) {
     let _profiler = dhat::Profiler::new_heap();
 
     let cursor = Cursor::new(zip_data);
-    let mut archive = ZipArchive::new(cursor).unwrap();
+    let archive = ZipArchive::new(cursor).unwrap();
     archive
         .extract(
             temp.path(),
@@ -87,7 +87,7 @@ fn profile_tar_extraction(file_count: usize, file_size: usize) {
     let _profiler = dhat::Profiler::new_heap();
 
     let cursor = Cursor::new(tar_data);
-    let mut archive = TarArchive::new(cursor);
+    let archive = TarArchive::new(cursor);
     archive
         .extract(
             temp.path(),

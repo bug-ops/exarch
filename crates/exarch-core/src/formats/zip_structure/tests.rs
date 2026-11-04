@@ -415,7 +415,7 @@ fn name_mismatch_zip() -> Vec<u8> {
 fn enforce_rejects_before_creating_the_destination() {
     let temp = TempDir::new().unwrap();
     let dest = temp.path().join("out");
-    let mut archive = open_bytes(name_mismatch_zip());
+    let archive = open_bytes(name_mismatch_zip());
     let err = archive
         .extract(
             &dest,
@@ -437,9 +437,8 @@ fn enforce_rejects_before_creating_the_destination() {
 #[test]
 fn ignore_keeps_the_central_directory_interpretation() {
     let temp = TempDir::new().unwrap();
-    let mut archive = open_bytes(name_mismatch_zip());
     let ignore = config(ZipConsistencyPolicy::Ignore);
-    archive
+    open_bytes(name_mismatch_zip())
         .extract(
             temp.path(),
             &ignore,
@@ -449,13 +448,13 @@ fn ignore_keeps_the_central_directory_interpretation() {
         .unwrap();
     assert!(temp.path().join("doc_report.pdf").exists());
 
-    let manifest = archive.list(&ignore).unwrap();
+    let manifest = open_bytes(name_mismatch_zip()).list(&ignore).unwrap();
     assert_eq!(manifest.total_entries(), 1);
 }
 
 #[test]
 fn list_rejects_under_enforce() {
-    let mut archive = open_bytes(name_mismatch_zip());
+    let archive = open_bytes(name_mismatch_zip());
     assert_matches!(
         archive.list(&config(ZipConsistencyPolicy::Enforce)),
         Err(ArchiveError::ZipInconsistency(_))
@@ -659,7 +658,7 @@ fn local_header_between_two_entries_is_found() {
     built.bytes[second_record + 42..second_record + 46]
         .copy_from_slice(&(old + shift).to_le_bytes());
     let eocd = built.bytes.len() - 22;
-    let dir = u32::from_le_bytes(built.bytes[eocd + 16..eocd + 20].try_into().unwrap());
+    let dir = u32::from_le_bytes(*built.bytes[eocd + 16..].first_chunk::<4>().unwrap());
     built.bytes[eocd + 16..eocd + 20].copy_from_slice(&(dir + shift).to_le_bytes());
     let found = open_bytes(built.bytes).structure().findings().to_vec();
     assert_eq!(found, [hidden_at(at)]);
@@ -792,7 +791,7 @@ fn every_structural_finding_is_ignored_under_the_ignore_policy() {
         stray_before_entry(&stray_central()).bytes,
     ] {
         assert!(!open_bytes(bytes.clone()).structure().findings().is_empty());
-        let mut archive = open_bytes(bytes.clone());
+        let archive = open_bytes(bytes.clone());
         archive.list(&ignore).unwrap();
         let report = open_bytes(bytes)
             .verify(&ignore, &VerificationOptions::default())
@@ -911,7 +910,7 @@ fn the_central_directory_is_parsed_once_and_offsets_stay_cached() {
         inner: Cursor::new(built.bytes.clone()),
         seeks: seeks.clone(),
     };
-    let mut archive = ZipArchive::new(probe).unwrap();
+    let archive = ZipArchive::new(probe.clone()).unwrap();
     let count_at = |position: usize| {
         let at = position as u64;
         seeks.lock().unwrap().iter().filter(|&&s| s == at).count()
@@ -934,12 +933,13 @@ fn the_central_directory_is_parsed_once_and_offsets_stay_cached() {
     // reader, so it can only seek there less often than an unwindowed parse.
     assert!(count_at(built.directory_start) <= crate_parse + 1);
 
+    let extracting = ZipArchive::new(probe).unwrap();
     let before: Vec<_> = built.local_offsets.iter().map(|&o| count_at(o)).collect();
     archive
         .list(&config(ZipConsistencyPolicy::Enforce))
         .unwrap();
     let temp = TempDir::new().unwrap();
-    archive
+    extracting
         .extract(
             temp.path(),
             &config(ZipConsistencyPolicy::Enforce),
@@ -1238,7 +1238,7 @@ fn with_absolute_offsets(stub: &[u8], built: &BuiltZip) -> Vec<u8> {
     let mut bytes = built.bytes.clone();
     let mut at = built.directory_start;
     let patch = |bytes: &mut Vec<u8>, at: usize| {
-        let old = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let old = u32::from_le_bytes(*bytes[at..].first_chunk::<4>().unwrap());
         bytes[at..at + 4].copy_from_slice(&(old + shift).to_le_bytes());
     };
     while bytes[at..at + 4] == *b"PK\x01\x02" {
@@ -1352,7 +1352,7 @@ fn end_record_text_inside_a_comment_is_not_a_finding() {
 fn ignored_end_record_is_fatal_under_enforce() {
     let temp = TempDir::new().unwrap();
     let dest = temp.path().join("out");
-    let mut archive = open_bytes(with_second_end_record(&end_record(0x00ff_ffff, b"")));
+    let archive = open_bytes(with_second_end_record(&end_record(0x00ff_ffff, b"")));
     let err = archive
         .extract(
             &dest,
@@ -1551,7 +1551,7 @@ fn opening_many_entries_reads_the_file_in_a_bounded_number_of_requests() {
         inner: Cursor::new(built.bytes),
         seeks: seeks.clone(),
     };
-    let mut archive = ZipArchive::new(probe).unwrap();
+    let archive = ZipArchive::new(probe).unwrap();
     archive
         .list(&config(ZipConsistencyPolicy::Enforce))
         .unwrap();

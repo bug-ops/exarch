@@ -16,7 +16,6 @@ use crate::NoopProgress;
 use crate::ReuseLimit;
 use crate::SecurityConfig;
 use crate::config::Validated;
-use crate::formats::traits::ArchiveFormat;
 use crate::formats::zip::ZipArchive;
 
 fn limit(bytes: u64) -> ReuseLimit {
@@ -32,8 +31,8 @@ fn key_of(data: &[u8]) -> RetainKey {
     crc.update(data);
     RetainKey {
         data_start: 30,
-        compressed: data.len() as u64,
-        size: data.len() as u64,
+        compressed: Compressed(data.len() as u64),
+        size: Uncompressed(data.len() as u64),
         crc32: crc.sum(),
     }
 }
@@ -135,7 +134,10 @@ fn an_entry_over_the_limit_is_dropped_and_releases_its_bytes() {
             "the declared size does not fit"
         );
 
-        let forged = RetainKey { size: 40, ..key };
+        let forged = RetainKey {
+            size: Uncompressed(40),
+            ..key
+        };
         let mut capture = store.capture(forged).unwrap();
         capture.write_all(&data).unwrap();
         capture.finish(40);
@@ -296,7 +298,7 @@ fn open(bytes: &[u8], reuse: DecodeReuse) -> Opened {
 }
 
 fn extract(opened: &mut Opened, out: &std::path::Path) -> crate::Result<crate::ExtractionReport> {
-    opened.archive.extract(
+    opened.archive.extract_in_place(
         out,
         &opened.config,
         &ExtractionOptions::default(),
@@ -447,7 +449,7 @@ fn an_entry_the_limits_would_refuse_is_not_captured() {
     for mut store in stores() {
         let data = vec![0u8; 4096];
         let bomb = RetainKey {
-            compressed: 4,
+            compressed: Compressed(4),
             ..key_of(&data)
         };
         assert!(store.capture(bomb).is_none(), "ratio");

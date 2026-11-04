@@ -5,6 +5,8 @@ use crate::cli::ExtractArgs;
 use crate::commands::apply_size_limits;
 use crate::commands::atomic_swap;
 use crate::commands::atomic_swap::DestEntryKind;
+use crate::commands::atomic_swap::FileIdentity;
+use crate::commands::atomic_swap::IdentityCheck;
 use crate::commands::atomic_swap::PinnedDir;
 use crate::error::CliContext;
 use crate::error::add_archive_context;
@@ -19,12 +21,14 @@ use anyhow::Result;
 use exarch_core::ArchiveEntry;
 use exarch_core::ArchiveManifest;
 use exarch_core::DecodeReuse;
+use exarch_core::Extension;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::ListOptions;
 use exarch_core::ListedArchive;
 use exarch_core::ManifestEntryKind;
 use exarch_core::NoopProgress;
+use exarch_core::PathComponentName;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::StoredTargets;
@@ -87,11 +91,11 @@ struct AtomicForceTarget {
     /// [`Path::file_name`] — never a raw path fragment. See the invariant
     /// note at its point of derivation in [`resolve_atomic_force_replace`].
     dest_name: OsString,
-    /// The `(dev, ino)` identity `entry_status` reported for `dest_name`
+    /// The [`FileIdentity`] `entry_status` reported for `dest_name`
     /// when it confirmed the destination was a directory, carried forward
     /// rather than re-derived so the kind/identity pair snapshotted here is
     /// the one [`verify_destination_unchanged`] rechecks against.
-    dest_id: (u64, u64),
+    dest_id: FileIdentity,
     /// The pinned parent's canonical path, for temp/backup directory
     /// creation and error messages.
     parent_display: PathBuf,
@@ -211,7 +215,7 @@ fn run_atomic_force_extraction(
 
 /// Reserves a unique, currently-vacant sibling path in `temp.parent_display`
 /// to hold the pre-existing destination, then renames it there — returning
-/// the backup's resolved path, entry name, and `(dev, ino)` identity once the
+/// the backup's resolved path, entry name, and [`FileIdentity`] once the
 /// original destination is confirmed safely at that name.
 ///
 /// Renaming onto an existing path (even an empty directory) is unsupported
@@ -220,13 +224,12 @@ fn run_atomic_force_extraction(
 /// here also runs [`disclose_if_orphaned`] on the temp directory identified
 /// by `temp`, since the extraction that landed there has already succeeded
 /// by the time this is called.
-#[expect(clippy::type_complexity, reason = "tuple is local to this function")]
 fn move_destination_to_backup(
     temp: &TempOrphanRef<'_>,
     dest_name: &OsStr,
-    dest_id: (u64, u64),
+    dest_id: FileIdentity,
     dest_display: &Path,
-) -> Result<(PathBuf, OsString, Option<(u64, u64)>)> {
+) -> Result<(PathBuf, OsString, Option<FileIdentity>)> {
     let backup_dir = tempfile::tempdir_in(temp.parent_display).with_context(|| {
         temp.disclose(&format!(
             "failed to reserve backup path in {}",
@@ -304,7 +307,7 @@ fn cleanup_backup_or_warn(
     report: &mut ExtractionReport,
     pin: &PinnedDir,
     backup_name: &OsStr,
-    backup_id: Option<(u64, u64)>,
+    backup_id: Option<FileIdentity>,
     backup_path: &Path,
 ) {
     let Err(cleanup_err) = std::fs::remove_dir_all(backup_path) else {
@@ -313,21 +316,26 @@ fn cleanup_backup_or_warn(
     let Some(backup_id) = backup_id else {
         return;
     };
-    if pin
-        .entry_status(backup_name)
-        .is_ok_and(|(_, id)| id == backup_id)
-    {
-        report.warnings.push(format!(
-            "failed to remove backup of the original destination at {} ({cleanup_err}); it must \
-             be cleaned up manually",
-            backup_path.display()
-        ));
-    }
+    let Ok((_, observed)) = pin.entry_status(backup_name) else {
+        return;
+    };
+    let qualifier = match observed.check(backup_id) {
+        IdentityCheck::Same => "",
+        IdentityCheck::Unknown => " (its identity could not be verified on this platform)",
+        IdentityCheck::Different => return,
+    };
+    report.warnings.push(format!(
+        "failed to remove backup of the original destination at {}{qualifier} ({cleanup_err}); \
+         it must be cleaned up manually",
+        backup_path.display()
+    ));
 }
 
 /// Returns a disclosure clause naming where surviving content can be found,
 /// or `None` if nothing under `name` still identifies as `expected_id` (i.e.
 /// it was genuinely removed, or something unrelated now occupies the name).
+/// Where identity is unverifiable, an entry present under `name` is disclosed
+/// with a caveat rather than silently assumed to be ours or not.
 ///
 /// When content survives, the disclosed path is resolved fresh from an
 /// fd opened on the surviving entry itself ([`PinnedDir::open_entry`] +
@@ -344,34 +352,55 @@ fn cleanup_backup_or_warn(
 fn survival_clause(
     pin: &PinnedDir,
     name: &OsStr,
-    expected_id: (u64, u64),
+    expected_id: FileIdentity,
     parent_display: &Path,
 ) -> Option<String> {
     match pin.entry_status(name) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Ok((_, id)) if id == expected_id => {
-            let real_path = pin
-                .open_entry(name)
-                .ok()
-                .and_then(|fd| atomic_swap::current_path(&fd));
-            Some(real_path.map_or_else(
-                || unresolved_survival_message(expected_id, parent_display, name),
-                |path| {
-                    format!(
-                        "partial content survived cleanup and remains at {}",
-                        path.display()
-                    )
-                },
-            ))
-        }
-        // Something else now occupies the name (a decoy left by a redirect,
-        // or an unrelated benign reuse) — it is not ours to claim, so no
-        // disclosure is made for it either.
-        Ok(_) => None,
+        Ok((_, observed)) => match observed.check(expected_id) {
+            IdentityCheck::Same => Some(surviving_content_clause(
+                pin,
+                name,
+                expected_id,
+                parent_display,
+            )),
+            IdentityCheck::Unknown => Some(format!(
+                "an entry remains at {} whose identity could not be verified on this platform; \
+                 it may be partial content from this run",
+                parent_display.join(name).display()
+            )),
+            // Something else now occupies the name (a decoy left by a
+            // redirect, or an unrelated benign reuse) — it is not ours to
+            // claim, so no disclosure is made for it either.
+            IdentityCheck::Different => None,
+        },
         Err(e) => Some(format!(
             "whether partial content survived cleanup could not be determined ({e})"
         )),
     }
+}
+
+/// Builds the disclosure for content confirmed to survive under `name`,
+/// resolving its real path from an fd on the entry itself.
+fn surviving_content_clause(
+    pin: &PinnedDir,
+    name: &OsStr,
+    expected_id: FileIdentity,
+    parent_display: &Path,
+) -> String {
+    let real_path = pin
+        .open_entry(name)
+        .ok()
+        .and_then(|fd| atomic_swap::current_path(&fd));
+    real_path.map_or_else(
+        || unresolved_survival_message(expected_id, parent_display, name),
+        |path| {
+            format!(
+                "partial content survived cleanup and remains at {}",
+                path.display()
+            )
+        },
+    )
 }
 
 /// Builds the disclosure message for confirmed-surviving content whose
@@ -382,40 +411,28 @@ fn survival_clause(
 /// "platform limitation", so this only states the fact that resolution
 /// failed, not a claimed cause (S2, review of #530 round 4).
 ///
-/// On Unix, `expected_id`'s `(dev, ino)` is a real identity and gives an
-/// operator a `find`-based fallback. On non-Unix, [`PinnedDir::entry_status`]
-/// always reports `(0, 0)` (documented on its non-Unix impl) — printing that
-/// would be meaningless noise, and there is no portable `find`-by-inode
-/// equivalent to suggest either, so the non-Unix message stays plain rather
-/// than inventing Unix-flavored advice for a platform that has neither.
-#[cfg(unix)]
+/// A [`FileIdentity::Known`] identity gives an operator a `find`-based
+/// fallback. [`FileIdentity::Unknown`] has nothing to print and no portable
+/// by-inode lookup exists, so that message stays plain.
 fn unresolved_survival_message(
-    expected_id: (u64, u64),
+    expected_id: FileIdentity,
     parent_display: &Path,
     name: &OsStr,
 ) -> String {
-    let (dev, ino) = expected_id;
-    format!(
-        "partial content survived cleanup (device {dev}, inode {ino}); its current path could \
-         not be resolved — {} may no longer lead there if the containing directory has itself \
-         been redirected, in which case locate it via `find <volume-root> -xdev -inum {ino}`",
-        parent_display.join(name).display()
-    )
-}
-
-/// Non-Unix counterpart of [`unresolved_survival_message`]: see its doc
-/// comment for why `expected_id` is not printed here.
-#[cfg(not(unix))]
-fn unresolved_survival_message(
-    _expected_id: (u64, u64),
-    parent_display: &Path,
-    name: &OsStr,
-) -> String {
-    format!(
-        "partial content survived cleanup at an unresolvable path; {} may no longer lead there \
-         if the containing directory has itself been redirected",
-        parent_display.join(name).display()
-    )
+    match expected_id {
+        FileIdentity::Known { dev, ino } => format!(
+            "partial content survived cleanup (device {dev}, inode {ino}); its current path \
+             could not be resolved — {} may no longer lead there if the containing directory has \
+             itself been redirected, in which case locate it via `find <volume-root> -xdev -inum \
+             {ino}`",
+            parent_display.join(name).display()
+        ),
+        FileIdentity::Unknown => format!(
+            "partial content survived cleanup at an unresolvable path; {} may no longer lead \
+             there if the containing directory has itself been redirected",
+            parent_display.join(name).display()
+        ),
+    }
 }
 
 /// Best-effort removes the directory `name` (resolved by joining
@@ -423,7 +440,7 @@ fn unresolved_survival_message(
 /// operation in [`run_atomic_force_extraction`] uses), then appends
 /// [`survival_clause`]'s disclosure to `base_message` if it is still
 /// present under `name` afterward, identified by `expected_id` — the
-/// `(dev, ino)` pair `pin.entry_status` reported when this directory was
+/// [`FileIdentity`] `pin.entry_status` reported when this directory was
 /// created (fd-relative, so unaffected by a later redirect).
 ///
 /// In the ordinary case this removal succeeds: `parent_display` was never
@@ -448,12 +465,12 @@ fn unresolved_survival_message(
 /// issue). That narrower case remains a genuine, undisclosed orphan — the
 /// same class of accepted residual this module already documents elsewhere
 /// (e.g. [`verify_destination_unchanged`]'s doc comment, and the non-Unix
-/// `entry_status`'s always-`(0, 0)` identity, which cannot distinguish this
-/// function's "matching" and "mismatched" cases at all).
+/// `entry_status`'s [`FileIdentity::Unknown`], which survival disclosure
+/// reports with a caveat instead of a verified match).
 fn disclose_if_orphaned(
     pin: &PinnedDir,
     name: &OsStr,
-    expected_id: (u64, u64),
+    expected_id: FileIdentity,
     parent_display: &Path,
     base_message: &str,
 ) -> String {
@@ -473,7 +490,7 @@ fn disclose_if_orphaned(
 struct TempOrphanRef<'a> {
     pin: &'a PinnedDir,
     name: &'a OsStr,
-    id: (u64, u64),
+    id: FileIdentity,
     parent_display: &'a Path,
 }
 
@@ -521,8 +538,9 @@ fn describe_final_swap_failure(
     temp.disclose(&restored)
 }
 
-/// Aborts with a distinct, actionable error if `pin`'s entry `name` no
-/// longer identifies `expected`, or is no longer a directory at all.
+/// Aborts with a distinct, actionable error if `pin`'s entry `name` is
+/// known to differ from `expected`, or is no longer a directory at all. An
+/// unverifiable identity ([`IdentityCheck::Unknown`]) is not a mismatch.
 ///
 /// Called by [`run_atomic_force_extraction`] immediately before the
 /// destructive first swap rename. `display` is used only to build the error
@@ -530,7 +548,7 @@ fn describe_final_swap_failure(
 fn verify_destination_unchanged(
     pin: &PinnedDir,
     name: &OsStr,
-    expected: (u64, u64),
+    expected: FileIdentity,
     display: &Path,
 ) -> Result<()> {
     let (kind, current) = pin.entry_status(name).with_context(|| {
@@ -539,7 +557,11 @@ fn verify_destination_unchanged(
             display.display()
         )
     })?;
-    if kind != DestEntryKind::Directory || current != expected {
+    // `Unknown` (no stable identity on this platform) proceeds on the kind
+    // check alone: there is nothing to compare, and refusing would make
+    // `--atomic --force` unusable there.
+    let identity_changed = current.check(expected) == IdentityCheck::Different;
+    if kind != DestEntryKind::Directory || identity_changed {
         anyhow::bail!(
             "destination changed on disk during extraction; refusing to swap: {}",
             display.display()
@@ -693,13 +715,30 @@ fn resolve_atomic_force_replace(
 }
 
 /// Expands a list of extension tokens that may contain comma-separated values
-/// into individual lowercase extension strings without leading dots.
-fn parse_extensions(raw: &[String]) -> Vec<String> {
-    raw.iter()
+/// into [`Extension`]s: each token is trimmed, empty tokens are dropped, and
+/// the rest is parsed by the core constructor.
+///
+/// # Errors
+///
+/// Returns the core refusal, naming the offending token, for an entry that
+/// can never match (for example `tar.gz` or `a/b`), and an error when values
+/// were given but hold no extension at all (an empty list would allow every
+/// extension).
+fn parse_extensions(raw: &[String]) -> Result<Vec<Extension>> {
+    let parsed = raw
+        .iter()
         .flat_map(|s| s.split(','))
-        .map(|ext| ext.trim().trim_start_matches('.').to_lowercase())
+        .map(str::trim)
         .filter(|ext| !ext.is_empty())
-        .collect()
+        .map(|ext| {
+            Extension::try_from(ext)
+                .with_context(|| format!("invalid --allowed-extensions value {ext:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if parsed.is_empty() && !raw.is_empty() {
+        anyhow::bail!("--allowed-extensions {raw:?} names no extension");
+    }
+    Ok(parsed)
 }
 
 /// Maximum number of conflicting destination paths listed individually in
@@ -747,7 +786,9 @@ fn conflict_error(conflicts: &[std::path::PathBuf]) -> anyhow::Error {
     anyhow::Error::new(CliContext::new(conflict_error_message(conflicts)))
 }
 
-/// Drops empty entries from raw `--banned-component` values.
+/// Expands raw `--banned-component` values into [`PathComponentName`]s: each
+/// value is split on commas like `--allowed-extensions`, tokens are trimmed
+/// and empty tokens are dropped.
 ///
 /// `SecurityConfig::validate()` rejects empty entries, but an empty value is
 /// the documented idiom for disabling the default ban list (see the
@@ -756,8 +797,28 @@ fn conflict_error(conflicts: &[std::path::PathBuf]) -> anyhow::Error {
 /// unfiltered values to decide whether to override the default ban list at
 /// all; this only strips empties out of the values passed once that
 /// decision is made.
-fn filter_banned_components(raw: &[String]) -> Vec<String> {
-    raw.iter().filter(|c| !c.is_empty()).cloned().collect()
+///
+/// # Errors
+///
+/// Returns the core refusal, naming the offending value, for a component that
+/// can never equal a single path component (for example `a/b` or `..`), and
+/// an error for a non-empty value that names no component (`,` or a blank):
+/// only the exact empty string disables the list.
+fn filter_banned_components(raw: &[String]) -> Result<Vec<PathComponentName>> {
+    let mut components = Vec::new();
+    for value in raw {
+        let before = components.len();
+        for component in value.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+            components.push(
+                PathComponentName::try_from(component)
+                    .with_context(|| format!("invalid --banned-component value {component:?}"))?,
+            );
+        }
+        if components.len() == before && !value.is_empty() {
+            anyhow::bail!("--banned-component {value:?} names no component");
+        }
+    }
+    Ok(components)
 }
 
 /// Lists the archive before extraction: for conflict detection and the entry
@@ -858,7 +919,7 @@ pub fn execute(
         None => env::current_dir().context("failed to get current directory")?,
     };
 
-    let allowed_extensions = parse_extensions(&args.allowed_extensions);
+    let allowed_extensions = parse_extensions(&args.allowed_extensions)?;
 
     let config = args
         .parallel
@@ -878,7 +939,7 @@ pub fn execute(
     let config = if args.banned_components.is_empty() {
         config
     } else {
-        config.with_banned_path_components(filter_banned_components(&args.banned_components))
+        config.with_banned_path_components(filter_banned_components(&args.banned_components)?)
     };
 
     let list_config = list_config_for(&config);
@@ -1040,6 +1101,56 @@ mod tests {
         assert!(
             msg.contains("destination changed on disk during extraction; refusing to swap"),
             "error must carry the distinct refusing-to-swap message, got: {msg}"
+        );
+    }
+
+    /// An unverifiable expected identity (the non-Unix case) is the explicit
+    /// "proceed on the kind check alone" arm: a directory passes, but a
+    /// symlink is still refused.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn verify_destination_unchanged_with_unknown_identity_relies_on_kind_only() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        let dest = parent.join("dest");
+        std::fs::create_dir(&dest).expect("create dest");
+        let decoy = root.path().join("decoy");
+        std::fs::create_dir(&decoy).expect("create decoy");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let dest_name = OsStr::new("dest");
+
+        verify_destination_unchanged(&pin, dest_name, FileIdentity::Unknown, &dest)
+            .expect("a directory with unverifiable identity must pass on kind alone");
+
+        std::fs::remove_dir(&dest).expect("remove dest");
+        std::os::unix::fs::symlink(&decoy, &dest).expect("plant symlink over dest");
+
+        verify_destination_unchanged(&pin, dest_name, FileIdentity::Unknown, &dest)
+            .expect_err("a symlink must be refused even when identity is unknown");
+    }
+
+    /// With an unverifiable expected identity, an entry still present under
+    /// the name is disclosed with a caveat, not claimed as verified and not
+    /// silently dropped.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn survival_clause_with_unknown_identity_discloses_with_caveat() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        let name = OsStr::new("temp_dir");
+        std::fs::create_dir(parent.join(name)).expect("create temp dir");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let clause = survival_clause(&pin, name, FileIdentity::Unknown, &parent)
+            .expect("an entry that cannot be ruled out must be disclosed");
+        assert!(
+            clause.contains("identity could not be verified"),
+            "caveat expected, got: {clause}"
         );
     }
 
@@ -1252,57 +1363,114 @@ mod tests {
         );
     }
 
+    #[allow(clippy::unwrap_used)]
+    fn extension_names(raw: &[String]) -> Vec<String> {
+        parse_extensions(raw)
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().to_owned())
+            .collect()
+    }
+
     #[test]
     fn parse_extensions_comma_split() {
         let raw = vec!["zip,tar,gz".to_string()];
-        assert_eq!(parse_extensions(&raw), vec!["zip", "tar", "gz"]);
+        assert_eq!(extension_names(&raw), vec!["zip", "tar", "gz"]);
     }
 
     #[test]
     fn parse_extensions_strips_leading_dot() {
         let raw = vec![".zip".to_string(), ".TAR".to_string()];
-        assert_eq!(parse_extensions(&raw), vec!["zip", "tar"]);
+        assert_eq!(extension_names(&raw), vec!["zip", "tar"]);
     }
 
     #[test]
     fn parse_extensions_trims_whitespace() {
-        let raw = vec![" zip , tar ".to_string()];
-        assert_eq!(parse_extensions(&raw), vec!["zip", "tar"]);
+        let raw = vec![" zip , tar ".to_string(), " gz".to_string()];
+        assert_eq!(extension_names(&raw), vec!["zip", "tar", "gz"]);
     }
 
     #[test]
     fn parse_extensions_lowercases() {
-        let raw = vec!["ZIP".to_string(), "TAR.GZ".to_string()];
-        assert_eq!(parse_extensions(&raw), vec!["zip", "tar.gz"]);
+        let raw = vec!["ZIP".to_string(), "Txt".to_string()];
+        assert_eq!(extension_names(&raw), vec!["zip", "txt"]);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn parse_extensions_refuses_an_inner_dot() {
+        for raw in ["tar.gz", "A.TXT", "a/b"] {
+            let err = parse_extensions(&[raw.to_string()]).unwrap_err();
+            assert!(format!("{err:#}").contains(raw), "{err:#}");
+        }
     }
 
     #[test]
     fn parse_extensions_empty_input() {
-        assert_eq!(parse_extensions(&[]), Vec::<String>::new());
+        assert!(extension_names(&[]).is_empty());
+    }
+
+    #[test]
+    fn parse_extensions_refuses_values_without_any_extension() {
+        for raw in [",", " ", ""] {
+            assert!(parse_extensions(&[raw.to_string()]).is_err(), "{raw:?}");
+        }
     }
 
     #[test]
     fn parse_extensions_filters_empty_tokens() {
-        let raw = vec!["zip,,tar".to_string()];
-        assert_eq!(parse_extensions(&raw), vec!["zip", "tar"]);
+        let raw = vec!["zip,,tar, ,".to_string()];
+        assert_eq!(extension_names(&raw), vec!["zip", "tar"]);
     }
 
     #[test]
     fn parse_extensions_mixed_repeatable_and_comma() {
         let raw = vec!["zip,tar".to_string(), ".GZ".to_string()];
-        assert_eq!(parse_extensions(&raw), vec!["zip", "tar", "gz"]);
+        assert_eq!(extension_names(&raw), vec!["zip", "tar", "gz"]);
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn filter_banned_components_drops_empty_entries() {
         let raw = vec![String::new()];
-        assert_eq!(filter_banned_components(&raw), Vec::<String>::new());
+        assert!(filter_banned_components(&raw).unwrap().is_empty());
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn filter_banned_components_keeps_non_empty_entries() {
         let raw = vec![".git".to_string(), String::new(), ".ssh".to_string()];
-        assert_eq!(filter_banned_components(&raw), vec![".git", ".ssh"]);
+        let kept = filter_banned_components(&raw).unwrap();
+        let names: Vec<_> = kept.iter().map(PathComponentName::as_str).collect();
+        assert_eq!(names, vec![".git", ".ssh"]);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn filter_banned_components_refuses_a_separator() {
+        for raw in ["a/b", ".."] {
+            let err = filter_banned_components(&[raw.to_string()]).unwrap_err();
+            assert!(format!("{err:#}").contains("--banned-component"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn filter_banned_components_refuses_a_value_without_any_component() {
+        for raw in [",", " ", " , "] {
+            assert!(
+                filter_banned_components(&[raw.to_string()]).is_err(),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn filter_banned_components_splits_on_commas_and_trims() {
+        let raw = vec![".git, .ssh ,,.env".to_string()];
+        let kept = filter_banned_components(&raw).unwrap();
+        let names: Vec<_> = kept.iter().map(PathComponentName::as_str).collect();
+        assert_eq!(names, vec![".git", ".ssh", ".env"]);
     }
 
     #[test]

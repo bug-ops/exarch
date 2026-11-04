@@ -37,6 +37,7 @@ use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
 use crate::formats::target::Tally;
+use crate::security::Uncompressed;
 use crate::security::admitted::EntrySize;
 use crate::security::validator::EntryPath;
 use crate::security::validator::NodeKind;
@@ -198,7 +199,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 SevenZKind::Directory => pre.directory(&path)?,
                 SevenZKind::ReparsePoint => return Err(reparse_point_refusal(&entry.name)),
                 SevenZKind::UnixSymlink => {
-                    validate_entry_compression(&entry.compression, entry.size, config)?;
+                    validate_entry_compression(
+                        &entry.compression,
+                        Uncompressed(entry.size),
+                        config,
+                    )?;
                     require_symlinks_allowed(config)?;
                     pre.symlink(&safe_path, &path, &self.header.files()[index])?;
                     pre.reserve_symlink(entry.size)?;
@@ -207,7 +212,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     // The ratio is a property of the archive, not of the
                     // destination, so it is checked before the duplicate skip,
                     // matching what `verify` reports.
-                    validate_entry_compression(&entry.compression, entry.size, config)?;
+                    validate_entry_compression(
+                        &entry.compression,
+                        Uncompressed(entry.size),
+                        config,
+                    )?;
                     if !common::is_extension_allowed(&path, config) {
                         continue;
                     }
@@ -246,8 +255,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             };
             let path = PathBuf::from(common::normalize_entry_name(&entry.name));
             index = index.saturating_add(1);
-            progress.on_entry_start(&path, total, index);
-            let mut guard = EntryCompleteGuard::new(&mut *progress, &path);
+            let mut guard = EntryCompleteGuard::start(&mut *progress, &path, total, index);
 
             let outcome = {
                 let mut tally = Tally {
@@ -307,10 +315,7 @@ pub(super) fn process_entry<T: ExtractTarget>(
     path: &Path,
     tally: &mut Tally<'_>,
 ) -> Result<()> {
-    let size = EntrySize {
-        uncompressed: entry.size,
-        compressed: None,
-    };
+    let size = EntrySize::new(Uncompressed(entry.size), None);
     match kind {
         SevenZKind::ReparsePoint => Err(reparse_point_refusal(&entry.name)),
         SevenZKind::UnixSymlink => {
@@ -336,7 +341,7 @@ pub(super) fn process_entry<T: ExtractTarget>(
             };
             if let FileAdmission::Write(admitted) = target.validate_file(request, tally)? {
                 let mut reader = reader;
-                target.file(&mut reader, admitted, entry.size, tally)?;
+                target.file(&mut reader, admitted, tally)?;
             }
             Ok(())
         }

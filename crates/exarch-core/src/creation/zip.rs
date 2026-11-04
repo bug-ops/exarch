@@ -18,6 +18,8 @@ use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
+use crate::security::Compressed;
+use crate::security::Uncompressed;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -182,14 +184,9 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
     let mut report = CreationReport::default();
     let start = std::time::Instant::now();
 
-    // Configure ZIP file options with compression level. `compression_level`
-    // is guaranteed to be `None` or `Some(1..=9)` by
-    // `CreationConfig::validate`, so `Stored` (level 0) is unreachable
-    // through the public API.
-    let level = config.compression_level.unwrap_or(6);
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
-        .compression_level(Some(i64::from(level)));
+        .compression_level(Some(config.compression_level.to_zip_level()));
 
     // Single-pass collection of entries (avoids double directory traversal)
     let entries = collect_entries(sources, config)?;
@@ -200,39 +197,29 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
     let mut buffer = vec![0u8; 64 * 1024];
 
     for entry in &entries {
+        let mut guard = tracker.begin(&entry.archive_path);
         match &entry.entry_type {
-            EntryType::File => {
-                tracker.on_entry_start(&entry.archive_path);
-                add_file_to_zip_with_progress_and_buffer(
-                    &mut zip,
-                    &entry.path,
-                    &entry.archive_path,
-                    config,
-                    &mut report,
-                    &options,
-                    tracker.callback(),
-                    &mut buffer,
-                )?;
-                tracker.on_entry_complete(&entry.archive_path);
-            }
+            EntryType::File => add_file_to_zip_with_progress_and_buffer(
+                &mut zip,
+                &entry.path,
+                &entry.archive_path,
+                config,
+                &mut report,
+                &options,
+                guard.progress_mut(),
+                &mut buffer,
+            )?,
             EntryType::Directory => {
-                tracker.on_entry_start(&entry.archive_path);
-                // Skip root directory entry (empty path becomes "/" which is
-                // invalid)
-                if !entry.archive_path.is_empty() {
-                    let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
-                    zip.add_directory(&dir_path, options).map_err(|e| {
-                        std::io::Error::other(IoContext::new(
-                            "failed to add directory to zip archive",
-                            e.to_string(),
-                        ))
-                    })?;
-                    report.directories_added += 1;
-                }
-                tracker.on_entry_complete(&entry.archive_path);
+                let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
+                zip.add_directory(&dir_path, options).map_err(|e| {
+                    std::io::Error::other(IoContext::new(
+                        "failed to add directory to zip archive",
+                        e.to_string(),
+                    ))
+                })?;
+                report.directories_added += 1;
             }
             EntryType::Symlink { .. } => {
-                tracker.on_entry_start(&entry.archive_path);
                 if config.follow_symlinks {
                     add_file_to_zip_with_progress_and_buffer(
                         &mut zip,
@@ -241,16 +228,16 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
                         config,
                         &mut report,
                         &options,
-                        tracker.callback(),
+                        guard.progress_mut(),
                         &mut buffer,
                     )?;
                 } else {
                     report.files_skipped = report.files_skipped.saturating_add(1);
                     report.add_warning(format!("Skipped symlink: {}", entry.path.display()));
                 }
-                tracker.on_entry_complete(&entry.archive_path);
             }
         }
+        guard.complete();
     }
 
     // Finish writing ZIP
@@ -301,8 +288,11 @@ fn extraction_ratio_warning<R: Read + Seek>(
     let mut highest = 0.0_f64;
     for index in 0..zip.len() {
         let entry = zip.by_index_raw(index)?;
-        let details =
-            ZipBombDetails::new(ZipBombScope::Entry, entry.compressed_size(), entry.size());
+        let details = ZipBombDetails::new(
+            ZipBombScope::Entry,
+            Compressed(entry.compressed_size()),
+            Uncompressed(entry.size()),
+        );
         if let CompressionRatio::Finite(ratio) = details.ratio()
             && ratio > limit
         {
@@ -434,16 +424,13 @@ impl crate::formats::traits::FormatCreator for ZipCreator {
     ) -> crate::Result<crate::creation::CreationReport> {
         create_zip_with_progress(output, sources, config, progress)
     }
-
-    fn format_name(&self) -> &'static str {
-        "zip"
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
+    use crate::creation::CompressionLevel;
     use std::assert_matches;
     use std::fs;
     use tempfile::TempDir;
@@ -571,8 +558,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_compression_level(9)
-            .unwrap()
+            .with_compression_level(CompressionLevel::try_from(9u8).unwrap())
             .validate()
             .unwrap();
 
@@ -595,12 +581,11 @@ mod tests {
         fs::write(source_dir.path().join("test.txt"), "a".repeat(10000)).unwrap();
 
         // Test different compression levels (1-9 are valid)
-        for level in [1, 6, 9] {
+        for level in [1u8, 6, 9] {
             let output = temp.path().join(format!("output_{level}.zip"));
             let config = CreationConfig::default()
                 .with_exclude_patterns(vec![])
-                .with_compression_level(level)
-                .unwrap()
+                .with_compression_level(CompressionLevel::try_from(level).unwrap())
                 .validate()
                 .unwrap();
 

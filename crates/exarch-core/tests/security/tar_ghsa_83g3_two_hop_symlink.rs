@@ -105,7 +105,7 @@ fn two_hop_symlink_chain_is_rejected() {
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);
-    let mut archive = TarArchive::new(cursor);
+    let archive = TarArchive::new(cursor);
 
     let result = archive.extract(
         dest.path(),
@@ -150,7 +150,7 @@ fn two_hop_chain_rejected_when_symlinks_disabled() {
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);
-    let mut archive = TarArchive::new(cursor);
+    let archive = TarArchive::new(cursor);
 
     let result = archive.extract(
         dest.path(),

@@ -12,6 +12,7 @@
 //!   callback
 
 use crate::ProgressCallback;
+use crate::formats::common::EntryCompleteGuard;
 use std::io::Read;
 use std::path::Path;
 
@@ -25,8 +26,9 @@ use std::path::Path;
 ///
 /// Progress callbacks are invoked at specific lifecycle points:
 ///
-/// - `on_entry_start`: Called before processing each entry
-/// - `on_entry_complete`: Called after successfully processing an entry
+/// - `on_entry_start`: Called by `begin` before processing each entry
+/// - `on_entry_complete`: Called when the guard from `begin` completes or
+///   drops, so it follows every start even if the entry fails
 /// - `on_complete`: Called once when the entire operation finishes
 ///
 /// # Examples
@@ -54,9 +56,9 @@ use std::path::Path;
 /// let total_entries = 10;
 /// let mut tracker = ProgressTracker::new(&mut progress, total_entries);
 ///
-/// tracker.on_entry_start(Path::new("file1.txt"));
-/// // ... process entry ...
-/// tracker.on_entry_complete(Path::new("file1.txt"));
+/// let mut entry = tracker.begin(Path::new("file1.txt"));
+/// // ... process entry, passing `entry.progress_mut()` to helpers ...
+/// entry.complete();
 /// ```
 pub struct ProgressTracker<'a> {
     /// Reference to the progress callback implementation
@@ -101,27 +103,18 @@ impl<'a> ProgressTracker<'a> {
         }
     }
 
-    /// Reports that processing started for an entry.
+    /// Announces the entry at `path` and returns the guard that reports its
+    /// completion when completed or dropped, including on an early `?` return.
     ///
-    /// Automatically increments the current entry counter and invokes
-    /// the `on_entry_start` callback.
-    ///
-    /// # Parameters
-    ///
-    /// - `path`: Path of the entry being processed
-    pub fn on_entry_start(&mut self, path: &Path) {
+    /// Automatically increments the current entry counter.
+    pub fn begin<'p>(&'p mut self, path: &'p Path) -> EntryCompleteGuard<'p> {
         self.current_entry += 1;
-        self.progress
-            .on_entry_start(path, self.total_entries, self.current_entry);
-    }
-
-    /// Reports that processing completed for an entry.
-    ///
-    /// # Parameters
-    ///
-    /// - `path`: Path of the entry that was processed
-    pub fn on_entry_complete(&mut self, path: &Path) {
-        self.progress.on_entry_complete(path);
+        EntryCompleteGuard::start(
+            &mut *self.progress,
+            path,
+            self.total_entries,
+            self.current_entry,
+        )
     }
 
     /// Reports that the entire operation completed.
@@ -130,16 +123,6 @@ impl<'a> ProgressTracker<'a> {
     /// processed.
     pub fn on_complete(&mut self) {
         self.progress.on_complete();
-    }
-
-    /// Returns a mutable reference to the underlying progress callback.
-    ///
-    /// Use this to pass the callback into nested helpers that perform
-    /// byte-level progress reporting, while keeping the tracker in scope
-    /// for entry-level accounting. The borrow is sequential — call this
-    /// only between `on_entry_start` and the next tracker call.
-    pub fn callback(&mut self) -> &mut dyn ProgressCallback {
-        self.progress
     }
 }
 
@@ -356,11 +339,8 @@ mod tests {
         let mut progress = TestProgress::default();
         let mut tracker = ProgressTracker::new(&mut progress, 3);
 
-        tracker.on_entry_start(Path::new("file1.txt"));
-        tracker.on_entry_complete(Path::new("file1.txt"));
-
-        tracker.on_entry_start(Path::new("file2.txt"));
-        tracker.on_entry_complete(Path::new("file2.txt"));
+        tracker.begin(Path::new("file1.txt")).complete();
+        drop(tracker.begin(Path::new("file2.txt")));
 
         tracker.on_complete();
 

@@ -8,9 +8,7 @@
 
 use std::fs::File;
 use std::io::Read;
-use std::path::Component;
 use std::path::Path;
-use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::ExtractionReport;
@@ -20,6 +18,7 @@ use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+use crate::security::RawMode;
 use crate::security::admitted::EntrySize;
 use crate::security::admitted::PendingFile;
 use crate::security::admitted::ValidatedFile;
@@ -27,11 +26,13 @@ use crate::security::admitted::ValidatedHardlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
+use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::validator::FileScreen;
 use crate::security::validator::ValidatorCore;
+use crate::sink::DuplicatePolicy;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -105,7 +106,7 @@ pub struct SkipRecorded(());
 pub struct FileRequest<'p> {
     pub(crate) path: &'p Path,
     pub(crate) size: EntrySize,
-    pub(crate) mode: Option<u32>,
+    pub(crate) mode: Option<RawMode>,
 }
 
 /// A target's decision on a requested file.
@@ -170,12 +171,12 @@ pub trait ExtractTarget {
     /// Creates a validated directory.
     fn directory(&mut self, path: &SafePath<Self::Parent>, tally: &mut Tally<'_>) -> Result<()>;
 
-    /// Streams an admitted file from `reader`, enforcing the declared `size`.
+    /// Streams an admitted file from `reader`, capped at the size its quota
+    /// permit reserved.
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
         admitted: Self::AdmittedFile,
-        size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()>;
 
@@ -187,7 +188,7 @@ pub trait ExtractTarget {
     fn hardlink(
         &mut self,
         link: &SafePath<Self::Parent>,
-        target: &SafePath<Self::Parent>,
+        target: &HardlinkTarget,
         counted: EntryCount,
         tally: &mut Tally<'_>,
         hardlink_duplicate_skips: &mut u64,
@@ -333,7 +334,6 @@ impl ExtractTarget for HostTarget<'_> {
         &mut self,
         reader: &mut R,
         admitted: ValidatedFile<HostParent>,
-        size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         let (path, permit, mode) = admitted.into_parts();
@@ -344,7 +344,6 @@ impl ExtractTarget for HostTarget<'_> {
             permit,
             &self.root,
             tally.report,
-            Some(size),
             &mut self.copy_buffer,
             self.dirs,
             tally.options,
@@ -406,7 +405,7 @@ impl ExtractTarget for HostTarget<'_> {
     fn hardlink(
         &mut self,
         link: &SafePath<HostParent>,
-        target: &SafePath<HostParent>,
+        target: &HardlinkTarget,
         counted: EntryCount,
         tally: &mut Tally<'_>,
         hardlink_duplicate_skips: &mut u64,
@@ -419,13 +418,14 @@ impl ExtractTarget for HostTarget<'_> {
         // The target may be a pre-existing file of the destination, so its mode
         // is sanitized like an archive mode: never setuid, setgid or (unless
         // allowed) world-writable, and never wider than the target.
-        let link_mode = target_mode.map(|mode| sanitize_permissions(mode, self.config));
+        let link_mode =
+            target_mode.map(|mode| sanitize_permissions(RawMode::new(mode), self.config));
 
         let (link_dir, link_leaf) = self.dirs.ensure_parent(&self.root, link)?;
         let link_file = match link_dir.create_new(link_leaf, link_mode) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if tally.options.skip_duplicates {
+                if tally.options.duplicate_policy() == DuplicatePolicy::Skip {
                     common::checked_increment_files_skipped(tally.report)?;
                     *hardlink_duplicate_skips = hardlink_duplicate_skips.saturating_add(1);
                     return Ok(());
@@ -455,7 +455,6 @@ impl ExtractTarget for HostTarget<'_> {
         let bytes_copied = common::copy_file_content_with_permit(
             target_file,
             link_file,
-            target_size,
             &mut self.copy_buffer,
             permit,
         )?;
@@ -471,13 +470,9 @@ impl HostTarget<'_> {
     fn open_hardlink_target(
         &self,
         link: &SafePath<HostParent>,
-        target: &SafePath<HostParent>,
+        target: &HardlinkTarget,
     ) -> Result<OpenedTarget> {
-        let file = if target
-            .as_path()
-            .components()
-            .any(|c| matches!(c, Component::ParentDir))
-        {
+        let file = if target.has_parent_dir() {
             // A validated target may step out of a directory it entered
             // (`d/../f`); only the resolved form can be walked by name.
             self.open_through_symlink(link, target)?
@@ -507,18 +502,14 @@ impl HostTarget<'_> {
 
     /// Opens a hardlink target by name, falling back to its resolved location
     /// when the final component is a symlink.
-    fn open_direct(
-        &self,
-        link: &SafePath<HostParent>,
-        target: &SafePath<HostParent>,
-    ) -> Result<File> {
+    fn open_direct(&self, link: &SafePath<HostParent>, target: &HardlinkTarget) -> Result<File> {
         let missing = || hardlink_target_missing(target.as_path());
-        let (dir, leaf) = match self.dirs.open_parent(&self.root, target) {
+        let (dir, leaf) = match self.dirs.open_parent(&self.root, target.as_path()) {
             Ok(opened) => opened,
             // A pre-existing symlinked directory in the chain is read through
             // like a leaf symlink: resolved, checked for containment in `dest`
             // and walked again with every symlink refused.
-            Err(_) if self.has_symlink_parent(target.as_path()) => {
+            Err(_) if self.has_symlink_parent(target) => {
                 return self.open_through_symlink(link, target);
             }
             Err(err) => return Err(not_found_as(err, missing)),
@@ -533,22 +524,15 @@ impl HostTarget<'_> {
         }
     }
 
-    /// Whether a parent component of `rel` is a symlink right now. Only picks
-    /// the route: the resolved walk that follows enforces containment and
-    /// refuses any symlink by file descriptor.
-    fn has_symlink_parent(&self, rel: &Path) -> bool {
-        let mut prefix = PathBuf::new();
-        rel.parent()
-            .into_iter()
-            .flat_map(Path::components)
-            .any(|c| {
-                prefix.push(c);
-                self.root
-                    .dest()
-                    .probe(&prefix)
-                    .lstat()
-                    .is_ok_and(|meta| meta.file_type().is_symlink())
-            })
+    /// Whether a parent component of `target` is a symlink right now. Only
+    /// picks the route: the resolved walk that follows enforces containment
+    /// and refuses any symlink by file descriptor.
+    fn has_symlink_parent(&self, target: &HardlinkTarget) -> bool {
+        target.parent_probes(self.root.dest()).any(|parent| {
+            parent
+                .lstat()
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+        })
     }
 
     /// Opens a hardlink target through its resolved, symlink-free location:
@@ -556,12 +540,12 @@ impl HostTarget<'_> {
     fn open_through_symlink(
         &self,
         link: &SafePath<HostParent>,
-        target: &SafePath<HostParent>,
+        target: &HardlinkTarget,
     ) -> Result<File> {
         let missing = || hardlink_target_missing(target.as_path());
         // The path-based `exists` only picks the error: a dangling link is a
         // missing target, not an escape.
-        if !self.root.dest().probe(target.as_path()).exists() {
+        if !target.probe_under(self.root.dest()).exists() {
             return Err(missing());
         }
         let escape = || ArchiveError::HardlinkEscape {

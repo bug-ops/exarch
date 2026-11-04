@@ -9,8 +9,8 @@ use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
+use exarch_core::ErrorCode;
 use exarch_core::ExtractionReport;
-use exarch_core::FfiKind;
 use exarch_core::VerificationReport;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -19,28 +19,29 @@ use std::io::Write;
 use std::io::{self};
 use std::path::Path;
 
-fn kind_name(kind: &FfiKind) -> &'static str {
-    match kind {
-        FfiKind::Io(_) => "IoError",
-        FfiKind::SecurityViolation { .. } => "SecurityViolation",
-        FfiKind::InvalidArchive { .. } => "InvalidArchive",
-        FfiKind::PathTraversal => "PathTraversal",
-        FfiKind::SymlinkEscape => "SymlinkEscape",
-        FfiKind::HardlinkEscape => "HardlinkEscape",
-        FfiKind::ZipBomb => "ZipBomb",
-        FfiKind::ZipInconsistency => "ZipInconsistency",
-        FfiKind::InvalidPermissions => "InvalidPermissions",
-        FfiKind::QuotaExceeded => "QuotaExceeded",
-        FfiKind::SourceNotFound => "SourceNotFound",
-        FfiKind::SourceNotAccessible => "SourceNotAccessible",
-        FfiKind::OutputExists => "OutputExists",
-        FfiKind::InvalidCompressionLevel => "InvalidCompressionLevel",
-        FfiKind::UnknownFormat => "UnknownFormat",
-        FfiKind::InvalidConfiguration => "InvalidConfiguration",
-        // Forward-compat: a class added to FfiKind after this match was
-        // written. "Error" matches the generic fallback documented for kinds
-        // that don't map to a known archive validation failure.
-        _ => "Error",
+const GENERIC_KIND: &str = "Error";
+
+fn kind_name(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::IoError => "IoError",
+        ErrorCode::SecurityViolation => "SecurityViolation",
+        ErrorCode::InvalidArchive => "InvalidArchive",
+        ErrorCode::PathTraversal => "PathTraversal",
+        ErrorCode::SymlinkEscape => "SymlinkEscape",
+        ErrorCode::HardlinkEscape => "HardlinkEscape",
+        ErrorCode::ZipBomb => "ZipBomb",
+        ErrorCode::ZipInconsistency => "ZipInconsistency",
+        ErrorCode::InvalidPermissions => "InvalidPermissions",
+        ErrorCode::QuotaExceeded => "QuotaExceeded",
+        ErrorCode::SourceNotFound => "SourceNotFound",
+        ErrorCode::SourceNotAccessible => "SourceNotAccessible",
+        ErrorCode::OutputExists => "OutputExists",
+        ErrorCode::InvalidCompressionLevel => "InvalidCompressionLevel",
+        ErrorCode::UnknownFormat => "UnknownFormat",
+        ErrorCode::InvalidConfiguration => "InvalidConfiguration",
+        // Wildcard only for `#[non_exhaustive]`;
+        // `every_error_code_has_a_kind_name` fails if it is ever taken.
+        _ => GENERIC_KIND,
     }
 }
 
@@ -149,7 +150,10 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         let extraction_err = error.chain().find_map(|e| e.downcast_ref::<ArchiveError>());
 
         let ffi_kind = extraction_err.map(ArchiveError::ffi_kind);
-        let kind = ffi_kind.as_ref().map_or("Error", kind_name).to_string();
+        let kind = ffi_kind
+            .as_ref()
+            .map_or(GENERIC_KIND, |kind| kind_name(kind.code()))
+            .to_string();
         let message = format!("{error:#}");
 
         // PartialExtraction is converted by convert_extraction_error into a
@@ -357,11 +361,21 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use exarch_core::Compressed;
     use exarch_core::QuotaResource;
+    use exarch_core::Uncompressed;
+    use exarch_core::Violation;
     use std::path::PathBuf;
 
     fn extraction_error_kind(err: &ArchiveError) -> String {
-        kind_name(&err.ffi_kind()).to_string()
+        kind_name(err.ffi_kind().code()).to_string()
+    }
+
+    #[test]
+    fn every_error_code_has_a_kind_name() {
+        for &code in ErrorCode::ALL {
+            assert_ne!(kind_name(code), GENERIC_KIND, "{code:?}");
+        }
     }
 
     fn error_kind(err: &ArchiveError) -> String {
@@ -393,8 +407,8 @@ mod tests {
     fn test_extraction_error_kind_zip_bomb() {
         let err = exarch_core::ArchiveError::ZipBomb(exarch_core::ZipBombDetails::new(
             exarch_core::ZipBombScope::Entry,
-            1000,
-            1_000_000,
+            Compressed(1000),
+            Uncompressed(1_000_000),
         ));
         assert_eq!(error_kind(&err), "ZipBomb");
     }
@@ -484,22 +498,22 @@ mod tests {
 
     fn envelope_for(err: &ArchiveError) -> serde_json::Value {
         let kind = err.ffi_kind();
-        let output =
-            JsonOutput::<()>::error("extract", kind_name(&kind), "denied").with_ffi_kind(&kind);
+        let output = JsonOutput::<()>::error("extract", kind_name(kind.code()), "denied")
+            .with_ffi_kind(&kind);
         serde_json::to_value(&output).unwrap()
     }
 
     #[test]
     fn test_error_envelope_reports_relaxable_by_only_when_set() {
-        let relaxable = envelope_for(&ArchiveError::relaxable_violation(
-            exarch_core::PolicySetting::Symlinks,
-            "denied".to_string(),
-        ));
+        let relaxable = envelope_for(&ArchiveError::from(Violation::LinksNotAllowed(
+            exarch_core::LinkKind::Symlink,
+        )));
         assert_eq!(relaxable["error"]["relaxable_by"], "symlinks");
-        assert!(relaxable["error"].get("sub_code").is_none());
+        assert_eq!(relaxable["error"]["sub_code"], "LINK_POLICY");
 
-        let fixed = envelope_for(&ArchiveError::violation("denied".to_string()));
+        let fixed = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
         assert!(fixed["error"].get("relaxable_by").is_none());
+        assert_eq!(fixed["error"]["sub_code"], "ENCRYPTED");
     }
 
     #[test]
@@ -529,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_security_violation() {
-        let err = ArchiveError::violation("denied".to_string());
+        let err = ArchiveError::from(Violation::EncryptedArchive);
         assert_eq!(error_kind(&err), "SecurityViolation");
     }
 
@@ -539,8 +553,8 @@ mod tests {
         // chain containing an ArchiveError.
         let extraction_err = exarch_core::ArchiveError::ZipBomb(exarch_core::ZipBombDetails::new(
             exarch_core::ZipBombScope::Entry,
-            100,
-            100_000,
+            Compressed(100),
+            Uncompressed(100_000),
         ));
         let anyhow_err = anyhow::Error::new(extraction_err);
 
@@ -602,8 +616,8 @@ mod tests {
 
         let err = ArchiveError::ZipBomb(exarch_core::ZipBombDetails::new(
             exarch_core::ZipBombScope::Entry,
-            1_024,
-            1_024 * 1_024 * 150,
+            Compressed(1_024),
+            Uncompressed(1_024 * 1_024 * 150),
         ));
         // ArchiveError::Display emits the ratio info
         let display_text = err.to_string();
@@ -686,7 +700,11 @@ mod tests {
     fn format_error_writes_error_envelope() {
         let mut f = JsonFormatter::with_writer(Vec::new());
         let err = anyhow::anyhow!(exarch_core::ArchiveError::ZipBomb(
-            exarch_core::ZipBombDetails::new(exarch_core::ZipBombScope::Entry, 1000, 1_000_000)
+            exarch_core::ZipBombDetails::new(
+                exarch_core::ZipBombScope::Entry,
+                Compressed(1000),
+                Uncompressed(1_000_000)
+            )
         ));
         f.format_error("extract", &err);
         let v = parsed(&f);

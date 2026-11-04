@@ -43,8 +43,8 @@ fn extract_rejects_unsupported_method_with_empty_destination() {
 
     assert_matches!(
         extract_archive(&path, out.path(), &SecurityConfig::default()),
-        Err(ArchiveError::SecurityViolation { reason, .. })
-            if reason.contains("unsupported compression method")
+        Err(ArchiveError::SecurityViolation { kind, .. })
+            if kind.to_string().contains("unsupported compression method")
     );
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
 }
@@ -56,8 +56,8 @@ fn list_rejects_unsupported_method() {
 
     assert_matches!(
         list_archive(&path, &SecurityConfig::default()),
-        Err(ArchiveError::SecurityViolation { reason, .. })
-            if reason.contains("unsupported compression method")
+        Err(ArchiveError::SecurityViolation { kind, .. })
+            if kind.to_string().contains("unsupported compression method")
     );
 }
 
@@ -68,7 +68,7 @@ fn verify_rejects_unsupported_method() {
 
     assert_matches!(
         verify_archive(&path, &SecurityConfig::default()),
-        Err(ArchiveError::SecurityViolation { reason, .. })
-            if reason.contains("unsupported compression method")
+        Err(ArchiveError::SecurityViolation { kind, .. })
+            if kind.to_string().contains("unsupported compression method")
     );
 }

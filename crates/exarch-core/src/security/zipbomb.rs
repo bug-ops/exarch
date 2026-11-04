@@ -10,20 +10,47 @@ use crate::config::Validated;
 use crate::inspection::EntryCompression;
 use crate::inspection::SolidBlock;
 
+/// A byte count as stored in the archive.
+///
+/// Distinct from [`Uncompressed`] so the two sides of the compression ratio
+/// cannot be swapped at a call site.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::Compressed;
+///
+/// assert_eq!(Compressed(512).0, 512);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Compressed(pub u64);
+
+/// A byte count after decoding.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::Uncompressed;
+///
+/// assert_eq!(Uncompressed(1024).0, 1024);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Uncompressed(pub u64);
+
 /// Validates compression ratio to detect potential zip bombs.
 ///
 /// # Errors
 ///
 /// Returns an error if the compression ratio exceeds the configured maximum.
 pub fn validate_compression_ratio(
-    compressed_size: u64,
-    uncompressed_size: u64,
+    compressed: Compressed,
+    uncompressed: Uncompressed,
     config: &SecurityConfig<Validated>,
 ) -> Result<()> {
     check_ratio(
         ZipBombScope::Entry,
-        compressed_size,
-        uncompressed_size,
+        compressed,
+        uncompressed,
         config.max_compression_ratio,
     )
 }
@@ -60,7 +87,7 @@ pub fn validate_solid_block_ratio(
 /// [`validate_solid_block_ratio`].
 pub fn validate_entry_compression(
     compression: &EntryCompression,
-    uncompressed_size: u64,
+    uncompressed_size: Uncompressed,
     config: &SecurityConfig<Validated>,
 ) -> Result<()> {
     match compression {
@@ -74,23 +101,17 @@ pub fn validate_entry_compression(
 
 /// Whether an entry of `uncompressed_size` bytes from `compressed_size` bytes
 /// is within `max_ratio`, by the same rule as [`validate_compression_ratio`].
-pub fn ratio_admitted(compressed_size: u64, uncompressed_size: u64, max_ratio: f64) -> bool {
-    check_ratio(
-        ZipBombScope::Entry,
-        compressed_size,
-        uncompressed_size,
-        max_ratio,
-    )
-    .is_ok()
+pub fn ratio_admitted(compressed: Compressed, uncompressed: Uncompressed, max_ratio: f64) -> bool {
+    check_ratio(ZipBombScope::Entry, compressed, uncompressed, max_ratio).is_ok()
 }
 
 fn check_ratio(
     scope: ZipBombScope,
-    compressed_size: u64,
-    uncompressed_size: u64,
+    compressed: Compressed,
+    uncompressed: Uncompressed,
     max_ratio: f64,
 ) -> Result<()> {
-    let details = ZipBombDetails::new(scope, compressed_size, uncompressed_size);
+    let details = ZipBombDetails::new(scope, compressed, uncompressed);
     match details.ratio() {
         // HIGH-001: data claimed from zero compressed bytes bypasses any finite
         // limit
@@ -144,14 +165,14 @@ mod tests {
     #[test]
     fn test_validate_compression_ratio_safe() {
         let config = SecurityConfig::default().validate().expect("valid config");
-        let result = validate_compression_ratio(1000, 10_000, &config);
+        let result = validate_compression_ratio(Compressed(1000), Uncompressed(10_000), &config);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_compression_ratio_bomb() {
         let config = SecurityConfig::default().validate().expect("valid config");
-        let result = validate_compression_ratio(1000, 1_000_000, &config);
+        let result = validate_compression_ratio(Compressed(1000), Uncompressed(1_000_000), &config);
         assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
     }
 
@@ -161,7 +182,7 @@ mod tests {
 
         // HIGH-001: Zero compressed with non-zero uncompressed is an unbounded
         // ratio
-        let result = validate_compression_ratio(0, 1000, &config);
+        let result = validate_compression_ratio(Compressed(0), Uncompressed(1000), &config);
         assert_matches!(
             result,
             Err(ArchiveError::ZipBomb(details))
@@ -176,9 +197,18 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
         // 138x passes the solid limit (1000) though it exceeds the per-file one
         // (100).
-        assert!(validate_solid_block_ratio(&SolidBlock::new(1000, 138_000), &config).is_ok());
+        assert!(
+            validate_solid_block_ratio(
+                &SolidBlock::new(Compressed(1000), Uncompressed(138_000)),
+                &config
+            )
+            .is_ok()
+        );
         assert_matches!(
-            validate_solid_block_ratio(&SolidBlock::new(1000, 1_500_000), &config),
+            validate_solid_block_ratio(
+                &SolidBlock::new(Compressed(1000), Uncompressed(1_500_000)),
+                &config
+            ),
             Err(ArchiveError::ZipBomb(_))
         );
     }
@@ -186,14 +216,23 @@ mod tests {
     #[test]
     fn test_ratio_equal_to_limit_is_accepted_and_just_above_is_rejected() {
         let config = SecurityConfig::default().validate().expect("valid config");
-        assert!(validate_solid_block_ratio(&SolidBlock::new(10, 10_000), &config).is_ok());
+        assert!(
+            validate_solid_block_ratio(
+                &SolidBlock::new(Compressed(10), Uncompressed(10_000)),
+                &config
+            )
+            .is_ok()
+        );
         assert_matches!(
-            validate_solid_block_ratio(&SolidBlock::new(10, 10_001), &config),
+            validate_solid_block_ratio(
+                &SolidBlock::new(Compressed(10), Uncompressed(10_001)),
+                &config
+            ),
             Err(ArchiveError::ZipBomb(_))
         );
-        assert!(validate_compression_ratio(10, 1000, &config).is_ok());
+        assert!(validate_compression_ratio(Compressed(10), Uncompressed(1000), &config).is_ok());
         assert_matches!(
-            validate_compression_ratio(10, 1001, &config),
+            validate_compression_ratio(Compressed(10), Uncompressed(1001), &config),
             Err(ArchiveError::ZipBomb(_))
         );
     }
@@ -201,9 +240,12 @@ mod tests {
     #[test]
     fn test_solid_block_ratio_empty_and_zero_compressed() {
         let config = SecurityConfig::default().validate().expect("valid config");
-        assert!(validate_solid_block_ratio(&SolidBlock::new(0, 0), &config).is_ok());
+        assert!(
+            validate_solid_block_ratio(&SolidBlock::new(Compressed(0), Uncompressed(0)), &config)
+                .is_ok()
+        );
         assert_matches!(
-            validate_solid_block_ratio(&SolidBlock::new(0, 10), &config),
+            validate_solid_block_ratio(&SolidBlock::new(Compressed(0), Uncompressed(10)), &config),
             Err(ArchiveError::ZipBomb(details))
                 if details.ratio() == CompressionRatio::Unbounded
                     && details.scope() == ZipBombScope::SolidBlock
@@ -213,15 +255,29 @@ mod tests {
     #[test]
     fn test_entry_compression_dispatch() {
         let config = SecurityConfig::default().validate().expect("valid config");
-        let block = EntryCompression::SolidBlockStart(SolidBlock::new(1000, 138_000));
-        assert!(validate_entry_compression(&block, 1, &config).is_ok());
+        let block = EntryCompression::SolidBlockStart(SolidBlock::new(
+            Compressed(1000),
+            Uncompressed(138_000),
+        ));
+        assert!(validate_entry_compression(&block, Uncompressed(1), &config).is_ok());
         assert!(
-            validate_entry_compression(&EntryCompression::SolidBlockMember, u64::MAX, &config)
+            validate_entry_compression(
+                &EntryCompression::SolidBlockMember,
+                Uncompressed(u64::MAX),
+                &config
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_entry_compression(&EntryCompression::Unknown, Uncompressed(u64::MAX), &config)
                 .is_ok()
         );
-        assert!(validate_entry_compression(&EntryCompression::Unknown, u64::MAX, &config).is_ok());
         assert_matches!(
-            validate_entry_compression(&EntryCompression::Entry(1000), 138_000, &config),
+            validate_entry_compression(
+                &EntryCompression::Entry(Compressed(1000)),
+                Uncompressed(138_000),
+                &config
+            ),
             Err(ArchiveError::ZipBomb(_))
         );
     }
@@ -256,7 +312,7 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
 
         // Both zero - should be OK (empty file)
-        let result = validate_compression_ratio(0, 0, &config);
+        let result = validate_compression_ratio(Compressed(0), Uncompressed(0), &config);
         assert!(result.is_ok(), "0/0 should be handled gracefully");
     }
 
@@ -266,7 +322,7 @@ mod tests {
 
         // HIGH-001: Compressed size zero with uncompressed > 0 is INVALID
         // This prevents zip bomb bypass for stored compression
-        let result = validate_compression_ratio(0, 1_000_000, &config);
+        let result = validate_compression_ratio(Compressed(0), Uncompressed(1_000_000), &config);
         assert_matches!(
             result,
             Err(ArchiveError::ZipBomb(details))
@@ -281,7 +337,7 @@ mod tests {
 
         // Very small compressed size (1 byte) with large uncompressed
         // This should trigger zip bomb detection
-        let result = validate_compression_ratio(1, 1_000_000, &config);
+        let result = validate_compression_ratio(Compressed(1), Uncompressed(1_000_000), &config);
         assert_matches!(
             result,
             Err(ArchiveError::ZipBomb(_)),
@@ -294,7 +350,7 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
 
         // No compression (ratio = 1.0)
-        let result = validate_compression_ratio(1000, 1000, &config);
+        let result = validate_compression_ratio(Compressed(1000), Uncompressed(1000), &config);
         assert!(result.is_ok(), "ratio of 1.0 should be safe");
     }
 
@@ -303,7 +359,7 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
 
         // Compressed larger than uncompressed (poor compression)
-        let result = validate_compression_ratio(2000, 1000, &config);
+        let result = validate_compression_ratio(Compressed(2000), Uncompressed(1000), &config);
         assert!(
             result.is_ok(),
             "ratio < 1.0 should be safe (negative compression)"

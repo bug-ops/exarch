@@ -30,7 +30,7 @@ _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
 _InvalidArchiveSubCode = Literal["TAR_AMBIGUITY", "TAR_TRAILER"]
-_SecurityViolationSubCode = Literal["TAR_TRAILER"]
+_SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH"]  # noqa: E501  # fmt: skip
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
@@ -152,11 +152,20 @@ class SecurityConfig:
         ...
 
     def add_allowed_extension(self, ext: str) -> SecurityConfig:
-        """Adds an allowed file extension."""
+        """Adds an allowed file extension.
+
+        A leading dot is accepted and removed, and the value is lowercased.
+        Raises ``ValueError`` for an empty value or one holding whitespace, a
+        path separator or an inner dot (``tar.gz``).
+        """
         ...
 
     def add_banned_component(self, component: str) -> SecurityConfig:
-        """Adds a banned path component."""
+        """Adds a banned path component.
+
+        Raises ``ValueError`` for an empty value or one holding a path
+        separator, ``.`` or ``..``.
+        """
         ...
 
     def build(self) -> SecurityConfig:
@@ -269,14 +278,22 @@ class SecurityConfig:
 
     @property
     def allowed_extensions(self) -> list[str]:
-        """List of allowed file extensions (empty = allow all)."""
+        """List of allowed file extensions, normalized (empty = allow all).
+
+        Assigning raises ``ValueError`` for an entry ``add_allowed_extension``
+        would refuse.
+        """
         ...
 
     @allowed_extensions.setter
     def allowed_extensions(self, value: list[str]) -> None: ...
     @property
     def banned_path_components(self) -> list[str]:
-        """List of banned path components."""
+        """List of banned path components.
+
+        Assigning raises ``ValueError`` for an entry ``add_banned_component``
+        would refuse.
+        """
         ...
 
     @banned_path_components.setter
@@ -402,7 +419,20 @@ class CreationConfig:
         ...
 
     def with_compression_level(self, level: int) -> CreationConfig:
-        """Sets the compression level (1-9)."""
+        """Sets the compression level (1-9).
+
+        Raises ``ValueError`` for a level outside 1-9.
+        """
+        ...
+
+    @property
+    def compression_level(self) -> int:
+        """The compression level, 1-9 (default: 6)."""
+        ...
+
+    @compression_level.setter
+    def compression_level(self, value: int | None) -> None:
+        """Sets the level; ``None`` resets it to 6. Raises ``ValueError`` outside 1-9."""
         ...
 
     def with_preserve_permissions(self, preserve: bool = True) -> CreationConfig:
@@ -1485,8 +1515,9 @@ class SecurityViolationError(ArchiveError):
             later check. ``"windows_reserved_names"`` and
             ``"max_tar_metadata_bytes"`` have no setter in this binding (Rust
             API only).
-        sub_code: ``"TAR_TRAILER"`` when the bytes after the TAR end-of-archive
-            marker exceed ``max_tar_metadata_bytes``; ``None`` otherwise.
+        sub_code: The family of the refusal, set on every violation raised by the
+            core (``"PATH_NAME"``, ``"LINK_TARGET"``, ``"ENCRYPTED"``,
+            ``"TAR_TRAILER"``, ...); ``None`` only on the class itself.
     """
 
     files_extracted: int

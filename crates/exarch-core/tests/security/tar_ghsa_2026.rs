@@ -108,7 +108,7 @@ fn pax_header(out: &mut Vec<u8>, records: &[u8]) {
 
 fn extract(bytes: &[u8]) -> (exarch_core::Result<exarch_core::ExtractionReport>, TempDir) {
     let temp = TempDir::new().unwrap();
-    let mut archive = TarArchive::new(Cursor::new(bytes.to_vec()));
+    let archive = TarArchive::new(Cursor::new(bytes.to_vec()));
     let result = archive.extract(
         temp.path(),
         &SecurityConfig::default().validate().unwrap(),
@@ -123,7 +123,7 @@ fn extract_with_config(
     config: &SecurityConfig<exarch_core::Validated>,
 ) -> (exarch_core::Result<exarch_core::ExtractionReport>, TempDir) {
     let temp = TempDir::new().unwrap();
-    let mut archive = TarArchive::new(Cursor::new(bytes.to_vec()));
+    let archive = TarArchive::new(Cursor::new(bytes.to_vec()));
     let result = archive.extract(
         temp.path(),
         config,
@@ -288,7 +288,8 @@ fn ghsa_gvwx_nul_byte_in_pax_path_rejected_without_panic() {
         Err(ArchiveError::SecurityViolation { .. }),
         "NUL byte in PAX path must be a SecurityViolation, got: {result:?}"
     );
-    if let Err(ArchiveError::SecurityViolation { reason, .. }) = result {
+    if let Err(ArchiveError::SecurityViolation { kind, .. }) = result {
+        let reason = kind.to_string();
         assert!(reason.contains("null bytes"), "reason: {reason}");
     }
 }
@@ -311,7 +312,8 @@ fn ghsa_gvwx_nul_byte_in_gnu_longname_rejected_without_panic() {
         Err(ArchiveError::SecurityViolation { .. }),
         "NUL byte in GNU longname must be a SecurityViolation, got: {result:?}"
     );
-    if let Err(ArchiveError::SecurityViolation { reason, .. }) = result {
+    if let Err(ArchiveError::SecurityViolation { kind, .. }) = result {
+        let reason = kind.to_string();
         assert!(reason.contains("null bytes"), "reason: {reason}");
     }
 }
@@ -329,7 +331,8 @@ fn ghsa_w8wr_empty_pax_path_rejected() {
 
     let (result, _temp) = extract(&t);
     match &result {
-        Err(ArchiveError::SecurityViolation { reason, .. }) => {
+        Err(ArchiveError::SecurityViolation { kind, .. }) => {
+            let reason = kind.to_string();
             assert!(reason.contains("empty path"), "reason: {reason}");
         }
         other => panic!("expected SecurityViolation for empty path, got: {other:?}"),

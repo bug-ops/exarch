@@ -171,7 +171,9 @@ fn root_file_is_rejected_when_an_extension_filter_would_skip_it() {
         &tar_of(&[entry(".", tar::EntryType::Regular, b"hello", None)]),
     );
     let out = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".into()]);
+    let config = SecurityConfig::default()
+        .try_add_allowed_extension("txt")
+        .unwrap();
 
     let error = extract_archive(&archive, out.path(), &config).unwrap_err();
 

@@ -309,7 +309,7 @@ fn list_rejects_empty_and_oversized_targets_like_zip() {
         let path = archive_of(&dir, &[item]);
         assert_matches!(
             list_archive(&path, &SecurityConfig::default()),
-            Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains(expect)
+            Err(ArchiveError::SecurityViolation { kind, .. }) if kind.to_string().contains(expect)
         );
     }
 }
@@ -583,7 +583,7 @@ fn extract_refuses_a_link_unless_symlinks_are_allowed() {
 
     assert_matches!(
         extract_archive(&path, out.path(), &SecurityConfig::default()),
-        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("symlinks not allowed")
+        Err(ArchiveError::SecurityViolation { kind, .. }) if kind.to_string().contains("symlinks not allowed")
     );
     assert!(dir_is_empty(&out));
 }
@@ -927,7 +927,7 @@ fn symlink_policy_is_refused_before_link_data_is_read() {
 
         assert_matches!(
             extract_archive(&path, out.path(), &SecurityConfig::default()),
-            Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("symlinks not allowed")
+            Err(ArchiveError::SecurityViolation { kind, .. }) if kind.to_string().contains("symlinks not allowed")
         );
         assert!(dir_is_empty(&out));
     }
@@ -1055,7 +1055,7 @@ fn a_link_written_by_7zip_with_snl_is_a_unix_symlink_not_a_reparse_point() {
     let refused = TempDir::new().unwrap();
     assert_matches!(
         extract_archive(&path, refused.path(), &SecurityConfig::default()),
-        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("symlinks not allowed")
+        Err(ArchiveError::SecurityViolation { kind, .. }) if kind.to_string().contains("symlinks not allowed")
     );
     assert!(dir_is_empty(&refused));
 
@@ -1385,7 +1385,7 @@ fn a_link_found_by_p7zip_16_02_in_a_directory_is_a_unix_symlink() {
     let refused = TempDir::new().unwrap();
     assert_matches!(
         extract_archive(&path, refused.path(), &SecurityConfig::default()),
-        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("symlinks not allowed")
+        Err(ArchiveError::SecurityViolation { kind, .. }) if kind.to_string().contains("symlinks not allowed")
     );
     assert!(dir_is_empty(&refused));
 
@@ -1456,7 +1456,7 @@ fn a_link_is_refused_before_any_write_on_a_host_without_symlinks() {
 
     assert_matches!(
         extract_archive(&path, out.path(), &allow_symlinks()),
-        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("not supported on this platform")
+        Err(ArchiveError::SecurityViolation { kind, .. }) if kind.to_string().contains("not supported on this platform")
     );
     assert!(dir_is_empty(&out));
 }

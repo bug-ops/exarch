@@ -5,6 +5,7 @@
 
 use crate::ArchiveError;
 use crate::Result;
+use crate::Violation;
 use crate::creation::config::CreationConfig;
 use std::path::Path;
 use std::path::PathBuf;
@@ -172,11 +173,10 @@ pub fn compute_archive_path<State>(
 ) -> Result<PathBuf> {
     // Compute relative path from root
     let relative = source_path.strip_prefix(root).map_err(|_| {
-        ArchiveError::violation(format!(
-            "path {} is not under root directory: {}",
-            source_path.display(),
-            root.display()
-        ))
+        ArchiveError::from(Violation::SourceOutsideRoot {
+            path: source_path.display().to_string().into(),
+            root: root.display().to_string().into(),
+        })
     })?;
 
     // Apply strip_prefix if configured

@@ -13,8 +13,10 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
+use exarch_core::Compressed;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
+use exarch_core::Uncompressed;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::ZIP_FAMILY_ALIASES;
 use exarch_core::formats::detect::detect_format;
@@ -406,7 +408,7 @@ proptest! {
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let uncompressed = (compressed as f64 * ratio) as u64;
 
-        let result = validate_compression_ratio(compressed, uncompressed, &config);
+        let result = validate_compression_ratio(Compressed(compressed), Uncompressed(uncompressed), &config);
 
         if ratio <= config.max_compression_ratio {
             prop_assert!(result.is_ok(), "ratio {} should be safe", ratio);
@@ -423,7 +425,7 @@ proptest! {
         use exarch_core::security::validate_compression_ratio;
 
         let config = SecurityConfig::default().validate().unwrap();
-        let result = validate_compression_ratio(0, uncompressed, &config);
+        let result = validate_compression_ratio(Compressed(0), Uncompressed(uncompressed), &config);
 
         prop_assert!(
             matches!(
@@ -441,7 +443,7 @@ proptest! {
         use exarch_core::security::validate_compression_ratio;
 
         let config = SecurityConfig::default().validate().unwrap();
-        let result = validate_compression_ratio(0, 0, &config);
+        let result = validate_compression_ratio(Compressed(0), Uncompressed(0), &config);
 
         prop_assert!(result.is_ok(), "empty file (0/0) should be valid");
     }
@@ -457,7 +459,7 @@ proptest! {
         let config = SecurityConfig::default().validate().unwrap(); // max = 1000.0
         let uncompressed = compressed.saturating_mul(multiplier);
 
-        let result = validate_compression_ratio(compressed, uncompressed, &config);
+        let result = validate_compression_ratio(Compressed(compressed), Uncompressed(uncompressed), &config);
 
         prop_assert!(
             matches!(result, Err(ArchiveError::ZipBomb(_))),

@@ -53,7 +53,7 @@ fn test_ghsa_qh76_sevenz_relative_traversal_rejected() {
     std::fs::create_dir_all(&dest).unwrap();
 
     let data = make_sevenz_archive("../../sevenz_pwned_relative", b"pwned");
-    let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
 
     let result = archive.extract(
         &dest,
@@ -85,7 +85,7 @@ fn test_ghsa_qh76_sevenz_absolute_path_rejected() {
     std::fs::create_dir_all(&dest).unwrap();
 
     let data = make_sevenz_archive("/sevenz_pwned_absolute", b"pwned");
-    let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
 
     let result = archive.extract(
         &dest,

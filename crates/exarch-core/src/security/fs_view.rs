@@ -54,6 +54,7 @@ use std::path::PathBuf;
 use crate::ArchiveError;
 use crate::QuotaResource;
 use crate::SecurityConfig;
+use crate::Violation;
 use crate::closed_enum::closed_enum;
 use crate::types::DestDir;
 
@@ -550,9 +551,14 @@ impl Occupant {
         format!(
             "refusing to replace the existing {} at {}",
             self.noun(),
-            rel.components().collect::<PathBuf>().display()
+            normalized_display(rel)
         )
     }
+}
+
+/// Spells `path` with its components re-joined, so `./a//b` reads `a/b`.
+pub fn normalized_display(path: &Path) -> String {
+    path.components().collect::<PathBuf>().display().to_string()
 }
 
 /// What stops an entry's parent chain from being a directory.
@@ -584,7 +590,10 @@ impl ParentBlocker {
                 io::ErrorKind::NotADirectory,
                 refusal(Occupant::File.noun()),
             )),
-            Self::Symlink => ArchiveError::violation(refusal(Occupant::Symlink.noun())),
+            Self::Symlink => ArchiveError::from(Violation::SymlinkParent {
+                entry: normalized_display(entry).into(),
+                parent: parent.display().to_string().into(),
+            }),
             Self::Escape => ArchiveError::SymlinkEscape { path: parent },
         }
     }
@@ -2353,7 +2362,7 @@ mod tests {
     fn classified(err: ArchiveError) -> (&'static str, String) {
         match err {
             ArchiveError::Io(e) => ("io", e.to_string()),
-            ArchiveError::SecurityViolation { reason, .. } => ("violation", reason),
+            ArchiveError::SecurityViolation { kind } => ("violation", kind.to_string()),
             ArchiveError::SymlinkEscape { path } => ("escape", path.display().to_string()),
             other => panic!("unexpected {other:?}"),
         }

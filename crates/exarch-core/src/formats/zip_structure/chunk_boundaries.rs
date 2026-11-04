@@ -39,7 +39,7 @@ fn noise() -> impl Strategy<Value = Vec<u8>> {
 }
 
 fn patch_u32(bytes: &mut [u8], at: usize, delta: usize) {
-    let old = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let old = u32::from_le_bytes(*bytes[at..].first_chunk::<4>().unwrap());
     let new = old + u32::try_from(delta).unwrap();
     bytes[at..at + 4].copy_from_slice(&new.to_le_bytes());
 }

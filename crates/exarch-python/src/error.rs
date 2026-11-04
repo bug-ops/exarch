@@ -1,12 +1,12 @@
 //! Python exception types for archive extraction errors.
 
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::ErrorCode;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
-use exarch_core::InvalidArchiveSubCode;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting;
-use exarch_core::SecurityViolationSubCode;
+use exarch_core::SubCode;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyIOError;
@@ -34,6 +34,42 @@ create_exception!(exarch, UnsupportedFormatError, ArchiveError);
 create_exception!(exarch, UnknownFormatError, UnsupportedFormatError);
 create_exception!(exarch, InvalidArchiveError, ArchiveError);
 
+/// Builds the Python exception for one error class from its message.
+type NewErr = fn(String) -> PyErr;
+
+fn new_base_error(description: String) -> PyErr {
+    ArchiveError::new_err(description)
+}
+
+/// The exception class of each [`ErrorCode`] except `IoError`, which maps to
+/// a builtin chosen by the I/O kind.
+///
+/// `None` only for a code added to the `#[non_exhaustive]` enum after this
+/// match was written; `test_every_error_code_has_an_exception_class` rejects
+/// that.
+fn class_for(code: ErrorCode) -> Option<NewErr> {
+    let ctor: NewErr = match code {
+        ErrorCode::PathTraversal => |d| PathTraversalError::new_err(d),
+        ErrorCode::SymlinkEscape => |d| SymlinkEscapeError::new_err(d),
+        ErrorCode::HardlinkEscape => |d| HardlinkEscapeError::new_err(d),
+        ErrorCode::ZipBomb => |d| ZipBombError::new_err(d),
+        ErrorCode::ZipInconsistency => |d| ZipInconsistencyError::new_err(d),
+        ErrorCode::InvalidPermissions => |d| InvalidPermissionsError::new_err(d),
+        ErrorCode::QuotaExceeded => |d| QuotaExceededError::new_err(d),
+        ErrorCode::SecurityViolation => |d| SecurityViolationError::new_err(d),
+        ErrorCode::InvalidArchive => |d| InvalidArchiveError::new_err(d),
+        ErrorCode::SourceNotFound | ErrorCode::SourceNotAccessible | ErrorCode::OutputExists => {
+            |d| PyIOError::new_err(d)
+        }
+        ErrorCode::InvalidCompressionLevel | ErrorCode::InvalidConfiguration => {
+            |d| PyValueError::new_err(d)
+        }
+        ErrorCode::UnknownFormat => |d| UnknownFormatError::new_err(d),
+        _ => return None,
+    };
+    Some(ctor)
+}
+
 /// Converts Rust extraction errors to Python exceptions.
 ///
 /// The exception class, message and attached attributes all come from
@@ -50,53 +86,17 @@ pub fn convert_error(err: CoreError) -> PyErr {
         partial,
         ..
     } = err.into_ffi_message();
-    let py_err = match kind {
-        FfiKind::PathTraversal => PathTraversalError::new_err(description),
-        FfiKind::SymlinkEscape => SymlinkEscapeError::new_err(description),
-        FfiKind::HardlinkEscape => HardlinkEscapeError::new_err(description),
-        FfiKind::ZipBomb => ZipBombError::new_err(description),
-        FfiKind::ZipInconsistency => ZipInconsistencyError::new_err(description),
-        FfiKind::InvalidPermissions => InvalidPermissionsError::new_err(description),
-        FfiKind::QuotaExceeded => QuotaExceededError::new_err(description),
-        FfiKind::SecurityViolation {
-            relaxable_by,
-            sub_code,
-            ..
-        } => {
-            let err = SecurityViolationError::new_err(description);
-            set_optional_str(
-                &err,
-                "relaxable_by",
-                relaxable_by.map(PolicySetting::as_str),
-            );
-            set_optional_str(
-                &err,
-                "sub_code",
-                sub_code.map(SecurityViolationSubCode::as_str),
-            );
-            err
-        }
-        FfiKind::InvalidArchive { sub_code, .. } => {
-            let err = InvalidArchiveError::new_err(description);
-            set_optional_str(
-                &err,
-                "sub_code",
-                sub_code.map(InvalidArchiveSubCode::as_str),
-            );
-            err
-        }
-        FfiKind::Io(kind) => PyErr::from(std::io::Error::new(kind, description)),
-        FfiKind::SourceNotFound | FfiKind::SourceNotAccessible | FfiKind::OutputExists => {
-            PyIOError::new_err(description)
-        }
-        FfiKind::InvalidCompressionLevel | FfiKind::InvalidConfiguration => {
-            PyValueError::new_err(description)
-        }
-        FfiKind::UnknownFormat => UnknownFormatError::new_err(description),
-        // Forward-compat: a class added to FfiKind after this match was
-        // written. #[non_exhaustive] requires this arm to compile against a
-        // newer exarch-core.
-        _ => ArchiveError::new_err(description),
+    let py_err = if let FfiKind::Io(io_kind) = kind {
+        PyErr::from(std::io::Error::new(io_kind, description))
+    } else {
+        let err = class_for(kind.code()).unwrap_or(new_base_error)(description);
+        set_optional_str(
+            &err,
+            "relaxable_by",
+            kind.relaxable_by().map(PolicySetting::as_str),
+        );
+        set_optional_str(&err, "sub_code", kind.sub_code().map(SubCode::as_str));
+        err
     };
     if let Some(outcome) = partial {
         attach_partial(&py_err, outcome);
@@ -186,8 +186,22 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_every_error_code_has_an_exception_class() {
+        for &code in ErrorCode::ALL {
+            assert_eq!(
+                class_for(code).is_none(),
+                code == ErrorCode::IoError,
+                "{code:?}"
+            );
+        }
+    }
+
+    use exarch_core::Compressed;
     use exarch_core::PartialWrites;
     use exarch_core::QuotaResource as CoreQuotaResource;
+    use exarch_core::Uncompressed;
     use std::path::PathBuf;
 
     /// Asserts the full attacker-supplied path is present in both debug and
@@ -260,8 +274,8 @@ mod tests {
     fn test_zip_bomb_conversion() {
         let err = CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
             exarch_core::ZipBombScope::Entry,
-            1000,
-            1_000_000,
+            Compressed(1000),
+            Uncompressed(1_000_000),
         ));
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
@@ -291,8 +305,8 @@ mod tests {
     fn test_zip_bomb_unbounded_conversion() {
         let err = CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
             exarch_core::ZipBombScope::Entry,
-            0,
-            10,
+            Compressed(0),
+            Uncompressed(10),
         ));
         let msg = convert_error(err).to_string();
         assert!(msg.contains("ratio: unbounded"), "got: {msg}");
@@ -410,7 +424,9 @@ mod tests {
 
     #[test]
     fn test_security_violation_conversion() {
-        let err = CoreError::violation("test violation".to_string());
+        let err = CoreError::from(exarch_core::Violation::EncryptedEntry {
+            name: "test violation".into(),
+        });
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
         assert!(
@@ -896,7 +912,7 @@ mod tests {
             bytes_written: 512,
             ..ExtractionReport::default()
         };
-        let source = CoreError::violation("test policy violation".to_string());
+        let source = CoreError::from(exarch_core::Violation::EncryptedArchive);
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,

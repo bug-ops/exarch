@@ -70,12 +70,16 @@ impl VerificationReport {
     /// use exarch_core::ArchiveEntry;
     /// use exarch_core::ArchiveManifest;
     /// use exarch_core::ManifestEntryKind;
+    /// use exarch_core::Uncompressed;
     /// use exarch_core::VerificationReport;
     /// use exarch_core::VerificationStatus;
     /// use exarch_core::formats::detect::ArchiveType;
     ///
     /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
-    /// let entry = ArchiveEntry::new(PathBuf::from("a.txt"), ManifestEntryKind::File, 1);
+    /// let kind = ManifestEntryKind::File {
+    ///     size: Uncompressed(1),
+    /// };
+    /// let entry = ArchiveEntry::new(PathBuf::from("a.txt"), kind);
     /// manifest.add_entry(entry)?;
     ///
     /// let report = VerificationReport::from_entry_issues(&manifest, |_| Vec::new());
@@ -962,6 +966,12 @@ mod tests {
 
     use crate::inspection::manifest::ManifestEntryKind;
 
+    fn file_of(size: u64) -> ManifestEntryKind {
+        ManifestEntryKind::File {
+            size: Uncompressed(size),
+        }
+    }
+
     fn spellings<T: Copy>(all: &[T], text: impl Fn(T) -> &'static str) -> Vec<&'static str> {
         all.iter().map(|v| text(*v)).collect()
     }
@@ -1234,7 +1244,7 @@ mod tests {
 
     fn report_with(issues: Vec<VerificationIssue>) -> VerificationReport {
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
-        let entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryKind::File, 1024);
+        let entry = ArchiveEntry::new(PathBuf::from("a"), file_of(1024));
         manifest.add_entry(entry).unwrap();
         let mut issues = Some(issues);
         VerificationReport::from_entry_issues(&manifest, |_| issues.take().unwrap_or_default())
@@ -1382,7 +1392,7 @@ mod tests {
         scope: IntegrityScope,
     ) -> VerificationReport {
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
-        let entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryKind::File, 1024);
+        let entry = ArchiveEntry::new(PathBuf::from("a"), file_of(1024));
         manifest.add_entry(entry).unwrap();
         VerificationReport::from_entry_issue_lists(
             &manifest,
@@ -1448,7 +1458,7 @@ mod tests {
     fn two_file_manifest() -> ArchiveManifest {
         let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
         for name in ["a.txt", "b.txt"] {
-            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryKind::File, 1);
+            let entry = ArchiveEntry::new(PathBuf::from(name), file_of(1));
             manifest.add_entry(entry).unwrap();
         }
         manifest
@@ -1504,7 +1514,7 @@ mod tests {
             manifest.add_oversized(300);
         }
         for name in ["a.txt", "b.txt"] {
-            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryKind::File, 1);
+            let entry = ArchiveEntry::new(PathBuf::from(name), file_of(1));
             manifest.add_entry(entry).unwrap();
         }
         VerificationReport::from_entry_issue_lists(

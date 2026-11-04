@@ -82,6 +82,7 @@ use crate::inspection::report::UnverifiedReason;
 use crate::reader::SeekableFormat;
 use crate::security::Compressed;
 use crate::security::RawMode;
+use crate::security::Uncompressed;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES;
 use crate::security::fs_view::PathModel;
@@ -124,7 +125,7 @@ use crate::types::safe_path::has_null_bytes;
 ///
 /// println!("Archive contains {} files", manifest.total_entries());
 /// for entry in manifest.entries() {
-///     println!("{}: {} bytes", entry.path.display(), entry.size);
+///     println!("{}: {} bytes", entry.path.display(), entry.size());
 /// }
 /// # Ok(())
 /// # }
@@ -571,7 +572,7 @@ fn list_tar_entries<R: std::io::Read>(
             }
 
             let entry_type = convert_tar_entry_type(tar_type)?;
-            let mode = crate::formats::tar::tar_permission_bits(entry.header()).map(RawMode::get);
+            let mode = crate::formats::tar::tar_permission_bits(entry.header());
             let modified = entry.header().mtime().ok().and_then(|t| {
                 SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(t))
             });
@@ -580,8 +581,7 @@ fn list_tar_entries<R: std::io::Read>(
 
             let archive_entry = ArchiveEntry {
                 path,
-                kind: manifest_entry_kind(entry_type, target),
-                size,
+                kind: manifest_entry_kind(entry_type, target, size),
                 compression: EntryCompression::Unknown,
                 mode,
                 modified,
@@ -766,7 +766,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
         let size = entry.size();
         let compression = EntryCompression::Entry(Compressed(entry.compressed_size()));
-        let mode = entry.unix_mode().map(|m| m & 0o7777);
+        let mode = entry.unix_mode().map(|m| RawMode::new(m & 0o7777));
         #[expect(
             clippy::cast_sign_loss,
             reason = "the value is non-negative at this point"
@@ -836,8 +836,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
         let archive_entry = ArchiveEntry {
             path,
-            kind: manifest_entry_kind(entry_type, target),
-            size,
+            kind: manifest_entry_kind(entry_type, target, size),
             compression,
             mode,
             modified,
@@ -1076,8 +1075,7 @@ fn list_sevenz_archive(
         };
         let archive_entry = ArchiveEntry {
             path,
-            kind: manifest_entry_kind(entry_type, target),
-            size,
+            kind: manifest_entry_kind(entry_type, target, size),
             compression,
             mode: None,
             modified,
@@ -1154,9 +1152,15 @@ fn admit_path(
     Ok(false)
 }
 
-fn manifest_entry_kind(entry_type: ManifestEntryType, target: LinkTarget) -> ManifestEntryKind {
+fn manifest_entry_kind(
+    entry_type: ManifestEntryType,
+    target: LinkTarget,
+    size: u64,
+) -> ManifestEntryKind {
     match entry_type {
-        ManifestEntryType::File => ManifestEntryKind::File,
+        ManifestEntryType::File => ManifestEntryKind::File {
+            size: Uncompressed(size),
+        },
         ManifestEntryType::Directory => ManifestEntryKind::Directory,
         ManifestEntryType::Symlink => ManifestEntryKind::Symlink { target },
         ManifestEntryType::Hardlink => ManifestEntryKind::Hardlink { target },
@@ -1607,7 +1611,7 @@ mod tests {
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
         assert_eq!(manifest.total_entries(), 1);
-        assert_eq!(manifest.entries()[0].mode, Some(0o644));
+        assert_eq!(manifest.entries()[0].mode, Some(RawMode::new(0o644)));
     }
 
     #[test]
@@ -1623,7 +1627,7 @@ mod tests {
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
         assert_eq!(manifest.total_entries(), 1);
-        assert_eq!(manifest.entries()[0].mode, Some(0o755));
+        assert_eq!(manifest.entries()[0].mode, Some(RawMode::new(0o755)));
     }
 
     #[test]
@@ -1639,7 +1643,7 @@ mod tests {
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
         assert_eq!(manifest.total_entries(), 1);
-        assert_eq!(manifest.entries()[0].mode, Some(0o644));
+        assert_eq!(manifest.entries()[0].mode, Some(RawMode::new(0o644)));
     }
 
     #[test]
@@ -2132,7 +2136,7 @@ mod tests {
             tar_manifest.entries()[0].mode,
             zip_manifest.entries()[0].mode
         );
-        assert_eq!(tar_manifest.entries()[0].mode, Some(0o644));
+        assert_eq!(tar_manifest.entries()[0].mode, Some(RawMode::new(0o644)));
     }
 
     #[test]
@@ -2335,13 +2339,13 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         for entry in manifest.entries() {
-            if entry.size > 0 {
+            if entry.size() > 0 {
                 assert_ne!(
                     entry.compressed_size(),
                     Some(0),
                     "entry {:?} has compressed_size=Some(0) with size={}, which is a false positive trigger",
                     entry.path,
-                    entry.size
+                    entry.size()
                 );
             }
         }

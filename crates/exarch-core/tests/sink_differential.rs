@@ -767,7 +767,7 @@ fn sevenz_interleaved_empty_entries_are_delivered_in_archive_order() {
         .unwrap()
         .entries()
         .iter()
-        .filter(|entry| matches!(entry.kind, exarch_core::ManifestEntryKind::File))
+        .filter(|entry| matches!(entry.kind, exarch_core::ManifestEntryKind::File { .. }))
         .map(|entry| entry.path.clone())
         .collect();
     assert!(in_archive_order.len() >= 3, "{in_archive_order:?}");

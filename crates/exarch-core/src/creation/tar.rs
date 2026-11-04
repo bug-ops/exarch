@@ -632,7 +632,7 @@ mod tests {
             manifest
                 .entries()
                 .iter()
-                .all(|e| e.mode.is_none_or(|m| m & !0o7777 == 0))
+                .all(|e| e.mode.is_none_or(|m| m.get() & !0o7777 == 0))
         );
     }
 

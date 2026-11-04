@@ -539,7 +539,7 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 ///
 /// println!("Archive contains {} files", manifest.total_entries());
 /// for entry in manifest.entries() {
-///     println!("{}: {} bytes", entry.path.display(), entry.size);
+///     println!("{}: {} bytes", entry.path.display(), entry.size());
 /// }
 /// # Ok(())
 /// # }

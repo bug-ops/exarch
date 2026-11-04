@@ -499,7 +499,7 @@ fn verify_entry(
     let path_result = check_entry_name_limits(
         PathModel::Host,
         &entry.path,
-        matches!(entry.kind, ManifestEntryKind::File),
+        matches!(entry.kind, ManifestEntryKind::File { .. }),
         config,
     )
     .map_err(ArchiveError::Io)
@@ -509,12 +509,12 @@ fn verify_entry(
     }
 
     // Quota validation using reserve (combines all checks)
-    if let Err(e) = quota_tracker.reserve(entry.size, config) {
+    if let Err(e) = quota_tracker.reserve(entry.size(), config) {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
     // Compression ratio validation (zip bomb detection)
-    if let Err(e) = validate_entry_compression(&entry.compression, Uncompressed(entry.size), config)
+    if let Err(e) = validate_entry_compression(&entry.compression, Uncompressed(entry.size()), config)
     {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
@@ -547,7 +547,7 @@ fn verify_entry(
                         .map(drop)
                 }),
             ),
-            ManifestEntryKind::File | ManifestEntryKind::Directory => None,
+            ManifestEntryKind::File { .. } | ManifestEntryKind::Directory => None,
         };
         match link_result {
             Some(Err(e)) => {
@@ -679,7 +679,7 @@ fn record_entry(
     config: &SecurityConfig,
 ) -> std::result::Result<(), PlaceError> {
     let node = match kind {
-        ManifestEntryKind::File => Node::File,
+        ManifestEntryKind::File { .. } => Node::File,
         ManifestEntryKind::Directory => Node::Dir,
         ManifestEntryKind::Symlink {
             target: LinkTarget::Recorded(t),
@@ -886,12 +886,11 @@ fn unread_targets_issue(
     ))
 }
 
-fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig) -> Result<()> {
-    let raw = RawMode::new(mode);
-    let sanitized = sanitize_permissions(raw, config);
-    (sanitized.as_u32() == mode).ok_or_else(|| ArchiveError::InvalidPermissions {
+fn check_permissions(path: &Path, mode: RawMode, config: &SecurityConfig) -> Result<()> {
+    let sanitized = sanitize_permissions(mode, config);
+    (sanitized.as_u32() == mode.get()).ok_or_else(|| ArchiveError::InvalidPermissions {
         path: path.to_path_buf(),
-        mode: raw,
+        mode,
     })
 }
 
@@ -900,15 +899,15 @@ fn check_heuristics(entry: &ArchiveEntry) -> Vec<VerificationIssue> {
 
     // Executable file detection
     if let Some(mode) = entry.mode
-        && mode & 0o111 != 0
-        && entry.kind == ManifestEntryKind::File
+        && mode.get() & 0o111 != 0
+        && matches!(entry.kind, ManifestEntryKind::File { .. })
     {
         issues.push(VerificationIssue {
             severity: IssueSeverity::Low,
             category: IssueCategory::ExecutableFile,
             entry_path: Some(entry.path.clone()),
             message: format!("Executable file: {}", entry.path.display()),
-            context: Some(format!("mode: {mode:#o}")),
+            context: Some(format!("mode: {:#o}", mode.get())),
         });
     }
 
@@ -969,11 +968,17 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
+    fn file() -> ManifestEntryKind {
+        ManifestEntryKind::File {
+            size: Uncompressed(0),
+        }
+    }
+
     fn manifest_of(entries: Vec<(&str, ManifestEntryKind)>) -> ArchiveManifest {
         let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
         for (path, kind) in entries {
             manifest
-                .add_entry(ArchiveEntry::new(PathBuf::from(path), kind, 0))
+                .add_entry(ArchiveEntry::new(PathBuf::from(path), kind))
                 .unwrap();
         }
         manifest
@@ -1016,7 +1021,7 @@ mod tests {
     #[test]
     fn dangling_link_used_as_a_parent_fails_the_security_status() {
         assert_link_placement_finding(
-            vec![("d", symlink_to("sub")), ("d/f", ManifestEntryKind::File)],
+            vec![("d", symlink_to("sub")), ("d/f", file())],
             "refusing to create d/f under the existing symlink at d",
         );
     }
@@ -1039,7 +1044,7 @@ mod tests {
         assert_overwrite_note(
             vec![
                 ("sub", ManifestEntryKind::Directory),
-                ("d/f", ManifestEntryKind::File),
+                ("d/f", file()),
                 ("d", symlink_to("sub")),
             ],
             "extraction with overwrite fails at d: an earlier entry is a directory",
@@ -1069,22 +1074,22 @@ mod tests {
     fn file_over_a_dir_or_symlink_is_an_overwrite_note() {
         assert_overwrite_note(
             vec![
-                ("d/f", ManifestEntryKind::File),
-                ("d", ManifestEntryKind::File),
+                ("d/f", file()),
+                ("d", file()),
             ],
             "fails at d: an earlier entry is a directory",
         );
         assert_overwrite_note(
-            vec![("s", symlink_to("t")), ("s", ManifestEntryKind::File)],
+            vec![("s", symlink_to("t")), ("s", file())],
             "fails at s: an earlier entry is a symlink",
         );
     }
 
     #[test]
     fn hardlink_over_any_earlier_entry_is_an_overwrite_note() {
-        let target = ("t", ManifestEntryKind::File);
+        let target = ("t", file());
         for (earlier, noun) in [
-            (ManifestEntryKind::File, "file"),
+            (file(), "file"),
             (ManifestEntryKind::Directory, "directory"),
             (symlink_to("t"), "symlink"),
         ] {
@@ -1098,7 +1103,7 @@ mod tests {
     #[test]
     fn symlink_over_a_file_stays_a_security_finding() {
         assert_link_placement_finding(
-            vec![("d", ManifestEntryKind::File), ("d", symlink_to("sub"))],
+            vec![("d", file()), ("d", symlink_to("sub"))],
             "extraction can fail at d unless duplicates are skipped:",
         );
     }
@@ -1122,7 +1127,7 @@ mod tests {
         assert_link_placement_finding(
             vec![
                 ("d", symlink_to("sub")),
-                ("t", ManifestEntryKind::File),
+                ("t", file()),
                 ("d/h", hardlink_to("t")),
             ],
             "refusing to create d/h under the existing symlink at d",
@@ -1132,7 +1137,7 @@ mod tests {
     #[test]
     fn directory_over_a_file_is_not_a_security_finding() {
         let manifest = manifest_of(vec![
-            ("a", ManifestEntryKind::File),
+            ("a", file()),
             ("a", ManifestEntryKind::Directory),
         ]);
         let report = verify_manifest(&manifest, &link_config(), None);
@@ -1147,8 +1152,8 @@ mod tests {
 
     fn manifest_with_mode(path: &str, kind: ManifestEntryKind, mode: u32) -> ArchiveManifest {
         let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
-        let mut entry = ArchiveEntry::new(PathBuf::from(path), kind, 0);
-        entry.mode = Some(mode);
+        let mut entry = ArchiveEntry::new(PathBuf::from(path), kind);
+        entry.mode = Some(RawMode::new(mode));
         manifest.add_entry(entry).unwrap();
         manifest
     }
@@ -1174,12 +1179,11 @@ mod tests {
         manifest
             .add_entry(ArchiveEntry::new(
                 PathBuf::from("t"),
-                ManifestEntryKind::File,
-                0,
+                file(),
             ))
             .unwrap();
-        let mut link = ArchiveEntry::new(PathBuf::from("h"), hardlink_to("t"), 0);
-        link.mode = Some(0o777);
+        let mut link = ArchiveEntry::new(PathBuf::from("h"), hardlink_to("t"));
+        link.mode = Some(RawMode::new(0o777));
         manifest.add_entry(link).unwrap();
 
         let report = verify_manifest(&manifest, &link_config(), None);
@@ -1196,7 +1200,7 @@ mod tests {
 
     #[test]
     fn world_writable_regular_file_is_still_a_permission_finding() {
-        let manifest = manifest_with_mode("f", ManifestEntryKind::File, 0o666);
+        let manifest = manifest_with_mode("f", file(), 0o666);
         let report = verify_manifest(&manifest, &link_config(), None);
         assert!(
             report
@@ -1213,7 +1217,7 @@ mod tests {
         let long = "a".repeat(1 << 20);
         let manifest = manifest_of(vec![
             ("s", symlink_to(&long)),
-            ("t", ManifestEntryKind::File),
+            ("t", file()),
             ("h", hardlink_to(&long)),
         ]);
         let report = verify_manifest(&manifest, &link_config(), None);
@@ -1239,7 +1243,7 @@ mod tests {
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
 
         for entries in [
-            vec![("d", unread_symlink()), ("d/f", ManifestEntryKind::File)],
+            vec![("d", unread_symlink()), ("d/f", file())],
             vec![("d", unread_symlink()), ("l", symlink_to("d/x"))],
             vec![("d", unread_symlink()), ("l", symlink_to("d"))],
         ] {
@@ -1343,7 +1347,7 @@ mod tests {
     #[test]
     fn hardlink_over_differently_spelled_file_is_not_a_pass() {
         let report = verify_folding(vec![
-            ("a.txt", ManifestEntryKind::File),
+            ("a.txt", file()),
             ("A.txt", hardlink_to("a.txt")),
         ]);
         assert_ne!(report.status(), VerificationStatus::Pass);
@@ -1352,7 +1356,7 @@ mod tests {
 
     #[test]
     fn symlink_over_differently_spelled_file_is_reported_as_mixed() {
-        let report = verify_folding(vec![("a", ManifestEntryKind::File), ("A", symlink_to("x"))]);
+        let report = verify_folding(vec![("a", file()), ("A", symlink_to("x"))]);
         assert!(collisions(&report).contains(&IssueSeverity::High));
         assert_eq!(report.status(), VerificationStatus::Fail);
     }
@@ -1360,10 +1364,10 @@ mod tests {
     #[test]
     fn differently_spelled_files_and_directories_with_contents_are_reported() {
         let report = verify_folding(vec![
-            ("Images/x", ManifestEntryKind::File),
-            ("images/y", ManifestEntryKind::File),
-            ("f", ManifestEntryKind::File),
-            ("F", ManifestEntryKind::File),
+            ("Images/x", file()),
+            ("images/y", file()),
+            ("f", file()),
+            ("F", file()),
         ]);
         assert_eq!(
             collisions(&report),
@@ -1377,8 +1381,8 @@ mod tests {
         let entries: Vec<_> = (0..50)
             .flat_map(|i| {
                 [
-                    (format!("a/f{i}"), ManifestEntryKind::File),
-                    (format!("A/f{i}"), ManifestEntryKind::File),
+                    (format!("a/f{i}"), file()),
+                    (format!("A/f{i}"), file()),
                 ]
             })
             .collect();
@@ -1420,7 +1424,7 @@ mod tests {
         let report = verify_folding(vec![
             ("Dir", ManifestEntryKind::Directory),
             ("dir", ManifestEntryKind::Directory),
-            ("Dir/f", ManifestEntryKind::File),
+            ("Dir/f", file()),
         ]);
         assert_eq!(collisions(&report), [IssueSeverity::Medium]);
         assert_eq!(report.status(), VerificationStatus::Warning);
@@ -1431,7 +1435,7 @@ mod tests {
         let manifest = manifest_of(vec![
             ("real", ManifestEntryKind::Directory),
             ("alias", symlink_to("real")),
-            ("real/t", ManifestEntryKind::File),
+            ("real/t", file()),
             ("alias/h", hardlink_to("real/t")),
             ("again", hardlink_to("real/h")),
         ]);
@@ -1454,7 +1458,7 @@ mod tests {
     fn phase_two_accepts_target_declared_later() {
         let manifest = manifest_of(vec![
             ("h", hardlink_to("later")),
-            ("later", ManifestEntryKind::File),
+            ("later", file()),
         ]);
         let report = verify_manifest(&manifest, &link_config(), None);
         assert!(report.issues().is_empty(), "{:?}", report.issues());
@@ -1463,7 +1467,7 @@ mod tests {
     #[test]
     fn phase_one_failure_is_not_reported_again_in_phase_two() {
         let manifest = manifest_of(vec![
-            ("t", ManifestEntryKind::File),
+            ("t", file()),
             ("h", hardlink_to("../outside")),
         ]);
         let report = verify_manifest(&manifest, &link_config(), None);
@@ -1492,10 +1496,11 @@ mod tests {
     fn test_check_heuristics_executable() {
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from("test.sh"),
-            kind: ManifestEntryKind::File,
-            size: 100,
+            kind: ManifestEntryKind::File {
+                size: Uncompressed(100),
+            },
             compression: EntryCompression::Unknown,
-            mode: Some(0o755),
+            mode: Some(RawMode::new(0o755)),
             modified: None,
         };
 
@@ -1512,10 +1517,11 @@ mod tests {
     fn test_check_heuristics_suspicious_extension() {
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from("malware.exe"),
-            kind: ManifestEntryKind::File,
-            size: 100,
+            kind: ManifestEntryKind::File {
+                size: Uncompressed(100),
+            },
             compression: EntryCompression::Unknown,
-            mode: Some(0o644),
+            mode: Some(RawMode::new(0o644)),
             modified: None,
         };
 
@@ -1536,10 +1542,11 @@ mod tests {
 
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from(OsStr::from_bytes(b"weird-\xFF\xFE-name.txt")),
-            kind: ManifestEntryKind::File,
-            size: 100,
+            kind: ManifestEntryKind::File {
+                size: Uncompressed(100),
+            },
             compression: EntryCompression::Unknown,
-            mode: Some(0o644),
+            mode: Some(RawMode::new(0o644)),
             modified: None,
         };
 
@@ -1556,10 +1563,11 @@ mod tests {
     fn test_check_heuristics_valid_utf8_name_no_warning() {
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from("safe/file.txt"),
-            kind: ManifestEntryKind::File,
-            size: 100,
+            kind: ManifestEntryKind::File {
+                size: Uncompressed(100),
+            },
             compression: EntryCompression::Unknown,
-            mode: Some(0o644),
+            mode: Some(RawMode::new(0o644)),
             modified: None,
         };
 

@@ -11,6 +11,7 @@ use crate::ZipEntryIndex;
 use crate::closed_enum::closed_enum;
 use crate::formats::detect::ArchiveType;
 use crate::security::Compressed;
+use crate::security::RawMode;
 use crate::security::Uncompressed;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::check_link_target_length;
@@ -32,7 +33,7 @@ use crate::security::fs_view::check_link_target_length;
 /// let manifest = list_archive("archive.tar.gz", &config)?;
 ///
 /// for entry in manifest.entries() {
-///     println!("{}: {} bytes", entry.path.display(), entry.size);
+///     println!("{}: {} bytes", entry.path.display(), entry.size());
 /// }
 /// # Ok(())
 /// # }
@@ -135,7 +136,9 @@ impl ArchiveManifest {
     /// # Errors
     ///
     /// Returns [`ArchiveError::InvalidArchive`] if the total uncompressed size
-    /// would overflow `u64`.
+    /// would overflow `u64`. Only regular files add to the total; the data of
+    /// a link entry (a ZIP symlink's stored target) is bounded by the
+    /// symlink-target size limit instead.
     ///
     /// # Examples
     ///
@@ -145,10 +148,14 @@ impl ArchiveManifest {
     /// use exarch_core::ArchiveEntry;
     /// use exarch_core::ArchiveManifest;
     /// use exarch_core::ManifestEntryKind;
+    /// use exarch_core::Uncompressed;
     /// use exarch_core::formats::detect::ArchiveType;
     ///
     /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
-    /// let entry = ArchiveEntry::new(PathBuf::from("a.txt"), ManifestEntryKind::File, 10);
+    /// let kind = ManifestEntryKind::File {
+    ///     size: Uncompressed(10),
+    /// };
+    /// let entry = ArchiveEntry::new(PathBuf::from("a.txt"), kind);
     /// manifest.add_entry(entry)?;
     /// assert_eq!(manifest.total_entries(), 1);
     /// assert_eq!(manifest.total_size(), 10);
@@ -157,7 +164,7 @@ impl ArchiveManifest {
     pub fn add_entry(&mut self, entry: ArchiveEntry) -> Result<()> {
         self.total_size = self
             .total_size
-            .checked_add(entry.size)
+            .checked_add(entry.size())
             .ok_or_else(|| ArchiveError::from(Malformation::TotalSizeOverflow))?;
         self.entries.push(entry);
         Ok(())
@@ -225,14 +232,11 @@ pub struct ArchiveEntry {
     /// Entry kind; link kinds carry their target
     pub kind: ManifestEntryKind,
 
-    /// Uncompressed size in bytes (0 for directories)
-    pub size: u64,
-
     /// How this entry's data is compressed, as far as the format exposes it
     pub compression: EntryCompression,
 
-    /// File permissions (Unix mode)
-    pub mode: Option<u32>,
+    /// Permission bits as stored in the archive, before sanitization
+    pub mode: Option<RawMode>,
 
     /// Modification time
     pub modified: Option<SystemTime>,
@@ -241,15 +245,21 @@ pub struct ArchiveEntry {
 impl ArchiveEntry {
     /// Creates an entry with all optional metadata unset.
     #[must_use]
-    pub const fn new(path: PathBuf, kind: ManifestEntryKind, size: u64) -> Self {
+    pub const fn new(path: PathBuf, kind: ManifestEntryKind) -> Self {
         Self {
             path,
             kind,
-            size,
             compression: EntryCompression::Unknown,
             mode: None,
             modified: None,
         }
+    }
+
+    /// Returns the uncompressed size in bytes: the size of a regular file, and
+    /// 0 for every other kind.
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.kind.size()
     }
 
     /// Returns the compressed size in bytes when the format reports one.
@@ -269,7 +279,7 @@ impl ArchiveEntry {
         self.compression
             .entry_compressed_size()
             .filter(|&c| c > 0)
-            .map(|c| self.size as f64 / c as f64)
+            .map(|c| self.size() as f64 / c as f64)
     }
 }
 
@@ -481,19 +491,26 @@ impl LinkTarget {
 /// use exarch_core::LinkTarget;
 /// use exarch_core::ManifestEntryKind;
 /// use exarch_core::ManifestEntryType;
+/// use exarch_core::Uncompressed;
 ///
 /// let kind = ManifestEntryKind::Symlink {
 ///     target: LinkTarget::Recorded("a.txt".into()),
 /// };
 /// assert_eq!(kind.entry_type(), ManifestEntryType::Symlink);
 /// assert_eq!(kind.link_target(), Some(Path::new("a.txt")));
-/// assert_eq!(ManifestEntryKind::File.link_target(), None);
+/// let file = ManifestEntryKind::File {
+///     size: Uncompressed(3),
+/// };
+/// assert_eq!(file.link_target(), None);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ManifestEntryKind {
     /// Regular file
-    File,
+    File {
+        /// Uncompressed size in bytes
+        size: Uncompressed,
+    },
 
     /// Directory
     Directory,
@@ -516,10 +533,20 @@ impl ManifestEntryKind {
     #[must_use]
     pub const fn entry_type(&self) -> ManifestEntryType {
         match self {
-            Self::File => ManifestEntryType::File,
+            Self::File { .. } => ManifestEntryType::File,
             Self::Directory => ManifestEntryType::Directory,
             Self::Symlink { .. } => ManifestEntryType::Symlink,
             Self::Hardlink { .. } => ManifestEntryType::Hardlink,
+        }
+    }
+
+    /// Returns the uncompressed size of a regular file, and 0 for any other
+    /// kind.
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        match self {
+            Self::File { size } => size.0,
+            Self::Directory | Self::Symlink { .. } | Self::Hardlink { .. } => 0,
         }
     }
 
@@ -534,7 +561,7 @@ impl ManifestEntryKind {
     pub fn symlink_target(&self) -> Option<&Path> {
         match self {
             Self::Symlink { target } => target.path(),
-            Self::File | Self::Directory | Self::Hardlink { .. } => None,
+            Self::File { .. } | Self::Directory | Self::Hardlink { .. } => None,
         }
     }
 
@@ -543,7 +570,7 @@ impl ManifestEntryKind {
     pub fn hardlink_target(&self) -> Option<&Path> {
         match self {
             Self::Hardlink { target } => target.path(),
-            Self::File | Self::Directory | Self::Symlink { .. } => None,
+            Self::File { .. } | Self::Directory | Self::Symlink { .. } => None,
         }
     }
 
@@ -582,6 +609,12 @@ mod tests {
 
     use super::*;
 
+    fn file(size: u64) -> ManifestEntryKind {
+        ManifestEntryKind::File {
+            size: Uncompressed(size),
+        }
+    }
+
     #[test]
     fn test_manifest_new() {
         let manifest = ArchiveManifest::new(ArchiveType::TarGz);
@@ -597,10 +630,9 @@ mod tests {
 
         let entry = ArchiveEntry {
             path: PathBuf::from("file.txt"),
-            kind: ManifestEntryKind::File,
-            size: 1024,
+            kind: file(1024),
             compression: EntryCompression::Entry(Compressed(512)),
-            mode: Some(0o644),
+            mode: Some(RawMode::new(0o644)),
             modified: None,
         };
 
@@ -614,10 +646,10 @@ mod tests {
     #[test]
     fn test_manifest_add_entry_size_overflow() {
         let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
-        let big = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryKind::File, u64::MAX);
+        let big = ArchiveEntry::new(PathBuf::from("a"), file(u64::MAX));
         manifest.add_entry(big).unwrap();
 
-        let more = ArchiveEntry::new(PathBuf::from("b"), ManifestEntryKind::File, 1);
+        let more = ArchiveEntry::new(PathBuf::from("b"), file(1));
         assert_matches!(
             manifest.add_entry(more),
             Err(ArchiveError::InvalidArchive(_))
@@ -627,11 +659,36 @@ mod tests {
     }
 
     #[test]
+    fn test_only_regular_files_carry_a_size() {
+        let target = LinkTarget::Recorded("t".into());
+        let symlink = ManifestEntryKind::Symlink {
+            target: target.clone(),
+        };
+        let hardlink = ManifestEntryKind::Hardlink { target };
+        assert_eq!(file(7).size(), 7);
+        for kind in [ManifestEntryKind::Directory, symlink, hardlink] {
+            assert_eq!(kind.size(), 0);
+        }
+
+        let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
+        for kind in [
+            file(5),
+            ManifestEntryKind::Symlink {
+                target: LinkTarget::Missing,
+            },
+        ] {
+            manifest
+                .add_entry(ArchiveEntry::new(PathBuf::from("x"), kind))
+                .unwrap();
+        }
+        assert_eq!(manifest.total_size(), 5);
+    }
+
+    #[test]
     fn test_compression_ratio() {
         let entry = ArchiveEntry {
             path: PathBuf::from("file.txt"),
-            kind: ManifestEntryKind::File,
-            size: 1000,
+            kind: file(1000),
             compression: EntryCompression::Entry(Compressed(100)),
             mode: None,
             modified: None,
@@ -644,8 +701,7 @@ mod tests {
     fn test_compression_ratio_no_compressed() {
         let entry = ArchiveEntry {
             path: PathBuf::from("file.txt"),
-            kind: ManifestEntryKind::File,
-            size: 1000,
+            kind: file(1000),
             compression: EntryCompression::Unknown,
             mode: None,
             modified: None,
@@ -656,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_solid_entries_have_no_per_file_ratio() {
-        let mut entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryKind::File, 1000);
+        let mut entry = ArchiveEntry::new(PathBuf::from("a"), file(1000));
         entry.compression =
             EntryCompression::SolidBlockStart(SolidBlock::new(Compressed(10), Uncompressed(2000)));
         assert_eq!(entry.compression_ratio(), None);
@@ -680,7 +736,7 @@ mod tests {
         let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
         manifest.add_oversized(300);
         for name in ["a", "b"] {
-            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryKind::File, 0);
+            let entry = ArchiveEntry::new(PathBuf::from(name), file(0));
             manifest.add_entry(entry).unwrap();
         }
         manifest.add_oversized(300);

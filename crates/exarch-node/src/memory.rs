@@ -399,7 +399,7 @@ fn create_to_bytes_core(
 ) -> CoreResult<CreatedArchive> {
     let sources = boundary_paths(sources)?;
     let format = CreatableFormat::try_from(CoreArchiveType::from(format))?;
-    let (bytes, report) = exarch_core::create_to_bytes(&sources, format, config)?;
+    let (bytes, report) = exarch_core::CreateRequest::new(config).to_bytes(format, &sources)?;
     Ok(CreatedArchive {
         data: Uint8Array::from(bytes),
         report: CreationReport::from(report),

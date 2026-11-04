@@ -30,11 +30,7 @@ fn list_core(
     format: Option<ArchiveType>,
 ) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
     data.run(format, |reader| {
-        Ok(exarch_core::list_reader(
-            reader,
-            config,
-            &exarch_core::ListOptions::default(),
-        )?)
+        Ok(exarch_core::ListRequest::new(config).list_reader(reader)?)
     })
 }
 
@@ -45,7 +41,9 @@ fn verify_core(
     format: Option<ArchiveType>,
 ) -> CoreResult<exarch_core::inspection::VerificationReport> {
     data.run(format, |reader| {
-        Ok(exarch_core::verify_reader(reader, config, &options)?)
+        Ok(exarch_core::VerifyRequest::new(config)
+            .with_options(options)
+            .verify_reader(reader)?)
     })
 }
 
@@ -62,12 +60,9 @@ fn list_with_progress_core(
         data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
-                Ok(exarch_core::list_reader_with_progress(
-                    reader,
-                    config,
-                    &exarch_core::ListOptions::default(),
-                    progress,
-                )?)
+                Ok(exarch_core::ListRequest::new(config)
+                    .with_progress(progress)
+                    .list_reader(reader)?)
             })
         },
         |source, _| ProgressCallbackError::ListCallback { source },
@@ -88,9 +83,10 @@ fn verify_with_progress_core(
         data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
-                Ok(exarch_core::verify_reader_with_progress(
-                    reader, config, &options, progress,
-                )?)
+                Ok(exarch_core::VerifyRequest::new(config)
+                    .with_options(options)
+                    .with_progress(progress)
+                    .verify_reader(reader)?)
             })
         },
         |source, _| ProgressCallbackError::VerifyCallback { source },

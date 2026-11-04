@@ -246,12 +246,9 @@ fn extract_core(
 ) -> CoreResult<exarch_core::ExtractionReport> {
     let archive_path = boundary_path(archive_path)?;
     let output_dir = boundary_path(output_dir)?;
-    Ok(exarch_core::extract_archive_with_options(
-        &archive_path,
-        &output_dir,
-        config,
-        options,
-    )?)
+    Ok(exarch_core::ExtractRequest::new(config)
+        .with_options(options.clone())
+        .extract(&archive_path, &output_dir)?)
 }
 
 /// Extract an archive to the specified directory (sync).
@@ -367,7 +364,10 @@ fn create_core(
     config: &exarch_core::creation::CreationConfig,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
-    Ok(exarch_core::create_archive(&output_path, &sources, config)?)
+    Ok(exarch_core::CreateRequest::new(config).create(
+        &exarch_core::OutputFile::replace(output_path.as_str()),
+        &sources,
+    )?)
 }
 
 /// Create an archive from source files and directories (sync).
@@ -755,7 +755,9 @@ fn run_create_with_optional_progress(
     progress.map_or_else(
         || {
             let mut noop = exarch_core::NoopProgress;
-            exarch_core::create_archive_with_progress(output_path, sources, config, &mut noop)
+            exarch_core::CreateRequest::new(config)
+                .with_progress(&mut noop)
+                .create(&exarch_core::OutputFile::replace(output_path), sources)
                 .map_err(|source| {
                     Box::new(ProgressCallbackError::Core {
                         source,
@@ -765,12 +767,9 @@ fn run_create_with_optional_progress(
         },
         |tsfn| {
             let mut callback = NodeProgressAdapter::new(tsfn, dispatch, AbortHandle::NONE);
-            let result = exarch_core::create_archive_with_progress(
-                output_path,
-                sources,
-                config,
-                &mut callback,
-            );
+            let result = exarch_core::CreateRequest::new(config)
+                .with_progress(&mut callback)
+                .create(&exarch_core::OutputFile::replace(output_path), sources);
             match (result, callback.into_callback_error()) {
                 (Ok(report), None) => Ok(report),
                 (Ok(report), Some(source)) => {
@@ -833,7 +832,7 @@ fn list_core(
     config: &exarch_core::SecurityConfig,
 ) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
     let archive_path = boundary_path(archive_path)?;
-    Ok(exarch_core::list_archive(&archive_path, config)?)
+    Ok(exarch_core::ListRequest::new(config).list(&archive_path)?)
 }
 
 /// List archive contents without extracting (sync).
@@ -938,11 +937,9 @@ fn verify_core(
     options: exarch_core::VerificationOptions,
 ) -> CoreResult<exarch_core::inspection::VerificationReport> {
     let archive_path = boundary_path(archive_path)?;
-    Ok(exarch_core::verify_archive_with_options(
-        &archive_path,
-        config,
-        &options,
-    )?)
+    Ok(exarch_core::VerifyRequest::new(config)
+        .with_options(options)
+        .verify(&archive_path)?)
 }
 
 /// Verify archive security (sync).
@@ -1139,30 +1136,24 @@ fn run_extract_with_optional_progress(
     progress.map_or_else(
         || {
             let mut noop = exarch_core::NoopProgress;
-            exarch_core::extract_archive_with_options_and_progress(
-                archive_path,
-                output_dir,
-                config,
-                options,
-                &mut noop,
-            )
-            .map_err(|source| {
-                Box::new(ProgressCallbackError::Core {
-                    source,
-                    callback: None,
+            exarch_core::ExtractRequest::new(config)
+                .with_options(options.clone())
+                .with_progress(&mut noop)
+                .extract(archive_path, output_dir)
+                .map_err(|source| {
+                    Box::new(ProgressCallbackError::Core {
+                        source,
+                        callback: None,
+                    })
                 })
-            })
         },
         |tsfn| {
             let mut callback =
                 NodeProgressAdapter::new(tsfn, ProgressDispatch::Awaited, AbortHandle::NONE);
-            let result = exarch_core::extract_archive_with_options_and_progress(
-                archive_path,
-                output_dir,
-                config,
-                options,
-                &mut callback,
-            );
+            let result = exarch_core::ExtractRequest::new(config)
+                .with_options(options.clone())
+                .with_progress(&mut callback)
+                .extract(archive_path, output_dir);
             match (result, callback.into_callback_error()) {
                 (Ok(report), None) => Ok(report),
                 (Ok(report), Some(source)) => {

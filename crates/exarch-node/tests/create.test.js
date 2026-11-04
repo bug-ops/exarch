@@ -134,3 +134,39 @@ describe('createArchiveSync', () => {
     assert.strictEqual(logEntries.length, 0);
   });
 });
+
+describe('createArchive output handling', () => {
+  let tempDir;
+  let sourceDir;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    sourceDir = path.join(tempDir, 'source');
+    fs.mkdirSync(sourceDir);
+    createTestFiles(sourceDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('leaves no archive behind when a source is missing', () => {
+    const outputPath = path.join(tempDir, 'failed.tar.gz');
+    assert.throws(() => createArchiveSync(outputPath, [path.join(tempDir, 'nope')]));
+    assert.strictEqual(fs.existsSync(outputPath), false);
+  });
+
+  it('keeps an existing archive when creation fails', () => {
+    const outputPath = path.join(tempDir, 'keep.tar.gz');
+    fs.writeFileSync(outputPath, 'previous');
+    assert.throws(() => createArchiveSync(outputPath, [path.join(tempDir, 'nope')]));
+    assert.strictEqual(fs.readFileSync(outputPath, 'utf8'), 'previous');
+  });
+
+  it('replaces an existing archive on success', () => {
+    const outputPath = path.join(tempDir, 'replace.tar.gz');
+    fs.writeFileSync(outputPath, 'previous');
+    createArchiveSync(outputPath, [sourceDir]);
+    assert.ok(listArchiveSync(outputPath).entries.length > 0);
+  });
+});

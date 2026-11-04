@@ -6,6 +6,7 @@
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::ExcludeRefusal;
 use crate::Result;
 use crate::SkipKind;
 use crate::Violation;
@@ -31,7 +32,12 @@ use std::path::PathBuf;
 ///
 /// Matching uses the entry's archive path (after `strip_prefix` and the
 /// multi-source naming), the name `list` shows, never the ancestors of a
-/// source directory. Any other shape, such as `*.m*`, `a*b`, `**/x`, a bare
+/// source directory. That path does not start with the source directory's own
+/// name, so a pattern such as `src/build` for a source `src` matches
+/// nothing; write `build`. A non-UTF-8 component is matched by its raw bytes.
+/// There is no escaping, so a name holding `?`, `[`, `]`, `{`, `}`, `!` or a
+/// comma, or one with leading or trailing whitespace, cannot be excluded by
+/// name and is refused. Any other shape, such as `*.m*`, `a*b`, `**/x`, a bare
 /// `*`, a separator combined with `*` (`build/*`, write `build`), `..` or an
 /// absolute path, is refused when parsed instead of silently never matching.
 ///
@@ -102,23 +108,31 @@ impl ExcludePattern {
     #[must_use]
     pub fn matches(&self, archive_path: &Path) -> bool {
         match self {
-            Self::Exact { name } => any_component(archive_path, |c| c == name),
-            Self::Prefix { prefix } => any_component(archive_path, |c| c.starts_with(prefix)),
-            Self::Suffix { suffix } => any_component(archive_path, |c| c.ends_with(suffix)),
+            Self::Exact { name } => any_component(archive_path, |c| c == name.as_bytes()),
+            Self::Prefix { prefix } => {
+                any_component(archive_path, |c| c.starts_with(prefix.as_bytes()))
+            }
+            Self::Suffix { suffix } => {
+                any_component(archive_path, |c| c.ends_with(suffix.as_bytes()))
+            }
             Self::Path { relative } => archive_path.starts_with(relative),
         }
     }
 }
 
-fn any_component(path: &Path, matches: impl Fn(&str) -> bool) -> bool {
+fn any_component(path: &Path, matches: impl Fn(&[u8]) -> bool) -> bool {
     path.components()
-        .any(|component| component.as_os_str().to_str().is_some_and(&matches))
+        .any(|component| matches(component.as_os_str().as_encoded_bytes()))
 }
 
-fn refuse(problem: ConfigProblem) -> ArchiveError {
+fn refuse(text: &str, reason: ExcludeRefusal) -> ArchiveError {
+    let end = text.floor_char_boundary(MAX_CONFIG_ENTRY_LENGTH);
     ArchiveError::InvalidConfiguration {
         setting: ExcludePattern::SETTING,
-        problem,
+        problem: ConfigProblem::ExcludePatternRefused {
+            pattern: text.get(..end).unwrap_or(text).to_owned(),
+            reason,
+        },
     }
 }
 
@@ -129,27 +143,41 @@ fn is_separator(c: char) -> bool {
 impl TryFrom<&str> for ExcludePattern {
     type Error = ArchiveError;
 
+    ///
     /// # Errors
     ///
-    /// Returns [`ArchiveError::InvalidConfiguration`] for an empty pattern, one
-    /// with a null byte or over [`MAX_CONFIG_ENTRY_LENGTH`] bytes, `.` or `..`
-    /// as a component, an absolute path, or a shape the matcher does not
-    /// support: more than one `*`, a bare `*`, a `*` that is neither first
-    /// nor last, or a `*` next to a path separator.
+    /// Returns [`ArchiveError::InvalidConfiguration`] with
+    /// [`ConfigProblem::ExcludePatternRefused`], which names the pattern and an
+    /// [`ExcludeRefusal`], for: an empty pattern, one over
+    /// [`MAX_CONFIG_ENTRY_LENGTH`] bytes or with a null byte, leading or
+    /// trailing whitespace, a comma, any of `?`, `[`, `]`, `{`, `}` and `!`
+    /// (they are not glob syntax here, so they would match literally and
+    /// silently exclude nothing), `.` or `..` as a component, an absolute
+    /// path, or a `*` shape other than `name*` and `*name`.
     fn try_from(text: &str) -> Result<Self> {
+        let is_blank = |c: char| c.is_ascii_whitespace() || c.is_ascii_control();
         if text.len() > MAX_CONFIG_ENTRY_LENGTH {
-            return Err(refuse(ConfigProblem::TooLong {
-                max: MAX_CONFIG_ENTRY_LENGTH,
-                got: text.len(),
-            }));
+            return Err(refuse(text, ExcludeRefusal::TooLong));
         }
         if text.contains('\0') {
-            return Err(refuse(ConfigProblem::ContainsNul));
+            return Err(refuse(text, ExcludeRefusal::ContainsNul));
+        }
+        if text.is_empty() {
+            return Err(refuse(text, ExcludeRefusal::Empty));
+        }
+        if text.starts_with(is_blank) || text.ends_with(is_blank) {
+            return Err(refuse(text, ExcludeRefusal::PaddedWithBlank));
+        }
+        if text.contains(',') {
+            return Err(refuse(text, ExcludeRefusal::ContainsComma));
+        }
+        if text.contains(['?', '[', ']', '{', '}', '!']) {
+            return Err(refuse(text, ExcludeRefusal::GlobMetacharacter));
         }
         let has_separator = text.contains(is_separator);
         let wildcards = text.matches('*').count();
         if has_separator && wildcards > 0 {
-            return Err(refuse(ConfigProblem::NotSupported));
+            return Err(refuse(text, ExcludeRefusal::WildcardWithSeparator));
         }
         if has_separator {
             return parse_path(text);
@@ -159,11 +187,8 @@ impl TryFrom<&str> for ExcludePattern {
 }
 
 fn parse_component(text: &str, wildcards: usize) -> Result<ExcludePattern> {
-    if text.is_empty() {
-        return Err(refuse(ConfigProblem::Empty));
-    }
     if text == "." || text == ".." {
-        return Err(refuse(ConfigProblem::DotEntry));
+        return Err(refuse(text, ExcludeRefusal::DotEntry));
     }
     match (wildcards, text.strip_prefix('*'), text.strip_suffix('*')) {
         (0, ..) => Ok(ExcludePattern::exact(text)),
@@ -171,13 +196,13 @@ fn parse_component(text: &str, wildcards: usize) -> Result<ExcludePattern> {
         (1, _, Some(prefix)) if !prefix.is_empty() => Ok(ExcludePattern::Prefix {
             prefix: prefix.into(),
         }),
-        _ => Err(refuse(ConfigProblem::NotSupported)),
+        _ => Err(refuse(text, ExcludeRefusal::UnsupportedWildcard)),
     }
 }
 
 fn parse_path(text: &str) -> Result<ExcludePattern> {
     if text.starts_with(is_separator) || Path::new(text).has_root() {
-        return Err(refuse(ConfigProblem::NotSupported));
+        return Err(refuse(text, ExcludeRefusal::Absolute));
     }
     let mut relative = PathBuf::new();
     for segment in text
@@ -185,7 +210,7 @@ fn parse_path(text: &str) -> Result<ExcludePattern> {
         .filter(|s| !s.is_empty() && *s != ".")
     {
         if segment == ".." {
-            return Err(refuse(ConfigProblem::DotEntry));
+            return Err(refuse(text, ExcludeRefusal::DotEntry));
         }
         relative.push(segment);
     }
@@ -193,10 +218,10 @@ fn parse_path(text: &str) -> Result<ExcludePattern> {
         .components()
         .all(|component| matches!(component, Component::Normal(_)))
     {
-        return Err(refuse(ConfigProblem::NotSupported));
+        return Err(refuse(text, ExcludeRefusal::Absolute));
     }
     if relative.as_os_str().is_empty() {
-        return Err(refuse(ConfigProblem::Empty));
+        return Err(refuse(text, ExcludeRefusal::Empty));
     }
     Ok(ExcludePattern::Path { relative })
 }
@@ -278,8 +303,7 @@ pub fn skip_reason(archive_path: &Path, config: &CreationConfig) -> Option<SkipK
 #[must_use]
 pub fn is_hidden(path: &Path) -> bool {
     path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with('.'))
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
 }
 
 /// Computes the archive path from source path.
@@ -405,40 +429,88 @@ mod tests {
         assert_eq!(pattern("./a\\b"), pattern("a/b"));
     }
 
-    #[test]
-    fn refuses_unsupported_shapes() {
-        let long = "x".repeat(MAX_CONFIG_ENTRY_LENGTH + 1);
-        for text in [
-            "", "*", "**", "*.m*", "a*b", "**/x", "build/*", "*/x", "a/*/b", "..", ".", "../x",
-            "a/../b", "/abs", "\\abs", "bad\0nul", "./", "/", &long,
-        ] {
-            let result = ExcludePattern::try_from(text);
-            assert!(
-                matches!(
-                    result,
-                    Err(ArchiveError::InvalidConfiguration {
-                        setting: ConfigSetting::ExcludePattern,
-                        ..
-                    })
-                ),
-                "{text:?} must be refused, got {result:?}"
-            );
+    fn refusal(text: &str) -> (String, ExcludeRefusal) {
+        match ExcludePattern::try_from(text) {
+            Err(ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::ExcludePattern,
+                problem: ConfigProblem::ExcludePatternRefused { pattern, reason },
+            }) => (pattern, reason),
+            other => panic!("{text:?} must be refused with a typed reason, got {other:?}"),
         }
     }
 
     #[test]
-    fn refusal_names_the_problem() {
-        let problem = |text: &str| match ExcludePattern::try_from(text) {
-            Err(ArchiveError::InvalidConfiguration { problem, .. }) => problem,
-            other => panic!("{text:?} must be refused, got {other:?}"),
+    fn every_refused_shape_names_the_pattern_and_a_typed_reason() {
+        let long = "x".repeat(MAX_CONFIG_ENTRY_LENGTH + 1);
+        let cases: [(&str, ExcludeRefusal); 29] = [
+            ("", ExcludeRefusal::Empty),
+            ("./", ExcludeRefusal::Empty),
+            ("bad\0nul", ExcludeRefusal::ContainsNul),
+            (&long, ExcludeRefusal::TooLong),
+            ("..", ExcludeRefusal::DotEntry),
+            (".", ExcludeRefusal::DotEntry),
+            ("../x", ExcludeRefusal::DotEntry),
+            ("a/../b", ExcludeRefusal::DotEntry),
+            ("/abs", ExcludeRefusal::Absolute),
+            ("\\abs", ExcludeRefusal::Absolute),
+            ("/", ExcludeRefusal::Absolute),
+            ("*", ExcludeRefusal::UnsupportedWildcard),
+            ("**", ExcludeRefusal::UnsupportedWildcard),
+            ("*.m*", ExcludeRefusal::UnsupportedWildcard),
+            ("a*b", ExcludeRefusal::UnsupportedWildcard),
+            ("**/x", ExcludeRefusal::WildcardWithSeparator),
+            ("build/*", ExcludeRefusal::WildcardWithSeparator),
+            ("*/x", ExcludeRefusal::WildcardWithSeparator),
+            ("?.txt", ExcludeRefusal::GlobMetacharacter),
+            ("[a", ExcludeRefusal::GlobMetacharacter),
+            ("a]", ExcludeRefusal::GlobMetacharacter),
+            ("{a}", ExcludeRefusal::GlobMetacharacter),
+            ("!a.txt", ExcludeRefusal::GlobMetacharacter),
+            ("dir/a?", ExcludeRefusal::GlobMetacharacter),
+            (" .env", ExcludeRefusal::PaddedWithBlank),
+            (".env ", ExcludeRefusal::PaddedWithBlank),
+            ("a\t", ExcludeRefusal::PaddedWithBlank),
+            ("a,b", ExcludeRefusal::ContainsComma),
+            ("a/b,c", ExcludeRefusal::ContainsComma),
+        ];
+        for (text, expected) in cases {
+            let (pattern, reason) = refusal(text);
+            assert_eq!(reason, expected, "{text:?}");
+            assert_eq!(pattern, text.get(..MAX_CONFIG_ENTRY_LENGTH).unwrap_or(text));
+        }
+    }
+
+    #[test]
+    fn a_refusal_message_quotes_the_pattern() {
+        let err = ExcludePattern::try_from("?.txt").unwrap_err();
+        let ArchiveError::InvalidConfiguration { setting, problem } = err else {
+            panic!("expected an invalid configuration");
         };
-        assert_eq!(problem(""), ConfigProblem::Empty);
-        assert_eq!(problem("bad\0"), ConfigProblem::ContainsNul);
-        assert_eq!(problem(".."), ConfigProblem::DotEntry);
-        assert_eq!(problem("a/../b"), ConfigProblem::DotEntry);
-        assert_eq!(problem("*.m*"), ConfigProblem::NotSupported);
-        assert_eq!(problem("build/*"), ConfigProblem::NotSupported);
-        assert_eq!(problem("/abs"), ConfigProblem::NotSupported);
+        let message = setting.describe(&problem);
+        assert!(
+            message.starts_with("exclude pattern \"?.txt\" "),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_components_match_by_their_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let key = Path::new(OsStr::from_bytes(b"dir/\xff.key"));
+        assert!(pattern("*.key").matches(key));
+        assert!(pattern("dir").matches(key));
+        assert!(!pattern("*.pem").matches(key));
+        assert!(pattern("dir/").matches(key));
+
+        let hidden = Path::new(OsStr::from_bytes(b".\xff"));
+        assert!(is_hidden(hidden));
+        let config = CreationConfig::default();
+        assert_eq!(skip_reason(hidden, &config), Some(SkipKind::Hidden));
+        let excluded = Path::new(OsStr::from_bytes(b"a/\xfe.tmp"));
+        assert_eq!(skip_reason(excluded, &config), Some(SkipKind::Excluded));
     }
 
     #[test]

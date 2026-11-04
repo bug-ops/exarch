@@ -71,6 +71,7 @@ pub use error::ConfigProblem;
 pub use error::ConfigSetting;
 pub use error::EndRecordKind;
 pub use error::ErrorCode;
+pub use error::ExcludeRefusal;
 pub use error::FfiErrorMessage;
 pub use error::FfiKind;
 pub use error::HiddenRegion;

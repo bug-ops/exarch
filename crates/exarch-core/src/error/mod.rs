@@ -13,6 +13,7 @@ pub mod zip_inconsistency;
 
 pub use config_error::ConfigProblem;
 pub use config_error::ConfigSetting;
+pub use config_error::ExcludeRefusal;
 pub use io_context::IoContext;
 pub use malformation::Malformation;
 pub use malformation::Unclassified;

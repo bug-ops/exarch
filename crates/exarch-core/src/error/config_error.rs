@@ -207,6 +207,77 @@ pub enum ConfigProblem {
     },
     /// The entry contains a NUL byte.
     ContainsNul,
+    /// A creation exclude pattern the matcher does not support.
+    ExcludePatternRefused {
+        /// The refused pattern text, cut to the maximum entry length.
+        pattern: String,
+        /// Why the pattern is refused.
+        reason: ExcludeRefusal,
+    },
+}
+
+closed_enum! {
+    /// Why a creation exclude pattern is refused.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ExcludeRefusal;
+    ///
+    /// assert_eq!(ExcludeRefusal::GlobMetacharacter.as_str(), "glob_metacharacter");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ExcludeRefusal {
+        /// The pattern is empty
+        Empty => "empty",
+        /// The pattern is longer than the maximum entry length
+        TooLong => "too_long",
+        /// The pattern contains a NUL byte
+        ContainsNul => "contains_nul",
+        /// A path component is `.` or `..`
+        DotEntry => "dot_entry",
+        /// The pattern is an absolute path
+        Absolute => "absolute",
+        /// The wildcard shape is not one of `name`, `name*` and `*name`
+        UnsupportedWildcard => "unsupported_wildcard",
+        /// A `*` is combined with a path separator
+        WildcardWithSeparator => "wildcard_with_separator",
+        /// The pattern holds `?`, `[`, `]`, `{`, `}` or `!`, which would be
+        /// matched literally
+        GlobMetacharacter => "glob_metacharacter",
+        /// The pattern starts or ends with whitespace or a control character
+        PaddedWithBlank => "padded_with_blank",
+        /// The pattern holds a comma, which reads as a list separator
+        ContainsComma => "contains_comma",
+    }
+}
+
+impl ExcludeRefusal {
+    /// A short explanation for a message.
+    #[must_use]
+    pub const fn explanation(self) -> &'static str {
+        match self {
+            Self::Empty => "is empty",
+            Self::TooLong => "is longer than the maximum entry length",
+            Self::ContainsNul => "contains a null byte",
+            Self::DotEntry => "has a `.` or `..` component",
+            Self::Absolute => {
+                "is an absolute path; patterns match archive paths, which are relative"
+            }
+            Self::UnsupportedWildcard => {
+                "uses an unsupported `*` shape; only `name`, `name*` and `*name` are supported"
+            }
+            Self::WildcardWithSeparator => {
+                "combines `*` with a path separator (for `build/*` write `build`)"
+            }
+            Self::GlobMetacharacter => {
+                "contains `?`, `[`, `]`, `{`, `}` or `!`, which are not glob syntax here and would match literally"
+            }
+            Self::PaddedWithBlank => "starts or ends with whitespace",
+            Self::ContainsComma => "contains a comma; give one pattern per option",
+        }
+    }
 }
 
 impl fmt::Display for ConfigProblem {
@@ -243,6 +314,9 @@ impl fmt::Display for ConfigProblem {
                 write!(f, "exceeds maximum length of {max} bytes (got {got} bytes)")
             }
             Self::ContainsNul => f.write_str("contains null bytes - potential security issue"),
+            Self::ExcludePatternRefused { pattern, reason } => {
+                write!(f, "{pattern:?} {}", reason.explanation())
+            }
         }
     }
 }

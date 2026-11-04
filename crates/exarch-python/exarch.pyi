@@ -29,7 +29,15 @@ _UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "si
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
-_InvalidArchiveSubCode = Literal["TAR_AMBIGUITY", "TAR_TRAILER", "LINK_TARGET", "DUPLICATE_ENTRY", "ENTRY_NAME", "DECLARED_SIZE", "INTEGRITY"]
+_InvalidArchiveSubCode = Literal[
+    "TAR_AMBIGUITY",
+    "TAR_TRAILER",
+    "LINK_TARGET",
+    "DUPLICATE_ENTRY",
+    "ENTRY_NAME",
+    "DECLARED_SIZE",
+    "INTEGRITY",
+]
 _SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH"]  # noqa: E501  # fmt: skip
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]

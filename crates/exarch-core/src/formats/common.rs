@@ -691,14 +691,12 @@ fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Re
         return Ok(());
     }
     if file_type.is_symlink() {
-        return if probe.lands_in_dir(dest) {
-            Ok(())
-        } else {
-            Err(Violation::ReplacesSymlink {
+        return probe.lands_in_dir(dest).ok_or_else(|| {
+            Violation::ReplacesSymlink {
                 rel: normalized_display(rel).into(),
             }
-            .into())
-        };
+            .into()
+        });
     }
     Err(occupant_at_dest_error(rel, Occupant::File).into())
 }

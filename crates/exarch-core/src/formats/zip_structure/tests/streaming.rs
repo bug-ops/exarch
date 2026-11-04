@@ -124,8 +124,8 @@ fn stray_end_record_is_fatal_under_enforce_and_reported_by_verify() {
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(report.issues().iter().any(|i| {
-        i.category == IssueCategory::HiddenEntry
-            && i.message
+        i.category() == IssueCategory::HiddenEntry
+            && i.message()
                 .contains("end of central directory record before an entry")
     }));
 }
@@ -315,7 +315,8 @@ fn descriptor_overrun_is_fatal_under_enforce_and_reported_by_verify() {
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(report.issues().iter().any(|i| {
-        i.category == IssueCategory::HiddenEntry && i.message.contains("data descriptor of entry 0")
+        i.category() == IssueCategory::HiddenEntry
+            && i.message().contains("data descriptor of entry 0")
     }));
     assert!(
         open_bytes(bytes)

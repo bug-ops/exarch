@@ -154,7 +154,8 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::VerificationOptions;
-use crate::inspection::report::IssueCategory;
+use crate::inspection::report::Finding;
+use crate::inspection::report::Heuristic;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use std::io::Read;
@@ -315,11 +316,7 @@ fn anti_item_issue(count: u64) -> Option<VerificationIssue> {
     (count > 0).then(|| {
         VerificationIssue::new(
             IssueSeverity::Info,
-            IssueCategory::ArchiveNote,
-            format!(
-                "{count} 7z {} skipped (deletion markers are not applied)",
-                anti_item_noun(count)
-            ),
+            Finding::Heuristic(Heuristic::AntiItemsSkipped { count }),
         )
     })
 }

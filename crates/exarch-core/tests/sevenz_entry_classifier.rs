@@ -273,9 +273,9 @@ fn verify_reports_skipped_anti_items_as_info_and_still_passes() {
     let [issue] = report.issues() else {
         panic!("expected one finding, got {:?}", report.issues());
     };
-    assert_eq!(issue.severity, IssueSeverity::Info);
+    assert_eq!(issue.severity(), IssueSeverity::Info);
     assert_eq!(
-        issue.message,
+        issue.message(),
         "2 7z anti-items skipped (deletion markers are not applied)"
     );
 }
@@ -336,7 +336,7 @@ fn verify_anti_item_info_does_not_mask_a_failing_issue() {
         report
             .issues()
             .iter()
-            .any(|i| i.severity == IssueSeverity::Info && i.message.contains("anti-item")),
+            .any(|i| i.severity() == IssueSeverity::Info && i.message().contains("anti-item")),
         "{:?}",
         report.issues()
     );

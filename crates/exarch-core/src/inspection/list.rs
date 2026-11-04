@@ -2477,8 +2477,8 @@ mod tests {
             "solid.7z should not fail verification when solid archives are allowed"
         );
         let has_false_positive = report.issues().iter().any(|issue| {
-            issue.severity == IssueSeverity::High
-                && issue.message.to_lowercase().contains("compressed_size")
+            issue.severity() == IssueSeverity::High
+                && issue.message().to_lowercase().contains("compressed_size")
         });
         assert!(
             !has_false_positive,
@@ -2962,18 +2962,18 @@ mod tests {
         let issues: Vec<_> = report
             .issues()
             .iter()
-            .filter(|i| i.message.contains("file name too long"))
+            .filter(|i| i.message().contains("file name too long"))
             .collect();
         assert_eq!(issues.len(), 2);
         assert!(
-            issues
-                .iter()
-                .all(|i| { i.severity == crate::IssueSeverity::High && i.entry_path.is_none() })
+            issues.iter().all(|i| {
+                i.severity() == crate::IssueSeverity::High && i.entry_path().is_none()
+            })
         );
-        assert!(issues[0].message.contains("entry 1"));
+        assert!(issues[0].message().contains("entry 1"));
         assert!(
             issues[1]
-                .message
+                .message()
                 .contains(&format!("{} bytes", HOST_PATH_LIMIT * 3))
         );
     }
@@ -3034,10 +3034,10 @@ mod tests {
         let issues: Vec<_> = report
             .issues()
             .iter()
-            .filter(|i| i.message.contains("file name too long"))
+            .filter(|i| i.message().contains("file name too long"))
             .collect();
         assert_eq!(issues.len(), 17);
-        assert!(issues[16].message.contains("4 more entries"));
+        assert!(issues[16].message().contains("4 more entries"));
     }
 
     #[test]
@@ -3364,8 +3364,8 @@ mod tests {
         assert_eq!(report.status(), crate::VerificationStatus::Fail);
         assert!(
             report.issues().iter().any(|i| {
-                i.category == crate::IssueCategory::QuotaExceeded
-                    && i.message.contains("single file size")
+                i.category() == crate::IssueCategory::QuotaExceeded
+                    && i.message().contains("single file size")
             }),
             "expected a FileSize issue, got: {:?}",
             report.issues()

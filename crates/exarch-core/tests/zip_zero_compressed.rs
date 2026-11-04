@@ -48,7 +48,7 @@ fn zero_compressed_entry_is_unbounded_zip_bomb_in_extract_and_verify() {
         report
             .issues()
             .iter()
-            .any(|i| i.category == IssueCategory::ZipBomb && i.message.contains("unbounded")),
+            .any(|i| i.category() == IssueCategory::ZipBomb && i.message().contains("unbounded")),
         "issues: {:?}",
         report.issues()
     );

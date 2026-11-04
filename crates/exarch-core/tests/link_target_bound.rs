@@ -60,7 +60,7 @@ fn oversized_link_targets_are_not_retained() {
     let reported = report
         .issues()
         .iter()
-        .filter(|i| i.category == IssueCategory::InvalidArchive)
+        .filter(|i| i.category() == IssueCategory::InvalidArchive)
         .count();
     assert_eq!(reported, LINKS);
     // Retaining every target would need LINKS x 900 KB = 57 MB.

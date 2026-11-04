@@ -188,7 +188,7 @@ fn trailing_garbage_after_last_member_fails_integrity_check() {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::CorruptData),
+                .any(|i| i.category() == IssueCategory::CorruptData),
             "{name}"
         );
     }
@@ -283,8 +283,8 @@ fn empty_members_after_the_end_marker_stop_at_the_base_allowance() {
                     report
                         .issues()
                         .iter()
-                        .any(|i| i.category == IssueCategory::QuotaExceeded
-                            && i.message.contains("compressed members (6 > allowance 5")),
+                        .any(|i| i.category() == IssueCategory::QuotaExceeded
+                            && i.message().contains("compressed members (6 > allowance 5")),
                     "{label}"
                 );
             } else {

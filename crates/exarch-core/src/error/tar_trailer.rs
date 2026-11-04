@@ -178,8 +178,8 @@ mod tests {
             &ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: 9 }),
             None,
         );
-        assert_eq!(issue.category, IssueCategory::SecurityPolicy);
-        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::SecurityPolicy);
+        assert_eq!(issue.severity(), IssueSeverity::High);
 
         for refusal in [corrupt(), TarTrailerRefusal::Truncated] {
             let error = ArchiveError::TarTrailer(refusal.clone());
@@ -194,8 +194,8 @@ mod tests {
                 }
             );
             let issue = VerificationIssue::from_error(&ArchiveError::TarTrailer(refusal), None);
-            assert_eq!(issue.category, IssueCategory::InvalidArchive);
-            assert_eq!(issue.severity, IssueSeverity::High);
+            assert_eq!(issue.category(), IssueCategory::InvalidArchive);
+            assert_eq!(issue.severity(), IssueSeverity::High);
         }
     }
 

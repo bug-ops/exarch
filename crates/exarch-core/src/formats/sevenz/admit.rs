@@ -15,7 +15,8 @@ use crate::SolidBlock;
 use crate::Violation;
 use crate::error::QuotaResource;
 use crate::formats::common;
-use crate::inspection::report::IssueCategory;
+use crate::inspection::report::Finding;
+use crate::inspection::report::Heuristic;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::UnverifiedReason;
 use crate::inspection::report::VerificationIssue;
@@ -494,8 +495,7 @@ pub fn refusal_issues(refusals: &[SevenZRefusal]) -> Vec<VerificationIssue> {
     {
         issues.push(VerificationIssue::new(
             IssueSeverity::Info,
-            IssueCategory::InvalidArchive,
-            format!("{omitted} further 7z refusals are not listed"),
+            Finding::Heuristic(Heuristic::OmittedRefusals { omitted }),
         ));
     }
     issues

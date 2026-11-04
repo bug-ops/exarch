@@ -6,11 +6,16 @@ use std::path::PathBuf;
 
 use crate::closed_enum::closed_enum;
 use crate::error::ArchiveError;
+use crate::error::FfiKind;
 use crate::error::TarTrailerRefusal;
 use crate::error::ZipInconsistency;
 use crate::formats::detect::ArchiveType;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
+use crate::security::RawMode;
+
+pub use crate::security::fs_view::CollisionKind as NameCollisionKind;
+pub use crate::security::fs_view::Occupant as PathOccupant;
 
 /// Result of archive verification.
 ///
@@ -38,7 +43,7 @@ use crate::inspection::manifest::ArchiveManifest;
 /// } else {
 ///     eprintln!("Security issues found:");
 ///     for issue in report.issues() {
-///         eprintln!("  [{}] {}", issue.severity, issue.message);
+///         eprintln!("  [{}] {}", issue.severity(), issue.message());
 ///     }
 /// }
 /// # Ok(())
@@ -137,13 +142,14 @@ impl VerificationReport {
                 | ZipInconsistency::StrayEndRecord { .. }
                 | ZipInconsistency::UncountedCentralRecords { .. } => None,
             };
-            let mut issue = VerificationIssue::from_error(
+            let issue = VerificationIssue::from_error(
                 &ArchiveError::ZipInconsistency(finding.clone()),
                 None,
             );
             match bound_entry {
                 Some(position) => {
-                    issue.entry_path = Some(manifest.entries()[position].path.clone());
+                    let issue =
+                        issue.with_entry_path(Some(manifest.entries()[position].path.clone()));
                     lists[position].push(issue);
                 }
                 None => lists.push(vec![issue]),
@@ -153,11 +159,9 @@ impl VerificationReport {
         if structure.omitted > 0 {
             lists.push(vec![VerificationIssue::new(
                 IssueSeverity::Info,
-                IssueCategory::InvalidArchive,
-                format!(
-                    "{} further ZIP structure findings are not listed",
-                    structure.omitted
-                ),
+                Finding::Heuristic(Heuristic::OmittedStructureFindings {
+                    omitted: structure.omitted,
+                }),
             )]);
         }
 
@@ -168,14 +172,14 @@ impl VerificationReport {
             if index < manifest.total_entries()
                 && entry_issues
                     .iter()
-                    .any(|i| i.severity >= IssueSeverity::Medium)
+                    .any(|i| i.severity() >= IssueSeverity::Medium)
             {
                 suspicious_entries += 1;
             }
             issues.extend(entry_issues);
         }
 
-        issues.sort_by(|a, b| a.severity.cmp(&b.severity).reverse());
+        issues.sort_by(|a, b| a.severity().cmp(&b.severity()).reverse());
 
         Self {
             issues,
@@ -280,7 +284,7 @@ impl VerificationReport {
     pub fn has_critical_issues(&self) -> bool {
         self.issues
             .iter()
-            .any(|i| i.severity == IssueSeverity::Critical)
+            .any(|i| i.severity() == IssueSeverity::Critical)
     }
 
     /// Returns issues of a specific severity level.
@@ -288,7 +292,7 @@ impl VerificationReport {
     pub fn issues_by_severity(&self, severity: IssueSeverity) -> Vec<&VerificationIssue> {
         self.issues
             .iter()
-            .filter(|i| i.severity == severity)
+            .filter(|i| i.severity() == severity)
             .collect()
     }
 }
@@ -336,9 +340,11 @@ impl<'a> ArchiveStructure<'a> {
 }
 
 fn determine_status(issues: &[VerificationIssue]) -> VerificationStatus {
-    let has_critical = issues.iter().any(|i| i.severity == IssueSeverity::Critical);
-    let has_high = issues.iter().any(|i| i.severity == IssueSeverity::High);
-    let has_medium = issues.iter().any(|i| i.severity == IssueSeverity::Medium);
+    let has_critical = issues
+        .iter()
+        .any(|i| i.severity() == IssueSeverity::Critical);
+    let has_high = issues.iter().any(|i| i.severity() == IssueSeverity::High);
+    let has_medium = issues.iter().any(|i| i.severity() == IssueSeverity::Medium);
 
     if has_critical || has_high {
         VerificationStatus::Fail
@@ -353,7 +359,7 @@ fn determine_integrity_status(
     issues: &[VerificationIssue],
     scope: &IntegrityScope,
 ) -> IntegrityStatus {
-    let has = |category| issues.iter().any(|i| i.category == category);
+    let has = |category| issues.iter().any(|i| i.category() == category);
     if has(IssueCategory::CorruptData) {
         IntegrityStatus::Fail
     } else if matches!(scope, IntegrityScope::NotRequested) {
@@ -573,7 +579,7 @@ impl IntegrityGaps {
 fn determine_security_status(issues: &[VerificationIssue]) -> CheckStatus {
     let mut security_issues = issues
         .iter()
-        .filter(|i| i.category.is_security() && !i.is_harmless_collision())
+        .filter(|i| i.category().is_security() && !i.is_harmless_collision())
         .peekable();
 
     if security_issues.peek().is_none() {
@@ -581,7 +587,7 @@ fn determine_security_status(issues: &[VerificationIssue]) -> CheckStatus {
     }
 
     let fails = security_issues
-        .any(|i| i.severity == IssueSeverity::Critical || i.severity == IssueSeverity::High);
+        .any(|i| i.severity() == IssueSeverity::Critical || i.severity() == IssueSeverity::High);
 
     if fails {
         CheckStatus::Fail
@@ -658,25 +664,208 @@ closed_enum! {
 
 /// Single verification issue.
 ///
-/// Construct with [`VerificationIssue::new`] or
+/// Holds the severity, the entry it concerns, and a typed [`Finding`]; the
+/// category and the message are derived from the finding, so they cannot
+/// disagree with it. Construct with [`VerificationIssue::new`] or
 /// [`VerificationIssue::from_error`].
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct VerificationIssue {
-    /// Issue severity level
-    pub severity: IssueSeverity,
+    severity: IssueSeverity,
+    entry_path: Option<PathBuf>,
+    finding: Finding,
+}
 
-    /// Issue category
-    pub category: IssueCategory,
+/// What a [`VerificationIssue`] found.
+///
+/// A refusal keeps the typed [`FfiKind`] of the error extraction would raise,
+/// so a front end reads the same code, sub-code and policy setting for a
+/// verify finding as for a failed extraction without parsing the message.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveError;
+/// use exarch_core::ErrorCode;
+/// use exarch_core::Finding;
+/// use exarch_core::VerificationIssue;
+///
+/// let error = ArchiveError::PathTraversal {
+///     path: "../x".into(),
+/// };
+/// let issue = VerificationIssue::from_error(&error, None);
+/// assert!(matches!(issue.finding(), Finding::Refusal { .. }));
+/// assert_eq!(
+///     issue.ffi_kind().map(|k| k.code()),
+///     Some(ErrorCode::PathTraversal)
+/// );
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum Finding {
+    /// Extraction would refuse the entry or the archive with this error.
+    #[non_exhaustive]
+    Refusal {
+        /// The category the refusal is reported under.
+        category: IssueCategory,
+        /// The typed discriminants of the refusing error.
+        kind: FfiKind,
+        /// Human-readable description.
+        message: String,
+    },
+    /// An observation `verify` makes that extraction does not refuse.
+    Heuristic(Heuristic),
+}
 
-    /// Entry path that triggered issue (if applicable)
-    pub entry_path: Option<PathBuf>,
+/// An observation `verify` reports on its own, not as a refusal.
+///
+/// `#[non_exhaustive]` so a new check is not a breaking change for
+/// downstream matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Heuristic {
+    /// A regular file with an execute bit set.
+    ExecutableFile {
+        /// The mode as the archive stores it.
+        mode: RawMode,
+    },
+    /// An entry name with an extension commonly used for executables.
+    SuspiciousExtension,
+    /// An entry name that is not valid UTF-8, which some filesystems refuse.
+    NonUtf8Name,
+    /// Two names the host filesystem treats as one.
+    #[non_exhaustive]
+    NameCollision {
+        /// Path of the entry that was there first.
+        existing: PathBuf,
+        /// Path of the entry that collided with it.
+        incoming: PathBuf,
+        /// How the two differ, which sets how serious the collision is.
+        kind: NameCollisionKind,
+    },
+    /// Extraction with overwrite enabled would fail at a path an earlier
+    /// entry holds; default extraction skips the entry.
+    #[non_exhaustive]
+    OverwriteConflict {
+        /// The destination-relative path of the conflict.
+        rel: PathBuf,
+        /// What an earlier entry put there.
+        occupant: PathOccupant,
+    },
+    /// Symlinks are allowed but some targets were not read, so they were not
+    /// validated.
+    UnreadSymlinkTargets {
+        /// How many symlink targets were left unread.
+        count: usize,
+    },
+    /// The integrity check could not cover part of the payload.
+    IntegrityIncomplete(IntegrityGaps),
+    /// A checksum or decoder error proved the payload corrupt.
+    CorruptData {
+        /// The decoder's description of the failure.
+        detail: String,
+    },
+    /// 7z anti-items were skipped; their deletion markers are not applied.
+    AntiItemsSkipped {
+        /// How many anti-items the archive holds.
+        count: u64,
+    },
+    /// Further 7z refusals exist beyond those listed.
+    OmittedRefusals {
+        /// How many refusals were left out.
+        omitted: usize,
+    },
+    /// Further ZIP structure findings exist beyond those listed.
+    OmittedStructureFindings {
+        /// How many findings were left out.
+        omitted: usize,
+    },
+}
 
-    /// Human-readable description
-    pub message: String,
+impl Heuristic {
+    /// The category this observation is reported under.
+    #[must_use]
+    pub const fn category(&self) -> IssueCategory {
+        match self {
+            Self::ExecutableFile { .. } => IssueCategory::ExecutableFile,
+            Self::SuspiciousExtension | Self::NonUtf8Name => IssueCategory::SuspiciousPath,
+            Self::NameCollision { .. } => IssueCategory::NameCollision,
+            Self::OverwriteConflict { .. }
+            | Self::OmittedRefusals { .. }
+            | Self::OmittedStructureFindings { .. } => IssueCategory::InvalidArchive,
+            Self::UnreadSymlinkTargets { .. } => IssueCategory::SecurityPolicy,
+            Self::IntegrityIncomplete(_) => IssueCategory::IntegrityIncomplete,
+            Self::CorruptData { .. } => IssueCategory::CorruptData,
+            Self::AntiItemsSkipped { .. } => IssueCategory::ArchiveNote,
+        }
+    }
 
-    /// Optional context (compression ratio, target path, etc.)
-    pub context: Option<String>,
+    fn message(&self, entry_path: Option<&Path>) -> String {
+        let entry = || {
+            entry_path
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        };
+        match self {
+            Self::ExecutableFile { .. } => format!("Executable file: {}", entry()),
+            Self::SuspiciousExtension => format!("Suspicious extension: {}", entry()),
+            Self::NonUtf8Name => format!(
+                "Entry name is not valid UTF-8; extraction may fail on filesystems that require \
+                 UTF-8 names (e.g. APFS, NTFS): {}",
+                entry()
+            ),
+            Self::NameCollision {
+                existing, incoming, ..
+            } => format!(
+                "Names \"{}\" and \"{}\" are the same name on case-insensitive or normalizing \
+                 filesystems",
+                escaped_path(existing),
+                escaped_path(incoming)
+            ),
+            Self::OverwriteConflict { rel, occupant } => format!(
+                "extraction with overwrite fails at {}: an earlier entry is a {} (default \
+                 extraction skips this entry)",
+                rel.display(),
+                occupant.noun()
+            ),
+            Self::UnreadSymlinkTargets { count } => {
+                let (subject, validated) = if *count == 1 {
+                    ("symlink target was", "it was")
+                } else {
+                    ("symlink targets were", "they were")
+                };
+                format!(
+                    "{count} {subject} not read, so {validated} not validated; entries beneath \
+                     or through an unread link are reported as failures (an integrity check with \
+                     a decompression budget that covers the link blocks reads the targets)"
+                )
+            }
+            Self::IntegrityIncomplete(gaps) => gaps.message().unwrap_or_default(),
+            Self::CorruptData { detail } => format!("Corrupt data: {detail}"),
+            Self::AntiItemsSkipped { count } => {
+                let noun = if *count == 1 {
+                    "anti-item"
+                } else {
+                    "anti-items"
+                };
+                format!("{count} 7z {noun} skipped (deletion markers are not applied)")
+            }
+            Self::OmittedRefusals { omitted } => {
+                format!("{omitted} further 7z refusals are not listed")
+            }
+            Self::OmittedStructureFindings { omitted } => {
+                format!("{omitted} further ZIP structure findings are not listed")
+            }
+        }
+    }
+}
+
+/// Spells a path with combining marks and control characters escaped, so two
+/// canonically equivalent names do not read as the same text.
+fn escaped_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .flat_map(char::escape_debug)
+        .collect()
 }
 
 fn high_invalid_archive(message: String) -> (IssueSeverity, IssueCategory, String) {
@@ -705,18 +894,79 @@ impl VerificationIssue {
     /// The one Low-severity security finding: two directories that merge
     /// without either holding an entry, which changes nothing on disk.
     fn is_harmless_collision(&self) -> bool {
-        self.category == IssueCategory::NameCollision && self.severity == IssueSeverity::Low
+        matches!(
+            self.finding,
+            Finding::Heuristic(Heuristic::NameCollision {
+                kind: NameCollisionKind::Directories,
+                ..
+            })
+        )
     }
 
-    /// Creates an issue with no entry path or context attached.
+    /// Creates an issue with no entry path attached.
     #[must_use]
-    pub const fn new(severity: IssueSeverity, category: IssueCategory, message: String) -> Self {
+    pub const fn new(severity: IssueSeverity, finding: Finding) -> Self {
         Self {
             severity,
-            category,
             entry_path: None,
-            message,
-            context: None,
+            finding,
+        }
+    }
+
+    /// Returns the issue attached to `entry_path`.
+    #[must_use]
+    pub(crate) fn with_entry_path(mut self, entry_path: Option<PathBuf>) -> Self {
+        self.entry_path = entry_path;
+        self
+    }
+
+    /// Returns how serious the issue is.
+    #[must_use]
+    pub const fn severity(&self) -> IssueSeverity {
+        self.severity
+    }
+
+    /// Returns the entry that triggered the issue, if it concerns one.
+    #[must_use]
+    pub fn entry_path(&self) -> Option<&Path> {
+        self.entry_path.as_deref()
+    }
+
+    /// Returns what was found.
+    #[must_use]
+    pub const fn finding(&self) -> &Finding {
+        &self.finding
+    }
+
+    /// Returns the category, derived from the finding.
+    #[must_use]
+    pub const fn category(&self) -> IssueCategory {
+        match &self.finding {
+            Finding::Refusal { category, .. } => *category,
+            Finding::Heuristic(heuristic) => heuristic.category(),
+        }
+    }
+
+    /// Returns the human-readable description, derived from the finding.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match &self.finding {
+            Finding::Refusal { message, .. } => message.clone(),
+            Finding::Heuristic(heuristic) => heuristic.message(self.entry_path()),
+        }
+    }
+
+    /// Returns the typed discriminants of the refusing error, or `None` for a
+    /// [`Heuristic`].
+    ///
+    /// This is the same value a failed extraction reports, so a front end
+    /// emits the code, sub-code and policy setting for a verify issue exactly
+    /// as it does for an extract error.
+    #[must_use]
+    pub const fn ffi_kind(&self) -> Option<&FfiKind> {
+        match &self.finding {
+            Finding::Refusal { kind, .. } => Some(kind),
+            Finding::Heuristic(_) => None,
         }
     }
 
@@ -817,10 +1067,12 @@ impl VerificationIssue {
 
         Self {
             severity,
-            category,
             entry_path,
-            message,
-            context: None,
+            finding: Finding::Refusal {
+                category,
+                kind: error.ffi_kind(),
+                message,
+            },
         }
     }
 }
@@ -974,6 +1226,7 @@ mod tests {
     use crate::ZipBombScope;
     use crate::security::Compressed;
     use crate::security::Uncompressed;
+    use std::assert_matches;
     use std::io;
 
     use crate::inspection::manifest::ManifestEntryKind;
@@ -1118,42 +1371,82 @@ mod tests {
         for (finding, category) in cases {
             let issue =
                 VerificationIssue::from_error(&ArchiveError::ZipInconsistency(finding), None);
-            assert_eq!(issue.category, category);
-            assert_eq!(issue.severity, IssueSeverity::High);
-            assert!(issue.category.is_security());
+            assert_eq!(issue.category(), category);
+            assert_eq!(issue.severity(), IssueSeverity::High);
+            assert!(issue.category().is_security());
         }
     }
 
     #[test]
     fn test_low_severity_issue_of_another_security_category_still_counts() {
-        let low = VerificationIssue::new(
-            IssueSeverity::Low,
-            IssueCategory::SecurityPolicy,
-            "policy".to_string(),
-        );
+        let low = issue(IssueSeverity::Low, IssueCategory::SecurityPolicy);
         assert_eq!(determine_security_status(&[low]), CheckStatus::Warning);
     }
 
     #[test]
     fn test_low_severity_security_issue_does_not_taint_security_status() {
-        let low = VerificationIssue::new(
-            IssueSeverity::Low,
-            IssueCategory::NameCollision,
-            "directories merge".to_string(),
-        );
+        let collision = |severity, kind| {
+            VerificationIssue::new(
+                severity,
+                Finding::Heuristic(Heuristic::NameCollision {
+                    existing: "a".into(),
+                    incoming: "A".into(),
+                    kind,
+                }),
+            )
+        };
+        let low = collision(IssueSeverity::Low, NameCollisionKind::Directories);
         assert_eq!(
             determine_security_status(std::slice::from_ref(&low)),
             CheckStatus::Pass
         );
-        let medium = VerificationIssue::new(
-            IssueSeverity::Medium,
-            IssueCategory::NameCollision,
-            "files collide".to_string(),
-        );
+        let medium = collision(IssueSeverity::Medium, NameCollisionKind::Files);
         assert_eq!(
             determine_security_status(&[low, medium]),
             CheckStatus::Warning
         );
+    }
+
+    #[test]
+    fn test_refusal_keeps_the_typed_error_kind() {
+        let quota = ArchiveError::QuotaExceeded {
+            resource: crate::error::QuotaResource::FileCount {
+                current: 11,
+                max: 10,
+            },
+        };
+        let issue = VerificationIssue::from_error(&quota, None);
+        assert_eq!(issue.ffi_kind(), Some(&quota.ffi_kind()));
+        assert_matches!(issue.finding(), Finding::Refusal { .. });
+
+        let policy = ArchiveError::from(Violation::EncryptedArchive);
+        let issue = VerificationIssue::from_error(&policy, None);
+        assert_eq!(
+            issue.ffi_kind().map(FfiKind::code),
+            Some(policy.error_code())
+        );
+    }
+
+    #[test]
+    fn test_heuristic_has_no_ffi_kind_and_derives_its_text() {
+        let exe = VerificationIssue::new(
+            IssueSeverity::Low,
+            Finding::Heuristic(Heuristic::ExecutableFile {
+                mode: RawMode::new(0o755),
+            }),
+        )
+        .with_entry_path(Some("bin/run".into()));
+        assert_eq!(exe.ffi_kind(), None);
+        assert_eq!(exe.category(), IssueCategory::ExecutableFile);
+        assert_eq!(exe.message(), "Executable file: bin/run");
+        assert_eq!(exe.entry_path(), Some(Path::new("bin/run")));
+    }
+
+    #[test]
+    fn test_unread_symlink_message_agrees_with_the_count() {
+        let message = |count| Heuristic::UnreadSymlinkTargets { count }.message(None);
+        assert!(message(1).starts_with("1 symlink target was not read, so it was"));
+        assert!(message(2).starts_with("2 symlink targets were not read, so they were"));
     }
 
     #[test]
@@ -1169,37 +1462,22 @@ mod tests {
 
     #[test]
     fn test_determine_status_fail_critical() {
-        let issues = vec![VerificationIssue {
-            severity: IssueSeverity::Critical,
-            category: IssueCategory::PathTraversal,
-            entry_path: None,
-            message: "Test".to_string(),
-            context: None,
-        }];
+        let issues = vec![issue(IssueSeverity::Critical, IssueCategory::PathTraversal)];
         assert_eq!(determine_status(&issues), VerificationStatus::Fail);
     }
 
     #[test]
     fn test_determine_status_fail_high() {
-        let issues = vec![VerificationIssue {
-            severity: IssueSeverity::High,
-            category: IssueCategory::QuotaExceeded,
-            entry_path: None,
-            message: "Test".to_string(),
-            context: None,
-        }];
+        let issues = vec![issue(IssueSeverity::High, IssueCategory::QuotaExceeded)];
         assert_eq!(determine_status(&issues), VerificationStatus::Fail);
     }
 
     #[test]
     fn test_determine_status_warning() {
-        let issues = vec![VerificationIssue {
-            severity: IssueSeverity::Medium,
-            category: IssueCategory::InvalidPermissions,
-            entry_path: None,
-            message: "Test".to_string(),
-            context: None,
-        }];
+        let issues = vec![issue(
+            IssueSeverity::Medium,
+            IssueCategory::InvalidPermissions,
+        )];
         assert_eq!(determine_status(&issues), VerificationStatus::Warning);
     }
 
@@ -1210,9 +1488,9 @@ mod tests {
         };
         let issue = VerificationIssue::from_error(&error, None);
 
-        assert_eq!(issue.severity, IssueSeverity::Critical);
-        assert_eq!(issue.category, IssueCategory::PathTraversal);
-        assert!(issue.message.contains("Path traversal"));
+        assert_eq!(issue.severity(), IssueSeverity::Critical);
+        assert_eq!(issue.category(), IssueCategory::PathTraversal);
+        assert!(issue.message().contains("Path traversal"));
     }
 
     #[test]
@@ -1222,9 +1500,9 @@ mod tests {
         };
         let issue = VerificationIssue::from_error(&error, Some(PathBuf::from("link")));
 
-        assert_eq!(issue.severity, IssueSeverity::Critical);
-        assert_eq!(issue.category, IssueCategory::SymlinkEscape);
-        assert!(issue.message.contains("Symlink escape"));
+        assert_eq!(issue.severity(), IssueSeverity::Critical);
+        assert_eq!(issue.category(), IssueCategory::SymlinkEscape);
+        assert!(issue.message().contains("Symlink escape"));
     }
 
     #[test]
@@ -1236,9 +1514,9 @@ mod tests {
         ));
         let issue = VerificationIssue::from_error(&error, None);
 
-        assert_eq!(issue.severity, IssueSeverity::Critical);
-        assert_eq!(issue.category, IssueCategory::ZipBomb);
-        assert!(issue.message.contains("zip bomb"));
+        assert_eq!(issue.severity(), IssueSeverity::Critical);
+        assert_eq!(issue.category(), IssueCategory::ZipBomb);
+        assert!(issue.message().contains("zip bomb"));
     }
 
     #[test]
@@ -1246,12 +1524,19 @@ mod tests {
         let error = ArchiveError::Io(io::Error::new(io::ErrorKind::NotFound, "not found"));
         let issue = VerificationIssue::from_error(&error, None);
 
-        assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::InvalidArchive);
+        assert_eq!(issue.severity(), IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::InvalidArchive);
     }
 
     fn issue(severity: IssueSeverity, category: IssueCategory) -> VerificationIssue {
-        VerificationIssue::new(severity, category, "Test".to_string())
+        VerificationIssue::new(
+            severity,
+            Finding::Refusal {
+                category,
+                kind: FfiKind::InvalidArchive { sub_code: None },
+                message: "Test".to_string(),
+            },
+        )
     }
 
     fn report_with(issues: Vec<VerificationIssue>) -> VerificationReport {
@@ -1323,9 +1608,9 @@ mod tests {
             path: PathBuf::from("link"),
         };
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::Critical);
-        assert_eq!(issue.category, IssueCategory::HardlinkEscape);
-        assert!(issue.message.contains("Hardlink escape"));
+        assert_eq!(issue.severity(), IssueSeverity::Critical);
+        assert_eq!(issue.category(), IssueCategory::HardlinkEscape);
+        assert!(issue.message().contains("Hardlink escape"));
     }
 
     #[test]
@@ -1337,8 +1622,8 @@ mod tests {
             },
         };
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::QuotaExceeded);
+        assert_eq!(issue.severity(), IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::QuotaExceeded);
     }
 
     #[test]
@@ -1348,27 +1633,27 @@ mod tests {
             mode: crate::RawMode::new(0o777),
         };
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::Medium);
-        assert_eq!(issue.category, IssueCategory::InvalidPermissions);
-        assert!(issue.message.contains("Invalid permissions"));
+        assert_eq!(issue.severity(), IssueSeverity::Medium);
+        assert_eq!(issue.category(), IssueCategory::InvalidPermissions);
+        assert!(issue.message().contains("Invalid permissions"));
     }
 
     #[test]
     fn test_verification_issue_from_invalid_archive() {
         let error = ArchiveError::unclassified("bad header");
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::InvalidArchive);
-        assert!(issue.message.contains("Invalid archive"));
+        assert_eq!(issue.severity(), IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::InvalidArchive);
+        assert!(issue.message().contains("Invalid archive"));
     }
 
     #[test]
     fn test_verification_issue_from_security_violation() {
         let error = ArchiveError::from(Violation::EncryptedArchive);
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::SecurityPolicy);
-        assert!(issue.message.contains("Security violation"));
+        assert_eq!(issue.severity(), IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::SecurityPolicy);
+        assert!(issue.message().contains("Security violation"));
     }
 
     #[test]
@@ -1506,7 +1791,7 @@ mod tests {
         assert_eq!(report.issues().len(), 2);
         for issue in report.issues() {
             assert_eq!(issue.entry_path.as_deref(), Some(Path::new("b.txt")));
-            assert_eq!(issue.category, IssueCategory::HiddenEntry);
+            assert_eq!(issue.category(), IssueCategory::HiddenEntry);
         }
     }
 
@@ -1574,9 +1859,9 @@ mod tests {
             path: PathBuf::from("/missing"),
         };
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::InvalidArchive);
-        assert!(issue.message.contains("Source not found"));
+        assert_eq!(issue.severity(), IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::InvalidArchive);
+        assert!(issue.message().contains("Source not found"));
     }
 
     #[test]
@@ -1585,9 +1870,9 @@ mod tests {
             path: PathBuf::from("/restricted"),
         };
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::InvalidArchive);
-        assert!(issue.message.contains("Source not accessible"));
+        assert_eq!(issue.severity(), IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::InvalidArchive);
+        assert!(issue.message().contains("Source not accessible"));
     }
 
     #[test]
@@ -1596,18 +1881,18 @@ mod tests {
             path: PathBuf::from("out/"),
         };
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::Medium);
-        assert_eq!(issue.category, IssueCategory::InvalidArchive);
-        assert!(issue.message.contains("Output already exists"));
+        assert_eq!(issue.severity(), IssueSeverity::Medium);
+        assert_eq!(issue.category(), IssueCategory::InvalidArchive);
+        assert!(issue.message().contains("Output already exists"));
     }
 
     #[test]
     fn test_verification_issue_from_invalid_compression_level() {
         let error = ArchiveError::InvalidCompressionLevel { level: 0 };
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::Medium);
-        assert_eq!(issue.category, IssueCategory::InvalidArchive);
-        assert!(issue.message.contains("Invalid compression level"));
+        assert_eq!(issue.severity(), IssueSeverity::Medium);
+        assert_eq!(issue.category(), IssueCategory::InvalidArchive);
+        assert!(issue.message().contains("Invalid compression level"));
     }
 
     #[test]
@@ -1616,9 +1901,9 @@ mod tests {
             path: PathBuf::from("archive.rar"),
         };
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::InvalidArchive);
-        assert!(issue.message.contains("Unknown format"));
+        assert_eq!(issue.severity(), IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::InvalidArchive);
+        assert!(issue.message().contains("Unknown format"));
     }
 
     #[test]
@@ -1628,9 +1913,9 @@ mod tests {
             problem: crate::ConfigProblem::NotSet,
         };
         let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::InvalidArchive);
-        assert!(issue.message.contains("Invalid configuration"));
+        assert_eq!(issue.severity(), IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::InvalidArchive);
+        assert!(issue.message().contains("Invalid configuration"));
     }
 
     #[test]

@@ -478,7 +478,7 @@ fn verify_reports_findings_and_the_true_entry_count() {
         report
             .issues()
             .iter()
-            .any(|i| i.category == IssueCategory::DuplicateEntry)
+            .any(|i| i.category() == IssueCategory::DuplicateEntry)
     );
 
     let report = open_bytes(duplicate)
@@ -506,7 +506,7 @@ fn uncounted_records_are_visible_to_verify() {
         report
             .issues()
             .iter()
-            .any(|i| i.category == IssueCategory::HiddenEntry)
+            .any(|i| i.category() == IssueCategory::HiddenEntry)
     );
     assert_matches!(
         open_bytes(zip.build().bytes).list(&config(ZipConsistencyPolicy::Enforce)),
@@ -531,9 +531,9 @@ fn header_mismatch_counts_once_with_the_entrys_own_issues() {
     let mismatch = report
         .issues()
         .iter()
-        .find(|i| i.category == IssueCategory::HeaderMismatch)
+        .find(|i| i.category() == IssueCategory::HeaderMismatch)
         .unwrap();
-    assert_eq!(mismatch.entry_path.as_deref(), Some("a.txt".as_ref()));
+    assert_eq!(mismatch.entry_path(), Some("a.txt".as_ref()));
 }
 
 #[test]
@@ -762,7 +762,7 @@ fn omitted_findings_are_reported_by_verify() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("further ZIP structure findings"))
+            .any(|i| i.message().contains("further ZIP structure findings"))
     );
 }
 
@@ -793,7 +793,7 @@ fn every_structural_finding_is_ignored_under_the_ignore_policy() {
             .verify(&ignore, &VerificationOptions::default())
             .unwrap();
         assert!(report.issues().iter().all(|i| !matches!(
-            i.category,
+            i.category(),
             IssueCategory::HiddenEntry
                 | IssueCategory::OverlappingEntries
                 | IssueCategory::HeaderMismatch
@@ -843,7 +843,7 @@ fn unparseable_local_header_is_rejected_by_every_operation_under_enforce() {
         report
             .issues()
             .iter()
-            .any(|i| i.category == IssueCategory::HeaderMismatch)
+            .any(|i| i.category() == IssueCategory::HeaderMismatch)
     );
 }
 
@@ -1415,7 +1415,7 @@ fn hidden_issues(report: &crate::VerificationReport) -> Vec<&crate::Verification
     report
         .issues()
         .iter()
-        .filter(|i| i.category == IssueCategory::HiddenEntry)
+        .filter(|i| i.category() == IssueCategory::HiddenEntry)
         .collect()
 }
 
@@ -1439,9 +1439,9 @@ fn header_hidden_behind_a_compressed_stream_is_found_with_integrity() {
         let found = hidden_issues(&report);
         assert_eq!(found.len(), 1, "method {method}");
         assert!(
-            found[0].message.contains(&format!("offset {expected} ")),
+            found[0].message().contains(&format!("offset {expected} ")),
             "method {method}: {}",
-            found[0].message
+            found[0].message()
         );
         assert_eq!(report.status(), VerificationStatus::Fail);
 
@@ -1477,7 +1477,7 @@ fn header_hidden_inside_stored_data_is_found_with_integrity() {
         let report = verify_with_integrity(built.bytes);
         let found = hidden_issues(&report);
         assert_eq!(found.len(), 1, "{filler}");
-        assert!(found[0].message.contains(&format!("offset {expected} ")));
+        assert!(found[0].message().contains(&format!("offset {expected} ")));
     }
 }
 
@@ -1885,8 +1885,8 @@ fn stray_central_record_is_fatal_under_enforce_and_reported_by_verify() {
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(report.issues().iter().any(|i| {
-        i.category == IssueCategory::HiddenEntry
-            && i.message
+        i.category() == IssueCategory::HiddenEntry
+            && i.message()
                 .contains("central directory record outside the central directory")
     }));
 }

@@ -635,7 +635,7 @@ pub fn list_archive_with_options<P: AsRef<Path>>(
 /// } else {
 ///     eprintln!("Security issues found:");
 ///     for issue in report.issues() {
-///         eprintln!("  [{}] {}", issue.severity, issue.message);
+///         eprintln!("  [{}] {}", issue.severity(), issue.message());
 ///     }
 /// }
 /// # Ok(())

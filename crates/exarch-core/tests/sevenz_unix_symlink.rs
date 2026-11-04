@@ -256,7 +256,7 @@ fn partial_source(err: ArchiveError) -> ArchiveError {
 }
 
 fn issue_categories(report: &VerificationReport) -> Vec<IssueCategory> {
-    report.issues().iter().map(|i| i.category).collect()
+    report.issues().iter().map(exarch_core::VerificationIssue::category).collect()
 }
 
 fn integrity(budget: u64) -> VerificationOptions {
@@ -347,9 +347,9 @@ fn verify_fails_a_link_when_symlinks_are_not_allowed() {
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(
         report.issues().iter().any(|i| {
-            i.category == IssueCategory::SecurityPolicy
-                && i.entry_path.as_deref() == Some(Path::new("link"))
-                && i.message.contains("symlinks not allowed")
+            i.category() == IssueCategory::SecurityPolicy
+                && i.entry_path() == Some(Path::new("link"))
+                && i.message().contains("symlinks not allowed")
         }),
         "{:?}",
         report.issues()
@@ -404,11 +404,11 @@ fn verify_without_integrity_warns_that_targets_were_not_validated() {
             report.issues()
         );
         let issue = &report.issues()[0];
-        assert_eq!(issue.entry_path, None);
+        assert_eq!(issue.entry_path(), None);
         assert!(
-            issue.message.contains("1 symlink target was not read"),
+            issue.message().contains("1 symlink target was not read"),
             "{}",
-            issue.message
+            issue.message()
         );
     }
 }
@@ -503,7 +503,10 @@ fn verify_integrity_checks_the_link_in_the_same_decode() {
     assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
     assert!(issue_categories(&report).contains(&IssueCategory::CorruptData));
     assert!(
-        report.issues().iter().all(|i| !i.message.contains("empty")),
+        report
+            .issues()
+            .iter()
+            .all(|i| !i.message().contains("empty")),
         "{:?}",
         report.issues()
     );
@@ -511,7 +514,7 @@ fn verify_integrity_checks_the_link_in_the_same_decode() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("could not be read")),
+            .any(|i| i.message().contains("could not be read")),
         "{:?}",
         report.issues()
     );
@@ -530,7 +533,7 @@ fn verify_integrity_leaves_a_link_unread_when_the_budget_cannot_decode_it() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("1 symlink target was not read")),
+            .any(|i| i.message().contains("1 symlink target was not read")),
         "{:?}",
         report.issues()
     );
@@ -558,7 +561,7 @@ fn verify_integrity_marks_the_links_of_a_refused_solid_block_unreadable() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("could not be read")),
+            .any(|i| i.message().contains("could not be read")),
         "{:?}",
         report.issues()
     );
@@ -566,7 +569,7 @@ fn verify_integrity_marks_the_links_of_a_refused_solid_block_unreadable() {
         report
             .issues()
             .iter()
-            .all(|i| !i.message.contains("symlink target was not read")),
+            .all(|i| !i.message().contains("symlink target was not read")),
         "{:?}",
         report.issues()
     );

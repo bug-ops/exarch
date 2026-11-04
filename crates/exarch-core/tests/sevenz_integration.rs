@@ -753,7 +753,7 @@ fn sevenz_unreferenced_trailing_pack_stream_does_not_dilute_the_ratio() {
         report
             .issues()
             .iter()
-            .any(|i| i.category == exarch_core::IssueCategory::ZipBomb),
+            .any(|i| i.category() == exarch_core::IssueCategory::ZipBomb),
         "unreferenced pack stream hid the ratio: {:?}",
         report.issues()
     );
@@ -770,7 +770,7 @@ fn sevenz_solid_archive_is_not_flagged_by_ratio_check() {
         report
             .issues()
             .iter()
-            .all(|i| i.category != exarch_core::IssueCategory::ZipBomb),
+            .all(|i| i.category() != exarch_core::IssueCategory::ZipBomb),
         "unexpected ratio issue: {:?}",
         report.issues()
     );

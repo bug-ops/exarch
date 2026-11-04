@@ -1710,7 +1710,7 @@ fn test_solid_block_over_limit_rejected_by_extract_and_verify() {
         report
             .issues()
             .iter()
-            .any(|i| i.category == crate::inspection::report::IssueCategory::ZipBomb),
+            .any(|i| i.category() == crate::inspection::report::IssueCategory::ZipBomb),
         "issues: {:?}",
         report.issues()
     );
@@ -2629,7 +2629,7 @@ fn scan_failing_file(error: io::Error) -> (bool, Option<BlockStop>, Vec<IssueCat
     (
         keep_going,
         stop,
-        issues.iter().map(|i| i.category).collect(),
+        issues.iter().map(crate::inspection::report::VerificationIssue::category).collect(),
     )
 }
 

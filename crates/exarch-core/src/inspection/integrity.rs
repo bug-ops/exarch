@@ -33,8 +33,9 @@ use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::zip::ZIP_DECLARED_SIZE_EXCEEDED;
 use crate::formats::zip::ZIP_INVALID_CHECKSUM;
 use crate::inspection::manifest::EntryCompression;
+use crate::inspection::report::Finding;
+use crate::inspection::report::Heuristic;
 use crate::inspection::report::IntegrityGaps;
-use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::UnverifiedReason;
 use crate::inspection::report::VerificationIssue;
@@ -522,11 +523,10 @@ impl<'c> IntegrityPass<'c> {
     /// Adds the single archive-level `IntegrityIncomplete` issue when anything
     /// was left unverified, and returns the collected issues.
     pub fn finish(mut self) -> IntegrityOutcome {
-        if let Some(message) = self.gaps.message() {
+        if !self.gaps.is_empty() {
             self.archive_issues.push(VerificationIssue::new(
                 IssueSeverity::Medium,
-                IssueCategory::IntegrityIncomplete,
-                message,
+                Finding::Heuristic(Heuristic::IntegrityIncomplete(self.gaps.clone())),
             ));
         }
         IntegrityOutcome {
@@ -552,13 +552,13 @@ fn corrupt_issue(
     failure: &DecodeFailure,
     entry_path: Option<std::path::PathBuf>,
 ) -> VerificationIssue {
-    let mut issue = VerificationIssue::new(
+    VerificationIssue::new(
         IssueSeverity::High,
-        IssueCategory::CorruptData,
-        format!("Corrupt data: {failure}"),
-    );
-    issue.entry_path = entry_path;
-    issue
+        Finding::Heuristic(Heuristic::CorruptData {
+            detail: failure.to_string(),
+        }),
+    )
+    .with_entry_path(entry_path)
 }
 
 #[cfg(test)]
@@ -570,6 +570,7 @@ mod tests {
 
     use super::*;
     use crate::formats::tar_metadata_limit::DecoderMemoryExceeded;
+    use crate::inspection::report::IssueCategory;
     use crate::inspection::report::MAX_LISTED_UNVERIFIED;
 
     fn read_failure(e: io::Error) -> DecodeFailure {
@@ -730,11 +731,11 @@ mod tests {
         let outcome = pass.finish();
         assert_eq!(outcome.archive_issues.len(), 1);
         let issue = &outcome.archive_issues[0];
-        assert_eq!(issue.severity, IssueSeverity::Medium);
-        assert_eq!(issue.category, IssueCategory::IntegrityIncomplete);
-        assert!(issue.message.contains("3 item(s)"), "{}", issue.message);
-        assert!(issue.message.contains("over budget: 2"));
-        assert!(!issue.message.contains("no end-of-archive"));
+        assert_eq!(issue.severity(), IssueSeverity::Medium);
+        assert_eq!(issue.category(), IssueCategory::IntegrityIncomplete);
+        assert!(issue.message().contains("3 item(s)"), "{}", issue.message());
+        assert!(issue.message().contains("over budget: 2"));
+        assert!(!issue.message().contains("no end-of-archive"));
     }
 
     #[test]
@@ -763,7 +764,7 @@ mod tests {
             ]
         );
         assert_eq!(gaps.omitted(), 0);
-        assert!(outcome.archive_issues[0].message.contains("3 item(s)"));
+        assert!(outcome.archive_issues[0].message().contains("3 item(s)"));
     }
 
     #[test]
@@ -889,7 +890,7 @@ mod tests {
         let outcome = pass.finish();
         assert!(
             outcome.archive_issues[0]
-                .message
+                .message()
                 .contains("no end-of-archive marker")
         );
     }
@@ -953,7 +954,10 @@ mod tests {
         assert_matches!(io_failure, Err(ArchiveError::Io(_)));
 
         let outcome = pass.finish();
-        let categories: Vec<_> = outcome.entry_issues[0].iter().map(|i| i.category).collect();
+        let categories: Vec<_> = outcome.entry_issues[0]
+            .iter()
+            .map(super::super::report::VerificationIssue::category)
+            .collect();
         assert_eq!(
             categories,
             [IssueCategory::CorruptData, IssueCategory::SecurityPolicy]

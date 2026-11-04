@@ -3314,7 +3314,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.message.contains("null bytes")),
+                .any(|i| i.message().contains("null bytes")),
             "expected a null-byte issue, got: {:?}",
             report.issues()
         );

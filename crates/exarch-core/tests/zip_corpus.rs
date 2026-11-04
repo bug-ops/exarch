@@ -155,7 +155,7 @@ fn assert_no_structural_finding(path: &Path, label: &str) {
     let findings: Vec<_> = report
         .issues()
         .iter()
-        .filter(|i| STRUCTURAL.contains(&i.category))
+        .filter(|i| STRUCTURAL.contains(&i.category()))
         .collect();
     assert!(findings.is_empty(), "{label}: {findings:?}");
 }
@@ -242,7 +242,7 @@ fn decoy_central_directory_before_a_prefixed_directory_is_reported() {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::HiddenEntry),
+                .any(|i| i.category() == IssueCategory::HiddenEntry),
             "{label}: {:?}",
             report.issues()
         );
@@ -287,7 +287,7 @@ fn zip64_directory_with_placeholder_local_sizes_is_reported() {
         report
             .issues()
             .iter()
-            .any(|i| i.category == IssueCategory::HeaderMismatch),
+            .any(|i| i.category() == IssueCategory::HeaderMismatch),
         "{:?}",
         report.issues()
     );

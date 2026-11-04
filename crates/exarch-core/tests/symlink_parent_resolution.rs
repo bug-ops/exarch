@@ -327,10 +327,10 @@ fn assert_issue_note(fixture: &Fixture, needle: &str) {
     let note = report
         .issues()
         .iter()
-        .find(|i| i.category == exarch_core::IssueCategory::InvalidArchive)
+        .find(|i| i.category() == exarch_core::IssueCategory::InvalidArchive)
         .unwrap_or_else(|| panic!("no overwrite note: {:?}", report.issues()));
-    assert_eq!(note.severity, exarch_core::IssueSeverity::Low);
-    assert!(note.message.contains(needle), "{}", note.message);
+    assert_eq!(note.severity(), exarch_core::IssueSeverity::Low);
+    assert!(note.message().contains(needle), "{}", note.message());
 }
 
 fn resolves_to(fixture: &Fixture, link: &str, expected: &str) {

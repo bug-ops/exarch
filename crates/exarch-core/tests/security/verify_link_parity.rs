@@ -92,7 +92,7 @@ fn run_verify_and_extract(items: &[Item], plant: impl FnOnce(&std::path::Path)) 
     let report = verify_archive(&archive, &config).expect("verify report");
     let extracted = extract_archive(&archive, &dest, &config);
     Outcome {
-        categories: report.issues().iter().map(|i| i.category).collect(),
+        categories: report.issues().iter().map(exarch_core::VerificationIssue::category).collect(),
         status: report.status(),
         extracted,
         base,
@@ -234,7 +234,7 @@ fn symlink_over_earlier_file_is_checked_as_replacement() {
         report
             .issues()
             .iter()
-            .any(|i| i.category == IssueCategory::SymlinkEscape)
+            .any(|i| i.category() == IssueCategory::SymlinkEscape)
     );
 }
 
@@ -429,7 +429,7 @@ fn disallowed_hardlink_is_reported_once() {
         report
             .issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::SecurityPolicy)
+            .filter(|i| i.category() == IssueCategory::SecurityPolicy)
             .count(),
         1
     );

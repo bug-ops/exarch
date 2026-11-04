@@ -64,7 +64,7 @@ fn count(report: &VerificationReport, category: IssueCategory) -> usize {
     report
         .issues()
         .iter()
-        .filter(|i| i.category == category)
+        .filter(|i| i.category() == category)
         .count()
 }
 
@@ -72,8 +72,8 @@ fn corrupt_paths(report: &VerificationReport) -> Vec<String> {
     let mut paths: Vec<_> = report
         .issues()
         .iter()
-        .filter(|i| i.category == IssueCategory::CorruptData)
-        .filter_map(|i| i.entry_path.as_ref())
+        .filter(|i| i.category() == IssueCategory::CorruptData)
+        .filter_map(|i| i.entry_path())
         .map(|p| p.display().to_string())
         .collect();
     paths.sort();
@@ -320,7 +320,7 @@ fn tar_plain_without_end_marker_is_incomplete() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("no end-of-archive marker"))
+            .any(|i| i.message().contains("no end-of-archive marker"))
     );
 }
 
@@ -358,7 +358,7 @@ fn tar_gz_bad_trailer_crc_is_a_failed_report() {
         report
             .issues()
             .iter()
-            .any(|i| i.category == IssueCategory::CorruptData && i.entry_path.is_none())
+            .any(|i| i.category() == IssueCategory::CorruptData && i.entry_path().is_none())
     );
 
     let plain = verify_archive(&path, &SecurityConfig::default()).unwrap();
@@ -769,7 +769,7 @@ fn zip_over_ratio_entry_is_not_decoded() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("resource limit: 1"))
+            .any(|i| i.message().contains("resource limit: 1"))
     );
 }
 
@@ -813,7 +813,7 @@ fn sevenz_unknown_coder_is_not_decodable() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("not decodable: 2"))
+            .any(|i| i.message().contains("not decodable: 2"))
     );
 }
 
@@ -1000,7 +1000,7 @@ fn integrity_gaps_count_and_list_the_unverified_entries_of_a_solid_archive() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("10 item(s)"))
+            .any(|i| i.message().contains("10 item(s)"))
     );
 }
 
@@ -1113,7 +1113,7 @@ fn sevenz_dropped_oversized_entry_does_not_misalign_its_solid_block() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("file name too long"))
+            .any(|i| i.message().contains("file name too long"))
     );
     assert_eq!(
         report
@@ -1143,7 +1143,7 @@ fn zip_entry_dropped_for_its_path_is_an_integrity_gap() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("path too long for the host"))
+            .any(|i| i.message().contains("path too long for the host"))
     );
 
     let plain = verify(&path, VerificationOptions::default());

@@ -157,7 +157,8 @@ fn xl_type_divergence_is_fatal_under_enforce_and_reported_by_verify() {
             .unwrap();
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert!(report.issues().iter().any(|i| {
-            i.category == IssueCategory::HiddenEntry && i.message.contains("gives it a file type")
+            i.category() == IssueCategory::HiddenEntry
+                && i.message().contains("gives it a file type")
         }));
     }
 

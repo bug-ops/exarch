@@ -27,8 +27,9 @@ use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::OversizedEntry;
 use crate::inspection::report::ArchiveStructure;
+use crate::inspection::report::Finding;
+use crate::inspection::report::Heuristic;
 use crate::inspection::report::IntegrityScope;
-use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
@@ -321,7 +322,7 @@ where
 /// } else {
 ///     eprintln!("Security issues found:");
 ///     for issue in report.issues() {
-///         eprintln!("  [{}] {}", issue.severity, issue.message);
+///         eprintln!("  [{}] {}", issue.severity(), issue.message());
 ///     }
 /// }
 /// # Ok(())
@@ -514,7 +515,8 @@ fn verify_entry(
     }
 
     // Compression ratio validation (zip bomb detection)
-    if let Err(e) = validate_entry_compression(&entry.compression, Uncompressed(entry.size()), config)
+    if let Err(e) =
+        validate_entry_compression(&entry.compression, Uncompressed(entry.size()), config)
     {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
@@ -642,33 +644,22 @@ fn collision_issues(tree: &mut VirtualTree) -> Vec<VerificationIssue> {
         .collect()
 }
 
-/// Spells a path with combining marks and control characters escaped, so two
-/// canonically equivalent names do not read as the same text.
-fn escaped(path: &Path) -> String {
-    path.to_string_lossy()
-        .chars()
-        .flat_map(char::escape_debug)
-        .collect()
-}
-
 fn collision_issue(collision: NameCollision) -> VerificationIssue {
     let severity = match collision.kind {
         CollisionKind::Directories => IssueSeverity::Low,
         CollisionKind::DirectoriesWithContents | CollisionKind::Files => IssueSeverity::Medium,
         CollisionKind::Mixed => IssueSeverity::High,
     };
-    VerificationIssue {
+    let entry_path = collision.incoming.clone();
+    VerificationIssue::new(
         severity,
-        category: IssueCategory::NameCollision,
-        message: format!(
-            "Names \"{}\" and \"{}\" are the same name on case-insensitive or normalizing \
-             filesystems",
-            escaped(&collision.existing),
-            escaped(&collision.incoming)
-        ),
-        entry_path: Some(collision.incoming),
-        context: None,
-    }
+        Finding::Heuristic(Heuristic::NameCollision {
+            existing: collision.existing,
+            incoming: collision.incoming,
+            kind: collision.kind,
+        }),
+    )
+    .with_entry_path(Some(entry_path))
 }
 
 /// Records a successfully validated non-hardlink entry in the tree.
@@ -813,18 +804,14 @@ fn placement_issue(
     }
     let error = match Placement::of(kind, &conflict) {
         Placement::RefusedUnderOverwrite(occupant) => {
-            let mut issue = VerificationIssue::new(
+            return VerificationIssue::new(
                 IssueSeverity::Low,
-                IssueCategory::InvalidArchive,
-                format!(
-                    "extraction with overwrite fails at {}: an earlier entry is a {} (default \
-                     extraction skips this entry)",
-                    rel.display(),
-                    occupant.noun()
-                ),
-            );
-            issue.entry_path = entry_path;
-            return issue;
+                Finding::Heuristic(Heuristic::OverwriteConflict {
+                    rel: rel.to_path_buf(),
+                    occupant,
+                }),
+            )
+            .with_entry_path(entry_path);
         }
         Placement::ReplacesUnderOverwrite => ArchiveError::from(Violation::ConflictUnlessSkipped {
             rel: rel.display().to_string().into(),
@@ -870,20 +857,12 @@ fn unread_targets_issue(
             )
         })
         .count();
-    let (subject, validated) = match unread {
-        0 => return None,
-        1 => ("symlink target was", "it was"),
-        _ => ("symlink targets were", "they were"),
-    };
-    Some(VerificationIssue::new(
-        IssueSeverity::Medium,
-        IssueCategory::SecurityPolicy,
-        format!(
-            "{unread} {subject} not read, so {validated} not validated; entries beneath or \
-             through an unread link are reported as failures (an integrity check with a \
-             decompression budget that covers the link blocks reads the targets)"
-        ),
-    ))
+    (unread > 0).then(|| {
+        VerificationIssue::new(
+            IssueSeverity::Medium,
+            Finding::Heuristic(Heuristic::UnreadSymlinkTargets { count: unread }),
+        )
+    })
 }
 
 fn check_permissions(path: &Path, mode: RawMode, config: &SecurityConfig) -> Result<()> {
@@ -902,24 +881,24 @@ fn check_heuristics(entry: &ArchiveEntry) -> Vec<VerificationIssue> {
         && mode.get() & 0o111 != 0
         && matches!(entry.kind, ManifestEntryKind::File { .. })
     {
-        issues.push(VerificationIssue {
-            severity: IssueSeverity::Low,
-            category: IssueCategory::ExecutableFile,
-            entry_path: Some(entry.path.clone()),
-            message: format!("Executable file: {}", entry.path.display()),
-            context: Some(format!("mode: {:#o}", mode.get())),
-        });
+        issues.push(
+            VerificationIssue::new(
+                IssueSeverity::Low,
+                Finding::Heuristic(Heuristic::ExecutableFile { mode }),
+            )
+            .with_entry_path(Some(entry.path.clone())),
+        );
     }
 
     // Suspicious extension detection
     if is_suspicious_extension(&entry.path) {
-        issues.push(VerificationIssue {
-            severity: IssueSeverity::Info,
-            category: IssueCategory::SuspiciousPath,
-            entry_path: Some(entry.path.clone()),
-            message: format!("Suspicious extension: {}", entry.path.display()),
-            context: None,
-        });
+        issues.push(
+            VerificationIssue::new(
+                IssueSeverity::Info,
+                Finding::Heuristic(Heuristic::SuspiciousExtension),
+            )
+            .with_entry_path(Some(entry.path.clone())),
+        );
     }
 
     // Non-UTF8 name detection: TAR entry names are stored byte-exact, so a
@@ -930,17 +909,13 @@ fn check_heuristics(entry: &ArchiveEntry) -> Vec<VerificationIssue> {
     // used to vet archives before shipping them to a different host, so the
     // warning must not depend on which filesystem happens to be running it.
     if entry.path.to_str().is_none() {
-        issues.push(VerificationIssue {
-            severity: IssueSeverity::Medium,
-            category: IssueCategory::SuspiciousPath,
-            entry_path: Some(entry.path.clone()),
-            message: format!(
-                "Entry name is not valid UTF-8; extraction may fail on filesystems that require \
-                 UTF-8 names (e.g. APFS, NTFS): {}",
-                entry.path.display()
-            ),
-            context: None,
-        });
+        issues.push(
+            VerificationIssue::new(
+                IssueSeverity::Medium,
+                Finding::Heuristic(Heuristic::NonUtf8Name),
+            )
+            .with_entry_path(Some(entry.path.clone())),
+        );
     }
 
     issues
@@ -962,6 +937,7 @@ mod tests {
     use super::*;
     use crate::inspection::manifest::EntryCompression;
     use crate::inspection::report::CheckStatus;
+    use crate::inspection::report::IssueCategory;
     use crate::inspection::report::VerificationStatus;
     use crate::test_utils::tar_with_pax_nul_path;
     use std::io::Write;
@@ -1008,13 +984,13 @@ mod tests {
         let issue = report
             .issues()
             .iter()
-            .find(|i| i.category == IssueCategory::SecurityPolicy)
+            .find(|i| i.category() == IssueCategory::SecurityPolicy)
             .unwrap_or_else(|| panic!("no SecurityPolicy issue: {:?}", report.issues()));
-        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.severity(), IssueSeverity::High);
         assert!(
-            issue.message.replace('\\', "/").contains(expected),
+            issue.message().replace('\\', "/").contains(expected),
             "{}",
-            issue.message
+            issue.message()
         );
     }
 
@@ -1032,11 +1008,15 @@ mod tests {
         let note: Vec<_> = report
             .issues()
             .iter()
-            .filter(|i| i.severity == IssueSeverity::Low)
+            .filter(|i| i.severity() == IssueSeverity::Low)
             .collect();
         assert_eq!(note.len(), 1, "{:?}", report.issues());
-        assert_eq!(note[0].category, IssueCategory::InvalidArchive);
-        assert!(note[0].message.contains(expected), "{}", note[0].message);
+        assert_eq!(note[0].category(), IssueCategory::InvalidArchive);
+        assert!(
+            note[0].message().contains(expected),
+            "{}",
+            note[0].message()
+        );
     }
 
     #[test]
@@ -1073,10 +1053,7 @@ mod tests {
     #[test]
     fn file_over_a_dir_or_symlink_is_an_overwrite_note() {
         assert_overwrite_note(
-            vec![
-                ("d/f", file()),
-                ("d", file()),
-            ],
+            vec![("d/f", file()), ("d", file())],
             "fails at d: an earlier entry is a directory",
         );
         assert_overwrite_note(
@@ -1136,17 +1113,14 @@ mod tests {
 
     #[test]
     fn directory_over_a_file_is_not_a_security_finding() {
-        let manifest = manifest_of(vec![
-            ("a", file()),
-            ("a", ManifestEntryKind::Directory),
-        ]);
+        let manifest = manifest_of(vec![("a", file()), ("a", ManifestEntryKind::Directory)]);
         let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.security_status(), CheckStatus::Pass);
         assert!(
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::InvalidArchive)
+                .any(|i| i.category() == IssueCategory::InvalidArchive)
         );
     }
 
@@ -1167,7 +1141,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .all(|i| i.category != IssueCategory::InvalidPermissions),
+                .all(|i| i.category() != IssueCategory::InvalidPermissions),
             "{:?}",
             report.issues()
         );
@@ -1177,10 +1151,7 @@ mod tests {
     fn hardlink_mode_is_not_a_permission_finding() {
         let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
         manifest
-            .add_entry(ArchiveEntry::new(
-                PathBuf::from("t"),
-                file(),
-            ))
+            .add_entry(ArchiveEntry::new(PathBuf::from("t"), file()))
             .unwrap();
         let mut link = ArchiveEntry::new(PathBuf::from("h"), hardlink_to("t"));
         link.mode = Some(RawMode::new(0o777));
@@ -1192,7 +1163,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .all(|i| i.category != IssueCategory::InvalidPermissions),
+                .all(|i| i.category() != IssueCategory::InvalidPermissions),
             "{:?}",
             report.issues()
         );
@@ -1206,7 +1177,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::InvalidPermissions),
+                .any(|i| i.category() == IssueCategory::InvalidPermissions),
             "{:?}",
             report.issues()
         );
@@ -1224,7 +1195,7 @@ mod tests {
         let too_long = report
             .issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::InvalidArchive)
+            .filter(|i| i.category() == IssueCategory::InvalidArchive)
             .count();
         assert_eq!(too_long, 2, "{:?}", report.issues());
     }
@@ -1273,7 +1244,7 @@ mod tests {
         let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
-        assert!(report.issues()[0].message.contains("could not be read"));
+        assert!(report.issues()[0].message().contains("could not be read"));
     }
 
     #[test]
@@ -1296,7 +1267,7 @@ mod tests {
         let too_long = report
             .issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::InvalidArchive)
+            .filter(|i| i.category() == IssueCategory::InvalidArchive)
             .count();
         assert_eq!(too_long, 2, "{:?}", report.issues());
         assert_eq!(report.status(), VerificationStatus::Fail);
@@ -1309,7 +1280,7 @@ mod tests {
             incoming: PathBuf::from("A"),
             kind,
         };
-        let severity = |kind| collision_issue(collision(kind)).severity;
+        let severity = |kind| collision_issue(collision(kind)).severity();
         assert_eq!(severity(CollisionKind::Directories), IssueSeverity::Low);
         assert_eq!(
             severity(CollisionKind::DirectoriesWithContents),
@@ -1339,17 +1310,14 @@ mod tests {
         report
             .issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::NameCollision)
-            .map(|i| i.severity)
+            .filter(|i| i.category() == IssueCategory::NameCollision)
+            .map(super::super::report::VerificationIssue::severity)
             .collect()
     }
 
     #[test]
     fn hardlink_over_differently_spelled_file_is_not_a_pass() {
-        let report = verify_folding(vec![
-            ("a.txt", file()),
-            ("A.txt", hardlink_to("a.txt")),
-        ]);
+        let report = verify_folding(vec![("a.txt", file()), ("A.txt", hardlink_to("a.txt"))]);
         assert_ne!(report.status(), VerificationStatus::Pass);
         assert_eq!(collisions(&report), [IssueSeverity::Medium]);
     }
@@ -1379,12 +1347,7 @@ mod tests {
     #[test]
     fn merged_directories_with_colliding_children_are_never_a_pass() {
         let entries: Vec<_> = (0..50)
-            .flat_map(|i| {
-                [
-                    (format!("a/f{i}"), file()),
-                    (format!("A/f{i}"), file()),
-                ]
-            })
+            .flat_map(|i| [(format!("a/f{i}"), file()), (format!("A/f{i}"), file())])
             .collect();
         let manifest = manifest_of(
             entries
@@ -1449,32 +1412,26 @@ mod tests {
         let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert!(report.issues().iter().any(|i| {
-            i.category == IssueCategory::InvalidArchive
-                && i.message.contains("hardlink target does not exist")
+            i.category() == IssueCategory::InvalidArchive
+                && i.message().contains("hardlink target does not exist")
         }));
     }
 
     #[test]
     fn phase_two_accepts_target_declared_later() {
-        let manifest = manifest_of(vec![
-            ("h", hardlink_to("later")),
-            ("later", file()),
-        ]);
+        let manifest = manifest_of(vec![("h", hardlink_to("later")), ("later", file())]);
         let report = verify_manifest(&manifest, &link_config(), None);
         assert!(report.issues().is_empty(), "{:?}", report.issues());
     }
 
     #[test]
     fn phase_one_failure_is_not_reported_again_in_phase_two() {
-        let manifest = manifest_of(vec![
-            ("t", file()),
-            ("h", hardlink_to("../outside")),
-        ]);
+        let manifest = manifest_of(vec![("t", file()), ("h", hardlink_to("../outside"))]);
         let report = verify_manifest(&manifest, &link_config(), None);
         let escapes = report
             .issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::HardlinkEscape)
+            .filter(|i| i.category() == IssueCategory::HardlinkEscape)
             .count();
         assert_eq!(escapes, 1);
     }
@@ -1509,7 +1466,7 @@ mod tests {
         assert!(
             issues
                 .iter()
-                .any(|i| i.category == IssueCategory::ExecutableFile)
+                .any(|i| i.category() == IssueCategory::ExecutableFile)
         );
     }
 
@@ -1530,7 +1487,7 @@ mod tests {
         assert!(
             issues
                 .iter()
-                .any(|i| i.category == IssueCategory::SuspiciousPath)
+                .any(|i| i.category() == IssueCategory::SuspiciousPath)
         );
     }
 
@@ -1553,7 +1510,7 @@ mod tests {
         let issues = check_heuristics(&entry);
         assert!(!issues.is_empty());
         assert!(issues.iter().any(|i| {
-            i.category == IssueCategory::SuspiciousPath && i.severity == IssueSeverity::Medium
+            i.category() == IssueCategory::SuspiciousPath && i.severity() == IssueSeverity::Medium
         }));
     }
 
@@ -1636,9 +1593,9 @@ mod tests {
         let issue = report
             .issues()
             .iter()
-            .find(|i| i.message.contains("xl extra field"))
+            .find(|i| i.message().contains("xl extra field"))
             .unwrap();
-        assert_eq!(issue.entry_path.as_deref(), Some(Path::new("a.txt")));
+        assert_eq!(issue.entry_path(), Some(Path::new("a.txt")));
     }
 
     #[test]
@@ -1667,9 +1624,9 @@ mod tests {
         let issue = report
             .issues()
             .iter()
-            .find(|i| i.message.contains("xl extra field"))
+            .find(|i| i.message().contains("xl extra field"))
             .unwrap();
-        assert_eq!(issue.entry_path.as_deref(), Some(Path::new("a.txt")));
+        assert_eq!(issue.entry_path(), Some(Path::new("a.txt")));
     }
 
     #[test]
@@ -1694,9 +1651,9 @@ mod tests {
         let issue = report
             .issues()
             .iter()
-            .find(|i| i.message.contains("data descriptor of entry 1"))
+            .find(|i| i.message().contains("data descriptor of entry 1"))
             .unwrap();
-        assert_eq!(issue.entry_path.as_deref(), Some(Path::new("a.txt")));
+        assert_eq!(issue.entry_path(), Some(Path::new("a.txt")));
     }
 
     // Regression test: verify_archive() must report an oversized entry as a
@@ -1734,9 +1691,9 @@ mod tests {
         assert_eq!(report.suspicious_entries(), 1);
         assert!(
             report.issues().iter().any(|i| {
-                i.severity == IssueSeverity::High
-                    && i.category == IssueCategory::QuotaExceeded
-                    && i.message.contains("single file size")
+                i.severity() == IssueSeverity::High
+                    && i.category() == IssueCategory::QuotaExceeded
+                    && i.message().contains("single file size")
             }),
             "expected a High-severity QuotaExceeded FileSize issue, got: {:?}",
             report.issues()
@@ -1767,7 +1724,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.message.contains("null bytes")),
+                .any(|i| i.message().contains("null bytes")),
             "expected an issue mentioning null bytes, got: {:?}",
             report.issues()
         );
@@ -1812,7 +1769,8 @@ mod tests {
         );
         assert!(
             report.issues().iter().any(|i| {
-                i.category == IssueCategory::SuspiciousPath && i.message.contains("not valid UTF-8")
+                i.category() == IssueCategory::SuspiciousPath
+                    && i.message().contains("not valid UTF-8")
             }),
             "expected a SuspiciousPath issue mentioning UTF-8, got: {:?}",
             report.issues()
@@ -1856,8 +1814,8 @@ mod tests {
         assert_eq!(report.suspicious_entries(), 1);
         assert!(
             report.issues().iter().any(|i| {
-                i.category == IssueCategory::SecurityPolicy
-                    && i.message.contains("hardlink target is missing")
+                i.category() == IssueCategory::SecurityPolicy
+                    && i.message().contains("hardlink target is missing")
             }),
             "expected a SecurityPolicy issue citing the missing target, got: {:?}",
             report.issues()
@@ -1900,8 +1858,8 @@ mod tests {
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.security_status(), crate::CheckStatus::Fail);
         assert!(report.issues().iter().any(|i| {
-            i.category == IssueCategory::SecurityPolicy
-                && i.message.contains("hardlinks not allowed")
+            i.category() == IssueCategory::SecurityPolicy
+                && i.message().contains("hardlinks not allowed")
         }));
     }
 
@@ -1911,7 +1869,7 @@ mod tests {
         let report = verify_archive(archive.path(), &hardlink_config(true)).unwrap();
 
         assert!(
-            !report.issues().iter().any(|i| i.category.is_security()),
+            !report.issues().iter().any(|i| i.category().is_security()),
             "got: {:?}",
             report.issues()
         );
@@ -1925,7 +1883,7 @@ mod tests {
         );
         let report = verify_archive(archive.path(), &hardlink_config(true)).unwrap();
 
-        assert!(!report.issues().iter().any(|i| i.category.is_security()));
+        assert!(!report.issues().iter().any(|i| i.category().is_security()));
     }
 
     #[test]
@@ -1938,7 +1896,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::HardlinkEscape),
+                .any(|i| i.category() == IssueCategory::HardlinkEscape),
             "got: {:?}",
             report.issues()
         );
@@ -1954,7 +1912,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::HardlinkEscape),
+                .any(|i| i.category() == IssueCategory::HardlinkEscape),
             "got: {:?}",
             report.issues()
         );
@@ -1971,8 +1929,8 @@ mod tests {
             assert_eq!(report.status(), VerificationStatus::Fail);
             assert!(
                 report.issues().iter().any(|i| {
-                    i.category == IssueCategory::SecurityPolicy
-                        && i.message.contains("symlink target is missing")
+                    i.category() == IssueCategory::SecurityPolicy
+                        && i.message().contains("symlink target is missing")
                 }),
                 "allowed={allowed}, got: {:?}",
                 report.issues()
@@ -2019,7 +1977,7 @@ mod tests {
         assert!(!report.issues().is_empty(), "Should detect symlink");
 
         let has_symlink_issue = report.issues().iter().any(|i| {
-            matches!(i.category, IssueCategory::SecurityPolicy) && i.message.contains("symlink")
+            matches!(i.category(), IssueCategory::SecurityPolicy) && i.message().contains("symlink")
         });
 
         assert!(
@@ -2057,7 +2015,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::InvalidPermissions),
+                .any(|i| i.category() == IssueCategory::InvalidPermissions),
             "Should have InvalidPermissions issue for setuid"
         );
     }
@@ -2087,14 +2045,14 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::ExecutableFile),
+                .any(|i| i.category() == IssueCategory::ExecutableFile),
             "Should have ExecutableFile issue"
         );
         assert!(
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::SuspiciousPath),
+                .any(|i| i.category() == IssueCategory::SuspiciousPath),
             "Should have SuspiciousPath issue for .sh extension"
         );
         assert_eq!(
@@ -2130,7 +2088,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::HeaderMismatch)
+                .any(|i| i.category() == IssueCategory::HeaderMismatch)
         );
         assert_eq!(report.total_entries(), 1);
     }
@@ -2170,8 +2128,8 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::InvalidArchive
-                    && i.message.contains("file name too long")),
+                .any(|i| i.category() == IssueCategory::InvalidArchive
+                    && i.message().contains("file name too long")),
             "{:?}",
             report.issues()
         );

@@ -7,6 +7,8 @@ mod error;
 mod operation;
 mod output;
 mod progress;
+#[cfg(test)]
+mod test_support;
 
 use clap::Parser;
 use commands::CommandResult;

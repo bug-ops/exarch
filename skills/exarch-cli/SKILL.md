@@ -133,7 +133,7 @@ exarch create out.tar.gz src/ --json
 |---|---|---|
 | `-f, --force` | off | Replace `OUTPUT` if it already exists. The archive is written to a temporary file in `OUTPUT`'s directory (which must be writable) and renamed into place only when complete, so a failed run leaves the previous archive untouched and no temp file behind; a replaced file keeps its permission bits (verified live: a `0600` archive stays `0600`). Without `--force` an existing `OUTPUT` is refused with `OutputExists` (exit `1`, `HINT: Use --force to overwrite.`) and left as it was. A directory, FIFO or device as `OUTPUT` is refused even with `--force` (`InvalidConfiguration`, setting `output_path`). The output file is never archived into itself. |
 | `-l, --compression-level <1-9>` | 6 | Compression level on a shared 1-9 scale (each codec maps it to its own range). A value outside 1-9 is refused as `InvalidCompressionLevel` with exit `1`; a value that is not a whole number is a clap usage error (exit `2`). |
-| `-x, --exclude <PATTERN>` | none | Glob exclude pattern; repeatable. |
+| `-x, --exclude <PATTERN>` | none | Exclude pattern; repeatable. One path component matched exactly (`node_modules`), as a prefix (`tmp*`) or as a suffix (`*.log`), or a relative path with separators (`build/out`) that excludes that path and everything below it. Any other shape is refused rather than silently matching nothing: an inner or second `*`, a bare `*`, a `*` next to a separator (`build/*`; use `build`), `.`/`..`, an absolute path, an empty or NUL-containing value. A refusal is `InvalidConfiguration` (setting `exclude_pattern`), exit `1`, with the JSON envelope under `--json`, and no archive is written (verified live: `-x 'build/*'` and `-x 'a*b'`). Excluded entries are counted in `skipped_by_kind.excluded`. |
 | `--strip-prefix <PREFIX>` | none | Strip a path prefix from entry names. |
 | `--include-hidden` | off | Include dotfiles/hidden entries. |
 | `--follow-symlinks` | off | Follow symlinks when walking source trees (stores target contents, not the link). |
@@ -533,7 +533,7 @@ three-entry archive where the first entry extracts, the second is skipped for a 
 extension (via `--allowed-extensions`), and the third is a symlink rejected by the (default-off)
 `--allow-symlinks` check. The same progress counts, skip count, and warnings also appear as free
 text inside `error.message` (prefixed `"WARNING: Extraction was stopped. ..."`, with optional
-`"Files skipped: N"` / `"Warnings:"` lines when non-empty) — prefer the structured
+`"Files skipped: N"` / `"Warnings:"` lines when non-empty; the partial report carries the same skip fields as a finished run) — prefer the structured
 `error.partial_report` field over parsing that text.
 
 Human-readable output (`list`, `list -l`, `verify` issue lines, `extract -v`, warnings and error
@@ -599,14 +599,23 @@ Success (`extract`):
     "symlinks_created": 0,
     "bytes_written": 6,
     "files_skipped": 0,
+    "skipped_by_kind": {},
+    "skipped_sample": [],
     "duration_ms": 0,
     "warnings": []
   }
 }
 ```
 
-`files_skipped` and `warnings` are populated whenever entries are skipped without failing the
-extraction — e.g. `--allowed-extensions` rejecting entries by extension, or duplicate destination
+`files_skipped` (the total), `skipped_by_kind` (exact counts per reason: `duplicate`,
+`extension_not_allowed`, `excluded`, `hidden`, `over_max_file_size`, `symlink_unsupported`,
+`unreadable`; only reasons that occurred) and `skipped_sample` (the first 64 skipped entries, each
+`{"kind", "path"}` plus `io_kind` for an unreadable one) are populated whenever entries are skipped
+without failing the extraction; `warnings` holds other conditions (7z anti-items, an undeletable
+backup). `create` reports the same three skip fields. In text mode the total is followed by one
+`kind: N` line per reason. Verified live: `extract --allowed-extensions md` of a one-file archive prints
+`Files skipped: 1` / `extension_not_allowed: 1`, and `create -x a.txt` prints `excluded: 1`. A skip no
+longer appears as a free-text warning — e.g. `--allowed-extensions` rejecting entries by extension, or duplicate destination
 files skipped under `--skip-duplicates` semantics (the default when `--force` is absent).
 Verified live with a mixed-extension archive extracted via `--allowed-extensions txt`:
 
@@ -620,10 +629,15 @@ Verified live with a mixed-extension archive extracted via `--allowed-extensions
     "symlinks_created": 0,
     "bytes_written": 18,
     "files_skipped": 2,
+    "skipped_by_kind": {
+      "extension_not_allowed": 2
+    },
+    "skipped_sample": [
+      {"kind": "extension_not_allowed", "path": "a.bin"},
+      {"kind": "extension_not_allowed", "path": "b.bin"}
+    ],
     "duration_ms": 0,
-    "warnings": [
-      "skipped 2 entries with disallowed extensions"
-    ]
+    "warnings": []
   }
 }
 ```
@@ -653,16 +667,16 @@ partial extraction is kept):
   "status": "error",
   "error": {
     "kind": "SecurityViolation",
-    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nFiles skipped: 1\nWarnings:\n  - skipped 1 entry with disallowed extension\nHINT: Inspect or remove the output directory before re-running.: operation denied by security policy: symlinks not allowed",
+    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nFiles skipped: 1\nHINT: Inspect or remove the output directory before re-running.: operation denied by security policy: symlinks not allowed",
     "partial_report": {
       "files_extracted": 1,
       "directories_created": 0,
       "symlinks_created": 0,
       "bytes_written": 5,
       "files_skipped": 1,
-      "warnings": [
-        "skipped 1 entry with disallowed extension"
-      ],
+      "skipped_by_kind": {"extension_not_allowed": 1},
+      "skipped_sample": [{"kind": "extension_not_allowed", "path": "x.bin"}],
+      "warnings": [],
       "writes": "kept"
     }
   }

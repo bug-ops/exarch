@@ -33,6 +33,7 @@ use exarch_core::Extension;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
+use exarch_core::ExtractionWarning;
 use exarch_core::ListOptions;
 use exarch_core::ListRequest;
 use exarch_core::ListedArchive;
@@ -402,16 +403,16 @@ impl<'a> DisplacedDestination<'a> {
         let Ok((_, observed)) = self.pin.entry_status(&self.backup_name) else {
             return;
         };
-        let qualifier = match observed.check(backup_id) {
-            IdentityCheck::Same => "",
-            IdentityCheck::Unknown => " (its identity could not be verified on this platform)",
+        let identity_unverified = match observed.check(backup_id) {
+            IdentityCheck::Same => false,
+            IdentityCheck::Unknown => true,
             IdentityCheck::Different => return,
         };
-        report.warnings.push(format!(
-            "failed to remove backup of the original destination at {}{qualifier} \
-             ({cleanup_err}); it must be cleaned up manually",
-            self.backup_path.display()
-        ));
+        report.add_warning(ExtractionWarning::BackupCleanupFailed {
+            path: self.backup_path.clone(),
+            identity_unverified,
+            error: cleanup_err.to_string(),
+        });
     }
 }
 

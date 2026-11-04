@@ -291,15 +291,15 @@ impl PartialExtractionContext {
                         r.files_extracted, r.directories_created, r.symlinks_created,
                     ))
                     .lit(" were written to disk before the error.");
-                if r.files_skipped > 0 {
+                if r.files_skipped() > 0 {
                     message = message
                         .lit("\nFiles skipped: ")
-                        .text(r.files_skipped.to_string());
+                        .text(r.files_skipped().to_string());
                 }
                 if !r.warnings.is_empty() {
                     message = message.lit("\nWarnings:");
                     for warning in &r.warnings {
-                        message = message.lit("\n  - ").text(warning.clone());
+                        message = message.lit("\n  - ").text(warning.to_string());
                     }
                 }
                 message.lit("\nHINT: Inspect or remove the output directory before re-running.")
@@ -781,20 +781,21 @@ mod tests {
 
     #[test]
     fn test_partial_hardlink_escape_inner_text_appears_once() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -1013,20 +1014,21 @@ mod tests {
 
     #[test]
     fn test_partial_symlink_escape_inner_text_appears_once() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::SymlinkEscape {
             path: PathBuf::from("symlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 2,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 100,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 2;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 100;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -1048,20 +1050,23 @@ mod tests {
 
     #[test]
     fn test_partial_display_shows_files_skipped_and_warnings_when_present() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 2,
-            warnings: vec!["skipped a broken symlink".to_string()],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(2);
+            r.warnings = vec![crate::test_support::extraction_warning(
+                "skipped a broken symlink",
+            )];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -1080,18 +1085,19 @@ mod tests {
 
     #[test]
     fn test_partial_security_violation_keeps_hint_and_partial_progress_wording() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::from(Violation::LinksNotAllowed(LinkKind::Symlink));
-        let report = ExtractionReport {
-            files_extracted: 3,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 42,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 3;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 42;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -1117,17 +1123,18 @@ mod tests {
 
     #[test]
     fn test_partial_rolled_back_display_makes_no_written_claim() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             ArchiveError::HardlinkEscape {
@@ -1146,17 +1153,18 @@ mod tests {
 
     #[test]
     fn test_partial_rolled_back_display_omits_the_discarded_runs_skips_and_warnings() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 3,
-            warnings: vec!["skipped 3 entries".to_string()],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(3);
+            r.warnings = vec![crate::test_support::extraction_warning("skipped 3 entries")];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             ArchiveError::HardlinkEscape {
@@ -1175,20 +1183,21 @@ mod tests {
 
     #[test]
     fn test_partial_display_hides_files_skipped_and_warnings_when_empty() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -1255,9 +1264,10 @@ mod tests {
 
     fn forged_warning_context() -> PartialExtractionContext {
         PartialExtractionContext {
-            report: ExtractionReport {
-                warnings: vec!["w\x1b[31m\nforged".to_string()],
-                ..ExtractionReport::default()
+            report: {
+                let mut r = exarch_core::ExtractionReport::new();
+                r.warnings = vec![crate::test_support::extraction_warning("w\x1b[31m\nforged")];
+                r
             },
             writes: PartialWrites::Kept,
             inner: anyhow::anyhow!("inner"),

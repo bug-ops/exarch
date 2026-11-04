@@ -19,6 +19,8 @@ use exarch_core::ExtractionReport;
 use exarch_core::IssueSeverity;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
+use exarch_core::SkipKind;
+use exarch_core::Skips;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
 use std::io::Write;
@@ -173,7 +175,7 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
     }
 
     /// A blank line, the warnings heading and one line per warning.
-    fn write_warnings(&mut self, warnings: &[String]) {
+    fn write_warnings(&mut self, warnings: &[impl std::fmt::Display]) {
         emit_blank(&mut self.out);
         emit_line(
             &mut self.out,
@@ -182,8 +184,23 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
         for warning in warnings {
             emit_line(
                 &mut self.out,
-                format_args!("  - {}", TerminalText::new(warning)),
+                format_args!("  - {}", TerminalText::new(&warning.to_string())),
             );
+        }
+    }
+
+    /// The skip total and, under it, one line per reason that occurred.
+    /// `label` pads the total's label to the report's column.
+    fn write_skips(&mut self, label: &str, skips: &Skips) {
+        if skips.is_empty() {
+            return;
+        }
+        emit_line(&mut self.out, format_args!("{label}{}", skips.total()));
+        for kind in SkipKind::ALL {
+            let count = skips.count(*kind);
+            if count > 0 {
+                emit_line(&mut self.out, format_args!("    {kind}: {count}"));
+            }
         }
     }
 
@@ -325,12 +342,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                 format_args!("  Total size: {}", humanize_bytes(report.bytes_written)),
             );
 
-            if report.files_skipped > 0 {
-                emit_line(
-                    &mut f.out,
-                    format_args!("  Files skipped: {}", report.files_skipped),
-                );
-            }
+            f.write_skips("  Files skipped: ", &report.skipped);
 
             if f.verbosity == Verbosity::Verbose {
                 emit_line(
@@ -399,12 +411,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                 );
             }
 
-            if report.files_skipped > 0 {
-                emit_line(
-                    &mut f.out,
-                    format_args!("  Files skipped:    {}", report.files_skipped),
-                );
-            }
+            f.write_skips("  Files skipped:    ", &report.skipped);
 
             if report.has_warnings() {
                 f.write_warnings(&report.warnings);
@@ -558,27 +565,21 @@ mod tests {
     }
 
     fn sample_extraction_report() -> ExtractionReport {
-        ExtractionReport {
-            files_extracted: 3,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 2048,
-            duration: std::time::Duration::from_secs(1),
-            ..Default::default()
-        }
+        let mut r = ExtractionReport::new();
+        r.files_extracted = 3;
+        r.directories_created = 1;
+        r.duration = std::time::Duration::from_secs(1);
+        r.bytes_written = 2048;
+        r
     }
 
     fn sample_creation_report() -> CreationReport {
-        CreationReport {
-            files_added: 2,
-            directories_added: 1,
-            symlinks_added: 0,
-            bytes_written: 1024,
-            bytes_compressed: 0,
-            files_skipped: 0,
-            duration: std::time::Duration::from_secs(1),
-            warnings: vec![],
-        }
+        let mut r = CreationReport::new();
+        r.files_added = 2;
+        r.directories_added = 1;
+        r.bytes_written = 1024;
+        r.duration = std::time::Duration::from_secs(1);
+        r
     }
 
     #[test]
@@ -602,10 +603,12 @@ mod tests {
     fn format_extraction_result_with_warnings_and_files_skipped() {
         let mut f = formatter(Verbosity::Normal, false);
         let mut report = sample_extraction_report();
-        report.files_skipped = 2;
+        report.skipped = crate::test_support::skips(2);
         report
             .warnings
-            .push("skipped 2 entries with disallowed extensions".to_string());
+            .push(crate::test_support::extraction_warning(
+                "skipped 2 entries with disallowed extensions",
+            ));
         f.format_extraction_result(&report).unwrap();
         let text = out_text(&f);
         assert!(text.contains("Files skipped: 2"));
@@ -676,8 +679,10 @@ mod tests {
         let mut f = formatter(Verbosity::Normal, false);
         let mut report = sample_creation_report();
         report.bytes_compressed = 512;
-        report.files_skipped = 1;
-        report.warnings.push("skipped a broken symlink".to_string());
+        report.skipped = crate::test_support::skips(1);
+        report.warnings.push(crate::test_support::creation_warning(
+            "skipped a broken symlink",
+        ));
         f.format_creation_result(Path::new("out.tar.gz"), &report)
             .unwrap();
         let text = out_text(&f);
@@ -1037,10 +1042,14 @@ mod tests {
     fn format_extraction_and_creation_warnings_escape_control_characters() {
         let mut f = formatter(Verbosity::Normal, false);
         let mut report = sample_extraction_report();
-        report.warnings.push(HOSTILE.to_string());
+        report
+            .warnings
+            .push(crate::test_support::extraction_warning(HOSTILE));
         f.format_extraction_result(&report).unwrap();
         let mut creation = sample_creation_report();
-        creation.warnings.push(HOSTILE.to_string());
+        creation
+            .warnings
+            .push(crate::test_support::creation_warning(HOSTILE));
         f.format_creation_result(Path::new(HOSTILE), &creation)
             .unwrap();
         let text = out_text(&f);

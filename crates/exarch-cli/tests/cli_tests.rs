@@ -1815,6 +1815,71 @@ fn test_verify_and_extract_agree_at_the_projected_landing_limit() {
     }
 }
 
+/// A skip is reported by kind, with exact counts and a sample (#906).
+#[test]
+fn test_skips_are_reported_per_kind_in_text_and_json() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("mixed.tar.gz");
+    make_mixed_extension_archive(&archive, 3, 2);
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allowed-extensions")
+        .arg("txt")
+        .arg(&archive)
+        .arg(temp.path().join("out-text"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Files skipped: 2"))
+        .stdout(predicates::str::contains("extension_not_allowed: 2"));
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("extract")
+        .arg("--allowed-extensions")
+        .arg("txt")
+        .arg(&archive)
+        .arg(temp.path().join("out-json"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["data"]["files_skipped"], 2);
+    assert_eq!(json["data"]["skipped_by_kind"]["extension_not_allowed"], 2);
+    assert_eq!(
+        json["data"]["skipped_sample"].as_array().map(Vec::len),
+        Some(2)
+    );
+}
+
+/// An exclude pattern the matcher cannot honor is refused, not silently
+/// matched against nothing (#916).
+#[test]
+fn test_create_refuses_unsupported_exclude_patterns() {
+    for pattern in ["build/*", "a*b", "*", "..", ""] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let out = temp.path().join("o.tar.gz");
+        let output = exarch_cmd()
+            .arg("--json")
+            .arg("create")
+            .arg("-x")
+            .arg(pattern)
+            .arg(&out)
+            .arg(fixture_path("sample.txt"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+        assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{pattern:?}");
+        assert_eq!(json["error"]["setting"], "exclude_pattern", "{pattern:?}");
+        assert!(!out.exists(), "{pattern:?} must not create an archive");
+    }
+}
+
 #[test]
 fn test_fractional_compression_ratio_is_accepted() {
     exarch_cmd()

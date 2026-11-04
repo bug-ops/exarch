@@ -10,10 +10,13 @@ use exarch_core::ExtractionReport;
 use exarch_core::FfiKind;
 use exarch_core::PartialWrites;
 use exarch_core::PolicySetting;
+use exarch_core::SkipKind;
+use exarch_core::Skips;
 use exarch_core::SubCode;
 use exarch_core::VerificationReport;
 use serde::Serialize;
 use serde::Serializer;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Units of the size column in the long manifest listing.
@@ -150,6 +153,46 @@ impl Serialize for JsonKind {
     }
 }
 
+/// One skipped entry in a report's bounded sample.
+#[derive(Debug, Serialize)]
+pub struct JsonSkip {
+    pub kind: &'static str,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_kind: Option<String>,
+}
+
+/// What an operation left out: the total, exact counts per reason (only the
+/// reasons that occurred) and a bounded sample of the individual entries.
+#[derive(Debug, Serialize)]
+pub struct JsonSkips {
+    pub files_skipped: usize,
+    pub skipped_by_kind: BTreeMap<&'static str, usize>,
+    pub skipped_sample: Vec<JsonSkip>,
+}
+
+impl From<&Skips> for JsonSkips {
+    fn from(skips: &Skips) -> Self {
+        Self {
+            files_skipped: skips.total(),
+            skipped_by_kind: SkipKind::ALL
+                .iter()
+                .filter(|kind| skips.count(**kind) > 0)
+                .map(|kind| (kind.as_str(), skips.count(*kind)))
+                .collect(),
+            skipped_sample: skips
+                .sample()
+                .iter()
+                .map(|skip| JsonSkip {
+                    kind: skip.kind.as_str(),
+                    path: skip.path.display().to_string(),
+                    io_kind: skip.io_kind.map(|kind| kind.to_string()),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The counters of an extraction, shared by a finished run and the partial
 /// report of a stopped one.
 #[derive(Debug, Serialize)]
@@ -158,7 +201,8 @@ pub struct JsonExtractionCounts {
     pub directories_created: usize,
     pub symlinks_created: usize,
     pub bytes_written: u64,
-    pub files_skipped: usize,
+    #[serde(flatten)]
+    pub skips: JsonSkips,
     pub warnings: Vec<String>,
 }
 
@@ -169,8 +213,8 @@ impl From<&ExtractionReport> for JsonExtractionCounts {
             directories_created: report.directories_created,
             symlinks_created: report.symlinks_created,
             bytes_written: report.bytes_written,
-            files_skipped: report.files_skipped,
-            warnings: report.warnings.clone(),
+            skips: JsonSkips::from(&report.skipped),
+            warnings: report.warnings.iter().map(ToString::to_string).collect(),
         }
     }
 }

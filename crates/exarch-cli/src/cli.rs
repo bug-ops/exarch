@@ -354,7 +354,8 @@ pub struct CreateArgs {
     #[arg(long)]
     pub include_hidden: bool,
 
-    /// Exclude pattern (glob, can be repeated)
+    /// Exclude pattern, can be repeated: a name, `name*`, `*name` (one path
+    /// component) or a relative path with separators (that path and below)
     #[arg(long = "exclude", short = 'x', value_name = "PATTERN")]
     pub exclude: Vec<String>,
 

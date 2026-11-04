@@ -366,13 +366,13 @@ impl TarReadBudget {
         }
     }
 
-    /// Raw archive bytes consumed so far; under an [`TapSource::Opaque`]
-    /// source this is the decoded byte count, so a decoded/consumed ratio is
-    /// about one and never exceeds any ratio limit.
+    /// Raw archive bytes consumed so far; under an [`TapSource::Opaque`] or
+    /// [`TapSource::Replay`] source this is the decoded byte count, so a
+    /// decoded/consumed ratio is about one and never exceeds any ratio limit.
     fn source_consumed(&self) -> u64 {
         match &self.0.source {
             TapSource::Tapped(tap) => tap.consumed(),
-            TapSource::Opaque => self.total_read(),
+            TapSource::Opaque | TapSource::Replay(_) => self.total_read(),
         }
     }
 

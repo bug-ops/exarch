@@ -55,6 +55,8 @@ use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::source_fault::SourceRead;
+use crate::formats::source_fault::SourceTap;
 use crate::formats::source_fault::TapSource;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::traits::ArchiveFormat;
@@ -230,18 +232,31 @@ impl ListedArchive {
         };
         let config = validated;
         extract_staged(output_dir.as_ref(), options, |dir| {
-            let stream = BufReader::with_capacity(SPOOL_BUFFER, spool.file);
-            extract_tar_stream(
-                stream,
-                TapSource::Opaque,
-                TarTrailer::DrainToDecoderEof,
-                dir,
-                &config,
-                options,
-                progress,
-            )
+            replay_spool(spool.file, dir, &config, options, progress)
         })
     }
+}
+
+/// Extracts the decoded TAR stream `spool`, reporting a fault of the spool as
+/// the I/O error it raised rather than as a corrupt archive.
+fn replay_spool<R: Read>(
+    spool: R,
+    dir: &Path,
+    config: &SecurityConfig<Validated>,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport> {
+    let tap = SourceTap::default();
+    let stream = BufReader::with_capacity(SPOOL_BUFFER, SourceRead::new(spool, tap.clone()));
+    extract_tar_stream(
+        stream,
+        TapSource::Replay(tap),
+        TarTrailer::DrainToDecoderEof,
+        dir,
+        config,
+        options,
+        progress,
+    )
 }
 
 /// Lists an archive and keeps what extraction can reuse.
@@ -837,6 +852,68 @@ mod tests {
         let mut sink = [0; 8];
         while tee.read(&mut sink).is_ok_and(|n| n > 0) {}
         tee.finish_spool(&SecurityConfig::default().validate().unwrap())
+    }
+
+    const EIO: i32 = 5;
+
+    /// Serves `inner` until `remaining` bytes were read, then fails every read.
+    struct FailAfter {
+        inner: io::Cursor<Vec<u8>>,
+        remaining: usize,
+    }
+
+    impl Read for FailAfter {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::from_raw_os_error(EIO));
+            }
+            let want = buf.len().min(self.remaining);
+            let n = self.inner.read(&mut buf[..want])?;
+            self.remaining -= n;
+            Ok(n)
+        }
+    }
+
+    fn replay_failing_after(bytes: &[u8], budget: usize) -> Result<ExtractionReport> {
+        let dir = TempDir::new().unwrap();
+        let spool = FailAfter {
+            inner: io::Cursor::new(bytes.to_vec()),
+            remaining: budget,
+        };
+        let config = SecurityConfig::default().validate().unwrap();
+        replay_spool(
+            spool,
+            dir.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut NoopProgress,
+        )
+    }
+
+    fn io_root(error: &crate::ArchiveError) -> &crate::ArchiveError {
+        match error {
+            crate::ArchiveError::PartialExtraction { source, .. } => io_root(source),
+            other => other,
+        }
+    }
+
+    #[test]
+    fn a_spool_read_fault_is_io_with_its_errno_at_every_position() {
+        let tar = create_test_tar(vec![
+            ("a.txt", &[1u8; 3000][..]),
+            ("dir/b.bin", &[2u8; 5000][..]),
+            ("c.txt", CONTENT),
+        ]);
+
+        for budget in (0..tar.len()).step_by(11) {
+            let error = replay_failing_after(&tar, budget).unwrap_err();
+            assert_matches!(
+                io_root(&error),
+                crate::ArchiveError::Io(e) if e.raw_os_error() == Some(EIO),
+                "budget {budget}: {error:?}"
+            );
+        }
+        replay_failing_after(&tar, tar.len() + 1).unwrap();
     }
 
     #[test]

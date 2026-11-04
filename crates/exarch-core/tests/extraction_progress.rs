@@ -23,7 +23,7 @@ struct Counter {
 }
 
 impl ProgressCallback for Counter {
-    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+    fn on_entry_start(&mut self, _path: &Path, _position: exarch_core::EntryPosition) {
         self.starts += 1;
     }
 

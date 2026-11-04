@@ -7,6 +7,9 @@
 use crate::ArchiveError;
 use crate::IoContext;
 use crate::Result;
+use crate::Skip;
+use crate::SkipKind;
+use crate::Skips;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
 use crate::creation::staged::ExcludedOutput;
@@ -79,43 +82,48 @@ impl<'a> FilteredWalker<'a> {
     /// - File metadata cannot be read
     /// - Path is not valid UTF-8 (platform-specific)
     /// - Symlink target cannot be read
-    pub fn walk(&self) -> impl Iterator<Item = Result<FilteredEntry>> + '_ {
+    pub fn walk(&self) -> impl Iterator<Item = Result<WalkItem>> + '_ {
         let walker = WalkDir::new(self.root)
             .follow_links(self.config.follow_symlinks)
             .into_iter();
 
-        walker.filter_map(move |entry| {
-            match entry {
-                Ok(entry) => {
-                    let path = entry.path();
-
-                    // Skip if matches filter rules
-                    if filters::should_skip(path, self.config) {
-                        return None;
-                    }
-
-                    // Build FilteredEntry
-                    match self.build_filtered_entry(&entry) {
-                        Ok(Some(filtered)) => Some(Ok(filtered)),
-                        Ok(None) => None, // Filtered out (e.g., size limit)
-                        Err(e) => Some(Err(e)),
-                    }
-                }
-                Err(e) => {
-                    // Convert walkdir error to ArchiveError
-                    Some(Err(ArchiveError::Io(std::io::Error::other(
-                        IoContext::new("directory walk failed", e.to_string()),
-                    ))))
-                }
+        walker.filter_map(move |entry| match entry {
+            Ok(entry) => self.visit(&entry).transpose(),
+            Err(e) => {
+                // Convert walkdir error to ArchiveError
+                Some(Err(ArchiveError::Io(std::io::Error::other(
+                    IoContext::new("directory walk failed", e.to_string()),
+                ))))
             }
         })
     }
 
-    /// Builds a `FilteredEntry` from a `walkdir::DirEntry`.
+    /// Applies the filter rules to one walked entry.
     ///
-    /// Returns `Ok(None)` if the entry should be filtered out (e.g., exceeds
-    /// size limit).
-    fn build_filtered_entry(&self, entry: &walkdir::DirEntry) -> Result<Option<FilteredEntry>> {
+    /// Returns `Ok(None)` for the walk root, which is no entry of the archive.
+    fn visit(&self, entry: &walkdir::DirEntry) -> Result<Option<WalkItem>> {
+        let relative = filters::compute_archive_path(entry.path(), self.root, self.config)?;
+        match ArchiveEntryName::from_relative(&relative) {
+            Some(name) => filters::skip_reason(&name, self.config).map_or_else(
+                || self.build_filtered_entry(entry, relative),
+                |kind| Ok(Some(WalkItem::Skipped(Skip::new(kind, name.to_path_buf())))),
+            ),
+            // No name left: the walk root, or an entry `strip_prefix` emptied.
+            None if !self.config.include_hidden && filters::is_hidden(entry.path()) => Ok(None),
+            None => self.build_filtered_entry(entry, relative),
+        }
+    }
+
+    /// Builds a `WalkItem` from a `walkdir::DirEntry` that passed the filter
+    /// rules.
+    ///
+    /// Returns `Ok(None)` for an entry with no name left, and a skip for a
+    /// file over the size limit.
+    fn build_filtered_entry(
+        &self,
+        entry: &walkdir::DirEntry,
+        relative: PathBuf,
+    ) -> Result<Option<WalkItem>> {
         let path = entry.path().to_path_buf();
         let metadata = entry.metadata().map_err(|e| {
             ArchiveError::Io(std::io::Error::other(IoContext::new(
@@ -142,22 +150,49 @@ impl<'a> FilteredWalker<'a> {
         // Check file size limit (only for regular files)
         let size = get_file_size(&metadata);
         if entry_type == EntryType::File && !self.config.max_file_size.admits(size) {
-            return Ok(None); // Filter out
+            let shown = if relative.as_os_str().is_empty() {
+                path
+            } else {
+                relative
+            };
+            return Ok(Some(WalkItem::Skipped(Skip::new(
+                SkipKind::OverMaxFileSize,
+                shown,
+            ))));
         }
 
-        let relative = filters::compute_archive_path(&path, self.root, self.config)?;
         let Some(archive_path) = entry_name(&path, &relative, entry_type == EntryType::Directory)?
         else {
             return Ok(None);
         };
 
-        Ok(Some(FilteredEntry {
+        Ok(Some(WalkItem::Entry(FilteredEntry {
             path,
             archive_path,
             entry_type,
             size,
-        }))
+        })))
     }
+}
+
+/// What the walker decided about one walked entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalkItem {
+    /// The entry goes into the archive.
+    Entry(FilteredEntry),
+
+    /// The entry is left out, with the reason.
+    Skipped(Skip),
+}
+
+/// The entries of a creation and what was left out on the way.
+#[derive(Debug, Default)]
+pub struct Collected {
+    /// The entries to add, in walk order.
+    pub entries: Vec<FilteredEntry>,
+
+    /// The entries the filters left out.
+    pub skipped: Skips,
 }
 
 /// Name of an entry inside a created archive: relative, normalized and
@@ -272,8 +307,8 @@ pub fn collect_entries<P: AsRef<Path>>(
     sources: &[P],
     config: &CreationConfig,
     excluded: &ExcludedOutput,
-) -> Result<Vec<FilteredEntry>> {
-    let mut entries = Vec::new();
+) -> Result<Collected> {
+    let mut collected = Collected::default();
 
     for source in sources {
         let path = source.as_ref();
@@ -304,10 +339,14 @@ pub fn collect_entries<P: AsRef<Path>>(
         // open the symlink as a regular file and fail with an I/O error.
         if metadata.is_dir() || (config.follow_symlinks && path.is_dir()) {
             let walker = FilteredWalker::new(path, config);
-            for entry in walker.walk() {
-                let entry = entry?;
-                if !excluded.excludes(&entry.path) {
-                    entries.push(entry);
+            for item in walker.walk() {
+                match item? {
+                    WalkItem::Entry(entry) => {
+                        if !excluded.excludes(&entry.path) {
+                            collected.entries.push(entry);
+                        }
+                    }
+                    WalkItem::Skipped(skip) => collected.skipped.record(skip)?,
                 }
             }
         } else {
@@ -348,7 +387,7 @@ pub fn collect_entries<P: AsRef<Path>>(
             if !excluded.excludes(path)
                 && let Some(archive_path) = entry_name(path, &relative, false)?
             {
-                entries.push(FilteredEntry {
+                collected.entries.push(FilteredEntry {
                     path: path.to_path_buf(),
                     archive_path,
                     entry_type,
@@ -358,7 +397,7 @@ pub fn collect_entries<P: AsRef<Path>>(
         }
     }
 
-    Ok(entries)
+    Ok(collected)
 }
 
 /// Gets the file size from metadata in a cross-platform way.
@@ -377,9 +416,93 @@ fn get_file_size(metadata: &Metadata) -> u64 {
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
+    use crate::creation::ExcludePattern;
     use std::assert_matches;
     use std::fs;
     use tempfile::TempDir;
+
+    fn walked_items(walker: &FilteredWalker<'_>) -> Vec<WalkItem> {
+        walker.walk().collect::<Result<Vec<_>>>().unwrap()
+    }
+
+    fn walked_entries(walker: &FilteredWalker<'_>) -> Vec<FilteredEntry> {
+        walked_items(walker)
+            .into_iter()
+            .filter_map(|item| match item {
+                WalkItem::Entry(entry) => Some(entry),
+                WalkItem::Skipped(_) => None,
+            })
+            .collect()
+    }
+
+    /// #916: the root's own ancestors used to match the exclude patterns, so
+    /// the default `*.tmp` emptied an archive whose source sat under `job.tmp`.
+    #[test]
+    fn test_walker_ignores_patterns_matching_the_ancestors_of_the_root() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("job.tmp").join("src");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "a").unwrap();
+        fs::write(root.join("b.rs"), "b").unwrap();
+
+        let config = CreationConfig::default();
+        let collected =
+            collect_entries(&[root.as_path()], &config, &ExcludedOutput::none()).unwrap();
+
+        assert_eq!(collected.entries.len(), 2);
+        assert!(collected.skipped.is_empty());
+    }
+
+    #[test]
+    fn test_walker_counts_what_the_filters_leave_out() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::write(root.join("keep.txt"), "keep").unwrap();
+        fs::write(root.join("skip.tmp"), "x").unwrap();
+        fs::write(root.join(".secret"), "x").unwrap();
+        fs::write(root.join("big.bin"), "a".repeat(1000)).unwrap();
+
+        let config = CreationConfig::default().with_max_file_size(crate::non_zero!(100));
+        let collected = collect_entries(&[root], &config, &ExcludedOutput::none()).unwrap();
+
+        assert_eq!(collected.entries.len(), 1);
+        assert_eq!(collected.skipped.count(SkipKind::Excluded), 1);
+        assert_eq!(collected.skipped.count(SkipKind::Hidden), 1);
+        assert_eq!(collected.skipped.count(SkipKind::OverMaxFileSize), 1);
+        let mut sample: Vec<_> = collected
+            .skipped
+            .sample()
+            .iter()
+            .map(|skip| skip.path.clone())
+            .collect();
+        sample.sort();
+        assert_eq!(
+            sample,
+            [".secret", "big.bin", "skip.tmp"].map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn test_walker_path_pattern_excludes_the_subtree_by_archive_path() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("build/out")).unwrap();
+        fs::write(root.join("build/out/app"), "bin").unwrap();
+        fs::write(root.join("build/keep.txt"), "k").unwrap();
+
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![ExcludePattern::try_from("build/out").unwrap()]);
+        let collected = collect_entries(&[root], &config, &ExcludedOutput::none()).unwrap();
+
+        let paths: Vec<_> = collected
+            .entries
+            .iter()
+            .map(|e| e.archive_path.to_str().unwrap().to_owned())
+            .collect();
+        assert!(paths.contains(&"build/keep.txt".to_owned()));
+        assert!(!paths.iter().any(|p| p.starts_with("build/out")));
+        assert_eq!(collected.skipped.count(SkipKind::Excluded), 2);
+    }
 
     #[test]
     fn test_walker_basic_directory() {
@@ -397,7 +520,7 @@ mod tests {
             .with_exclude_patterns(vec![]);
 
         let walker = FilteredWalker::new(root, &config);
-        let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
+        let entries = walked_entries(&walker);
 
         // Should find exactly: file1, file2, subdir, file3; the root is not
         // an entry.
@@ -424,7 +547,7 @@ mod tests {
 
         let config = CreationConfig::default(); // include_hidden = false by default
         let walker = FilteredWalker::new(root, &config);
-        let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
+        let entries = walked_entries(&walker);
 
         let paths: Vec<_> = entries
             .iter()
@@ -445,7 +568,7 @@ mod tests {
 
         let config = CreationConfig::default().with_include_hidden(true);
         let walker = FilteredWalker::new(root, &config);
-        let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
+        let entries = walked_entries(&walker);
 
         let paths: Vec<_> = entries
             .iter()
@@ -465,11 +588,13 @@ mod tests {
         fs::write(root.join("skip.tmp"), "skip").unwrap();
         fs::write(root.join("also.log"), "skip").unwrap();
 
-        let config = CreationConfig::default()
-            .with_exclude_patterns(vec!["*.tmp".to_string(), "*.log".to_string()]);
+        let config = CreationConfig::default().with_exclude_patterns(vec![
+            ExcludePattern::try_from("*.tmp").unwrap(),
+            ExcludePattern::try_from("*.log").unwrap(),
+        ]);
 
         let walker = FilteredWalker::new(root, &config);
-        let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
+        let entries = walked_entries(&walker);
 
         let paths: Vec<_> = entries
             .iter()
@@ -493,7 +618,7 @@ mod tests {
         // Don't follow symlinks (default)
         let config = CreationConfig::default();
         let walker = FilteredWalker::new(root, &config);
-        let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
+        let entries = walked_entries(&walker);
 
         let link_entry = entries
             .iter()
@@ -551,7 +676,7 @@ mod tests {
         let config = CreationConfig::default().with_max_file_size(crate::non_zero!(100));
 
         let walker = FilteredWalker::new(root, &config);
-        let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
+        let entries = walked_entries(&walker);
 
         let paths: Vec<_> = entries
             .iter()
@@ -572,7 +697,7 @@ mod tests {
 
         let config = CreationConfig::default();
         let walker = FilteredWalker::new(root, &config);
-        let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
+        let entries = walked_entries(&walker);
 
         let main_entry = entries
             .iter()
@@ -596,7 +721,7 @@ mod tests {
         let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from("project")));
 
         let walker = FilteredWalker::new(root, &config);
-        let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
+        let entries = walked_entries(&walker);
 
         let main_entry = entries
             .iter()
@@ -683,7 +808,9 @@ mod tests {
         let config = CreationConfig::default();
         let sources: Vec<&Path> = vec![];
 
-        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none())
+            .unwrap()
+            .entries;
 
         assert_eq!(entries.len(), 0);
     }
@@ -719,7 +846,9 @@ mod tests {
             root.join("dir2"),
         ];
 
-        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none())
+            .unwrap()
+            .entries;
 
         // single_file.txt + 2 files of dir1 + 1 file of dir2; the source
         // directories themselves are walk roots and are not entries.
@@ -757,7 +886,9 @@ mod tests {
         let config = CreationConfig::default().with_include_hidden(true);
         let sources = [root];
 
-        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none())
+            .unwrap()
+            .entries;
 
         // Should have: 50 files in root + 1 subdir + 1 root dir + 30 files in
         // subdir = 82
@@ -777,7 +908,9 @@ mod tests {
         let config = CreationConfig::default();
         let sources = [&file_path];
 
-        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none())
+            .unwrap()
+            .entries;
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, EntryType::File);
@@ -802,7 +935,9 @@ mod tests {
         let config = CreationConfig::default();
         let sources = [&link_path];
 
-        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none())
+            .unwrap()
+            .entries;
 
         assert_eq!(entries.len(), 1);
         assert_eq!(
@@ -831,7 +966,9 @@ mod tests {
         let config = CreationConfig::default();
         let sources = [&link_path];
 
-        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none())
+            .unwrap()
+            .entries;
 
         assert_eq!(entries.len(), 1);
         assert_eq!(
@@ -862,7 +999,9 @@ mod tests {
         let config = CreationConfig::default();
         let sources = [&link_path];
 
-        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none())
+            .unwrap()
+            .entries;
 
         assert_eq!(entries.len(), 1);
         assert_eq!(
@@ -888,11 +1027,13 @@ mod tests {
         fs::write(root.join(".hidden"), "hidden").unwrap();
 
         let config = CreationConfig::default()
-            .with_exclude_patterns(vec!["*.tmp".to_string()])
+            .with_exclude_patterns(vec![ExcludePattern::try_from("*.tmp").unwrap()])
             .with_include_hidden(false);
 
         let sources = [root];
-        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none())
+            .unwrap()
+            .entries;
 
         let paths: Vec<_> = entries
             .iter()

@@ -97,11 +97,11 @@ fn an_overlong_name_of_a_skipped_extension_is_not_refused_in_any_destination_sta
 
     let fresh = TempDir::new().unwrap();
     let report = extract_archive(&archive, fresh.path().join("new"), &config).unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
 
     let existing = TempDir::new().unwrap();
     let report = extract_archive(&archive, existing.path(), &config).unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     assert!(existing.path().join("ok.txt").is_file());
 }
 

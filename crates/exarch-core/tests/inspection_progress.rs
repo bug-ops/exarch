@@ -34,8 +34,7 @@ use tempfile::TempDir;
 enum Event {
     Start {
         path: PathBuf,
-        total: usize,
-        current: usize,
+        position: exarch_core::EntryPosition,
     },
     Complete(PathBuf),
     Done,
@@ -47,11 +46,10 @@ struct Recorder {
 }
 
 impl ProgressCallback for Recorder {
-    fn on_entry_start(&mut self, path: &Path, total: usize, current: usize) {
+    fn on_entry_start(&mut self, path: &Path, position: exarch_core::EntryPosition) {
         self.events.push(Event::Start {
             path: path.to_path_buf(),
-            total,
-            current,
+            position,
         });
     }
 
@@ -239,19 +237,20 @@ fn entry_numbers_are_one_based_and_totals_follow_the_format() {
         let mut recorder = Recorder::default();
         list_archive_with_progress(&path, &config, &ListOptions::default(), &mut recorder).unwrap();
         let expected_total = if format == ArchiveType::TarGz {
-            0
+            exarch_core::EntryTotal::Unknown
         } else {
-            entries
+            exarch_core::EntryTotal::Known(entries)
         };
-        let numbers: Vec<(usize, usize)> = recorder
+        let numbers: Vec<(exarch_core::EntryTotal, usize)> = recorder
             .events
             .iter()
             .filter_map(|e| match e {
-                Event::Start { total, current, .. } => Some((*total, *current)),
+                Event::Start { position, .. } => Some((position.total, position.current.get())),
                 _ => None,
             })
             .collect();
-        let expected: Vec<(usize, usize)> = (1..=entries).map(|n| (expected_total, n)).collect();
+        let expected: Vec<(exarch_core::EntryTotal, usize)> =
+            (1..=entries).map(|n| (expected_total, n)).collect();
         assert_eq!(numbers, expected, "{format}");
     }
 }

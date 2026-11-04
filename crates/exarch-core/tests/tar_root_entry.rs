@@ -213,7 +213,7 @@ fn root_directory_entry_stays_a_no_op() {
 
         let report = extract_archive(&archive, out.path(), &config).unwrap();
 
-        assert_eq!(report.files_skipped, 0, "{name:?}");
+        assert_eq!(report.files_skipped(), 0, "{name:?}");
         assert_eq!(std::fs::read(out.path().join("a.txt")).unwrap(), b"hi");
         assert!(verify_archive(&archive, &config).unwrap().is_safe());
         let manifest = list_archive(&archive, &config).unwrap();

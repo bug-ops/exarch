@@ -10,6 +10,7 @@ use crate::OutputFile;
 use crate::OutputFormat;
 use crate::creation::config::CompressionLevel;
 use crate::creation::config::CreationConfig;
+use crate::creation::filters::ExcludePattern;
 use crate::creation::report::CreationReport;
 use crate::error::ArchiveError;
 use crate::error::Result;
@@ -192,11 +193,16 @@ impl ArchiveCreator {
     /// ```
     /// use exarch_core::creation::ArchiveCreator;
     ///
-    /// let creator = ArchiveCreator::new().exclude("*.log").exclude("target/");
+    /// use exarch_core::creation::ExcludePattern;
+    ///
+    /// let creator = ArchiveCreator::new()
+    ///     .exclude(ExcludePattern::try_from("*.log")?)
+    ///     .exclude(ExcludePattern::try_from("target/")?);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
-    pub fn exclude<S: Into<String>>(mut self, pattern: S) -> Self {
-        self.config.exclude_patterns.push(pattern.into());
+    pub fn exclude(mut self, pattern: ExcludePattern) -> Self {
+        self.config.exclude_patterns.push(pattern);
         self
     }
 
@@ -287,6 +293,10 @@ mod tests {
     use std::assert_matches;
     use std::path::PathBuf;
 
+    fn pattern(text: &str) -> ExcludePattern {
+        ExcludePattern::try_from(text).unwrap()
+    }
+
     #[test]
     fn test_builder_basic() {
         let creator = ArchiveCreator::new()
@@ -323,8 +333,8 @@ mod tests {
             .compression_level(CompressionLevel::try_from(9u8).unwrap())
             .follow_symlinks(true)
             .include_hidden(true)
-            .exclude("*.log")
-            .exclude("target/")
+            .exclude(pattern("*.log"))
+            .exclude(pattern("target/"))
             .strip_prefix("/base")
             .format(CreatableFormat::TarGz);
 
@@ -334,17 +344,12 @@ mod tests {
         );
         assert!(creator.config.follow_symlinks);
         assert!(creator.config.include_hidden);
+        assert!(creator.config.exclude_patterns.contains(&pattern("*.log")));
         assert!(
             creator
                 .config
                 .exclude_patterns
-                .contains(&"*.log".to_string())
-        );
-        assert!(
-            creator
-                .config
-                .exclude_patterns
-                .contains(&"target/".to_string())
+                .contains(&pattern("target/"))
         );
         assert_eq!(creator.config.strip_prefix, Some(PathBuf::from("/base")));
         assert_eq!(
@@ -400,35 +405,20 @@ mod tests {
     #[test]
     fn test_builder_exclude_patterns() {
         let creator = ArchiveCreator::new()
-            .exclude("*.log")
-            .exclude("*.tmp")
-            .exclude(".git");
+            .exclude(pattern("*.log"))
+            .exclude(pattern("*.tmp"))
+            .exclude(pattern(".git"));
 
-        assert!(
-            creator
-                .config
-                .exclude_patterns
-                .contains(&"*.log".to_string())
-        );
-        assert!(
-            creator
-                .config
-                .exclude_patterns
-                .contains(&"*.tmp".to_string())
-        );
-        assert!(
-            creator
-                .config
-                .exclude_patterns
-                .contains(&".git".to_string())
-        );
+        for text in ["*.log", "*.tmp", ".git"] {
+            assert!(creator.config.exclude_patterns.contains(&pattern(text)));
+        }
 
         // Default exclude patterns should still be there
         assert!(
             creator
                 .config
                 .exclude_patterns
-                .contains(&".DS_Store".to_string())
+                .contains(&pattern(".DS_Store"))
         );
     }
 

@@ -341,13 +341,10 @@ fn skipped_duplicate_hardlink_is_counted_and_not_delivered() {
         sink_support::tar_hardlink("h", "t"),
     ];
     let report = extract_links(&entries, &mut sink, SinkOptions::default()).unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     assert_eq!(sink.tree.files[Path::new("h")], b"y");
-    assert!(
-        report.warnings.iter().any(|w| w.contains("hardlink")),
-        "{:?}",
-        report.warnings
-    );
+    assert_eq!(report.skipped.count(exarch_core::SkipKind::Duplicate), 1);
+    assert!(report.warnings.is_empty());
 }
 
 fn tree_node_quota(error: &ArchiveError) -> Option<usize> {

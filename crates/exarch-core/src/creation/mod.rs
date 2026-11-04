@@ -19,4 +19,6 @@ pub mod zip;
 pub use config::CompressionLevel;
 pub use config::CreationConfig;
 pub use creator::ArchiveCreator;
+pub use filters::ExcludePattern;
 pub use report::CreationReport;
+pub use report::CreationWarning;

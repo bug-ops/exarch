@@ -137,6 +137,8 @@ use zip::ZipArchive as ZipReader;
 
 use crate::ArchiveError;
 use crate::DecodeReuse;
+use crate::EntryPosition;
+use crate::EntryTotal;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::Malformation;
@@ -407,20 +409,6 @@ pub(crate) fn is_password_required(error: &zip::result::ZipError) -> bool {
         error,
         ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED) | ZipError::InvalidPassword
     )
-}
-
-/// Appends aggregated duplicate-skip and disallowed-extension warnings to
-/// `report`, mirroring TAR's `push_duplicate_skip_warnings` (issues #490,
-/// #495). Called on every extraction exit path — including entry-open/name
-/// failures that occur before a [`ZipExtractionContext`] exists — so no
-/// early return can drop accumulated skip counts from the report.
-fn push_duplicate_skip_warnings(
-    report: &mut ExtractionReport,
-    duplicate_skips: u64,
-    extension_skips: u64,
-) {
-    common::push_duplicate_skip_warning(report, duplicate_skips, "entry", "entries");
-    common::push_disallowed_extension_warning(report, extension_skips);
 }
 
 /// A ZIP archive that passed [`ZipArchive::check_admission`] under a config:
@@ -907,15 +895,6 @@ impl<R: Read + Seek> ZipArchive<R> {
 
         let mut report = ExtractionReport::new();
 
-        // Aggregated into a single warning after extraction instead of one
-        // per skipped entry, mirroring 7z's `duplicate_skips` accumulator
-        // (issue #490).
-        let mut duplicate_skips: u64 = 0;
-
-        // Same aggregation, for entries rejected by the extension allowlist
-        // (issue #495).
-        let mut extension_skips: u64 = 0;
-
         let entry_count = self.inner.len();
 
         for i in 0..entry_count {
@@ -930,7 +909,6 @@ impl<R: Read + Seek> ZipArchive<R> {
                             detail: e.to_string().into(),
                         })
                     };
-                    push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
                 }
             };
@@ -941,19 +919,16 @@ impl<R: Read + Seek> ZipArchive<R> {
                         index: Some(i),
                         detail: e.to_string().into(),
                     });
-                    push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
                 }
             };
-            let mut guard =
-                EntryCompleteGuard::start(progress, &entry_path, entry_count, i.saturating_add(1));
+            let position = EntryPosition::at_index(i, EntryTotal::Known(entry_count));
+            let mut guard = EntryCompleteGuard::start(progress, &entry_path, position);
 
             let mut ctx = ZipExtractionContext {
                 tally: Tally {
                     report: &mut report,
                     options,
-                    duplicate_skips: &mut duplicate_skips,
-                    extension_skips: &mut extension_skips,
                     progress: guard.progress_mut(),
                 },
                 config,
@@ -971,13 +946,11 @@ impl<R: Read + Seek> ZipArchive<R> {
 
             if let Err(e) = result {
                 drop(guard);
-                push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
                 return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
             }
             guard.complete();
         }
 
-        push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
         progress.on_complete();
         report.duration = start.elapsed();
 
@@ -2582,19 +2555,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(report.files_skipped, ENTRY_COUNT);
+        assert_eq!(report.files_skipped(), ENTRY_COUNT);
         assert_eq!(report.files_extracted, 0);
         assert_eq!(
-            report.warnings.len(),
-            1,
-            "duplicate skips must be aggregated into a single warning, got: {:?}",
-            report.warnings
+            report.skipped.count(crate::SkipKind::Duplicate),
+            ENTRY_COUNT
         );
-        assert!(
-            report.warnings[0].contains(&ENTRY_COUNT.to_string()),
-            "aggregated warning must report the correct skipped count, got: {}",
-            report.warnings[0]
-        );
+        assert!(report.warnings.is_empty());
+        assert!(report.skipped.sample().len() <= crate::Skips::SAMPLE_CAP);
     }
 
     #[test]
@@ -2732,15 +2700,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
-        assert_eq!(report.files_skipped, 1);
+        assert_eq!(report.files_skipped(), 1);
         assert!(dest.path().join("keep.txt").exists());
         assert!(!dest.path().join("skip.exe").exists());
         assert_eq!(
-            report.warnings,
-            vec!["skipped 1 entry with disallowed extension".to_string()],
-            "the disallowed-extension skip must be aggregated into a single warning \
-             instead of a per-entry, path-bearing one (issue #495)"
+            report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+            1,
+            "the disallowed-extension skip must be typed (issue #906)"
         );
+        assert!(report.warnings.is_empty());
     }
 
     /// Reproduces the actual #495 bug scenario end-to-end: many entries
@@ -2772,16 +2740,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(report.files_skipped, ENTRY_COUNT);
+        assert_eq!(report.files_skipped(), ENTRY_COUNT);
         assert_eq!(report.files_extracted, 0);
         assert_eq!(
-            report.warnings,
-            vec![format!(
-                "skipped {ENTRY_COUNT} entries with disallowed extensions"
-            )],
-            "disallowed-extension skips must be aggregated into a single warning, got: {:?}",
-            report.warnings
+            report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+            ENTRY_COUNT
         );
+        assert!(report.warnings.is_empty());
+        assert!(report.skipped.sample().len() <= crate::Skips::SAMPLE_CAP);
     }
 
     /// Verifies duplicate-skip and disallowed-extension-skip counters
@@ -2823,31 +2789,17 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(report.files_skipped, DUPLICATE_COUNT + DISALLOWED_COUNT);
+        assert_eq!(report.files_skipped(), DUPLICATE_COUNT + DISALLOWED_COUNT);
         assert_eq!(report.files_extracted, 0);
         assert_eq!(
-            report.warnings.len(),
-            2,
-            "each skip reason must aggregate into its own single warning, got: {:?}",
-            report.warnings
+            report.skipped.count(crate::SkipKind::Duplicate),
+            DUPLICATE_COUNT
         );
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|w| w.contains(&DUPLICATE_COUNT.to_string()) && w.contains("duplicate")),
-            "expected a duplicate-skip warning reporting {DUPLICATE_COUNT}, got: {:?}",
-            report.warnings
+        assert_eq!(
+            report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+            DISALLOWED_COUNT
         );
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|w| w.contains(&DISALLOWED_COUNT.to_string())
-                    && w.contains("disallowed extension")),
-            "expected a disallowed-extension warning reporting {DISALLOWED_COUNT}, got: {:?}",
-            report.warnings
-        );
+        assert!(report.warnings.is_empty());
     }
 
     /// Regression for critic finding S1 (found during #505 review):
@@ -2909,13 +2861,15 @@ mod tests {
             ArchiveError::PartialExtraction(partial) => {
                 let report = partial.report();
                 assert_eq!(
-                    report.files_skipped, 1,
+                    report.files_skipped(),
+                    1,
                     "the disallowed-extension skip of bad.exe before the by_index failure \
                      must be preserved, got report: {report:?}"
                 );
-                assert!(
-                    report.has_warnings(),
-                    "the disallowed-extension warning must be preserved, got report: {report:?}"
+                assert_eq!(
+                    report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+                    1,
+                    "the typed skip must be preserved, got report: {report:?}"
                 );
             }
             other => panic!("expected PartialExtraction preserving the prior skip, got: {other:?}"),
@@ -2940,7 +2894,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.files_extracted, 2);
-        assert_eq!(report.files_skipped, 0);
+        assert_eq!(report.files_skipped(), 0);
     }
 
     #[test]
@@ -2964,7 +2918,8 @@ mod tests {
 
         assert_eq!(report.files_extracted, 1, "only .txt should be extracted");
         assert_eq!(
-            report.files_skipped, 1,
+            report.files_skipped(),
+            1,
             "extension-less file must be skipped"
         );
         assert!(!dest.path().join("Makefile").exists());

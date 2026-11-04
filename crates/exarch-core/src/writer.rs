@@ -450,7 +450,7 @@ mod tests {
             report
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("extraction ratio limit")),
+                .any(|warning| warning.to_string().contains("extraction ratio limit")),
             "{:?}",
             report.warnings
         );
@@ -499,7 +499,7 @@ mod tests {
             done: usize,
         }
         impl ProgressCallback for Recorder {
-            fn on_entry_start(&mut self, path: &Path, _total: usize, _current: usize) {
+            fn on_entry_start(&mut self, path: &Path, _position: crate::EntryPosition) {
                 self.starts.push(path.to_path_buf());
             }
 

@@ -23,8 +23,9 @@ use super::iter_sevenz_refusals;
 use super::links::read_sevenz_link_target;
 use super::lzma2::DecodeKnobs;
 use super::push_anti_item_warning;
-use super::push_skip_warnings;
 use crate::ArchiveError;
+use crate::EntryPosition;
+use crate::EntryTotal;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
@@ -234,8 +235,6 @@ impl<R: Read + Seek> SevenZArchive<R> {
         anti_items: u64,
     ) -> Result<ExtractionReport> {
         let mut report = ExtractionReport::new();
-        let mut duplicate_skips = 0_u64;
-        let mut extension_skips = 0_u64;
         let mut pending_error: Option<ArchiveError> = None;
         let mut index = 0_usize;
         let is_solid = self.header.is_solid();
@@ -249,15 +248,14 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 Err(refusal) => return Err(abort_with(&mut pending_error, refusal)),
             };
             let path = PathBuf::from(common::normalize_entry_name(&entry.name));
+            let position = EntryPosition::at_index(index, EntryTotal::Known(total));
             index = index.saturating_add(1);
-            let mut guard = EntryCompleteGuard::start(&mut *progress, &path, total, index);
+            let mut guard = EntryCompleteGuard::start(&mut *progress, &path, position);
 
             let outcome = {
                 let mut tally = Tally {
                     report: &mut report,
                     options,
-                    duplicate_skips: &mut duplicate_skips,
-                    extension_skips: &mut extension_skips,
                     progress: guard.progress_mut(),
                 };
                 process_entry(target, entry, kind, &mut *reader, &path, &mut tally)
@@ -289,7 +287,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             DecodeKnobs::production(),
             &mut each,
         );
-        push_skip_warnings(&mut report, (duplicate_skips, extension_skips), anti_items);
+        push_anti_item_warning(&mut report, anti_items);
         match result {
             Ok(()) => Ok(report),
             Err(error) => Err(ArchiveError::partial_or(

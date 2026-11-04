@@ -80,7 +80,7 @@ struct SwapRoot {
 }
 
 impl ProgressCallback for SwapRoot {
-    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+    fn on_entry_start(&mut self, _path: &Path, _position: exarch_core::EntryPosition) {}
 
     fn on_bytes_written(&mut self, _bytes: u64) {}
 

@@ -19,7 +19,8 @@ struct Recorder {
 }
 
 impl ProgressCallback for Recorder {
-    fn on_entry_start(&mut self, path: &Path, total: usize, _current: usize) {
+    fn on_entry_start(&mut self, path: &Path, position: exarch_core::EntryPosition) {
+        let total = position.total.known().unwrap_or(0);
         self.starts.push((path.to_path_buf(), total));
     }
 

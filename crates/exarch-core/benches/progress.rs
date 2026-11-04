@@ -22,7 +22,7 @@ use tempfile::TempDir;
 struct NoOpProgress;
 
 impl ProgressCallback for NoOpProgress {
-    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+    fn on_entry_start(&mut self, _path: &Path, _position: exarch_core::EntryPosition) {}
 
     fn on_bytes_written(&mut self, _bytes: u64) {}
 
@@ -38,7 +38,7 @@ struct CountingProgress {
 }
 
 impl ProgressCallback for CountingProgress {
-    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+    fn on_entry_start(&mut self, _path: &Path, _position: exarch_core::EntryPosition) {
         self.entries += 1;
     }
 

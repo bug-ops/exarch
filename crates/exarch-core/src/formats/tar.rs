@@ -126,6 +126,8 @@ use smallvec::SmallVec;
 use tar::Archive;
 
 use crate::ArchiveError;
+use crate::EntryPosition;
+use crate::EntryTotal;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::LinkKind;
@@ -153,7 +155,7 @@ use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::safe_path::ParentCheck;
 
-use super::common;
+use super::common::EntryCompleteGuard;
 use super::compression::CompressionCodec;
 use super::source_fault::TapSource;
 use super::tar_metadata_limit::CheckedTarEntry;
@@ -307,7 +309,7 @@ impl<R: Read> TarArchive<R> {
     fn process_entry<ER: Read, T: ExtractTarget>(
         entry: &mut tar::Entry<'_, ER>,
         target: &mut T,
-        ctx: &mut ExtractionContext<'_>,
+        tally: &mut Tally<'_>,
     ) -> Result<EntryOutcome<T::Parent>> {
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
         if TarEntryAdapter::is_metadata_entry(entry) {
@@ -342,9 +344,9 @@ impl<R: Read> TarArchive<R> {
                     size: entry_size,
                     mode,
                 };
-                match target.validate_file(request, &mut ctx.tally)? {
+                match target.validate_file(request, tally)? {
                     FileAdmission::Write(admitted) => {
-                        target.file(entry, admitted, &mut ctx.tally)?;
+                        target.file(entry, admitted, tally)?;
                         Ok(EntryOutcome::Done)
                     }
                     FileAdmission::Skipped(_) => Ok(EntryOutcome::Skipped),
@@ -353,7 +355,7 @@ impl<R: Read> TarArchive<R> {
 
             EntryType::Directory => {
                 let safe_path = target.validate_directory(&path, entry_size)?;
-                target.directory(&safe_path, &mut ctx.tally)?;
+                target.directory(&safe_path, tally)?;
                 Ok(EntryOutcome::Done)
             }
 
@@ -361,7 +363,7 @@ impl<R: Read> TarArchive<R> {
                 target: link_target,
             } => {
                 let safe_symlink = target.validate_symlink(&path, link_target, entry_size)?;
-                target.symlink(&safe_symlink, &mut ctx.tally)?;
+                target.symlink(&safe_symlink, tally)?;
                 Ok(EntryOutcome::Done)
             }
 
@@ -383,10 +385,10 @@ impl<R: Read> TarArchive<R> {
     fn process_and_skip<ER: Read, T: ExtractTarget>(
         entry: &mut CheckedTarEntry<'_, '_, ER>,
         target: &mut T,
-        ctx: &mut ExtractionContext<'_>,
+        tally: &mut Tally<'_>,
         skip_limits: &SkipLimits,
     ) -> Result<EntryOutcome<T::Parent>> {
-        let outcome = Self::process_entry(entry, target, ctx)?;
+        let outcome = Self::process_entry(entry, target, tally)?;
         if matches!(outcome, EntryOutcome::Skipped) {
             entry.drain_skipped(skip_limits)?;
         }
@@ -408,19 +410,7 @@ impl<R: Read> TarArchive<R> {
 
         let mut hardlinks: SmallVec<[HardlinkInfo<T::Parent>; 8]> = SmallVec::new();
 
-        let mut current_entry: usize = 0;
-
-        // Aggregated once, at every exit point, into a single warning per
-        // counter instead of one warning per skipped entry — keeps
-        // `report.warnings`'s growth independent of how many duplicate
-        // entries an archive contains (issue #490). Hardlinks are counted
-        // separately since they are format-specific to TAR (ZIP has no
-        // hardlink entry type).
-        let mut duplicate_skips: u64 = 0;
-        let mut hardlink_duplicate_skips: u64 = 0;
-        // Same aggregation, for entries rejected by the extension allowlist
-        // (issue #495).
-        let mut extension_skips: u64 = 0;
+        let mut started: usize = 0;
 
         let (budgeted, budget) = budgeted_reader_with(
             self.inner,
@@ -435,56 +425,40 @@ impl<R: Read> TarArchive<R> {
         })?;
 
         let skip_limits = SkipLimits::of(config);
-        let mut ctx = ExtractionContext {
-            tally: Tally {
-                report: &mut report,
-                options,
-                duplicate_skips: &mut duplicate_skips,
-                extension_skips: &mut extension_skips,
-                progress,
-            },
-            hardlink_duplicate_skips: &mut hardlink_duplicate_skips,
-        };
-
         while let Some(entry_result) = entries.next_entry() {
-            let guard = entry_result.map_err(|raw| {
-                ctx.push_skip_warnings();
-                ArchiveError::partial_or(std::mem::take(ctx.tally.report), raw)
-            })?;
+            let guard = entry_result
+                .map_err(|raw| ArchiveError::partial_or(std::mem::take(&mut report), raw))?;
             let mut guard = guard
                 .check(config.max_tar_metadata_bytes.get())
-                .map_err(|e| {
-                    ctx.push_skip_warnings();
-                    ArchiveError::partial_or(std::mem::take(ctx.tally.report), e)
-                })?;
+                .map_err(|e| ArchiveError::partial_or(std::mem::take(&mut report), e))?;
 
-            // TAR is streaming: total entry count is not known upfront, so pass
-            // 0.
             let entry_path = guard
                 .path()
                 .ok()
                 .map_or_default(std::borrow::Cow::into_owned);
-            current_entry = current_entry.saturating_add(1);
-            ctx.tally
-                .progress
-                .on_entry_start(&entry_path, 0, current_entry);
+            // A stream's entry count is not known until it ends.
+            let position = EntryPosition::at_index(started, EntryTotal::Unknown);
+            started = started.saturating_add(1);
+            let mut progress_guard =
+                EntryCompleteGuard::start(&mut *progress, &entry_path, position);
 
-            // `settle` abandons the entry on failure: no further
-            // `next_entry()` calls follow, so the guard's usual drain is
-            // pointless I/O (see `TarEntryGuard::abandon`).
-            let settled =
-                guard.settle(|guard| Self::process_and_skip(guard, target, &mut ctx, &skip_limits));
-            ctx.tally.progress.on_entry_complete(&entry_path);
+            let settled = {
+                let mut tally = Tally {
+                    report: &mut report,
+                    options,
+                    progress: progress_guard.progress_mut(),
+                };
+                // `settle` abandons the entry on failure: no further
+                // `next_entry()` calls follow, so the guard's usual drain is
+                // pointless I/O (see `TarEntryGuard::abandon`).
+                guard
+                    .settle(|guard| Self::process_and_skip(guard, target, &mut tally, &skip_limits))
+            };
+            progress_guard.complete();
             match settled {
                 Ok(EntryOutcome::Hardlink(hardlink_info)) => hardlinks.push(hardlink_info),
                 Ok(EntryOutcome::Done | EntryOutcome::Skipped) => {}
-                Err(e) => {
-                    ctx.push_skip_warnings();
-                    return Err(ArchiveError::partial_or(
-                        std::mem::take(ctx.tally.report),
-                        e,
-                    ));
-                }
+                Err(e) => return Err(ArchiveError::partial_or(std::mem::take(&mut report), e)),
             }
         }
 
@@ -495,32 +469,27 @@ impl<R: Read> TarArchive<R> {
                 .enforce(&mut inner_archive.into_inner(), config)
         });
         if let Err(e) = finished {
-            ctx.push_skip_warnings();
-            return Err(ArchiveError::partial_or(
-                std::mem::take(ctx.tally.report),
-                e,
-            ));
+            return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
         }
 
         // Two-pass extraction: create hardlinks after all target files exist
         for hardlink in hardlinks {
+            let mut tally = Tally {
+                report: &mut report,
+                options,
+                progress: &mut *progress,
+            };
             if let Err(e) = target.hardlink(
                 &hardlink.link_path,
                 &hardlink.target_path,
                 hardlink.counted,
-                &mut ctx.tally,
-                ctx.hardlink_duplicate_skips,
+                &mut tally,
             ) {
-                ctx.push_skip_warnings();
-                return Err(ArchiveError::partial_or(
-                    std::mem::take(ctx.tally.report),
-                    e,
-                ));
+                return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
             }
         }
 
-        ctx.push_skip_warnings();
-        ctx.tally.progress.on_complete();
+        progress.on_complete();
         report.duration = start.elapsed();
 
         Ok(report)
@@ -563,40 +532,6 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             |listing| self.list_with_pass(config, listing),
         )
     }
-}
-
-struct ExtractionContext<'a> {
-    tally: Tally<'a>,
-    /// Count of hardlinks skipped as pre-existing duplicates. Tracked
-    /// separately from the tally's `duplicate_skips` because hardlinks are
-    /// TAR-specific (ZIP has no hardlink entry type).
-    hardlink_duplicate_skips: &'a mut u64,
-}
-
-impl ExtractionContext<'_> {
-    fn push_skip_warnings(&mut self) {
-        push_duplicate_skip_warnings(
-            self.tally.report,
-            *self.tally.duplicate_skips,
-            *self.hardlink_duplicate_skips,
-            *self.tally.extension_skips,
-        );
-    }
-}
-
-/// Appends aggregated duplicate-skip and disallowed-extension warnings to
-/// `report`, one entry per non-zero counter, mirroring 7z's single
-/// end-of-extraction warning (`SevenZArchive::extract_into`)
-/// instead of one warning per skipped entry (issues #490, #495).
-fn push_duplicate_skip_warnings(
-    report: &mut ExtractionReport,
-    duplicate_skips: u64,
-    hardlink_duplicate_skips: u64,
-    disallowed_extension_skips: u64,
-) {
-    common::push_duplicate_skip_warning(report, duplicate_skips, "entry", "entries");
-    common::push_duplicate_skip_warning(report, hardlink_duplicate_skips, "hardlink", "hardlinks");
-    common::push_disallowed_extension_warning(report, disallowed_extension_skips);
 }
 
 /// What `process_entry` did with an entry.
@@ -2122,12 +2057,9 @@ mod tests {
                 }
                 let mut report = ExtractionReport::new();
                 let mut progress = crate::NoopProgress;
-                let (mut skips, mut link_skips, mut extension_skips) = (0u64, 0u64, 0u64);
                 let mut tally = Tally {
                     report: &mut report,
                     options: SinkOptions::default(),
-                    duplicate_skips: &mut skips,
-                    extension_skips: &mut extension_skips,
                     progress: &mut progress,
                 };
                 Ok(target.hardlink(
@@ -2135,7 +2067,6 @@ mod tests {
                     &validated.target,
                     validated.counted,
                     &mut tally,
-                    &mut link_skips,
                 ))
             })();
             let _ = tx.send(outcome);
@@ -2388,7 +2319,7 @@ mod tests {
             )
             .expect("extraction should succeed by skipping the duplicate");
 
-        assert_eq!(report.files_skipped, 1);
+        assert_eq!(report.files_skipped(), 1);
         assert!(
             !victim_path.exists(),
             "hardlink write followed the pre-planted symlink outside the extraction root"
@@ -2500,24 +2431,13 @@ mod tests {
 
         let mut report = ExtractionReport::new();
         let mut progress = crate::NoopProgress;
-        let mut duplicate_skips = 0u64;
-        let mut hardlink_duplicate_skips = 0u64;
-        let mut extension_skips = 0u64;
         let mut tally = Tally {
             report: &mut report,
             options: SinkOptions::default(),
-            duplicate_skips: &mut duplicate_skips,
-            extension_skips: &mut extension_skips,
             progress: &mut progress,
         };
 
-        let result = target.hardlink(
-            &info.link_path,
-            &info.target_path,
-            info.counted,
-            &mut tally,
-            &mut hardlink_duplicate_skips,
-        );
+        let result = target.hardlink(&info.link_path, &info.target_path, info.counted, &mut tally);
 
         assert_matches!(
             result,
@@ -2925,9 +2845,10 @@ mod tests {
 
         // First entry extracted, second skipped
         assert_eq!(report.files_extracted, 1);
-        assert_eq!(report.files_skipped, 1);
-        assert_eq!(report.warnings.len(), 1);
-        assert!(report.warnings[0].contains("pre-existing duplicates"));
+        assert_eq!(report.files_skipped(), 1);
+        assert_eq!(report.skipped.count(crate::SkipKind::Duplicate), 1);
+        assert_eq!(report.skipped.sample()[0].path, Path::new("legit.txt"));
+        assert!(report.warnings.is_empty());
 
         // File content is from the first entry
         let content = std::fs::read(temp.path().join("legit.txt")).unwrap();
@@ -2953,7 +2874,7 @@ mod tests {
 
         // Both entries extracted (second overwrites first)
         assert_eq!(report.files_extracted, 2);
-        assert_eq!(report.files_skipped, 0);
+        assert_eq!(report.files_skipped(), 0);
 
         // File content is from the second (overwriting) entry
         let content = std::fs::read(temp.path().join("legit.txt")).unwrap();
@@ -2990,18 +2911,16 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(report.files_skipped, ENTRY_COUNT);
+        assert_eq!(report.files_skipped(), ENTRY_COUNT);
         assert_eq!(report.files_extracted, 0);
         assert_eq!(
-            report.warnings.len(),
-            1,
-            "duplicate skips must be aggregated into a single warning, got: {:?}",
-            report.warnings
+            report.skipped.count(crate::SkipKind::Duplicate),
+            ENTRY_COUNT
         );
+        assert!(report.warnings.is_empty());
         assert!(
-            report.warnings[0].contains(&ENTRY_COUNT.to_string()),
-            "aggregated warning must report the correct skipped count, got: {}",
-            report.warnings[0]
+            report.skipped.sample().len() <= crate::Skips::SAMPLE_CAP,
+            "the sample must stay bounded however many entries are skipped"
         );
     }
 
@@ -3056,20 +2975,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(report.files_skipped, LINK_COUNT);
+        assert_eq!(report.files_skipped(), LINK_COUNT);
         assert_eq!(report.files_extracted, 1, "only target.txt is extracted");
-        assert_eq!(
-            report.warnings.len(),
-            1,
-            "hardlink duplicate skips must be aggregated into a single warning, got: {:?}",
-            report.warnings
-        );
-        assert!(
-            report.warnings[0].contains(&LINK_COUNT.to_string())
-                && report.warnings[0].contains("hardlink"),
-            "aggregated warning must report the correct skipped hardlink count, got: {}",
-            report.warnings[0]
-        );
+        assert_eq!(report.skipped.count(crate::SkipKind::Duplicate), LINK_COUNT);
+        assert!(report.warnings.is_empty());
     }
 
     #[test]
@@ -3210,15 +3119,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
-        assert_eq!(report.files_skipped, 1);
+        assert_eq!(report.files_skipped(), 1);
         assert!(dest.path().join("keep.txt").exists());
         assert!(!dest.path().join("skip.exe").exists());
         assert_eq!(
-            report.warnings,
-            vec!["skipped 1 entry with disallowed extension".to_string()],
-            "the disallowed-extension skip must be aggregated into a single warning \
-             instead of a per-entry, path-bearing one (issue #495)"
+            report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+            1,
+            "the disallowed-extension skip must be typed (issue #906)"
         );
+        assert!(report.warnings.is_empty());
     }
 
     /// Reproduces the actual #495 bug scenario end-to-end: many entries
@@ -3248,16 +3157,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(report.files_skipped, ENTRY_COUNT);
+        assert_eq!(report.files_skipped(), ENTRY_COUNT);
         assert_eq!(report.files_extracted, 0);
         assert_eq!(
-            report.warnings,
-            vec![format!(
-                "skipped {ENTRY_COUNT} entries with disallowed extensions"
-            )],
-            "disallowed-extension skips must be aggregated into a single warning, got: {:?}",
-            report.warnings
+            report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+            ENTRY_COUNT
         );
+        assert!(report.warnings.is_empty());
+        assert!(report.skipped.sample().len() <= crate::Skips::SAMPLE_CAP);
     }
 
     /// Verifies duplicate-skip and disallowed-extension-skip counters
@@ -3297,31 +3204,60 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(report.files_skipped, DUPLICATE_COUNT + DISALLOWED_COUNT);
+        assert_eq!(report.files_skipped(), DUPLICATE_COUNT + DISALLOWED_COUNT);
         assert_eq!(report.files_extracted, 0);
         assert_eq!(
-            report.warnings.len(),
-            2,
-            "each skip reason must aggregate into its own single warning, got: {:?}",
-            report.warnings
+            report.skipped.count(crate::SkipKind::Duplicate),
+            DUPLICATE_COUNT
         );
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|w| w.contains(&DUPLICATE_COUNT.to_string()) && w.contains("duplicate")),
-            "expected a duplicate-skip warning reporting {DUPLICATE_COUNT}, got: {:?}",
-            report.warnings
+        assert_eq!(
+            report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+            DISALLOWED_COUNT
         );
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|w| w.contains(&DISALLOWED_COUNT.to_string())
-                    && w.contains("disallowed extension")),
-            "expected a disallowed-extension warning reporting {DISALLOWED_COUNT}, got: {:?}",
-            report.warnings
-        );
+        assert!(report.warnings.is_empty());
+    }
+
+    /// #904: a stream cannot count its entries up front, so TAR reports an
+    /// unknown total instead of a `0` a callback might divide by, numbers the
+    /// entries from 1, and closes every entry it opened.
+    #[test]
+    fn test_progress_reports_unknown_total_and_pairs_every_entry() {
+        #[derive(Default)]
+        struct Recorder {
+            starts: Vec<(crate::EntryTotal, usize)>,
+            completes: usize,
+        }
+
+        impl crate::ProgressCallback for Recorder {
+            fn on_entry_start(&mut self, _path: &Path, position: crate::EntryPosition) {
+                self.starts.push((position.total, position.current.get()));
+            }
+
+            fn on_bytes_written(&mut self, _bytes: u64) {}
+
+            fn on_entry_complete(&mut self, _path: &Path) {
+                self.completes += 1;
+            }
+
+            fn on_complete(&mut self) {}
+        }
+
+        let tar_data = create_test_tar(vec![("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c")]);
+        let dest = tempfile::tempdir().unwrap();
+        let mut recorder = Recorder::default();
+
+        TarArchive::new(Cursor::new(tar_data))
+            .extract(
+                dest.path(),
+                &SecurityConfig::default(),
+                &ExtractionOptions::default(),
+                &mut recorder,
+            )
+            .unwrap();
+
+        let unknown = crate::EntryTotal::Unknown;
+        assert_eq!(recorder.starts, [(unknown, 1), (unknown, 2), (unknown, 3)]);
+        assert_eq!(recorder.completes, 3);
     }
 
     #[test]
@@ -3340,7 +3276,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.files_extracted, 2);
-        assert_eq!(report.files_skipped, 0);
+        assert_eq!(report.files_skipped(), 0);
     }
 
     #[test]
@@ -3364,7 +3300,8 @@ mod tests {
 
         assert_eq!(report.files_extracted, 1, "only .txt should be extracted");
         assert_eq!(
-            report.files_skipped, 1,
+            report.files_skipped(),
+            1,
             "extension-less file must be skipped"
         );
         assert!(!dest.path().join("Makefile").exists());

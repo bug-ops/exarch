@@ -1434,7 +1434,7 @@ mod tests {
         }
 
         impl ProgressCallback for TrackingProgress {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+            fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {
                 self.started += 1;
             }
 
@@ -1490,7 +1490,7 @@ mod tests {
         }
 
         impl ProgressCallback for TrackingProgress {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+            fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {
                 self.started += 1;
             }
 
@@ -1548,7 +1548,7 @@ mod tests {
         }
 
         impl ProgressCallback for TrackingProgress {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+            fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {
                 self.started += 1;
             }
 
@@ -1604,7 +1604,7 @@ mod tests {
         }
 
         impl ProgressCallback for ByteTracker {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+            fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {}
 
             fn on_bytes_written(&mut self, bytes: u64) {
                 self.total += bytes;
@@ -1655,7 +1655,7 @@ mod tests {
         }
 
         impl ProgressCallback for ByteTracker {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+            fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {}
 
             fn on_bytes_written(&mut self, bytes: u64) {
                 self.total += bytes;
@@ -1706,7 +1706,7 @@ mod tests {
         }
 
         impl ProgressCallback for ByteTracker {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+            fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {}
 
             fn on_bytes_written(&mut self, bytes: u64) {
                 self.total += bytes;
@@ -1757,7 +1757,7 @@ mod tests {
         }
 
         impl ProgressCallback for ByteTracker {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+            fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {}
 
             fn on_bytes_written(&mut self, bytes: u64) {
                 self.total += bytes;
@@ -1837,7 +1837,7 @@ mod tests {
         }
 
         impl ProgressCallback for SymmetryTracker {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+            fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {
                 self.started += 1;
             }
 
@@ -1892,7 +1892,7 @@ mod tests {
         }
 
         impl ProgressCallback for SymmetryTracker {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+            fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {
                 self.started += 1;
             }
 

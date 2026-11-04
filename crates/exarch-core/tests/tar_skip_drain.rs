@@ -381,7 +381,7 @@ fn plain_tar_with_skipped_data_passes_at_any_size() {
     .unwrap();
 
     assert_eq!(report.files_extracted, 1);
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
 }
 
 #[test]
@@ -400,5 +400,5 @@ fn a_caller_decoded_stream_is_not_bounded_by_ratio() {
         )
         .unwrap();
 
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
 }

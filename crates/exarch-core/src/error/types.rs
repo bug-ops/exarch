@@ -943,7 +943,7 @@ impl ArchiveError {
     /// `warnings` that the caller should see.
     #[must_use]
     pub(crate) fn partial_or(report: crate::ExtractionReport, err: Self) -> Self {
-        if report.total_items() > 0 || report.files_skipped > 0 || report.has_warnings() {
+        if report.total_items() > 0 || report.files_skipped() > 0 || report.has_warnings() {
             Self::PartialExtraction(Partial::new(err, report, PartialWrites::Kept))
         } else {
             err
@@ -1533,7 +1533,12 @@ mod tests {
         use crate::ExtractionReport;
 
         let mut report = ExtractionReport::new();
-        report.files_skipped = 2;
+        for name in ["a", "b"] {
+            let recorded = report
+                .skipped
+                .record(crate::Skip::new(crate::SkipKind::Duplicate, name));
+            assert!(recorded.is_ok());
+        }
         let err = ArchiveError::unclassified("bad entry");
 
         let result = ArchiveError::partial_or(report, err);
@@ -1550,7 +1555,7 @@ mod tests {
         use crate::ExtractionReport;
 
         let mut report = ExtractionReport::new();
-        report.add_warning("skipped disallowed extension".into());
+        report.add_warning(crate::ExtractionWarning::AntiItemsSkipped { count: 1 });
         let err = ArchiveError::unclassified("bad entry");
 
         let result = ArchiveError::partial_or(report, err);

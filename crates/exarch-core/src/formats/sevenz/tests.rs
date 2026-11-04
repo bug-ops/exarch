@@ -1400,7 +1400,7 @@ fn test_allowed_extensions_filters_out_disallowed() {
         report.files_extracted, 2,
         "only .txt files should be extracted"
     );
-    assert_eq!(report.files_skipped, 1, ".exe file should be skipped");
+    assert_eq!(report.files_skipped(), 1, ".exe file should be skipped");
     assert!(
         !dest
             .path()
@@ -1417,11 +1417,11 @@ fn test_allowed_extensions_filters_out_disallowed() {
         ".txt files must be extracted"
     );
     assert_eq!(
-        report.warnings,
-        vec!["skipped 1 entry with disallowed extension".to_string()],
-        "the disallowed-extension skip must be aggregated into a single warning \
-         instead of a per-entry, path-bearing one (issue #495)"
+        report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+        1,
+        "the disallowed-extension skip must be typed (issue #906)"
     );
+    assert!(report.warnings.is_empty());
 }
 
 /// Reproduces the actual #495 bug scenario end-to-end: many entries
@@ -1452,16 +1452,14 @@ fn test_disallowed_extension_aggregates_single_warning() {
         )
         .unwrap();
 
-    assert_eq!(report.files_skipped, ENTRY_COUNT);
+    assert_eq!(report.files_skipped(), ENTRY_COUNT);
     assert_eq!(report.files_extracted, 0);
     assert_eq!(
-        report.warnings,
-        vec![format!(
-            "skipped {ENTRY_COUNT} entries with disallowed extensions"
-        )],
-        "disallowed-extension skips must be aggregated into a single warning, got: {:?}",
-        report.warnings
+        report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+        ENTRY_COUNT
     );
+    assert!(report.warnings.is_empty());
+    assert!(report.skipped.sample().len() <= crate::Skips::SAMPLE_CAP);
 }
 
 /// Verifies duplicate-skip and disallowed-extension-skip counters
@@ -1502,29 +1500,17 @@ fn test_duplicate_and_disallowed_extension_skips_aggregate_independently() {
         )
         .unwrap();
 
-    assert_eq!(report.files_skipped, DUPLICATE_COUNT + DISALLOWED_COUNT);
+    assert_eq!(report.files_skipped(), DUPLICATE_COUNT + DISALLOWED_COUNT);
     assert_eq!(report.files_extracted, 0);
     assert_eq!(
-        report.warnings.len(),
-        2,
-        "each skip reason must aggregate into its own single warning, got: {:?}",
-        report.warnings
+        report.skipped.count(crate::SkipKind::Duplicate),
+        DUPLICATE_COUNT
     );
-    assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.contains(&DUPLICATE_COUNT.to_string()) && w.contains("duplicate")),
-        "expected a duplicate-skip warning reporting {DUPLICATE_COUNT}, got: {:?}",
-        report.warnings
+    assert_eq!(
+        report.skipped.count(crate::SkipKind::ExtensionNotAllowed),
+        DISALLOWED_COUNT
     );
-    assert!(
-        report.warnings.iter().any(
-            |w| w.contains(&DISALLOWED_COUNT.to_string()) && w.contains("disallowed extension")
-        ),
-        "expected a disallowed-extension warning reporting {DISALLOWED_COUNT}, got: {:?}",
-        report.warnings
-    );
+    assert!(report.warnings.is_empty());
 }
 
 #[test]
@@ -1543,7 +1529,7 @@ fn test_empty_allowed_extensions_allows_all() {
         )
         .unwrap();
 
-    assert_eq!(report.files_skipped, 0);
+    assert_eq!(report.files_skipped(), 0);
     assert!(report.files_extracted > 0);
 }
 
@@ -1568,7 +1554,8 @@ fn test_extension_less_files_blocked_when_allowlist_nonempty() {
 
     assert_eq!(report.files_extracted, 1, "only .txt should be extracted");
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "extension-less file must be skipped"
     );
     assert!(!dest.path().join("no-ext-fixture").join("Makefile").exists());
@@ -1754,7 +1741,7 @@ fn test_solid_block_disallowed_entry_does_not_shift_next_entry() {
         .unwrap();
 
     assert_eq!(report.files_extracted, 1);
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     assert!(!dest.path().join("a.bin").exists());
     assert_eq!(std::fs::read(dest.path().join("b.txt")).unwrap(), kept);
 }
@@ -1781,7 +1768,7 @@ fn test_solid_block_skipping_last_entry_extracts_earlier_entries() {
         .unwrap();
 
     assert_eq!(report.files_extracted, 2);
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), first);
     assert_eq!(std::fs::read(dest.path().join("b.txt")).unwrap(), second);
     assert!(!dest.path().join("c.exe").exists());
@@ -1807,7 +1794,7 @@ fn test_solid_block_duplicate_entry_does_not_shift_next_entry() {
         .unwrap();
 
     assert_eq!(report.files_extracted, 1);
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     assert_eq!(
         std::fs::read(dest.path().join("a.txt")).unwrap(),
         b"already here"
@@ -1924,14 +1911,10 @@ fn test_process_entry_rejects_traversal_independently() {
     let config = SecurityConfig::default();
     let mut target = SevenZHostTarget::create(temp.path(), &config).unwrap();
     let mut report = ExtractionReport::new();
-    let mut duplicate_skips = 0u64;
-    let mut extension_skips = 0u64;
     let mut progress = crate::NoopProgress;
     let mut tally = Tally {
         report: &mut report,
         options: SinkOptions::default().with_skip_duplicates(false),
-        duplicate_skips: &mut duplicate_skips,
-        extension_skips: &mut extension_skips,
         progress: &mut progress,
     };
 
@@ -1956,21 +1939,20 @@ fn test_process_entry_rejects_traversal_independently() {
     );
 }
 
-/// Regression test for #502: `duplicate_skips` must saturate instead of
-/// wrapping (or panicking, in debug builds) once it reaches `u64::MAX`,
-/// mirroring the near-boundary pattern used by
+/// Regression test for #502 and #515: the duplicate-skip counter must fail
+/// closed instead of wrapping (or panicking, in debug builds) once it reaches
+/// `usize::MAX`, mirroring the near-boundary pattern used by
 /// `common.rs`'s `test_extract_file_with_permit_integer_overflow_check`
 /// for `bytes_written`.
 #[test]
-fn test_process_entry_duplicate_skips_saturates_at_max() {
+fn test_process_entry_duplicate_skip_fails_closed_at_max() {
     let temp = TempDir::new().unwrap();
     std::fs::write(temp.path().join("existing.txt"), b"already here").unwrap();
 
     let config = SecurityConfig::default();
     let mut target = SevenZHostTarget::create(temp.path(), &config).unwrap();
     let mut report = ExtractionReport::new();
-    let mut duplicate_skips = u64::MAX;
-    let mut extension_skips = 0u64;
+    report.skipped = crate::Skips::with_saturated_count(crate::SkipKind::Duplicate);
     let mut progress = crate::NoopProgress;
 
     let mut entry = sevenz_rust2::ArchiveEntry::new_file("existing.txt");
@@ -1982,8 +1964,6 @@ fn test_process_entry_duplicate_skips_saturates_at_max() {
         let mut tally = Tally {
             report: &mut report,
             options: SinkOptions::default(),
-            duplicate_skips: &mut duplicate_skips,
-            extension_skips: &mut extension_skips,
             progress: &mut progress,
         };
         process_entry(
@@ -1998,15 +1978,12 @@ fn test_process_entry_duplicate_skips_saturates_at_max() {
 
     assert_matches!(
         result,
-        Ok(()),
-        "duplicate skip must not error, got: {result:?}"
+        Err(ArchiveError::QuotaExceeded {
+            resource: QuotaResource::IntegerOverflow
+        }),
+        "a saturated duplicate counter must fail closed, got: {result:?}"
     );
-    assert_eq!(report.files_skipped, 1);
-    assert_eq!(
-        duplicate_skips,
-        u64::MAX,
-        "duplicate_skips must saturate at u64::MAX instead of wrapping or panicking"
-    );
+    assert_eq!(report.skipped.count(crate::SkipKind::Duplicate), usize::MAX);
 }
 
 /// Issue #468: `Path::exists()` follows symlinks and returns `false` for
@@ -2040,7 +2017,8 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
         .unwrap();
 
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "entry must be skipped as a duplicate of the dangling symlink"
     );
     assert_eq!(report.files_extracted, 0);
@@ -2313,19 +2291,14 @@ fn test_skip_duplicates_aggregates_single_warning() {
         )
         .unwrap();
 
-    assert_eq!(report.files_skipped, ENTRY_COUNT);
+    assert_eq!(report.files_skipped(), ENTRY_COUNT);
     assert_eq!(report.files_extracted, 0);
     assert_eq!(
-        report.warnings.len(),
-        1,
-        "duplicate skips must be aggregated into a single warning, got: {:?}",
-        report.warnings
+        report.skipped.count(crate::SkipKind::Duplicate),
+        ENTRY_COUNT
     );
-    assert!(
-        report.warnings[0].contains(&ENTRY_COUNT.to_string()),
-        "aggregated warning must report the correct skipped count, got: {}",
-        report.warnings[0]
-    );
+    assert!(report.warnings.is_empty());
+    assert!(report.skipped.sample().len() <= crate::Skips::SAMPLE_CAP);
 }
 
 /// Replaces `a` with a link to another directory once `a/file1.txt` is
@@ -2338,7 +2311,7 @@ struct DirSwapper {
 
 #[cfg(unix)]
 impl crate::ProgressCallback for DirSwapper {
-    fn on_entry_start(&mut self, _path: &std::path::Path, _total: usize, _current: usize) {}
+    fn on_entry_start(&mut self, _path: &std::path::Path, _position: crate::EntryPosition) {}
 
     fn on_bytes_written(&mut self, _bytes: u64) {}
 

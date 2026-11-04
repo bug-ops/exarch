@@ -19,6 +19,7 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
+use crate::SkipKind;
 use crate::copy::CopyBuffer;
 use crate::security::RawMode;
 use crate::security::admitted::EntrySize;
@@ -54,10 +55,6 @@ use super::pinned_dir::TempFileGuard;
 pub struct Tally<'a> {
     pub(crate) report: &'a mut ExtractionReport,
     pub(crate) options: SinkOptions,
-    /// File and symlink entries skipped as pre-existing duplicates.
-    pub(crate) duplicate_skips: &'a mut u64,
-    /// File entries skipped by the extension allowlist.
-    pub(crate) extension_skips: &'a mut u64,
     pub(crate) progress: &'a mut dyn ProgressCallback,
 }
 
@@ -71,9 +68,8 @@ impl Tally<'_> {
     /// # Errors
     ///
     /// Returns an error when the skipped-files counter would overflow.
-    pub(crate) fn record_duplicate_skip(&mut self) -> Result<SkipRecorded> {
-        common::checked_increment_files_skipped(self.report)?;
-        *self.duplicate_skips = self.duplicate_skips.saturating_add(1);
+    pub(crate) fn record_duplicate_skip(&mut self, path: &Path) -> Result<SkipRecorded> {
+        common::record_duplicate_skip(self.report, path)?;
         Ok(SkipRecorded(()))
     }
 
@@ -82,9 +78,8 @@ impl Tally<'_> {
     /// # Errors
     ///
     /// Returns an error when the skipped-files counter would overflow.
-    pub(crate) fn record_extension_skip(&mut self) -> Result<SkipRecorded> {
-        common::checked_increment_files_skipped(self.report)?;
-        *self.extension_skips = self.extension_skips.saturating_add(1);
+    pub(crate) fn record_extension_skip(&mut self, path: &Path) -> Result<SkipRecorded> {
+        common::record_skip(self.report, SkipKind::ExtensionNotAllowed, path)?;
         Ok(SkipRecorded(()))
     }
 
@@ -209,7 +204,6 @@ pub trait ExtractTarget {
         target: &HardlinkTarget,
         counted: EntryCount,
         tally: &mut Tally<'_>,
-        hardlink_duplicate_skips: &mut u64,
     ) -> Result<()>;
 }
 
@@ -308,9 +302,9 @@ impl ExtractTarget for HostTarget<'_> {
         tally: &mut Tally<'_>,
     ) -> Result<FileAdmission<ValidatedFile<HostParent>>> {
         match self.screen_file(request)? {
-            FileScreen::DisallowedExtension => {
-                tally.record_extension_skip().map(FileAdmission::Skipped)
-            }
+            FileScreen::DisallowedExtension => tally
+                .record_extension_skip(request.path)
+                .map(FileAdmission::Skipped),
             FileScreen::Pending(pending) => self.admit_file(pending).map(FileAdmission::Write),
         }
     }
@@ -365,20 +359,12 @@ impl ExtractTarget for HostTarget<'_> {
             &mut self.copy_buffer,
             self.dirs,
             tally.options,
-            tally.duplicate_skips,
             tally.progress,
         )
     }
 
     fn symlink(&mut self, symlink: &SafeSymlink<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
-        common::create_symlink(
-            symlink,
-            &self.root,
-            tally.report,
-            self.dirs,
-            tally.options,
-            tally.duplicate_skips,
-        )
+        common::create_symlink(symlink, &self.root, tally.report, self.dirs, tally.options)
     }
 
     /// Creates a hardlink in the second pass by copying content.
@@ -426,7 +412,6 @@ impl ExtractTarget for HostTarget<'_> {
         target: &HardlinkTarget,
         counted: EntryCount,
         tally: &mut Tally<'_>,
-        hardlink_duplicate_skips: &mut u64,
     ) -> Result<()> {
         let OpenedTarget {
             file: target_file,
@@ -444,9 +429,7 @@ impl ExtractTarget for HostTarget<'_> {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-                    common::checked_increment_files_skipped(tally.report)?;
-                    *hardlink_duplicate_skips = hardlink_duplicate_skips.saturating_add(1);
-                    return Ok(());
+                    return common::record_duplicate_skip(tally.report, link.as_path());
                 }
                 return Err(ArchiveError::from(Malformation::DuplicateEntry {
                     path: link.as_path().to_path_buf(),

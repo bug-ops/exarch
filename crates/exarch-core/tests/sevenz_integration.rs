@@ -380,7 +380,7 @@ struct RecordingProgress {
 }
 
 impl ProgressCallback for RecordingProgress {
-    fn on_entry_start(&mut self, path: &Path, _total: usize, _index: usize) {
+    fn on_entry_start(&mut self, path: &Path, _position: exarch_core::EntryPosition) {
         self.events
             .lock()
             .unwrap()
@@ -808,7 +808,7 @@ struct SwapDirForSymlink<'a> {
 
 #[cfg(unix)]
 impl ProgressCallback for SwapDirForSymlink<'_> {
-    fn on_entry_start(&mut self, path: &Path, _total: usize, _index: usize) {
+    fn on_entry_start(&mut self, path: &Path, _position: exarch_core::EntryPosition) {
         if path.ends_with(self.trigger) {
             std::fs::remove_dir_all(&self.dir).unwrap();
             std::os::unix::fs::symlink(&self.outside, &self.dir).unwrap();

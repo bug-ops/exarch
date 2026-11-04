@@ -125,7 +125,8 @@ fn assert_parity(
                 "bytes_written"
             );
             assert_eq!(
-                sink_report.files_skipped, host_report.files_skipped,
+                sink_report.files_skipped(),
+                host_report.files_skipped(),
                 "files_skipped"
             );
             assert_eq!(sink_report.warnings, host_report.warnings, "warnings");

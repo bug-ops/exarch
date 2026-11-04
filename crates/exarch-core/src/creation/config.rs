@@ -3,6 +3,7 @@
 use crate::ArchiveError;
 use crate::Limit;
 use crate::Result;
+use crate::creation::filters::ExcludePattern;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -124,7 +125,7 @@ pub struct CreationConfig {
     /// Files matching these patterns will be skipped.
     ///
     /// Default: `[".git", ".DS_Store", "*.tmp"]`.
-    pub exclude_patterns: Vec<String>,
+    pub exclude_patterns: Vec<ExcludePattern>,
 
     /// Prefix to strip from entry paths in the archive.
     ///
@@ -164,9 +165,9 @@ impl Default for CreationConfig {
             include_hidden: false,
             max_file_size: Limit::Unbounded,
             exclude_patterns: vec![
-                ".git".to_string(),
-                ".DS_Store".to_string(),
-                "*.tmp".to_string(),
+                ExcludePattern::exact(".git"),
+                ExcludePattern::exact(".DS_Store"),
+                ExcludePattern::suffix(".tmp"),
             ],
             strip_prefix: None,
             compression_level: CompressionLevel::default(),
@@ -243,12 +244,15 @@ impl CreationConfig {
     ///
     /// ```
     /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::creation::ExcludePattern;
     ///
-    /// let config = CreationConfig::default().with_exclude_patterns(vec!["*.log".to_string()]);
-    /// assert_eq!(config.exclude_patterns, vec!["*.log".to_string()]);
+    /// let log = ExcludePattern::try_from("*.log")?;
+    /// let config = CreationConfig::default().with_exclude_patterns(vec![log.clone()]);
+    /// assert_eq!(config.exclude_patterns, vec![log]);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
-    pub fn with_exclude_patterns(mut self, patterns: Vec<String>) -> Self {
+    pub fn with_exclude_patterns(mut self, patterns: Vec<ExcludePattern>) -> Self {
         self.exclude_patterns = patterns;
         self
     }
@@ -319,9 +323,12 @@ mod tests {
         assert!(!config.include_hidden);
         assert_eq!(config.max_file_size, Limit::Unbounded);
         assert_eq!(config.exclude_patterns.len(), 3);
-        assert!(config.exclude_patterns.contains(&".git".to_string()));
-        assert!(config.exclude_patterns.contains(&".DS_Store".to_string()));
-        assert!(config.exclude_patterns.contains(&"*.tmp".to_string()));
+        let shown: Vec<String> = config
+            .exclude_patterns
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(shown, [".git", ".DS_Store", "*.tmp"]);
         assert_eq!(config.strip_prefix, None);
         assert_eq!(config.compression_level, CompressionLevel::default());
         assert!(config.preserve_permissions);
@@ -334,7 +341,7 @@ mod tests {
             .with_follow_symlinks(true)
             .with_include_hidden(true)
             .with_max_file_size(crate::non_zero!(1024 * 1024))
-            .with_exclude_patterns(vec!["*.log".to_string()])
+            .with_exclude_patterns(vec![ExcludePattern::try_from("*.log").unwrap()])
             .with_strip_prefix(Some(PathBuf::from("/base")))
             .with_compression_level(level)
             .with_preserve_permissions(false);
@@ -345,7 +352,10 @@ mod tests {
             config.max_file_size,
             Limit::Bounded(crate::non_zero!(1024 * 1024))
         );
-        assert_eq!(config.exclude_patterns, vec!["*.log".to_string()]);
+        assert_eq!(
+            config.exclude_patterns,
+            vec![ExcludePattern::try_from("*.log").unwrap()]
+        );
         assert_eq!(config.strip_prefix, Some(PathBuf::from("/base")));
         assert_eq!(config.compression_level, level);
         assert!(!config.preserve_permissions);
@@ -404,7 +414,9 @@ mod tests {
 
         // Security: Exclude sensitive patterns
         assert!(
-            config.exclude_patterns.contains(&".git".to_string()),
+            config
+                .exclude_patterns
+                .contains(&ExcludePattern::exact(".git")),
             "should exclude .git by default"
         );
     }

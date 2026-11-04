@@ -5,11 +5,16 @@
 
 use crate::ProgressCallback;
 use crate::Result;
+#[cfg(not(unix))]
+use crate::Skip;
+#[cfg(not(unix))]
+use crate::SkipKind;
 use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressReader;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::staged::ExcludedOutput;
+use crate::creation::walker::Collected;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
 use crate::formats::compression::CompressionCodec;
@@ -62,8 +67,8 @@ use tar::Header;
 /// struct SimpleProgress;
 ///
 /// impl ProgressCallback for SimpleProgress {
-///     fn on_entry_start(&mut self, path: &Path, total: usize, current: usize) {
-///         println!("[{}/{}] Processing: {}", current, total, path.display());
+///     fn on_entry_start(&mut self, path: &Path, position: exarch_core::EntryPosition) {
+///         println!("[{}] Processing: {}", position.current, path.display());
 ///     }
 ///
 ///     fn on_bytes_written(&mut self, bytes: u64) {
@@ -162,7 +167,8 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     let start = std::time::Instant::now();
 
     // Single-pass collection of entries (avoids double directory traversal)
-    let entries = collect_entries(sources, config, excluded)?;
+    let Collected { entries, skipped } = collect_entries(sources, config, excluded)?;
+    report.skipped = skipped;
     let total_entries = entries.len();
 
     let mut tracker = ProgressTracker::new(progress, total_entries);
@@ -302,20 +308,16 @@ fn add_symlink_to_tar<W: Write>(
 }
 
 #[cfg(not(unix))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "signature must match the Unix variant"
-)]
 fn add_symlink_to_tar<W: Write>(
     _builder: &mut Builder<W>,
-    _link_path: &Path,
+    link_path: &Path,
     _target: &Path,
     report: &mut CreationReport,
 ) -> Result<()> {
     // On non-Unix platforms, skip symlinks
-    report.files_skipped = report.files_skipped.saturating_add(1);
-    report.add_warning("Symlinks not supported on this platform");
-    Ok(())
+    report
+        .skipped
+        .record(Skip::new(SkipKind::SymlinkUnsupported, link_path))
 }
 
 /// Sets file permissions in TAR header from metadata.
@@ -653,7 +655,7 @@ mod tests {
 
         assert_eq!(report.files_added, 3);
         assert!(report.directories_added >= 1);
-        assert_eq!(report.files_skipped, 0);
+        assert_eq!(report.files_skipped(), 0);
         assert!(!report.has_warnings());
         assert!(report.duration.as_nanos() > 0);
     }
@@ -787,7 +789,7 @@ mod tests {
         }
 
         impl ProgressCallback for TestProgress {
-            fn on_entry_start(&mut self, path: &Path, _total: usize, _current: usize) {
+            fn on_entry_start(&mut self, path: &Path, _position: crate::EntryPosition) {
                 self.entries_started
                     .push(path.to_string_lossy().to_string());
             }

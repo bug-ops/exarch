@@ -68,7 +68,8 @@ fn skip_only_report_still_wraps_as_partial_extraction_on_later_failure() {
                 "expected SymlinkEscape source, got: {source:?}"
             );
             assert_eq!(
-                report.files_skipped, 1,
+                report.files_skipped(),
+                1,
                 "payload.bin must be counted as skipped for its disallowed extension"
             );
             assert_eq!(
@@ -76,9 +77,12 @@ fn skip_only_report_still_wraps_as_partial_extraction_on_later_failure() {
                 0,
                 "no entry was ever written before the failure"
             );
-            assert!(
-                report.has_warnings(),
-                "the extension-skip warning must survive on the wrapped report"
+            assert_eq!(
+                report
+                    .skipped
+                    .count(exarch_core::SkipKind::ExtensionNotAllowed),
+                1,
+                "the typed extension skip must survive on the wrapped report"
             );
         }
         other => panic!("expected PartialExtraction wrapping the skip-only report, got: {other:?}"),

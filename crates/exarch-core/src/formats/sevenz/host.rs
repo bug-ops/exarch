@@ -144,7 +144,9 @@ impl ExtractTarget for SevenZHostTarget<'_> {
     ) -> Result<FileAdmission<SevenZAdmittedFile>> {
         let pending = match self.inner.screen_file(request)? {
             FileScreen::DisallowedExtension => {
-                return tally.record_extension_skip().map(FileAdmission::Skipped);
+                return tally
+                    .record_extension_skip(request.path)
+                    .map(FileAdmission::Skipped);
             }
             FileScreen::Pending(pending) => pending,
         };
@@ -158,7 +160,9 @@ impl ExtractTarget for SevenZHostTarget<'_> {
 
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
         if occupancy.is_occupied() && tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-            return tally.record_duplicate_skip().map(FileAdmission::Skipped);
+            return tally
+                .record_duplicate_skip(safe_path.as_path())
+                .map(FileAdmission::Skipped);
         }
         let write_mode = occupancy.write_mode(safe_path.as_path())?;
 
@@ -232,10 +236,8 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         target: &HardlinkTarget,
         counted: crate::security::quota::EntryCount,
         tally: &mut Tally<'_>,
-        hardlink_duplicate_skips: &mut u64,
     ) -> Result<()> {
-        self.inner
-            .hardlink(link, target, counted, tally, hardlink_duplicate_skips)
+        self.inner.hardlink(link, target, counted, tally)
     }
 }
 

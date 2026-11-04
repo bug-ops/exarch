@@ -794,7 +794,11 @@ fn extract_fully_skips_a_legitimate_large_disallowed_extension_entry_and_continu
          search",
     );
     assert_eq!(report.files_extracted, 2, "before.txt and after.txt");
-    assert_eq!(report.files_skipped, 1, "big.bin skipped for its extension");
+    assert_eq!(
+        report.files_skipped(),
+        1,
+        "big.bin skipped for its extension"
+    );
     assert!(temp.path().join("before.txt").exists());
     assert!(temp.path().join("after.txt").exists());
     assert!(!temp.path().join("big.bin").exists());
@@ -808,7 +812,7 @@ fn extract_fully_skips_a_legitimate_large_disallowed_extension_entry_and_continu
     let report = exarch_core::extract_archive(&path, &out, &config)
         .expect("extract_archive must not reject this archive");
     assert_eq!(report.files_extracted, 2);
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
 }
 
 #[test]

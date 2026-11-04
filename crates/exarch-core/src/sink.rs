@@ -641,7 +641,7 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
         let rel = path.as_path();
         match (self.tree.occupant(rel), tally.options.duplicate_policy()) {
             (Some(_), DuplicatePolicy::Skip) => {
-                tally.record_duplicate_skip()?;
+                tally.record_duplicate_skip(rel)?;
                 return Ok(None);
             }
             (
@@ -775,9 +775,9 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             &ctx,
         )?;
         match screen {
-            FileScreen::DisallowedExtension => {
-                tally.record_extension_skip().map(FileAdmission::Skipped)
-            }
+            FileScreen::DisallowedExtension => tally
+                .record_extension_skip(request.path)
+                .map(FileAdmission::Skipped),
             FileScreen::Pending(pending) => {
                 let file = self.core.admit_file(pending)?;
                 self.check_limits(request.path, None)?;
@@ -875,7 +875,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         let target = symlink.target_path();
         let occupant = self.tree.occupant(rel);
         match (occupant, tally.options.duplicate_policy()) {
-            (Some(_), DuplicatePolicy::Skip) => return tally.record_duplicate_skip().map(drop),
+            (Some(_), DuplicatePolicy::Skip) => return tally.record_duplicate_skip(rel).map(drop),
             (Some(Occupant::Directory), DuplicatePolicy::Overwrite) => {
                 return Err(common::occupant_at_dest_error(rel, Occupant::Directory).into());
             }
@@ -888,7 +888,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                     LandingLimits::Enforced,
                 );
                 return match unchanged {
-                    Ok(_) => common::checked_increment_files_skipped(tally.report),
+                    Ok(_) => common::record_duplicate_skip(tally.report, rel),
                     Err(PlaceError::Conflict(_)) => {
                         Err(common::occupant_at_dest_error(rel, Occupant::Symlink).into())
                     }
@@ -925,7 +925,6 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         target: &HardlinkTarget,
         counted: EntryCount,
         tally: &mut Tally<'_>,
-        hardlink_duplicate_skips: &mut u64,
     ) -> Result<()> {
         let config = self.config;
         let link = SafePath::validate_in(link.as_path(), &self.root, config, &self.tree)?;
@@ -948,9 +947,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         }
         if self.tree.occupant(link.as_path()).is_some() {
             if tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-                common::checked_increment_files_skipped(tally.report)?;
-                *hardlink_duplicate_skips = hardlink_duplicate_skips.saturating_add(1);
-                return Ok(());
+                return common::record_duplicate_skip(tally.report, link.as_path());
             }
             return Err(ArchiveError::from(Malformation::DuplicateEntry {
                 path: link.as_path().to_path_buf(),

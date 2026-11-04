@@ -228,7 +228,7 @@ fn extract_warns_once_with_the_number_of_skipped_anti_items() {
 
     assert_eq!(
         report.warnings,
-        ["skipped 3 7z anti-items (deletion markers are not applied)"]
+        [exarch_core::ExtractionWarning::AntiItemsSkipped { count: 3 }]
     );
 }
 
@@ -242,7 +242,7 @@ fn extract_of_only_anti_items_still_warns() {
 
     assert_eq!(
         report.warnings,
-        ["skipped 1 7z anti-item (deletion markers are not applied)"]
+        [exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 }]
     );
 }
 
@@ -305,7 +305,7 @@ fn anti_item_warning_survives_a_failing_extract() {
     let report = partial.report();
     assert_eq!(
         report.warnings,
-        ["skipped 1 7z anti-item (deletion markers are not applied)"]
+        [exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 }]
     );
 }
 
@@ -348,8 +348,9 @@ struct Recorder {
 }
 
 impl ProgressCallback for Recorder {
-    fn on_entry_start(&mut self, _path: &Path, total: usize, current: usize) {
-        self.starts.push((total, current));
+    fn on_entry_start(&mut self, _path: &Path, position: exarch_core::EntryPosition) {
+        let total = position.total.known().unwrap_or(0);
+        self.starts.push((total, position.current.get()));
     }
 
     fn on_bytes_written(&mut self, _bytes: u64) {}

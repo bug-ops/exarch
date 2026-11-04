@@ -202,7 +202,7 @@ fn portable_case_variants_are_one_name_on_every_host() {
         tar_file("dir/a", b"second"),
     ]));
     let report = result.unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     let paths: Vec<_> = sink.iter().map(|(p, _)| p.to_path_buf()).collect();
     assert_eq!(paths, [std::path::PathBuf::from("Dir/A")]);
 }
@@ -213,7 +213,7 @@ fn portable_canonically_equivalent_names_are_one_name_on_every_host() {
         tar_file("caf\u{e9}", b"first"),
         tar_file("cafe\u{301}", b"second"),
     ]));
-    assert_eq!(result.unwrap().files_skipped, 1);
+    assert_eq!(result.unwrap().files_skipped(), 1);
     assert_eq!(sink.iter().count(), 1);
 }
 
@@ -225,7 +225,7 @@ fn the_linux_host_model_keeps_case_variants_apart() {
         PathModel::Host,
         &SecurityConfig::default(),
     );
-    assert_eq!(result.unwrap().files_skipped, 0);
+    assert_eq!(result.unwrap().files_skipped(), 0);
     assert_eq!(sink.iter().count(), 2);
 }
 

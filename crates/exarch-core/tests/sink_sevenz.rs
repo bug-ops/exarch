@@ -42,7 +42,9 @@ use tempfile::TempDir;
 struct Events(Vec<String>);
 
 impl ProgressCallback for Events {
-    fn on_entry_start(&mut self, path: &Path, total: usize, current: usize) {
+    fn on_entry_start(&mut self, path: &Path, position: exarch_core::EntryPosition) {
+        let total = position.total.known().unwrap_or(0);
+        let current = position.current;
         self.0
             .push(format!("start {} {current}/{total}", path.display()));
     }
@@ -410,7 +412,7 @@ fn an_overlong_name_of_a_skipped_extension_is_not_refused() {
     let config = config().try_add_allowed_extension("txt").unwrap();
     let mut sink = RecordingSink::default();
     let report = extract_bytes(bytes, &config, &mut sink).unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     assert_eq!(sink.finished.len(), 1);
 }
 

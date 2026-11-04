@@ -80,17 +80,13 @@ fn tar_skip_duplicates_true_keeps_first_entry() {
         "only the first entry is extracted"
     );
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "second entry must be counted as skipped"
     );
-    // TAR aggregates all pre-existing-duplicate skips into a single warning
-    // without per-path text, to keep `report.warnings` bounded regardless of
-    // how many entries are skipped (see #490, mirroring 7z's #484).
-    assert_eq!(
-        report.warnings,
-        vec!["skipped 1 entry as pre-existing duplicates".to_string()],
-        "TAR now emits one aggregated duplicate-skip warning, not a per-path one"
-    );
+    // The skip is typed and keeps the path, with nothing left to warn about.
+    assert_eq!(report.skipped.count(exarch_core::SkipKind::Duplicate), 1);
+    assert!(report.warnings.is_empty());
 
     let content = std::fs::read(dest.path().join("file.txt")).unwrap();
     assert_eq!(content, b"first", "first entry content must be preserved");
@@ -114,7 +110,7 @@ fn tar_skip_duplicates_false_overwrites_with_last_entry() {
         report.files_extracted, 2,
         "both entries must be counted as extracted (second overwrites first)"
     );
-    assert_eq!(report.files_skipped, 0, "no entries must be skipped");
+    assert_eq!(report.files_skipped(), 0, "no entries must be skipped");
 
     let content = std::fs::read(dest.path().join("file.txt")).unwrap();
     assert_eq!(
@@ -196,18 +192,13 @@ fn sevenz_skip_duplicates_true_keeps_first_entry() {
         "only the first entry is extracted"
     );
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "second entry must be counted as skipped"
     );
-    // 7z aggregates all pre-existing-duplicate skips into a single warning
-    // without per-path text, to keep `report.warnings` bounded regardless of
-    // how many entries are skipped (see #484; TAR/ZIP do the same as of #490,
-    // asserted above).
-    assert_eq!(
-        report.warnings,
-        vec!["skipped 1 entry as pre-existing duplicates".to_string()],
-        "7z emits one aggregated duplicate-skip warning, not a per-path one"
-    );
+    // The skip is typed and keeps the path, with nothing left to warn about.
+    assert_eq!(report.skipped.count(exarch_core::SkipKind::Duplicate), 1);
+    assert!(report.warnings.is_empty());
 
     let content = std::fs::read(dest.path().join("file.txt")).unwrap();
     assert_eq!(content, b"first", "first entry content must be preserved");
@@ -229,7 +220,7 @@ fn sevenz_skip_duplicates_false_overwrites_with_last_entry() {
         report.files_extracted, 2,
         "both entries must be counted as extracted (second overwrites first)"
     );
-    assert_eq!(report.files_skipped, 0, "no entries must be skipped");
+    assert_eq!(report.files_skipped(), 0, "no entries must be skipped");
 
     let content = std::fs::read(dest.path().join("file.txt")).unwrap();
     assert_eq!(
@@ -253,7 +244,7 @@ fn tar_skip_duplicates_false_overwrites_nested_path() {
         .expect("extraction with skip_duplicates=false must succeed for nested paths");
 
     assert_eq!(report.files_extracted, 2);
-    assert_eq!(report.files_skipped, 0);
+    assert_eq!(report.files_skipped(), 0);
 
     let content = std::fs::read(dest.path().join("subdir/nested.txt")).unwrap();
     assert_eq!(content, b"overwritten");
@@ -302,7 +293,8 @@ fn tar_dangling_symlink_at_destination_skipped_not_followed() {
         .expect("skip_duplicates=true must skip the symlinked path, not error");
 
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "the symlinked path must be counted as skipped"
     );
     assert_eq!(report.files_extracted, 0);
@@ -442,7 +434,8 @@ fn sevenz_dangling_symlink_at_destination_quota_not_consumed_when_skipped() {
         .expect("a skipped duplicate must not permanently consume the file-count quota");
 
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "the symlinked path must be counted as skipped"
     );
     assert_eq!(

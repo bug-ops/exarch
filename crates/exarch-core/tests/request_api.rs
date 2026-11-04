@@ -41,7 +41,7 @@ struct Count {
 }
 
 impl ProgressCallback for Count {
-    fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {
+    fn on_entry_start(&mut self, _: &Path, _: exarch_core::EntryPosition) {
         self.starts += 1;
     }
 

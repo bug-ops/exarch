@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::ArchiveError;
+use crate::EntryTotal;
 use crate::ListOptions;
 use crate::Malformation;
 use crate::NoopProgress;
@@ -296,7 +297,7 @@ enum Reporter<'a> {
 /// carry.
 pub(crate) struct Progress<'a> {
     reporter: Reporter<'a>,
-    total: usize,
+    total: EntryTotal,
     started: usize,
 }
 
@@ -304,26 +305,27 @@ impl Progress<'_> {
     const fn noop() -> Self {
         Self {
             reporter: Reporter::Noop(NoopProgress),
-            total: 0,
+            total: EntryTotal::Unknown,
             started: 0,
         }
     }
 
-    /// Sets the `total` that following entry events report.
+    /// Sets the total that following entry events report; a stream that never
+    /// calls this reports [`EntryTotal::Unknown`].
     pub(crate) const fn set_total(&mut self, total: usize) {
-        self.total = total;
+        self.total = EntryTotal::Known(total);
     }
 
     /// Announces the entry at `path`; the guard closes it when completed or
     /// dropped, including on an early `?` return.
     pub(crate) fn begin<'p>(&'p mut self, path: &'p Path) -> EntryCompleteGuard<'p> {
+        let position = crate::EntryPosition::at_index(self.started, self.total);
         self.started += 1;
-        let (total, current) = (self.total, self.started);
         let callback: &'p mut dyn ProgressCallback = match &mut self.reporter {
             Reporter::Noop(noop) => noop,
             Reporter::Callback(callback) => &mut **callback,
         };
-        EntryCompleteGuard::start(callback, path, total, current)
+        EntryCompleteGuard::start(callback, path, position)
     }
 }
 

@@ -147,6 +147,7 @@ use crate::ArchiveError;
 use crate::EntryCompression;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::ExtractionWarning;
 use crate::Malformation;
 use crate::ProgressCallback;
 use crate::Result;
@@ -291,24 +292,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
     }
 }
 
-/// Appends the aggregated warnings for what `extract` skipped: duplicates and
-/// disallowed extensions as `(duplicates, disallowed)`, and anti-items.
-fn push_skip_warnings(report: &mut ExtractionReport, skips: (u64, u64), anti_items: u64) {
-    let (duplicates, disallowed) = skips;
-    common::push_duplicate_skip_warning(report, duplicates, "entry", "entries");
-    common::push_disallowed_extension_warning(report, disallowed);
-    push_anti_item_warning(report, anti_items);
-}
-
-/// Appends one aggregated warning for the anti-items `extract` skipped.
+/// Appends one warning for the anti-items `extract` skipped.
 ///
 /// A no-op when `count` is zero.
 fn push_anti_item_warning(report: &mut ExtractionReport, count: u64) {
     if count > 0 {
-        report.warnings.push(format!(
-            "skipped {count} 7z {} (deletion markers are not applied)",
-            anti_item_noun(count)
-        ));
+        report.add_warning(ExtractionWarning::AntiItemsSkipped { count });
     }
 }
 

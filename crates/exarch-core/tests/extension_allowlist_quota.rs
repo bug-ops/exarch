@@ -112,7 +112,7 @@ fn a_skipped_file_charges_no_quota_on_a_fresh_and_an_existing_destination() {
                 .unwrap_or_else(|e| panic!("{format:?} into {}: {e}", dest.display()));
 
             assert_eq!(report.files_extracted, 2, "{format:?}");
-            assert_eq!(report.files_skipped, 1, "{format:?}");
+            assert_eq!(report.files_skipped(), 1, "{format:?}");
             assert!(dest.join("a.txt").is_file(), "{format:?}");
             assert!(!dest.join("deep/dir/big.bin").exists(), "{format:?}");
         }
@@ -206,7 +206,7 @@ fn a_disallowed_high_ratio_file_is_skipped_in_zip_and_refused_in_7z() {
 
     let zip = Format::Zip.write(work.path(), &zip_with_zeros("bomb.bin"));
     let report = extract_archive(&zip, work.path().join("zip-out"), &relaxed).unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
 
     let sevenz = Format::SevenZ.write(work.path(), &sevenz_with_zeros("bomb.bin"));
     let error = extract_archive(&sevenz, work.path().join("7z-out"), &relaxed).unwrap_err();

@@ -10,12 +10,16 @@ use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Skip;
+use crate::SkipKind;
 use crate::ZipBombDetails;
 use crate::ZipBombScope;
 use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
+use crate::creation::report::CreationWarning;
 use crate::creation::staged::ExcludedOutput;
+use crate::creation::walker::Collected;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
 use crate::security::Compressed;
@@ -97,8 +101,8 @@ pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
 /// struct SimpleProgress;
 ///
 /// impl ProgressCallback for SimpleProgress {
-///     fn on_entry_start(&mut self, path: &Path, total: usize, current: usize) {
-///         println!("[{}/{}] Processing: {}", current, total, path.display());
+///     fn on_entry_start(&mut self, path: &Path, position: exarch_core::EntryPosition) {
+///         println!("[{}] Processing: {}", position.current, path.display());
 ///     }
 ///
 ///     fn on_bytes_written(&mut self, bytes: u64) {
@@ -192,7 +196,8 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
         .compression_level(Some(config.compression_level.to_zip_level()));
 
     // Single-pass collection of entries (avoids double directory traversal)
-    let entries = collect_entries(sources, config, excluded)?;
+    let Collected { entries, skipped } = collect_entries(sources, config, excluded)?;
+    report.skipped = skipped;
     let total_entries = entries.len();
 
     let mut tracker = ProgressTracker::new(progress, total_entries);
@@ -235,8 +240,10 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
                         &mut buffer,
                     )?;
                 } else {
-                    report.files_skipped = report.files_skipped.saturating_add(1);
-                    report.add_warning(format!("Skipped symlink: {}", entry.path.display()));
+                    report.skipped.record(Skip::new(
+                        SkipKind::SymlinkUnsupported,
+                        entry.archive_path.to_path_buf(),
+                    ))?;
                 }
             }
         }
@@ -275,15 +282,15 @@ pub(crate) fn warn_on_extraction_ratio<R: Read + Seek>(archive: R, report: &mut 
     match extraction_ratio_warning(archive) {
         Ok(Some(warning)) => report.add_warning(warning),
         Ok(None) => {}
-        Err(e) => report.add_warning(format!(
-            "could not check the ZIP entries against the default extraction ratio limit: {e}"
-        )),
+        Err(e) => report.add_warning(CreationWarning::ZipRatioCheckFailed {
+            reason: e.to_string(),
+        }),
     }
 }
 
 fn extraction_ratio_warning<R: Read + Seek>(
     archive: R,
-) -> std::result::Result<Option<String>, zip::result::ZipError> {
+) -> std::result::Result<Option<CreationWarning>, zip::result::ZipError> {
     let limit = SecurityConfig::default().max_compression_ratio.get();
     let mut zip = zip::ZipArchive::new(archive)?;
 
@@ -307,13 +314,11 @@ fn extraction_ratio_warning<R: Read + Seek>(
     if over_limit == 0 {
         return Ok(None);
     }
-    let noun = if over_limit == 1 { "entry" } else { "entries" };
-    Ok(Some(format!(
-        "ZIP archive has {over_limit} {noun} over the default extraction ratio limit of \
-         {limit}x; default extraction refuses it as a zip bomb unless the maximum compression \
-         ratio is at least {needed}",
-        needed = highest.ceil(),
-    )))
+    Ok(Some(CreationWarning::ZipRatioOverDefaultLimit {
+        entries: over_limit,
+        limit,
+        needed_ratio: highest.ceil(),
+    }))
 }
 
 /// Adds a single file to the ZIP archive with progress reporting and reusable
@@ -338,12 +343,10 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
 
     // Check file size limit
     if !config.max_file_size.admits(size) {
-        report.files_skipped = report.files_skipped.saturating_add(1);
-        report.add_warning(format!(
-            "Skipped file (too large): {} ({} bytes)",
-            file_path.display(),
-            size
-        ));
+        report.skipped.record(Skip::new(
+            SkipKind::OverMaxFileSize,
+            archive_path.to_path_buf(),
+        ))?;
         return Ok(());
     }
 
@@ -469,8 +472,11 @@ mod tests {
         .unwrap()
     }
 
-    fn needed_ratio(warning: &str) -> f64 {
-        warning.rsplit(' ').next().unwrap().parse().unwrap()
+    fn needed_ratio(warning: &CreationWarning) -> f64 {
+        match warning {
+            CreationWarning::ZipRatioOverDefaultLimit { needed_ratio, .. } => *needed_ratio,
+            other => panic!("expected the ratio warning, got {other:?}"),
+        }
     }
 
     #[test]
@@ -479,7 +485,7 @@ mod tests {
 
         assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
         let warning = &report.warnings[0];
-        assert!(warning.starts_with(
+        assert!(warning.to_string().starts_with(
             "ZIP archive has 1 entry over the default extraction ratio limit of 100x"
         ));
         assert!(needed_ratio(warning) > 100.0);
@@ -510,7 +516,11 @@ mod tests {
         warn_on_extraction_ratio(std::io::Cursor::new(b"not a zip".to_vec()), &mut report);
 
         assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
-        assert!(report.warnings[0].starts_with("could not check the ZIP entries"));
+        assert!(
+            report.warnings[0]
+                .to_string()
+                .starts_with("could not check the ZIP entries")
+        );
     }
 
     #[test]
@@ -683,7 +693,7 @@ mod tests {
 
         assert_eq!(report.files_added, 3);
         assert!(report.directories_added >= 1);
-        assert_eq!(report.files_skipped, 0);
+        assert_eq!(report.files_skipped(), 0);
         assert!(!report.has_warnings());
         assert!(report.duration.as_nanos() > 0);
     }
@@ -832,10 +842,11 @@ mod tests {
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
-        // Walker filters out large.txt, so only small.txt is added
-        // No files are skipped at the ZIP level (walker already filtered)
+        // The walker leaves out large.txt and counts it, so only small.txt is
+        // added
         assert_eq!(report.files_added, 1);
-        assert_eq!(report.files_skipped, 0);
+        assert_eq!(report.skipped.count(SkipKind::OverMaxFileSize), 1);
+        assert_eq!(report.files_skipped(), 1);
     }
 
     #[cfg(unix)]
@@ -862,11 +873,10 @@ mod tests {
 
         // Should add target.txt, skip link.txt
         assert_eq!(report.files_added, 1);
-        assert_eq!(report.files_skipped, 1);
-        assert!(report.has_warnings());
-
-        let warning = &report.warnings[0];
-        assert!(warning.contains("Skipped symlink"));
+        assert_eq!(report.files_skipped(), 1);
+        assert_eq!(report.skipped.count(SkipKind::SymlinkUnsupported), 1);
+        assert_eq!(report.skipped.sample()[0].path, Path::new("link.txt"));
+        assert!(!report.has_warnings());
     }
 
     #[cfg(unix)]
@@ -893,7 +903,7 @@ mod tests {
         // Both target.txt and the followed link.txt must be written as regular
         // entries.
         assert_eq!(report.files_added, 2);
-        assert_eq!(report.files_skipped, 0);
+        assert_eq!(report.files_skipped(), 0);
         assert!(!report.has_warnings());
 
         let file = File::open(&output).unwrap();
@@ -915,7 +925,7 @@ mod tests {
         }
 
         impl ProgressCallback for TestProgress {
-            fn on_entry_start(&mut self, path: &Path, _total: usize, _current: usize) {
+            fn on_entry_start(&mut self, path: &Path, _position: crate::EntryPosition) {
                 self.entries_started
                     .push(path.to_string_lossy().to_string());
             }

@@ -1892,6 +1892,117 @@ mod tests {
         assert!(t.place_path(Path::new("f/g"), Node::File).is_err());
     }
 
+    fn lowercase_fold(name: &OsStr) -> Cow<'_, OsStr> {
+        let text = name.to_string_lossy();
+        let lowered = text.to_lowercase();
+        if lowered == text {
+            Cow::Borrowed(name)
+        } else {
+            Cow::Owned(OsString::from(lowered))
+        }
+    }
+
+    /// What the tree decided and left behind, for either entry point.
+    fn decision(
+        setup: fn(&mut VirtualTree),
+        rel: &str,
+        verdict_only: bool,
+    ) -> (&'static str, Option<Occupant>) {
+        let mut t = VirtualTree::with_fold(&VirtualRoot::at("/dest"), lowercase_fold);
+        setup(&mut t);
+        let safe = SafePath::for_test(rel);
+        let outcome = if verdict_only {
+            t.check_landing(&safe, Node::File, LandingLimits::Enforced)
+                .map(drop)
+        } else {
+            t.project_landing(&safe, Node::File, LandingLimits::Enforced)
+                .map(drop)
+        };
+        let tag = match outcome {
+            Ok(()) => "accepted",
+            Err(PlaceError::LandingTooLong) => "too long",
+            Err(PlaceError::Conflict(_)) => "conflict",
+            Err(PlaceError::Budget(_)) => "budget",
+        };
+        (tag, t.occupant(Path::new(rel)))
+    }
+
+    const KELVIN: &str = "\u{212A}";
+
+    fn components(spelling: &str, count: usize) -> String {
+        vec![spelling.repeat(80); count].join("/")
+    }
+
+    /// The entry points are one decision: `check_landing` may skip building
+    /// the landing, never change what is accepted, refused or left behind.
+    #[test]
+    fn check_landing_and_project_landing_decide_alike() {
+        let count = MAX_PATH_LEN / (KELVIN.len() * 80) + 1;
+        let stored = components("k", count);
+        let alias = components(KELVIN, count);
+        assert!(stored.len() <= MAX_PATH_LEN && alias.len() > MAX_PATH_LEN);
+        let long = "n".repeat(MAX_PATH_LEN);
+        let cases: Vec<(&str, fn(&mut VirtualTree), String)> = vec![
+            ("no link, short", |_| {}, "a/b".to_owned()),
+            ("no link, long", |_| {}, format!("a/{long}")),
+            (
+                "link, short through it",
+                |t| {
+                    put(t, "real", Node::Dir);
+                    put(t, "alias", sym("real"));
+                },
+                "alias/f".to_owned(),
+            ),
+            (
+                "link, long through it",
+                |t| {
+                    put(t, "real", Node::Dir);
+                    put(t, "alias", sym("real"));
+                },
+                format!("alias/{long}"),
+            ),
+            (
+                "link elsewhere, long beside it",
+                |t| put(t, "real", Node::Dir),
+                format!("real/{long}"),
+            ),
+            (
+                "file replaced by a link, then through it",
+                |t| {
+                    put(t, "real", Node::Dir);
+                    put(t, "x", Node::File);
+                    let _ = t.insert(Path::new("x"), sym("real"));
+                },
+                format!("x/{long}"),
+            ),
+        ];
+        for (name, setup, rel) in cases {
+            assert_eq!(
+                decision(setup, &rel, true),
+                decision(setup, &rel, false),
+                "{name}"
+            );
+        }
+        // A spelling that folds onto a shorter stored one: both entry points
+        // judge it by the spelling the entry uses.
+        let stored_spelling = stored.clone();
+        let setup: fn(&mut VirtualTree) = |t| {
+            let count = MAX_PATH_LEN / (KELVIN.len() * 80) + 1;
+            put(t, &components("k", count), Node::Dir);
+        };
+        let rel = format!("{alias}/f");
+        assert_eq!(
+            decision(setup, &rel, true),
+            decision(setup, &rel, false),
+            "alias of another byte length"
+        );
+        assert_eq!(decision(setup, &rel, true).0, "too long");
+        assert_eq!(
+            decision(setup, &format!("{stored_spelling}/f"), true).0,
+            decision(setup, &format!("{stored_spelling}/f"), false).0
+        );
+    }
+
     #[test]
     fn a_tree_without_links_checks_the_spelled_path_before_inserting() {
         let mut t = tree();

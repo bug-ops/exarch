@@ -97,11 +97,32 @@ fn push_path(out: &mut String, path: &Path) {
     push_bytes(out, path.as_os_str().as_bytes());
 }
 
+/// On Windows the components of the path are joined with `/`, whatever
+/// separator the path was spelled with, so a name reads the same on every
+/// host. A component of a normalized name never holds a `\`, which on Windows
+/// is a separator, so no two paths share a rendering.
 #[cfg(windows)]
 fn push_path(out: &mut String, path: &Path) {
+    use std::path::Component;
+
+    for component in path.components() {
+        match component {
+            Component::RootDir => out.push('/'),
+            other => {
+                if !out.is_empty() && !out.ends_with('/') {
+                    out.push('/');
+                }
+                push_wide(out, other.as_os_str());
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn push_wide(out: &mut String, text: &std::ffi::OsStr) {
     use std::os::windows::ffi::OsStrExt;
 
-    for unit in char::decode_utf16(path.as_os_str().encode_wide()) {
+    for unit in char::decode_utf16(text.encode_wide()) {
         match unit {
             Ok(ch) => push_text(out, ch.encode_utf8(&mut [0; 4])),
             Err(unpaired) => {
@@ -125,6 +146,18 @@ mod tests {
     fn valid_text_is_unchanged_but_for_backslashes() {
         assert_eq!(path_text(Path::new("a/b é.txt")), "a/b é.txt");
         assert_eq!(path_text(Path::new("x\\y")), "x\\x5Cy");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_components_are_joined_with_a_forward_slash() {
+        assert_eq!(path_text(Path::new(r"x\y\z")), "x/y/z");
+        assert_eq!(path_text(Path::new(r"x/y\z")), "x/y/z");
+        assert_eq!(path_text(Path::new(r"a\.\b")), "a/b");
+        assert_eq!(
+            path_text(Path::new("x/y/z")),
+            path_text(Path::new(r"x\y\z"))
+        );
     }
 
     #[cfg(unix)]

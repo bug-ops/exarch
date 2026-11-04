@@ -1929,8 +1929,10 @@ mod tests {
 
     type Setup = fn(&mut VirtualTree);
 
+    #[cfg(not(windows))]
     const KELVIN: &str = "\u{212A}";
 
+    #[cfg(not(windows))]
     fn components(spelling: &str, count: usize) -> String {
         vec![spelling.repeat(80); count].join("/")
     }
@@ -1939,10 +1941,6 @@ mod tests {
     /// the landing, never change what is accepted, refused or left behind.
     #[test]
     fn check_landing_and_project_landing_decide_alike() {
-        let count = MAX_PATH_LEN / (KELVIN.len() * 80) + 1;
-        let stored = components("k", count);
-        let alias = components(KELVIN, count);
-        assert!(stored.len() <= MAX_PATH_LEN && alias.len() > MAX_PATH_LEN);
         let long = "n".repeat(MAX_PATH_LEN);
         let cases: Vec<(&str, Setup, String)> = vec![
             ("no link, short", |_| {}, "a/b".to_owned()),
@@ -1985,23 +1983,33 @@ mod tests {
                 "{name}"
             );
         }
-        // A spelling that folds onto a shorter stored one: both entry points
-        // judge it by the spelling the entry uses.
-        let setup: fn(&mut VirtualTree) = |t| {
+        // Windows counts UTF-16 units, and no fold changes the unit count of
+        // a name, so a longer spelling of a shorter stored one exists only
+        // where the limit counts bytes.
+        #[cfg(not(windows))]
+        {
             let count = MAX_PATH_LEN / (KELVIN.len() * 80) + 1;
-            put(t, &components("k", count), Node::Dir);
-        };
-        let rel = format!("{alias}/f");
-        assert_eq!(
-            decision(setup, &rel, true),
-            decision(setup, &rel, false),
-            "alias of another byte length"
-        );
-        assert_eq!(decision(setup, &rel, true).0, "too long");
-        assert_eq!(
-            decision(setup, &format!("{stored}/f"), true).0,
-            decision(setup, &format!("{stored}/f"), false).0
-        );
+            let stored = components("k", count);
+            let alias = components(KELVIN, count);
+            assert!(stored.len() <= MAX_PATH_LEN && alias.len() > MAX_PATH_LEN);
+            // A spelling that folds onto a shorter stored one: both entry
+            // points judge it by the spelling the entry uses.
+            let setup: fn(&mut VirtualTree) = |t| {
+                let count = MAX_PATH_LEN / (KELVIN.len() * 80) + 1;
+                put(t, &components("k", count), Node::Dir);
+            };
+            let rel = format!("{alias}/f");
+            assert_eq!(
+                decision(setup, &rel, true),
+                decision(setup, &rel, false),
+                "alias of another byte length"
+            );
+            assert_eq!(decision(setup, &rel, true).0, "too long");
+            assert_eq!(
+                decision(setup, &format!("{stored}/f"), true).0,
+                decision(setup, &format!("{stored}/f"), false).0
+            );
+        }
     }
 
     #[test]

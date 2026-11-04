@@ -394,13 +394,18 @@ mod tests {
         tar_entry(&mut builder, b"/abs.txt", tar::EntryType::Regular, "");
         tar_entry(&mut builder, b"d/", tar::EntryType::Directory, "");
         tar_entry(&mut builder, b"d/sub.txt", tar::EntryType::Regular, "");
-        tar_entry(&mut builder, b"link", tar::EntryType::Symlink, "d");
-        tar_entry(
-            &mut builder,
-            b"link/through.txt",
-            tar::EntryType::Regular,
-            "",
-        );
+        // Windows extraction refuses symlinks, so the linked parent is
+        // Unix-only.
+        #[cfg(unix)]
+        {
+            tar_entry(&mut builder, b"link", tar::EntryType::Symlink, "d");
+            tar_entry(
+                &mut builder,
+                b"link/through.txt",
+                tar::EntryType::Regular,
+                "",
+            );
+        }
         tar_entry(&mut builder, b"x/y/z.txt", tar::EntryType::Regular, "");
         assert_landing_matches_extraction("a.tar", &builder.into_inner().unwrap());
     }

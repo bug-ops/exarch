@@ -166,6 +166,7 @@ fn symlinks_are_refused_by_default() {
     assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
 }
 
+#[cfg(unix)]
 #[test]
 fn symlinks_that_stay_inside_the_root_extract() {
     for (link, target) in [("foo/link", "../bar/target.txt"), ("link", "target.txt")] {

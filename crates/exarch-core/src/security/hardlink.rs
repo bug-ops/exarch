@@ -285,7 +285,7 @@ impl HardlinkTracker {
     }
 
     /// Returns the number of tracked hardlinks.
-    #[inline]
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn count(&self) -> usize {
         self.seen_targets.len()

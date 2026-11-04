@@ -108,11 +108,10 @@ impl<P: ParentCheck> ValidatedFile<P> {
     }
 }
 
-/// A symlink entry that passed validation, with its own location.
+/// A symlink entry that passed validation; the symlink carries its own
+/// validated location.
 #[derive(Debug)]
 pub struct ValidatedSymlink<P: ParentCheck = Resolved> {
-    /// Validated location of the link.
-    pub link: SafePath<P>,
     /// The validated link and target.
     pub symlink: SafeSymlink<P>,
 }
@@ -211,7 +210,7 @@ mod tests {
                 &ctx,
             )
             .unwrap();
-        assert_eq!(symlink.link.as_path(), Path::new("s"));
+        assert_eq!(symlink.symlink.link().as_path(), Path::new("s"));
         assert_eq!(symlink.symlink.target_path(), Path::new("d"));
 
         let ctx = core.context::<HostFs>();

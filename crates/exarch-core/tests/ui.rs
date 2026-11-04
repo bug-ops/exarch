@@ -1,6 +1,6 @@
 //! Compile-fail regression suite for the sealing guarantees introduced by
-//! #433/#434/#435: `ValidatedEntry` and the quota, mode and hardlink-target
-//! proofs must stay non-constructible from outside their invariant-checked
+//! #433/#434/#435: the quota, mode and hardlink-target proofs must stay
+//! non-constructible from outside their invariant-checked
 //! construction paths. See `tests/ui/*.rs` for the individual cases.
 //!
 //! Each fixture ships a committed `.stderr` snapshot that trybuild compares

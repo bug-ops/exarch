@@ -192,9 +192,6 @@ pub use security::HardlinkTarget;
 pub use security::RawMode;
 pub use security::SanitizedMode;
 pub use security::Uncompressed;
-/// Summary statistics produced by the validation pipeline; see
-/// [`security::ValidationReport`].
-pub use security::ValidationReport;
 /// Validates a raw, caller-supplied path string before it enters the
 /// archive pipeline. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::BoundaryPath;
@@ -226,6 +223,5 @@ pub use types::PathComponentName;
 // Re-export types module for easier access
 pub use types::CheckedLinkTarget;
 pub use types::DestDir;
-pub use types::EntryType;
 pub use types::SafePath;
 pub use types::SafeSymlink;

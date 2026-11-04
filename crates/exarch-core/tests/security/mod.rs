@@ -1,10 +1,7 @@
 //! CVE regression tests for security vulnerabilities.
 
 mod cve_regression;
-mod entry_validator_hardlink;
-mod entry_validator_path_traversal;
-mod entry_validator_symlink;
-mod entry_validator_zip_bomb;
+mod entry_pipeline;
 mod hardlink_quota_bypass;
 mod partial_report_skip_and_fail;
 mod safe_path_ghsa_wcmx;

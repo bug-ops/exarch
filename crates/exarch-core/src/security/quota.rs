@@ -17,56 +17,13 @@ use crate::security::zipbomb::Uncompressed;
 /// that reserved one quantity and enforces another (GHSA-5j8q). Its only
 /// producers are [`QuotaTracker::reserve`] and the crate-private
 /// `QuotaTracker::charge` — the private field means no other code, in or out of
-/// this crate, can assemble one directly. `EntryValidator` exposes three ways
-/// to obtain one: [`EntryValidator::validate_entry`] embeds it in
-/// [`ValidatedEntryType::File`] for the common case where path validation and
-/// quota reservation happen together; its crate-private `charge_hardlink`
-/// and `reserve_file` methods return it standalone for callers that must
-/// decouple the two — hardlinks (target size only known in a second pass,
-/// after [`EntryCount`] counted them in the first) and 7z's duplicate-skip
-/// check (quota must not be reserved for an entry that turns out to be a
-/// skipped duplicate), respectively.
+/// this crate, can assemble one directly. The extraction pipeline reserves one
+/// when it admits a file, and spends it into an [`AdmittedSize`] for the
+/// sink; hardlinks charge theirs in a second pass, after [`EntryCount`]
+/// counted them in the first.
 ///
 /// Deliberately not `Clone`/`Copy`/`Default`: a permit represents a single
 /// reservation and must not be duplicated or spent more than once.
-///
-/// [`ValidatedEntryType::File`]: crate::security::validator::ValidatedEntryType::File
-/// [`EntryValidator::validate_entry`]: crate::security::validator::EntryValidator::validate_entry
-///
-/// # Examples
-///
-/// The common case: a `QuotaPermit` arrives already embedded in a validated
-/// file entry, via [`EntryValidator::validate_entry`]:
-///
-/// ```no_run
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::security::EntrySize;
-/// use exarch_core::security::EntryValidator;
-/// use exarch_core::security::Uncompressed;
-/// use exarch_core::security::ValidatedEntryType;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::EntryType;
-/// use std::path::Path;
-/// use std::path::PathBuf;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-/// let config = SecurityConfig::default();
-/// let mut validator = EntryValidator::new(&config, &dest);
-///
-/// let entry = validator.validate_entry(
-///     Path::new("file.txt"),
-///     &EntryType::File,
-///     EntrySize::new(Uncompressed(1024), None),
-///     None,
-/// )?;
-///
-/// if let ValidatedEntryType::File(permit) = entry.entry_type() {
-///     println!("{permit:?}");
-/// }
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug)]
 #[must_use]
 pub struct QuotaPermit {
@@ -134,42 +91,6 @@ impl AdmittedSize {
 ///
 /// Deliberately not `Clone`/`Copy`/`Default`, and only producible by
 /// `QuotaTracker::reserve_count`. Zero-sized.
-///
-/// # Examples
-///
-/// A validated hardlink carries its `EntryCount`:
-///
-/// ```no_run
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::security::EntrySize;
-/// use exarch_core::security::EntryValidator;
-/// use exarch_core::security::Uncompressed;
-/// use exarch_core::security::ValidatedEntryType;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::EntryType;
-/// use std::path::Path;
-/// use std::path::PathBuf;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-/// let config = SecurityConfig::default().with_allow_hardlinks(true);
-/// let mut validator = EntryValidator::new(&config, &dest);
-///
-/// let entry = validator.validate_entry(
-///     Path::new("link"),
-///     &EntryType::Hardlink {
-///         target: PathBuf::from("target.txt"),
-///     },
-///     EntrySize::new(Uncompressed(0), None),
-///     None,
-/// )?;
-///
-/// if let ValidatedEntryType::Hardlink { counted, .. } = entry.entry_type() {
-///     println!("{counted:?}");
-/// }
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug)]
 #[must_use]
 pub struct EntryCount(PhantomData<()>);
@@ -372,12 +293,14 @@ impl QuotaTracker {
     }
 
     /// Returns the number of files extracted.
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn files_extracted(&self) -> usize {
         self.files_extracted
     }
 
     /// Returns the total bytes written.
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn bytes_written(&self) -> u64 {
         self.bytes_written

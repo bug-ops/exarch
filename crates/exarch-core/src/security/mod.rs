@@ -11,26 +11,17 @@ pub(crate) mod permissions;
 pub(crate) mod quota;
 #[cfg(any(test, feature = "testing"))]
 pub(crate) mod symlink;
-pub mod validator;
+pub(crate) mod validator;
 pub(crate) mod zipbomb;
 
-// Re-export public API types
-pub use validator::EntryValidator;
-pub use validator::ValidatedEntry;
-pub use validator::ValidatedEntryType;
-pub use validator::ValidationReport;
-
-// QuotaPermit and EntryCount ride inside the unconditionally-public
-// ValidatedEntryType::File and ::Hardlink, so it must be exported ungated: a
-// `#[cfg(feature = "testing")]` re-export (as `QuotaTracker` gets below)
-// would be a private-type-in-public-interface compile error.
+// The proofs and values the public `EntrySink` trait and the config API carry
+// must be exported ungated: a `#[cfg(feature = "testing")]` re-export (as
+// `QuotaTracker` gets below) would be a private-type-in-public-interface
+// compile error.
 pub use quota::AdmittedSize;
 pub use quota::EntryCount;
 pub use quota::QuotaPermit;
 
-// SanitizedMode rides inside the unconditionally-public
-// ValidatedEntry::mode(), so — like QuotaPermit above — it must be exported
-// ungated rather than gated behind `testing`.
 pub use admitted::EntrySize;
 pub use hardlink::HardlinkTarget;
 pub use permissions::RawMode;

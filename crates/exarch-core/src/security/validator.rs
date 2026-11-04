@@ -1,7 +1,9 @@
-//! Entry validation orchestrator.
+//! Entry validation core.
 //!
-//! This module provides the main `EntryValidator` type that coordinates all
-//! security validations for archive entries.
+//! [`ValidatorCore`] coordinates every security validation for archive
+//! entries: path, quota, compression ratio, link policy and target. Each
+//! extraction target (the host directory, a sink, a listing) drives it and
+//! receives one proof token per entry kind from [`crate::security::admitted`].
 
 use std::path::Path;
 
@@ -18,17 +20,12 @@ use crate::security::admitted::ValidatedHardlink;
 use crate::security::admitted::ValidatedSymlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::FsView;
-use crate::security::fs_view::HostFs;
-use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::require_hardlinks_allowed;
 use crate::security::permissions::RawMode;
-use crate::security::permissions::SanitizedMode;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
-use crate::types::DestDir;
-use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::ParentCheck;
@@ -49,7 +46,7 @@ fn check_name_limits<V: FsView, P: ParentCheck>(
 
 /// Whether an archive entry is a directory, as the root-entry rule sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NodeKind {
+pub enum NodeKind {
     /// The entry is a directory (or stands for one, like ZIP's empty root
     /// file).
     Directory,
@@ -60,7 +57,7 @@ pub(crate) enum NodeKind {
 impl NodeKind {
     /// Converts a format's directory flag at the boundary, so the rule itself
     /// never takes a bare `bool`.
-    pub(crate) const fn directory_if(is_directory: bool) -> Self {
+    pub const fn directory_if(is_directory: bool) -> Self {
         if is_directory {
             Self::Directory
         } else {
@@ -76,7 +73,7 @@ impl NodeKind {
 /// path as carried at that stage (`&Path` for a raw name, `SafePath` once
 /// validated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntryPath<P> {
+pub enum EntryPath<P> {
     /// The destination itself (`.`, `./`).
     Root(P),
     /// Any path below the destination.
@@ -86,7 +83,7 @@ pub(crate) enum EntryPath<P> {
 impl<'a> EntryPath<&'a Path> {
     /// Classifies a raw entry name; the single definition of "root" for names
     /// not yet validated.
-    pub(crate) fn of(path: &'a Path) -> Self {
+    pub fn of(path: &'a Path) -> Self {
         if path == Path::new(".") {
             Self::Root(path)
         } else {
@@ -98,12 +95,12 @@ impl<'a> EntryPath<&'a Path> {
 impl<P> EntryPath<P> {
     /// Whether this is the root; for tests and callers that only need to know
     /// that, not to act on the path.
-    pub(crate) const fn is_root(&self) -> bool {
+    pub const fn is_root(&self) -> bool {
         matches!(self, Self::Root(_))
     }
 
     /// The path, for callers that treat the root like any directory.
-    pub(crate) fn into_inner(self) -> P {
+    pub fn into_inner(self) -> P {
         match self {
             Self::Root(path) | Self::Child(path) => path,
         }
@@ -114,7 +111,7 @@ impl<P> EntryPath<P> {
     /// A file, symlink or hardlink standing for the root would be written
     /// onto, or remove, the destination. Shared by entry validation and
     /// listing so `extract`, `list` and `verify` agree.
-    pub(crate) fn require_directory_root(self, kind: NodeKind) -> Result<Self> {
+    pub fn require_directory_root(self, kind: NodeKind) -> Result<Self> {
         if self.is_root() && kind == NodeKind::NonDirectory {
             return Err(Violation::RootEntryNotDirectory.into());
         }
@@ -124,127 +121,22 @@ impl<P> EntryPath<P> {
 
 /// Rejects a root entry that is not a directory, for the TAR extractor, which
 /// checks the raw name before its extension filter.
-pub(crate) fn check_root_entry_is_directory(path: &Path, kind: NodeKind) -> Result<()> {
+pub fn check_root_entry_is_directory(path: &Path, kind: NodeKind) -> Result<()> {
     EntryPath::of(path).require_directory_root(kind).map(drop)
 }
 
 /// Rejects an empty entry name, so listing fails on the name that extraction
 /// and `verify` refuse, instead of joining it onto the destination directory.
-pub(crate) fn require_non_empty_name(path: &Path) -> Result<()> {
+pub fn require_non_empty_name(path: &Path) -> Result<()> {
     if path.is_empty() {
         return Err(Violation::EmptyPath.into());
     }
     Ok(())
 }
 
-/// Result of entry validation.
-///
-/// Contains validated and sanitized entry information ready for extraction.
-///
-/// # Security Properties
-///
-/// - Can ONLY be constructed through [`EntryValidator::validate_entry`]
-/// - Fields are private; accessed through getters, so a `ValidatedEntry` cannot
-///   be hand-assembled from unvalidated parts anywhere else in the crate
-#[derive(Debug)]
-pub struct ValidatedEntry {
-    safe_path: SafePath,
-    entry_type: ValidatedEntryType,
-    mode: Option<SanitizedMode>,
-}
-
-impl ValidatedEntry {
-    /// Constructs a `ValidatedEntry` from its already-validated parts.
-    ///
-    /// `pub(crate)` rather than fully private so that unit tests elsewhere in
-    /// this crate (`formats::common`) can build fixtures without weakening
-    /// the sealing against external construction.
-    pub(crate) fn new(
-        safe_path: SafePath,
-        entry_type: ValidatedEntryType,
-        mode: Option<SanitizedMode>,
-    ) -> Self {
-        Self {
-            safe_path,
-            entry_type,
-            mode,
-        }
-    }
-
-    /// Returns the validated path within the destination directory.
-    #[inline]
-    #[must_use]
-    pub fn safe_path(&self) -> &SafePath {
-        &self.safe_path
-    }
-
-    /// Returns the validated entry type.
-    #[inline]
-    #[must_use]
-    pub fn entry_type(&self) -> &ValidatedEntryType {
-        &self.entry_type
-    }
-
-    /// Returns the sanitized file permissions, if applicable.
-    #[inline]
-    #[must_use]
-    pub fn mode(&self) -> Option<SanitizedMode> {
-        self.mode
-    }
-}
-
-/// Validated entry type variants.
-///
-/// This enum alone does not carry the sealing guarantee — the external seal
-/// comes from [`ValidatedEntry`]: its constructor is `pub(crate)`, so
-/// nothing outside this crate can assemble a `ValidatedEntry` at all,
-/// regardless of how its `ValidatedEntryType` field was produced. Within
-/// that guarantee, several variants add a second, crate-internal layer for
-/// their own payloads:
-///
-/// - The `Symlink` and `Hardlink` variants wrap [`SafeSymlink`] and
-///   [`HardlinkTarget`], which are independently sealed and can only be
-///   produced by their own validation routines, so even crate-internal code
-///   cannot forge a "validated" symlink/hardlink target.
-/// - The `File` variant wraps [`QuotaPermit`], whose only producer is
-///   [`QuotaTracker::reserve`]: a `File` variant cannot be built without a
-///   quota reservation having actually succeeded. This is crate-internal
-///   discipline, not an external-construction barrier — enum variant fields are
-///   as visible as the enum itself, so `ValidatedEntryType::File(todo!())`
-///   compiles from outside this crate too; it just can never *run*, since
-///   nothing outside this crate can produce a genuine `QuotaPermit`.
-///
-/// `#[non_exhaustive]` so a future variant is not a breaking change for
-/// downstream matches — [`ValidatedEntry::entry_type`] is the only way
-/// external code observes this type, and even that always sees output from
-/// [`EntryValidator::validate_entry`].
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum ValidatedEntryType {
-    /// Regular file, carrying proof that its size was reserved against a
-    /// [`QuotaTracker`] before this entry was validated.
-    File(QuotaPermit),
-
-    /// Directory
-    Directory,
-
-    /// Validated symlink
-    Symlink(SafeSymlink),
-
-    /// Hardlink (validated in tracker, target path stored for two-pass)
-    #[non_exhaustive]
-    Hardlink {
-        /// Target path (already validated)
-        target: HardlinkTarget,
-        /// Proof the hardlink was counted against `max_file_count` in the
-        /// first pass; the second pass spends it to charge the copied bytes.
-        counted: EntryCount,
-    },
-}
-
 /// What path validation and the extension allowlist decide about a file, before
 /// any quota is charged.
-pub(crate) enum FileScreen<P: ParentCheck = Resolved> {
+pub enum FileScreen<P: ParentCheck = Resolved> {
     /// The file is to be extracted once its quota is reserved.
     Pending(PendingFile<P>),
     /// The extension allowlist excludes the file; extraction skips it.
@@ -257,7 +149,7 @@ pub(crate) enum FileScreen<P: ParentCheck = Resolved> {
 /// It holds neither a root nor a view. Both are passed per call, tied by
 /// [`FsView::Root`], so a target can mutate its view between validations and a
 /// root can never be paired with the wrong view.
-pub(crate) struct ValidatorCore<'a> {
+pub struct ValidatorCore<'a> {
     config: &'a SecurityConfig,
     quota_tracker: QuotaTracker,
     hardlink_tracker: HardlinkTracker,
@@ -265,7 +157,7 @@ pub(crate) struct ValidatorCore<'a> {
 }
 
 impl<'a> ValidatorCore<'a> {
-    pub(crate) fn new(config: &'a SecurityConfig) -> Self {
+    pub fn new(config: &'a SecurityConfig) -> Self {
         Self {
             config,
             quota_tracker: QuotaTracker::new(),
@@ -276,7 +168,7 @@ impl<'a> ValidatorCore<'a> {
 
     /// A context reflecting the symlinks seen so far; build a fresh one for
     /// every entry.
-    pub(crate) fn context<'r, V: FsView>(&self) -> ValidationContext<'r, V> {
+    pub fn context<'r, V: FsView>(&self) -> ValidationContext<'r, V> {
         let mut ctx = ValidationContext::new(self.config.allowed.symlinks.is_allowed());
         if self.symlink_seen {
             ctx.mark_symlink_seen();
@@ -284,63 +176,9 @@ impl<'a> ValidatorCore<'a> {
         ctx
     }
 
-    /// See [`EntryValidator::validate_entry`].
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "mirrors the public validate_entry plus the root, view and context"
-    )]
-    pub(crate) fn validate_entry_in<V: FsView>(
-        &mut self,
-        path: &Path,
-        entry_type: &EntryType,
-        size: EntrySize,
-        mode: Option<RawMode>,
-        root: &V::Root,
-        view: &V,
-        ctx: &ValidationContext<'_, V>,
-    ) -> Result<ValidatedEntry> {
-        match entry_type {
-            EntryType::File => {
-                let file = self.validate_file_in(path, size, mode, root, view, ctx)?;
-                let (safe_path, permit, mode) = file.into_parts();
-                Ok(ValidatedEntry::new(
-                    safe_path,
-                    ValidatedEntryType::File(permit),
-                    mode,
-                ))
-            }
-            EntryType::Directory => {
-                let safe_path = self.validate_directory_in(path, size, root, view, ctx)?;
-                Ok(ValidatedEntry::new(
-                    safe_path,
-                    ValidatedEntryType::Directory,
-                    None,
-                ))
-            }
-            EntryType::Symlink { target } => {
-                let symlink = self.validate_symlink_in(path, target, size, root, view, ctx)?;
-                Ok(ValidatedEntry::new(
-                    symlink.link,
-                    ValidatedEntryType::Symlink(symlink.symlink),
-                    None,
-                ))
-            }
-            EntryType::Hardlink { target } => {
-                let link = self.validate_hardlink_in(path, target, size, root, view, ctx)?;
-                Ok(ValidatedEntry::new(
-                    link.link,
-                    ValidatedEntryType::Hardlink {
-                        target: link.target,
-                        counted: link.counted,
-                    },
-                    None,
-                ))
-            }
-        }
-    }
-
     /// Validates a regular file: path, quota reservation, ratio and mode.
-    pub(crate) fn validate_file_in<V: FsView, P: ParentCheck>(
+    #[cfg(test)]
+    pub fn validate_file_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
         size: EntrySize,
@@ -360,7 +198,7 @@ impl<'a> ValidatorCore<'a> {
     /// The path comes first, so a disallowed entry named `../x.bin` is
     /// refused rather than skipped. This is the one place the allowlist rule
     /// is applied to extraction.
-    pub(crate) fn screen_file_path_in<V: FsView, P: ParentCheck>(
+    pub fn screen_file_path_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         size: EntrySize,
@@ -380,7 +218,7 @@ impl<'a> ValidatorCore<'a> {
 
     /// Reserves the quota of a screened file, checks its ratio and sanitizes
     /// its mode.
-    pub(crate) fn admit_file<P: ParentCheck>(
+    pub fn admit_file<P: ParentCheck>(
         &mut self,
         pending: PendingFile<P>,
     ) -> Result<ValidatedFile<P>> {
@@ -403,7 +241,7 @@ impl<'a> ValidatorCore<'a> {
     }
 
     /// Validates a directory entry: path and ratio.
-    pub(crate) fn validate_directory_in<V: FsView, P: ParentCheck>(
+    pub fn validate_directory_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         size: EntrySize,
@@ -420,7 +258,7 @@ impl<'a> ValidatorCore<'a> {
     }
 
     /// Validates a symlink entry: path, ratio, policy, quota and target.
-    pub(crate) fn validate_symlink_in<V: FsView, P: ParentCheck>(
+    pub fn validate_symlink_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
         target: &Path,
@@ -438,14 +276,11 @@ impl<'a> ValidatorCore<'a> {
         self.reserve_symlink(size.uncompressed.0)?;
         let symlink = SafeSymlink::validate_in(&safe_path, target, root, self.config, view)?;
         self.symlink_seen = true;
-        Ok(ValidatedSymlink {
-            link: safe_path,
-            symlink,
-        })
+        Ok(ValidatedSymlink { symlink })
     }
 
     /// Validates a hardlink entry: path, ratio, policy, count and target.
-    pub(crate) fn validate_hardlink_in<V: FsView, P: ParentCheck>(
+    pub fn validate_hardlink_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
         target: &Path,
@@ -477,8 +312,9 @@ impl<'a> ValidatorCore<'a> {
         })
     }
 
-    /// See [`EntryValidator::validate_entry_path`].
-    pub(crate) fn validate_entry_path_in<V: FsView, P: ParentCheck>(
+    /// Validates an entry's path, which must be a directory if it names the
+    /// archive root.
+    pub fn validate_entry_path_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         kind: NodeKind,
@@ -495,176 +331,17 @@ impl<'a> ValidatorCore<'a> {
         }
     }
 
-    pub(crate) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
+    pub fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
         self.quota_tracker.reserve(size, self.config)
     }
 
-    pub(crate) fn reserve_symlink(&mut self, size: u64) -> Result<()> {
+    pub fn reserve_symlink(&mut self, size: u64) -> Result<()> {
         self.quota_tracker.reserve(size, self.config).map(drop)
     }
 
-    pub(crate) fn charge_hardlink(
-        &mut self,
-        counted: EntryCount,
-        size: u64,
-    ) -> Result<QuotaPermit> {
+    pub fn charge_hardlink(&mut self, counted: EntryCount, size: u64) -> Result<QuotaPermit> {
         self.quota_tracker.charge(counted, size, self.config)
     }
-
-    pub(crate) fn finish(self) -> ValidationReport {
-        ValidationReport {
-            files_validated: self.quota_tracker.files_extracted(),
-            total_bytes: self.quota_tracker.bytes_written(),
-            hardlinks_tracked: self.hardlink_tracker.count(),
-        }
-    }
-}
-
-/// Orchestrates security validation for archive entries.
-///
-/// This type maintains state across entry validations:
-/// - Quota tracking (file count, total size)
-/// - Compression ratio monitoring (zip bomb detection)
-/// - Hardlink target tracking
-/// - Symlink-seen flag (for canonicalize optimization)
-///
-/// # Lifecycle
-///
-/// 1. Create with `EntryValidator::new(&config, &dest)`
-/// 2. For each entry, call `validate_entry()`
-/// 3. After all entries processed, call `finish()` for final report
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::security::Compressed;
-/// use exarch_core::security::EntrySize;
-/// use exarch_core::security::EntryValidator;
-/// use exarch_core::security::RawMode;
-/// use exarch_core::security::Uncompressed;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::EntryType;
-/// use std::path::Path;
-/// use std::path::PathBuf;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-/// let config = SecurityConfig::default();
-///
-/// let mut validator = EntryValidator::new(&config, &dest);
-///
-/// // Validate a file entry
-/// let entry = validator.validate_entry(
-///     Path::new("foo/bar.txt"),
-///     &EntryType::File,
-///     EntrySize::new(Uncompressed(1024), Some(Compressed(512))),
-///     Some(RawMode::new(0o644)),
-/// )?;
-///
-/// let report = validator.finish();
-/// println!("Validated {} files", report.files_validated);
-/// # Ok(())
-/// # }
-/// ```
-/// OPT-H004: Validator uses references to avoid cloning config and dest.
-/// This eliminates 1 clone per extraction (`SecurityConfig` + `DestDir`).
-pub struct EntryValidator<'a> {
-    core: ValidatorCore<'a>,
-    dest: &'a DestDir,
-}
-
-impl<'a> EntryValidator<'a> {
-    /// Creates a new entry validator with the given security configuration.
-    #[must_use]
-    pub fn new(config: &'a SecurityConfig, dest: &'a DestDir) -> Self {
-        Self {
-            core: ValidatorCore::new(config),
-            dest,
-        }
-    }
-
-    /// Validates an archive entry.
-    ///
-    /// This method orchestrates all security validations:
-    /// 1. Path validation (traversal, depth, banned components)
-    /// 2. Quota checking (file size, count, total size) — files and symlinks; a
-    ///    hardlink is counted here and charged its bytes in the second pass.
-    ///    Directories are not counted
-    /// 3. Compression ratio validation (zip bomb detection)
-    /// 4. Type-specific validation (symlink, hardlink, permissions)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any validation fails. Common errors:
-    /// - `ArchiveError::PathTraversal` - Path escapes destination
-    /// - `ArchiveError::QuotaExceeded` - Size or count limits exceeded
-    /// - `ArchiveError::ZipBomb` - Compression ratio too high
-    /// - `ArchiveError::SymlinkEscape` - Symlink target escapes
-    /// - `ArchiveError::HardlinkEscape` - Hardlink target escapes
-    /// - `ArchiveError::InvalidPermissions` - Dangerous permissions
-    /// - `ArchiveError::SecurityViolation` - Root entry (`.`) that is not a
-    ///   directory. This is a backstop for formats that reach here without an
-    ///   earlier check; TAR checks first, in `process_entry`, so the root is
-    ///   rejected before the extension filter can skip it.
-    #[inline]
-    pub fn validate_entry(
-        &mut self,
-        path: &Path,
-        entry_type: &EntryType,
-        size: EntrySize,
-        mode: Option<RawMode>,
-    ) -> Result<ValidatedEntry> {
-        let ctx = self.core.context::<HostFs>();
-        self.core
-            .validate_entry_in(path, entry_type, size, mode, self.dest, &HostFs, &ctx)
-    }
-
-    /// Charges a hardlink's copied byte count against the shared quota tracker,
-    /// returning a capability token that proves the charge succeeded.
-    ///
-    /// The hardlink was already counted against `max_file_count` in the first
-    /// pass (`validate_entry`), which is what `counted` proves; its size is
-    /// only known once the target file exists on disk, in the second pass. This
-    /// routes that size through the same `QuotaTracker` used for regular files,
-    /// so `max_file_size` and `max_total_size` are enforced uniformly
-    /// regardless of entry type, without counting the entry twice.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ArchiveError::QuotaExceeded`] if the copy would exceed
-    /// `max_file_size` or `max_total_size`.
-    #[cfg(test)]
-    pub(crate) fn charge_hardlink(
-        &mut self,
-        counted: EntryCount,
-        size: u64,
-    ) -> Result<QuotaPermit> {
-        self.core.charge_hardlink(counted, size)
-    }
-
-    /// Finishes validation and returns a summary report.
-    ///
-    /// This consumes the validator and returns statistics about the
-    /// validation process.
-    #[must_use]
-    pub fn finish(self) -> ValidationReport {
-        self.core.finish()
-    }
-}
-
-/// Summary report of validation process.
-#[derive(Debug)]
-pub struct ValidationReport {
-    /// Number of entries counted against `max_file_count`: files, symlinks and
-    /// hardlinks (directories are not counted)
-    pub files_validated: usize,
-
-    /// Total bytes processed
-    pub total_bytes: u64,
-
-    /// Number of hardlinks tracked
-    pub hardlinks_tracked: usize,
 }
 
 #[cfg(test)]
@@ -677,9 +354,85 @@ mod tests {
     use super::*;
     use crate::security::Compressed;
     use crate::security::Uncompressed;
+    use crate::security::fs_view::HostFs;
+    use crate::security::permissions::SanitizedMode;
+    use crate::types::DestDir;
     use std::assert_matches;
-    use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// A core with a real destination, answering one call per entry kind.
+    struct Harness<'a> {
+        core: ValidatorCore<'a>,
+        dest: DestDir,
+        _temp: TempDir,
+    }
+
+    impl<'a> Harness<'a> {
+        fn new(config: &'a SecurityConfig) -> Self {
+            let temp = TempDir::new().expect("failed to create temp dir");
+            let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+            Self {
+                core: ValidatorCore::new(config),
+                dest,
+                _temp: temp,
+            }
+        }
+
+        fn file(
+            &mut self,
+            path: &str,
+            size: EntrySize,
+            mode: Option<u32>,
+        ) -> Result<ValidatedFile> {
+            let ctx = self.core.context::<HostFs>();
+            self.core.validate_file_in(
+                Path::new(path),
+                size,
+                mode.map(RawMode::new),
+                &self.dest,
+                &HostFs,
+                &ctx,
+            )
+        }
+
+        fn plain_file(&mut self, path: &str, bytes: u64) -> Result<ValidatedFile> {
+            self.file(path, sizes(bytes), Some(0o644))
+        }
+
+        fn directory(&self, path: &str) -> Result<SafePath> {
+            let ctx = self.core.context::<HostFs>();
+            self.core
+                .validate_directory_in(Path::new(path), sizes(0), &self.dest, &HostFs, &ctx)
+        }
+
+        fn symlink(&mut self, path: &str) -> Result<ValidatedSymlink> {
+            let ctx = self.core.context::<HostFs>();
+            self.core.validate_symlink_in(
+                Path::new(path),
+                Path::new("target.txt"),
+                sizes(0),
+                &self.dest,
+                &HostFs,
+                &ctx,
+            )
+        }
+
+        fn hardlink(&mut self, path: &str) -> Result<ValidatedHardlink> {
+            let ctx = self.core.context::<HostFs>();
+            self.core.validate_hardlink_in(
+                Path::new(path),
+                Path::new("target.txt"),
+                sizes(0),
+                &self.dest,
+                &HostFs,
+                &ctx,
+            )
+        }
+    }
+
+    fn sizes(uncompressed: u64) -> EntrySize {
+        EntrySize::new(Uncompressed(uncompressed), None)
+    }
 
     #[test]
     fn test_entry_path_of_splits_root_from_child() {
@@ -705,472 +458,145 @@ mod tests {
     }
 
     #[test]
-    fn test_entry_validator_new() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
-        let validator = EntryValidator::new(&config, &dest);
-        let report = validator.finish();
-        assert_eq!(report.files_validated, 0);
-        assert_eq!(report.total_bytes, 0);
-        assert_eq!(report.hardlinks_tracked, 0);
-    }
-
-    #[test]
     fn test_validate_file_entry() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let config = SecurityConfig::default();
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        let result = validator.validate_entry(
-            Path::new("file.txt"),
-            &EntryType::File,
-            EntrySize::new(Uncompressed(1024), None),
-            Some(RawMode::new(0o644)),
-        );
+        let (path, _permit, mode) = harness.plain_file("file.txt", 1024).unwrap().into_parts();
 
-        assert!(result.is_ok());
-        let entry = result.unwrap();
-        assert_eq!(entry.safe_path.as_path(), Path::new("file.txt"));
-        assert_matches!(entry.entry_type, ValidatedEntryType::File(_));
-        assert_eq!(entry.mode.map(SanitizedMode::as_u32), Some(0o644));
+        assert_eq!(path.as_path(), Path::new("file.txt"));
+        assert_eq!(mode.map(SanitizedMode::as_u32), Some(0o644));
     }
 
     #[test]
     fn test_validate_directory_entry() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let config = SecurityConfig::default();
-        let mut validator = EntryValidator::new(&config, &dest);
+        let harness = Harness::new(&config);
 
-        let result = validator.validate_entry(
-            Path::new("dir"),
-            &EntryType::Directory,
-            EntrySize::new(Uncompressed(0), None),
-            None,
-        );
+        let path = harness.directory("dir").unwrap();
 
-        assert!(result.is_ok());
-        let entry = result.unwrap();
-        assert_matches!(entry.entry_type, ValidatedEntryType::Directory);
-        assert!(entry.mode.is_none());
+        assert_eq!(path.as_path(), Path::new("dir"));
     }
 
     #[test]
     fn test_validate_path_traversal_rejected() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let config = SecurityConfig::default();
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        let result = validator.validate_entry(
-            Path::new("../etc/passwd"),
-            &EntryType::File,
-            EntrySize::new(Uncompressed(1024), None),
-            Some(RawMode::new(0o644)),
+        assert_matches!(
+            harness.plain_file("../etc/passwd", 1024),
+            Err(ArchiveError::PathTraversal { .. })
         );
-
-        assert!(result.is_err());
     }
 
     #[test]
     fn test_quota_exceeded_file_size() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(100));
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        let result = validator.validate_entry(
-            Path::new("large.txt"),
-            &EntryType::File,
-            EntrySize::new(Uncompressed(1000), None),
-            Some(RawMode::new(0o644)),
+        assert_matches!(
+            harness.plain_file("large.txt", 1000),
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileSize { .. }
+            })
         );
-
-        assert!(result.is_err());
     }
 
     #[test]
     fn test_quota_exceeded_file_count() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2));
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        assert!(
-            validator
-                .validate_entry(
-                    Path::new("file1.txt"),
-                    &EntryType::File,
-                    EntrySize::new(Uncompressed(100), None),
-                    Some(RawMode::new(0o644))
-                )
-                .is_ok()
+        assert!(harness.plain_file("file1.txt", 100).is_ok());
+        assert!(harness.plain_file("file2.txt", 100).is_ok());
+        assert_matches!(
+            harness.plain_file("file3.txt", 100),
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileCount { .. }
+            })
         );
-        assert!(
-            validator
-                .validate_entry(
-                    Path::new("file2.txt"),
-                    &EntryType::File,
-                    EntrySize::new(Uncompressed(100), None),
-                    Some(RawMode::new(0o644))
-                )
-                .is_ok()
-        );
-
-        let result = validator.validate_entry(
-            Path::new("file3.txt"),
-            &EntryType::File,
-            EntrySize::new(Uncompressed(100), None),
-            Some(RawMode::new(0o644)),
-        );
-        assert!(result.is_err());
     }
 
     #[test]
     fn test_zip_bomb_detected() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let config = SecurityConfig::default();
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        let result = validator.validate_entry(
-            Path::new("bomb.txt"),
-            &EntryType::File,
+        let result = harness.file(
+            "bomb.txt",
             EntrySize::new(Uncompressed(1_000_000), Some(Compressed(100))),
-            Some(RawMode::new(0o644)),
+            Some(0o644),
         );
 
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_report() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
-        let mut validator = EntryValidator::new(&config, &dest);
-
-        validator
-            .validate_entry(
-                Path::new("file1.txt"),
-                &EntryType::File,
-                EntrySize::new(Uncompressed(1024), None),
-                Some(RawMode::new(0o644)),
-            )
-            .unwrap();
-
-        validator
-            .validate_entry(
-                Path::new("file2.txt"),
-                &EntryType::File,
-                EntrySize::new(Uncompressed(2048), None),
-                Some(RawMode::new(0o644)),
-            )
-            .unwrap();
-
-        let report = validator.finish();
-        assert_eq!(report.files_validated, 2);
-        assert_eq!(report.total_bytes, 1024 + 2048);
+        assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
     }
 
     #[test]
     fn test_sanitize_permissions_setuid() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let config = SecurityConfig::default();
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        let result = validator.validate_entry(
-            Path::new("file.txt"),
-            &EntryType::File,
-            EntrySize::new(Uncompressed(1024), None),
-            Some(RawMode::new(0o4755)),
-        );
+        let (_, _, mode) = harness
+            .file("file.txt", sizes(1024), Some(0o4755))
+            .unwrap()
+            .into_parts();
 
-        assert!(result.is_ok());
-        let entry = result.unwrap();
-        assert_eq!(entry.mode.map(SanitizedMode::as_u32), Some(0o755)); // setuid stripped
+        assert_eq!(mode.map(SanitizedMode::as_u32), Some(0o755));
     }
 
     #[test]
-    fn test_symlink_validation() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+    fn test_symlink_validation_marks_the_context() {
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = crate::Admit::Allow;
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
+        assert!(!harness.core.symlink_seen);
 
-        let result = validator.validate_entry(
-            Path::new("link"),
-            &EntryType::Symlink {
-                target: PathBuf::from("target.txt"),
-            },
-            EntrySize::new(Uncompressed(0), None),
-            None,
-        );
+        let validated = harness.symlink("link").unwrap();
 
-        assert!(result.is_ok());
-        let entry = result.unwrap();
-        assert_matches!(entry.entry_type, ValidatedEntryType::Symlink(_));
-        assert!(validator.core.symlink_seen);
+        assert_eq!(validated.symlink.link().as_path(), Path::new("link"));
+        assert_eq!(validated.symlink.target_path(), Path::new("target.txt"));
+        assert!(harness.core.symlink_seen);
     }
 
     #[test]
     fn test_hardlink_validation() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        let result = validator.validate_entry(
-            Path::new("link"),
-            &EntryType::Hardlink {
-                target: PathBuf::from("target.txt"),
-            },
-            EntrySize::new(Uncompressed(0), None),
-            None,
-        );
+        let validated = harness.hardlink("link").unwrap();
 
-        assert!(result.is_ok());
-        let entry = result.unwrap();
-        assert_matches!(entry.entry_type, ValidatedEntryType::Hardlink { .. });
-    }
-
-    #[test]
-    fn test_multiple_entries_with_report() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-        let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = crate::Admit::Allow;
-        let mut validator = EntryValidator::new(&config, &dest);
-
-        // Validate multiple entry types
-        validator
-            .validate_entry(
-                Path::new("file1.txt"),
-                &EntryType::File,
-                EntrySize::new(Uncompressed(1024), None),
-                Some(RawMode::new(0o644)),
-            )
-            .unwrap();
-
-        validator
-            .validate_entry(
-                Path::new("dir"),
-                &EntryType::Directory,
-                EntrySize::new(Uncompressed(0), None),
-                None,
-            )
-            .unwrap();
-
-        validator
-            .validate_entry(
-                Path::new("hardlink"),
-                &EntryType::Hardlink {
-                    target: PathBuf::from("file1.txt"),
-                },
-                EntrySize::new(Uncompressed(0), None),
-                None,
-            )
-            .unwrap();
-
-        let report = validator.finish();
-        assert_eq!(report.files_validated, 2); // File and hardlink; directories are not counted
-        assert_eq!(report.total_bytes, 1024);
-        assert_eq!(report.hardlinks_tracked, 1);
-    }
-
-    // M-TEST-1: Empty directory handling
-    #[test]
-    fn test_empty_directory_validation() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
-        let mut validator = EntryValidator::new(&config, &dest);
-
-        // Empty directory should be valid
-        let result = validator.validate_entry(
-            Path::new("empty_dir/"),
-            &EntryType::Directory,
-            EntrySize::new(Uncompressed(0), None),
-            None,
-        );
-
-        assert!(result.is_ok(), "empty directory should be valid");
-        let entry = result.unwrap();
-        assert_matches!(
-            entry.entry_type,
-            ValidatedEntryType::Directory,
-            "should be directory type"
-        );
-        assert!(entry.mode.is_none(), "directory should not have mode set");
+        assert_eq!(validated.link.as_path(), Path::new("link"));
+        assert_eq!(validated.target.as_path(), Path::new("target.txt"));
     }
 
     #[test]
     fn test_nested_empty_directories() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let config = SecurityConfig::default();
-        let mut validator = EntryValidator::new(&config, &dest);
+        let harness = Harness::new(&config);
 
-        // Multiple nested empty directories
-        let dirs = ["a/", "a/b/", "a/b/c/"];
-        for dir in &dirs {
-            let result = validator.validate_entry(
-                Path::new(dir),
-                &EntryType::Directory,
-                EntrySize::new(Uncompressed(0), None),
-                None,
-            );
-            assert!(result.is_ok(), "nested directory {dir} should be valid");
+        for dir in ["a/", "a/b/", "a/b/c/", "empty_dir/"] {
+            assert!(harness.directory(dir).is_ok(), "{dir}");
         }
-
-        let report = validator.finish();
-        assert_eq!(
-            report.files_validated, 0,
-            "directories are not counted as files"
-        );
-    }
-
-    // OPT-H004: Test validator uses references (no cloning)
-    #[test]
-    fn test_validator_uses_references() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-        let config = SecurityConfig::default();
-
-        // Create validator with references
-        let validator = EntryValidator::new(&config, &dest);
-
-        // Verify config and dest are still accessible (not moved)
-        assert_eq!(
-            config.max_file_size,
-            SecurityConfig::default().max_file_size
-        );
-        // Note: dest.as_path() may be canonicalized on macOS (/var vs
-        // /private/var) Just verify dest is still accessible
-        let _ = dest.as_path();
-
-        // Validator can still be used
-        drop(validator);
-    }
-
-    // OPT-H004: Test multiple validators can share same config
-    #[test]
-    fn test_multiple_validators_share_config() {
-        let temp1 = TempDir::new().unwrap();
-        let temp2 = TempDir::new().unwrap();
-        let dest1 = DestDir::new(temp1.path().to_path_buf()).unwrap();
-        let dest2 = DestDir::new(temp2.path().to_path_buf()).unwrap();
-        let config = SecurityConfig::default();
-
-        // Create two validators sharing the same config reference
-        let mut validator1 = EntryValidator::new(&config, &dest1);
-        let mut validator2 = EntryValidator::new(&config, &dest2);
-
-        // Both validators work independently
-        let result1 = validator1.validate_entry(
-            Path::new("file1.txt"),
-            &EntryType::File,
-            EntrySize::new(Uncompressed(1024), None),
-            Some(RawMode::new(0o644)),
-        );
-        assert!(result1.is_ok());
-
-        let result2 = validator2.validate_entry(
-            Path::new("file2.txt"),
-            &EntryType::File,
-            EntrySize::new(Uncompressed(2048), None),
-            Some(RawMode::new(0o644)),
-        );
-        assert!(result2.is_ok());
-
-        // Config is still accessible
-        assert_eq!(
-            config.max_file_size,
-            SecurityConfig::default().max_file_size
-        );
-    }
-
-    #[test]
-    fn test_symlink_seen_flag_propagates() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-        let mut config = SecurityConfig::default();
-        config.allowed.symlinks = crate::Admit::Allow;
-        let mut validator = EntryValidator::new(&config, &dest);
-
-        assert!(!validator.core.symlink_seen);
-
-        // Validate a symlink entry
-        validator
-            .validate_entry(
-                Path::new("link"),
-                &EntryType::Symlink {
-                    target: PathBuf::from("target.txt"),
-                },
-                EntrySize::new(Uncompressed(0), None),
-                None,
-            )
-            .unwrap();
-
-        assert!(validator.core.symlink_seen);
     }
 
     // Issue #426: hardlink quota bypass regression tests.
 
-    fn validate_hardlink_entry(
-        validator: &mut EntryValidator<'_>,
-        name: &str,
-    ) -> crate::Result<EntryCount> {
-        let entry = validator.validate_entry(
-            Path::new(name),
-            &EntryType::Hardlink {
-                target: PathBuf::from("target.txt"),
-            },
-            EntrySize::new(Uncompressed(0), None),
-            None,
-        )?;
-        match entry.entry_type {
-            ValidatedEntryType::Hardlink { counted, .. } => Ok(counted),
-            other => panic!("expected a hardlink, got {other:?}"),
-        }
-    }
-
-    fn validate_symlink_entry(
-        validator: &mut EntryValidator<'_>,
-        name: &str,
-    ) -> crate::Result<ValidatedEntry> {
-        validator.validate_entry(
-            Path::new(name),
-            &EntryType::Symlink {
-                target: PathBuf::from("target.txt"),
-            },
-            EntrySize::new(Uncompressed(0), None),
-            None,
-        )
-    }
-
     #[test]
     fn test_charge_hardlink_exceeding_max_file_size_rejected() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(100));
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        let counted = validate_hardlink_entry(&mut validator, "link").unwrap();
-        let result = validator.charge_hardlink(counted, 1_000);
+        let counted = harness.hardlink("link").unwrap().counted;
+        let result = harness.core.charge_hardlink(counted, 1_000);
 
         assert_matches!(
             result,
-            Err(crate::ArchiveError::QuotaExceeded {
+            Err(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::FileSize { .. }
             }),
             "hardlink exceeding max_file_size must be rejected, got: {result:?}"
@@ -1179,30 +605,20 @@ mod tests {
 
     #[test]
     fn test_charge_hardlink_shares_quota_tracker_with_files() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
         config.max_total_size = crate::Limit::Bounded(crate::non_zero!(250));
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        validator
-            .validate_entry(
-                Path::new("file1.txt"),
-                &EntryType::File,
-                EntrySize::new(Uncompressed(100), None),
-                Some(RawMode::new(0o644)),
-            )
-            .unwrap();
+        harness.plain_file("file1.txt", 100).unwrap();
+        let first = harness.hardlink("link1").unwrap().counted;
+        let second = harness.hardlink("link2").unwrap().counted;
+        assert!(harness.core.charge_hardlink(first, 100).is_ok());
 
-        let first = validate_hardlink_entry(&mut validator, "link1").unwrap();
-        let second = validate_hardlink_entry(&mut validator, "link2").unwrap();
-        assert!(validator.charge_hardlink(first, 100).is_ok());
-
-        let result = validator.charge_hardlink(second, 100);
+        let result = harness.core.charge_hardlink(second, 100);
         assert_matches!(
             result,
-            Err(crate::ArchiveError::QuotaExceeded {
+            Err(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::TotalSize { .. }
             }),
             "hardlink bytes must accumulate on the same tracker as file bytes \
@@ -1212,46 +628,41 @@ mod tests {
 
     #[test]
     fn test_hardlink_counted_once_in_pass_one() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2));
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        let first = validate_hardlink_entry(&mut validator, "link1").unwrap();
-        let second = validate_hardlink_entry(&mut validator, "link2").unwrap();
+        let first = harness.hardlink("link1").unwrap().counted;
+        let second = harness.hardlink("link2").unwrap().counted;
 
-        let result = validate_hardlink_entry(&mut validator, "link3");
+        let result = harness.hardlink("link3");
         assert_matches!(
             result,
-            Err(crate::ArchiveError::QuotaExceeded {
+            Err(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::FileCount { .. }
             }),
             "the third hardlink must exceed max_file_count in pass one, got: {result:?}"
         );
 
-        assert!(validator.charge_hardlink(first, 1).is_ok());
-        assert!(validator.charge_hardlink(second, 1).is_ok());
-        assert_eq!(validator.finish().files_validated, 3);
+        assert!(harness.core.charge_hardlink(first, 1).is_ok());
+        assert!(harness.core.charge_hardlink(second, 1).is_ok());
     }
 
     #[test]
     fn test_symlink_exceeding_max_file_count_rejected() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = crate::Admit::Allow;
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2));
-        let mut validator = EntryValidator::new(&config, &dest);
+        let mut harness = Harness::new(&config);
 
-        assert!(validate_symlink_entry(&mut validator, "l1").is_ok());
-        assert!(validate_symlink_entry(&mut validator, "l2").is_ok());
+        assert!(harness.symlink("l1").is_ok());
+        assert!(harness.symlink("l2").is_ok());
 
-        let result = validate_symlink_entry(&mut validator, "l3");
+        let result = harness.symlink("l3");
         assert_matches!(
             result,
-            Err(crate::ArchiveError::QuotaExceeded {
+            Err(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::FileCount { .. }
             }),
             "symlinks must count against max_file_count, got: {result:?}"
@@ -1260,24 +671,15 @@ mod tests {
 
     #[test]
     fn test_symlink_policy_error_wins_over_file_count() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(1));
-        let mut validator = EntryValidator::new(&config, &dest);
-        validator
-            .validate_entry(
-                Path::new("f"),
-                &EntryType::File,
-                EntrySize::new(Uncompressed(1), None),
-                None,
-            )
-            .unwrap();
+        let mut harness = Harness::new(&config);
+        harness.file("f", sizes(1), None).unwrap();
 
-        let result = validate_symlink_entry(&mut validator, "l1");
+        let result = harness.symlink("l1");
         assert_matches!(
             result,
-            Err(crate::ArchiveError::SecurityViolation { ref kind })
+            Err(ArchiveError::SecurityViolation { ref kind })
                 if kind.to_string() == "symlinks not allowed",
             "got: {result:?}"
         );
@@ -1285,24 +687,15 @@ mod tests {
 
     #[test]
     fn test_hardlink_policy_error_wins_over_file_count() {
-        let temp = TempDir::new().unwrap();
-        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(1));
-        let mut validator = EntryValidator::new(&config, &dest);
-        validator
-            .validate_entry(
-                Path::new("f"),
-                &EntryType::File,
-                EntrySize::new(Uncompressed(1), None),
-                None,
-            )
-            .unwrap();
+        let mut harness = Harness::new(&config);
+        harness.file("f", sizes(1), None).unwrap();
 
-        let result = validate_hardlink_entry(&mut validator, "l1");
+        let result = harness.hardlink("l1");
         assert_matches!(
             result,
-            Err(crate::ArchiveError::SecurityViolation { ref kind })
+            Err(ArchiveError::SecurityViolation { ref kind })
                 if kind.to_string() == "hardlinks not allowed",
             "got: {result:?}"
         );

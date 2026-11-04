@@ -3,7 +3,6 @@
 use std::error::Error;
 use std::fmt;
 use std::io;
-use std::path::Path;
 
 use crate::ArchiveError;
 use crate::ArchiveReader;
@@ -11,11 +10,13 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
+use crate::security::quota::AdmittedSize;
 use crate::sink::EntrySink;
 use crate::sink::MemoryEntry;
 use crate::sink::MemoryEntryKind;
 use crate::sink::MemoryExtractRequest;
 use crate::sink::MemoryFile;
+use crate::types::CheckedLinkTarget;
 use crate::types::SafePath;
 
 /// An entry delivered by a [`CallbackSink`].
@@ -205,20 +206,20 @@ where
         &mut self,
         _path: &SafePath,
         mode: Option<SanitizedMode>,
-        size: u64,
+        size: AdmittedSize,
     ) -> io::Result<MemoryFile> {
-        Ok(MemoryFile::with_size(size, mode))
+        Ok(MemoryFile::with_size(size.get(), mode))
     }
 
     fn finish_file(&mut self, path: &SafePath, file: MemoryFile) -> io::Result<()> {
         (self.callback)(path, file.into_entry().into())
     }
 
-    fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()> {
+    fn create_symlink(&mut self, link: &SafePath, target: CheckedLinkTarget<'_>) -> io::Result<()> {
         (self.callback)(
             link,
             MemoryEntry::Symlink {
-                target: target.to_path_buf(),
+                target: target.as_path().to_path_buf(),
             }
             .into(),
         )

@@ -78,7 +78,9 @@
 //! use std::path::Path;
 //! use std::path::PathBuf;
 //!
+//! use exarch_core::AdmittedSize;
 //! use exarch_core::ArchiveReader;
+//! use exarch_core::CheckedLinkTarget;
 //! use exarch_core::EntrySink;
 //! use exarch_core::SafePath;
 //! use exarch_core::SanitizedMode;
@@ -100,10 +102,10 @@
 //!         &mut self,
 //!         _: &SafePath,
 //!         _: Option<SanitizedMode>,
-//!         size: u64,
+//!         size: AdmittedSize,
 //!     ) -> io::Result<Vec<u8>> {
 //!         Ok(Vec::with_capacity(
-//!             usize::try_from(size.min(1 << 16)).unwrap_or(0),
+//!             usize::try_from(size.get().min(1 << 16)).unwrap_or(0),
 //!         ))
 //!     }
 //!
@@ -112,7 +114,7 @@
 //!         Ok(())
 //!     }
 //!
-//!     fn create_symlink(&mut self, _: &SafePath, _: &Path) -> io::Result<()> {
+//!     fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
 //!         Ok(())
 //!     }
 //!
@@ -205,9 +207,11 @@ use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
+use crate::security::quota::AdmittedSize;
 use crate::security::quota::EntryCount;
 use crate::security::validator::FileScreen;
 use crate::security::validator::ValidatorCore;
+use crate::types::CheckedLinkTarget;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::Resolved;
@@ -457,7 +461,8 @@ pub trait EntrySink {
     /// Returns an error if the directory cannot be created.
     fn create_directory(&mut self, path: &SafePath) -> io::Result<()>;
 
-    /// Starts a file of exactly `size` bytes, as the archive declares it.
+    /// Starts a file of exactly `size` bytes, the size the quota tracker
+    /// admitted for it.
     ///
     /// `mode` is the permission bits after setuid and setgid are stripped, if
     /// the archive carries any.
@@ -469,14 +474,14 @@ pub trait EntrySink {
         &mut self,
         path: &SafePath,
         mode: Option<SanitizedMode>,
-        size: u64,
+        size: AdmittedSize,
     ) -> io::Result<Self::File>;
 
     /// Starts a file whose `bytes` are already complete and verified.
     ///
     /// The result is then passed to [`finish_file`](Self::finish_file) like one
-    /// from [`create_file`](Self::create_file), and `bytes.len()` is the size
-    /// the archive declares. The default writes `bytes` through
+    /// from [`create_file`](Self::create_file), and `bytes.len()` equals
+    /// `size`. The default writes `bytes` through
     /// [`create_file`](Self::create_file); a sink that keeps its files in
     /// memory can override it to take the buffer without copying it.
     ///
@@ -488,8 +493,9 @@ pub trait EntrySink {
     ///
     /// ```
     /// use std::io;
-    /// use std::path::Path;
     ///
+    /// use exarch_core::AdmittedSize;
+    /// use exarch_core::CheckedLinkTarget;
     /// use exarch_core::EntrySink;
     /// use exarch_core::SafePath;
     /// use exarch_core::SanitizedMode;
@@ -507,10 +513,10 @@ pub trait EntrySink {
     ///         &mut self,
     ///         _: &SafePath,
     ///         _: Option<SanitizedMode>,
-    ///         size: u64,
+    ///         size: AdmittedSize,
     ///     ) -> io::Result<Vec<u8>> {
     ///         Ok(Vec::with_capacity(
-    ///             usize::try_from(size.min(1 << 16)).unwrap_or(0),
+    ///             usize::try_from(size.get().min(1 << 16)).unwrap_or(0),
     ///         ))
     ///     }
     ///
@@ -518,6 +524,7 @@ pub trait EntrySink {
     ///         &mut self,
     ///         _: &SafePath,
     ///         _: Option<SanitizedMode>,
+    ///         _: AdmittedSize,
     ///         bytes: Vec<u8>,
     ///     ) -> io::Result<Vec<u8>> {
     ///         Ok(bytes)
@@ -527,7 +534,7 @@ pub trait EntrySink {
     ///         Ok(())
     ///     }
     ///
-    ///     fn create_symlink(&mut self, _: &SafePath, _: &Path) -> io::Result<()> {
+    ///     fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
     ///         Ok(())
     ///     }
     ///
@@ -540,9 +547,10 @@ pub trait EntrySink {
         &mut self,
         path: &SafePath,
         mode: Option<SanitizedMode>,
+        size: AdmittedSize,
         bytes: Vec<u8>,
     ) -> io::Result<Self::File> {
-        let mut file = self.create_file(path, mode, bytes.len() as u64)?;
+        let mut file = self.create_file(path, mode, size)?;
         file.write_all(&bytes)?;
         Ok(file)
     }
@@ -559,12 +567,13 @@ pub trait EntrySink {
     /// the archive spells it and is validated not to escape the root.
     ///
     /// Entries delivered later are already resolved through this link, so a
-    /// sink may store it as opaque data.
+    /// sink may store it as opaque data; [`CheckedLinkTarget::as_path`] gives
+    /// the text to store.
     ///
     /// # Errors
     ///
     /// Returns an error if the link cannot be created.
-    fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()>;
+    fn create_symlink(&mut self, link: &SafePath, target: CheckedLinkTarget<'_>) -> io::Result<()>;
 
     /// Creates `link` with the content of the file at `target`.
     ///
@@ -578,7 +587,7 @@ pub trait EntrySink {
 struct StagedFile {
     path: SafePath,
     mode: Option<SanitizedMode>,
-    size: u64,
+    size: AdmittedSize,
 }
 
 /// An [`ExtractTarget`] that validates against an in-memory model of the
@@ -625,9 +634,9 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
         tally: &mut Tally<'_>,
     ) -> Result<Option<StagedFile>> {
         let (path, permit, mode) = admitted.into_parts();
-        let size = permit.into_bytes();
+        let size = permit.into_admitted();
         // Overflow guard only, as on the host: the sum is not stored.
-        common::checked_add_bytes(tally.report.bytes_written, size)?;
+        common::checked_add_bytes(tally.report.bytes_written, size.get())?;
 
         let rel = path.as_path();
         match (self.tree.occupant(rel), tally.options.duplicate_policy()) {
@@ -659,8 +668,12 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
             .sink
             .create_file(&staged.path, staged.mode, staged.size)
             .map_err(sink_error)?;
-        let written =
-            copy_with_buffer(reader, &mut file, &mut self.copy_buffer, Some(staged.size))?;
+        let written = copy_with_buffer(
+            reader,
+            &mut file,
+            &mut self.copy_buffer,
+            Some(staged.size.get()),
+        )?;
         self.finish_staged(staged.path, file, written, tally)
     }
 
@@ -843,11 +856,11 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             return Ok(());
         };
         match retained {
-            Retained::Bytes(bytes) if bytes.len() as u64 == staged.size => {
+            Retained::Bytes(bytes) if bytes.len() as u64 == staged.size.get() => {
                 let written = bytes.len() as u64;
                 let file = self
                     .sink
-                    .create_file_from(&staged.path, staged.mode, bytes)
+                    .create_file_from(&staged.path, staged.mode, staged.size, bytes)
                     .map_err(sink_error)?;
                 self.finish_staged(staged.path, file, written, tally)
             }
@@ -900,7 +913,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             Err(error) => return Err(place_error(error)),
         };
         self.sink
-            .create_symlink(&resolved, target)
+            .create_symlink(&resolved, symlink.checked_target())
             .map_err(sink_error)?;
         tally.report.symlinks_created += 1;
         Ok(())

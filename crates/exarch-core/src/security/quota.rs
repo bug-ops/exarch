@@ -85,6 +85,41 @@ impl QuotaPermit {
     pub(crate) const fn into_bytes(self) -> u64 {
         self.bytes.0
     }
+
+    /// Spends the permit, yielding a copyable view of the bytes it reserved
+    /// for a sink to read.
+    pub(crate) const fn into_admitted(self) -> AdmittedSize {
+        AdmittedSize(self.bytes.0)
+    }
+}
+
+/// The size of a file the pipeline admitted: the bytes a [`QuotaPermit`]
+/// reserved for it.
+///
+/// A read-only, copyable view handed to an [`EntrySink`](crate::EntrySink) so
+/// it can tell a size the quota tracker already charged from any other number.
+/// Only the pipeline can build one: the field is private and the sole
+/// constructor spends a permit.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::AdmittedSize;
+///
+/// fn capacity_hint(size: AdmittedSize) -> usize {
+///     usize::try_from(size.get().min(1 << 16)).unwrap_or(0)
+/// }
+/// # let _ = capacity_hint;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AdmittedSize(u64);
+
+impl AdmittedSize {
+    /// The admitted size in bytes.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 /// Proof that one entry was counted against `max_file_count` while its bytes

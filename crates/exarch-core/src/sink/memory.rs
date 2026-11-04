@@ -19,9 +19,11 @@ use crate::SecurityConfig;
 use crate::closed_enum::closed_enum;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
+use crate::security::quota::AdmittedSize;
 use crate::sink::EntrySink;
 use crate::sink::SinkFull;
 use crate::sink::SinkOptions;
+use crate::types::CheckedLinkTarget;
 use crate::types::SafePath;
 
 const DEFAULT_LIMIT_BYTES: u64 = 500 * 1024 * 1024;
@@ -563,19 +565,20 @@ impl EntrySink for MemorySink {
         &mut self,
         path: &SafePath,
         mode: Option<SanitizedMode>,
-        size: u64,
+        size: AdmittedSize,
     ) -> io::Result<MemoryFile> {
-        self.reserve_file(path, size)?;
-        Ok(MemoryFile::with_size(size, mode))
+        self.reserve_file(path, size.get())?;
+        Ok(MemoryFile::with_size(size.get(), mode))
     }
 
     fn create_file_from(
         &mut self,
         path: &SafePath,
         mode: Option<SanitizedMode>,
+        size: AdmittedSize,
         bytes: Vec<u8>,
     ) -> io::Result<MemoryFile> {
-        self.reserve_file(path, bytes.len() as u64)?;
+        self.reserve_file(path, size.get())?;
         Ok(MemoryFile::from_vec(bytes, mode))
     }
 
@@ -583,11 +586,11 @@ impl EntrySink for MemorySink {
         self.store(path, file.into_entry())
     }
 
-    fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()> {
+    fn create_symlink(&mut self, link: &SafePath, target: CheckedLinkTarget<'_>) -> io::Result<()> {
         self.store(
             link,
             MemoryEntry::Symlink {
-                target: target.to_path_buf(),
+                target: target.as_path().to_path_buf(),
             },
         )
     }

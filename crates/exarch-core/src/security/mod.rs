@@ -24,6 +24,7 @@ pub use validator::ValidationReport;
 // ValidatedEntryType::File and ::Hardlink, so it must be exported ungated: a
 // `#[cfg(feature = "testing")]` re-export (as `QuotaTracker` gets below)
 // would be a private-type-in-public-interface compile error.
+pub use quota::AdmittedSize;
 pub use quota::EntryCount;
 pub use quota::QuotaPermit;
 

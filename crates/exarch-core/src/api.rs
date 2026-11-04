@@ -904,9 +904,10 @@ pub fn verify_reader_with_progress(
 ///
 /// ```
 /// use std::io;
-/// use std::path::Path;
 ///
+/// use exarch_core::AdmittedSize;
 /// use exarch_core::ArchiveReader;
+/// use exarch_core::CheckedLinkTarget;
 /// use exarch_core::EntrySink;
 /// use exarch_core::SafePath;
 /// use exarch_core::SanitizedMode;
@@ -928,7 +929,7 @@ pub fn verify_reader_with_progress(
 ///         &mut self,
 ///         _: &SafePath,
 ///         _: Option<SanitizedMode>,
-///         _: u64,
+///         _: AdmittedSize,
 ///     ) -> io::Result<io::Sink> {
 ///         Ok(io::sink())
 ///     }
@@ -938,7 +939,7 @@ pub fn verify_reader_with_progress(
 ///         Ok(())
 ///     }
 ///
-///     fn create_symlink(&mut self, _: &SafePath, _: &Path) -> io::Result<()> {
+///     fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
 ///         Ok(())
 ///     }
 ///

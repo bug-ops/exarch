@@ -25,4 +25,5 @@ pub use entry_type::EntryType;
 #[cfg(all(feature = "testing", any(unix, target_os = "wasi")))]
 pub use parent_check::Walked;
 pub use safe_path::SafePath;
+pub use safe_symlink::CheckedLinkTarget;
 pub use safe_symlink::SafeSymlink;

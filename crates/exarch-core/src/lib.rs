@@ -185,6 +185,7 @@ pub use security::fs_view::LinkKind;
 pub use listed::ListedArchive;
 pub use listed::ListedExtractOptions;
 pub use listed::list_archive_for_extraction;
+pub use security::AdmittedSize;
 pub use security::Compressed;
 pub use security::EntrySize;
 pub use security::HardlinkTarget;
@@ -223,6 +224,7 @@ pub use types::Extension;
 pub use types::PathComponentName;
 
 // Re-export types module for easier access
+pub use types::CheckedLinkTarget;
 pub use types::DestDir;
 pub use types::EntryType;
 pub use types::SafePath;

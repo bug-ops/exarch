@@ -12,8 +12,10 @@ use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::AdmittedSize;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::CheckedLinkTarget;
 use exarch_core::EntrySink;
 use exarch_core::ExtractionOptions;
 use exarch_core::QuotaResource;
@@ -86,7 +88,7 @@ impl EntrySink for FailingSink {
         &mut self,
         _: &SafePath,
         _: Option<SanitizedMode>,
-        _: u64,
+        _: AdmittedSize,
     ) -> io::Result<Vec<u8>> {
         if let Some(max) = self.full_at {
             return Err(io::Error::new(
@@ -108,7 +110,7 @@ impl EntrySink for FailingSink {
         Ok(())
     }
 
-    fn create_symlink(&mut self, _: &SafePath, _: &Path) -> io::Result<()> {
+    fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
         if self.fail_symlink {
             return Err(io::Error::other("symlink refused"));
         }
@@ -432,4 +434,62 @@ fn an_archive_within_the_node_budget_extracts() {
         &SinkOptions::default(),
     )
     .unwrap();
+}
+
+/// Keeps what the pipeline proves about a file's size and a link's target.
+#[derive(Default)]
+struct ProofSink {
+    sizes: Vec<u64>,
+    targets: Vec<PathBuf>,
+}
+
+impl EntrySink for ProofSink {
+    type File = Vec<u8>;
+
+    fn create_directory(&mut self, _: &SafePath) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn create_file(
+        &mut self,
+        _: &SafePath,
+        _: Option<SanitizedMode>,
+        size: AdmittedSize,
+    ) -> io::Result<Vec<u8>> {
+        self.sizes.push(size.get());
+        Ok(Vec::new())
+    }
+
+    fn finish_file(&mut self, _: &SafePath, _: Vec<u8>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn create_symlink(&mut self, _: &SafePath, target: CheckedLinkTarget<'_>) -> io::Result<()> {
+        self.targets.push(target.as_path().to_path_buf());
+        Ok(())
+    }
+
+    fn create_hardlink(&mut self, _: &SafePath, _: &SafePath) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_sink_receives_the_admitted_size_and_the_validated_link_target() {
+    let mut sink = ProofSink::default();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+    let entries = [
+        tar_file("a", b"hello"),
+        sink_support::tar_symlink("l", "a"),
+        tar_file("empty", b""),
+    ];
+    extract_to_sink(
+        tar_reader(&entries),
+        &mut sink,
+        &config,
+        &SinkOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(sink.sizes, [5, 0]);
+    assert_eq!(sink.targets, [PathBuf::from("a")]);
 }

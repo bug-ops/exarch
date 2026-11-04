@@ -243,6 +243,42 @@ impl<P: ParentCheck> SafeSymlink<P> {
     pub fn target_path(&self) -> &Path {
         &self.target_path
     }
+
+    /// The target as a proof a sink can read: it came from a validated
+    /// symlink.
+    pub(crate) fn checked_target(&self) -> CheckedLinkTarget<'_> {
+        CheckedLinkTarget(&self.target_path)
+    }
+}
+
+/// The target of a symlink that passed validation, borrowed from its
+/// [`SafeSymlink`].
+///
+/// Handed to an [`EntrySink`](crate::EntrySink) so it can tell a target the
+/// pipeline checked (relative, free of banned components, resolving inside
+/// the root) from any other path. Only a validated symlink can produce one:
+/// the field is private and the sole constructor is crate-private. The path
+/// is the target as the archive spells it, not resolved.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::CheckedLinkTarget;
+///
+/// fn stored_as_text(target: CheckedLinkTarget<'_>) -> String {
+///     target.as_path().to_string_lossy().into_owned()
+/// }
+/// # let _ = stored_as_text;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckedLinkTarget<'a>(&'a Path);
+
+impl<'a> CheckedLinkTarget<'a> {
+    /// The validated target, as the archive spells it.
+    #[must_use]
+    pub const fn as_path(&self) -> &'a Path {
+        self.0
+    }
 }
 
 /// Fails with the symlink-policy refusal unless `config` allows symlinks.

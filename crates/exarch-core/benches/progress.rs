@@ -8,11 +8,11 @@
 use criterion::Criterion;
 use criterion::criterion_group;
 use criterion::criterion_main;
+use exarch_core::CreateRequest;
+use exarch_core::OutputFile;
 use exarch_core::ProgressCallback;
 use exarch_core::create_archive;
 use exarch_core::creation::CreationConfig;
-use exarch_core::creation::tar::create_tar_with_progress;
-use exarch_core::creation::zip::create_zip_with_progress;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
@@ -88,7 +88,9 @@ fn benchmark_tar_with_noop_progress(c: &mut Criterion) {
             let archive = output.path().join("test.tar");
             let mut progress = NoOpProgress;
             black_box(
-                create_tar_with_progress(&archive, None, &[source.path()], &config, &mut progress)
+                CreateRequest::new(&config)
+                    .with_progress(&mut progress)
+                    .create(&OutputFile::replace(&archive), &[source.path()])
                     .unwrap(),
             );
         });
@@ -110,7 +112,9 @@ fn benchmark_tar_with_counting_progress(c: &mut Criterion) {
                 bytes: 0,
             };
             black_box(
-                create_tar_with_progress(&archive, None, &[source.path()], &config, &mut progress)
+                CreateRequest::new(&config)
+                    .with_progress(&mut progress)
+                    .create(&OutputFile::replace(&archive), &[source.path()])
                     .unwrap(),
             );
         });
@@ -144,7 +148,9 @@ fn benchmark_zip_with_noop_progress(c: &mut Criterion) {
             let archive = output.path().join("test.zip");
             let mut progress = NoOpProgress;
             black_box(
-                create_zip_with_progress(&archive, &[source.path()], &config, &mut progress)
+                CreateRequest::new(&config)
+                    .with_progress(&mut progress)
+                    .create(&OutputFile::replace(&archive), &[source.path()])
                     .unwrap(),
             );
         });
@@ -166,7 +172,9 @@ fn benchmark_zip_with_counting_progress(c: &mut Criterion) {
                 bytes: 0,
             };
             black_box(
-                create_zip_with_progress(&archive, &[source.path()], &config, &mut progress)
+                CreateRequest::new(&config)
+                    .with_progress(&mut progress)
+                    .create(&OutputFile::replace(&archive), &[source.path()])
                     .unwrap(),
             );
         });

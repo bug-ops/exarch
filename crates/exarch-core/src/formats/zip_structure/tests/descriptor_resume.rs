@@ -18,11 +18,8 @@ fn has_overrun(found: &[ZipInconsistency], entry: usize) -> bool {
 }
 
 fn plain_verify(bytes: Vec<u8>) -> crate::VerificationReport {
-    open_bytes(bytes)
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap()
 }
 
@@ -60,7 +57,7 @@ fn deflate_header_behind_the_stream_end_is_fatal_for_listing_under_enforce() {
     let tail = [descriptor(payload, 0), unmapped_local()].concat();
     let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
     assert_matches!(
-        open_bytes(built.bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(built.bytes.clone(), &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(
             ZipInconsistency::HiddenLocalHeader {
                 region: HiddenRegion::DescriptorTail,
@@ -69,8 +66,8 @@ fn deflate_header_behind_the_stream_end_is_fatal_for_listing_under_enforce() {
         ))
     );
     assert!(
-        open_bytes(built.bytes)
-            .list(&config(ZipConsistencyPolicy::Ignore))
+        open_bytes(built.bytes, &config(ZipConsistencyPolicy::Ignore))
+            .list()
             .is_ok()
     );
 }
@@ -121,7 +118,12 @@ fn deflate_streaming_writer_archive_has_no_findings() {
         zip.write_all(&vec![b'k'; len]).unwrap();
     }
     let bytes = zip.finish().unwrap().into_inner();
-    assert!(open_bytes(bytes).structure().findings().is_empty());
+    assert!(
+        open_bytes(bytes, &SecurityConfig::default())
+            .structure()
+            .findings()
+            .is_empty()
+    );
 }
 
 pub(super) fn zstd_raw_frame(content: &[u8]) -> Vec<u8> {
@@ -202,7 +204,7 @@ fn a_forged_descriptor_crc_is_fatal_under_enforce_with_plain_verify() {
     let report = plain_verify(built.bytes.clone());
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_matches!(
-        open_bytes(built.bytes).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(
             ZipInconsistency::DescriptorOverrun { .. }
         ))
@@ -435,10 +437,12 @@ fn a_nameless_header_with_an_extra_field_is_a_hidden_header_wherever_it_sits() {
     );
 
     assert_eq!(
-        with_prefix(header.clone()).structure().findings(),
+        with_prefix(header.clone(), &SecurityConfig::default())
+            .structure()
+            .findings(),
         [hidden_in(0, HiddenRegion::Prefix)]
     );
-    let stubbed = with_prefix([b"#".to_vec(), header].concat());
+    let stubbed = with_prefix([b"#".to_vec(), header].concat(), &SecurityConfig::default());
     assert_eq!(stubbed.structure().findings().len(), 1);
 }
 

@@ -290,7 +290,7 @@ fn extract_atomic(
     let parent = canonical_output
         .parent()
         .ok_or(ArchiveError::InvalidConfiguration {
-            setting: crate::ConfigSetting::OutputDirectory,
+            setting: crate::ConfigSetting::OutputPath,
             problem: crate::ConfigProblem::NoParent,
         })?;
 
@@ -381,7 +381,7 @@ pub(crate) fn extract_tar_stream<R: std::io::Read>(
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
 
-    TarArchive::with_source(stream, source, trailer).extract(output_dir, config, options, progress)
+    TarArchive::with_source(stream, source, trailer, config).extract(output_dir, options, progress)
 }
 
 fn extract_zip(
@@ -397,7 +397,7 @@ fn extract_zip(
 
     let file = File::open(archive_path)?;
     let archive = ZipArchive::for_extraction(file, config, options.decode_reuse)?;
-    archive.extract(output_dir, config, options, progress)
+    archive.extract(output_dir, options, progress)
 }
 
 fn extract_7z(
@@ -412,8 +412,8 @@ fn extract_7z(
     use std::fs::File;
 
     let file = File::open(archive_path)?;
-    let archive = SevenZArchive::new(file)?;
-    archive.extract(output_dir, config, options, progress)
+    let archive = SevenZArchive::new(file, config)?;
+    archive.extract(output_dir, options, progress)
 }
 
 /// Creates an archive from source files and directories.
@@ -1046,7 +1046,7 @@ pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
 ) -> Result<ExtractionReport> {
     match reader.into_source() {
         Source::Tar { stream, codec } => {
-            let archive = tar_archive(stream, codec, DecoderLimits::of(config))?;
+            let archive = tar_archive(stream, codec, config)?;
             let mut target = SinkTarget::new(sink, config);
             archive.extract_into(&mut target, config, options, progress)
         }
@@ -1068,7 +1068,7 @@ pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
             reader,
             format: SeekableFormat::SevenZ,
         } => {
-            let mut archive = SevenZArchive::new(reader)?;
+            let mut archive = SevenZArchive::new(reader, config)?;
             archive.admit(config)?.extract_with(
                 |config| Ok(SinkTarget::new(sink, config)),
                 options,
@@ -1799,15 +1799,10 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
 
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
         let mut progress = ByteTracker { total: 0 };
         let report = archive
-            .extract(
-                temp.path(),
-                &config,
-                &ExtractionOptions::default(),
-                &mut progress,
-            )
+            .extract(temp.path(), &ExtractionOptions::default(), &mut progress)
             .unwrap();
 
         // The hardlink copies the file content — bytes should be reported
@@ -1855,17 +1850,12 @@ mod tests {
         let tar_data = make_raw_tar_single(b"../../etc/passwd", b"evil");
 
         let temp = tempfile::TempDir::new().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
         let mut progress = SymmetryTracker {
             started: 0,
             completed: 0,
         };
-        let result = archive.extract(
-            temp.path(),
-            &SecurityConfig::default(),
-            &ExtractionOptions::default(),
-            &mut progress,
-        );
+        let result = archive.extract(temp.path(), &ExtractionOptions::default(), &mut progress);
 
         assert!(result.is_err(), "traversal entry must be rejected");
         assert_eq!(
@@ -1909,17 +1899,12 @@ mod tests {
         let zip_data = make_zip_with_traversal(b"../../etc/passwd", b"evil");
 
         let temp = tempfile::TempDir::new().unwrap();
-        let archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
+        let archive = ZipArchive::new(Cursor::new(zip_data), &SecurityConfig::default()).unwrap();
         let mut progress = SymmetryTracker {
             started: 0,
             completed: 0,
         };
-        let result = archive.extract(
-            temp.path(),
-            &SecurityConfig::default(),
-            &ExtractionOptions::default(),
-            &mut progress,
-        );
+        let result = archive.extract(temp.path(), &ExtractionOptions::default(), &mut progress);
 
         assert!(result.is_err(), "traversal entry must be rejected");
         assert_eq!(

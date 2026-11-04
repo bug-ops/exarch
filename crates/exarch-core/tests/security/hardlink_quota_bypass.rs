@@ -114,10 +114,9 @@ fn test_hardlink_bomb_exceeds_total_size() {
         .with_max_total_size(exarch_core::non_zero!(20_000)) // room for target + 3 links, not 4
         .with_max_file_count(exarch_core::non_zero!(1_000));
 
-    let archive = TarArchive::new(Cursor::new(tar_data));
+    let archive = TarArchive::new(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -164,10 +163,9 @@ fn test_hardlink_bomb_exceeds_file_count() {
         .with_max_total_size(exarch_core::non_zero!(1_000_000))
         .with_max_file_count(exarch_core::non_zero!(3)); // target.txt + 2 hardlinks allowed, 3rd rejected
 
-    let archive = TarArchive::new(Cursor::new(tar_data));
+    let archive = TarArchive::new(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -208,10 +206,9 @@ fn test_legitimate_hardlinks_within_quota_succeed() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_hardlinks(true);
 
-    let archive = TarArchive::new(Cursor::new(tar_data));
+    let archive = TarArchive::new(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );

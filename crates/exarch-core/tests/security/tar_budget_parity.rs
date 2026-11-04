@@ -109,11 +109,10 @@ fn extract_via_budgeted_pipeline(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
         .with_max_file_count(exarch_core::non_zero!(10_000))
         .with_max_total_size(exarch_core::Limit::Unbounded)
         .with_max_file_size(exarch_core::Limit::Unbounded);
-    let archive = TarArchive::new(Cursor::new(bytes.to_vec()));
+    let archive = TarArchive::new(Cursor::new(bytes.to_vec()), &config);
     archive
         .extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut NoopProgress,
         )

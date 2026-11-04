@@ -341,20 +341,22 @@ fn extract_kept(
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     let spool = match kept {
-        Kept::Zip(zip) if zip.serves(config) => {
-            return extract_staged(output_dir, options, |dir| {
-                zip.extract(dir, config, options, progress)
-            });
+        Kept::Zip(zip) => match (*zip).rebind(config) {
+            Some(zip) => {
+                return extract_staged(output_dir, options, |dir| {
+                    zip.extract(dir, options, progress)
+                });
+            }
+            None => None,
+        },
+        Kept::TarSpool(spool) if DecoderLimits::of(config).covers(spool.decoded_with) => {
+            Some(spool)
         }
-        Kept::TarSpool(spool) if DecoderLimits::of(config).covers(spool.decoded_with) => spool,
-        Kept::Nothing | Kept::TarSpool(_) | Kept::Zip(_) => {
-            return extract_staged(output_dir, options, |dir| {
-                extract_validated(archive, dir, config, options, progress)
-            });
-        }
+        Kept::Nothing | Kept::TarSpool(_) => None,
     };
-    extract_staged(output_dir, options, |dir| {
-        replay_spool(spool.file, dir, config, options, progress)
+    extract_staged(output_dir, options, |dir| match spool {
+        Some(spool) => replay_spool(spool.file, dir, config, options, progress),
+        None => extract_validated(archive, dir, config, options, progress),
     })
 }
 

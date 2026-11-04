@@ -95,6 +95,7 @@ const MEMBER_OUTPUT_BYTES: u64 = 16 * 1024;
 pub(crate) struct MemberAllowance(NonZeroU64);
 
 impl MemberAllowance {
+    #[cfg(test)]
     pub(crate) const UNBOUNDED: Self = Self(NonZeroU64::MAX);
 
     pub(crate) fn of(config: &SecurityConfig) -> Self {
@@ -125,13 +126,6 @@ pub(crate) struct DecoderLimits {
 }
 
 impl DecoderLimits {
-    /// No limit beyond what the formats themselves impose.
-    pub(crate) const UNBOUNDED: Self = Self {
-        memory: u64::MAX,
-        zstd_window: ZstdWindowLog::LIBZSTD_DEFAULT,
-        members: MemberAllowance::UNBOUNDED,
-    };
-
     pub(crate) fn of(config: &SecurityConfig) -> Self {
         Self {
             memory: config.max_decoder_memory.get(),

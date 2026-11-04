@@ -358,7 +358,7 @@ impl<'a> ArchiveReader<'a> {
             Source::Seekable {
                 reader,
                 format: SeekableFormat::Zip,
-            } => ZipArchive::for_config(reader, config)?.list_with(config, listing),
+            } => ZipArchive::new(reader, config)?.list_with(config, listing),
             Source::Seekable {
                 reader,
                 format: SeekableFormat::SevenZ,
@@ -384,12 +384,13 @@ impl<'a> ArchiveReader<'a> {
             Source::Seekable {
                 reader,
                 format: SeekableFormat::Zip,
-            } => ZipArchive::for_config(reader, config)?
-                .verify_with_progress(config, options, progress),
+            } => ZipArchive::new(reader, config)?.verify_with_progress(config, options, progress),
             Source::Seekable {
                 reader,
                 format: SeekableFormat::SevenZ,
-            } => SevenZArchive::new(reader)?.verify_with_progress(config, options, progress),
+            } => {
+                SevenZArchive::new(reader, config)?.verify_with_progress(config, options, progress)
+            }
         }
     }
 }
@@ -431,11 +432,11 @@ pub(crate) fn decode_tar_stream<'r, R: Read + Send + 'r>(
 pub(crate) fn tar_archive<'r, R: Read + Send + 'r>(
     reader: R,
     codec: Option<CompressionCodec>,
-    limits: DecoderLimits,
+    config: &SecurityConfig,
 ) -> Result<TarArchive<Box<dyn Read + Send + 'r>>> {
     let trailer = TarTrailer::for_codec(codec);
-    decode_tar_stream(reader, codec, limits)
-        .map(|decoded| TarArchive::from_stream(decoded, trailer))
+    decode_tar_stream(reader, codec, DecoderLimits::of(config))
+        .map(|decoded| TarArchive::from_stream(decoded, trailer, config))
 }
 
 #[cfg(test)]

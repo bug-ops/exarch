@@ -6,7 +6,6 @@
 use crate::ArchiveError;
 use crate::CompressionRatio;
 use crate::IoContext;
-use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -25,7 +24,6 @@ use crate::creation::walker::collect_entries;
 use crate::security::Compressed;
 use crate::security::Uncompressed;
 use std::fs::File;
-use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
@@ -33,139 +31,6 @@ use std::path::Path;
 use zip::CompressionMethod;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
-
-/// Creates a ZIP archive.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::zip::create_zip;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let report = create_zip(Path::new("output.zip"), &[Path::new("src")], &config)?;
-/// println!("Added {} files", report.files_added);
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Source path does not exist
-/// - Output file cannot be created
-/// - I/O error during archive creation
-pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig,
-) -> Result<CreationReport> {
-    create_zip_with_progress(output, sources, config, &mut NoopProgress)
-}
-
-/// Creates a ZIP archive with progress reporting.
-///
-/// This function provides real-time progress updates during archive creation
-/// through callback functions. Useful for displaying progress bars or logging
-/// in interactive applications.
-///
-/// # Parameters
-///
-/// - `output`: Path where the ZIP archive will be created
-/// - `sources`: Slice of source paths to include in the archive
-/// - `config`: Configuration controlling filtering, permissions, compression,
-///   and archiving behavior
-/// - `progress`: Mutable reference to a progress callback implementation
-///
-/// # Progress Callbacks
-///
-/// The `progress` callback receives four types of events:
-///
-/// 1. `on_entry_start`: Called before processing each file/directory
-/// 2. `on_bytes_written`: Called for each chunk of data written (typically
-///    every 64 KB)
-/// 3. `on_entry_complete`: Called after successfully processing an entry
-/// 4. `on_complete`: Called once when the entire archive is finished
-///
-/// Note: Callbacks are invoked frequently during large file processing. For
-/// better performance with very large files, consider batching updates.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ProgressCallback;
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::zip::create_zip_with_progress;
-/// use std::path::Path;
-///
-/// struct SimpleProgress;
-///
-/// impl ProgressCallback for SimpleProgress {
-///     fn on_entry_start(&mut self, path: &Path, position: exarch_core::EntryPosition) {
-///         println!("[{}] Processing: {}", position.current, path.display());
-///     }
-///
-///     fn on_bytes_written(&mut self, bytes: u64) {
-///         // Called frequently - consider rate limiting
-///     }
-///
-///     fn on_entry_complete(&mut self, path: &Path) {
-///         println!("Completed: {}", path.display());
-///     }
-///
-///     fn on_complete(&mut self) {
-///         println!("Archive creation complete!");
-///     }
-/// }
-///
-/// let config = CreationConfig::default();
-/// let mut progress = SimpleProgress;
-/// let report = create_zip_with_progress(
-///     Path::new("output.zip"),
-///     &[Path::new("src")],
-///     &config,
-///     &mut progress,
-/// )?;
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Source path does not exist
-/// - Output file cannot be created
-/// - I/O error during archive creation
-/// - File metadata cannot be read
-pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig,
-    progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "creates the caller-named output archive, not an extraction destination"
-    )]
-    let (file, readable) = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(output.as_ref())
-    {
-        Ok(file) => (file, true),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            (File::create(output.as_ref())?, false)
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let (mut report, mut file) =
-        write_zip(file, sources, config, &ExcludedOutput::none(), progress)?;
-    if readable {
-        warn_on_extraction_ratio(&mut file, &mut report);
-    }
-    Ok(report)
-}
 
 /// Internal function that creates ZIP with any writer and progress reporting.
 ///
@@ -415,25 +280,11 @@ fn normalize_zip_path(path: &Path) -> Result<String> {
     Ok(normalized)
 }
 
-/// Format creator for ZIP archives.
-pub struct ZipCreator;
-
-impl crate::formats::traits::FormatCreator for ZipCreator {
-    fn create(
-        &self,
-        output: &std::path::Path,
-        sources: &[&std::path::Path],
-        config: &CreationConfig,
-        progress: &mut dyn ProgressCallback,
-    ) -> crate::Result<crate::creation::CreationReport> {
-        create_zip_with_progress(output, sources, config, progress)
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
+    use crate::create_archive;
     use crate::creation::CompressionLevel;
     use std::assert_matches;
     use std::fs;
@@ -452,7 +303,8 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_include_hidden(true);
 
-        let report = create_zip(&output, &[source_dir.path().join("test.txt")], &config).unwrap();
+        let report =
+            create_archive(&output, &[source_dir.path().join("test.txt")], &config).unwrap();
 
         assert_eq!(report.files_added, 1);
         assert!(report.bytes_written > 0);
@@ -464,7 +316,7 @@ mod tests {
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("data"), content).unwrap();
         let config = CreationConfig::default();
-        create_zip(
+        create_archive(
             temp.path().join("out.zip"),
             &[source_dir.path().join("data")],
             &config,
@@ -498,7 +350,7 @@ mod tests {
         fs::write(source_dir.path().join("data"), [b'B'; 5000]).unwrap();
         let output = temp.path().join("out.zip");
         let config = CreationConfig::default();
-        let report = create_zip(&output, &[source_dir.path().join("data")], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path().join("data")], &config).unwrap();
         let needed = needed_ratio(&report.warnings[0]);
 
         let dest = temp.path().join("dest");
@@ -546,7 +398,7 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_include_hidden(true);
 
-        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         // Should have exactly 3 files: file1.txt, file2.txt, subdir/file3.txt
         assert_eq!(report.files_added, 3);
@@ -569,7 +421,7 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_compression_level(CompressionLevel::try_from(9u8).unwrap());
 
-        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         assert_eq!(report.files_added, 1);
         assert!(output.exists());
@@ -594,7 +446,7 @@ mod tests {
                 .with_exclude_patterns(vec![])
                 .with_compression_level(CompressionLevel::try_from(level).unwrap());
 
-            let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+            let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
             assert_eq!(report.files_added, 1);
             assert!(output.exists());
         }
@@ -615,7 +467,7 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_include_hidden(true);
 
-        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         assert!(report.directories_added >= 2); // dir1 and dir1/dir2
         assert!(output.exists());
@@ -656,7 +508,7 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_preserve_permissions(true);
 
-        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert_eq!(report.files_added, 1);
 
         // Verify permissions in archive
@@ -689,7 +541,7 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_include_hidden(true);
 
-        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         assert_eq!(report.files_added, 3);
         assert!(report.directories_added >= 1);
@@ -714,7 +566,7 @@ mod tests {
             .with_include_hidden(true);
 
         // Create archive
-        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert!(report.files_added >= 2);
 
         // Extract and verify using zip crate
@@ -760,7 +612,7 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_include_hidden(true);
 
-        create_zip(&output, &[source_dir.path()], &config).unwrap();
+        create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         // Verify paths use forward slashes
         let file = File::open(&output).unwrap();
@@ -787,7 +639,7 @@ mod tests {
         let output = temp.path().join("output.zip");
 
         let config = CreationConfig::default();
-        let result = create_zip(&output, &[Path::new("/nonexistent/path")], &config);
+        let result = create_archive(&output, &[Path::new("/nonexistent/path")], &config);
 
         assert!(result.is_err());
         assert_matches!(result.unwrap_err(), ArchiveError::SourceNotFound { .. });
@@ -840,7 +692,7 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_max_file_size(crate::non_zero!(100));
 
-        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         // The walker leaves out large.txt and counts it, so only small.txt is
         // added
@@ -869,7 +721,7 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_include_hidden(true);
 
-        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         // Should add target.txt, skip link.txt
         assert_eq!(report.files_added, 1);
@@ -898,7 +750,7 @@ mod tests {
             .with_include_hidden(true)
             .with_follow_symlinks(true);
 
-        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         // Both target.txt and the followed link.txt must be written as regular
         // entries.
@@ -960,9 +812,10 @@ mod tests {
 
         let mut progress = TestProgress::default();
 
-        let report =
-            create_zip_with_progress(&output, &[source_dir.path()], &config, &mut progress)
-                .unwrap();
+        let report = crate::CreateRequest::new(&config)
+            .with_progress(&mut progress)
+            .create(&crate::OutputFile::replace(&output), &[source_dir.path()])
+            .unwrap();
 
         // Verify report
         assert_eq!(report.files_added, 3);

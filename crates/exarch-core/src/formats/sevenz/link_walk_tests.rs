@@ -374,11 +374,10 @@ mod bytes_read {
             ));
         let out = tempfile::TempDir::new().unwrap();
 
-        let report = SevenZArchive::new(source)
+        let report = SevenZArchive::new(source, &config)
             .unwrap()
             .extract(
                 out.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )

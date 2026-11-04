@@ -39,12 +39,12 @@ fn config(policy: ZipConsistencyPolicy) -> SecurityConfig {
     SecurityConfig::default().with_zip_consistency(policy)
 }
 
-fn open_bytes(bytes: Vec<u8>) -> ZipArchive<Cursor<Vec<u8>>> {
-    ZipArchive::new(Cursor::new(bytes)).unwrap()
+fn open_bytes(bytes: Vec<u8>, config: &SecurityConfig) -> ZipArchive<Cursor<Vec<u8>>> {
+    ZipArchive::new(Cursor::new(bytes), config).unwrap()
 }
 
 fn findings_of(built: &BuiltZip) -> Vec<ZipInconsistency> {
-    let archive = open_bytes(built.bytes.clone());
+    let archive = open_bytes(built.bytes.clone(), &SecurityConfig::default());
     archive.structure().findings().to_vec()
 }
 
@@ -99,14 +99,19 @@ fn extended_timestamp_with_bad_flags() -> Vec<u8> {
 #[test]
 fn clean_archives_have_no_findings() {
     let created = create_test_zip(vec![("a.txt", b"hello"), ("dir/b.txt", b"world")]);
-    assert!(open_bytes(created).structure().findings().is_empty());
+    assert!(
+        open_bytes(created, &SecurityConfig::default())
+            .structure()
+            .findings()
+            .is_empty()
+    );
 
     let empty = RawZip::new(Vec::new()).build();
     assert!(findings_of(&empty).is_empty());
 
     for (signature, zip64) in [(true, false), (false, false), (true, true), (false, true)] {
         let built = deflated_pair(signature, zip64).build();
-        let archive = open_bytes(built.bytes);
+        let archive = open_bytes(built.bytes, &SecurityConfig::default());
         assert!(archive.structure().findings().is_empty());
         let reads = archive.structure().gap_reads();
         assert!(
@@ -193,14 +198,21 @@ fn entry_with_a_header_mismatch_is_still_admitted() {
     let mut forged = RawEntry::stored("a.txt", b"hello");
     forged.local_extra = extended_timestamp_with_bad_flags();
     forged.declared_compressed = Some(1 << 20);
-    let budget = ZipArchive::new(Cursor::new(RawZip::new(vec![forged]).build().bytes)).map(drop);
+    let budget = ZipArchive::new(
+        Cursor::new(RawZip::new(vec![forged]).build().bytes),
+        &SecurityConfig::default(),
+    )
+    .map(drop);
     assert_matches!(budget, Err(ArchiveError::InvalidArchive(_)));
 
     let mut unsupported = RawEntry::stored("a.txt", b"hello");
     unsupported.local_extra = extended_timestamp_with_bad_flags();
     unsupported.method = 9;
-    let method =
-        ZipArchive::new(Cursor::new(RawZip::new(vec![unsupported]).build().bytes)).map(drop);
+    let method = ZipArchive::new(
+        Cursor::new(RawZip::new(vec![unsupported]).build().bytes),
+        &SecurityConfig::default(),
+    )
+    .map(drop);
     assert_matches!(method, Err(ArchiveError::SecurityViolation { .. }));
 }
 
@@ -212,7 +224,7 @@ fn duplicate_names_are_found_even_though_the_crate_collapses_them() {
         RawEntry::stored("a.txt", b"EVIL"),
     ])
     .build();
-    let mut archive = open_bytes(built.bytes);
+    let mut archive = open_bytes(built.bytes, &SecurityConfig::default());
     assert_eq!(archive.reader_mut().len(), 2);
     assert_eq!(archive.structure().central_entries(), 3);
     assert_eq!(
@@ -229,7 +241,7 @@ fn central_records_past_the_end_count_are_found() {
     let mut zip = two_files();
     zip.end_count = Some(1);
     let built = zip.build();
-    let mut archive = open_bytes(built.bytes.clone());
+    let mut archive = open_bytes(built.bytes.clone(), &SecurityConfig::default());
     assert_eq!(archive.reader_mut().len(), 1);
     assert_eq!(archive.structure().central_entries(), 2);
     assert_eq!(
@@ -277,7 +289,7 @@ fn local_header_after_a_descriptor_is_found_at_every_descriptor_width() {
         let mut zip = RawZip::new(vec![entry.clone()]);
         zip.before_directory = evil.bytes[..evil.directory_start].to_vec();
         let built = zip.build();
-        let archive = open_bytes(built.bytes.clone());
+        let archive = open_bytes(built.bytes.clone(), &SecurityConfig::default());
         let end = data_end(&entry, built.local_offsets[0]);
         assert_eq!(
             archive.structure().findings(),
@@ -298,7 +310,7 @@ fn descriptor_size_equal_to_the_header_magic_is_not_a_hidden_header() {
     entry.method = 8;
     entry.size = MAGIC_AS_SIZE;
     let built = RawZip::new(vec![entry]).build();
-    let archive = open_bytes(built.bytes);
+    let archive = open_bytes(built.bytes, &SecurityConfig::default());
     assert!(
         archive.structure().findings().is_empty(),
         "{:?}",
@@ -326,13 +338,18 @@ fn gaps_and_prefixes_that_hold_no_header_are_not_reported() {
         RawEntry::stored("b.txt", b"world").with_padding_after(64),
     ])
     .build();
-    let archive = open_bytes(apk_like.bytes);
+    let archive = open_bytes(apk_like.bytes, &SecurityConfig::default());
     assert!(archive.structure().findings().is_empty());
     assert_eq!(archive.structure().gap_reads(), 2);
 
     let mut with_stub = vec![b'#'; 100];
     with_stub.extend(two_files().build().bytes);
-    assert!(open_bytes(with_stub).structure().findings().is_empty());
+    assert!(
+        open_bytes(with_stub, &SecurityConfig::default())
+            .structure()
+            .findings()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -411,14 +428,9 @@ fn name_mismatch_zip() -> Vec<u8> {
 fn enforce_rejects_before_creating_the_destination() {
     let temp = TempDir::new().unwrap();
     let dest = temp.path().join("out");
-    let archive = open_bytes(name_mismatch_zip());
+    let archive = open_bytes(name_mismatch_zip(), &config(ZipConsistencyPolicy::Enforce));
     let err = archive
-        .extract(
-            &dest,
-            &config(ZipConsistencyPolicy::Enforce),
-            &ExtractionOptions::default(),
-            &mut NoopProgress,
-        )
+        .extract(&dest, &ExtractionOptions::default(), &mut NoopProgress)
         .unwrap_err();
     assert_matches!(
         err,
@@ -434,27 +446,23 @@ fn enforce_rejects_before_creating_the_destination() {
 fn ignore_keeps_the_central_directory_interpretation() {
     let temp = TempDir::new().unwrap();
     let ignore = config(ZipConsistencyPolicy::Ignore);
-    open_bytes(name_mismatch_zip())
+    open_bytes(name_mismatch_zip(), &ignore)
         .extract(
             temp.path(),
-            &ignore,
             &ExtractionOptions::default(),
             &mut NoopProgress,
         )
         .unwrap();
     assert!(temp.path().join("doc_report.pdf").exists());
 
-    let manifest = open_bytes(name_mismatch_zip()).list(&ignore).unwrap();
+    let manifest = open_bytes(name_mismatch_zip(), &ignore).list().unwrap();
     assert_eq!(manifest.total_entries(), 1);
 }
 
 #[test]
 fn list_rejects_under_enforce() {
-    let archive = open_bytes(name_mismatch_zip());
-    assert_matches!(
-        archive.list(&config(ZipConsistencyPolicy::Enforce)),
-        Err(ArchiveError::ZipInconsistency(_))
-    );
+    let archive = open_bytes(name_mismatch_zip(), &config(ZipConsistencyPolicy::Enforce));
+    assert_matches!(archive.list(), Err(ArchiveError::ZipInconsistency(_)));
 }
 
 #[test]
@@ -466,11 +474,8 @@ fn verify_reports_findings_and_the_true_entry_count() {
     .build()
     .bytes;
 
-    let report = open_bytes(duplicate.clone())
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(duplicate.clone(), &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 2);
     assert_ne!(report.status(), VerificationStatus::Pass);
@@ -481,11 +486,8 @@ fn verify_reports_findings_and_the_true_entry_count() {
             .any(|i| i.category() == IssueCategory::DuplicateEntry)
     );
 
-    let report = open_bytes(duplicate)
-        .verify(
-            &config(ZipConsistencyPolicy::Ignore),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(duplicate, &config(ZipConsistencyPolicy::Ignore))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 2);
     assert_eq!(report.status(), VerificationStatus::Pass);
@@ -495,11 +497,8 @@ fn verify_reports_findings_and_the_true_entry_count() {
 fn uncounted_records_are_visible_to_verify() {
     let mut zip = two_files();
     zip.end_count = Some(1);
-    let report = open_bytes(zip.build().bytes)
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(zip.build().bytes, &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 2);
     assert!(
@@ -509,7 +508,7 @@ fn uncounted_records_are_visible_to_verify() {
             .any(|i| i.category() == IssueCategory::HiddenEntry)
     );
     assert_matches!(
-        open_bytes(zip.build().bytes).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(zip.build().bytes, &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(_))
     );
 }
@@ -520,11 +519,8 @@ fn header_mismatch_counts_once_with_the_entrys_own_issues() {
     setuid.external_attributes = 0o104_755 << 16;
     let mut built = RawZip::new(vec![setuid, RawEntry::stored("b.txt", b"world")]).build();
     patch(&mut built, 0, 30, b"x");
-    let report = open_bytes(built.bytes)
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 2);
     assert_eq!(report.suspicious_entries(), 1);
@@ -558,17 +554,16 @@ fn raw_record_count_is_limited_whatever_the_policy() {
             );
         };
         expected(
-            open_bytes(bytes.clone())
-                .verify(&config, &VerificationOptions::default())
+            open_bytes(bytes.clone(), &config)
+                .verify(&VerificationOptions::default())
                 .map(drop),
         );
-        expected(open_bytes(bytes.clone()).list(&config).map(drop));
+        expected(open_bytes(bytes.clone(), &config).list().map(drop));
         let temp = TempDir::new().unwrap();
         expected(
-            open_bytes(bytes.clone())
+            open_bytes(bytes.clone(), &config)
                 .extract(
                     temp.path(),
-                    &config,
                     &ExtractionOptions::default(),
                     &mut NoopProgress,
                 )
@@ -582,7 +577,7 @@ fn findings_are_capped_per_kind() {
     let record = RawEntry::stored("a.txt", b"x");
     let mut zip = RawZip::new(vec![record.clone()]);
     zip.extra_central_records = (1..200).map(|_| (record.clone(), 0)).collect();
-    let archive = open_bytes(zip.build().bytes);
+    let archive = open_bytes(zip.build().bytes, &SecurityConfig::default());
     assert_eq!(archive.structure().findings().len(), 16);
     assert_eq!(archive.structure().omitted_findings(), 199 - 16);
     assert_eq!(archive.structure().central_entries(), 200);
@@ -608,7 +603,7 @@ fn hidden_in(offset: usize, region: HiddenRegion) -> ZipInconsistency {
 fn local_header_at_file_start_before_the_archive_is_found() {
     let mut bytes = unmapped_local();
     bytes.extend(two_files().build().bytes);
-    let archive = open_bytes(bytes);
+    let archive = open_bytes(bytes, &SecurityConfig::default());
     assert_eq!(
         archive.structure().findings(),
         [hidden_in(0, HiddenRegion::Prefix)]
@@ -656,7 +651,10 @@ fn local_header_between_two_entries_is_found() {
     let eocd = built.bytes.len() - 22;
     let dir = u32::from_le_bytes(*built.bytes[eocd + 16..].first_chunk::<4>().unwrap());
     built.bytes[eocd + 16..eocd + 20].copy_from_slice(&(dir + shift).to_le_bytes());
-    let found = open_bytes(built.bytes).structure().findings().to_vec();
+    let found = open_bytes(built.bytes, &SecurityConfig::default())
+        .structure()
+        .findings()
+        .to_vec();
     assert_eq!(found, [hidden_at(at)]);
 }
 
@@ -666,7 +664,12 @@ fn embedded_signature_in_a_stub_or_gap_is_not_a_hidden_header() {
     stub.extend_from_slice(b"PK\x03\x04");
     stub.extend(vec![b'#'; 100]);
     stub.extend(two_files().build().bytes);
-    assert!(open_bytes(stub).structure().findings().is_empty());
+    assert!(
+        open_bytes(stub, &SecurityConfig::default())
+            .structure()
+            .findings()
+            .is_empty()
+    );
 
     let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
     let mut gap = b"PK\x03\x04".to_vec();
@@ -682,7 +685,7 @@ fn large_gaps_are_searched_across_read_boundaries() {
         let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
         zip.before_directory = [vec![0u8; padding], local.clone()].concat();
         let built = zip.build();
-        let archive = open_bytes(built.bytes.clone());
+        let archive = open_bytes(built.bytes.clone(), &SecurityConfig::default());
         let at = built.directory_start - local.len();
         assert_eq!(archive.structure().findings(), [hidden_at(at)], "{padding}");
         assert!(archive.structure().gap_reads() >= 2);
@@ -695,12 +698,12 @@ fn contiguous_archives_need_no_gap_read() {
         two_files().build().bytes,
         with_prefix_stub(two_files().build().bytes),
     ] {
-        let archive = open_bytes(bytes);
+        let archive = open_bytes(bytes, &SecurityConfig::default());
         assert!(archive.structure().findings().is_empty());
         assert!(archive.structure().gap_reads() <= 1);
     }
     assert_eq!(
-        open_bytes(two_files().build().bytes)
+        open_bytes(two_files().build().bytes, &SecurityConfig::default())
             .structure()
             .gap_reads(),
         0
@@ -724,7 +727,7 @@ fn many_header_mismatches_do_not_push_out_other_findings() {
     for entry in 0..40 {
         patch(&mut built, entry, 30, b"g");
     }
-    let archive = open_bytes(built.bytes);
+    let archive = open_bytes(built.bytes, &SecurityConfig::default());
     let found = archive.structure().findings();
     assert!(
         found
@@ -752,11 +755,8 @@ fn omitted_findings_are_reported_by_verify() {
     for entry in 0..40 {
         patch(&mut built, entry, 30, b"g");
     }
-    let report = open_bytes(built.bytes)
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert!(
         report
@@ -786,11 +786,16 @@ fn every_structural_finding_is_ignored_under_the_ignore_policy() {
         overlap.bytes,
         stray_before_entry(&stray_central()).bytes,
     ] {
-        assert!(!open_bytes(bytes.clone()).structure().findings().is_empty());
-        let archive = open_bytes(bytes.clone());
-        archive.list(&ignore).unwrap();
-        let report = open_bytes(bytes)
-            .verify(&ignore, &VerificationOptions::default())
+        assert!(
+            !open_bytes(bytes.clone(), &SecurityConfig::default())
+                .structure()
+                .findings()
+                .is_empty()
+        );
+        let archive = open_bytes(bytes.clone(), &ignore);
+        archive.list().unwrap();
+        let report = open_bytes(bytes, &ignore)
+            .verify(&VerificationOptions::default())
             .unwrap();
         assert!(report.issues().iter().all(|i| !matches!(
             i.category(),
@@ -823,20 +828,15 @@ fn unparseable_local_header_is_rejected_by_every_operation_under_enforce() {
             ))
         );
     };
-    unparseable(open_bytes(ut_archive()).list(&enforce).map(drop));
+    unparseable(open_bytes(ut_archive(), &enforce).list().map(drop));
     unparseable(
-        open_bytes(ut_archive())
-            .extract(
-                &dest,
-                &enforce,
-                &ExtractionOptions::default(),
-                &mut NoopProgress,
-            )
+        open_bytes(ut_archive(), &enforce)
+            .extract(&dest, &ExtractionOptions::default(), &mut NoopProgress)
             .map(drop),
     );
     assert!(!dest.exists());
-    let report = open_bytes(ut_archive())
-        .verify(&enforce, &VerificationOptions::default())
+    let report = open_bytes(ut_archive(), &enforce)
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(
@@ -851,25 +851,24 @@ fn unparseable_local_header_is_rejected_by_every_operation_under_enforce() {
 fn unparseable_local_header_extracts_as_before_under_ignore() {
     let ignore = config(ZipConsistencyPolicy::Ignore);
     let temp = TempDir::new().unwrap();
-    open_bytes(ut_archive())
+    open_bytes(ut_archive(), &ignore)
         .extract(
             temp.path(),
-            &ignore,
             &ExtractionOptions::default(),
             &mut NoopProgress,
         )
         .unwrap();
     assert_eq!(std::fs::read(temp.path().join("a.txt")).unwrap(), b"hello");
     assert_eq!(
-        open_bytes(ut_archive())
-            .list(&ignore)
+        open_bytes(ut_archive(), &ignore)
+            .list()
             .unwrap()
             .total_entries(),
         1
     );
     assert_eq!(
-        open_bytes(ut_archive())
-            .verify(&ignore, &VerificationOptions::default())
+        open_bytes(ut_archive(), &ignore)
+            .verify(&VerificationOptions::default())
             .unwrap()
             .status(),
         VerificationStatus::Pass
@@ -906,7 +905,7 @@ fn the_central_directory_is_parsed_once_and_offsets_stay_cached() {
         inner: Cursor::new(built.bytes.clone()),
         seeks: seeks.clone(),
     };
-    let archive = ZipArchive::new(probe.clone()).unwrap();
+    let archive = ZipArchive::new(probe.clone(), &config(ZipConsistencyPolicy::Enforce)).unwrap();
     let count_at = |position: usize| {
         let at = position as u64;
         seeks.lock().unwrap().iter().filter(|&&s| s == at).count()
@@ -929,16 +928,13 @@ fn the_central_directory_is_parsed_once_and_offsets_stay_cached() {
     // reader, so it can only seek there less often than an unwindowed parse.
     assert!(count_at(built.directory_start) <= crate_parse + 1);
 
-    let extracting = ZipArchive::new(probe).unwrap();
+    let extracting = ZipArchive::new(probe, &config(ZipConsistencyPolicy::Enforce)).unwrap();
     let before: Vec<_> = built.local_offsets.iter().map(|&o| count_at(o)).collect();
-    archive
-        .list(&config(ZipConsistencyPolicy::Enforce))
-        .unwrap();
+    archive.list().unwrap();
     let temp = TempDir::new().unwrap();
     extracting
         .extract(
             temp.path(),
-            &config(ZipConsistencyPolicy::Enforce),
             &ExtractionOptions::default(),
             &mut NoopProgress,
         )
@@ -962,7 +958,7 @@ fn a_gap_full_of_signatures_costs_a_bounded_number_of_reads() {
     const GAP: usize = 8 * 1024 * 1024;
     let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
     zip.before_directory = b"PK\x03\x04".repeat(GAP / 4);
-    let archive = open_bytes(zip.build().bytes);
+    let archive = open_bytes(zip.build().bytes, &SecurityConfig::default());
     let found = archive.structure().findings();
     assert_eq!(found.len(), 16);
     assert!(
@@ -990,7 +986,7 @@ fn a_gap_of_implausible_signatures_is_read_in_chunks_not_per_hit() {
     }
     let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
     zip.before_directory = gap;
-    let archive = open_bytes(zip.build().bytes);
+    let archive = open_bytes(zip.build().bytes, &SecurityConfig::default());
     assert!(archive.structure().findings().is_empty());
     let chunks = GAP / GAP_CHUNK;
     assert!(
@@ -1016,11 +1012,8 @@ fn many_mismatches() -> Vec<u8> {
 
 #[test]
 fn ignore_policy_adds_no_omitted_findings_note() {
-    let report = open_bytes(many_mismatches())
-        .verify(
-            &config(ZipConsistencyPolicy::Ignore),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(many_mismatches(), &config(ZipConsistencyPolicy::Ignore))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert!(report.issues().is_empty(), "{:?}", report.issues());
 }
@@ -1029,11 +1022,8 @@ fn ignore_policy_adds_no_omitted_findings_note() {
 fn suspicious_entries_never_exceed_the_entries() {
     let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
     zip.before_directory = unmapped_local().repeat(20);
-    let report = open_bytes(zip.build().bytes)
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(zip.build().bytes, &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 1);
     assert!(report.suspicious_entries() <= report.total_entries());
@@ -1071,7 +1061,7 @@ fn a_failing_reader_is_an_io_error_not_a_finding() {
         inner: Cursor::new(built.bytes),
         limit: built.directory_start as u64,
     };
-    let result = ZipArchive::new(reader).map(drop);
+    let result = ZipArchive::new(reader, &SecurityConfig::default()).map(drop);
     assert_matches!(
         result,
         Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied
@@ -1080,7 +1070,7 @@ fn a_failing_reader_is_an_io_error_not_a_finding() {
 
 #[test]
 fn a_malformed_extra_field_stays_a_finding_not_an_io_error() {
-    let archive = open_bytes(ut_archive());
+    let archive = open_bytes(ut_archive(), &SecurityConfig::default());
     assert_matches!(
         archive.structure().findings(),
         [ZipInconsistency::HeaderUncomparable {
@@ -1133,13 +1123,13 @@ fn a_reader_failing_in_the_raw_directory_walk_is_an_io_error() {
         allowed,
     };
 
-    ZipArchive::new(reader(usize::MAX)).unwrap();
+    ZipArchive::new(reader(usize::MAX), &SecurityConfig::default()).unwrap();
     let opening_reads = counter.swap(0, std::sync::atomic::Ordering::Relaxed);
     assert!(opening_reads > 0);
 
     for allowed in 0..opening_reads {
         counter.store(0, std::sync::atomic::Ordering::Relaxed);
-        let result = ZipArchive::new(reader(allowed)).map(drop);
+        let result = ZipArchive::new(reader(allowed), &SecurityConfig::default()).map(drop);
         assert_matches!(
             result,
             Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied,
@@ -1162,10 +1152,10 @@ fn local_header(version: u16, flags: u16, method: u16, name: &[u8], compressed: 
     bytes
 }
 
-fn with_prefix(prefix: Vec<u8>) -> ZipArchive<Cursor<Vec<u8>>> {
+fn with_prefix(prefix: Vec<u8>, config: &SecurityConfig) -> ZipArchive<Cursor<Vec<u8>>> {
     let mut bytes = prefix;
     bytes.extend(two_files().build().bytes);
-    open_bytes(bytes)
+    open_bytes(bytes, config)
 }
 
 #[test]
@@ -1174,7 +1164,7 @@ fn local_header_inside_the_prefix_is_found() {
         let mut prefix = vec![b'#'; lead];
         prefix.extend(unmapped_local());
         prefix.extend(vec![b'#'; 50]);
-        let archive = with_prefix(prefix);
+        let archive = with_prefix(prefix, &SecurityConfig::default());
         assert_eq!(
             archive.structure().findings(),
             [hidden_in(lead, HiddenRegion::Prefix)],
@@ -1200,7 +1190,7 @@ fn prefix_headers_that_do_not_fit_or_look_odd_are_ignored() {
         }),
     ];
     for (label, header) in cases {
-        let archive = with_prefix([b"#".to_vec(), header].concat());
+        let archive = with_prefix([b"#".to_vec(), header].concat(), &SecurityConfig::default());
         assert!(archive.structure().findings().is_empty(), "{label}");
     }
 }
@@ -1219,7 +1209,7 @@ fn header_at_offset_zero_is_judged_like_one_in_a_gap() {
         ),
     ];
     for (label, header) in cases {
-        let archive = with_prefix(header);
+        let archive = with_prefix(header, &SecurityConfig::default());
         assert_eq!(
             archive.structure().findings(),
             [hidden_in(0, HiddenRegion::Prefix)],
@@ -1265,15 +1255,10 @@ fn self_extractor_stub_is_not_a_hidden_header() {
     let relative = [stub.clone(), built.bytes.clone()].concat();
     let absolute = with_absolute_offsets(&stub, &built);
     for (label, bytes) in [("relative", relative), ("absolute", absolute)] {
-        let mut archive = open_bytes(bytes);
+        let mut archive = open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce));
         assert_eq!(archive.reader_mut().len(), 2, "{label}");
         assert!(archive.structure().findings().is_empty(), "{label}");
-        let report = archive
-            .verify(
-                &config(ZipConsistencyPolicy::Enforce),
-                &VerificationOptions::default(),
-            )
-            .unwrap();
+        let report = archive.verify(&VerificationOptions::default()).unwrap();
         assert_eq!(report.status(), VerificationStatus::Pass, "{label}");
     }
 }
@@ -1283,7 +1268,7 @@ fn header_hidden_in_an_absolute_offset_stub_is_found() {
     let mut stub = vec![b'#'; 64];
     stub.extend(unmapped_local());
     let absolute = with_absolute_offsets(&stub, &two_files().build());
-    let archive = open_bytes(absolute);
+    let archive = open_bytes(absolute, &SecurityConfig::default());
     assert_eq!(
         archive.structure().findings(),
         [hidden_in(64, HiddenRegion::Prefix)]
@@ -1292,7 +1277,10 @@ fn header_hidden_in_an_absolute_offset_stub_is_found() {
 
 #[test]
 fn prefix_header_with_a_descriptor_needs_no_data_in_the_prefix() {
-    let archive = with_prefix(local_header(20, 0x0008, 8, b"evil.sh", 5_000));
+    let archive = with_prefix(
+        local_header(20, 0x0008, 8, b"evil.sh", 5_000),
+        &SecurityConfig::default(),
+    );
     assert_eq!(
         archive.structure().findings(),
         [hidden_in(0, HiddenRegion::Prefix)]
@@ -1301,7 +1289,10 @@ fn prefix_header_with_a_descriptor_needs_no_data_in_the_prefix() {
 
 #[test]
 fn prefix_with_many_signature_hits_stays_bounded() {
-    let archive = with_prefix([b"#".to_vec(), b"PK\x03\x04".repeat(100_000)].concat());
+    let archive = with_prefix(
+        [b"#".to_vec(), b"PK\x03\x04".repeat(100_000)].concat(),
+        &SecurityConfig::default(),
+    );
     assert!(archive.structure().findings().is_empty());
 }
 
@@ -1327,7 +1318,10 @@ fn end_record_the_crate_skipped_is_found() {
     let used_end = built.bytes.len();
     // The last record points past the file, so the crate falls back to the
     // record before it.
-    let archive = open_bytes(with_second_end_record(&end_record(0x00ff_ffff, b"")));
+    let archive = open_bytes(
+        with_second_end_record(&end_record(0x00ff_ffff, b"")),
+        &SecurityConfig::default(),
+    );
     assert_eq!(
         archive.structure().findings(),
         [ZipInconsistency::IgnoredEndRecord {
@@ -1348,14 +1342,12 @@ fn end_record_text_inside_a_comment_is_not_a_finding() {
 fn ignored_end_record_is_fatal_under_enforce() {
     let temp = TempDir::new().unwrap();
     let dest = temp.path().join("out");
-    let archive = open_bytes(with_second_end_record(&end_record(0x00ff_ffff, b"")));
+    let archive = open_bytes(
+        with_second_end_record(&end_record(0x00ff_ffff, b"")),
+        &config(ZipConsistencyPolicy::Enforce),
+    );
     let err = archive
-        .extract(
-            &dest,
-            &config(ZipConsistencyPolicy::Enforce),
-            &ExtractionOptions::default(),
-            &mut NoopProgress,
-        )
+        .extract(&dest, &ExtractionOptions::default(), &mut NoopProgress)
         .unwrap_err();
     assert_matches!(
         err,
@@ -1402,9 +1394,8 @@ fn descriptor_entry(method: u16, payload: &[u8], tail: &[u8]) -> RawEntry {
 }
 
 fn verify_with_integrity(bytes: Vec<u8>) -> crate::VerificationReport {
-    open_bytes(bytes)
+    open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
         .verify(
-            &config(ZipConsistencyPolicy::Enforce),
             &VerificationOptions::default()
                 .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),
         )
@@ -1445,11 +1436,8 @@ fn header_hidden_behind_a_compressed_stream_is_found_with_integrity() {
         );
         assert_eq!(report.status(), VerificationStatus::Fail);
 
-        let plain = open_bytes(built.bytes)
-            .verify(
-                &config(ZipConsistencyPolicy::Enforce),
-                &VerificationOptions::default(),
-            )
+        let plain = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
+            .verify(&VerificationOptions::default())
             .unwrap();
         assert_eq!(hidden_issues(&plain).len(), 1, "method {method}");
     }
@@ -1467,11 +1455,8 @@ fn header_hidden_inside_stored_data_is_found_with_integrity() {
         .concat();
         let built = RawZip::new(vec![descriptor_entry(0, &whole, &[])]).build();
         let expected = built.local_offsets[0] + 30 + 5 + filler + 16;
-        let plain = open_bytes(built.bytes.clone())
-            .verify(
-                &config(ZipConsistencyPolicy::Enforce),
-                &VerificationOptions::default(),
-            )
+        let plain = open_bytes(built.bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
+            .verify(&VerificationOptions::default())
             .unwrap();
         assert_eq!(hidden_issues(&plain).len(), 1, "{filler}");
         let report = verify_with_integrity(built.bytes);
@@ -1547,10 +1532,8 @@ fn opening_many_entries_reads_the_file_in_a_bounded_number_of_requests() {
         inner: Cursor::new(built.bytes),
         seeks: seeks.clone(),
     };
-    let archive = ZipArchive::new(probe).unwrap();
-    archive
-        .list(&config(ZipConsistencyPolicy::Enforce))
-        .unwrap();
+    let archive = ZipArchive::new(probe, &config(ZipConsistencyPolicy::Enforce)).unwrap();
+    archive.list().unwrap();
     assert!(seeks.lock().unwrap().len() < 100);
 }
 
@@ -1591,7 +1574,7 @@ fn zip64_end_record_the_crate_rejected_is_not_taken_for_the_used_one() {
         zip64_end_chain(directory_start, central.len(), end_at),
     ]
     .concat();
-    let mut archive = open_bytes(bytes);
+    let mut archive = open_bytes(bytes, &SecurityConfig::default());
     assert_eq!(archive.reader_mut().len(), 2);
     assert!(
         archive
@@ -1610,7 +1593,7 @@ fn end_record_at_the_far_edge_of_the_search_range_is_still_compared() {
     let used = bytes.len() - 22;
     bytes.extend(vec![0u8; 65_538 - 22]);
     bytes.extend(end_record(0x00ff_ffff, b""));
-    let archive = open_bytes(bytes.clone());
+    let archive = open_bytes(bytes.clone(), &SecurityConfig::default());
     assert_eq!(bytes.len() - used, 65_560);
     assert_eq!(
         archive.structure().findings(),
@@ -1699,9 +1682,8 @@ fn descriptor_tail_check_is_off_under_the_ignore_policy() {
     let payload = b"hello hello hello hello";
     let tail = [descriptor(payload, 0), unmapped_local()].concat();
     let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
-    let report = open_bytes(built.bytes)
+    let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Ignore))
         .verify(
-            &config(ZipConsistencyPolicy::Ignore),
             &VerificationOptions::default()
                 .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),
         )
@@ -1716,7 +1698,7 @@ fn file_starting_with_pk_is_judged_leniently_before_the_first_entry() {
     let relative = [prefix.clone(), built.bytes.clone()].concat();
     let absolute = with_absolute_offsets(&prefix, &built);
     for (label, bytes) in [("relative", relative), ("absolute", absolute)] {
-        let archive = open_bytes(bytes);
+        let archive = open_bytes(bytes, &SecurityConfig::default());
         assert_eq!(
             archive.structure().findings(),
             [hidden_in(4, HiddenRegion::Prefix)],
@@ -1726,7 +1708,12 @@ fn file_starting_with_pk_is_judged_leniently_before_the_first_entry() {
 
     let stub = [b"MZ00".to_vec(), local_header(64, 0, 0, b"evil.sh", 0)].concat();
     let absolute = with_absolute_offsets(&stub, &built);
-    assert!(open_bytes(absolute).structure().findings().is_empty());
+    assert!(
+        open_bytes(absolute, &SecurityConfig::default())
+            .structure()
+            .findings()
+            .is_empty()
+    );
 }
 
 fn stray_central() -> Vec<u8> {
@@ -1821,7 +1808,9 @@ fn central_record_in_the_prefix_is_found_only_when_the_file_starts_with_pk() {
         let absolute = with_absolute_offsets(&record, &built);
         for (kind, bytes) in [("relative", relative), ("absolute", absolute)] {
             assert_eq!(
-                open_bytes(bytes).structure().findings(),
+                open_bytes(bytes, &SecurityConfig::default())
+                    .structure()
+                    .findings(),
                 [stray(0)],
                 "{label} {kind}"
             );
@@ -1830,14 +1819,21 @@ fn central_record_in_the_prefix_is_found_only_when_the_file_starts_with_pk() {
         let after_pk = [b"PK00".to_vec(), record.clone()].concat();
         let absolute = with_absolute_offsets(&after_pk, &built);
         assert_eq!(
-            open_bytes(absolute).structure().findings(),
+            open_bytes(absolute, &SecurityConfig::default())
+                .structure()
+                .findings(),
             [stray(4)],
             "{label} behind PK00"
         );
 
         let stub = [b"MZ00".to_vec(), record].concat();
         let absolute = with_absolute_offsets(&stub, &built);
-        assert!(open_bytes(absolute).structure().findings().is_empty());
+        assert!(
+            open_bytes(absolute, &SecurityConfig::default())
+                .structure()
+                .findings()
+                .is_empty()
+        );
     }
 }
 
@@ -1872,16 +1868,13 @@ fn stray_central_record_is_fatal_under_enforce_and_reported_by_verify() {
     let bytes = stray_before_entry(&stray_central()).bytes;
 
     assert_matches!(
-        open_bytes(bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(
             ZipInconsistency::StrayCentralRecord { .. }
         ))
     );
-    let report = open_bytes(bytes)
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(report.issues().iter().any(|i| {
@@ -1895,9 +1888,8 @@ fn stray_central_record_is_fatal_under_enforce_and_reported_by_verify() {
 fn descriptor_tail_the_budget_cannot_cover_is_listed_with_its_own_reason() {
     let payload = b"hello hello hello hello";
     let built = RawZip::new(vec![descriptor_entry(12, payload, &descriptor(payload, 0))]).build();
-    let report = open_bytes(built.bytes)
+    let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
         .verify(
-            &config(ZipConsistencyPolicy::Enforce),
             &VerificationOptions::default().with_integrity(IntegrityCheck::DecodeToEof(
                 DecompressionBudget::try_from_bytes(payload.len() as u64).unwrap(),
             )),

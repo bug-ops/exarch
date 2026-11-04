@@ -25,106 +25,6 @@ use std::path::Path;
 use tar::Builder;
 use tar::Header;
 
-/// Creates a TAR archive, optionally compressed, with progress reporting.
-///
-/// `codec` selects the compression (`None` writes an uncompressed `.tar`);
-/// the level comes from `config.compression_level`.
-///
-/// This function provides real-time progress updates during archive creation
-/// through callback functions. Useful for displaying progress bars or logging
-/// in interactive applications.
-///
-/// # Parameters
-///
-/// - `output`: Path where the TAR archive will be created
-/// - `codec`: Compression codec, or `None` for an uncompressed TAR
-/// - `sources`: Slice of source paths to include in the archive
-/// - `config`: Configuration controlling filtering, permissions, and archiving
-///   behavior
-/// - `progress`: Mutable reference to a progress callback implementation
-///
-/// # Progress Callbacks
-///
-/// The `progress` callback receives four types of events:
-///
-/// 1. `on_entry_start`: Called before processing each file/directory
-/// 2. `on_bytes_written`: Called for each chunk of data written (typically
-///    every 64 KB)
-/// 3. `on_entry_complete`: Called after successfully processing an entry
-/// 4. `on_complete`: Called once when the entire archive is finished
-///
-/// Note: Callbacks are invoked frequently during large file processing. For
-/// better performance with very large files, consider batching updates.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ProgressCallback;
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::tar::create_tar_with_progress;
-/// use std::path::Path;
-///
-/// struct SimpleProgress;
-///
-/// impl ProgressCallback for SimpleProgress {
-///     fn on_entry_start(&mut self, path: &Path, position: exarch_core::EntryPosition) {
-///         println!("[{}] Processing: {}", position.current, path.display());
-///     }
-///
-///     fn on_bytes_written(&mut self, bytes: u64) {
-///         // Called frequently - consider rate limiting
-///     }
-///
-///     fn on_entry_complete(&mut self, path: &Path) {
-///         println!("Completed: {}", path.display());
-///     }
-///
-///     fn on_complete(&mut self) {
-///         println!("Archive creation complete!");
-///     }
-/// }
-///
-/// let config = CreationConfig::default();
-/// let mut progress = SimpleProgress;
-/// let report = create_tar_with_progress(
-///     Path::new("output.tar"),
-///     None,
-///     &[Path::new("src")],
-///     &config,
-///     &mut progress,
-/// )?;
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Source path does not exist
-/// - Output file cannot be created
-/// - I/O error during archive creation
-/// - File metadata cannot be read
-#[expect(
-    clippy::disallowed_methods,
-    reason = "creates the caller-named output archive, not an extraction destination"
-)]
-pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    codec: Option<CompressionCodec>,
-    sources: &[Q],
-    config: &CreationConfig,
-    progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    write_tar(
-        file,
-        codec,
-        sources,
-        config,
-        &ExcludedOutput::none(),
-        progress,
-    )
-}
-
 /// Writes a TAR archive, optionally compressed, into `out`.
 ///
 /// `bytes_compressed` is the number of bytes that reached `out`, counted
@@ -824,9 +724,10 @@ mod tests {
 
         let mut progress = TestProgress::default();
 
-        let report =
-            create_tar_with_progress(&output, None, &[source_dir.path()], &config, &mut progress)
-                .unwrap();
+        let report = crate::CreateRequest::new(&config)
+            .with_progress(&mut progress)
+            .create(&crate::OutputFile::replace(&output), &[source_dir.path()])
+            .unwrap();
 
         // Verify report
         assert_eq!(report.files_added, 3);
@@ -886,14 +787,13 @@ mod tests {
 
         let config = CreationConfig::default().with_exclude_patterns(vec![]);
         let mut noop = crate::NoopProgress;
-        let report = create_tar_with_progress(
-            &output,
-            Some(CompressionCodec::Zstd),
-            &[source_dir.path()],
-            &config,
-            &mut noop,
-        )
-        .unwrap();
+        let report = crate::CreateRequest::new(&config)
+            .with_progress(&mut noop)
+            .create(
+                &crate::OutputFile::replace(&output).with_format(CreatableFormat::TarZst),
+                &[source_dir.path()],
+            )
+            .unwrap();
 
         assert_eq!(report.files_added, 1);
         assert!(output.exists());

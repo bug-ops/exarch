@@ -387,7 +387,7 @@ fn test_magic_only_buffer_is_invalid_archive() {
     let cursor = Cursor::new(data);
 
     // new() will fail because it's not a valid archive, but that's expected
-    let result = SevenZArchive::new(cursor);
+    let result = SevenZArchive::new(cursor, &SecurityConfig::default());
     assert!(result.is_err(), "invalid archive should fail to parse");
 
     // Verify the error is InvalidArchive (not security violation)
@@ -400,7 +400,7 @@ fn test_invalid_magic_rejected() {
     let data = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05];
     let cursor = Cursor::new(data);
 
-    let result = SevenZArchive::new(cursor);
+    let result = SevenZArchive::new(cursor, &SecurityConfig::default());
     assert!(result.is_err());
     assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
 }
@@ -638,15 +638,14 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
 fn test_extract_simple_file() {
     let data = load_fixture("simple.7z");
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(cursor, &config).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default();
 
     let report = archive
         .extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -665,15 +664,14 @@ fn test_extract_simple_file() {
 fn test_extract_nested_directories() {
     let data = load_fixture("nested-dirs.7z");
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(cursor, &config).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default();
 
     let report = archive
         .extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -690,13 +688,12 @@ fn test_solid_archive_rejected() {
     let cursor = Cursor::new(data);
 
     // new() should now succeed (just caches is_solid flag)
-    let archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor, &SecurityConfig::default()).unwrap();
 
     // Rejection happens in extract() with default config
     let temp = TempDir::new().unwrap();
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default(),
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
@@ -711,7 +708,7 @@ fn test_encrypted_archive_rejected() {
     let cursor = Cursor::new(data);
 
     // Should fail in new() due to encryption detection
-    let result = SevenZArchive::new(cursor);
+    let result = SevenZArchive::new(cursor, &SecurityConfig::default());
     assert!(result.is_err());
     assert_matches!(result.unwrap_err(), ArchiveError::SecurityViolation { .. });
 }
@@ -720,15 +717,14 @@ fn test_encrypted_archive_rejected() {
 fn test_empty_archive() {
     let data = load_fixture("empty.7z");
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(cursor, &config).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default();
 
     let report = archive
         .extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -742,15 +738,14 @@ fn test_empty_archive() {
 fn test_empty_archive_extract() {
     let path = std::path::Path::new("../../tests/fixtures/empty.7z");
     let file = std::fs::File::open(path).unwrap();
-    let archive = SevenZArchive::new(file).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(file, &config).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default();
 
     let report = archive
         .extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -941,15 +936,14 @@ fn test_compression_rejects_source_shorter_than_declared_streams() {
 fn test_multiple_files_quota_not_double_counted() {
     let data = load_fixture("simple.7z"); // Contains 2 files
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
+    let config = SecurityConfig::default().with_max_file_count(crate::non_zero!(3));
+    let archive = SevenZArchive::new(cursor, &config).unwrap();
 
     let temp = TempDir::new().unwrap();
     // Should allow 2 files
-    let config = SecurityConfig::default().with_max_file_count(crate::non_zero!(3));
 
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
@@ -969,7 +963,7 @@ fn test_path_traversal_integration() {
     // archive and verifying the validator is properly called
     let data = load_fixture("simple.7z");
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor);
+    let archive = SevenZArchive::new(cursor, &SecurityConfig::default());
 
     // Verify our validator is properly integrated
     assert!(archive.is_ok());
@@ -984,19 +978,18 @@ fn test_path_traversal_integration() {
 fn test_solid_archive_allowed_with_config() {
     let data = load_fixture("solid.7z");
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
-
-    let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_solid_archives(crate::SolidArchives::Allow(
         crate::SolidLimits::DEFAULT.with_max_block_memory(crate::non_zero!(100 * 1024 * 1024)),
     )); // 100 MB
 
+    let archive = SevenZArchive::new(cursor, &config).unwrap();
+    let temp = TempDir::new().unwrap();
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
+
     assert!(result.is_ok(), "solid archive should extract: {result:?}");
     assert!(result.unwrap().files_extracted > 0);
 }
@@ -1006,14 +999,13 @@ fn test_solid_archive_allowed_with_config() {
 fn test_solid_archive_rejected_by_default() {
     let data = load_fixture("solid.7z");
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(cursor, &config).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default();
 
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
@@ -1026,19 +1018,18 @@ fn test_solid_archive_rejected_by_default() {
 fn test_solid_archive_memory_limit_exceeded() {
     let data = load_fixture("solid.7z");
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
-
-    let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_solid_archives(crate::SolidArchives::Allow(
         crate::SolidLimits::DEFAULT.with_max_block_memory(crate::non_zero!(1)),
     )); // 1 byte (too small)
 
+    let archive = SevenZArchive::new(cursor, &config).unwrap();
+    let temp = TempDir::new().unwrap();
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
+
     assert!(result.is_err());
     assert_matches!(result.unwrap_err(), ArchiveError::QuotaExceeded { .. });
 }
@@ -1048,17 +1039,16 @@ fn test_solid_archive_memory_limit_exceeded() {
 fn test_non_solid_archive_unaffected_by_solid_config() {
     let data = load_fixture("simple.7z");
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
-
-    let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default(); // solid_archives = Refuse
 
+    let archive = SevenZArchive::new(cursor, &config).unwrap();
+    let temp = TempDir::new().unwrap();
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
+
     assert!(result.is_ok(), "non-solid should work: {result:?}");
 }
 
@@ -1072,7 +1062,7 @@ fn test_is_solid_flag_detected_correctly() {
     // Solid archive should have is_solid = true
     let solid_data = load_fixture("solid.7z");
     let solid_cursor = Cursor::new(solid_data);
-    let solid_archive = SevenZArchive::new(solid_cursor).unwrap();
+    let solid_archive = SevenZArchive::new(solid_cursor, &SecurityConfig::default()).unwrap();
     assert!(
         solid_archive.header.is_solid(),
         "solid.7z should have is_solid=true"
@@ -1081,7 +1071,8 @@ fn test_is_solid_flag_detected_correctly() {
     // Non-solid archive should have is_solid = false
     let non_solid_data = load_fixture("simple.7z");
     let non_solid_cursor = Cursor::new(non_solid_data);
-    let non_solid_archive = SevenZArchive::new(non_solid_cursor).unwrap();
+    let non_solid_archive =
+        SevenZArchive::new(non_solid_cursor, &SecurityConfig::default()).unwrap();
     assert!(
         !non_solid_archive.header.is_solid(),
         "simple.7z should have is_solid=false"
@@ -1094,23 +1085,23 @@ fn test_solid_archive_memory_limit_exact_boundary() {
     let data = load_fixture("solid.7z");
 
     // First read to get total size
-    let archive_for_size = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
+    let archive_for_size =
+        SevenZArchive::new(Cursor::new(data.clone()), &SecurityConfig::default()).unwrap();
     let total_size: u64 = archive_for_size.entries.iter().map(|e| e.size).sum();
 
-    // Now test with exact limit
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
-    let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_solid_archives(crate::SolidArchives::Allow(
         crate::SolidLimits::DEFAULT
             .with_max_block_memory(std::num::NonZeroU64::new(total_size).unwrap()),
     )); // Exact match
 
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
+    let temp = TempDir::new().unwrap();
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
+    // Now test with exact limit
     assert!(
         result.is_ok(),
         "exact limit should allow extraction: {result:?}"
@@ -1123,7 +1114,8 @@ fn test_solid_archive_memory_limit_one_under_boundary() {
     let data = load_fixture("solid.7z");
 
     // First read to get total size
-    let archive_for_size = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
+    let archive_for_size =
+        SevenZArchive::new(Cursor::new(data.clone()), &SecurityConfig::default()).unwrap();
     let total_size: u64 = archive_for_size.entries.iter().map(|e| e.size).sum();
 
     // Ensure we have at least 2 bytes of content to make test meaningful
@@ -1131,20 +1123,19 @@ fn test_solid_archive_memory_limit_one_under_boundary() {
         return; // Skip test if fixture is too small
     }
 
-    // Now test with one byte under
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
-    let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_solid_archives(crate::SolidArchives::Allow(
         crate::SolidLimits::DEFAULT
             .with_max_block_memory(std::num::NonZeroU64::new(total_size - 1).unwrap()),
     )); // One byte under
 
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
+    let temp = TempDir::new().unwrap();
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
+    // Now test with one byte under
     assert!(result.is_err(), "one byte under limit should reject");
     assert_matches!(result.unwrap_err(), ArchiveError::QuotaExceeded { .. });
 }
@@ -1154,12 +1145,11 @@ fn test_solid_archive_memory_limit_one_under_boundary() {
 fn test_solid_archive_rejected_error_message() {
     let data = load_fixture("solid.7z");
     let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor, &SecurityConfig::default()).unwrap();
 
     let temp = TempDir::new().unwrap();
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default(),
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
@@ -1352,10 +1342,10 @@ fn test_sevenz_error_classification_is_typed() {
 #[test]
 fn test_list_returns_manifest_with_entries() {
     let data = load_fixture("simple.7z");
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
     let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
-    let manifest = archive.list(&config).unwrap();
+    let manifest = archive.list().unwrap();
 
     assert!(
         manifest.total_entries() > 0,
@@ -1366,11 +1356,11 @@ fn test_list_returns_manifest_with_entries() {
 #[test]
 fn test_verify_clean_sevenz_is_safe() {
     let data = load_fixture("simple.7z");
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
     let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let report = archive
-        .verify(&config, &crate::VerificationOptions::default())
+        .verify(&crate::VerificationOptions::default())
         .unwrap();
 
     assert!(report.is_safe());
@@ -1386,11 +1376,10 @@ fn test_allowed_extensions_filters_out_disallowed() {
         .try_add_allowed_extension("txt")
         .unwrap();
 
-    let report = SevenZArchive::new(Cursor::new(data))
+    let report = SevenZArchive::new(Cursor::new(data), &config)
         .unwrap()
         .extract(
             dest.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -1442,11 +1431,10 @@ fn test_disallowed_extension_aggregates_single_warning() {
         .try_add_allowed_extension("txt")
         .unwrap();
 
-    let report = SevenZArchive::new(Cursor::new(data))
+    let report = SevenZArchive::new(Cursor::new(data), &config)
         .unwrap()
         .extract(
             dest.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -1490,11 +1478,10 @@ fn test_duplicate_and_disallowed_extension_skips_aggregate_independently() {
         .try_add_allowed_extension("txt")
         .unwrap();
 
-    let report = SevenZArchive::new(Cursor::new(data))
+    let report = SevenZArchive::new(Cursor::new(data), &config)
         .unwrap()
         .extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(), // skip_duplicates = true
             &mut crate::NoopProgress,
         )
@@ -1519,11 +1506,10 @@ fn test_empty_allowed_extensions_allows_all() {
     let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default(); // empty = allow all
 
-    let report = SevenZArchive::new(Cursor::new(data))
+    let report = SevenZArchive::new(Cursor::new(data), &config)
         .unwrap()
         .extract(
             dest.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -1542,11 +1528,10 @@ fn test_extension_less_files_blocked_when_allowlist_nonempty() {
         .try_add_allowed_extension("txt")
         .unwrap();
 
-    let report = SevenZArchive::new(Cursor::new(data))
+    let report = SevenZArchive::new(Cursor::new(data), &config)
         .unwrap()
         .extract(
             dest.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -1730,15 +1715,17 @@ fn test_solid_block_disallowed_entry_does_not_shift_next_entry() {
     let data = make_solid_sevenz_archive(&[("a.bin", &skipped), ("b.txt", &kept)]);
     let dest = TempDir::new().unwrap();
 
-    let report = SevenZArchive::new(Cursor::new(data))
-        .unwrap()
-        .extract(
-            dest.path(),
-            &solid_config(vec![Extension::try_from("txt").unwrap()]),
-            &ExtractionOptions::default(),
-            &mut crate::NoopProgress,
-        )
-        .unwrap();
+    let report = SevenZArchive::new(
+        Cursor::new(data),
+        &solid_config(vec![Extension::try_from("txt").unwrap()]),
+    )
+    .unwrap()
+    .extract(
+        dest.path(),
+        &ExtractionOptions::default(),
+        &mut crate::NoopProgress,
+    )
+    .unwrap();
 
     assert_eq!(report.files_extracted, 1);
     assert_eq!(report.files_skipped(), 1);
@@ -1757,15 +1744,17 @@ fn test_solid_block_skipping_last_entry_extracts_earlier_entries() {
         make_solid_sevenz_archive(&[("a.txt", &first), ("b.txt", &second), ("c.exe", &skipped)]);
     let dest = TempDir::new().unwrap();
 
-    let report = SevenZArchive::new(Cursor::new(data))
-        .unwrap()
-        .extract(
-            dest.path(),
-            &solid_config(vec![Extension::try_from("txt").unwrap()]),
-            &ExtractionOptions::default(),
-            &mut crate::NoopProgress,
-        )
-        .unwrap();
+    let report = SevenZArchive::new(
+        Cursor::new(data),
+        &solid_config(vec![Extension::try_from("txt").unwrap()]),
+    )
+    .unwrap()
+    .extract(
+        dest.path(),
+        &ExtractionOptions::default(),
+        &mut crate::NoopProgress,
+    )
+    .unwrap();
 
     assert_eq!(report.files_extracted, 2);
     assert_eq!(report.files_skipped(), 1);
@@ -1783,11 +1772,10 @@ fn test_solid_block_duplicate_entry_does_not_shift_next_entry() {
     let dest = TempDir::new().unwrap();
     std::fs::write(dest.path().join("a.txt"), b"already here").unwrap();
 
-    let report = SevenZArchive::new(Cursor::new(data))
+    let report = SevenZArchive::new(Cursor::new(data), &solid_config(Vec::new()))
         .unwrap()
         .extract(
             dest.path(),
-            &solid_config(Vec::new()),
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -1811,12 +1799,11 @@ fn test_solid_block_duplicate_entry_does_not_shift_next_entry() {
 #[test]
 fn test_7z_backslash_entry_rejected() {
     let data = make_sevenz_archive(&[("..\\..\\x", b"payload")]);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let archive = SevenZArchive::new(Cursor::new(data), &SecurityConfig::default()).unwrap();
 
     let temp = TempDir::new().unwrap();
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default(),
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
@@ -1834,14 +1821,13 @@ fn test_7z_backslash_entry_rejected() {
 #[test]
 fn test_7z_absolute_path_rejected_by_default() {
     let data = make_sevenz_archive(&[("/etc/shadow", b"secret")]);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default();
 
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
@@ -1854,15 +1840,14 @@ fn test_7z_absolute_path_rejected_by_default() {
 #[test]
 fn test_7z_absolute_path_with_flag_writes_to_dest() {
     let data = make_sevenz_archive(&[("/etc/shadow", b"content")]);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default().with_allow_absolute_paths(true);
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_allow_absolute_paths(true);
 
     let report = archive
         .extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -1878,14 +1863,13 @@ fn test_7z_absolute_path_with_flag_writes_to_dest() {
 #[test]
 fn test_7z_absolute_path_traversal_still_rejected_with_flag() {
     let data = make_sevenz_archive(&[("/../etc/passwd", b"secret")]);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default().with_allow_absolute_paths(true);
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_allow_absolute_paths(true);
 
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut crate::NoopProgress,
     );
@@ -1996,7 +1980,8 @@ fn test_process_entry_duplicate_skip_fails_closed_at_max() {
 #[cfg(unix)]
 fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
     let data = make_sevenz_archive(&[("target.txt", b"payload")]);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let temp = TempDir::new().unwrap();
     let link_path = temp.path().join("target.txt");
@@ -2006,11 +1991,9 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
         "sanity check: dangling symlink must be invisible to exists()"
     );
 
-    let config = SecurityConfig::default();
     let report = archive
         .extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(), // skip_duplicates = true
             &mut crate::NoopProgress,
         )
@@ -2042,18 +2025,18 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
 #[cfg(unix)]
 fn test_duplicate_rejects_dangling_symlink_when_not_skipping() {
     let data = make_sevenz_archive(&[("target.txt", b"payload")]);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let temp = TempDir::new().unwrap();
     let link_path = temp.path().join("target.txt");
     std::os::unix::fs::symlink(temp.path().join("does-not-exist"), &link_path).unwrap();
 
-    let config = SecurityConfig::default();
     let options = ExtractionOptions {
         skip_duplicates: false,
         ..ExtractionOptions::default()
     };
-    let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
+    let result = archive.extract(temp.path(), &options, &mut crate::NoopProgress);
 
     assert!(
         result.is_err(),
@@ -2097,13 +2080,13 @@ fn planted_parent_symlink_is_refused_for_a_top_level_file_sibling() {
 }
 
 fn extract_forced(data: Vec<u8>, out: &std::path::Path) -> Result<ExtractionReport> {
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
     let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
     let options = ExtractionOptions {
         skip_duplicates: false,
         ..ExtractionOptions::default()
     };
-    archive.extract(out, &config, &options, &mut crate::NoopProgress)
+    archive.extract(out, &options, &mut crate::NoopProgress)
 }
 
 fn directory_entry_names(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
@@ -2185,7 +2168,8 @@ fn test_force_overwrite_replaces_file_with_fresh_inode() {
 #[test]
 fn test_overwrite_directory_returns_error_without_deleting_it() {
     let data = make_sevenz_archive(&[("target", b"payload")]);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let temp = TempDir::new().unwrap();
     let dir_path = temp.path().join("target");
@@ -2193,13 +2177,12 @@ fn test_overwrite_directory_returns_error_without_deleting_it() {
     let inner_file = dir_path.join("keep-me.txt");
     std::fs::write(&inner_file, b"do not delete").unwrap();
 
-    let config = SecurityConfig::default();
     let options = ExtractionOptions {
         skip_duplicates: false,
         ..ExtractionOptions::default()
     };
 
-    let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
+    let result = archive.extract(temp.path(), &options, &mut crate::NoopProgress);
 
     let err = result.expect_err("extracting a file entry onto a pre-existing directory must fail");
     assert_matches!(
@@ -2230,7 +2213,8 @@ fn test_overwrite_directory_returns_error_without_deleting_it() {
 #[cfg(unix)]
 fn test_symlink_to_directory_rejected_via_symlink_check_not_directory_check() {
     let data = make_sevenz_archive(&[("target", b"payload")]);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let temp = TempDir::new().unwrap();
     let real_dir = temp.path().join("real-dir");
@@ -2238,13 +2222,12 @@ fn test_symlink_to_directory_rejected_via_symlink_check_not_directory_check() {
     let link_path = temp.path().join("target");
     std::os::unix::fs::symlink(&real_dir, &link_path).unwrap();
 
-    let config = SecurityConfig::default();
     let options = ExtractionOptions {
         skip_duplicates: false,
         ..ExtractionOptions::default()
     };
 
-    let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
+    let result = archive.extract(temp.path(), &options, &mut crate::NoopProgress);
 
     assert!(
         result.is_err(),
@@ -2274,18 +2257,17 @@ fn test_skip_duplicates_aggregates_single_warning() {
         .map(|n| (n.as_str(), b"payload".as_slice()))
         .collect();
     let data = make_sevenz_archive(&entries);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let temp = TempDir::new().unwrap();
     for name in &names {
         std::fs::write(temp.path().join(name), b"already here").unwrap();
     }
 
-    let config = SecurityConfig::default();
     let report = archive
         .extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(), // skip_duplicates = true
             &mut crate::NoopProgress,
         )
@@ -2352,7 +2334,7 @@ fn make_swap_archive(follow: sevenz_rust2::ArchiveEntry, follow_data: &[u8]) -> 
 /// directory, and asserts extraction fails and creates nothing outside.
 #[cfg(unix)]
 fn assert_swapped_parent_is_refused(archive_bytes: Vec<u8>, config: &SecurityConfig) {
-    let archive = SevenZArchive::new(Cursor::new(archive_bytes)).unwrap();
+    let archive = SevenZArchive::new(Cursor::new(archive_bytes), config).unwrap();
     let dest = TempDir::new().unwrap();
     let outside = TempDir::new().unwrap();
     let mut swapper = DirSwapper {
@@ -2360,12 +2342,7 @@ fn assert_swapped_parent_is_refused(archive_bytes: Vec<u8>, config: &SecurityCon
         outside_root: outside.path().to_path_buf(),
     };
 
-    let result = archive.extract(
-        dest.path(),
-        config,
-        &ExtractionOptions::default(),
-        &mut swapper,
-    );
+    let result = archive.extract(dest.path(), &ExtractionOptions::default(), &mut swapper);
 
     assert!(
         result.is_err(),
@@ -2414,7 +2391,8 @@ fn test_symlink_entry_under_swapped_parent_is_rejected() {
 #[cfg(unix)]
 fn test_dir_swapped_for_symlink_between_entries_is_rejected() {
     let data = make_sevenz_archive(&[("a/file1.txt", b"one"), ("a/file2.txt", b"two")]);
-    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default();
+    let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let dest = TempDir::new().unwrap();
     let outside = TempDir::new().unwrap();
@@ -2424,13 +2402,7 @@ fn test_dir_swapped_for_symlink_between_entries_is_rejected() {
         outside_root: outside.path().to_path_buf(),
     };
 
-    let config = SecurityConfig::default();
-    let result = archive.extract(
-        dest.path(),
-        &config,
-        &ExtractionOptions::default(),
-        &mut swapper,
-    );
+    let result = archive.extract(dest.path(), &ExtractionOptions::default(), &mut swapper);
 
     assert!(
         result.is_err(),

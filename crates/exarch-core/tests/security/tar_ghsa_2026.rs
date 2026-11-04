@@ -108,10 +108,9 @@ fn pax_header(out: &mut Vec<u8>, records: &[u8]) {
 
 fn extract(bytes: &[u8]) -> (exarch_core::Result<exarch_core::ExtractionReport>, TempDir) {
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(bytes.to_vec()));
+    let archive = TarArchive::new(Cursor::new(bytes.to_vec()), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default(),
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -123,10 +122,9 @@ fn extract_with_config(
     config: &SecurityConfig,
 ) -> (exarch_core::Result<exarch_core::ExtractionReport>, TempDir) {
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(bytes.to_vec()));
+    let archive = TarArchive::new(Cursor::new(bytes.to_vec()), config);
     let result = archive.extract(
         temp.path(),
-        config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );

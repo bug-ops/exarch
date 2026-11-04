@@ -115,11 +115,10 @@
 //!
 //! # fn main() -> Result<(), exarch_core::ArchiveError> {
 //! let file = File::open("archive.7z")?;
-//! let mut archive = SevenZArchive::new(file)?;
 //! let config = SecurityConfig::default();
+//! let mut archive = SevenZArchive::new(file, &config)?;
 //! let report = archive.extract(
 //!     Path::new("/output"),
-//!     &config,
 //!     &ExtractionOptions::default(),
 //!     &mut exarch_core::NoopProgress,
 //! )?;
@@ -143,6 +142,7 @@
 
 use super::common;
 use super::traits::ArchiveFormat;
+use super::traits::sealed;
 use crate::ArchiveError;
 use crate::EntryCompression;
 use crate::ExtractionOptions;
@@ -162,6 +162,7 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Cached entry metadata from initial archive read.
 /// Avoids re-parsing archive during extraction.
@@ -207,11 +208,10 @@ const SIGNATURE_HEADER_SIZE: u64 = 32;
 /// use std::path::Path;
 ///
 /// let file = File::open("archive.7z")?;
-/// let mut archive = SevenZArchive::new(file)?;
 /// let config = SecurityConfig::default();
+/// let mut archive = SevenZArchive::new(file, &config)?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
-///     &config,
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
@@ -227,10 +227,12 @@ pub struct SevenZArchive<R: Read + Seek> {
     /// second call on the same instance still has a real parsed archive to
     /// work with.
     header: SevenZHeader,
+    /// The policy every operation of the handle enforces.
+    config: Arc<SecurityConfig>,
 }
 
 impl<R: Read + Seek> SevenZArchive<R> {
-    /// Creates a new 7z archive reader.
+    /// Creates a 7z archive reader that enforces `config`.
     ///
     /// # Security Checks
     ///
@@ -248,14 +250,15 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// # Examples
     ///
     /// ```no_run
+    /// use exarch_core::SecurityConfig;
     /// use exarch_core::formats::SevenZArchive;
     /// use std::fs::File;
     ///
     /// let file = File::open("archive.7z")?;
-    /// let archive = SevenZArchive::new(file)?;
+    /// let archive = SevenZArchive::new(file, &SecurityConfig::default())?;
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
-    pub fn new(mut source: R) -> Result<Self> {
+    pub fn new(mut source: R, config: &SecurityConfig) -> Result<Self> {
         let header = read_sevenz_header(&mut source)?;
 
         let source_len = source.seek(SeekFrom::End(0)).map_err(ArchiveError::Io)?;
@@ -278,6 +281,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             source,
             entries,
             header,
+            config: Arc::new(config.clone()),
         })
     }
 }
@@ -313,38 +317,41 @@ fn anti_item_issue(count: u64) -> Option<VerificationIssue> {
     })
 }
 
+impl<R: Read + Seek> sealed::Sealed for SevenZArchive<R> {}
+
 impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     fn extract(
         mut self,
         output_dir: &Path,
-        config: &SecurityConfig,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        self.admit(config)?.extract_with(
+        let config = Arc::clone(&self.config);
+        self.admit(&config)?.extract_with(
             |config| SevenZHostTarget::create(output_dir, config),
             SinkOptions::duplicates_of(options),
             progress,
         )
     }
 
-    fn list(mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
+    fn list(mut self) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::ListPass;
         use crate::inspection::list::list_sevenz_parsed;
+        let config = Arc::clone(&self.config);
         list_sevenz_parsed(
             &self.header,
             &mut self.source,
-            config,
+            &config,
             &mut ListPass::strict(),
         )
     }
 
     fn verify(
         mut self,
-        config: &SecurityConfig,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
-        self.verify_with_progress(config, *options, &mut crate::NoopProgress)
+        let config = Arc::clone(&self.config);
+        self.verify_with_progress(&config, *options, &mut crate::NoopProgress)
     }
 }
 

@@ -722,13 +722,13 @@ fn tar_archive_trait_verify_reads_the_trailer_within_the_cap() {
     let mut tar = three_entries();
     tar.extend(std::iter::repeat_n(0x55u8, 4096));
 
-    let archive = TarArchive::new(Cursor::new(tar.clone()));
-    let report = archive.verify(&config, &integrity(1024)).unwrap();
+    let archive = TarArchive::new(Cursor::new(tar.clone()), &config);
+    let report = archive.verify(&integrity(1024)).unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
 
     tar.extend(std::iter::repeat_n(0x55u8, cap));
-    let archive = TarArchive::new(Cursor::new(tar));
-    let refused = archive.verify(&config, &default_integrity()).unwrap_err();
+    let archive = TarArchive::new(Cursor::new(tar), &config);
+    let refused = archive.verify(&default_integrity()).unwrap_err();
     assert_eq!(
         refused.relaxable_by(),
         Some(exarch_core::PolicySetting::MaxTarMetadataBytes)

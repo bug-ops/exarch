@@ -465,12 +465,11 @@ pub fn verify_archive_with_progress<P: AsRef<Path>>(
     let report = match format.family() {
         FormatFamily::Seekable(SeekableFormat::Zip) => {
             let file = std::fs::File::open(archive_path)?;
-            ZipArchive::for_config(file, config)?
-                .verify_with_progress(config, *options, progress)?
+            ZipArchive::new(file, config)?.verify_with_progress(config, *options, progress)?
         }
         FormatFamily::Seekable(SeekableFormat::SevenZ) => {
             let file = std::fs::File::open(archive_path)?;
-            SevenZArchive::new(file)?.verify_with_progress(config, *options, progress)?
+            SevenZArchive::new(file, config)?.verify_with_progress(config, *options, progress)?
         }
         FormatFamily::Tar(_) => verify_with(config, *options, progress, |listing| {
             list_detected(archive_path, format, config, listing)

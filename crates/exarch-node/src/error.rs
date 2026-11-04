@@ -299,12 +299,6 @@ pub enum ConfigSetting {
     /// `banned_path_component`.
     #[napi(value = "banned_path_component")]
     BannedPathComponent,
-    /// `archive_path`.
-    #[napi(value = "archive_path")]
-    ArchivePath,
-    /// `output_directory`.
-    #[napi(value = "output_directory")]
-    OutputDirectory,
     /// `output_path`.
     #[napi(value = "output_path")]
     OutputPath,
@@ -320,9 +314,6 @@ pub enum ConfigSetting {
     /// `atomic_extraction`.
     #[napi(value = "atomic_extraction")]
     AtomicExtraction,
-    /// `zip_archive`.
-    #[napi(value = "zip_archive")]
-    ZipArchive,
     /// `zip_output_writer`.
     #[napi(value = "zip_output_writer")]
     ZipOutputWriter,

@@ -391,10 +391,9 @@ fn a_caller_decoded_stream_is_not_bounded_by_ratio() {
     let work = TempDir::new().unwrap();
 
     let config = tight_config();
-    let report = TarArchive::new(decoder)
+    let report = TarArchive::new(decoder, &config)
         .extract(
             &work.path().join("out"),
-            &config,
             &ExtractionOptions::default(),
             &mut exarch_core::NoopProgress,
         )

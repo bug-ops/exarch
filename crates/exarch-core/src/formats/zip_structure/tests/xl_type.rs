@@ -129,9 +129,8 @@ fn xl_type_divergence_is_fatal_under_enforce_and_reported_by_verify() {
     let temp = TempDir::new().unwrap();
     let dest = temp.path().join("out");
     assert_matches!(
-        open_bytes(bytes.clone()).extract(
+        open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce)).extract(
             &dest,
-            &config(ZipConsistencyPolicy::Enforce),
             &ExtractionOptions::default(),
             &mut NoopProgress,
         ),
@@ -141,7 +140,7 @@ fn xl_type_divergence_is_fatal_under_enforce_and_reported_by_verify() {
     );
     assert!(!dest.exists());
     assert_matches!(
-        open_bytes(bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(
             ZipInconsistency::XlTypeDivergence { .. }
         ))
@@ -152,8 +151,8 @@ fn xl_type_divergence_is_fatal_under_enforce_and_reported_by_verify() {
         VerificationOptions::default()
             .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),
     ] {
-        let report = open_bytes(bytes.clone())
-            .verify(&config(ZipConsistencyPolicy::Enforce), &options)
+        let report = open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
+            .verify(&options)
             .unwrap();
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert!(report.issues().iter().any(|i| {
@@ -163,8 +162,8 @@ fn xl_type_divergence_is_fatal_under_enforce_and_reported_by_verify() {
     }
 
     assert!(
-        open_bytes(bytes)
-            .list(&config(ZipConsistencyPolicy::Ignore))
+        open_bytes(bytes, &config(ZipConsistencyPolicy::Ignore))
+            .list()
             .is_ok()
     );
 }
@@ -174,7 +173,10 @@ fn xl_type_findings_keep_their_own_limit() {
     let entries = (0..20)
         .map(|i| with_xl(RawEntry::stored(&format!("f{i}.txt"), b"t"), LINK))
         .collect();
-    let archive = open_bytes(RawZip::new(entries).build().bytes);
+    let archive = open_bytes(
+        RawZip::new(entries).build().bytes,
+        &SecurityConfig::default(),
+    );
     let kept = archive
         .structure()
         .findings()
@@ -221,7 +223,7 @@ fn seeks_for_shared_long_header(first: &RawEntry) -> (usize, Vec<ZipInconsistenc
         inner: Cursor::new(zip.build().bytes),
         seeks: seeks.clone(),
     };
-    let archive = ZipArchive::new(probe).unwrap();
+    let archive = ZipArchive::new(probe, &SecurityConfig::default()).unwrap();
     let findings = archive.structure().findings().to_vec();
     let count = seeks.lock().unwrap().len();
     (count, findings)
@@ -294,7 +296,7 @@ fn local_xl_divergence_is_found_whatever_else_the_central_extra_block_holds() {
     let entry = with_xl(RawEntry::stored("a.txt", b"../../x"), LINK)
         .with_central_extra_field(0x9999, &[1, 2]);
     let built = RawZip::new(vec![entry]).build();
-    let archive = ZipArchive::new(Cursor::new(built.bytes)).unwrap();
+    let archive = ZipArchive::new(Cursor::new(built.bytes), &SecurityConfig::default()).unwrap();
     assert!(archive.structure().findings().contains(&divergence(0, 0)));
 }
 

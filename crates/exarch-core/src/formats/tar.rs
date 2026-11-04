@@ -81,11 +81,10 @@
 //! use std::path::Path;
 //!
 //! let file = File::open("archive.tar")?;
-//! let mut archive = TarArchive::new(file);
 //! let config = SecurityConfig::default();
+//! let mut archive = TarArchive::new(file, &config);
 //! let report = archive.extract(
 //!     Path::new("/output"),
-//!     &config,
 //!     &ExtractionOptions::default(),
 //!     &mut exarch_core::NoopProgress,
 //! )?;
@@ -106,11 +105,10 @@
 //!
 //! let file = File::open("archive.tar.gz")?;
 //! let decoder = GzDecoder::new(file);
-//! let mut archive = TarArchive::new(decoder);
 //! let config = SecurityConfig::default();
+//! let mut archive = TarArchive::new(decoder, &config);
 //! let report = archive.extract(
 //!     Path::new("/output"),
-//!     &config,
 //!     &ExtractionOptions::default(),
 //!     &mut exarch_core::NoopProgress,
 //! )?;
@@ -120,6 +118,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use smallvec::SmallVec;
@@ -168,6 +167,7 @@ use super::target::FileRequest;
 use super::target::HostTarget;
 use super::target::Tally;
 use super::traits::ArchiveFormat;
+use super::traits::sealed;
 use crate::formats::compression::DecoderLimits;
 use crate::reader::TarStream;
 use crate::reader::decode_tar_stream;
@@ -192,11 +192,10 @@ use crate::reader::decode_tar_stream;
 /// use std::path::Path;
 ///
 /// let file = File::open("archive.tar")?;
-/// let mut archive = TarArchive::new(file);
 /// let config = SecurityConfig::default();
+/// let mut archive = TarArchive::new(file, &config);
 /// let report = archive.extract(
 ///     Path::new("/output"),
-///     &config,
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
@@ -213,18 +212,24 @@ pub struct TarArchive<R: Read> {
     source: TapSource,
     /// How the bytes after the end-of-archive marker are checked.
     trailer: TarTrailer,
+    /// The policy every operation of the handle enforces.
+    config: Arc<SecurityConfig>,
 }
 
 impl<'r> TarArchive<Box<dyn Read + Send + 'r>> {
     /// Creates a handler over a stream core decoded and metered itself.
-    pub(crate) fn from_stream(decoded: TarStream<'r>, trailer: TarTrailer) -> Self {
+    pub(crate) fn from_stream(
+        decoded: TarStream<'r>,
+        trailer: TarTrailer,
+        config: &SecurityConfig,
+    ) -> Self {
         let source = decoded.source();
-        Self::with_source(decoded.stream, source, trailer)
+        Self::with_source(decoded.stream, source, trailer, config)
     }
 }
 
 impl<R: Read> TarArchive<R> {
-    /// Creates a new TAR archive handler from a reader.
+    /// Creates a TAR archive handler over a reader, enforcing `config`.
     ///
     /// The reader will be consumed during extraction. For file-based
     /// archives, wrap in `BufReader` for optimal performance.
@@ -253,31 +258,38 @@ impl<R: Read> TarArchive<R> {
     /// # Examples
     ///
     /// ```no_run
+    /// use exarch_core::SecurityConfig;
     /// use exarch_core::formats::TarArchive;
     /// use std::fs::File;
     /// use std::io::BufReader;
     ///
     /// let file = File::open("archive.tar")?;
     /// let reader = BufReader::new(file);
-    /// let archive = TarArchive::new(reader);
+    /// let archive = TarArchive::new(reader, &SecurityConfig::default());
     /// # Ok::<(), std::io::Error>(())
     /// ```
     #[must_use]
-    pub fn new(reader: R) -> Self {
-        Self::with_trailer(reader, TarTrailer::DrainToDecoderEof)
+    pub fn new(reader: R, config: &SecurityConfig) -> Self {
+        Self::with_trailer(reader, TarTrailer::DrainToDecoderEof, config)
     }
 
     /// Creates a handler that checks the tail of the stream as `trailer` says.
-    pub(crate) fn with_trailer(reader: R, trailer: TarTrailer) -> Self {
-        Self::with_source(reader, TapSource::Opaque, trailer)
+    pub(crate) fn with_trailer(reader: R, trailer: TarTrailer, config: &SecurityConfig) -> Self {
+        Self::with_source(reader, TapSource::Opaque, trailer, config)
     }
 
     /// Creates a handler over `reader`, whose raw input `source` meters.
-    pub(crate) fn with_source(reader: R, source: TapSource, trailer: TarTrailer) -> Self {
+    pub(crate) fn with_source(
+        reader: R,
+        source: TapSource,
+        trailer: TarTrailer,
+        config: &SecurityConfig,
+    ) -> Self {
         Self {
             inner: reader,
             source,
             trailer,
+            config: Arc::new(config.clone()),
         }
     }
 
@@ -496,25 +508,28 @@ impl<R: Read> TarArchive<R> {
     }
 }
 
+impl<R: Read> sealed::Sealed for TarArchive<R> {}
+
 impl<R: Read> ArchiveFormat for TarArchive<R> {
     fn extract(
         self,
         output_dir: &Path,
-        config: &SecurityConfig,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        let mut target = HostTarget::create(output_dir, config)?;
+        let config = Arc::clone(&self.config);
+        let mut target = HostTarget::create(output_dir, &config)?;
         self.extract_into(
             &mut target,
-            config,
+            &config,
             SinkOptions::duplicates_of(options),
             progress,
         )
     }
 
-    fn list(self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
-        self.list_with_pass(config, &mut ListPass::strict())
+    fn list(self) -> Result<crate::inspection::ArchiveManifest> {
+        let config = Arc::clone(&self.config);
+        self.list_with_pass(&config, &mut ListPass::strict())
     }
 
     /// Verifies the archive; the TAR stream's codec is unknown here, so with
@@ -522,14 +537,14 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     /// after the end marker.
     fn verify(
         self,
-        config: &SecurityConfig,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
+        let config = Arc::clone(&self.config);
         crate::inspection::verify::verify_with(
-            config,
+            &config,
             *options,
             &mut crate::NoopProgress,
-            |listing| self.list_with_pass(config, listing),
+            |listing| self.list_with_pass(&config, listing),
         )
     }
 }
@@ -739,10 +754,10 @@ pub(crate) fn open_tar_stream(
 fn open_tar_archive(
     path: &Path,
     codec: CompressionCodec,
-    limits: DecoderLimits,
+    config: &SecurityConfig,
 ) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(path, Some(codec), limits)
-        .map(|decoded| TarArchive::from_stream(decoded, TarTrailer::DrainToDecoderEof))
+    open_tar_stream(path, Some(codec), DecoderLimits::of(config))
+        .map(|decoded| TarArchive::from_stream(decoded, TarTrailer::DrainToDecoderEof, config))
 }
 
 /// Opens a gzip-compressed TAR archive (.tar.gz).
@@ -762,22 +777,20 @@ fn open_tar_archive(
 /// use exarch_core::formats::traits::ArchiveFormat;
 /// use std::path::Path;
 ///
-/// let mut archive = open_tar_gz("archive.tar.gz")?;
 /// let config = SecurityConfig::default();
+/// let mut archive = open_tar_gz("archive.tar.gz", &config)?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
-///     &config,
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
-pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_archive(
-        path.as_ref(),
-        CompressionCodec::Gzip,
-        DecoderLimits::UNBOUNDED,
-    )
+pub fn open_tar_gz<P: AsRef<Path>>(
+    path: P,
+    config: &SecurityConfig,
+) -> Result<TarArchive<Box<dyn Read + Send>>> {
+    open_tar_archive(path.as_ref(), CompressionCodec::Gzip, config)
 }
 
 /// Opens a bzip2-compressed TAR archive (.tar.bz2).
@@ -797,22 +810,20 @@ pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + 
 /// use exarch_core::formats::traits::ArchiveFormat;
 /// use std::path::Path;
 ///
-/// let mut archive = open_tar_bz2("archive.tar.bz2")?;
 /// let config = SecurityConfig::default();
+/// let mut archive = open_tar_bz2("archive.tar.bz2", &config)?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
-///     &config,
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
-pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_archive(
-        path.as_ref(),
-        CompressionCodec::Bzip2,
-        DecoderLimits::UNBOUNDED,
-    )
+pub fn open_tar_bz2<P: AsRef<Path>>(
+    path: P,
+    config: &SecurityConfig,
+) -> Result<TarArchive<Box<dyn Read + Send>>> {
+    open_tar_archive(path.as_ref(), CompressionCodec::Bzip2, config)
 }
 
 /// Opens an xz-compressed TAR archive (.tar.xz).
@@ -843,7 +854,6 @@ pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read +
 /// let mut archive = open_tar_xz("archive.tar.xz", &config)?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
-///     &config,
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
@@ -853,11 +863,7 @@ pub fn open_tar_xz<P: AsRef<Path>>(
     path: P,
     config: &SecurityConfig,
 ) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_archive(
-        path.as_ref(),
-        CompressionCodec::Xz,
-        DecoderLimits::of(config),
-    )
+    open_tar_archive(path.as_ref(), CompressionCodec::Xz, config)
 }
 
 /// Opens a zstd-compressed TAR archive (.tar.zst).
@@ -878,22 +884,20 @@ pub fn open_tar_xz<P: AsRef<Path>>(
 /// use exarch_core::formats::traits::ArchiveFormat;
 /// use std::path::Path;
 ///
-/// let mut archive = open_tar_zst("archive.tar.zst")?;
 /// let config = SecurityConfig::default();
+/// let mut archive = open_tar_zst("archive.tar.zst", &config)?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
-///     &config,
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
-pub fn open_tar_zst<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_archive(
-        path.as_ref(),
-        CompressionCodec::Zstd,
-        DecoderLimits::UNBOUNDED,
-    )
+pub fn open_tar_zst<P: AsRef<Path>>(
+    path: P,
+    config: &SecurityConfig,
+) -> Result<TarArchive<Box<dyn Read + Send>>> {
+    open_tar_archive(path.as_ref(), CompressionCodec::Zstd, config)
 }
 
 #[cfg(test)]
@@ -919,15 +923,14 @@ mod tests {
     #[test]
     fn test_extract_simple_file() {
         let tar_data = create_test_tar(vec![("file.txt", b"hello world")]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -971,15 +974,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1016,16 +1018,15 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let mut config = SecurityConfig::default();
 
         let temp = TempDir::new().unwrap();
-        let mut config = SecurityConfig::default();
         config.allowed.symlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1062,16 +1063,15 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
-
-        let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
+
+        let temp = TempDir::new().unwrap();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1085,14 +1085,13 @@ mod tests {
     #[test]
     fn test_quota_file_size_exceeded() {
         let tar_data = create_test_tar(vec![("large.bin", &vec![0u8; 1000])]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(100));
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(100));
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1112,14 +1111,13 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1139,14 +1137,13 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1166,14 +1163,13 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1214,15 +1210,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1256,15 +1251,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1298,15 +1292,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1329,14 +1322,13 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1360,14 +1352,13 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1393,15 +1384,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1426,15 +1416,14 @@ mod tests {
 
         // Extract
         let decoder = flate2::read::GzDecoder::new(Cursor::new(gz_data));
-        let archive = TarArchive::new(decoder);
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(decoder, &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1459,15 +1448,14 @@ mod tests {
 
         // Extract
         let decoder = bzip2::read::BzDecoder::new(Cursor::new(bz2_data));
-        let archive = TarArchive::new(decoder);
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(decoder, &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1491,15 +1479,14 @@ mod tests {
 
         // Extract
         let decoder = liblzma::read::XzDecoder::new(Cursor::new(xz_data));
-        let archive = TarArchive::new(decoder);
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(decoder, &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1519,15 +1506,14 @@ mod tests {
 
         // Extract
         let decoder = zstd::Decoder::with_buffer(Cursor::new(zst_data)).unwrap();
-        let archive = TarArchive::new(decoder);
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(decoder, &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1540,15 +1526,14 @@ mod tests {
     #[test]
     fn test_empty_tar_archive() {
         let tar_data = create_test_tar(vec![]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1561,15 +1546,14 @@ mod tests {
     #[test]
     fn test_extract_empty_file() {
         let tar_data = create_test_tar(vec![("empty.txt", b"")]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1592,15 +1576,14 @@ mod tests {
             ("file2.txt", b"content2"),
             ("file3.txt", b"content3"),
         ]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1619,14 +1602,13 @@ mod tests {
             ("file2.txt", b"b"),
             ("file3.txt", b"c"),
         ]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default().with_max_file_count(crate::non_zero!(2));
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_max_file_count(crate::non_zero!(2));
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1640,14 +1622,13 @@ mod tests {
             ("file1.txt", &vec![0u8; 500]),
             ("file2.txt", &vec![0u8; 600]),
         ]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default().with_max_total_size(crate::non_zero!(1000));
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_max_total_size(crate::non_zero!(1000));
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1670,15 +1651,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1706,15 +1686,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1731,15 +1710,14 @@ mod tests {
     #[test]
     fn test_bytes_written_tracking() {
         let tar_data = create_test_tar(vec![("file1.txt", b"12345"), ("file2.txt", b"67890")]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1761,15 +1739,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1795,14 +1772,12 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
-
-        let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default(); // symlinks disabled by default
 
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
+        let temp = TempDir::new().unwrap();
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1825,14 +1800,12 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
-
-        let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default(); // hardlinks disabled by default
 
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
+        let temp = TempDir::new().unwrap();
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1843,15 +1816,14 @@ mod tests {
     #[test]
     fn test_extraction_duration_recorded() {
         let tar_data = create_test_tar(vec![("file.txt", b"test")]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -1877,14 +1849,13 @@ mod tests {
         builder.append(&header, &b"evil\n"[..]).unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1913,14 +1884,13 @@ mod tests {
         builder.append(&header, &b"evil\n"[..]).unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1958,15 +1928,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let mut config = SecurityConfig::default();
 
         let temp = TempDir::new().unwrap();
-        let mut config = SecurityConfig::default();
         config.allowed.symlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1999,15 +1968,14 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let mut config = SecurityConfig::default();
 
         let temp = TempDir::new().unwrap();
-        let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -2097,9 +2065,12 @@ mod tests {
 
     #[cfg(unix)]
     fn extract_hardlink_only(dest: &Path, link_name: &str) -> Result<ExtractionReport> {
-        TarArchive::new(Cursor::new(hardlink_only_tar(link_name))).extract(
-            dest,
+        TarArchive::new(
+            Cursor::new(hardlink_only_tar(link_name)),
             &hardlink_config(),
+        )
+        .extract(
+            dest,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         )
@@ -2164,10 +2135,9 @@ mod tests {
             std::fs::set_permissions(&target, std::fs::Permissions::from_mode(target_mode))
                 .unwrap();
 
-            TarArchive::new(Cursor::new(hardlink_only_tar("t")))
+            TarArchive::new(Cursor::new(hardlink_only_tar("t")), &config)
                 .extract(
                     temp.path(),
-                    &config,
                     &ExtractionOptions::default(),
                     &mut crate::NoopProgress,
                 )
@@ -2244,10 +2214,9 @@ mod tests {
                     }
                 }
             });
-            let archive = TarArchive::new(Cursor::new(data.clone()));
+            let archive = TarArchive::new(Cursor::new(data.clone()), &config);
             let _ = archive.extract(
                 &dest,
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             );
@@ -2305,15 +2274,14 @@ mod tests {
         assert!(!victim_path.exists());
 
         let tar_data = create_hardlink_tar(b"pwned!");
-        let archive = TarArchive::new(Cursor::new(tar_data));
-
         let mut config = SecurityConfig::default();
+
         config.allowed.hardlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(), // skip_duplicates = true
                 &mut crate::NoopProgress,
             )
@@ -2345,17 +2313,17 @@ mod tests {
         std::os::unix::fs::symlink(&victim_path, &link_dest).unwrap();
 
         let tar_data = create_hardlink_tar(b"pwned!");
-        let archive = TarArchive::new(Cursor::new(tar_data));
-
         let mut config = SecurityConfig::default();
+
         config.allowed.hardlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: false,
             ..ExtractionOptions::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
+        let result = archive.extract(temp.path(), &options, &mut crate::NoopProgress);
 
         assert!(!victim_path.exists());
         // The regular `target.txt` entry extracts successfully before the
@@ -2461,17 +2429,16 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         let tar_data = create_hardlink_tar(&[b'A'; 100]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
-
         let mut config = SecurityConfig::default();
+
         config.allowed.hardlinks = crate::Admit::Allow;
         // Enough room for target.txt (100 bytes) but not for the hardlink's
         // own independent 100-byte copy on top of it.
         config.max_total_size = crate::Limit::Bounded(crate::non_zero!(150));
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -2539,16 +2506,15 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
-
         let mut config = SecurityConfig::default();
+
         config.allowed.hardlinks = crate::Admit::Allow;
         config.allowed.symlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -2593,16 +2559,15 @@ mod tests {
         }
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let mut config = SecurityConfig::default();
 
         let temp = TempDir::new().unwrap();
-        let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -2645,16 +2610,15 @@ mod tests {
         }
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let mut config = SecurityConfig::default();
 
         let temp = TempDir::new().unwrap();
-        let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -2718,13 +2682,12 @@ mod tests {
         let data = vec![0u8; usize::try_from(PAX_SIZE).unwrap()];
         let tar_data = create_tar_with_pax_size_override("big.bin", PAX_SIZE, &data);
 
-        let archive = TarArchive::new(Cursor::new(tar_data));
-        let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(1024 * 1024));
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
+        let temp = TempDir::new().unwrap();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -2743,13 +2706,12 @@ mod tests {
         let data = vec![0u8; usize::try_from(PAX_SIZE).unwrap()];
         let tar_data = create_tar_with_pax_size_override("big.bin", PAX_SIZE, &data);
 
-        let archive = TarArchive::new(Cursor::new(tar_data));
-        let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().with_max_total_size(crate::non_zero!(500 * 1024));
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
+        let temp = TempDir::new().unwrap();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -2789,16 +2751,15 @@ mod tests {
         }
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let mut config = SecurityConfig::default();
 
         let temp = TempDir::new().unwrap();
-        let mut config = SecurityConfig::default();
         config.allowed.hardlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )
@@ -2833,14 +2794,14 @@ mod tests {
     #[test]
     fn test_duplicate_entry_skip_default() {
         let tar_data = create_duplicate_entry_tar("legit.txt", b"first", b"second");
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
         let options = ExtractionOptions::default(); // skip_duplicates = true
 
         let report = archive
-            .extract(temp.path(), &config, &options, &mut crate::NoopProgress)
+            .extract(temp.path(), &options, &mut crate::NoopProgress)
             .unwrap();
 
         // First entry extracted, second skipped
@@ -2858,10 +2819,10 @@ mod tests {
     #[test]
     fn test_duplicate_entry_overwrites_when_skip_disabled() {
         let tar_data = create_duplicate_entry_tar("legit.txt", b"first", b"second");
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: false,
@@ -2869,7 +2830,7 @@ mod tests {
         };
 
         let report = archive
-            .extract(temp.path(), &config, &options, &mut crate::NoopProgress)
+            .extract(temp.path(), &options, &mut crate::NoopProgress)
             .unwrap();
 
         // Both entries extracted (second overwrites first)
@@ -2894,18 +2855,17 @@ mod tests {
             .map(|n| (n.as_str(), b"payload".as_slice()))
             .collect();
         let tar_data = create_test_tar(entries);
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
         for name in &names {
             std::fs::write(temp.path().join(name), b"already here").unwrap();
         }
 
-        let config = SecurityConfig::default();
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(), // skip_duplicates = true
                 &mut crate::NoopProgress,
             )
@@ -2956,20 +2916,18 @@ mod tests {
         }
 
         let tar_data = builder.into_inner().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = crate::Admit::Allow;
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
         for i in 0..LINK_COUNT {
             std::fs::write(temp.path().join(format!("link{i}.txt")), b"already here").unwrap();
         }
 
-        let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = crate::Admit::Allow;
-
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(), // skip_duplicates = true
                 &mut crate::NoopProgress,
             )
@@ -2984,10 +2942,10 @@ mod tests {
     #[test]
     fn test_list_returns_manifest_with_entries() {
         let tar_data = create_test_tar(vec![("a.txt", b"hello"), ("b.txt", b"world")]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
         let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
-        let manifest = archive.list(&config).unwrap();
+        let manifest = archive.list().unwrap();
 
         assert_eq!(manifest.total_entries(), 2);
         assert_eq!(manifest.total_size(), 10);
@@ -2996,10 +2954,10 @@ mod tests {
     #[test]
     fn test_list_empty_archive_returns_empty_manifest() {
         let tar_data = create_test_tar(vec![]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
         let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
-        let manifest = archive.list(&config).unwrap();
+        let manifest = archive.list().unwrap();
 
         assert_eq!(manifest.total_entries(), 0);
         assert_eq!(manifest.total_size(), 0);
@@ -3008,11 +2966,11 @@ mod tests {
     #[test]
     fn test_verify_clean_archive_is_safe() {
         let tar_data = create_test_tar(vec![("safe.txt", b"data")]);
-        let archive = TarArchive::new(Cursor::new(tar_data));
         let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let report = archive
-            .verify(&config, &crate::VerificationOptions::default())
+            .verify(&crate::VerificationOptions::default())
             .unwrap();
 
         assert!(report.is_safe());
@@ -3036,14 +2994,13 @@ mod tests {
     #[test]
     fn test_tar_absolute_path_rejected_by_default() {
         let tar_data = create_tar_with_absolute_path(b"/etc/shadow", b"secret");
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut NoopProgress,
         );
@@ -3058,15 +3015,14 @@ mod tests {
     #[test]
     fn test_tar_absolute_path_with_flag_writes_to_dest() {
         let tar_data = create_tar_with_absolute_path(b"/etc/shadow", b"content");
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_allow_absolute_paths(true);
 
         let report = archive
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut NoopProgress,
             )
@@ -3084,14 +3040,13 @@ mod tests {
         // Even with allow_absolute_paths, `/../etc/passwd` contains `..` and
         // must be rejected regardless.
         let tar_data = create_tar_with_absolute_path(b"/../etc/passwd", b"secret");
-        let archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_allow_absolute_paths(true);
 
         let result = archive.extract(
             temp.path(),
-            &config,
             &ExtractionOptions::default(),
             &mut NoopProgress,
         );
@@ -3109,10 +3064,9 @@ mod tests {
             .try_add_allowed_extension("txt")
             .unwrap();
 
-        let report = TarArchive::new(Cursor::new(tar_data))
+        let report = TarArchive::new(Cursor::new(tar_data), &config)
             .extract(
                 dest.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut NoopProgress,
             )
@@ -3148,10 +3102,9 @@ mod tests {
             .try_add_allowed_extension("txt")
             .unwrap();
 
-        let report = TarArchive::new(Cursor::new(tar_data))
+        let report = TarArchive::new(Cursor::new(tar_data), &config)
             .extract(
                 dest.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut NoopProgress,
             )
@@ -3195,10 +3148,9 @@ mod tests {
             .try_add_allowed_extension("txt")
             .unwrap();
 
-        let report = TarArchive::new(Cursor::new(tar_data))
+        let report = TarArchive::new(Cursor::new(tar_data), &config)
             .extract(
                 temp.path(),
-                &config,
                 &ExtractionOptions::default(), // skip_duplicates = true
                 &mut NoopProgress,
             )
@@ -3246,13 +3198,8 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         let mut recorder = Recorder::default();
 
-        TarArchive::new(Cursor::new(tar_data))
-            .extract(
-                dest.path(),
-                &SecurityConfig::default(),
-                &ExtractionOptions::default(),
-                &mut recorder,
-            )
+        TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default())
+            .extract(dest.path(), &ExtractionOptions::default(), &mut recorder)
             .unwrap();
 
         let unknown = crate::EntryTotal::Unknown;
@@ -3266,10 +3213,9 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default(); // empty = allow all
 
-        let report = TarArchive::new(Cursor::new(tar_data))
+        let report = TarArchive::new(Cursor::new(tar_data), &config)
             .extract(
                 dest.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut NoopProgress,
             )
@@ -3289,10 +3235,9 @@ mod tests {
             .try_add_allowed_extension("txt")
             .unwrap();
 
-        let report = TarArchive::new(Cursor::new(tar_data))
+        let report = TarArchive::new(Cursor::new(tar_data), &config)
             .extract(
                 dest.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut NoopProgress,
             )

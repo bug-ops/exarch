@@ -87,7 +87,7 @@ fn a_record_signature_behind_the_stream_end_is_a_stray_record() {
 fn a_header_behind_the_stream_end_is_fatal_under_enforce_with_plain_verify() {
     let built = RawZip::new(vec![known_size_entry(8, &unmapped_local())]).build();
     assert_matches!(
-        open_bytes(built.bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(built.bytes.clone(), &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(
             ZipInconsistency::HiddenLocalHeader {
                 region: HiddenRegion::StreamTail,
@@ -95,17 +95,14 @@ fn a_header_behind_the_stream_end_is_fatal_under_enforce_with_plain_verify() {
             }
         ))
     );
-    let report = open_bytes(built.bytes.clone())
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(built.bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_eq!(hidden_issues(&report).len(), 1);
     assert!(
-        open_bytes(built.bytes)
-            .list(&config(ZipConsistencyPolicy::Ignore))
+        open_bytes(built.bytes, &config(ZipConsistencyPolicy::Ignore))
+            .list()
             .is_ok()
     );
 }
@@ -142,7 +139,7 @@ fn ordinary_known_size_entries_have_no_findings() {
 fn a_stream_ending_exactly_at_the_declared_end_needs_no_gap_search() {
     for method in METHODS {
         let built = RawZip::new(vec![known_size_entry(method, &[])]).build();
-        let archive = open_bytes(built.bytes);
+        let archive = open_bytes(built.bytes, &SecurityConfig::default());
         assert!(archive.structure().findings().is_empty(), "method {method}");
     }
 }
@@ -176,7 +173,12 @@ fn archives_written_by_common_producers_have_no_findings() {
             zip.write_all(&vec![b'k'; len]).unwrap();
         }
         let bytes = zip.finish().unwrap().into_inner();
-        assert!(open_bytes(bytes).structure().findings().is_empty());
+        assert!(
+            open_bytes(bytes, &SecurityConfig::default())
+                .structure()
+                .findings()
+                .is_empty()
+        );
     }
 }
 

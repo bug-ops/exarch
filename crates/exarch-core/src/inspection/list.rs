@@ -675,7 +675,7 @@ fn list_zip(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
-    ZipArchive::for_config(file, config)?.list_with(config, listing)
+    ZipArchive::new(file, config)?.list_with(config, listing)
 }
 
 /// Lists entries from an already budget-wrapped TAR reader.
@@ -1477,7 +1477,8 @@ mod tests {
         use std::io::Cursor;
 
         let zip_bytes = create_zip_with_symlink("link", "target.txt");
-        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let mut archive =
+            ZipArchive::new(Cursor::new(zip_bytes), &SecurityConfig::default()).unwrap();
         let config = SecurityConfig::default();
         let manifest = list_zip_reader(
             &mut archive.check_admission(&config).unwrap(),
@@ -2747,7 +2748,8 @@ mod tests {
         use std::io::Cursor;
 
         let zip_bytes = create_zip_with_symlink("link", "foo\0bar");
-        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let mut archive =
+            ZipArchive::new(Cursor::new(zip_bytes), &SecurityConfig::default()).unwrap();
         let config = SecurityConfig::default();
         let result = list_zip_reader(
             &mut archive.check_admission(&config).unwrap(),
@@ -2772,7 +2774,8 @@ mod tests {
         use std::io::Cursor;
 
         let zip_bytes = create_zip_with_symlink("link", "");
-        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let mut archive =
+            ZipArchive::new(Cursor::new(zip_bytes), &SecurityConfig::default()).unwrap();
         let config = SecurityConfig::default();
         let result = list_zip_reader(
             &mut archive.check_admission(&config).unwrap(),
@@ -3105,7 +3108,8 @@ mod tests {
     #[test]
     fn test_list_zip_verify_preflight_allows_nul_byte_path() {
         let zip_bytes = create_raw_zip_entry("foo\0bar.txt", b"");
-        let mut archive = ZipArchive::new(std::io::Cursor::new(zip_bytes)).unwrap();
+        let mut archive =
+            ZipArchive::new(std::io::Cursor::new(zip_bytes), &SecurityConfig::default()).unwrap();
         let config = SecurityConfig::default().with_allow_absolute_paths(true);
         let manifest = list_zip_reader(
             &mut archive.check_admission(&config).unwrap(),
@@ -3243,12 +3247,11 @@ mod tests {
         use std::io::Cursor;
 
         let zip_bytes = zip_with_zip64_declared_sizes(&[("a.bin", u64::MAX - 100), ("b.bin", 200)]);
-        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
-
         let config = SecurityConfig::default()
             .with_max_file_size(crate::Limit::Unbounded)
             .with_max_file_count(crate::Limit::Unbounded)
             .with_max_total_size(crate::Limit::Unbounded);
+        let mut archive = ZipArchive::new(Cursor::new(zip_bytes), &config).unwrap();
         let result = list_zip_reader(
             &mut archive.check_admission(&config).unwrap(),
             &config,
@@ -3400,7 +3403,8 @@ mod tests {
 
         let zip_bytes = create_zip_with_symlink("link", &"a".repeat(HOST_SYMLINK_TARGET_BYTES + 1));
 
-        let mut archive = ZipArchive::new(Cursor::new(zip_bytes.clone())).unwrap();
+        let mut archive =
+            ZipArchive::new(Cursor::new(zip_bytes.clone()), &SecurityConfig::default()).unwrap();
         let strict = SecurityConfig::default();
         assert_matches!(
             list_zip_reader(
@@ -3411,7 +3415,8 @@ mod tests {
             Err(ArchiveError::SecurityViolation { .. })
         );
 
-        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let mut archive =
+            ZipArchive::new(Cursor::new(zip_bytes), &SecurityConfig::default()).unwrap();
         let manifest = list_zip_reader(
             &mut archive.check_admission(&strict).unwrap(),
             &strict,
@@ -3441,7 +3446,7 @@ mod tests {
         link.external_attributes = 0o120_777 << 16;
         let bytes = RawZip::new(vec![link]).build().bytes;
 
-        let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(bytes), &SecurityConfig::default()).unwrap();
         let config = SecurityConfig::default();
         let manifest = list_zip_reader(
             &mut archive.check_admission(&config).unwrap(),

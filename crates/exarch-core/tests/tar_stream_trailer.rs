@@ -245,13 +245,8 @@ fn corrupt_gzip_crc_is_refused_by_tar_archive_over_a_decoder() {
     let config = SecurityConfig::default();
     let out = TempDir::new().unwrap();
 
-    let error = TarArchive::new(decoder)
-        .extract(
-            out.path(),
-            &config,
-            &ExtractionOptions::default(),
-            &mut NoopProgress,
-        )
+    let error = TarArchive::new(decoder, &config)
+        .extract(out.path(), &ExtractionOptions::default(), &mut NoopProgress)
         .unwrap_err();
 
     assert_trailer_failure(&error);

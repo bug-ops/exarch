@@ -781,7 +781,7 @@ export type ArchiveType = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'archive_path' | 'output_directory' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_archive' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern'
 
 /**
  * Create an archive from source files and directories (async).

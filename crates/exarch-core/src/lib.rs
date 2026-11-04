@@ -157,12 +157,10 @@ pub use request::SinkExtractRequest;
 pub use request::VerifyRequest;
 
 // Re-export creation types
-pub use creation::ArchiveCreator;
 pub use creation::CreationConfig;
 pub use creation::CreationReport;
 pub use creation::CreationWarning;
 pub use creation::ExcludePattern;
-pub use formats::traits::FormatCreator;
 pub use writer::ArchiveWriter;
 pub use writer::create_to_bytes;
 pub use writer::create_to_writer;

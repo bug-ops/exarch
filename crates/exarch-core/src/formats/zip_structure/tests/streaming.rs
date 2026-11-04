@@ -72,7 +72,9 @@ fn end_record_in_the_prefix_is_found_only_when_the_file_starts_with_pk() {
         let absolute = with_absolute_offsets(&record, &built);
         for (label, bytes) in [("relative", relative), ("absolute", absolute)] {
             assert_eq!(
-                open_bytes(bytes).structure().findings(),
+                open_bytes(bytes, &SecurityConfig::default())
+                    .structure()
+                    .findings(),
                 [stray_end(0, kind)],
                 "{kind} {label}"
             );
@@ -80,13 +82,20 @@ fn end_record_in_the_prefix_is_found_only_when_the_file_starts_with_pk() {
         let after_pk = [b"PK00".to_vec(), record.clone()].concat();
         let absolute = with_absolute_offsets(&after_pk, &built);
         assert_eq!(
-            open_bytes(absolute).structure().findings(),
+            open_bytes(absolute, &SecurityConfig::default())
+                .structure()
+                .findings(),
             [stray_end(4, kind)],
             "{kind} behind PK00"
         );
         let stub = [b"MZ00".to_vec(), record].concat();
         let absolute = with_absolute_offsets(&stub, &built);
-        assert!(open_bytes(absolute).structure().findings().is_empty());
+        assert!(
+            open_bytes(absolute, &SecurityConfig::default())
+                .structure()
+                .findings()
+                .is_empty()
+        );
     }
 }
 
@@ -111,16 +120,13 @@ fn stray_end_record_is_fatal_under_enforce_and_reported_by_verify() {
     let (built, _) = gap_before_entry(b"PK\x05\x06");
     let bytes = built.bytes;
     assert_matches!(
-        open_bytes(bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(
             ZipInconsistency::StrayEndRecord { .. }
         ))
     );
-    let report = open_bytes(bytes)
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(report.issues().iter().any(|i| {
@@ -302,16 +308,13 @@ fn descriptor_overrun_is_fatal_under_enforce_and_reported_by_verify() {
     let first = RawEntry::stored("a.txt", b"stored a\n").with_descriptor(false, false);
     let bytes = first_then_stored(first).0.bytes;
     assert_matches!(
-        open_bytes(bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(
             ZipInconsistency::DescriptorOverrun { .. }
         ))
     );
-    let report = open_bytes(bytes.clone())
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(report.issues().iter().any(|i| {
@@ -319,8 +322,8 @@ fn descriptor_overrun_is_fatal_under_enforce_and_reported_by_verify() {
             && i.message().contains("data descriptor of entry 0")
     }));
     assert!(
-        open_bytes(bytes)
-            .list(&config(ZipConsistencyPolicy::Ignore))
+        open_bytes(bytes, &config(ZipConsistencyPolicy::Ignore))
+            .list()
             .is_ok()
     );
 }
@@ -398,7 +401,7 @@ fn a_gap_just_under_two_chunks_takes_two_reads() {
     let mut first = RawEntry::stored("a.txt", b"hello");
     first.padding_after = 2 * GAP_CHUNK - 40;
     let built = RawZip::new(vec![first, RawEntry::stored("b.txt", b"world")]).build();
-    let archive = open_bytes(built.bytes);
+    let archive = open_bytes(built.bytes, &SecurityConfig::default());
     assert!(archive.structure().findings().is_empty());
     assert_eq!(archive.structure().gap_reads(), 2);
 }
@@ -425,7 +428,12 @@ fn signature_in_the_overlap_of_two_chunks_is_reported_once() {
 #[test]
 fn central_signature_at_offset_zero_is_reported() {
     let bytes = [b"PK\x01\x02".to_vec(), two_files().build().bytes].concat();
-    assert_eq!(open_bytes(bytes).structure().findings(), [stray(0)]);
+    assert_eq!(
+        open_bytes(bytes, &SecurityConfig::default())
+            .structure()
+            .findings(),
+        [stray(0)]
+    );
 }
 
 #[test]
@@ -446,7 +454,7 @@ fn truncated_header_at_the_end_of_a_middle_chunk_costs_no_extra_read() {
     let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
     zip.before_directory = [vec![0u8; GAP_CHUNK - 20], local.clone()].concat();
     let built = zip.build();
-    let archive = open_bytes(built.bytes.clone());
+    let archive = open_bytes(built.bytes.clone(), &SecurityConfig::default());
     assert_eq!(
         archive.structure().findings(),
         [hidden_at(built.directory_start - local.len())]

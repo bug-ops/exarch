@@ -694,20 +694,10 @@ impl DirectoryMap {
     }
 }
 
-/// Opens `reader` as a ZIP archive and runs the census.
-///
-/// Returns the archive, parsed once and already admitted, and its structure.
-///
-/// # Errors
-///
-/// Fails on unparseable, encrypted or unsupported archives, and when the
-/// raw central directory and the `zip` crate's map of it disagree.
-pub(super) fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
-    open_chunked(reader, ChunkSizes::PRODUCTION)
-}
-
-/// Like [`open`], running the checks that read entry data (decoding streams,
-/// scanning stored data) only when `checks` asks for them.
+/// Opens `reader` as a ZIP archive and runs the census, returning the archive
+/// (parsed once and already admitted) and its structure. The checks that read
+/// entry data (decoding streams, scanning stored data) run only when `checks`
+/// asks for them.
 ///
 /// The findings of those checks are discarded under
 /// [`ZipConsistencyPolicy::Ignore`](crate::ZipConsistencyPolicy), so an
@@ -728,7 +718,8 @@ pub(super) fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, Z
 ///
 /// # Errors
 ///
-/// Same as [`open`].
+/// Fails on unparseable, encrypted or unsupported archives, and when the
+/// raw central directory and the `zip` crate's map of it disagree.
 pub(super) fn open_with<R: Read + Seek>(
     reader: R,
     checks: StreamChecks,

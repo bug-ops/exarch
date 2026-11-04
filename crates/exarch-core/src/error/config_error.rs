@@ -52,10 +52,6 @@ closed_enum! {
         AllowedExtension => "allowed_extension",
         /// An entry of the banned path component list.
         BannedPathComponent => "banned_path_component",
-        /// The path of the archive to read.
-        ArchivePath => "archive_path",
-        /// The directory to extract into.
-        OutputDirectory => "output_directory",
         /// The path of the archive to create.
         OutputPath => "output_path",
         /// The paths to add to an archive.
@@ -66,8 +62,6 @@ closed_enum! {
         CreationFormat => "creation_format",
         /// Atomic extraction.
         AtomicExtraction => "atomic_extraction",
-        /// A ZIP archive opened for extraction.
-        ZipArchive => "zip_archive",
         /// The writer a ZIP archive is created into.
         ZipOutputWriter => "zip_output_writer",
         /// The byte cap of an in-memory extraction.
@@ -108,13 +102,10 @@ impl ConfigSetting {
             Self::DecompressionBudget => "decompression budget",
             Self::AllowedExtension => "allowed extension",
             Self::BannedPathComponent => "banned path component",
-            Self::ArchivePath => "archive path",
-            Self::OutputDirectory => "output directory",
             Self::OutputPath => "output path",
             Self::SourcePaths => "source paths",
             Self::CreationFormat => "7z archive creation",
             Self::AtomicExtraction => "atomic extraction",
-            Self::ZipArchive => "ZIP archive",
             Self::ZipOutputWriter => "ZIP output writer",
             Self::ParallelDecodeMemory => "parallel decode memory",
             Self::ExcludePattern => "exclude pattern",
@@ -168,10 +159,6 @@ pub enum ConfigProblem {
     NotSupported,
     /// Atomic extraction cannot target a sink.
     CannotTargetSink,
-    /// The ZIP archive was opened for a policy that skips stream checks.
-    OpenedForOtherPolicy,
-    /// The ZIP archive was opened under a smaller zstd window limit.
-    OpenedUnderSmallerZstdWindow,
     /// The prefix would remove the whole name of this path.
     RemovesWholeName {
         /// The path that would be left without a name.
@@ -215,12 +202,6 @@ impl fmt::Display for ConfigProblem {
             Self::NoParent => f.write_str("has no parent"),
             Self::NotSupported => f.write_str("is not supported"),
             Self::CannotTargetSink => f.write_str("renames a directory and cannot target a sink"),
-            Self::OpenedForOtherPolicy => {
-                f.write_str("was opened for a policy that skips stream checks")
-            }
-            Self::OpenedUnderSmallerZstdWindow => {
-                f.write_str("was opened under a smaller zstd window limit than its config allows")
-            }
             Self::RemovesWholeName { path } => {
                 write!(f, "removes the whole name of {}", path.display())
             }
@@ -287,19 +268,14 @@ mod tests {
                 "decompression budget must not be zero",
             ),
             (
-                ConfigSetting::ArchivePath,
-                ConfigProblem::NotSet,
-                "archive path not set",
-            ),
-            (
                 ConfigSetting::SourcePaths,
                 ConfigProblem::NoneProvided,
                 "no source paths provided",
             ),
             (
-                ConfigSetting::OutputDirectory,
+                ConfigSetting::OutputPath,
                 ConfigProblem::NoParent,
-                "output directory has no parent",
+                "output path has no parent",
             ),
             (
                 ConfigSetting::CreationFormat,
@@ -310,16 +286,6 @@ mod tests {
                 ConfigSetting::AtomicExtraction,
                 ConfigProblem::CannotTargetSink,
                 "atomic extraction renames a directory and cannot target a sink",
-            ),
-            (
-                ConfigSetting::ZipArchive,
-                ConfigProblem::OpenedForOtherPolicy,
-                "ZIP archive was opened for a policy that skips stream checks",
-            ),
-            (
-                ConfigSetting::ZipArchive,
-                ConfigProblem::OpenedUnderSmallerZstdWindow,
-                "ZIP archive was opened under a smaller zstd window limit than its config allows",
             ),
             (
                 ConfigSetting::StripPrefix,

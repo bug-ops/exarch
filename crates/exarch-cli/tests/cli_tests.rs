@@ -431,6 +431,32 @@ fn test_create_with_include_hidden() {
         .success();
 
     assert!(archive.exists());
+    let names = listed_files(&archive);
+    assert!(names.contains(&".hidden".to_owned()), "{names:?}");
+    assert!(names.contains(&"visible.txt".to_owned()), "{names:?}");
+}
+
+/// Paths of the entries of `archive`, sorted, from `list --json`.
+fn listed_files(archive: &std::path::Path) -> Vec<String> {
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("list")
+        .arg(archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    let mut names: Vec<String> = json["data"]["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter_map(|e| e["path"].as_str())
+        .map(str::to_owned)
+        .collect();
+    names.sort();
+    names
 }
 
 #[test]
@@ -504,8 +530,11 @@ fn test_create_excludes_hidden_by_default() {
         .assert()
         .success();
 
-    // Archive should exist
+    // Archive should exist and hold only the visible file
     assert!(archive.exists());
+    let names = listed_files(&archive);
+    assert!(names.contains(&"visible.txt".to_owned()), "{names:?}");
+    assert!(!names.iter().any(|n| n.contains(".hidden")), "{names:?}");
 }
 
 #[test]
@@ -861,6 +890,73 @@ fn test_create_directory_with_only_hidden_files() {
         .success();
 
     assert!(archive.exists());
+    let names = listed_files(&archive);
+    assert!(!names.iter().any(|n| n.contains(".hidden")), "{names:?}");
+}
+
+/// A hidden directory is skipped whole: it is counted once, however many
+/// files it holds, and nothing inside it is archived (`--include-hidden`
+/// brings it back).
+#[test]
+fn test_create_skips_hidden_directories_whole_and_counts_each_once() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let src = temp.path().join("src");
+    for file in [
+        "visible.txt",
+        ".ssh/id_rsa",
+        ".ssh/keys/more",
+        "sub/.aws/credentials",
+        "sub/.aws/visible_inside.txt",
+    ] {
+        let path = src.join(file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+        std::fs::write(path, "secret").expect("write file");
+    }
+
+    let archive = temp.path().join("default.tar.gz");
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("create")
+        .arg(&archive)
+        .arg(&src)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["data"]["files_skipped"], 2, "{json}");
+    assert_eq!(json["data"]["skipped_by_kind"]["hidden"], 2, "{json}");
+    let names = listed_files(&archive);
+    assert!(names.contains(&"visible.txt".to_owned()), "{names:?}");
+    for secret in [
+        ".ssh",
+        ".aws",
+        "id_rsa",
+        "credentials",
+        "visible_inside",
+        "more",
+    ] {
+        assert!(
+            !names.iter().any(|n| n.contains(secret)),
+            "{secret} in {names:?}"
+        );
+    }
+
+    let included = temp.path().join("included.tar.gz");
+    exarch_cmd()
+        .arg("create")
+        .arg("--include-hidden")
+        .arg(&included)
+        .arg(&src)
+        .assert()
+        .success();
+    let names = listed_files(&included);
+    assert!(names.contains(&".ssh/id_rsa".to_owned()), "{names:?}");
+    assert!(
+        names.contains(&"sub/.aws/credentials".to_owned()),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -1970,6 +2066,40 @@ fn test_force_still_refuses_a_non_directory_at_an_implied_parent_before_writing(
         "nothing may be written first"
     );
     assert_eq!(std::fs::read(out.join("a")).expect("kept"), b"file");
+}
+
+/// Under `--force` a symlink sitting at a file landing is refused, never
+/// replaced and never written through to its target.
+#[cfg(unix)]
+#[test]
+fn test_force_refuses_a_symlink_at_a_file_landing_and_writes_nothing_through_it() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("f.tar");
+    tar_entries_archive(&archive, &[("f.txt", tar::EntryType::Regular, "new")]);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+    let outside = temp.path().join("outside.txt");
+    std::fs::write(&outside, "keep").expect("outside file");
+    std::os::unix::fs::symlink(&outside, out.join("f.txt")).expect("occupying symlink");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--force")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains(
+            "refusing to replace the existing symlink at f.txt",
+        ));
+
+    let landed = std::fs::symlink_metadata(out.join("f.txt")).expect("landing");
+    assert!(landed.file_type().is_symlink(), "the link is left in place");
+    assert_eq!(
+        std::fs::read(&outside).expect("target untouched"),
+        b"keep",
+        "nothing may be written through the link"
+    );
 }
 
 /// A verify issue carries the same code, sub-code and policy setting a failed

@@ -157,3 +157,142 @@ fn a_file_source_named_directly_is_archived_even_when_hidden() {
         assert_eq!(names, [PathBuf::from(".env")], "{name}");
     }
 }
+
+fn create_many(sources: &[&Path], config: &CreationConfig) -> (Vec<PathBuf>, CreationReport) {
+    let out = TempDir::new().unwrap();
+    let archive = out.path().join("out.tar.gz");
+    let report = CreateRequest::new(config)
+        .create(&OutputFile::replace(&archive), sources)
+        .unwrap();
+    let mut names: Vec<PathBuf> = list_archive(&archive, &SecurityConfig::default())
+        .unwrap()
+        .entries()
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
+    names.sort();
+    (names, report)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hidden_symlink_to_a_directory_is_skipped_with_and_without_following() {
+    for follow in [false, true] {
+        let src = TempDir::new().unwrap();
+        write(src.path(), "real/data.txt");
+        std::os::unix::fs::symlink(src.path().join("real"), src.path().join(".link")).unwrap();
+
+        let config = CreationConfig::default().with_follow_symlinks(follow);
+        let (names, report) = create_many(&[src.path()], &config);
+
+        assert!(
+            !names.iter().any(|n| n.starts_with(".link")),
+            "follow={follow}: {names:?}"
+        );
+        assert!(
+            names.contains(&PathBuf::from("real/data.txt")),
+            "follow={follow}"
+        );
+        assert_eq!(report.skipped.count(SkipKind::Hidden), 1, "follow={follow}");
+    }
+}
+
+/// The visible name of a link decides: with `follow_symlinks` the contents of
+/// `keys -> .ssh` are archived under `keys/`, while `.ssh` itself is skipped.
+/// Without following, only the link is stored.
+#[cfg(unix)]
+#[test]
+fn a_visibly_named_link_to_a_hidden_directory_follows_the_visible_name() {
+    let src = TempDir::new().unwrap();
+    write(src.path(), ".ssh/id_rsa");
+    std::os::unix::fs::symlink(src.path().join(".ssh"), src.path().join("keys")).unwrap();
+
+    let followed = CreationConfig::default().with_follow_symlinks(true);
+    let (names, _) = create_many(&[src.path()], &followed);
+    assert!(names.contains(&PathBuf::from("keys/id_rsa")), "{names:?}");
+    assert!(!names.iter().any(|n| n.starts_with(".ssh")), "{names:?}");
+
+    let (names, _) = create_many(&[src.path()], &CreationConfig::default());
+    assert!(names.contains(&PathBuf::from("keys")), "{names:?}");
+    assert!(!names.iter().any(|n| n.ends_with("id_rsa")), "{names:?}");
+}
+
+#[test]
+fn every_source_root_is_walked_even_when_one_is_hidden() {
+    let src = TempDir::new().unwrap();
+    write(src.path(), "plain/a.txt");
+    write(src.path(), ".named/b.txt");
+    write(src.path(), ".named/.inner/c.txt");
+    let plain = src.path().join("plain");
+    let dot_root = src.path().join(".named");
+
+    let (names, report) = create_many(
+        &[plain.as_path(), dot_root.as_path()],
+        &CreationConfig::default(),
+    );
+
+    assert!(names.contains(&PathBuf::from("a.txt")), "{names:?}");
+    assert!(names.contains(&PathBuf::from("b.txt")), "{names:?}");
+    assert!(!names.iter().any(|n| n.ends_with("c.txt")), "{names:?}");
+    assert_eq!(report.skipped.count(SkipKind::Hidden), 1);
+}
+
+#[test]
+fn a_dotted_source_path_and_a_hidden_subdirectory_source() {
+    let src = TempDir::new().unwrap();
+    write(src.path(), "a.txt");
+    write(src.path(), ".cache/x.txt");
+
+    let dotted = src.path().join(".");
+    let (names, report) = create_many(&[dotted.as_path()], &CreationConfig::default());
+    assert!(names.contains(&PathBuf::from("a.txt")), "{names:?}");
+    assert!(!names.iter().any(|n| n.ends_with("x.txt")), "{names:?}");
+    assert_eq!(report.skipped.count(SkipKind::Hidden), 1);
+
+    let hidden = src.path().join(".").join(".cache");
+    let (names, _) = create_many(&[hidden.as_path()], &CreationConfig::default());
+    assert!(names.contains(&PathBuf::from("x.txt")), "{names:?}");
+}
+
+/// Hidden directories are judged by their name on disk, before `strip_prefix`
+/// is applied, so stripping a hidden directory's name does not reveal it.
+#[test]
+fn strip_prefix_naming_a_hidden_directory_does_not_reveal_it() {
+    let src = TempDir::new().unwrap();
+    write(src.path(), "visible.txt");
+    write(src.path(), ".cfg/secret.txt");
+
+    let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from(".cfg")));
+    let (names, report) = create_many(&[src.path()], &config);
+
+    assert!(names.contains(&PathBuf::from("visible.txt")), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n.ends_with("secret.txt")),
+        "{names:?}"
+    );
+    assert_eq!(report.skipped.count(SkipKind::Hidden), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_hidden_directory_name_is_skipped() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let src = TempDir::new().unwrap();
+    write(src.path(), "visible.txt");
+    let hidden = src.path().join(OsStr::from_bytes(b".caf\xe9"));
+    if std::fs::create_dir(&hidden).is_err() {
+        return;
+    }
+    std::fs::write(hidden.join("secret.txt"), b"secret").unwrap();
+
+    let (names, report) = create_many(&[src.path()], &CreationConfig::default());
+
+    assert!(names.contains(&PathBuf::from("visible.txt")), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n.ends_with("secret.txt")),
+        "{names:?}"
+    );
+    assert_eq!(report.skipped.count(SkipKind::Hidden), 1);
+}

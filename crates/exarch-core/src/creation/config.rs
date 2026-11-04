@@ -116,6 +116,12 @@ pub struct CreationConfig {
     /// A hidden source directory named by the caller, and a source file named
     /// directly, are archived regardless.
     ///
+    /// The name on disk decides, before `strip_prefix` applies. With
+    /// [`follow_symlinks`](Self::follow_symlinks) a link is judged by its own
+    /// visible name, not its target's: a link `keys -> .ssh` is archived (its
+    /// contents under `keys/`), while a hidden-named link to a directory is
+    /// skipped.
+    ///
     /// Default: `false` (skip hidden entries).
     pub include_hidden: bool,
 

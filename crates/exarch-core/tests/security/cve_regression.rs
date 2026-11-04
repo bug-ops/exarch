@@ -779,10 +779,9 @@ fn test_windows_backslash_parent_traversal() {
     let tar_data = make_raw_tar(&[(b"subdir\\..\\evil.txt", b"escaped")]);
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data));
+    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default(),
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
@@ -799,10 +798,9 @@ fn test_windows_backslash_deep_traversal() {
     let tar_data = make_raw_tar(&[(b"foo\\..\\..\\etc\\passwd", b"content")]);
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data));
+    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default(),
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );

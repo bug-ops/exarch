@@ -18,7 +18,6 @@ use exarch_core::CreationConfig;
 use exarch_core::OutputFile;
 use exarch_core::SecurityConfig;
 use exarch_core::create_archive;
-use exarch_core::formats::detect::CreatableFormat;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use tempfile::TempDir;
@@ -293,6 +292,8 @@ fn a_directory_output_is_refused_for_both_policies() {
 mod unix {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
+
+    use exarch_core::formats::detect::CreatableFormat;
 
     use super::*;
 

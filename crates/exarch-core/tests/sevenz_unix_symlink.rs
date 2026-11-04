@@ -40,7 +40,6 @@ use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
 use exarch_core::extract_archive;
-#[cfg(unix)]
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use sevenz_rust2::Archive;

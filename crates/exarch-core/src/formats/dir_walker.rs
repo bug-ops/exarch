@@ -557,18 +557,30 @@ impl<'r> HandleResolution<'r> {
         let Some(leaf) = Leaf::from_component(Component::Normal(name)) else {
             return Err(ParentBlocker::Symlink);
         };
-        match self.dir.probe(leaf) {
-            Ok(Some(Occupant::Directory)) => {
-                let next = self
-                    .dir
-                    .open_dir(leaf)
-                    .map_err(|_| ParentBlocker::Symlink)?;
+        if matches!(self.pending.front(), Some(Pending::Parent)) {
+            // `name/..` returns to the directory it started in once `name` is
+            // known to be a real directory, so it is neither opened nor left.
+            return match self.dir.probe(leaf) {
+                Ok(Some(Occupant::Directory)) => {
+                    self.pending.pop_front();
+                    Ok(())
+                }
+                Ok(Some(Occupant::Symlink)) => self.follow_link(leaf),
+                Ok(Some(Occupant::File) | None) | Err(_) => Err(ParentBlocker::Symlink),
+            };
+        }
+        match self.dir.open_dir(leaf) {
+            Ok(next) => {
                 self.parents.push(std::mem::replace(&mut self.dir, next));
                 self.position.push(name);
                 Ok(())
             }
-            Ok(Some(Occupant::Symlink)) => self.follow_link(leaf),
-            Ok(Some(Occupant::File) | None) | Err(_) => Err(ParentBlocker::Symlink),
+            Err(_) => match self.dir.probe(leaf) {
+                Ok(Some(Occupant::Symlink)) => self.follow_link(leaf),
+                Ok(Some(Occupant::Directory | Occupant::File) | None) | Err(_) => {
+                    Err(ParentBlocker::Symlink)
+                }
+            },
         }
     }
 
@@ -912,6 +924,70 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(60),
             "2000 crossings took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn name_then_parent_returns_only_through_a_real_directory() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        fs::create_dir_all(base.join("a/b")).unwrap();
+        fs::create_dir(base.join("real")).unwrap();
+        fs::write(base.join("file"), b"x").unwrap();
+        symlink("a/b", base.join("s")).unwrap();
+        symlink("real/../real", base.join("plain")).unwrap();
+        symlink("s/..", base.join("through_link")).unwrap();
+        symlink("file/..", base.join("through_file")).unwrap();
+        symlink("missing/..", base.join("through_missing")).unwrap();
+
+        walker(true).ensure_dir(&dest, &sp("plain/x")).unwrap();
+        assert!(base.join("real/x").is_dir());
+        // `s/..` is the parent of the link's target (`a`), not of the link.
+        walker(true)
+            .ensure_dir(&dest, &sp("through_link/y"))
+            .unwrap();
+        assert!(base.join("a/y").is_dir());
+        assert!(!base.join("y").exists());
+        assert!(
+            walker(true)
+                .ensure_dir(&dest, &sp("through_file/z"))
+                .is_err()
+        );
+        assert!(
+            walker(true)
+                .ensure_dir(&dest, &sp("through_missing/z"))
+                .is_err()
+        );
+    }
+
+    // The shape of the perf fixture, scaled down: a chain of links whose
+    // targets each go down a nested directory, back up, and on to the previous
+    // link.
+    #[test]
+    fn a_chain_of_down_and_up_links_resolves_and_stays_cheap() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        let nested = vec!["d"; 15].join("/");
+        walker(false).ensure_dir(&dest, &sp(&nested)).unwrap();
+        fs::create_dir(base.join("end")).unwrap();
+        let wiggle = format!("{nested}/{}", vec![".."; 15].join("/"));
+        symlink("end", base.join("l0")).unwrap();
+        for i in 1..=10 {
+            symlink(format!("{wiggle}/l{}", i - 1), base.join(format!("l{i}"))).unwrap();
+        }
+        let started = std::time::Instant::now();
+
+        for i in 0..300 {
+            walker(true)
+                .ensure_dir(&dest, &sp(&format!("l10/e{i}")))
+                .unwrap();
+        }
+
+        assert!(base.join("end/e299").is_dir());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "{:?}",
             started.elapsed()
         );
     }

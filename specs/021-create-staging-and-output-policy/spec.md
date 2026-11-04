@@ -182,6 +182,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FR-023 | `CreationConfig::exclude_patterns` SHALL be `Vec<ExcludePattern>`; `with_exclude_patterns` takes `Vec<ExcludePattern>`; there SHALL be no unparsed-string setter, so a refused shape cannot be stored | must |
 | FR-024 | Matching SHALL compare raw bytes of path components (`OsStr::as_encoded_bytes`), so a non-UTF-8 name is matched, not skipped or lossily converted. Entries dropped by an exclude pattern or by the hidden-file rule SHALL be counted in `CreationReport::skipped` as `SkipKind::Excluded` and `SkipKind::Hidden`; the other creation skips are `OverMaxFileSize` and `SymlinkUnsupported` | must |
 | FR-025 | `CreateRequest` SHALL document `# Errors` once; `ArchiveCreator`, `FormatCreator`, `TarCreator`, `ZipCreator` and the public `creation::{tar,zip}::create_*` SHALL NOT exist; creation SHALL dispatch by `CreationFamily` | must |
+| FR-026 | WITH `include_hidden = false`, THE walker SHALL NOT enter a hidden directory below a source root and SHALL count it once as `SkipKind::Hidden`; hidden is decided on the raw name bytes (a leading `.`); a hidden source root named by the caller, a file source and `include_hidden = true` SHALL be unchanged; with `follow_symlinks` the visible name of a link decides whether it is hidden, not its target's (BREAKING: contents of hidden directories that were previously archived and then filtered are no longer read) | must |
 
 ### Surfaces
 
@@ -227,6 +228,9 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FAT or exFAT output with `CreateNew` | Reserve-then-rename fallback (FR-014); a crash between the two steps leaves an empty file at the target |
 | `Replace` over a symlink to a regular file | The link itself is replaced; the mode comes from the file it pointed to |
 | `Replace` of a read-only file | The new archive carries the read-only mode (set after the write); the rename still succeeds when the directory is writable |
+| A hidden directory below a source root (`.git`, `.ssh`) without `include_hidden` | Never entered; one `hidden` skip for the directory, so a large hidden tree costs nothing (faster than walking and filtering it) |
+| A hidden source root named by the caller, a file source, or `include_hidden = true` | Unchanged: archived |
+| `--follow-symlinks` and a link `keys -> .ssh` | The visible name of the link decides: archived |
 | Pattern `target/` or `src/gen` | `Path`, anchored at the archive root |
 | Pattern `*.{a,b}`, `file?.txt`, `[ab]`, `!x`, `a,b` or `" a"` | Refused (`glob_metacharacter`, `contains_comma`, `padded_with_blank`); the message names the pattern |
 | A non-UTF-8 file name and a pattern | Matched by raw bytes |
@@ -266,6 +270,9 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 - [NEEDS CLARIFICATION: Should `ExcludedOutput` add a platform identity check (device and inode on Unix) as a second test for case-insensitive filesystems?]
 - [NEEDS CLARIFICATION: Should Python `overwrite: bool` become a `Literal["replace", "create_new"]` to match `OutputPolicy`?]
 - [NEEDS CLARIFICATION: Should `Skip.io_kind` get a stable string table in Python (Node has `IoKind`)?]
+
+> [!question] Follow-up issues
+> #949 (Windows/WASI link walk and `canonical_within`), #950 (Linux spool and tmpfs measurement), #951 (`from_utf8_lossy_owned`, needs MSRV 1.99), #952 (symlink-chain cost, about +22 percent on the 30 x 31 stress shape), #953 (Node sync create cancellation and fsync opt-out).
 
 ## 10. See Also
 

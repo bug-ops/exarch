@@ -1074,17 +1074,17 @@ impl VerificationIssue {
             ArchiveError::SourceNotFound { path } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
-                format!("Source not found: {}", crate::path_text(path)),
+                format!("Source not found: {}", path.display()),
             ),
             ArchiveError::SourceNotAccessible { path } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
-                format!("Source not accessible: {}", crate::path_text(path)),
+                format!("Source not accessible: {}", path.display()),
             ),
             ArchiveError::OutputExists { path } => (
                 IssueSeverity::Medium,
                 IssueCategory::InvalidArchive,
-                format!("Output already exists: {}", crate::path_text(path)),
+                format!("Output already exists: {}", path.display()),
             ),
             ArchiveError::InvalidCompressionLevel { level } => (
                 IssueSeverity::Medium,
@@ -1094,7 +1094,7 @@ impl VerificationIssue {
             ArchiveError::UnknownFormat { path } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
-                format!("Unknown format: {}", crate::path_text(path)),
+                format!("Unknown format: {}", path.display()),
             ),
             ArchiveError::InvalidConfiguration { setting, problem } => high_invalid_archive(
                 format!("Invalid configuration: {}", setting.describe(problem)),
@@ -1599,6 +1599,22 @@ mod tests {
                 mode: None,
             },
         )
+    }
+
+    #[test]
+    fn test_host_paths_keep_their_native_spelling_in_messages() {
+        let path = PathBuf::from("C:\\out\\a.tar");
+        let errors = [
+            ArchiveError::SourceNotFound { path: path.clone() },
+            ArchiveError::SourceNotAccessible { path: path.clone() },
+            ArchiveError::OutputExists { path: path.clone() },
+            ArchiveError::UnknownFormat { path: path.clone() },
+        ];
+        for error in errors {
+            let message = VerificationIssue::from_error(&error, None).message();
+            assert!(message.ends_with(&path.display().to_string()), "{message}");
+            assert!(!message.contains("\\x5C"), "{message}");
+        }
     }
 
     #[cfg(unix)]

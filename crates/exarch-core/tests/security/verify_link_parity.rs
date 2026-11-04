@@ -92,7 +92,11 @@ fn run_verify_and_extract(items: &[Item], plant: impl FnOnce(&std::path::Path)) 
     let report = verify_archive(&archive, &config).expect("verify report");
     let extracted = extract_archive(&archive, &dest, &config);
     Outcome {
-        categories: report.issues().iter().map(exarch_core::VerificationIssue::category).collect(),
+        categories: report
+            .issues()
+            .iter()
+            .map(exarch_core::VerificationIssue::category)
+            .collect(),
         status: report.status(),
         extracted,
         base,

@@ -278,10 +278,11 @@ where
 /// On macOS entry names are compared after NFD and a per-character case fold,
 /// on Windows after the same fold without normalisation, and elsewhere
 /// exactly. Two names that differ exactly but compare equal under that fold
-/// are reported as a [`IssueCategory::NameCollision`] (High when the kinds
-/// differ or a symlink is involved, Medium for two files or for directories
-/// that hold entries, Low for two directories that hold none), so a merge is
-/// never silent. The fold approximates the host
+/// are reported as a
+/// [`IssueCategory::NameCollision`](crate::IssueCategory::NameCollision) (High
+/// when the kinds differ or a symlink is involved, Medium for two files or for
+/// directories that hold entries, Low for two directories that hold none), so a
+/// merge is never silent. The fold approximates the host
 /// table, so a pair it merges that the host keeps apart is reported too.
 /// Windows component checks (reserved names, `:`, trailing dot or space,
 /// `<>"|?*`, control characters) run only on Windows hosts.
@@ -294,8 +295,9 @@ where
 /// fails closed and replaces nothing (a symlink over a symlink or directory,
 /// a file over a directory or symlink, a hardlink over any earlier entry; a
 /// symlink repeating an earlier symlink's target is not noted at all) the
-/// entry is only noted as a Low [`IssueCategory::InvalidArchive`] issue, so the
-/// status stays `PASS`.
+/// entry is only noted as a Low
+/// [`IssueCategory::InvalidArchive`](crate::IssueCategory::InvalidArchive)
+/// issue, so the status stays `PASS`.
 ///
 /// Hardlinks are materialized after every other entry, so their path and
 /// target are validated against the final tree.

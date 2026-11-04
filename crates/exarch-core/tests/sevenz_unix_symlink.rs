@@ -256,7 +256,11 @@ fn partial_source(err: ArchiveError) -> ArchiveError {
 }
 
 fn issue_categories(report: &VerificationReport) -> Vec<IssueCategory> {
-    report.issues().iter().map(exarch_core::VerificationIssue::category).collect()
+    report
+        .issues()
+        .iter()
+        .map(exarch_core::VerificationIssue::category)
+        .collect()
 }
 
 fn integrity(budget: u64) -> VerificationOptions {

@@ -2629,7 +2629,10 @@ fn scan_failing_file(error: io::Error) -> (bool, Option<BlockStop>, Vec<IssueCat
     (
         keep_going,
         stop,
-        issues.iter().map(crate::inspection::report::VerificationIssue::category).collect(),
+        issues
+            .iter()
+            .map(crate::inspection::report::VerificationIssue::category)
+            .collect(),
     )
 }
 

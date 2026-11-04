@@ -177,7 +177,7 @@ THEN extraction respects those settings
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
 | `PySecurityConfig` | Python class wrapping `SecurityConfig` | Fluent builder methods all use `with_` prefix: `with_max_file_size()`, `with_allow_symlinks()`, `with_allow_hardlinks()`, `with_allow_absolute_paths()`, `with_allow_world_writable()`, `with_allow_solid_archives()`, etc.; scalar getters (`max_file_size`, `max_total_size`, etc.) return values directly |
-| `PyCreationConfig` | Python class wrapping `CreationConfig` | Same fluent builder methods |
+| `PyCreationConfig` | Python class wrapping `CreationConfig` | Same fluent builder methods; `with_max_file_size(size: int \| None)` takes `None` for no limit and refuses `0` with `ValueError` (#893, #946) |
 | `PyExtractionReport` | Python class wrapping `ExtractionReport` | `files_extracted`, `bytes_written`, `duration`, `warnings` |
 | `PyCreationReport` | Python class wrapping `CreationReport` | `files_added`, `bytes_written`, `duration` |
 | `PyArchiveManifest` | Python class wrapping `ArchiveManifest` | `total_entries`, `total_size`, `format`, `entries` |

@@ -205,7 +205,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | FR-030 | `SecurityConfig` SHALL use a fluent builder API (15 `with_*` methods returning `Self`) and implement `Default` with secure deny-by-default settings | must |
 | FR-031 | `SecurityConfig` SHALL be annotated `#[non_exhaustive]`; external crates must use `Default::default()` or builder methods — struct literal construction is rejected at compile time | must |
 | FR-032 | `SecurityConfig::validate()` SHALL return an error if any limit field is zero (including `max_file_count` and `max_solid_block_memory`), `max_compression_ratio` is not a positive finite number, or any field contains an invalid value | must |
-| FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns`, `strip_prefix`, `compression_level` (1-9), `preserve_permissions`, `format` override | must |
+| FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size` (`Limit<NonZeroU64>`, unbounded by default, zero refused as `InvalidConfiguration`; #893, #946), `exclude_patterns`, `strip_prefix`, `compression_level` (1-9), `preserve_permissions`, `format` override | must |
 | FR-034 | `ExtractionOptions` SHALL be annotated `#[non_exhaustive]` and SHALL support: `atomic` (temp-dir + rename), `skip_duplicates` (default true); fluent builders `with_atomic` and `with_skip_duplicates` are provided | must |
 | FR-035 | WHEN `ExtractionOptions::atomic` is true, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and atomically rename on success; on failure it SHALL delete the temp dir | must |
 | FR-036 | `AllowedFeatures` SHALL be annotated `#[non_exhaustive]` so new flags do not break downstream struct literals | must |
@@ -283,7 +283,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 |--------|-------------|----------------|
 | `SecurityConfig` | Security policy for extraction operations | `max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`, `max_path_depth`, `allowed` (features), `banned_path_components`, `allowed_extensions`, `allow_solid_archives`, `max_solid_block_memory` |
 | `AllowedFeatures` | Feature flags for deny-by-default policy | `symlinks`, `hardlinks`, `absolute_paths`, `world_writable` |
-| `CreationConfig` | Configuration for archive creation | `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns`, `strip_prefix`, `compression_level`, `preserve_permissions`, `format` |
+| `CreationConfig` | Configuration for archive creation | `follow_symlinks`, `include_hidden`, `max_file_size: Limit<NonZeroU64>`, `exclude_patterns`, `strip_prefix`, `compression_level`, `preserve_permissions`, `format` |
 | `ExtractionOptions` | Operational options for extraction (non-security) | `atomic`, `skip_duplicates` |
 | `SafePath` | Newtype for a validated archive entry path | Wraps `PathBuf`; can only be constructed after traversal/depth/component checks pass |
 | `ValidatedEntry` | Validated archive entry ready for extraction | `safe_path: SafePath`, `entry_type: ValidatedEntryType`, `mode: Option<u32>` |

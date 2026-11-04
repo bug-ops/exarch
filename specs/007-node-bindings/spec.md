@@ -253,7 +253,7 @@ class CreationConfig {
     setFollowSymlinks(follow: boolean): this
     setIncludeHidden(include: boolean): this
     addExcludePattern(pattern: string): this
-    setMaxFileSize(size: number): this
+    setMaxFileSize(size: number | null): this  // null = no limit; 0 is INVALID_CONFIGURATION
 }
 
 class ExtractionOptions {
@@ -303,7 +303,7 @@ Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.
 | `SecurityViolation` | `SECURITY_VIOLATION`, with `relaxableBy` set only when a setting relaxes the refusal (v0.7.0, #741, #757); a path rejected at the JS boundary (null byte, too long) is also `SECURITY_VIOLATION` |
 | `UnknownFormat`, `ReaderFormat(Unrecognized)` | `UNKNOWN_FORMAT` |
 | `InvalidConfiguration`, `ReaderFormat(NeedsSeek \| NotAtStart)` | `INVALID_CONFIGURATION` (also a rejected setter value) |
-| `InvalidArchive` | `INVALID_ARCHIVE` |
+| `InvalidArchive` | `INVALID_ARCHIVE`, with `subCode` set when the failure is classified, for example `ZIP_READER` for a ZIP reader failure (#889, #946; see [[001-security-pipeline/spec]] FR-028) |
 | `Io` | `IO_ERROR` |
 | `SourceNotFound`, `SourceNotAccessible`, `OutputExists`, `InvalidCompressionLevel` | `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`, `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL` |
 | `PartialExtraction` | The inner error's `code`; `writes` is `'kept'` with `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` set, `'rolled_back'` after an atomic rollback, or `'discarded'` after an in-memory extraction, the last two without counters (v0.6.0, #508; v0.7.0, #735, #747; v0.8.0, #760, #800) |

@@ -698,7 +698,8 @@ impl CreationConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if size is negative.
+    /// Returns a plain argument error if size is negative. Unlike the
+    /// `SecurityConfig` limits, zero is accepted here and removes the limit.
     #[napi(js_name = "setMaxFileSize")]
     pub fn set_max_file_size(&mut self, size: i64) -> Result<&Self> {
         if size < 0 {

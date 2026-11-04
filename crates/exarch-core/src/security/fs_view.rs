@@ -759,8 +759,9 @@ impl NodeBudget {
     /// shared. Explicit directory entries and aliases spend it too although
     /// `max_file_count` does not count directories, so an archive of many
     /// directories can exhaust it while within the file limit; raise
-    /// `max_file_count` or `max_path_depth` to allow more. Unbounded if either
-    /// is `usize::MAX`.
+    /// `max_file_count` or `max_path_depth` to allow more. Unbounded when
+    /// `max_file_count` is [`Limit::Unbounded`](crate::Limit::Unbounded); a
+    /// product that overflows saturates at `usize::MAX`.
     #[must_use]
     pub fn from_config<State>(config: &SecurityConfig<State>) -> Self {
         let max = match config.max_file_count {

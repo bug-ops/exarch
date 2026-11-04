@@ -41,6 +41,12 @@ class SecurityConfig:
     Security configuration for archive extraction.
 
     All security features default to deny (secure-by-default policy).
+
+    Every limit (file size, total size, file count, path depth, compression
+    ratio, solid block memory) is refused at assignment: a builder method or a
+    property setter raises ``ValueError`` for zero, and for a ratio that is not
+    a positive finite number. The exception's ``setting`` attribute names the
+    refused setting (``"max_file_size"``, ``"max_compression_ratio"``, ...).
     """
 
     def __init__(self) -> None:
@@ -83,6 +89,9 @@ class SecurityConfig:
 
         Solid 7z blocks are exempt: each block is checked as a whole against a
         fixed 1000x limit that is configurable only from the Rust API.
+
+        Raises ``ValueError`` for a ratio that is not a positive finite number;
+        its ``setting`` attribute is ``"max_compression_ratio"``.
         """
         ...
 
@@ -158,7 +167,8 @@ class SecurityConfig:
         Sets the maximum memory budget in bytes for decompressing a solid 7z block.
 
         Only enforced when ``with_allow_solid_archives`` is called with ``True``. Raises
-        ``ValueError`` if *size* is zero.
+        ``ValueError`` if *size* is zero. Its ``setting`` attribute
+        is ``"max_solid_block_memory"``.
         """
         ...
 

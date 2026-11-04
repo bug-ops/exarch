@@ -11,6 +11,8 @@ use exarch_core::ArchiveError;
 use exarch_core::ConfigSetting;
 use exarch_core::Limit;
 use exarch_core::SecurityConfig;
+use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 
 /// Builds the default [`SecurityConfig`] with the CLI-provided count and
 /// size-limit overrides, leaving the default size limits in place when an
@@ -24,21 +26,20 @@ pub fn apply_size_limits(
     max_total: Option<u64>,
     max_file: Option<u64>,
 ) -> Result<SecurityConfig, ArchiveError> {
-    let config = SecurityConfig::default().with_max_file_count(
-        Limit::<std::num::NonZeroUsize>::parse(ConfigSetting::MaxFileCount, max_files)?,
-    );
+    let config = SecurityConfig::default().with_max_file_count(Limit::<NonZeroUsize>::parse(
+        ConfigSetting::MaxFileCount,
+        max_files,
+    )?);
     let config = match max_total {
-        Some(v) => config.with_max_total_size(Limit::<std::num::NonZeroU64>::parse(
-            ConfigSetting::MaxTotalSize,
-            v,
-        )?),
+        Some(v) => {
+            config.with_max_total_size(Limit::<NonZeroU64>::parse(ConfigSetting::MaxTotalSize, v)?)
+        }
         None => config,
     };
     Ok(match max_file {
-        Some(v) => config.with_max_file_size(Limit::<std::num::NonZeroU64>::parse(
-            ConfigSetting::MaxFileSize,
-            v,
-        )?),
+        Some(v) => {
+            config.with_max_file_size(Limit::<NonZeroU64>::parse(ConfigSetting::MaxFileSize, v)?)
+        }
         None => config,
     })
 }

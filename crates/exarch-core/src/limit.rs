@@ -212,14 +212,10 @@ impl RatioLimit {
     /// Returns [`ArchiveError::InvalidConfiguration`] naming `setting` when
     /// `ratio` is not finite or not greater than zero.
     pub fn parse(setting: ConfigSetting, ratio: f64) -> Result<Self> {
-        if ratio.is_finite() && ratio > 0.0 {
-            Ok(Self(ratio))
-        } else {
-            Err(ArchiveError::InvalidConfiguration {
-                setting,
-                problem: ConfigProblem::NotPositive,
-            })
-        }
+        Self::new(ratio).ok_or(ArchiveError::InvalidConfiguration {
+            setting,
+            problem: ConfigProblem::NotPositive,
+        })
     }
 
     /// The ratio.

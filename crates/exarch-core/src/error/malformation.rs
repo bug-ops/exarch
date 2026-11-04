@@ -16,19 +16,8 @@ use crate::security::fs_view::LinkKind;
 /// A malformed-archive refusal that has no family of its own.
 ///
 /// Only this crate constructs it, so a refusal with a family cannot be raised
-/// untyped from outside.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::ArchiveError;
-///
-/// # fn demo(err: ArchiveError) {
-/// if let Some(m) = err.malformation() {
-///     assert_eq!(m.sub_code(), None);
-/// }
-/// # }
-/// ```
+/// untyped from outside. Callers meet it only inside a received
+/// [`Malformation::Unclassified`], whose [`Malformation::sub_code`] is `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unclassified(Box<str>);
 

@@ -217,7 +217,8 @@ export declare class CreationConfig {
    *
    * # Errors
    *
-   * Returns error if size is negative.
+   * Returns a plain argument error if size is negative. Unlike the
+   * `SecurityConfig` limits, zero is accepted here and removes the limit.
    */
   setMaxFileSize(size: number): this
   /**

@@ -1524,6 +1524,32 @@ pub enum IntegrityCheck {
     DecodeToEof(DecompressionBudget),
 }
 
+impl IntegrityCheck {
+    /// The decompression budget of the check, or `None` for
+    /// [`Skip`](Self::Skip).
+    ///
+    /// The one exhaustive match over the variants, so a new check mode fails to
+    /// compile here instead of reading as "enabled, no budget" in a front end.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DecompressionBudget;
+    /// use exarch_core::IntegrityCheck;
+    ///
+    /// assert_eq!(IntegrityCheck::Skip.budget(), None);
+    /// let check = IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT);
+    /// assert_eq!(check.budget(), Some(DecompressionBudget::DEFAULT));
+    /// ```
+    #[must_use]
+    pub const fn budget(self) -> Option<DecompressionBudget> {
+        match self {
+            Self::Skip => None,
+            Self::DecodeToEof(budget) => Some(budget),
+        }
+    }
+}
+
 /// Options controlling `verify` behavior.
 ///
 /// # Examples

@@ -748,7 +748,7 @@ impl VerificationIssue {
                 format!(
                     "Invalid permissions: {} (mode: {:#o})",
                     path.display(),
-                    mode
+                    mode.get()
                 ),
             ),
             ArchiveError::Io(io_err) => (
@@ -1323,7 +1323,7 @@ mod tests {
     fn test_verification_issue_from_invalid_permissions() {
         let error = ArchiveError::InvalidPermissions {
             path: PathBuf::from("file.txt"),
-            mode: 0o777,
+            mode: crate::RawMode::new(0o777),
         };
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity, IssueSeverity::Medium);

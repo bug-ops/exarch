@@ -1081,7 +1081,7 @@ mod tests {
             CoreError::HardlinkEscape { path: path.clone() },
             CoreError::InvalidPermissions {
                 path: path.clone(),
-                mode: 0o644,
+                mode: exarch_core::RawMode::new(0o644),
             },
             CoreError::SourceNotFound { path: path.clone() },
             CoreError::SourceNotAccessible { path: path.clone() },

@@ -321,7 +321,7 @@ mod tests {
     fn test_invalid_permissions_conversion() {
         let err = CoreError::InvalidPermissions {
             path: PathBuf::from("malicious.sh"),
-            mode: 0o777,
+            mode: exarch_core::RawMode::new(0o777),
         };
         let py_err = convert_error(err);
         let err_str = py_err.to_string();

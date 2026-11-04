@@ -340,7 +340,7 @@ mod tests {
             },
             ArchiveError::InvalidPermissions {
                 path: attacker_path,
-                mode: 0o777,
+                mode: crate::RawMode::new(0o777),
             },
         ];
 

@@ -154,7 +154,7 @@ fn extract_archive(
 /// # Security
 ///
 /// Delegates to the shared boundary check in `exarch_core`; see
-/// [`exarch_core::validate_raw_path_str`] for the exact rules (null bytes,
+/// [`exarch_core::BoundaryPath::parse`] for the exact rules (null bytes,
 /// maximum length). Errors are routed through [`convert_error`] so they
 /// surface as `SecurityViolationError`, the same exception type used for
 /// every other security-policy rejection raised by this module.
@@ -170,9 +170,9 @@ fn path_to_string(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<String> {
         result.extract()?
     };
 
-    exarch_core::validate_raw_path_str(&path_str).map_err(convert_error)?;
-
-    Ok(path_str)
+    exarch_core::BoundaryPath::parse(path_str)
+        .map(exarch_core::BoundaryPath::into_string)
+        .map_err(convert_error)
 }
 
 /// Runs `f`, converting a Rust panic into a `PyRuntimeError` instead of

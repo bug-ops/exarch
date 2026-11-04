@@ -229,6 +229,24 @@ impl ArchiveType {
         }
     }
 
+    /// Whether this type is a TAR stream, with or without a compression codec.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::formats::detect::ArchiveType;
+    ///
+    /// assert!(ArchiveType::TarZst.is_tar());
+    /// assert!(!ArchiveType::Zip.is_tar());
+    /// ```
+    #[must_use]
+    pub const fn is_tar(self) -> bool {
+        match self.family() {
+            FormatFamily::Tar(_) => true,
+            FormatFamily::Seekable(_) => false,
+        }
+    }
+
     /// Groups this type by the reader that handles it.
     pub(crate) const fn family(self) -> FormatFamily {
         match self {

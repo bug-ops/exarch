@@ -572,7 +572,7 @@ impl ArchiveError {
             Self::InvalidArchive(reason) => format!("invalid archive: {reason}"),
             Self::Io(io_err) => sanitize_io_error_for_error(io_err),
             Self::InvalidPermissions { mode, .. } => {
-                format!("invalid permissions for {path}: {mode:#o}")
+                format!("invalid permissions for {path}: {:#o}", mode.get())
             }
             Self::SourceNotFound { .. } => format!("source path not found: {path}"),
             Self::SourceNotAccessible { .. } => {
@@ -753,7 +753,7 @@ mod tests {
             ArchiveError::Io(std::io::Error::other("test")),
             ArchiveError::InvalidPermissions {
                 path: PathBuf::from("test"),
-                mode: 0o777,
+                mode: crate::RawMode::new(0o777),
             },
             ArchiveError::SourceNotFound {
                 path: PathBuf::from("test"),

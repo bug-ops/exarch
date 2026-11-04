@@ -872,10 +872,11 @@ fn unread_targets_issue(
 }
 
 fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig) -> Result<()> {
-    let sanitized = sanitize_permissions(RawMode::new(mode), config);
+    let raw = RawMode::new(mode);
+    let sanitized = sanitize_permissions(raw, config);
     (sanitized.as_u32() == mode).ok_or_else(|| ArchiveError::InvalidPermissions {
         path: path.to_path_buf(),
-        mode,
+        mode: raw,
     })
 }
 

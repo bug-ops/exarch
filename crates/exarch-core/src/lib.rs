@@ -187,6 +187,9 @@ pub use security::Uncompressed;
 /// Summary statistics produced by the validation pipeline; see
 /// [`security::ValidationReport`].
 pub use security::ValidationReport;
+/// Validates a raw, caller-supplied path string before it enters the
+/// archive pipeline. Shared by `exarch-python` and `exarch-node`.
+pub use security::boundary::BoundaryPath;
 /// Maximum length, in bytes, of a single `SecurityConfig` entry — an
 /// allowed extension or a banned path component. Shared by `exarch-python`
 /// and `exarch-node`.
@@ -194,9 +197,6 @@ pub use security::boundary::MAX_CONFIG_ENTRY_LENGTH;
 /// Maximum length, in bytes, of a raw path string accepted at the FFI
 /// boundary. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::MAX_PATH_LENGTH;
-/// Validates a raw, caller-supplied path string before it enters the
-/// archive pipeline. Shared by `exarch-python` and `exarch-node`.
-pub use security::boundary::validate_raw_path_str;
 pub use security::fs_view::PathModel;
 pub use sink::CallbackEntry;
 pub use sink::CallbackError;

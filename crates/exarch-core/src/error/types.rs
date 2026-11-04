@@ -476,12 +476,12 @@ pub enum ArchiveError {
     ZipInconsistency(ZipInconsistency),
 
     /// File permissions are invalid or unsafe.
-    #[error("invalid permissions for {path}: {mode:#o}")]
+    #[error("invalid permissions for {path}: {:#o}", .mode.get())]
     InvalidPermissions {
         /// The file path.
         path: PathBuf,
-        /// The permission mode.
-        mode: u32,
+        /// The raw permission mode as the archive recorded it.
+        mode: crate::RawMode,
     },
 
     /// Extraction quota exceeded.
@@ -1172,7 +1172,7 @@ mod tests {
     fn test_invalid_permissions_error() {
         let err = ArchiveError::InvalidPermissions {
             path: PathBuf::from("file.txt"),
-            mode: 0o777,
+            mode: crate::RawMode::new(0o777),
         };
         let display = err.to_string();
         assert!(display.contains("invalid permissions"));

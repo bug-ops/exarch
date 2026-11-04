@@ -376,7 +376,10 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
             TerminalPath::new(path),
         ),
         ArchiveError::InvalidPermissions { mode, .. } => {
-            format!("Invalid permissions {mode:#o}: blocked by security policy.")
+            format!(
+                "Invalid permissions {:#o}: blocked by security policy.",
+                mode.get()
+            )
         }
         ArchiveError::InvalidCompressionLevel { level } => {
             format!("Invalid compression level {level}: must be between 1 and 9.")
@@ -599,7 +602,10 @@ mod tests {
     #[test]
     fn test_invalid_permissions_contains_mode_and_path() {
         let path = PathBuf::from("evil/file");
-        let err = ArchiveError::InvalidPermissions { path, mode: 0o4755 };
+        let err = ArchiveError::InvalidPermissions {
+            path,
+            mode: exarch_core::RawMode::new(0o4755),
+        };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains("evil/file"), "path missing: {msg}");

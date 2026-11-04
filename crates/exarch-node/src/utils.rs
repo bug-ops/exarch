@@ -5,7 +5,7 @@ use exarch_core::ArchiveError as CoreError;
 /// Validates a path string for security issues.
 ///
 /// Delegates to the shared boundary check in `exarch_core`; see
-/// [`exarch_core::validate_raw_path_str`] for the exact rules (null bytes,
+/// [`exarch_core::BoundaryPath::parse`] for the exact rules (null bytes,
 /// maximum length). The core error is returned unconverted so it reaches
 /// JavaScript with the same `SECURITY_VIOLATION` code as every other
 /// security-policy rejection surfaced by this crate.
@@ -14,7 +14,7 @@ use exarch_core::ArchiveError as CoreError;
 ///
 /// Returns error if path contains null bytes or exceeds maximum length.
 pub fn validate_path(path: &str) -> Result<(), CoreError> {
-    exarch_core::validate_raw_path_str(path)
+    exarch_core::BoundaryPath::parse(path.to_owned()).map(drop)
 }
 
 #[cfg(test)]

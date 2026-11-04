@@ -84,14 +84,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `--banned-component` takes comma-separated values, `""` disables the list, and a value naming no component or `--allowed-extensions` naming no extension is an error (#871, #888).
 - CLI: the atomic swap compares a typed `FileIdentity` with an explicit unknown case on non-Unix (#878, #888).
 - Core: `ArchiveFormat` internals use `Option<RawMode>` and a private duplicate policy instead of `Option<u32>` and a bool (#881, #888).
-- **BREAKING:** `ArchiveError::InvalidArchive` carries a typed `Malformation` with a stable `sub_code` for five families (link target, duplicate entry, entry name, declared size, integrity), exposed as `sub_code` in Python, `subCode` in Node and `error.sub_code` in CLI `--json`; the ZIP, TAR and 7z reader failures stay `Unclassified` (#887, #PR).
-- **BREAKING:** `ArchiveError::InvalidConfiguration` carries a `ConfigSetting` and a `ConfigProblem` instead of a reason string, and `FfiKind::InvalidConfiguration` names the setting, exposed as `setting` in Python, Node and CLI `--json` `error.setting` (#870, #PR).
-- **BREAKING:** `SecurityConfig` limits are typed (`Limit<NonZeroU64>`, `RatioLimit`, `NonZero*`); zero and non-finite limits cannot be built and `validate()` no longer rejects anything, `u64::MAX` is a valid `max_tar_metadata_bytes`, and Node and Python setters and the CLI refuse a zero limit when it is set (#870, #PR).
-- **BREAKING:** `MemorySink::new` is no longer `const`, and `EntrySink` gains the provided method `create_file_from` (#866, #PR).
-- Core: `DecodeReuse` also keeps the bzip2 and zstd output of the ZIP structure check and serves `extract_reader_to_memory`, bringing those paths to about 1.0x of the single-decode baseline (#866, #PR).
-- Core: `extract` refuses an entry that lands above the host path limit through an archive symlink on every platform, before creating any directory below the link (#885, #PR).
-- Core: `verify` with the integrity check bounds the decode of allowlist-skipped compressed TAR entries as `extract` and `list` do (#868, #PR).
-- Docs and benches: the documented `validation` bench commands name `--features testing` (#883, #PR).
+- **BREAKING:** `ArchiveError::InvalidArchive` carries a typed `Malformation` with a stable `sub_code` for five families (link target, duplicate entry, entry name, declared size, integrity), exposed as `sub_code` in Python, `subCode` in Node and `error.sub_code` in CLI `--json`; the ZIP, TAR and 7z reader failures stay `Unclassified` (#887, #894).
+- **BREAKING:** `ArchiveError::InvalidConfiguration` carries a `ConfigSetting` and a `ConfigProblem` instead of a reason string, and `FfiKind::InvalidConfiguration` names the setting, exposed as `setting` in Python, Node and CLI `--json` `error.setting` (#870, #894).
+- **BREAKING:** `SecurityConfig` limits are typed (`Limit<NonZeroU64>`, `RatioLimit`, `NonZero*`); zero and non-finite limits cannot be built and `validate()` no longer rejects anything, `u64::MAX` is a valid `max_tar_metadata_bytes`, and Node and Python setters and the CLI refuse a zero limit when it is set (#870, #894).
+- **BREAKING:** `MemorySink::new` is no longer `const`, and `EntrySink` gains the provided method `create_file_from` (#866, #894).
+- Core: `DecodeReuse` also keeps the bzip2 and zstd output of the ZIP structure check and serves `extract_reader_to_memory`, bringing those paths to about 1.0x of the single-decode baseline (#866, #894).
+- Core: `extract` refuses an entry that lands above the host path limit through an archive symlink on every platform, before creating any directory below the link (#885, #894).
+- Core: `verify` with the integrity check bounds the decode of allowlist-skipped compressed TAR entries as `extract` and `list` do (#868, #894).
+- Docs and benches: the documented `validation` bench commands name `--features testing` (#883, #894).
 
 
 ### Fixed
@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Node: `extractArchiveToCallback` keeps the `AbortSignal` reason when the abort is raised from `onEntry` (#860, #884).
 - Core: `exarch extract` of a compressed TAR into an existing directory no longer panics on WASI (#867, #888).
 - Core: `on_entry_complete` fires for every started archive entry on creation, including failures (#874, #888).
-- Core: a read error during the replay of a listed TAR spool is reported as `Io` with its errno instead of `InvalidArchive` (#882, #PR).
+- Core: a read error during the replay of a listed TAR spool is reported as `Io` with its errno instead of `InvalidArchive` (#882, #894).
 
 ## [0.8.0] - 2026-11-02
 

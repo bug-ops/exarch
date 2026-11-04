@@ -375,7 +375,7 @@ fn replay_enforces_the_extract_configs_trailer_limit() {
     let out = TempDir::new().unwrap();
 
     let error = listed
-        .extract(
+        .extract_under(
             out.path(),
             &config_with_tail_limit(SMALL_LIMIT),
             &ExtractionOptions::default(),

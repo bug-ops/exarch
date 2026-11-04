@@ -15,6 +15,7 @@ use crate::ZipBombScope;
 use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
+use crate::creation::staged::ExcludedOutput;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
 use crate::security::Compressed;
@@ -154,7 +155,8 @@ pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
         }
         Err(e) => return Err(e.into()),
     };
-    let (mut report, mut file) = write_zip(file, sources, config, progress)?;
+    let (mut report, mut file) =
+        write_zip(file, sources, config, &ExcludedOutput::none(), progress)?;
     if readable {
         warn_on_extraction_ratio(&mut file, &mut report);
     }
@@ -172,6 +174,7 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
     mut out: W,
     sources: &[P],
     config: &CreationConfig,
+    excluded: &ExcludedOutput,
     progress: &mut dyn ProgressCallback,
 ) -> Result<(CreationReport, W)> {
     if out.stream_position()? != 0 {
@@ -189,7 +192,7 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
         .compression_level(Some(config.compression_level.to_zip_level()));
 
     // Single-pass collection of entries (avoids double directory traversal)
-    let entries = collect_entries(sources, config)?;
+    let entries = collect_entries(sources, config, excluded)?;
     let total_entries = entries.len();
 
     let mut tracker = ProgressTracker::new(progress, total_entries);

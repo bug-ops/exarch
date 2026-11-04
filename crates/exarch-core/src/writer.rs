@@ -8,19 +8,18 @@
 //! On error the writer may already hold a partial archive; the caller owns it
 //! and decides whether to discard it.
 
-use std::io::Cursor;
 use std::io::Seek;
 use std::io::Write;
 use std::path::Path;
 
 use crate::ArchiveError;
+use crate::CreateRequest;
 use crate::CreationConfig;
 use crate::CreationReport;
-use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
+use crate::creation::staged::ExcludedOutput;
 use crate::creation::tar::write_tar;
-use crate::creation::zip::warn_on_extraction_ratio;
 use crate::creation::zip::write_zip;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::CreatableFormat;
@@ -166,12 +165,30 @@ impl<'a> ArchiveWriter<'a> {
             Destination::Zip { .. } => CreatableFormat::Zip,
         }
     }
+
+    /// Writes the archive of `sources` to the destination.
+    pub(crate) fn write<P: AsRef<Path>>(
+        self,
+        sources: &[P],
+        config: &CreationConfig,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<CreationReport> {
+        let excluded = ExcludedOutput::none();
+        match self.destination {
+            Destination::Tar { stream, codec } => {
+                write_tar(stream, codec, sources, config, &excluded, progress)
+            }
+            Destination::Zip { stream } => {
+                write_zip(stream, sources, config, &excluded, progress).map(|(report, _)| report)
+            }
+        }
+    }
 }
 
 /// Creates an archive from `sources` into `writer`.
 ///
 /// Same as [`create_archive`](crate::create_archive) with the output in a
-/// writer. The writer fixes the format, so `config.format` is ignored.
+/// writer. The writer fixes the format.
 /// `CreationReport::bytes_compressed` is the number of bytes written to it.
 ///
 /// # Errors
@@ -208,7 +225,7 @@ pub fn create_to_writer<P: AsRef<Path>>(
     sources: &[P],
     config: &CreationConfig,
 ) -> Result<CreationReport> {
-    create_to_writer_with_progress(writer, sources, config, &mut NoopProgress)
+    CreateRequest::new(config).write(writer, sources)
 }
 
 /// Creates an archive from `sources` into `writer`, reporting progress.
@@ -249,12 +266,9 @@ pub fn create_to_writer_with_progress<P: AsRef<Path>>(
     config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
-    match writer.destination {
-        Destination::Tar { stream, codec } => write_tar(stream, codec, sources, config, progress),
-        Destination::Zip { stream } => {
-            write_zip(stream, sources, config, progress).map(|(report, _)| report)
-        }
-    }
+    CreateRequest::new(config)
+        .with_progress(progress)
+        .write(writer, sources)
 }
 
 /// Creates an archive of `format` from `sources` and returns its bytes.
@@ -294,13 +308,7 @@ pub fn create_to_bytes<P: AsRef<Path>>(
     format: CreatableFormat,
     config: &CreationConfig,
 ) -> Result<(Vec<u8>, CreationReport)> {
-    let mut out = Cursor::new(Vec::new());
-    let writer = ArchiveWriter::of_type(&mut out, format);
-    let mut report = create_to_writer(writer, sources, config)?;
-    if format == CreatableFormat::Zip {
-        warn_on_extraction_ratio(&mut out, &mut report);
-    }
-    Ok((out.into_inner(), report))
+    CreateRequest::new(config).to_bytes(format, sources)
 }
 
 #[cfg(test)]
@@ -461,20 +469,6 @@ mod tests {
             create_to_writer(writer, &[src.path()], &config()).unwrap();
             assert!(!out.get_ref().is_empty());
         }
-    }
-
-    #[test]
-    fn test_writer_format_wins_over_config_format() {
-        let src = source_tree();
-        let cfg = config().with_format(Some(CreatableFormat::Zip));
-        let mut out = Cursor::new(Vec::new());
-        create_to_writer(
-            ArchiveWriter::tar(&mut out, Some(CompressionCodec::Gzip)),
-            &[src.path()],
-            &cfg,
-        )
-        .unwrap();
-        assert_eq!(&out.get_ref()[..2], b"\x1f\x8b");
     }
 
     #[test]

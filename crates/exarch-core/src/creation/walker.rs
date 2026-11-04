@@ -9,6 +9,7 @@ use crate::IoContext;
 use crate::Result;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
+use crate::creation::staged::ExcludedOutput;
 use std::fs::Metadata;
 use std::ops::Deref;
 use std::path::Component;
@@ -256,7 +257,7 @@ pub enum EntryType {
 ///
 /// let config = CreationConfig::default();
 /// let sources = [Path::new("./src")];
-/// let entries = collect_entries(&sources, &config)?;
+/// let entries = collect_entries(&sources, &config, &ExcludedOutput::none())?;
 /// println!("Total entries: {}", entries.len());
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
@@ -270,6 +271,7 @@ pub enum EntryType {
 pub fn collect_entries<P: AsRef<Path>>(
     sources: &[P],
     config: &CreationConfig,
+    excluded: &ExcludedOutput,
 ) -> Result<Vec<FilteredEntry>> {
     let mut entries = Vec::new();
 
@@ -303,7 +305,10 @@ pub fn collect_entries<P: AsRef<Path>>(
         if metadata.is_dir() || (config.follow_symlinks && path.is_dir()) {
             let walker = FilteredWalker::new(path, config);
             for entry in walker.walk() {
-                entries.push(entry?);
+                let entry = entry?;
+                if !excluded.excludes(&entry.path) {
+                    entries.push(entry);
+                }
             }
         } else {
             // For single files, we need to create a FilteredEntry manually.
@@ -340,7 +345,9 @@ pub fn collect_entries<P: AsRef<Path>>(
                     .into()
             };
 
-            if let Some(archive_path) = entry_name(path, &relative, false)? {
+            if !excluded.excludes(path)
+                && let Some(archive_path) = entry_name(path, &relative, false)?
+            {
                 entries.push(FilteredEntry {
                     path: path.to_path_buf(),
                     archive_path,
@@ -676,7 +683,7 @@ mod tests {
         let config = CreationConfig::default();
         let sources: Vec<&Path> = vec![];
 
-        let entries = collect_entries(&sources, &config).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
 
         assert_eq!(entries.len(), 0);
     }
@@ -686,7 +693,7 @@ mod tests {
         let config = CreationConfig::default();
         let sources = [Path::new("/nonexistent/path/that/does/not/exist")];
 
-        let result = collect_entries(&sources, &config);
+        let result = collect_entries(&sources, &config, &ExcludedOutput::none());
 
         assert!(result.is_err());
         assert_matches!(result.unwrap_err(), ArchiveError::SourceNotFound { .. });
@@ -712,7 +719,7 @@ mod tests {
             root.join("dir2"),
         ];
 
-        let entries = collect_entries(&sources, &config).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
 
         // single_file.txt + 2 files of dir1 + 1 file of dir2; the source
         // directories themselves are walk roots and are not entries.
@@ -750,7 +757,7 @@ mod tests {
         let config = CreationConfig::default().with_include_hidden(true);
         let sources = [root];
 
-        let entries = collect_entries(&sources, &config).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
 
         // Should have: 50 files in root + 1 subdir + 1 root dir + 30 files in
         // subdir = 82
@@ -770,7 +777,7 @@ mod tests {
         let config = CreationConfig::default();
         let sources = [&file_path];
 
-        let entries = collect_entries(&sources, &config).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, EntryType::File);
@@ -795,7 +802,7 @@ mod tests {
         let config = CreationConfig::default();
         let sources = [&link_path];
 
-        let entries = collect_entries(&sources, &config).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(
@@ -824,7 +831,7 @@ mod tests {
         let config = CreationConfig::default();
         let sources = [&link_path];
 
-        let entries = collect_entries(&sources, &config).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(
@@ -855,7 +862,7 @@ mod tests {
         let config = CreationConfig::default();
         let sources = [&link_path];
 
-        let entries = collect_entries(&sources, &config).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(
@@ -885,7 +892,7 @@ mod tests {
             .with_include_hidden(false);
 
         let sources = [root];
-        let entries = collect_entries(&sources, &config).unwrap();
+        let entries = collect_entries(&sources, &config, &ExcludedOutput::none()).unwrap();
 
         let paths: Vec<_> = entries
             .iter()

@@ -81,7 +81,7 @@ fn mixed_methods_and_empty_entries_extract_the_same_in_every_mode() {
             list_archive_for_extraction(&archive, &config, &ListOptions::default(), mode).unwrap();
         let via_list = TempDir::new().unwrap();
         listed
-            .extract(
+            .extract_under(
                 via_list.path(),
                 &config,
                 &ExtractionOptions::default(),
@@ -113,7 +113,7 @@ fn a_listed_zip_extracts_the_same_files_in_every_mode() {
         assert_eq!(listed.manifest().total_entries(), ENTRIES, "{mode:?}");
         let out = TempDir::new().unwrap();
         let report = listed
-            .extract(
+            .extract_under(
                 out.path(),
                 &config,
                 &ExtractionOptions::default(),
@@ -140,7 +140,7 @@ fn a_listed_zip_opened_without_stream_checks_extracts_under_the_enforcing_policy
 
     let out = TempDir::new().unwrap();
     listed
-        .extract(
+        .extract_under(
             out.path(),
             &SecurityConfig::default(),
             &ExtractionOptions::default(),

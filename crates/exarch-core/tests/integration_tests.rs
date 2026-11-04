@@ -16,7 +16,6 @@ use exarch_core::create_archive;
 use exarch_core::creation::CompressionLevel;
 use exarch_core::creation::CreationConfig;
 use exarch_core::extract_archive;
-use exarch_core::formats::detect::CreatableFormat;
 use exarch_core::types::DestDir;
 use exarch_core::types::SafePath;
 use exarch_core::types::SafeSymlink;
@@ -300,16 +299,14 @@ fn assert_roundtrip_content(extract_dir: &TempDir, files: &[(&str, &[u8])]) {
 }
 
 macro_rules! roundtrip_test {
-    ($name:ident, $ext:literal, $format:expr) => {
+    ($name:ident, $ext:literal) => {
         #[test]
         fn $name() {
             let (src, files) = make_roundtrip_source();
             let archive_dir = TempDir::new().unwrap();
             let archive = archive_dir.path().join(concat!("out.", $ext));
 
-            let config = CreationConfig::default()
-                .with_include_hidden(true)
-                .with_format(Some($format));
+            let config = CreationConfig::default().with_include_hidden(true);
             create_archive(&archive, &[src.path()], &config).unwrap();
             assert!(archive.exists(), "archive file must exist after creation");
 
@@ -321,11 +318,11 @@ macro_rules! roundtrip_test {
     };
 }
 
-roundtrip_test!(roundtrip_tar_gz, "tar.gz", CreatableFormat::TarGz);
-roundtrip_test!(roundtrip_tar_bz2, "tar.bz2", CreatableFormat::TarBz2);
-roundtrip_test!(roundtrip_tar_xz, "tar.xz", CreatableFormat::TarXz);
-roundtrip_test!(roundtrip_tar_zst, "tar.zst", CreatableFormat::TarZst);
-roundtrip_test!(roundtrip_zip, "zip", CreatableFormat::Zip);
+roundtrip_test!(roundtrip_tar_gz, "tar.gz");
+roundtrip_test!(roundtrip_tar_bz2, "tar.bz2");
+roundtrip_test!(roundtrip_tar_xz, "tar.xz");
+roundtrip_test!(roundtrip_tar_zst, "tar.zst");
+roundtrip_test!(roundtrip_zip, "zip");
 
 // ============================================================================
 // Empty directory preservation tests (issue #400)
@@ -360,16 +357,14 @@ fn assert_empty_dirs_preserved(extract_dir: &TempDir) {
 }
 
 macro_rules! empty_dir_roundtrip_test {
-    ($name:ident, $ext:literal, $format:expr) => {
+    ($name:ident, $ext:literal) => {
         #[test]
         fn $name() {
             let src = make_empty_dir_source();
             let archive_dir = TempDir::new().unwrap();
             let archive = archive_dir.path().join(concat!("out.", $ext));
 
-            let config = CreationConfig::default()
-                .with_include_hidden(true)
-                .with_format(Some($format));
+            let config = CreationConfig::default().with_include_hidden(true);
             let report = create_archive(&archive, &[src.path()], &config).unwrap();
             // empty1, empty2, empty2/empty3 = 3 directory entries.
             assert_eq!(report.directories_added, 3);
@@ -384,11 +379,11 @@ macro_rules! empty_dir_roundtrip_test {
     };
 }
 
-empty_dir_roundtrip_test!(empty_dirs_tar, "tar", CreatableFormat::Tar);
-empty_dir_roundtrip_test!(empty_dirs_tar_gz, "tar.gz", CreatableFormat::TarGz);
-empty_dir_roundtrip_test!(empty_dirs_tar_bz2, "tar.bz2", CreatableFormat::TarBz2);
-empty_dir_roundtrip_test!(empty_dirs_tar_xz, "tar.xz", CreatableFormat::TarXz);
-empty_dir_roundtrip_test!(empty_dirs_tar_zst, "tar.zst", CreatableFormat::TarZst);
+empty_dir_roundtrip_test!(empty_dirs_tar, "tar");
+empty_dir_roundtrip_test!(empty_dirs_tar_gz, "tar.gz");
+empty_dir_roundtrip_test!(empty_dirs_tar_bz2, "tar.bz2");
+empty_dir_roundtrip_test!(empty_dirs_tar_xz, "tar.xz");
+empty_dir_roundtrip_test!(empty_dirs_tar_zst, "tar.zst");
 
 /// Parity check (SC-003): the same source tree with nested empty
 /// directories produces the same directory-entry count for TAR and ZIP.
@@ -400,12 +395,8 @@ fn empty_dirs_parity_between_tar_gz_and_zip() {
     let tar_gz = archive_dir.path().join("out.tar.gz");
     let zip = archive_dir.path().join("out.zip");
 
-    let tar_config = CreationConfig::default()
-        .with_include_hidden(true)
-        .with_format(Some(CreatableFormat::TarGz));
-    let zip_config = CreationConfig::default()
-        .with_include_hidden(true)
-        .with_format(Some(CreatableFormat::Zip));
+    let tar_config = CreationConfig::default().with_include_hidden(true);
+    let zip_config = CreationConfig::default().with_include_hidden(true);
 
     let tar_report = create_archive(&tar_gz, &[src.path()], &tar_config).unwrap();
     let zip_report = create_archive(&zip, &[src.path()], &zip_config).unwrap();
@@ -426,14 +417,14 @@ fn make_compressible_source() -> TempDir {
 }
 
 macro_rules! bytes_compressed_matches_disk_test {
-    ($name:ident, $ext:literal, $format:expr) => {
+    ($name:ident, $ext:literal) => {
         #[test]
         fn $name() {
             let src = make_compressible_source();
             let archive_dir = TempDir::new().unwrap();
             let archive = archive_dir.path().join(concat!("out.", $ext));
 
-            let config = CreationConfig::default().with_format(Some($format));
+            let config = CreationConfig::default();
             let report = create_archive(&archive, &[src.path()], &config).unwrap();
 
             let on_disk = fs::metadata(&archive).unwrap().len();
@@ -450,31 +441,11 @@ macro_rules! bytes_compressed_matches_disk_test {
     };
 }
 
-bytes_compressed_matches_disk_test!(
-    bytes_compressed_matches_disk_zip,
-    "zip",
-    CreatableFormat::Zip
-);
-bytes_compressed_matches_disk_test!(
-    bytes_compressed_matches_disk_tar_gz,
-    "tar.gz",
-    CreatableFormat::TarGz
-);
-bytes_compressed_matches_disk_test!(
-    bytes_compressed_matches_disk_tar_bz2,
-    "tar.bz2",
-    CreatableFormat::TarBz2
-);
-bytes_compressed_matches_disk_test!(
-    bytes_compressed_matches_disk_tar_xz,
-    "tar.xz",
-    CreatableFormat::TarXz
-);
-bytes_compressed_matches_disk_test!(
-    bytes_compressed_matches_disk_tar_zst,
-    "tar.zst",
-    CreatableFormat::TarZst
-);
+bytes_compressed_matches_disk_test!(bytes_compressed_matches_disk_zip, "zip");
+bytes_compressed_matches_disk_test!(bytes_compressed_matches_disk_tar_gz, "tar.gz");
+bytes_compressed_matches_disk_test!(bytes_compressed_matches_disk_tar_bz2, "tar.bz2");
+bytes_compressed_matches_disk_test!(bytes_compressed_matches_disk_tar_xz, "tar.xz");
+bytes_compressed_matches_disk_test!(bytes_compressed_matches_disk_tar_zst, "tar.zst");
 
 /// Plain (uncompressed) TAR: `bytes_compressed` still reflects the actual
 /// on-disk TAR stream size (headers + padding), not a reused
@@ -485,7 +456,7 @@ fn bytes_compressed_matches_disk_plain_tar() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.tar");
 
-    let config = CreationConfig::default().with_format(Some(CreatableFormat::Tar));
+    let config = CreationConfig::default();
     let report = create_archive(&archive, &[src.path()], &config).unwrap();
 
     let on_disk = fs::metadata(&archive).unwrap().len();
@@ -506,7 +477,6 @@ fn bytes_compressed_matches_disk_across_compression_levels() {
         let archive = archive_dir.path().join("out.tar.gz");
 
         let config = CreationConfig::default()
-            .with_format(Some(CreatableFormat::TarGz))
             .with_compression_level(CompressionLevel::try_from(level).unwrap());
         let report = create_archive(&archive, &[src.path()], &config).unwrap();
 
@@ -539,7 +509,7 @@ fn bytes_compressed_matches_disk_incompressible_data() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.tar.gz");
 
-    let config = CreationConfig::default().with_format(Some(CreatableFormat::TarGz));
+    let config = CreationConfig::default();
     let report = create_archive(&archive, &[src.path()], &config).unwrap();
 
     let on_disk = fs::metadata(&archive).unwrap().len();
@@ -561,9 +531,7 @@ fn only_empty_directories_no_files_roundtrip() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.tar.gz");
 
-    let config = CreationConfig::default()
-        .with_include_hidden(true)
-        .with_format(Some(CreatableFormat::TarGz));
+    let config = CreationConfig::default().with_include_hidden(true);
     let report = create_archive(&archive, &[src.path()], &config).unwrap();
 
     // a, a/b, a/b/c = 3 directory entries; zero files.
@@ -592,9 +560,7 @@ fn empty_dir_unicode_and_space_names_roundtrip_tar() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.tar.gz");
 
-    let config = CreationConfig::default()
-        .with_include_hidden(true)
-        .with_format(Some(CreatableFormat::TarGz));
+    let config = CreationConfig::default().with_include_hidden(true);
     let report = create_archive(&archive, &[src.path()], &config).unwrap();
     assert_eq!(report.directories_added, 2);
 
@@ -629,7 +595,7 @@ fn dir_symlink_source_without_follow_symlinks_archives_as_symlink_tar() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.tar.gz");
 
-    let config = CreationConfig::default().with_format(Some(CreatableFormat::TarGz));
+    let config = CreationConfig::default();
     let report = create_archive(&archive, &[&link_path], &config).unwrap();
 
     assert_eq!(report.files_added, 0);
@@ -653,9 +619,7 @@ fn dir_symlink_source_with_follow_symlinks_walks_tree_tar() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.tar.gz");
 
-    let config = CreationConfig::default()
-        .with_format(Some(CreatableFormat::TarGz))
-        .with_follow_symlinks(true);
+    let config = CreationConfig::default().with_follow_symlinks(true);
     let report = create_archive(&archive, &[&link_path], &config).unwrap();
 
     assert_eq!(report.files_added, 1);
@@ -684,9 +648,7 @@ fn dir_symlink_source_with_follow_symlinks_walks_tree_zip() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.zip");
 
-    let config = CreationConfig::default()
-        .with_format(Some(CreatableFormat::Zip))
-        .with_follow_symlinks(true);
+    let config = CreationConfig::default().with_follow_symlinks(true);
     let report = create_archive(&archive, &[&link_path], &config).unwrap();
 
     assert_eq!(report.files_added, 1);

@@ -5,6 +5,9 @@ use std::path::PathBuf;
 
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::CreateRequest;
+use crate::OutputFile;
+use crate::OutputFormat;
 use crate::creation::config::CompressionLevel;
 use crate::creation::config::CreationConfig;
 use crate::creation::report::CreationReport;
@@ -38,6 +41,7 @@ pub struct ArchiveCreator {
     output_path: Option<PathBuf>,
     sources: Vec<PathBuf>,
     config: CreationConfig,
+    format: OutputFormat,
 }
 
 impl ArchiveCreator {
@@ -227,7 +231,7 @@ impl ArchiveCreator {
     /// ```
     #[must_use]
     pub fn format(mut self, format: CreatableFormat) -> Self {
-        self.config.format = Some(format);
+        self.format = OutputFormat::Explicit(format);
         self
     }
 
@@ -266,8 +270,12 @@ impl ArchiveCreator {
             });
         }
 
-        // Configuration is validated inside `create_archive`.
-        crate::api::create_archive(&output_path, &self.sources, &self.config)
+        let output = OutputFile::replace(output_path);
+        let output = match self.format {
+            OutputFormat::Explicit(format) => output.with_format(format),
+            OutputFormat::FromExtension => output,
+        };
+        CreateRequest::new(&self.config).create(&output, &self.sources)
     }
 }
 
@@ -339,7 +347,10 @@ mod tests {
                 .contains(&"target/".to_string())
         );
         assert_eq!(creator.config.strip_prefix, Some(PathBuf::from("/base")));
-        assert_eq!(creator.config.format, Some(CreatableFormat::TarGz));
+        assert_eq!(
+            creator.format,
+            OutputFormat::Explicit(CreatableFormat::TarGz)
+        );
     }
 
     #[test]

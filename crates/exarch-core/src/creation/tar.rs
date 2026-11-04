@@ -9,6 +9,7 @@ use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressReader;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
+use crate::creation::staged::ExcludedOutput;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
 use crate::formats::compression::CompressionCodec;
@@ -109,7 +110,14 @@ pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
-    write_tar(file, codec, sources, config, progress)
+    write_tar(
+        file,
+        codec,
+        sources,
+        config,
+        &ExcludedOutput::none(),
+        progress,
+    )
 }
 
 /// Writes a TAR archive, optionally compressed, into `out`.
@@ -121,16 +129,17 @@ pub(crate) fn write_tar<W: Write, P: AsRef<Path>>(
     codec: Option<CompressionCodec>,
     sources: &[P],
     config: &CreationConfig,
+    excluded: &ExcludedOutput,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let counter = CountingWriter::new(out);
     let (mut report, mut counter) = if let Some(codec) = codec {
         let encoder = codec.encoder(counter, config.compression_level)?;
         let (report, encoder) =
-            create_tar_internal_with_progress(encoder, sources, config, progress)?;
+            create_tar_internal_with_progress(encoder, sources, config, excluded, progress)?;
         (report, encoder.finish()?)
     } else {
-        create_tar_internal_with_progress(counter, sources, config, progress)?
+        create_tar_internal_with_progress(counter, sources, config, excluded, progress)?
     };
     counter.flush()?;
     report.bytes_compressed = counter.bytes();
@@ -145,6 +154,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     writer: W,
     sources: &[P],
     config: &CreationConfig,
+    excluded: &ExcludedOutput,
     progress: &mut dyn ProgressCallback,
 ) -> Result<(CreationReport, W)> {
     let mut builder = Builder::new(writer);
@@ -152,7 +162,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     let start = std::time::Instant::now();
 
     // Single-pass collection of entries (avoids double directory traversal)
-    let entries = collect_entries(sources, config)?;
+    let entries = collect_entries(sources, config, excluded)?;
     let total_entries = entries.len();
 
     let mut tracker = ProgressTracker::new(progress, total_entries);
@@ -342,21 +352,6 @@ fn set_permissions(header: &mut Header, metadata: &std::fs::Metadata) {
     }
 }
 
-/// Format creator for TAR archives, uncompressed or with one codec.
-pub(crate) struct TarCreator(pub(crate) Option<CompressionCodec>);
-
-impl crate::formats::traits::FormatCreator for TarCreator {
-    fn create(
-        &self,
-        output: &Path,
-        sources: &[&Path],
-        config: &CreationConfig,
-        progress: &mut dyn ProgressCallback,
-    ) -> crate::Result<crate::creation::CreationReport> {
-        create_tar_with_progress(output, self.0, sources, config, progress)
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
@@ -381,8 +376,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .with_format(Some(CreatableFormat::Tar));
+            .with_include_hidden(true);
 
         let report = create_archive(
             &output,
@@ -409,8 +403,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .with_format(Some(CreatableFormat::Tar));
+            .with_include_hidden(true);
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -431,8 +424,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_compression_level(CompressionLevel::try_from(9u8).unwrap())
-            .with_format(Some(CreatableFormat::TarGz));
+            .with_compression_level(CompressionLevel::try_from(9u8).unwrap());
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -451,9 +443,7 @@ mod tests {
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "bzip2 test").unwrap();
 
-        let config = CreationConfig::default()
-            .with_exclude_patterns(vec![])
-            .with_format(Some(CreatableFormat::TarBz2));
+        let config = CreationConfig::default().with_exclude_patterns(vec![]);
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -472,9 +462,7 @@ mod tests {
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "xz test").unwrap();
 
-        let config = CreationConfig::default()
-            .with_exclude_patterns(vec![])
-            .with_format(Some(CreatableFormat::TarXz));
+        let config = CreationConfig::default().with_exclude_patterns(vec![]);
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -493,9 +481,7 @@ mod tests {
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "zstd test").unwrap();
 
-        let config = CreationConfig::default()
-            .with_exclude_patterns(vec![])
-            .with_format(Some(CreatableFormat::TarZst));
+        let config = CreationConfig::default().with_exclude_patterns(vec![]);
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -531,10 +517,14 @@ mod tests {
                 let output = temp.path().join(format!("output_{format:?}_{level}.tar"));
                 let config = CreationConfig::default()
                     .with_exclude_patterns(vec![])
-                    .with_compression_level(CompressionLevel::try_from(level).unwrap())
-                    .with_format(Some(format));
+                    .with_compression_level(CompressionLevel::try_from(level).unwrap());
 
-                let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
+                let report = crate::CreateRequest::new(&config)
+                    .create(
+                        &crate::OutputFile::replace(&output).with_format(format),
+                        &[source_dir.path()],
+                    )
+                    .unwrap();
                 assert_eq!(report.files_added, 1, "{format:?} level {level}");
                 assert!(output.exists(), "{format:?} level {level}");
             }
@@ -556,8 +546,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_preserve_permissions(true)
-            .with_format(Some(CreatableFormat::Tar));
+            .with_preserve_permissions(true);
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert_eq!(report.files_added, 1);
@@ -593,8 +582,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_preserve_permissions(false)
-            .with_format(Some(CreatableFormat::Tar));
+            .with_preserve_permissions(false);
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert_eq!(report.directories_added, 1);
@@ -625,8 +613,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_preserve_permissions(true)
-            .with_format(Some(CreatableFormat::Tar));
+            .with_preserve_permissions(true);
         create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         let mut archive = tar::Archive::new(fs::File::open(&output).unwrap());
@@ -660,8 +647,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .with_format(Some(CreatableFormat::Tar));
+            .with_include_hidden(true);
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -684,8 +670,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true)
-            .with_format(Some(CreatableFormat::TarGz));
+            .with_include_hidden(true);
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert!(report.files_added >= 2);
@@ -706,7 +691,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar");
 
-        let config = CreationConfig::default().with_format(Some(CreatableFormat::Tar));
+        let config = CreationConfig::default();
         let result = create_archive(&output, &[Path::new("/nonexistent/path")], &config);
 
         assert!(result.is_err());
@@ -760,9 +745,7 @@ mod tests {
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("a.txt"), "hello").unwrap();
 
-        let config = CreationConfig::default()
-            .with_exclude_patterns(vec![])
-            .with_format(Some(CreatableFormat::TarZst));
+        let config = CreationConfig::default().with_exclude_patterns(vec![]);
 
         // Allow enough bytes for the zstd header but fail mid-stream so that
         // encoder.finish() must flush remaining data and hits the limit.
@@ -772,8 +755,13 @@ mod tests {
         encoder.include_checksum(true).unwrap();
 
         let mut noop = crate::NoopProgress;
-        let result =
-            create_tar_internal_with_progress(encoder, &[source_dir.path()], &config, &mut noop);
+        let result = create_tar_internal_with_progress(
+            encoder,
+            &[source_dir.path()],
+            &config,
+            &ExcludedOutput::none(),
+            &mut noop,
+        );
 
         // Either the internal write or encoder.finish() must surface an error.
         // We call finish() only if internal succeeded, mirroring the real code

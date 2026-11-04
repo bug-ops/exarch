@@ -76,7 +76,7 @@ fn run_extraction(
         Source::Archive => extract_archive_with_options_and_progress(
             archive, output_dir, config, options, progress,
         ),
-        Source::Listed(listed) => listed.extract(output_dir, config, options, progress),
+        Source::Listed(listed) => listed.extract_under(output_dir, config, options, progress),
     }
     .map_err(|err| match staging {
         Staging::Direct => err,

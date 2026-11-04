@@ -1215,10 +1215,6 @@ impl SecurityConfig {
     /// The config of a list pass that precedes extraction: the same quota,
     /// path, allowlist and decoder limits, with the flags that only matter once
     /// bytes are written reset to their deny-by-default values.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "first caller arrives with the request API")
-    )]
     pub(crate) fn for_listing(&self) -> Self {
         let mut listing = self.clone();
         listing.allowed.symlinks = Admit::Refuse;

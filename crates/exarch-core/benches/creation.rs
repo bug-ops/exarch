@@ -148,10 +148,10 @@ fn benchmark_create_tar_formats(c: &mut Criterion) {
     ];
 
     for (name, format) in formats {
-        group.bench_with_input(BenchmarkId::new("format", name), &format, |b, format| {
+        group.bench_with_input(BenchmarkId::new("format", name), &format, |b, _format| {
             b.iter(|| {
                 let output = temp.path().join(format!("output.{}", name));
-                let config = CreationConfig::default().with_format(Some(*format));
+                let config = CreationConfig::default();
                 let _ = create_archive(
                     black_box(&output),
                     black_box(&[&source_dir]),
@@ -196,7 +196,6 @@ fn benchmark_compression_levels(c: &mut Criterion) {
                 b.iter(|| {
                     let output = temp.path().join("output.tar.gz");
                     let config = CreationConfig::default()
-                        .with_format(Some(CreatableFormat::TarGz))
                         .with_compression_level(CompressionLevel::try_from(*level).unwrap());
                     let _ = create_archive(
                         black_box(&output),

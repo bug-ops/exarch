@@ -23,7 +23,6 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod api;
-pub mod archive;
 pub(crate) mod closed_enum;
 pub mod config;
 pub(crate) mod copy;
@@ -37,6 +36,7 @@ mod listed;
 use exarch_testkit::raw_zip;
 pub mod reader;
 pub mod report;
+mod request;
 pub mod security;
 pub mod sink;
 #[cfg(test)]
@@ -61,8 +61,6 @@ pub use api::verify_archive;
 pub use api::verify_archive_with_options;
 pub use api::verify_reader;
 pub use api::verify_reader_with_progress;
-pub use archive::Archive;
-pub use archive::ArchiveBuilder;
 pub use config::Admit;
 pub use config::DecodeReuse;
 pub use config::DecompressionBudget;
@@ -143,6 +141,14 @@ pub use reader::SeekableFormat;
 pub use report::ExtractionReport;
 pub use report::NoopProgress;
 pub use report::ProgressCallback;
+pub use request::CreateRequest;
+pub use request::ExtractRequest;
+pub use request::ListRequest;
+pub use request::OutputFile;
+pub use request::OutputFormat;
+pub use request::OutputPolicy;
+pub use request::SinkExtractRequest;
+pub use request::VerifyRequest;
 
 // Re-export creation types
 pub use creation::ArchiveCreator;
@@ -177,6 +183,7 @@ pub use security::fs_view::LinkKind;
 
 // Re-export security types
 pub use listed::ListedArchive;
+pub use listed::ListedExtractOptions;
 pub use listed::list_archive_for_extraction;
 pub use security::Compressed;
 pub use security::EntrySize;

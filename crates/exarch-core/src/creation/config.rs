@@ -3,7 +3,6 @@
 use crate::ArchiveError;
 use crate::Limit;
 use crate::Result;
-use crate::formats::detect::CreatableFormat;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -146,15 +145,6 @@ pub struct CreationConfig {
     ///
     /// Default: `true`.
     pub preserve_permissions: bool,
-
-    /// Archive format to create.
-    ///
-    /// `None` means auto-detect from output file extension. Ignored by
-    /// [`create_to_writer`](crate::create_to_writer), whose writer already
-    /// fixes the format.
-    ///
-    /// Default: `None`.
-    pub format: Option<CreatableFormat>,
 }
 
 impl Default for CreationConfig {
@@ -168,7 +158,6 @@ impl Default for CreationConfig {
     /// - `strip_prefix`: `None`
     /// - `compression_level`: 6
     /// - `preserve_permissions`: `true`
-    /// - `format`: `None`
     fn default() -> Self {
         Self {
             follow_symlinks: false,
@@ -182,7 +171,6 @@ impl Default for CreationConfig {
             strip_prefix: None,
             compression_level: CompressionLevel::default(),
             preserve_permissions: true,
-            format: None,
         }
     }
 }
@@ -316,23 +304,6 @@ impl CreationConfig {
         self.preserve_permissions = preserve;
         self
     }
-
-    /// Sets the archive format.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::creation::CreationConfig;
-    /// use exarch_core::formats::detect::CreatableFormat;
-    ///
-    /// let config = CreationConfig::default().with_format(Some(CreatableFormat::TarGz));
-    /// assert_eq!(config.format, Some(CreatableFormat::TarGz));
-    /// ```
-    #[must_use]
-    pub fn with_format(mut self, format: Option<CreatableFormat>) -> Self {
-        self.format = format;
-        self
-    }
 }
 
 #[cfg(test)]
@@ -354,7 +325,6 @@ mod tests {
         assert_eq!(config.strip_prefix, None);
         assert_eq!(config.compression_level, CompressionLevel::default());
         assert!(config.preserve_permissions);
-        assert_eq!(config.format, None);
     }
 
     #[test]
@@ -367,8 +337,7 @@ mod tests {
             .with_exclude_patterns(vec!["*.log".to_string()])
             .with_strip_prefix(Some(PathBuf::from("/base")))
             .with_compression_level(level)
-            .with_preserve_permissions(false)
-            .with_format(Some(CreatableFormat::TarGz));
+            .with_preserve_permissions(false);
 
         assert!(config.follow_symlinks);
         assert!(config.include_hidden);
@@ -380,7 +349,6 @@ mod tests {
         assert_eq!(config.strip_prefix, Some(PathBuf::from("/base")));
         assert_eq!(config.compression_level, level);
         assert!(!config.preserve_permissions);
-        assert_eq!(config.format, Some(CreatableFormat::TarGz));
     }
 
     #[test]

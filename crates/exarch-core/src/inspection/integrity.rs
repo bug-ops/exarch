@@ -144,7 +144,7 @@ impl DecodeFailure {
     /// Error returned when TAR entry content fails to decode: the scan stops,
     /// so no report can claim the uninspected entries are fine.
     pub fn into_tar_error(self, path: &Path) -> ArchiveError {
-        self.into_error(&format!("at {}", path.display()))
+        self.into_error(&format!("at {}", crate::path_text(path)))
     }
 
     /// Error returned when the stream fails after the TAR end-of-archive

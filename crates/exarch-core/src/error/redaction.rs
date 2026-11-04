@@ -102,14 +102,11 @@ pub fn sanitize_path_for_error(path: &Path) -> String {
 /// use std::path::Path;
 ///
 /// let path = Path::new("../../etc/passwd");
-/// assert_eq!(
-///     format_entry_path_for_error(path),
-///     path.display().to_string()
-/// );
+/// assert_eq!(format_entry_path_for_error(path), "../../etc/passwd");
 /// ```
 #[must_use]
 pub fn format_entry_path_for_error(path: &Path) -> String {
-    path.display().to_string()
+    crate::path_text(path)
 }
 
 /// Sanitizes I/O error messages for FFI error reporting.

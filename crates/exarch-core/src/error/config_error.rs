@@ -224,7 +224,7 @@ impl fmt::Display for ConfigProblem {
             Self::NotSupported => f.write_str("is not supported"),
             Self::CannotTargetSink => f.write_str("renames a directory and cannot target a sink"),
             Self::RemovesWholeName { path } => {
-                write!(f, "removes the whole name of {}", path.display())
+                write!(f, "removes the whole name of {}", crate::path_text(path))
             }
             Self::NotAtStart => f.write_str("must be positioned at offset 0"),
             Self::Empty => f.write_str("must not be empty"),

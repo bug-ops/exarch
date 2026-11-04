@@ -720,7 +720,7 @@ fn placement_issue(
             .with_entry_path(entry_path);
         }
         Placement::ReplacesUnderOverwrite => ArchiveError::from(Violation::ConflictUnlessSkipped {
-            rel: rel.display().to_string().into(),
+            rel: crate::path_text(rel).into(),
             cause: conflict.error.to_string().into(),
         }),
         Placement::FailsAlways => {
@@ -731,7 +731,7 @@ fn placement_issue(
             };
             if kind.is_link() || crosses_link() {
                 ArchiveError::from(Violation::ConflictFails {
-                    rel: rel.display().to_string().into(),
+                    rel: crate::path_text(rel).into(),
                     cause: conflict.error.to_string().into(),
                 })
             } else {

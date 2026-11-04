@@ -291,17 +291,27 @@ impl fmt::Display for Malformation {
                 write!(f, "{kind} target too long: {bytes} bytes")
             }
             Self::HardlinkTargetAbsent { target } => {
-                write!(f, "hardlink target does not exist: {}", target.display())
+                write!(
+                    f,
+                    "hardlink target does not exist: {}",
+                    crate::path_text(target)
+                )
             }
             Self::HardlinkTargetDirectory { target } => {
-                write!(f, "hardlink target is a directory: {}", target.display())
+                write!(
+                    f,
+                    "hardlink target is a directory: {}",
+                    crate::path_text(target)
+                )
             }
             Self::HardlinkTargetNotRegular { target } => write!(
                 f,
                 "hardlink target is not a regular file: {}",
-                target.display()
+                crate::path_text(target)
             ),
-            Self::DuplicateEntry { path } => write!(f, "duplicate entry: {}", path.display()),
+            Self::DuplicateEntry { path } => {
+                write!(f, "duplicate entry: {}", crate::path_text(path))
+            }
             Self::EntryPathUnreadable { detail } => write!(f, "invalid path: {detail}"),
             Self::EntryNameUnreadable {
                 index: Some(index),
@@ -312,7 +322,11 @@ impl fmt::Display for Malformation {
                 detail,
             } => write!(f, "invalid entry name: {detail}"),
             Self::EntryPathNotUtf8 { path } => {
-                write!(f, "entry path is not valid UTF-8: {}", path.display())
+                write!(
+                    f,
+                    "entry path is not valid UTF-8: {}",
+                    crate::path_text(path)
+                )
             }
             Self::DeclaredCompressedExceedsArchive => {
                 f.write_str("declared compressed size exceeds archive length")

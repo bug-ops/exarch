@@ -457,7 +457,7 @@ fn list_tar_entries<R: std::io::Read>(
 
             if list_mode == ListMode::Strict && has_null_bytes(&path) {
                 return Err(Violation::NulInPath {
-                    path: path.display().to_string().into(),
+                    path: crate::path_text(&path).into(),
                 }
                 .into());
             }
@@ -2369,7 +2369,7 @@ mod tests {
                 entry.kind.entry_type(),
                 ManifestEntryType::Symlink,
                 "regular-mode entries are reported as File: {}",
-                entry.path.display()
+                crate::path_text(&entry.path)
             );
         }
     }

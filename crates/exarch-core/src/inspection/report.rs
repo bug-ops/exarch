@@ -806,11 +806,7 @@ impl Heuristic {
     }
 
     fn message(&self, entry_path: Option<&Path>) -> String {
-        let entry = || {
-            entry_path
-                .map(|p| p.display().to_string())
-                .unwrap_or_default()
-        };
+        let entry = || entry_path.map(crate::path_text).unwrap_or_default();
         match self {
             Self::ExecutableFile { .. } => format!("Executable file: {}", entry()),
             Self::SuspiciousExtension => format!("Suspicious extension: {}", entry()),
@@ -830,7 +826,7 @@ impl Heuristic {
             Self::OverwriteConflict { rel, occupant } => format!(
                 "extraction with overwrite fails at {}: an earlier entry is a {} (default \
                  extraction skips this entry)",
-                rel.display(),
+                crate::path_text(rel),
                 occupant.noun()
             ),
             Self::UnreadSymlinkTargets { count } => {
@@ -1023,17 +1019,17 @@ impl VerificationIssue {
             ArchiveError::PathTraversal { path } => (
                 IssueSeverity::Critical,
                 IssueCategory::PathTraversal,
-                format!("Path traversal detected: {}", path.display()),
+                format!("Path traversal detected: {}", crate::path_text(path)),
             ),
             ArchiveError::SymlinkEscape { path } => (
                 IssueSeverity::Critical,
                 IssueCategory::SymlinkEscape,
-                format!("Symlink escape: {}", path.display()),
+                format!("Symlink escape: {}", crate::path_text(path)),
             ),
             ArchiveError::HardlinkEscape { path } => (
                 IssueSeverity::Critical,
                 IssueCategory::HardlinkEscape,
-                format!("Hardlink escape: {}", path.display()),
+                format!("Hardlink escape: {}", crate::path_text(path)),
             ),
             ArchiveError::ZipBomb(details) => (
                 IssueSeverity::Critical,
@@ -1055,7 +1051,7 @@ impl VerificationIssue {
                 IssueCategory::InvalidPermissions,
                 format!(
                     "Invalid permissions: {} (mode: {:#o})",
-                    path.display(),
+                    crate::path_text(path),
                     mode.get()
                 ),
             ),
@@ -1078,17 +1074,17 @@ impl VerificationIssue {
             ArchiveError::SourceNotFound { path } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
-                format!("Source not found: {}", path.display()),
+                format!("Source not found: {}", crate::path_text(path)),
             ),
             ArchiveError::SourceNotAccessible { path } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
-                format!("Source not accessible: {}", path.display()),
+                format!("Source not accessible: {}", crate::path_text(path)),
             ),
             ArchiveError::OutputExists { path } => (
                 IssueSeverity::Medium,
                 IssueCategory::InvalidArchive,
-                format!("Output already exists: {}", path.display()),
+                format!("Output already exists: {}", crate::path_text(path)),
             ),
             ArchiveError::InvalidCompressionLevel { level } => (
                 IssueSeverity::Medium,
@@ -1098,7 +1094,7 @@ impl VerificationIssue {
             ArchiveError::UnknownFormat { path } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
-                format!("Unknown format: {}", path.display()),
+                format!("Unknown format: {}", crate::path_text(path)),
             ),
             ArchiveError::InvalidConfiguration { setting, problem } => high_invalid_archive(
                 format!("Invalid configuration: {}", setting.describe(problem)),
@@ -1603,6 +1599,35 @@ mod tests {
                 mode: None,
             },
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_messages_of_names_differing_in_invalid_bytes_differ() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
+        let (e9, e8) = (path(b"caf\xe9"), path(b"caf\xe8"));
+
+        let non_utf8 = |p: &PathBuf| {
+            VerificationIssue::new(
+                IssueSeverity::Medium,
+                Finding::Heuristic(Heuristic::NonUtf8Name),
+            )
+            .with_entry_path(Some(p.clone()))
+            .message()
+        };
+        assert_ne!(non_utf8(&e9), non_utf8(&e8));
+        assert!(non_utf8(&e9).ends_with("caf\\xE9"));
+        assert!(!non_utf8(&e9).contains('\u{FFFD}'));
+
+        let traversal = |p: &PathBuf| {
+            VerificationIssue::from_error(&ArchiveError::PathTraversal { path: p.clone() }, None)
+                .message()
+        };
+        assert_ne!(traversal(&e9), traversal(&e8));
+        assert!(!traversal(&e9).contains('\u{FFFD}'));
     }
 
     fn report_with(issues: Vec<VerificationIssue>) -> VerificationReport {

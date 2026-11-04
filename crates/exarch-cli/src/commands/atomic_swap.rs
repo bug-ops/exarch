@@ -16,6 +16,7 @@
 //! (GHSA-x8wr-7ww2-c94x) on every platform: the destination entry itself
 //! being a symlink or junction is rejected rather than followed.
 
+#[cfg(unix)]
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io;
@@ -47,6 +48,7 @@ impl EntryName {
     }
 
     /// The name as an OS string, for the `*at` syscalls.
+    #[cfg(unix)]
     pub(super) fn as_os_str(&self) -> &OsStr {
         &self.0
     }

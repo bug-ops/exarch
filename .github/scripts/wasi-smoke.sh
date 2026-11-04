@@ -69,6 +69,13 @@ exarch extract --allow-hardlinks basic.tar.gz out-gz
 expect_content out-gz/dir/file.txt payload
 expect_content out-gz/dir/hard.txt payload
 
+echo "== tar.gz into an existing non-empty directory"
+mkdir -p out-existing
+printf 'keep' >out-existing/existing.txt
+exarch extract --allow-hardlinks basic.tar.gz out-existing
+expect_content out-existing/existing.txt keep
+expect_content out-existing/dir/file.txt payload
+
 echo "== zip"
 exarch extract basic.zip out-zip
 expect_content out-zip/dir/file.txt zip-payload

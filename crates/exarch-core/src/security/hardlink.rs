@@ -5,17 +5,19 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
-use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Violation;
 use crate::config::Validated;
 use crate::security::fs_view::FsView;
 #[cfg(any(test, feature = "testing"))]
 use crate::security::fs_view::HostFs;
+use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::ModelRoot as _;
 #[cfg(any(test, feature = "testing"))]
 use crate::types::DestDir;
 use crate::types::SafePath;
+use crate::types::dest_dir::ProbePath;
 use crate::types::safe_path::ParentCheck;
 use crate::types::safe_path::check_component_for;
 use crate::types::safe_symlink::has_root_or_prefix;
@@ -36,9 +38,65 @@ pub fn hardlink_target_missing(target: &Path) -> ArchiveError {
 /// Returns `SecurityViolation` ("hardlinks not allowed") when hardlinks are
 /// disabled.
 pub fn require_hardlinks_allowed(config: &SecurityConfig<Validated>) -> Result<()> {
-    config.allowed.hardlinks.ok_or_else(|| {
-        ArchiveError::relaxable_violation(PolicySetting::Hardlinks, "hardlinks not allowed".into())
-    })
+    config
+        .allowed
+        .hardlinks
+        .ok_or_else(|| Violation::LinksNotAllowed(LinkKind::Hardlink).into())
+}
+
+/// A hardlink target that passed [`HardlinkTracker`] validation.
+///
+/// The path is relative, non-empty and free of NUL bytes, root and prefix
+/// components; every normal component passed the component checks, and the
+/// target resolved inside the extraction root when it was validated. It may
+/// contain `..` components that stay inside the root, and it is re-resolved
+/// when opened in the second extraction pass, so it names a lexical location,
+/// not a proof about what is on disk at that time.
+///
+/// There is no public constructor: the only producer is
+/// [`HardlinkTracker`]'s validation, so a hardlink target cannot be assembled
+/// from an unchecked path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HardlinkTarget(PathBuf);
+
+impl HardlinkTarget {
+    /// Returns the validated target, relative to the destination directory.
+    #[inline]
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Whether the target steps out of a directory it entered (`d/../f`).
+    #[must_use]
+    pub fn has_parent_dir(&self) -> bool {
+        self.0
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    }
+
+    /// Names the target below `dest` for a read-only probe.
+    #[must_use]
+    pub(crate) fn probe_under(&self, dest: &crate::types::DestDir) -> ProbePath {
+        dest.probe(&self.0)
+    }
+
+    /// Read-only probes of the target's parent directories below `dest`,
+    /// outermost first.
+    pub(crate) fn parent_probes<'a>(
+        &'a self,
+        dest: &'a crate::types::DestDir,
+    ) -> impl Iterator<Item = ProbePath> + 'a {
+        let mut prefix = PathBuf::new();
+        self.0
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+            .map(move |component| {
+                prefix.push(component);
+                dest.probe(&prefix)
+            })
+    }
 }
 
 /// Tracks hardlink targets during extraction.
@@ -145,7 +203,7 @@ impl HardlinkTracker {
         target: &Path,
         dest: &DestDir,
         config: &SecurityConfig<Validated>,
-    ) -> Result<()> {
+    ) -> Result<HardlinkTarget> {
         self.validate_hardlink_in(link_path, target, dest, config, &HostFs)
     }
 
@@ -161,13 +219,13 @@ impl HardlinkTracker {
         root: &V::Root,
         config: &SecurityConfig<Validated>,
         view: &V,
-    ) -> Result<()> {
+    ) -> Result<HardlinkTarget> {
         let dest = root.as_path();
         require_hardlinks_allowed(config)?;
 
         // Reject empty targets: they do not point anywhere.
         if target.is_empty() {
-            return Err(ArchiveError::violation("hardlink target is empty".into()));
+            return Err(Violation::LinkTargetEmpty(LinkKind::Hardlink).into());
         }
 
         // Reject null bytes in the target before any error message can be
@@ -177,9 +235,7 @@ impl HardlinkTracker {
         // "hardlink target does not exist: {target}"). The message here
         // intentionally omits the raw target bytes.
         if crate::types::safe_path::has_null_bytes(target) {
-            return Err(ArchiveError::violation(
-                "hardlink target contains null bytes".into(),
-            ));
+            return Err(Violation::LinkTargetNul(LinkKind::Hardlink).into());
         }
 
         use std::path::Component;
@@ -225,7 +281,7 @@ impl HardlinkTracker {
             .entry(resolved)
             .or_insert_with(|| link_path.as_path().to_path_buf());
 
-        Ok(())
+        Ok(HardlinkTarget(target.to_path_buf()))
     }
 
     /// Returns the number of tracked hardlinks.
@@ -386,6 +442,30 @@ mod tests {
 
         let result = tracker.validate_hardlink(&link, &target, &dest, &config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validated_target_keeps_the_validated_path_and_reports_parent_dir() {
+        let (_temp, dest) = create_test_dest();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
+        std::fs::create_dir(dest.as_path().join("d")).unwrap();
+
+        let mut tracker = HardlinkTracker::new();
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
+
+        let plain = tracker
+            .validate_hardlink(&link, Path::new("d/f"), &dest, &config)
+            .unwrap();
+        assert_eq!(plain.as_path(), Path::new("d/f"));
+        assert!(!plain.has_parent_dir());
+
+        let stepping = tracker
+            .validate_hardlink(&link, Path::new("d/../f"), &dest, &config)
+            .unwrap();
+        assert_eq!(stepping.as_path(), Path::new("d/../f"));
+        assert!(stepping.has_parent_dir());
     }
 
     // H-TEST-2: Duplicate hardlink to same target test

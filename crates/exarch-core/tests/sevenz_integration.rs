@@ -33,7 +33,7 @@ fn load_fixture(name: &str) -> Vec<u8> {
 fn test_7z_extraction_via_trait() {
     let data = load_fixture("simple.7z");
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let report = archive
@@ -58,7 +58,7 @@ fn test_7z_extraction_via_trait() {
 fn test_7z_security_config_integration() {
     let data = load_fixture("large-file.7z");
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
@@ -77,19 +77,10 @@ fn test_7z_security_config_integration() {
 }
 
 #[test]
-fn test_7z_format_name() {
-    let data = load_fixture("simple.7z");
-    let cursor = Cursor::new(data);
-    let archive = SevenZArchive::new(cursor).unwrap();
-
-    assert_eq!(archive.format_name(), "7z");
-}
-
-#[test]
 fn test_7z_nested_directories() {
     let data = load_fixture("nested-dirs.7z");
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let report = archive
@@ -112,7 +103,7 @@ fn test_7z_solid_archive_rejected_at_new() {
     let cursor = Cursor::new(data);
 
     // new() now succeeds (just caches is_solid flag)
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     // Rejection happens in extract() with default config
     let temp = TempDir::new().unwrap();
@@ -177,7 +168,7 @@ fn test_7z_malformed_coder_stream_overflow_rejected_gracefully() {
 fn test_7z_quota_file_count() {
     let data = load_fixture("simple.7z"); // 2 files
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
@@ -198,7 +189,7 @@ fn test_7z_quota_file_count() {
 fn test_7z_quota_total_size() {
     let data = load_fixture("simple.7z");
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
@@ -224,7 +215,7 @@ fn test_7z_quota_total_size() {
 fn test_7z_solid_archive_extraction_success() {
     let data = load_fixture("solid.7z");
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
@@ -246,7 +237,6 @@ fn test_7z_solid_archive_extraction_success() {
         report.files_extracted > 0,
         "should extract files from solid archive"
     );
-    assert_eq!(archive.format_name(), "7z");
 }
 
 /// M-4: Integration test for solid + file count quota interaction
@@ -254,7 +244,7 @@ fn test_7z_solid_archive_extraction_success() {
 fn test_7z_solid_archive_with_file_count_quota() {
     let data = load_fixture("solid.7z");
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
@@ -285,7 +275,7 @@ fn test_7z_solid_archive_with_file_count_quota() {
 fn test_7z_regular_mode_entry_with_target_text_extracts_as_file() {
     let data = load_fixture("symlink-unix.7z");
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().validate().unwrap();
@@ -334,7 +324,7 @@ fn test_7z_regular_mode_entry_with_target_text_extracts_as_file() {
 fn test_7z_hardlink_extracted_as_duplicate_files() {
     let data = load_fixture("hardlink.7z");
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().validate().unwrap();
@@ -425,7 +415,7 @@ impl ProgressCallback for RecordingProgress {
 fn test_7z_progress_interleaves_per_entry() {
     let data = load_fixture("simple.7z"); // 2-file archive
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut progress = RecordingProgress {
@@ -471,7 +461,7 @@ fn test_7z_progress_interleaves_per_entry() {
 fn test_7z_bytes_written_accumulates_correctly() {
     let data = load_fixture("simple.7z"); // 2-file archive: "hello world\n" each
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
     let report = archive
@@ -508,7 +498,7 @@ fn test_7z_partial_extraction_accurate_report() {
     // is written.  The result is a direct error, not PartialExtraction.
     let data = load_fixture("simple.7z");
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
     let out_temp = TempDir::new().unwrap();
 
     let config = SecurityConfig::default()
@@ -560,7 +550,7 @@ fn test_7z_force_overwrite_duplicate_entry() {
     let data = buf.into_inner();
 
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
     let out_temp = TempDir::new().unwrap();
 
     let options = ExtractionOptions::default().with_skip_duplicates(false);
@@ -606,7 +596,7 @@ fn test_7z_no_partial_extraction_when_zero_items() {
     let data = buf.into_inner();
 
     let cursor = Cursor::new(data);
-    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let archive = SevenZArchive::new(cursor).unwrap();
     let out_temp = TempDir::new().unwrap();
 
     let result = archive.extract(
@@ -701,7 +691,7 @@ fn build_plain_sevenz_packs(
 #[test]
 fn sevenz_plain_builder_round_trips_well_formed_archive() {
     let data = build_plain_sevenz("a.txt", b"hello", 5, 5);
-    let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
     let out = TempDir::new().unwrap();
     archive
         .extract(
@@ -740,7 +730,7 @@ fn sevenz_rejects_pack_sizes_beyond_archive_length() {
 #[test]
 fn sevenz_extract_enforces_compression_ratio() {
     let data = build_plain_sevenz("a.txt", &[0u8; 100], 1_000_000, 100);
-    let mut archive = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
+    let archive = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
     let out = TempDir::new().unwrap();
 
     let result = archive.extract(
@@ -801,7 +791,7 @@ fn sevenz_solid_archive_is_not_flagged_by_ratio_check() {
 #[test]
 fn sevenz_ratio_check_runs_before_duplicate_skip() {
     let data = build_plain_sevenz("a.txt", &[0u8; 100], 1_000_000, 100);
-    let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
     let out = TempDir::new().unwrap();
     std::fs::write(out.path().join("a.txt"), b"existing").unwrap();
 
@@ -859,7 +849,7 @@ fn directory_swapped_for_symlink_mid_extraction_reports_a_typed_security_error()
         outside: outside.path().to_path_buf(),
     };
     let config = SecurityConfig::default().validate().unwrap();
-    let mut archive = SevenZArchive::new(Cursor::new(bytes)).unwrap();
+    let archive = SevenZArchive::new(Cursor::new(bytes)).unwrap();
 
     let err = archive
         .extract(

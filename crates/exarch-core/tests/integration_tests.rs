@@ -13,6 +13,7 @@ mod security;
 use exarch_core::ArchiveError;
 use exarch_core::SecurityConfig;
 use exarch_core::create_archive;
+use exarch_core::creation::CompressionLevel;
 use exarch_core::creation::CreationConfig;
 use exarch_core::extract_archive;
 use exarch_core::formats::detect::CreatableFormat;
@@ -95,7 +96,10 @@ fn test_symlink_workflow() {
     let target = PathBuf::from("target.txt");
     let symlink = SafeSymlink::validate(&link, &target, &dest, &config).unwrap();
 
-    assert_eq!(symlink.link_path(), PathBuf::from("link.txt").as_path());
+    assert_eq!(
+        symlink.link().as_path(),
+        PathBuf::from("link.txt").as_path()
+    );
     assert_eq!(symlink.target_path(), PathBuf::from("target.txt").as_path());
 
     // Create actual symlink on filesystem
@@ -192,7 +196,7 @@ fn test_relative_symlink_resolution() {
     let target = PathBuf::from("b/target.txt");
     let symlink = SafeSymlink::validate(&link, &target, &dest, &config).unwrap();
 
-    assert!(symlink.link_path().starts_with("a"));
+    assert!(symlink.link().as_path().starts_with("a"));
     assert!(symlink.target_path().starts_with("b"));
 }
 
@@ -500,14 +504,13 @@ fn bytes_compressed_matches_disk_plain_tar() {
 fn bytes_compressed_matches_disk_across_compression_levels() {
     let src = make_compressible_source();
 
-    for level in [1, 9] {
+    for level in [1u8, 9] {
         let archive_dir = TempDir::new().unwrap();
         let archive = archive_dir.path().join("out.tar.gz");
 
         let config = CreationConfig::default()
             .with_format(Some(CreatableFormat::TarGz))
-            .with_compression_level(level)
-            .unwrap();
+            .with_compression_level(CompressionLevel::try_from(level).unwrap());
         let report = create_archive(&archive, &[src.path()], &config).unwrap();
 
         let on_disk = fs::metadata(&archive).unwrap().len();

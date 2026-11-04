@@ -9,6 +9,7 @@ use exarch_core::ParallelDecode;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::ZipConsistencyPolicy;
+use exarch_core::creation::CompressionLevel;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -274,8 +275,8 @@ pub struct CreateArgs {
     pub sources: Vec<PathBuf>,
 
     /// Compression level (1-9)
-    #[arg(short = 'l', long, value_parser = clap::value_parser!(u8).range(1..=9))]
-    pub compression_level: Option<u8>,
+    #[arg(short = 'l', long, value_parser = parse_compression_level)]
+    pub compression_level: Option<CompressionLevel>,
 
     /// Follow symbolic links
     #[arg(long)]
@@ -400,6 +401,14 @@ pub struct VerifyArgs {
     /// Treat warnings as errors and exit with status code 2
     #[arg(long)]
     pub strict: bool,
+}
+
+fn parse_compression_level(s: &str) -> Result<CompressionLevel, String> {
+    let level: u32 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{s}` is not a whole number"))?;
+    CompressionLevel::try_from(level).map_err(|_| format!("{level} is not in 1..=9"))
 }
 
 fn parse_parallel_decode(s: &str) -> Result<ParallelDecode, String> {

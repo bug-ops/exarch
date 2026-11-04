@@ -214,7 +214,7 @@ impl ListedArchive {
         let Self { archive, kept, .. } = self;
         let validated = config.clone().validate()?;
         let spool = match kept {
-            Kept::Zip(mut zip) if zip.serves(&validated) => {
+            Kept::Zip(zip) if zip.serves(&validated) => {
                 return extract_staged(output_dir.as_ref(), options, |dir| {
                     zip.extract(dir, &validated, options, progress)
                 });
@@ -391,8 +391,7 @@ struct SpoolTee<R> {
 impl<R: Read> SpoolTee<R> {
     fn new(inner: R, limit: u64) -> Self {
         // Without a temporary file the only loss is the optimisation.
-        let spool = tempfile::tempfile()
-            .ok()
+        let spool = crate::formats::zip_reuse::open_spool()
             .map(|file| BufWriter::with_capacity(SPOOL_BUFFER, file));
         Self {
             inner,
@@ -480,7 +479,9 @@ mod tests {
     const CONTENT: &[u8] = b"hello replay";
 
     fn encoded(codec: CompressionCodec, tar: &[u8]) -> Vec<u8> {
-        let mut encoder = codec.encoder(Vec::new(), None).unwrap();
+        let mut encoder = codec
+            .encoder(Vec::new(), crate::creation::CompressionLevel::default())
+            .unwrap();
         encoder.write_all(tar).unwrap();
         encoder.finish().unwrap()
     }
@@ -776,9 +777,9 @@ mod tests {
 
         let error = extract_into(listed, &dir, &strict).unwrap_err();
 
-        assert!(
-            format!("{error:?}").contains("MaxTarMetadataBytes")
-                || error.to_string().contains("max_tar_metadata_bytes"),
+        assert_eq!(
+            error.relaxable_by(),
+            Some(crate::PolicySetting::MaxTarMetadataBytes),
             "{error:?}"
         );
     }

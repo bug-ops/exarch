@@ -243,8 +243,11 @@ impl ArchiveError {
 mod tests {
     use super::super::types::ZipBombDetails;
     use super::super::types::ZipBombScope;
+    use super::super::violation::Violation;
     use super::*;
     use crate::ExtractionReport;
+    use crate::security::Compressed;
+    use crate::security::Uncompressed;
     use std::path::PathBuf;
 
     #[test]
@@ -386,9 +389,13 @@ mod tests {
     #[test]
     fn test_variants_without_path_return_none() {
         let no_path = [
-            ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 100_000)),
+            ArchiveError::ZipBomb(ZipBombDetails::new(
+                ZipBombScope::Entry,
+                Compressed(100),
+                Uncompressed(100_000),
+            )),
             ArchiveError::InvalidArchive("bad header".to_string()),
-            ArchiveError::violation("test".to_string()),
+            ArchiveError::from(Violation::EncryptedArchive),
             ArchiveError::InvalidCompressionLevel { level: 0 },
             ArchiveError::InvalidConfiguration {
                 reason: "test".to_string(),

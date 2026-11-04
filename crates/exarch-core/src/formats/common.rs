@@ -34,6 +34,8 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
+pub use crate::SpecialFile;
+use crate::Violation;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
@@ -50,8 +52,10 @@ use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
+use crate::security::fs_view::normalized_display;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
+use crate::sink::DuplicatePolicy;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -60,8 +64,9 @@ use crate::types::safe_path::ParentCheck;
 
 /// RAII guard that calls `on_entry_complete` when dropped.
 ///
-/// Ensures `on_entry_complete` is always paired with `on_entry_start`, even
-/// when extraction fails mid-entry and the caller returns early via `?`.
+/// The only way to build one is [`EntryCompleteGuard::start`], which fires
+/// `on_entry_start`, so `on_entry_complete` is paired with it on every path,
+/// including an early `?` return.
 pub struct EntryCompleteGuard<'a> {
     progress: &'a mut dyn ProgressCallback,
     path: &'a std::path::Path,
@@ -69,9 +74,15 @@ pub struct EntryCompleteGuard<'a> {
 }
 
 impl<'a> EntryCompleteGuard<'a> {
-    /// Creates a new guard. `on_entry_complete` will fire on drop unless
-    /// `disarm` is called first.
-    pub fn new(progress: &'a mut dyn ProgressCallback, path: &'a std::path::Path) -> Self {
+    /// Fires `on_entry_start` and returns the guard that will fire
+    /// `on_entry_complete` on drop unless [`complete`](Self::complete) ran.
+    pub fn start(
+        progress: &'a mut dyn ProgressCallback,
+        path: &'a std::path::Path,
+        total: usize,
+        current: usize,
+    ) -> Self {
+        progress.on_entry_start(path, total, current);
         Self {
             progress,
             path,
@@ -135,11 +146,7 @@ pub fn normalize_entry_name(name: &str) -> String {
 /// 7z (open, list and extract paths) report encryption identically.
 #[must_use]
 pub fn encrypted_archive_error() -> ArchiveError {
-    ArchiveError::violation(
-        "archive is encrypted (password-protected). Encrypted archives are not \
-                 supported; decrypt the archive externally and try again."
-            .into(),
-    )
+    Violation::EncryptedArchive.into()
 }
 
 /// Appends a single aggregated warning for `count` skipped duplicate
@@ -389,17 +396,16 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     reader: &mut R,
     safe_path: &SafePath<P>,
     mode: Option<SanitizedMode>,
-    _permit: QuotaPermit,
+    permit: QuotaPermit,
     root: &PinnedRoot,
     report: &mut ExtractionReport,
-    expected_size: Option<u64>,
     copy_buffer: &mut CopyBuffer,
     dirs: DirWalker,
     options: SinkOptions,
     duplicate_skips: &mut u64,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
-    let skip_duplicates = options.skip_duplicates;
+    let duplicates = options.duplicate_policy();
 
     let (parent, leaf) = dirs.ensure_parent(root, safe_path)?;
 
@@ -408,14 +414,13 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // guards report.bytes_written, a different quantity, against overflow.
     // Checked before any filesystem mutation so a rejected entry never
     // leaves a zero-byte file on disk (restores the pre-#446 ordering).
-    if let Some(size) = expected_size {
-        checked_add_bytes(report.bytes_written, size)?;
-    }
+    let expected_size = permit.into_bytes();
+    checked_add_bytes(report.bytes_written, expected_size)?;
 
     let Some(OutputSlot {
         file: output_file,
         written_at,
-    }) = open_output_slot(&parent, leaf, safe_path.as_path(), mode, skip_duplicates)?
+    }) = open_output_slot(&parent, leaf, safe_path.as_path(), mode, duplicates)?
     else {
         checked_increment_files_skipped(report)?;
         *duplicate_skips = duplicate_skips.saturating_add(1);
@@ -426,7 +431,12 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // `written_at` never holds a pre-existing entry, so nothing else is lost.
     let guard = written_at.guard(&parent, leaf);
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
-    let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer, expected_size)?;
+    let bytes_written = copy_with_buffer(
+        reader,
+        &mut buffered_writer,
+        copy_buffer,
+        Some(expected_size),
+    )?;
     buffered_writer.flush()?;
     drop(buffered_writer);
     commit_output(&parent, &written_at, leaf, safe_path.as_path())?;
@@ -529,20 +539,25 @@ struct OutputSlot {
 /// A free name is created in place with `O_EXCL`. When an entry already
 /// exists, overwrite mode writes a fresh sibling temp file that the caller
 /// renames over the entry, so other hardlinks to the old inode keep their
-/// content. Returns `None` when the entry exists and `skip_duplicates` is set.
+/// content. Returns `None` when the entry exists and `duplicates` is `Skip`.
 fn open_output_slot(
     dir: &VettedDir,
     leaf: Leaf<'_>,
     rel: &Path,
     mode: Option<SanitizedMode>,
-    skip_duplicates: bool,
+    duplicates: DuplicatePolicy,
 ) -> Result<Option<OutputSlot>> {
     match dir.create_new(leaf, mode) {
         Ok(file) => Ok(Some(OutputSlot {
             file,
             written_at: WrittenAt::Final,
         })),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && skip_duplicates => Ok(None),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::AlreadyExists
+                && duplicates == DuplicatePolicy::Skip =>
+        {
+            Ok(None)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             refuse_non_file_occupant(dir, leaf, rel)?;
             let (temp, file) = create_temp_sibling(dir, leaf, mode, TempLeaf::next)
@@ -659,7 +674,10 @@ fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Re
         return if probe.lands_in_dir(dest) {
             Ok(())
         } else {
-            Err(ArchiveError::violation(Occupant::Symlink.refusal(rel)))
+            Err(Violation::ReplacesSymlink {
+                rel: normalized_display(rel).into(),
+            }
+            .into())
         };
     }
     Err(occupant_at_dest_error(rel, Occupant::File).into())
@@ -719,7 +737,7 @@ pub fn create_symlink<P: ParentCheck>(
     options: SinkOptions,
     duplicate_skips: &mut u64,
 ) -> Result<()> {
-    let skip_duplicates = options.skip_duplicates;
+    let duplicates = options.duplicate_policy();
     #[cfg(unix)]
     {
         let target_path = safe_symlink.target_path();
@@ -727,7 +745,7 @@ pub fn create_symlink<P: ParentCheck>(
         let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link())?;
 
         if let Some(existing) = parent.probe(leaf)? {
-            if skip_duplicates {
+            if duplicates == DuplicatePolicy::Skip {
                 checked_increment_files_skipped(report)?;
                 *duplicate_skips = duplicate_skips.saturating_add(1);
                 return Ok(());
@@ -739,7 +757,7 @@ pub fn create_symlink<P: ParentCheck>(
                     checked_increment_files_skipped(report)?;
                     return Ok(());
                 }
-                return Err(symlink_at_dest_error(safe_symlink.link_path()).into());
+                return Err(symlink_at_dest_error(safe_symlink.link().as_path()).into());
             }
             parent.remove_file(leaf)?;
         }
@@ -829,38 +847,11 @@ fn refused_occupant(dir: &VettedDir, leaf: Leaf<'_>, err: &std::io::Error) -> Op
 ///
 /// Returns `SecurityViolation` on a non-Unix host.
 pub fn require_symlink_creation() -> Result<()> {
-    cfg!(unix).ok_or_else(|| {
-        ArchiveError::violation("symlinks are not supported on this platform".into())
-    })
+    cfg!(unix).ok_or_else(|| Violation::SymlinksUnsupported.into())
 }
 
 /// The file-type bits of a Unix mode (`S_IFMT`).
 const S_IFMT: u32 = 0o17_0000;
-
-/// A Unix file type that exarch never creates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpecialFile {
-    /// A named pipe.
-    Fifo,
-    /// A character device node.
-    CharDevice,
-    /// A block device node.
-    BlockDevice,
-    /// A Unix domain socket.
-    Socket,
-}
-
-impl SpecialFile {
-    /// The noun used in refusal messages.
-    pub const fn noun(self) -> &'static str {
-        match self {
-            Self::Fifo => "FIFO",
-            Self::CharDevice => "character device",
-            Self::BlockDevice => "block device",
-            Self::Socket => "socket",
-        }
-    }
-}
 
 /// The file type recorded in the type bits of a Unix mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -915,9 +906,11 @@ pub fn check_symlink_target_size(size: u64) -> Result<()> {
 
 /// The refusal for a stored symlink target of `size` bytes above the limit.
 pub fn symlink_target_too_large(size: u64) -> ArchiveError {
-    ArchiveError::violation(format!(
-        "symlink target too large: {size} bytes (max {MAX_STORED_SYMLINK_TARGET})"
-    ))
+    Violation::LinkTargetTooLarge {
+        size,
+        max: MAX_STORED_SYMLINK_TARGET,
+    }
+    .into()
 }
 
 /// Decodes the bytes of a stored symlink target.
@@ -960,7 +953,7 @@ pub fn is_filesystem_loop_error(error: &std::io::Error) -> bool {
 fn hardlink_target_changed(error: CopyError) -> ArchiveError {
     match error {
         CopyError::Overrun { .. } | CopyError::Short { .. } => {
-            ArchiveError::violation("hardlink target changed while it was being copied".into())
+            Violation::HardlinkTargetChanged.into()
         }
         other => other.into(),
     }
@@ -981,11 +974,12 @@ fn hardlink_target_changed(error: CopyError) -> ArchiveError {
 /// [`VettedDir::create_new`] (refusing to create through a pre-existing
 /// destination name, symlink or not) and `from` from [`VettedDir::open_read`]
 /// (refusing to follow a symlink), and reserve quota from `from`'s `fstat`
-/// size, passed as `expected_len`.
+/// size, which the `permit` then carries.
 ///
-/// `expected_len` is a hard ceiling and an exact length: the quota was charged
-/// for that many bytes, so a target that grew after the `fstat` fails closed
-/// instead of writing past the charged permit, and one that shrank fails too.
+/// The permit's byte count is a hard ceiling and an exact length: the quota was
+/// charged for that many bytes, so a target that grew after the `fstat` fails
+/// closed instead of writing past the charged permit, and one that shrank fails
+/// too.
 ///
 /// Permissions are not copied here: the caller creates `to` with the
 /// sanitized mode of the target before any byte is written (a pre-existing
@@ -995,15 +989,14 @@ fn hardlink_target_changed(error: CopyError) -> ArchiveError {
 /// # Errors
 ///
 /// Returns `SecurityViolation` if the target's length differs from
-/// `expected_len`, and an I/O error if the copy fails.
+/// the permit's byte count, and an I/O error if the copy fails.
 pub fn copy_file_content_with_permit(
     mut from: File,
     mut to: File,
-    expected_len: u64,
     copy_buffer: &mut CopyBuffer,
-    _permit: QuotaPermit,
+    permit: QuotaPermit,
 ) -> Result<u64> {
-    copy_bounded(&mut from, &mut to, copy_buffer, Some(expected_len))
+    copy_bounded(&mut from, &mut to, copy_buffer, Some(permit.into_bytes()))
         .map_err(hardlink_target_changed)
 }
 
@@ -1016,6 +1009,7 @@ mod tests {
     use crate::NoopProgress;
     use crate::SecurityConfig;
     use crate::copy::CopyBuffer;
+    use crate::security::RawMode;
     use crate::security::permissions::sanitize_permissions;
     use crate::security::quota::QuotaTracker;
     use std::assert_matches;
@@ -1029,7 +1023,7 @@ mod tests {
     /// default config never changes the value.
     fn sanitized(mode: u32) -> SanitizedMode {
         let config = SecurityConfig::default().validate().expect("valid config");
-        sanitize_permissions(mode, &config)
+        sanitize_permissions(RawMode::new(mode), &config)
     }
 
     fn test_walker() -> DirWalker {
@@ -1198,11 +1192,11 @@ mod tests {
         report.bytes_written = u64::MAX - 100;
 
         // Try to extract a file with size that would overflow
-        let expected_size = Some(200u64); // This would overflow when added
 
         let config = SecurityConfig::default().validate().expect("valid config");
+        // A 200-byte reservation would overflow when added to bytes_written
         let permit = QuotaTracker::new()
-            .reserve(0, &config)
+            .reserve(200, &config)
             .expect("reservation should succeed");
         let safe_path = SafePath::validate(&PathBuf::from("test.txt"), &dest, &config)
             .expect("path should be valid");
@@ -1216,7 +1210,6 @@ mod tests {
             permit,
             &pinned(&dest),
             &mut report,
-            expected_size,
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
@@ -1260,8 +1253,9 @@ mod tests {
         report.files_skipped = usize::MAX;
 
         let config = SecurityConfig::default().validate().expect("valid config");
+        // A 200-byte reservation would overflow when added to bytes_written
         let permit = QuotaTracker::new()
-            .reserve(0, &config)
+            .reserve(200, &config)
             .expect("reservation should succeed");
         let safe_path = SafePath::validate(&PathBuf::from("test.txt"), &dest, &config)
             .expect("path should be valid");
@@ -1280,7 +1274,6 @@ mod tests {
             permit,
             &pinned(&dest),
             &mut report,
-            None,
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
@@ -1329,7 +1322,6 @@ mod tests {
             permit,
             &pinned(&dest),
             &mut report,
-            Some(50),
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
@@ -1375,7 +1367,6 @@ mod tests {
             permit,
             &pinned(&dest),
             &mut report,
-            Some(1000),
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
@@ -1426,7 +1417,6 @@ mod tests {
             permit,
             &pinned(&dest),
             &mut report,
-            Some(50),
             &mut copy_buffer,
             dirs,
             SinkOptions::default().with_skip_duplicates(false),
@@ -1483,7 +1473,6 @@ mod tests {
             let result = copy_file_content_with_permit(
                 File::open(&source).expect("open source"),
                 File::create(&to).expect("create copy"),
-                charged,
                 &mut CopyBuffer::new(),
                 permit,
             );
@@ -1653,9 +1642,9 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
 
         // Mode 0o777 in archive, sanitized to 0o775 (world-writable stripped)
-        let sanitized_mode = sanitize_permissions(0o777, &config);
+        let sanitized_mode = sanitize_permissions(RawMode::new(0o777), &config);
         let permit = QuotaTracker::new()
-            .reserve(0, &config)
+            .reserve(7, &config)
             .expect("reservation should succeed");
         let safe_path = SafePath::validate(&PathBuf::from("perm_test.txt"), &dest, &config)
             .expect("path should be valid");
@@ -1669,7 +1658,6 @@ mod tests {
             permit,
             &pinned(&dest),
             &mut report,
-            None,
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
@@ -1949,7 +1937,7 @@ mod tests {
         let mut progress = Panicking(0);
         let path = PathBuf::from("f");
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            EntryCompleteGuard::new(&mut progress, &path).complete();
+            EntryCompleteGuard::start(&mut progress, &path, 1, 1).complete();
         }));
         assert!(outcome.is_err());
         assert_eq!(progress.0, 1, "Drop must not fire the callback again");

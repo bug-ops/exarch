@@ -9,11 +9,15 @@
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::security::hardlink::HardlinkTarget;
+use crate::security::permissions::RawMode;
 use crate::security::permissions::SanitizedMode;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
+use crate::security::zipbomb::Compressed;
+use crate::security::zipbomb::Uncompressed;
 use crate::security::zipbomb::validate_compression_ratio;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -23,13 +27,22 @@ use crate::types::safe_path::Resolved;
 /// The declared sizes of one entry, as the validators consume them.
 #[derive(Debug, Clone, Copy)]
 pub struct EntrySize {
-    /// Declared uncompressed size in bytes.
-    pub uncompressed: u64,
+    /// Declared uncompressed size.
+    pub uncompressed: Uncompressed,
     /// Declared compressed size, when the format records one.
-    pub compressed: Option<u64>,
+    pub compressed: Option<Compressed>,
 }
 
 impl EntrySize {
+    /// Pairs the declared sizes of one entry.
+    #[must_use]
+    pub const fn new(uncompressed: Uncompressed, compressed: Option<Compressed>) -> Self {
+        Self {
+            uncompressed,
+            compressed,
+        }
+    }
+
     /// Checks the declared sizes against the configured compression-ratio
     /// limit; a no-op when the format records no compressed size.
     pub(crate) fn check_ratio(self, config: &SecurityConfig<Validated>) -> Result<()> {
@@ -46,11 +59,11 @@ impl EntrySize {
 pub struct PendingFile<P: ParentCheck = Resolved> {
     path: SafePath<P>,
     size: EntrySize,
-    mode: Option<u32>,
+    mode: Option<RawMode>,
 }
 
 impl<P: ParentCheck> PendingFile<P> {
-    pub(super) const fn new(path: SafePath<P>, size: EntrySize, mode: Option<u32>) -> Self {
+    pub(super) const fn new(path: SafePath<P>, size: EntrySize, mode: Option<RawMode>) -> Self {
         Self { path, size, mode }
     }
 
@@ -70,7 +83,7 @@ impl<P: ParentCheck> PendingFile<P> {
         quota: &mut QuotaTracker,
         config: &SecurityConfig<Validated>,
     ) -> Result<ValidatedFile<P>> {
-        let permit = quota.reserve(self.size.uncompressed, config)?;
+        let permit = quota.reserve(self.size.uncompressed.0, config)?;
         self.size.check_ratio(config)?;
         Ok(ValidatedFile {
             path: self.path,
@@ -111,7 +124,7 @@ pub struct ValidatedHardlink<P: ParentCheck = Resolved> {
     /// Validated location of the link.
     pub link: SafePath<P>,
     /// Validated target of the link.
-    pub target: SafePath<P>,
+    pub target: HardlinkTarget,
     /// Proof the hardlink was counted against `max_file_count`.
     pub counted: EntryCount,
 }
@@ -132,10 +145,7 @@ mod tests {
     use crate::types::DestDir;
 
     fn sizes(uncompressed: u64) -> EntrySize {
-        EntrySize {
-            uncompressed,
-            compressed: None,
-        }
+        EntrySize::new(Uncompressed(uncompressed), None)
     }
 
     #[test]
@@ -150,7 +160,7 @@ mod tests {
             .validate_file_in(
                 Path::new("a.txt"),
                 sizes(3),
-                Some(0o4755),
+                Some(RawMode::new(0o4755)),
                 &dest,
                 &HostFs,
                 &ctx,

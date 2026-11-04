@@ -11,12 +11,15 @@
 //! - No `From<RawType>` implementations for security types
 //! - All constructors perform validation
 
+pub mod config_entry;
 pub mod dest_dir;
 pub mod entry_type;
 mod parent_check;
 pub mod safe_path;
 pub mod safe_symlink;
 
+pub use config_entry::Extension;
+pub use config_entry::PathComponentName;
 pub use dest_dir::DestDir;
 pub use entry_type::EntryType;
 #[cfg(all(feature = "testing", any(unix, target_os = "wasi")))]

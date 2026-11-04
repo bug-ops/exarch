@@ -762,10 +762,10 @@ impl VerificationIssue {
                 format!("Invalid archive: {msg}"),
             ),
             ArchiveError::TarAmbiguity(_) | ArchiveError::TarTrailer(_) => tar_framing_issue(error),
-            ArchiveError::SecurityViolation { reason, .. } => (
+            ArchiveError::SecurityViolation { kind } => (
                 IssueSeverity::High,
                 IssueCategory::SecurityPolicy,
-                format!("Security violation: {reason}"),
+                format!("Security violation: {kind}"),
             ),
             ArchiveError::SourceNotFound { path } => (
                 IssueSeverity::High,
@@ -953,8 +953,11 @@ impl IssueCategory {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::Violation;
     use crate::ZipBombDetails;
     use crate::ZipBombScope;
+    use crate::security::Compressed;
+    use crate::security::Uncompressed;
     use std::io;
 
     use crate::inspection::manifest::ManifestEntryKind;
@@ -1204,8 +1207,11 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_zip_bomb() {
-        let error =
-            ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
+        let error = ArchiveError::ZipBomb(ZipBombDetails::new(
+            ZipBombScope::Entry,
+            Compressed(1000),
+            Uncompressed(1_000_000),
+        ));
         let issue = VerificationIssue::from_error(&error, None);
 
         assert_eq!(issue.severity, IssueSeverity::Critical);
@@ -1336,7 +1342,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_security_violation() {
-        let error = ArchiveError::violation("encrypted".into());
+        let error = ArchiveError::from(Violation::EncryptedArchive);
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity, IssueSeverity::High);
         assert_eq!(issue.category, IssueCategory::SecurityPolicy);
@@ -1345,7 +1351,7 @@ mod tests {
 
     #[test]
     fn test_security_violation_fails_security_status() {
-        let error = ArchiveError::violation("symlinks not allowed".into());
+        let error = ArchiveError::from(Violation::LinksNotAllowed(crate::LinkKind::Symlink));
         let report = report_with(vec![VerificationIssue::from_error(&error, None)]);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.security_status(), CheckStatus::Fail);

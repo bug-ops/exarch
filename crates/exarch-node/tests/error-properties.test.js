@@ -236,11 +236,14 @@ describe('subCode', () => {
     assert.strictEqual(err.relaxableBy, 'max_tar_metadata_bytes');
   });
 
-  it('other failures carry no subCode', async () => {
+  it('a plain corrupt archive carries no subCode', async () => {
     const err = await failureOf(write('junk.tar', Buffer.alloc(2048, 0x41)));
     assert.strictEqual(err.subCode, undefined);
+  });
+
+  it('every core SECURITY_VIOLATION carries a subCode', async () => {
     const violation = await extractArchive('/tmp/a\0.tar', '/tmp/out').catch((e) => e);
     assert.strictEqual(violation.code, 'SECURITY_VIOLATION');
-    assert.strictEqual(violation.subCode, undefined);
+    assert.strictEqual(violation.subCode, 'PATH_NAME');
   });
 });

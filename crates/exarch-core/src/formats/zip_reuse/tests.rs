@@ -16,7 +16,6 @@ use crate::NoopProgress;
 use crate::ReuseLimit;
 use crate::SecurityConfig;
 use crate::config::Validated;
-use crate::formats::traits::ArchiveFormat;
 use crate::formats::zip::ZipArchive;
 
 fn limit(bytes: u64) -> ReuseLimit {
@@ -296,7 +295,7 @@ fn open(bytes: &[u8], reuse: DecodeReuse) -> Opened {
 }
 
 fn extract(opened: &mut Opened, out: &std::path::Path) -> crate::Result<crate::ExtractionReport> {
-    opened.archive.extract(
+    opened.archive.extract_in_place(
         out,
         &opened.config,
         &ExtractionOptions::default(),

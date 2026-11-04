@@ -210,7 +210,7 @@ except exarch.ZipBombError as e:
     print(f"Zip bomb detected: {e}")
 except exarch.SecurityViolationError as e:
     # e.relaxable_by names the SecurityConfig setting that would admit the entry, or None
-    # e.sub_code is "TAR_TRAILER" for an over-cap tail after the TAR end marker, else None
+    # e.sub_code names the refusal family, e.g. "PATH_NAME", "LINK_POLICY" or "ENCRYPTED"
     print(f"Security violation ({e.relaxable_by}, {e.sub_code}): {e}")
 except exarch.InvalidArchiveError as e:
     # e.sub_code is "TAR_AMBIGUITY" or "TAR_TRAILER" for those TAR refusals, else None

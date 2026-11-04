@@ -79,7 +79,8 @@ impl Format {
 fn config() -> SecurityConfig {
     SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_allowed_extensions(vec!["txt".into()])
+        .try_add_allowed_extension("txt")
+        .unwrap()
         .with_max_total_size(LIMIT)
 }
 
@@ -200,7 +201,8 @@ fn a_disallowed_high_ratio_file_is_skipped_in_zip_and_refused_in_7z() {
     let work = TempDir::new().unwrap();
     let relaxed = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_allowed_extensions(vec!["txt".into()]);
+        .try_add_allowed_extension("txt")
+        .unwrap();
 
     let zip = Format::Zip.write(work.path(), &zip_with_zeros("bomb.bin"));
     let report = extract_archive(&zip, work.path().join("zip-out"), &relaxed).unwrap();

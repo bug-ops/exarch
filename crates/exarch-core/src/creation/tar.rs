@@ -159,32 +159,24 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     let mut tracker = ProgressTracker::new(progress, total_entries);
 
     for entry in &entries {
+        let mut guard = tracker.begin(&entry.archive_path);
         match &entry.entry_type {
-            EntryType::File => {
-                tracker.on_entry_start(&entry.archive_path);
-                add_file_to_tar_with_progress_impl(
-                    &mut builder,
-                    &entry.path,
-                    &entry.archive_path,
-                    config,
-                    &mut report,
-                    tracker.callback(),
-                )?;
-                tracker.on_entry_complete(&entry.archive_path);
-            }
-            EntryType::Directory => {
-                tracker.on_entry_start(&entry.archive_path);
-                add_directory_to_tar(
-                    &mut builder,
-                    &entry.path,
-                    &entry.archive_path,
-                    config,
-                    &mut report,
-                )?;
-                tracker.on_entry_complete(&entry.archive_path);
-            }
+            EntryType::File => add_file_to_tar_with_progress_impl(
+                &mut builder,
+                &entry.path,
+                &entry.archive_path,
+                config,
+                &mut report,
+                guard.progress_mut(),
+            )?,
+            EntryType::Directory => add_directory_to_tar(
+                &mut builder,
+                &entry.path,
+                &entry.archive_path,
+                config,
+                &mut report,
+            )?,
             EntryType::Symlink { target } => {
-                tracker.on_entry_start(&entry.archive_path);
                 if config.follow_symlinks {
                     add_file_to_tar_with_progress_impl(
                         &mut builder,
@@ -192,14 +184,14 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
                         &entry.archive_path,
                         config,
                         &mut report,
-                        tracker.callback(),
+                        guard.progress_mut(),
                     )?;
                 } else {
                     add_symlink_to_tar(&mut builder, &entry.archive_path, target, &mut report)?;
                 }
-                tracker.on_entry_complete(&entry.archive_path);
             }
         }
+        guard.complete();
     }
 
     // Finish writing TAR
@@ -216,10 +208,6 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
 }
 
 /// Adds a directory entry to the TAR archive.
-///
-/// Skips the archive root (empty relative `archive_path`), mirroring the ZIP
-/// handler's root-skip behavior, since the root itself is not a meaningful
-/// entry in the archive.
 fn add_directory_to_tar<W: Write>(
     builder: &mut Builder<W>,
     dir_path: &Path,
@@ -227,10 +215,6 @@ fn add_directory_to_tar<W: Write>(
     config: &CreationConfig<Validated>,
     report: &mut CreationReport,
 ) -> Result<()> {
-    if archive_path.is_empty() {
-        return Ok(());
-    }
-
     let mut header = Header::new_gnu();
     header.set_entry_type(tar::EntryType::Directory);
     header.set_size(0);
@@ -372,10 +356,6 @@ impl crate::formats::traits::FormatCreator for TarCreator {
     ) -> crate::Result<crate::creation::CreationReport> {
         create_tar_with_progress(output, self.0, sources, config, progress)
     }
-
-    fn format_name(&self) -> &'static str {
-        self.0.map_or("tar", CompressionCodec::extension)
-    }
 }
 
 #[cfg(test)]
@@ -386,8 +366,7 @@ mod tests {
     use crate::SecurityConfig;
     use crate::api::create_archive;
     use crate::api::extract_archive;
-    use crate::creation::compression::compression_level_to_flate2;
-    use crate::creation::compression::compression_level_to_zstd;
+    use crate::creation::CompressionLevel;
     use crate::formats::detect::CreatableFormat;
     use std::assert_matches;
     use std::fs;
@@ -453,8 +432,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_compression_level(9)
-            .unwrap()
+            .with_compression_level(CompressionLevel::try_from(9u8).unwrap())
             .with_format(Some(CreatableFormat::TarGz));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
@@ -550,12 +528,11 @@ mod tests {
             CreatableFormat::TarXz,
             CreatableFormat::TarZst,
         ] {
-            for level in 1..=9 {
+            for level in 1..=9u8 {
                 let output = temp.path().join(format!("output_{format:?}_{level}.tar"));
                 let config = CreationConfig::default()
                     .with_exclude_patterns(vec![])
-                    .with_compression_level(level)
-                    .unwrap()
+                    .with_compression_level(CompressionLevel::try_from(level).unwrap())
                     .with_format(Some(format));
 
                 let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
@@ -737,34 +714,6 @@ mod tests {
         assert_matches!(result.unwrap_err(), ArchiveError::SourceNotFound { .. });
     }
 
-    #[test]
-    fn test_compression_level_to_flate2() {
-        // Default
-        let level = compression_level_to_flate2(None);
-        assert_eq!(level, flate2::Compression::default());
-
-        // Fast
-        let level = compression_level_to_flate2(Some(1));
-        assert_eq!(level, flate2::Compression::fast());
-
-        // Best
-        let level = compression_level_to_flate2(Some(9));
-        assert_eq!(level, flate2::Compression::best());
-
-        // Specific level
-        let level = compression_level_to_flate2(Some(5));
-        assert_eq!(level, flate2::Compression::new(5));
-    }
-
-    #[test]
-    fn test_compression_level_to_zstd() {
-        assert_eq!(compression_level_to_zstd(None), 3);
-        assert_eq!(compression_level_to_zstd(Some(1)), 1);
-        assert_eq!(compression_level_to_zstd(Some(6)), 3);
-        assert_eq!(compression_level_to_zstd(Some(7)), 10);
-        assert_eq!(compression_level_to_zstd(Some(9)), 19);
-    }
-
     // NOTE: Progress tracking reader tests are now in creation/progress.rs
 
     /// Writer that fails with an I/O error after `fail_after` bytes have been
@@ -821,7 +770,7 @@ mod tests {
         // Allow enough bytes for the zstd header but fail mid-stream so that
         // encoder.finish() must flush remaining data and hits the limit.
         let fail_writer = FailWriter::new(8);
-        let level = compression_level_to_zstd(config.compression_level);
+        let level = config.compression_level.to_zstd();
         let mut encoder = zstd::Encoder::new(fail_writer, level).unwrap();
         encoder.include_checksum(true).unwrap();
 

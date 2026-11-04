@@ -24,6 +24,7 @@ use crate::inspection::integrity::Slot;
 use crate::inspection::manifest::EntryPosition;
 use crate::inspection::manifest::LinkTarget;
 use crate::inspection::report::UnverifiedReason;
+use crate::security::Uncompressed;
 use crate::security::fs_view::LinkKind;
 use crate::security::zipbomb::validate_entry_compression;
 use std::collections::BTreeMap;
@@ -251,7 +252,8 @@ pub(super) fn blocks_closed_to_links(
     }
     for (index, file) in header.files().iter().enumerate() {
         if let Some(block) = header.file_block(index)
-            && validate_entry_compression(&compression[index], file.size, config).is_err()
+            && validate_entry_compression(&compression[index], Uncompressed(file.size), config)
+                .is_err()
         {
             closed[block.get()] = true;
         }

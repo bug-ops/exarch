@@ -1,0 +1,12 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/hardlink_target_forge_via_tuple_struct.rs:9:19
+  |
+9 |     let _target = HardlinkTarget(std::path::PathBuf::from("/etc/passwd"));
+  |                   ^^^^^^^^^^^^^^
+  |
+  = note: a struct named `HardlinkTarget` exists in another namespace
+note: constructor is not visible here due to private fields
+ --> src/security/hardlink.rs
+  |
+  | pub struct HardlinkTarget(PathBuf);
+  |                           ^^^^^^^ private field

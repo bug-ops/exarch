@@ -10,6 +10,73 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::PathBuf;
 
+/// A compression level on exarch's 1-9 scale; the default is 6.
+///
+/// Built only through [`TryFrom<u8>`] / [`TryFrom<u32>`], so the range is
+/// checked once at the boundary and every codec mapping can rely on it.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::creation::CompressionLevel;
+///
+/// let level = CompressionLevel::try_from(9u8)?;
+/// assert_eq!(level.get(), 9);
+/// assert_eq!(CompressionLevel::default().get(), 6);
+/// assert!(CompressionLevel::try_from(0u8).is_err());
+/// assert!(CompressionLevel::try_from(10u32).is_err());
+/// # Ok::<(), exarch_core::ArchiveError>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CompressionLevel(u8);
+
+impl CompressionLevel {
+    /// The level on the 1-9 scale.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for CompressionLevel {
+    fn default() -> Self {
+        Self(6)
+    }
+}
+
+impl TryFrom<u8> for CompressionLevel {
+    type Error = ArchiveError;
+
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidCompressionLevel`] if `level` is not in
+    /// 1-9.
+    fn try_from(level: u8) -> Result<Self> {
+        if (1..=9).contains(&level) {
+            Ok(Self(level))
+        } else {
+            Err(ArchiveError::InvalidCompressionLevel {
+                level: u32::from(level),
+            })
+        }
+    }
+}
+
+impl TryFrom<u32> for CompressionLevel {
+    type Error = ArchiveError;
+
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidCompressionLevel`] if `level` is not in
+    /// 1-9.
+    fn try_from(level: u32) -> Result<Self> {
+        u8::try_from(level)
+            .ok()
+            .and_then(|level| Self::try_from(level).ok())
+            .ok_or(ArchiveError::InvalidCompressionLevel { level })
+    }
+}
+
 /// The field data of a [`CreationConfig`], reachable via [`Deref`]/[`DerefMut`]
 /// regardless of (or gated by) validation state.
 ///
@@ -60,12 +127,9 @@ pub struct CreationConfigFields {
     /// Compression level (1-9).
     ///
     /// Higher values provide better compression but slower speed.
-    /// `None` uses format-specific defaults.
     ///
-    /// Default: `Some(6)` (balanced).
-    ///
-    /// Valid range: 1 (fastest) to 9 (best compression).
-    pub compression_level: Option<u8>,
+    /// Default: 6 (balanced).
+    pub compression_level: CompressionLevel,
 
     /// Preserve file permissions in the archive.
     ///
@@ -94,7 +158,7 @@ impl Default for CreationConfigFields {
                 "*.tmp".to_string(),
             ],
             strip_prefix: None,
-            compression_level: Some(6),
+            compression_level: CompressionLevel::default(),
             preserve_permissions: true,
             format: None,
         }
@@ -109,6 +173,7 @@ impl Default for CreationConfigFields {
 /// # Examples
 ///
 /// ```
+/// use exarch_core::creation::CompressionLevel;
 /// use exarch_core::creation::CreationConfig;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -118,7 +183,7 @@ impl Default for CreationConfigFields {
 /// // Customize for specific needs
 /// let custom = CreationConfig::default()
 ///     .with_follow_symlinks(true)
-///     .with_compression_level(9)?;
+///     .with_compression_level(CompressionLevel::try_from(9u8)?);
 /// # Ok(())
 /// # }
 /// ```
@@ -180,7 +245,7 @@ impl Default for CreationConfig<Unvalidated> {
     /// - `max_file_size`: `None`
     /// - `exclude_patterns`: `[".git", ".DS_Store", "*.tmp"]`
     /// - `strip_prefix`: `None`
-    /// - `compression_level`: `Some(6)`
+    /// - `compression_level`: 6
     /// - `preserve_permissions`: `true`
     /// - `format`: `None`
     fn default() -> Self {
@@ -281,26 +346,21 @@ impl CreationConfig<Unvalidated> {
 
     /// Sets the compression level.
     ///
-    /// # Errors
-    ///
-    /// Returns [`ArchiveError::InvalidCompressionLevel`] if `level` is not
-    /// in the range 1–9.
-    ///
     /// # Examples
     ///
     /// ```
+    /// use exarch_core::creation::CompressionLevel;
     /// use exarch_core::creation::CreationConfig;
     ///
-    /// let config = CreationConfig::default().with_compression_level(9)?;
-    /// assert_eq!(config.compression_level, Some(9));
+    /// let level = CompressionLevel::try_from(9u8)?;
+    /// let config = CreationConfig::default().with_compression_level(level);
+    /// assert_eq!(config.compression_level, level);
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
-    pub fn with_compression_level(mut self, level: u8) -> Result<Self> {
-        if !(1..=9).contains(&level) {
-            return Err(ArchiveError::InvalidCompressionLevel { level });
-        }
-        self.fields.compression_level = Some(level);
-        Ok(self)
+    #[must_use]
+    pub fn with_compression_level(mut self, level: CompressionLevel) -> Self {
+        self.fields.compression_level = level;
+        self
     }
 
     /// Sets whether to preserve permissions.
@@ -349,8 +409,9 @@ impl CreationConfig<Unvalidated> {
     ///
     /// # Errors
     ///
-    /// Returns [`ArchiveError::InvalidCompressionLevel`] if `compression_level`
-    /// is set but not in the range 1–9.
+    /// Currently never fails: every field is already typed to a valid range.
+    /// The `Result` keeps the signature stable for checks that need the whole
+    /// configuration.
     ///
     /// # Examples
     ///
@@ -361,11 +422,6 @@ impl CreationConfig<Unvalidated> {
     /// assert!(config.validate().is_ok());
     /// ```
     pub fn validate(self) -> Result<CreationConfig<Validated>> {
-        if let Some(level) = self.fields.compression_level
-            && !(1..=9).contains(&level)
-        {
-            return Err(ArchiveError::InvalidCompressionLevel { level });
-        }
         Ok(CreationConfig {
             fields: self.fields,
             _marker: PhantomData,
@@ -374,6 +430,7 @@ impl CreationConfig<Unvalidated> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::assert_matches;
@@ -389,22 +446,21 @@ mod tests {
         assert!(config.exclude_patterns.contains(&".DS_Store".to_string()));
         assert!(config.exclude_patterns.contains(&"*.tmp".to_string()));
         assert_eq!(config.strip_prefix, None);
-        assert_eq!(config.compression_level, Some(6));
+        assert_eq!(config.compression_level, CompressionLevel::default());
         assert!(config.preserve_permissions);
         assert_eq!(config.format, None);
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn test_creation_config_builder() {
+        let level = CompressionLevel::try_from(9u8).unwrap();
         let config = CreationConfig::default()
             .with_follow_symlinks(true)
             .with_include_hidden(true)
             .with_max_file_size(Some(1024 * 1024))
             .with_exclude_patterns(vec!["*.log".to_string()])
             .with_strip_prefix(Some(PathBuf::from("/base")))
-            .with_compression_level(9)
-            .unwrap()
+            .with_compression_level(level)
             .with_preserve_permissions(false)
             .with_format(Some(CreatableFormat::TarGz));
 
@@ -413,66 +469,53 @@ mod tests {
         assert_eq!(config.max_file_size, Some(1024 * 1024));
         assert_eq!(config.exclude_patterns, vec!["*.log".to_string()]);
         assert_eq!(config.strip_prefix, Some(PathBuf::from("/base")));
-        assert_eq!(config.compression_level, Some(9));
+        assert_eq!(config.compression_level, level);
         assert!(!config.preserve_permissions);
         assert_eq!(config.format, Some(CreatableFormat::TarGz));
     }
 
     #[test]
-    #[allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
     fn test_creation_config_validate_valid() {
-        let config = CreationConfig::default();
-        assert!(config.validate().is_ok());
-
-        let config = CreationConfig::default().with_compression_level(1).unwrap();
-        assert!(config.validate().is_ok());
-
-        let config = CreationConfig::default().with_compression_level(9).unwrap();
-        assert!(config.validate().is_ok());
-
-        let mut config = CreationConfig::default();
-        config.compression_level = None;
-        assert!(config.validate().is_ok());
+        assert!(CreationConfig::default().validate().is_ok());
+        for level in [1u8, 9] {
+            let config = CreationConfig::default()
+                .with_compression_level(CompressionLevel::try_from(level).unwrap());
+            assert!(config.validate().is_ok());
+        }
     }
 
     #[test]
-    #[allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
-    fn test_creation_config_validate_invalid() {
-        let mut config = CreationConfig::default();
-        config.compression_level = Some(0);
-        let result = config.validate();
-        assert!(result.is_err());
-        assert_matches!(
-            result.unwrap_err(),
-            ArchiveError::InvalidCompressionLevel { level: 0 }
-        );
-
-        let mut config = CreationConfig::default();
-        config.compression_level = Some(10);
-        let result = config.validate();
-        assert!(result.is_err());
-        assert_matches!(
-            result.unwrap_err(),
-            ArchiveError::InvalidCompressionLevel { level: 10 }
-        );
+    fn test_compression_level_refuses_out_of_range() {
+        for level in [0u8, 10, 200] {
+            assert_matches!(
+                CompressionLevel::try_from(level),
+                Err(ArchiveError::InvalidCompressionLevel { level: l }) if l == u32::from(level)
+            );
+        }
+        for level in [0u32, 10, 256, 4_294_967_295] {
+            assert_matches!(
+                CompressionLevel::try_from(level),
+                Err(ArchiveError::InvalidCompressionLevel { level: l }) if l == level
+            );
+        }
     }
 
     #[test]
-    fn test_creation_config_builder_invalid_compression() {
-        assert_matches!(
-            CreationConfig::default().with_compression_level(0),
-            Err(ArchiveError::InvalidCompressionLevel { level: 0 })
-        );
-        assert_matches!(
-            CreationConfig::default().with_compression_level(10),
-            Err(ArchiveError::InvalidCompressionLevel { level: 10 })
-        );
+    fn test_compression_level_accepts_the_whole_scale() {
+        for level in 1u8..=9 {
+            assert_eq!(CompressionLevel::try_from(level).unwrap().get(), level);
+            assert_eq!(
+                CompressionLevel::try_from(u32::from(level)).unwrap().get(),
+                level
+            );
+        }
+        assert_eq!(CompressionLevel::default().get(), 6);
     }
 
     #[test]
     fn test_creation_config_new() {
         let config = CreationConfig::new();
-        assert_eq!(config.compression_level, Some(6));
+        assert_eq!(config.compression_level, CompressionLevel::default());
         assert!(config.preserve_permissions);
     }
 
@@ -496,23 +539,6 @@ mod tests {
         assert!(
             config.exclude_patterns.contains(&".git".to_string()),
             "should exclude .git by default"
-        );
-    }
-
-    /// Regression test for #443: a validated config must not let levels
-    /// 10-255 reach the `flate2`/`liblzma` backends, which panic (rather than
-    /// error) on out-of-range values. `validate()` is the only path to
-    /// `CreationConfig<Validated>`, and it rejects out-of-range levels
-    /// regardless of how `compression_level` was set.
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn test_validate_rejects_forged_out_of_range_compression_level() {
-        let mut config = CreationConfig::default();
-        config.compression_level = Some(200);
-        let result = config.validate();
-        assert_matches!(
-            result,
-            Err(ArchiveError::InvalidCompressionLevel { level: 200 })
         );
     }
 }

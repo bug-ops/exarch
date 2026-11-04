@@ -163,9 +163,14 @@ use super::tar_extension_headers::check_entry_headers;
 use super::tar_extension_headers::check_trailing_headers;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Violation;
 use crate::ZipBombDetails;
 use crate::ZipBombScope;
 use crate::config::Validated;
+use crate::error::violation::fmt_tar_read_budget;
+use crate::error::violation::fmt_tar_synthetic_budget;
+use crate::security::Compressed;
+use crate::security::Uncompressed;
 
 /// Hard, non-configurable ceiling on how many *synthesized* bytes (drained
 /// output with no corresponding read from the underlying reader)
@@ -430,13 +435,7 @@ struct TarReadBudgetExceeded {
 
 impl std::fmt::Display for TarReadBudgetExceeded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "TAR metadata read budget exceeded: more than {} bytes read while searching for the \
-             next archive entry (long-name/long-link/PAX headers, or a run of GNU sparse \
-             extension blocks)",
-            self.limit
-        )
+        fmt_tar_read_budget(f, self.limit)
     }
 }
 
@@ -454,12 +453,7 @@ struct TarCumulativeSyntheticBudgetExceeded {
 
 impl std::fmt::Display for TarCumulativeSyntheticBudgetExceeded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "TAR cumulative synthetic-byte drain budget exceeded: more than {} bytes of \
-             synthesized (unbacked) padding drained from unread entries across this archive",
-            self.limit
-        )
+        fmt_tar_synthetic_budget(f, self.limit)
     }
 }
 
@@ -517,13 +511,20 @@ pub fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(err) = current {
         if let Some(exceeded) = err.downcast_ref::<TarReadBudgetExceeded>() {
-            return Some(crate::ArchiveError::relaxable_violation(
-                crate::PolicySetting::MaxTarMetadataBytes,
-                exceeded.to_string(),
-            ));
+            return Some(
+                Violation::TarMetadataBudget {
+                    limit: exceeded.limit,
+                }
+                .into(),
+            );
         }
         if let Some(exceeded) = err.downcast_ref::<TarCumulativeSyntheticBudgetExceeded>() {
-            return Some(crate::ArchiveError::violation(exceeded.to_string()));
+            return Some(
+                Violation::TarSyntheticBudget {
+                    limit: exceeded.limit,
+                }
+                .into(),
+            );
         }
         if let Some(exceeded) = err.downcast_ref::<DecoderMemoryExceeded>() {
             return Some(crate::ArchiveError::QuotaExceeded {
@@ -899,8 +900,8 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
             if decoded > limits.allowance(consumed) {
                 return Err(crate::ArchiveError::ZipBomb(ZipBombDetails::new(
                     ZipBombScope::SkippedEntries,
-                    consumed,
-                    decoded,
+                    Compressed(consumed),
+                    Uncompressed(decoded),
                 )));
             }
             Ok(())
@@ -1287,7 +1288,8 @@ mod tests {
         let mut entries = budgeted_tar_entries(&mut archive, budget).unwrap();
 
         let mut entry = entries.next_entry().unwrap().unwrap().check(4096).unwrap();
-        let failed = entry.settle(|_| Err::<(), _>(crate::ArchiveError::violation("no".into())));
+        let failed = entry
+            .settle(|_| Err::<(), _>(crate::ArchiveError::from(Violation::SymlinksUnsupported)));
         assert!(failed.is_err());
         drop(entry);
 

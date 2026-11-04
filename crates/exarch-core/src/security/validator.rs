@@ -8,6 +8,7 @@ use std::path::Path;
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Violation;
 use crate::config::Validated;
 use crate::formats::common::check_entry_name_limits;
 use crate::formats::common::is_extension_allowed;
@@ -19,8 +20,10 @@ use crate::security::admitted::ValidatedSymlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
+use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::require_hardlinks_allowed;
+use crate::security::permissions::RawMode;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
@@ -29,7 +32,6 @@ use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
-use crate::types::safe_path::EMPTY_PATH_REASON;
 use crate::types::safe_path::ParentCheck;
 use crate::types::safe_path::Resolved;
 use crate::types::safe_symlink::require_symlinks_allowed;
@@ -115,9 +117,7 @@ impl<P> EntryPath<P> {
     /// listing so `extract`, `list` and `verify` agree.
     pub(crate) fn require_directory_root(self, kind: NodeKind) -> Result<Self> {
         if self.is_root() && kind == NodeKind::NonDirectory {
-            return Err(ArchiveError::violation(
-                "archive root entry '.' must be a directory".into(),
-            ));
+            return Err(Violation::RootEntryNotDirectory.into());
         }
         Ok(self)
     }
@@ -133,7 +133,7 @@ pub(crate) fn check_root_entry_is_directory(path: &Path, kind: NodeKind) -> Resu
 /// and `verify` refuse, instead of joining it onto the destination directory.
 pub(crate) fn require_non_empty_name(path: &Path) -> Result<()> {
     if path.is_empty() {
-        return Err(ArchiveError::violation(EMPTY_PATH_REASON.into()));
+        return Err(Violation::EmptyPath.into());
     }
     Ok(())
 }
@@ -204,9 +204,9 @@ impl ValidatedEntry {
 /// their own payloads:
 ///
 /// - The `Symlink` and `Hardlink` variants wrap [`SafeSymlink`] and
-///   [`SafePath`], which are independently sealed and can only be produced by
-///   their own validation routines, so even crate-internal code cannot forge a
-///   "validated" symlink/hardlink target.
+///   [`HardlinkTarget`], which are independently sealed and can only be
+///   produced by their own validation routines, so even crate-internal code
+///   cannot forge a "validated" symlink/hardlink target.
 /// - The `File` variant wraps [`QuotaPermit`], whose only producer is
 ///   [`QuotaTracker::reserve`]: a `File` variant cannot be built without a
 ///   quota reservation having actually succeeded. This is crate-internal
@@ -236,7 +236,7 @@ pub enum ValidatedEntryType {
     #[non_exhaustive]
     Hardlink {
         /// Target path (already validated)
-        target: SafePath,
+        target: HardlinkTarget,
         /// Proof the hardlink was counted against `max_file_count` in the
         /// first pass; the second pass spends it to charge the copied bytes.
         counted: EntryCount,
@@ -294,17 +294,12 @@ impl<'a> ValidatorCore<'a> {
         &mut self,
         path: &Path,
         entry_type: &EntryType,
-        uncompressed_size: u64,
-        compressed_size: Option<u64>,
-        mode: Option<u32>,
+        size: EntrySize,
+        mode: Option<RawMode>,
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V>,
     ) -> Result<ValidatedEntry> {
-        let size = EntrySize {
-            uncompressed: uncompressed_size,
-            compressed: compressed_size,
-        };
         match entry_type {
             EntryType::File => {
                 let file = self.validate_file_in(path, size, mode, root, view, ctx)?;
@@ -350,7 +345,7 @@ impl<'a> ValidatorCore<'a> {
         &mut self,
         path: &Path,
         size: EntrySize,
-        mode: Option<u32>,
+        mode: Option<RawMode>,
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
@@ -370,7 +365,7 @@ impl<'a> ValidatorCore<'a> {
         &self,
         path: &Path,
         size: EntrySize,
-        mode: Option<u32>,
+        mode: Option<RawMode>,
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
@@ -397,7 +392,7 @@ impl<'a> ValidatorCore<'a> {
         &self,
         path: &Path,
         size: EntrySize,
-        mode: Option<u32>,
+        mode: Option<RawMode>,
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
@@ -441,7 +436,7 @@ impl<'a> ValidatorCore<'a> {
         check_name_limits(view, &safe_path, false, self.config)?;
         size.check_ratio(self.config)?;
         require_symlinks_allowed(self.config)?;
-        self.reserve_symlink(size.uncompressed)?;
+        self.reserve_symlink(size.uncompressed.0)?;
         let symlink = SafeSymlink::validate_in(&safe_path, target, root, self.config, view)?;
         self.symlink_seen = true;
         Ok(ValidatedSymlink {
@@ -468,15 +463,17 @@ impl<'a> ValidatorCore<'a> {
         require_hardlinks_allowed(self.config)?;
         let counted = self.quota_tracker.reserve_count(self.config)?;
 
-        self.hardlink_tracker
-            .validate_hardlink_in(&safe_path, target, root, self.config, view)?;
+        let target = self.hardlink_tracker.validate_hardlink_in(
+            &safe_path,
+            target,
+            root,
+            self.config,
+            view,
+        )?;
 
-        // SAFETY: validate_hardlink_in verified target is relative, normalized,
-        // within the root
-        let target_safe = SafePath::<P>::new_unchecked(target.to_path_buf());
         Ok(ValidatedHardlink {
             link: safe_path,
-            target: target_safe,
+            target,
             counted,
         })
     }
@@ -542,7 +539,11 @@ impl<'a> ValidatorCore<'a> {
 ///
 /// ```no_run
 /// use exarch_core::SecurityConfig;
+/// use exarch_core::security::Compressed;
+/// use exarch_core::security::EntrySize;
 /// use exarch_core::security::EntryValidator;
+/// use exarch_core::security::RawMode;
+/// use exarch_core::security::Uncompressed;
 /// use exarch_core::types::DestDir;
 /// use exarch_core::types::EntryType;
 /// use std::path::Path;
@@ -558,9 +559,8 @@ impl<'a> ValidatorCore<'a> {
 /// let entry = validator.validate_entry(
 ///     Path::new("foo/bar.txt"),
 ///     &EntryType::File,
-///     1024,        // uncompressed size
-///     Some(512),   // compressed size
-///     Some(0o644), // mode
+///     EntrySize::new(Uncompressed(1024), Some(Compressed(512))),
+///     Some(RawMode::new(0o644)),
 /// )?;
 ///
 /// let report = validator.finish();
@@ -613,21 +613,12 @@ impl<'a> EntryValidator<'a> {
         &mut self,
         path: &Path,
         entry_type: &EntryType,
-        uncompressed_size: u64,
-        compressed_size: Option<u64>,
-        mode: Option<u32>,
+        size: EntrySize,
+        mode: Option<RawMode>,
     ) -> Result<ValidatedEntry> {
         let ctx = self.core.context::<HostFs>();
-        self.core.validate_entry_in(
-            path,
-            entry_type,
-            uncompressed_size,
-            compressed_size,
-            mode,
-            self.dest,
-            &HostFs,
-            &ctx,
-        )
+        self.core
+            .validate_entry_in(path, entry_type, size, mode, self.dest, &HostFs, &ctx)
     }
 
     /// Charges a hardlink's copied byte count against the shared quota tracker,
@@ -685,6 +676,8 @@ pub struct ValidationReport {
 )]
 mod tests {
     use super::*;
+    use crate::security::Compressed;
+    use crate::security::Uncompressed;
     use std::assert_matches;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -706,7 +699,7 @@ mod tests {
         assert!(root.require_directory_root(NodeKind::Directory).is_ok());
         assert_matches!(
             root.require_directory_root(NodeKind::NonDirectory),
-            Err(ArchiveError::SecurityViolation { .. })
+            Err(crate::ArchiveError::SecurityViolation { .. })
         );
         let child = EntryPath::of(Path::new("a"));
         assert!(child.require_directory_root(NodeKind::NonDirectory).is_ok());
@@ -734,9 +727,8 @@ mod tests {
         let result = validator.validate_entry(
             Path::new("file.txt"),
             &EntryType::File,
-            1024,
-            None,
-            Some(0o644),
+            EntrySize::new(Uncompressed(1024), None),
+            Some(RawMode::new(0o644)),
         );
 
         assert!(result.is_ok());
@@ -753,8 +745,12 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
-        let result =
-            validator.validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None);
+        let result = validator.validate_entry(
+            Path::new("dir"),
+            &EntryType::Directory,
+            EntrySize::new(Uncompressed(0), None),
+            None,
+        );
 
         assert!(result.is_ok());
         let entry = result.unwrap();
@@ -772,9 +768,8 @@ mod tests {
         let result = validator.validate_entry(
             Path::new("../etc/passwd"),
             &EntryType::File,
-            1024,
-            None,
-            Some(0o644),
+            EntrySize::new(Uncompressed(1024), None),
+            Some(RawMode::new(0o644)),
         );
 
         assert!(result.is_err());
@@ -792,9 +787,8 @@ mod tests {
         let result = validator.validate_entry(
             Path::new("large.txt"),
             &EntryType::File,
-            1000,
-            None,
-            Some(0o644),
+            EntrySize::new(Uncompressed(1000), None),
+            Some(RawMode::new(0o644)),
         );
 
         assert!(result.is_err());
@@ -814,9 +808,8 @@ mod tests {
                 .validate_entry(
                     Path::new("file1.txt"),
                     &EntryType::File,
-                    100,
-                    None,
-                    Some(0o644),
+                    EntrySize::new(Uncompressed(100), None),
+                    Some(RawMode::new(0o644))
                 )
                 .is_ok()
         );
@@ -825,9 +818,8 @@ mod tests {
                 .validate_entry(
                     Path::new("file2.txt"),
                     &EntryType::File,
-                    100,
-                    None,
-                    Some(0o644),
+                    EntrySize::new(Uncompressed(100), None),
+                    Some(RawMode::new(0o644))
                 )
                 .is_ok()
         );
@@ -835,9 +827,8 @@ mod tests {
         let result = validator.validate_entry(
             Path::new("file3.txt"),
             &EntryType::File,
-            100,
-            None,
-            Some(0o644),
+            EntrySize::new(Uncompressed(100), None),
+            Some(RawMode::new(0o644)),
         );
         assert!(result.is_err());
     }
@@ -852,9 +843,8 @@ mod tests {
         let result = validator.validate_entry(
             Path::new("bomb.txt"),
             &EntryType::File,
-            1_000_000,
-            Some(100),
-            Some(0o644),
+            EntrySize::new(Uncompressed(1_000_000), Some(Compressed(100))),
+            Some(RawMode::new(0o644)),
         );
 
         assert!(result.is_err());
@@ -871,9 +861,8 @@ mod tests {
             .validate_entry(
                 Path::new("file1.txt"),
                 &EntryType::File,
-                1024,
-                None,
-                Some(0o644),
+                EntrySize::new(Uncompressed(1024), None),
+                Some(RawMode::new(0o644)),
             )
             .unwrap();
 
@@ -881,9 +870,8 @@ mod tests {
             .validate_entry(
                 Path::new("file2.txt"),
                 &EntryType::File,
-                2048,
-                None,
-                Some(0o644),
+                EntrySize::new(Uncompressed(2048), None),
+                Some(RawMode::new(0o644)),
             )
             .unwrap();
 
@@ -902,9 +890,8 @@ mod tests {
         let result = validator.validate_entry(
             Path::new("file.txt"),
             &EntryType::File,
-            1024,
-            None,
-            Some(0o4755),
+            EntrySize::new(Uncompressed(1024), None),
+            Some(RawMode::new(0o4755)),
         );
 
         assert!(result.is_ok());
@@ -926,8 +913,7 @@ mod tests {
             &EntryType::Symlink {
                 target: PathBuf::from("target.txt"),
             },
-            0,
-            None,
+            EntrySize::new(Uncompressed(0), None),
             None,
         );
 
@@ -951,8 +937,7 @@ mod tests {
             &EntryType::Hardlink {
                 target: PathBuf::from("target.txt"),
             },
-            0,
-            None,
+            EntrySize::new(Uncompressed(0), None),
             None,
         );
 
@@ -975,14 +960,18 @@ mod tests {
             .validate_entry(
                 Path::new("file1.txt"),
                 &EntryType::File,
-                1024,
-                None,
-                Some(0o644),
+                EntrySize::new(Uncompressed(1024), None),
+                Some(RawMode::new(0o644)),
             )
             .unwrap();
 
         validator
-            .validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None)
+            .validate_entry(
+                Path::new("dir"),
+                &EntryType::Directory,
+                EntrySize::new(Uncompressed(0), None),
+                None,
+            )
             .unwrap();
 
         validator
@@ -991,8 +980,7 @@ mod tests {
                 &EntryType::Hardlink {
                     target: PathBuf::from("file1.txt"),
                 },
-                0,
-                None,
+                EntrySize::new(Uncompressed(0), None),
                 None,
             )
             .unwrap();
@@ -1015,8 +1003,7 @@ mod tests {
         let result = validator.validate_entry(
             Path::new("empty_dir/"),
             &EntryType::Directory,
-            0,
-            None,
+            EntrySize::new(Uncompressed(0), None),
             None,
         );
 
@@ -1040,8 +1027,12 @@ mod tests {
         // Multiple nested empty directories
         let dirs = ["a/", "a/b/", "a/b/c/"];
         for dir in &dirs {
-            let result =
-                validator.validate_entry(Path::new(dir), &EntryType::Directory, 0, None, None);
+            let result = validator.validate_entry(
+                Path::new(dir),
+                &EntryType::Directory,
+                EntrySize::new(Uncompressed(0), None),
+                None,
+            );
             assert!(result.is_ok(), "nested directory {dir} should be valid");
         }
 
@@ -1092,18 +1083,16 @@ mod tests {
         let result1 = validator1.validate_entry(
             Path::new("file1.txt"),
             &EntryType::File,
-            1024,
-            None,
-            Some(0o644),
+            EntrySize::new(Uncompressed(1024), None),
+            Some(RawMode::new(0o644)),
         );
         assert!(result1.is_ok());
 
         let result2 = validator2.validate_entry(
             Path::new("file2.txt"),
             &EntryType::File,
-            2048,
-            None,
-            Some(0o644),
+            EntrySize::new(Uncompressed(2048), None),
+            Some(RawMode::new(0o644)),
         );
         assert!(result2.is_ok());
 
@@ -1132,8 +1121,7 @@ mod tests {
                 &EntryType::Symlink {
                     target: PathBuf::from("target.txt"),
                 },
-                0,
-                None,
+                EntrySize::new(Uncompressed(0), None),
                 None,
             )
             .unwrap();
@@ -1152,8 +1140,7 @@ mod tests {
             &EntryType::Hardlink {
                 target: PathBuf::from("target.txt"),
             },
-            0,
-            None,
+            EntrySize::new(Uncompressed(0), None),
             None,
         )?;
         match entry.entry_type {
@@ -1171,8 +1158,7 @@ mod tests {
             &EntryType::Symlink {
                 target: PathBuf::from("target.txt"),
             },
-            0,
-            None,
+            EntrySize::new(Uncompressed(0), None),
             None,
         )
     }
@@ -1213,9 +1199,8 @@ mod tests {
             .validate_entry(
                 Path::new("file1.txt"),
                 &EntryType::File,
-                100,
-                None,
-                Some(0o644),
+                EntrySize::new(Uncompressed(100), None),
+                Some(RawMode::new(0o644)),
             )
             .unwrap();
 
@@ -1293,14 +1278,19 @@ mod tests {
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
         validator
-            .validate_entry(Path::new("f"), &EntryType::File, 1, None, None)
+            .validate_entry(
+                Path::new("f"),
+                &EntryType::File,
+                EntrySize::new(Uncompressed(1), None),
+                None,
+            )
             .unwrap();
 
         let result = validate_symlink_entry(&mut validator, "l1");
         assert_matches!(
             result,
-            Err(crate::ArchiveError::SecurityViolation { ref reason, .. })
-                if reason == "symlinks not allowed",
+            Err(crate::ArchiveError::SecurityViolation { ref kind })
+                if kind.to_string() == "symlinks not allowed",
             "got: {result:?}"
         );
     }
@@ -1314,14 +1304,19 @@ mod tests {
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
         validator
-            .validate_entry(Path::new("f"), &EntryType::File, 1, None, None)
+            .validate_entry(
+                Path::new("f"),
+                &EntryType::File,
+                EntrySize::new(Uncompressed(1), None),
+                None,
+            )
             .unwrap();
 
         let result = validate_hardlink_entry(&mut validator, "l1");
         assert_matches!(
             result,
-            Err(crate::ArchiveError::SecurityViolation { ref reason, .. })
-                if reason == "hardlinks not allowed",
+            Err(crate::ArchiveError::SecurityViolation { ref kind })
+                if kind.to_string() == "hardlinks not allowed",
             "got: {result:?}"
         );
     }

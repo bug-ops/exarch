@@ -262,7 +262,7 @@ fn benchmark_many_small_files(c: &mut Criterion) {
 
                         let start = Instant::now();
                         let cursor = Cursor::new(data.clone());
-                        let mut archive = ZipArchive::new(cursor).unwrap();
+                        let archive = ZipArchive::new(cursor).unwrap();
                         archive
                             .extract(
                                 temp.path(),
@@ -362,7 +362,7 @@ fn benchmark_large_files(c: &mut Criterion) {
                 b.iter(|| {
                     let temp = TempDir::new().unwrap();
                     let cursor = Cursor::new(data.clone());
-                    let mut archive = ZipArchive::new(cursor).unwrap();
+                    let archive = ZipArchive::new(cursor).unwrap();
 
                     // Use config with increased limits for benchmarks
                     let config = SecurityConfig::default()
@@ -398,7 +398,7 @@ fn benchmark_nested_directories(c: &mut Criterion) {
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
-                let mut archive = ZipArchive::new(cursor).unwrap();
+                let archive = ZipArchive::new(cursor).unwrap();
                 archive
                     .extract(
                         temp.path(),
@@ -430,7 +430,7 @@ fn benchmark_compression_methods(c: &mut Criterion) {
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
-                let mut archive = ZipArchive::new(cursor).unwrap();
+                let archive = ZipArchive::new(cursor).unwrap();
                 archive
                     .extract(
                         temp.path(),
@@ -452,7 +452,7 @@ fn benchmark_compression_methods(c: &mut Criterion) {
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
-                let mut archive = ZipArchive::new(cursor).unwrap();
+                let archive = ZipArchive::new(cursor).unwrap();
                 archive
                     .extract(
                         temp.path(),
@@ -489,7 +489,7 @@ fn benchmark_sevenz_simple(c: &mut Criterion) {
         b.iter(|| {
             let temp = TempDir::new().unwrap();
             let cursor = Cursor::new(simple_data.clone());
-            let mut archive = SevenZArchive::new(cursor).unwrap();
+            let archive = SevenZArchive::new(cursor).unwrap();
             archive
                 .extract(
                     temp.path(),
@@ -514,7 +514,7 @@ fn benchmark_sevenz_nested_dirs(c: &mut Criterion) {
         b.iter(|| {
             let temp = TempDir::new().unwrap();
             let cursor = Cursor::new(nested_data.clone());
-            let mut archive = SevenZArchive::new(cursor).unwrap();
+            let archive = SevenZArchive::new(cursor).unwrap();
             archive
                 .extract(
                     temp.path(),
@@ -541,7 +541,7 @@ fn benchmark_sevenz_large_file(c: &mut Criterion) {
         b.iter(|| {
             let temp = TempDir::new().unwrap();
             let cursor = Cursor::new(large_data.clone());
-            let mut archive = SevenZArchive::new(cursor).unwrap();
+            let archive = SevenZArchive::new(cursor).unwrap();
             archive
                 .extract(
                     temp.path(),
@@ -588,7 +588,7 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
 
                     let start = Instant::now();
                     let cursor = Cursor::new(data.clone());
-                    let mut archive = ZipArchive::new(cursor).unwrap();
+                    let archive = ZipArchive::new(cursor).unwrap();
                     archive
                         .extract(
                             temp.path(),
@@ -639,7 +639,7 @@ fn benchmark_depth_scaling(c: &mut Criterion) {
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
-                let mut archive = ZipArchive::new(cursor).unwrap();
+                let archive = ZipArchive::new(cursor).unwrap();
                 archive
                     .extract(
                         temp.path(),
@@ -855,7 +855,7 @@ fn benchmark_sevenz_overwrite(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let temp = TempDir::new().unwrap();
-                        let mut archive = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
+                        let archive = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
                         archive
                             .extract(
                                 temp.path(),
@@ -867,7 +867,7 @@ fn benchmark_sevenz_overwrite(c: &mut Criterion) {
                         (temp, data.clone())
                     },
                     |(temp, data)| {
-                        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+                        let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
                         archive
                             .extract(
                                 temp.path(),

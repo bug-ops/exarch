@@ -97,12 +97,85 @@ closed_enum! {
     /// use exarch_core::SecurityViolationSubCode;
     ///
     /// assert_eq!(SecurityViolationSubCode::TarTrailer.as_str(), "TAR_TRAILER");
+    /// assert_eq!(SecurityViolationSubCode::PathName.as_str(), "PATH_NAME");
     /// ```
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     #[non_exhaustive]
     pub enum SecurityViolationSubCode {
+        /// An entry or argument path is refused by name rules.
+        PathName => "PATH_NAME",
+        /// A path or symlink target is deeper than the limit.
+        PathDepth => "PATH_DEPTH",
+        /// The target of a symlink or hardlink cannot be accepted.
+        LinkTarget => "LINK_TARGET",
+        /// The kind of link is disabled by the configuration.
+        LinkPolicy => "LINK_POLICY",
+        /// A symlink already at or above the entry's location blocks it.
+        ExistingSymlink => "EXISTING_SYMLINK",
+        /// An entry type exarch does not extract.
+        EntryType => "ENTRY_TYPE",
+        /// A root entry that is not a directory.
+        RootEntry => "ROOT_ENTRY",
+        /// An encrypted archive or entry.
+        Encrypted => "ENCRYPTED",
+        /// A compression method exarch does not read.
+        CompressionMethod => "COMPRESSION_METHOD",
+        /// A solid archive while solid archives are disabled.
+        SolidArchive => "SOLID_ARCHIVE",
+        /// A stream disagrees with the size its archive declared.
+        DeclaredSize => "DECLARED_SIZE",
+        /// A file changed while it was being copied.
+        ConcurrentChange => "CONCURRENT_CHANGE",
+        /// A TAR metadata or synthetic-byte budget was exceeded.
+        TarMetadata => "TAR_METADATA",
         /// An over-cap tail after the TAR end-of-archive marker.
         TarTrailer => "TAR_TRAILER",
+        /// The host platform cannot do what the entry asks.
+        Platform => "PLATFORM",
+        /// An existing output conflicts with an entry.
+        OutputConflict => "OUTPUT_CONFLICT",
+        /// A source path to archive lies outside the archive root.
+        SourcePath => "SOURCE_PATH",
+    }
+}
+
+/// The finer classification of an error, tagged with the class it refines.
+///
+/// The variant is the error class, so a pair of class and sub-code that core
+/// never produces cannot be built.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::InvalidArchiveSubCode;
+/// use exarch_core::SubCode;
+///
+/// let code = SubCode::InvalidArchive(InvalidArchiveSubCode::TarTrailer);
+/// assert_eq!(code.as_str(), "TAR_TRAILER");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SubCode {
+    /// Refines [`ErrorCode::InvalidArchive`].
+    InvalidArchive(InvalidArchiveSubCode),
+    /// Refines [`ErrorCode::SecurityViolation`].
+    SecurityViolation(SecurityViolationSubCode),
+}
+
+impl SubCode {
+    /// The stable string form of the wrapped sub-code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidArchive(code) => code.as_str(),
+            Self::SecurityViolation(code) => code.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for SubCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -119,14 +192,16 @@ closed_enum! {
 /// use exarch_core::ArchiveError;
 /// use exarch_core::ErrorCode;
 /// use exarch_core::FfiKind;
+/// use exarch_core::SecurityViolationSubCode;
+/// use exarch_core::Violation;
 /// use std::assert_matches;
 ///
-/// let msg = ArchiveError::violation("nope".into()).into_ffi_message();
+/// let msg = ArchiveError::from(Violation::EncryptedArchive).into_ffi_message();
 /// assert_matches!(
 ///     msg.kind,
 ///     FfiKind::SecurityViolation {
 ///         relaxable_by: None,
-///         sub_code: None,
+///         sub_code: SecurityViolationSubCode::Encrypted,
 ///         ..
 ///     }
 /// );
@@ -153,8 +228,8 @@ pub enum FfiKind {
         /// The `SecurityConfig` setting whose current value refused the
         /// entry; see [`ArchiveError::relaxable_by`].
         relaxable_by: Option<PolicySetting>,
-        /// Finer classification, when the refusal has one.
-        sub_code: Option<SecurityViolationSubCode>,
+        /// The family of the refusal.
+        sub_code: SecurityViolationSubCode,
     },
     /// Archive is corrupted or malformed.
     #[non_exhaustive]
@@ -181,6 +256,56 @@ pub enum FfiKind {
 }
 
 impl FfiKind {
+    /// The `SecurityConfig` setting whose current value refused the entry, if
+    /// this is a [`FfiKind::SecurityViolation`] that a setting can relax.
+    #[must_use]
+    pub const fn relaxable_by(&self) -> Option<PolicySetting> {
+        match self {
+            Self::SecurityViolation { relaxable_by, .. } => *relaxable_by,
+            Self::PathTraversal
+            | Self::SymlinkEscape
+            | Self::HardlinkEscape
+            | Self::ZipBomb
+            | Self::ZipInconsistency
+            | Self::QuotaExceeded
+            | Self::InvalidArchive { .. }
+            | Self::Io(_)
+            | Self::InvalidPermissions
+            | Self::SourceNotFound
+            | Self::SourceNotAccessible
+            | Self::OutputExists
+            | Self::InvalidCompressionLevel
+            | Self::UnknownFormat
+            | Self::InvalidConfiguration => None,
+        }
+    }
+
+    /// The finer classification of this error, when it has one.
+    #[must_use]
+    pub const fn sub_code(&self) -> Option<SubCode> {
+        match self {
+            Self::SecurityViolation { sub_code, .. } => Some(SubCode::SecurityViolation(*sub_code)),
+            Self::InvalidArchive {
+                sub_code: Some(code),
+            } => Some(SubCode::InvalidArchive(*code)),
+            Self::InvalidArchive { sub_code: None }
+            | Self::PathTraversal
+            | Self::SymlinkEscape
+            | Self::HardlinkEscape
+            | Self::ZipBomb
+            | Self::ZipInconsistency
+            | Self::QuotaExceeded
+            | Self::Io(_)
+            | Self::InvalidPermissions
+            | Self::SourceNotFound
+            | Self::SourceNotAccessible
+            | Self::OutputExists
+            | Self::InvalidCompressionLevel
+            | Self::UnknownFormat
+            | Self::InvalidConfiguration => None,
+        }
+    }
+
     /// The stable [`ErrorCode`] of this class.
     #[must_use]
     pub const fn code(&self) -> ErrorCode {
@@ -337,9 +462,9 @@ impl ArchiveError {
             Self::ZipBomb(_) => FfiKind::ZipBomb,
             Self::ZipInconsistency(_) => FfiKind::ZipInconsistency,
             Self::QuotaExceeded { .. } => FfiKind::QuotaExceeded,
-            Self::SecurityViolation { relaxable_by, .. } => FfiKind::SecurityViolation {
-                relaxable_by: *relaxable_by,
-                sub_code: None,
+            Self::SecurityViolation { kind } => FfiKind::SecurityViolation {
+                relaxable_by: kind.relaxable_by(),
+                sub_code: kind.sub_code(),
             },
             Self::InvalidArchive(_) => FfiKind::InvalidArchive { sub_code: None },
             Self::TarAmbiguity(_) => FfiKind::InvalidArchive {
@@ -349,7 +474,7 @@ impl ArchiveError {
                 if refusal.is_policy_refusal() {
                     FfiKind::SecurityViolation {
                         relaxable_by: refusal.relaxable_by(),
-                        sub_code: Some(SecurityViolationSubCode::TarTrailer),
+                        sub_code: SecurityViolationSubCode::TarTrailer,
                     }
                 } else {
                     FfiKind::InvalidArchive {
@@ -389,11 +514,9 @@ impl ArchiveError {
             Self::ZipBomb(_)
             | Self::ZipInconsistency(_)
             | Self::TarAmbiguity(_)
-            | Self::TarTrailer(_) => self.to_string(),
+            | Self::TarTrailer(_)
+            | Self::SecurityViolation { .. } => self.to_string(),
             Self::QuotaExceeded { resource } => resource.to_string(),
-            Self::SecurityViolation { reason, .. } => {
-                format!("operation denied by security policy: {reason}")
-            }
             Self::InvalidArchive(reason) => format!("invalid archive: {reason}"),
             Self::Io(io_err) => sanitize_io_error_for_error(io_err),
             Self::InvalidPermissions { mode, .. } => {
@@ -425,8 +548,9 @@ impl ArchiveError {
     /// ```
     /// use exarch_core::ArchiveError;
     /// use exarch_core::ErrorCode;
+    /// use exarch_core::Violation;
     ///
-    /// let err = ArchiveError::violation("nope".into());
+    /// let err = ArchiveError::from(Violation::EncryptedArchive);
     /// assert_eq!(err.error_code(), ErrorCode::SecurityViolation);
     /// assert_eq!(err.error_code().as_str(), "SECURITY_VIOLATION");
     /// ```
@@ -441,9 +565,33 @@ mod tests {
     use super::super::types::QuotaResource;
     use super::super::types::ZipBombDetails;
     use super::super::types::ZipBombScope;
+    use super::super::violation::Violation;
     use super::*;
+    use crate::security::Compressed;
+    use crate::security::Uncompressed;
     use std::assert_matches;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_ffi_kind_accessors_expose_payload() {
+        let kind = FfiKind::SecurityViolation {
+            relaxable_by: Some(PolicySetting::Symlinks),
+            sub_code: SecurityViolationSubCode::TarTrailer,
+        };
+        assert_eq!(kind.relaxable_by(), Some(PolicySetting::Symlinks));
+        assert_eq!(
+            kind.sub_code(),
+            Some(SubCode::SecurityViolation(
+                SecurityViolationSubCode::TarTrailer
+            ))
+        );
+        let kind = FfiKind::InvalidArchive {
+            sub_code: Some(InvalidArchiveSubCode::TarAmbiguity),
+        };
+        assert_eq!(kind.relaxable_by(), None);
+        assert_eq!(kind.sub_code().map(SubCode::as_str), Some("TAR_AMBIGUITY"));
+        assert_eq!(FfiKind::ZipBomb.sub_code(), None);
+    }
 
     /// Regression test for #462: `PathTraversal` carries an
     /// archive-relative, attacker-authored path and must never be redacted,
@@ -501,7 +649,11 @@ mod tests {
                 ErrorCode::SymlinkEscape,
             ),
             (
-                ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 10000)),
+                ArchiveError::ZipBomb(ZipBombDetails::new(
+                    ZipBombScope::Entry,
+                    Compressed(100),
+                    Uncompressed(10000),
+                )),
                 ErrorCode::ZipBomb,
             ),
         ];
@@ -523,14 +675,18 @@ mod tests {
             ArchiveError::HardlinkEscape {
                 path: PathBuf::from("test"),
             },
-            ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 10000)),
+            ArchiveError::ZipBomb(ZipBombDetails::new(
+                ZipBombScope::Entry,
+                Compressed(100),
+                Uncompressed(10000),
+            )),
             ArchiveError::ZipInconsistency(
                 super::super::zip_inconsistency::ZipInconsistency::OverlappingEntries,
             ),
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow,
             },
-            ArchiveError::violation("test".into()),
+            ArchiveError::from(Violation::EncryptedArchive),
             ArchiveError::InvalidArchive("test".into()),
             ArchiveError::Io(std::io::Error::other("test")),
             ArchiveError::InvalidPermissions {
@@ -653,7 +809,7 @@ mod tests {
             ArchiveError::TarTrailer(R::OverCap { cap: 1 }).ffi_kind(),
             FfiKind::SecurityViolation {
                 relaxable_by: Some(PolicySetting::MaxTarMetadataBytes),
-                sub_code: Some(SecurityViolationSubCode::TarTrailer),
+                sub_code: SecurityViolationSubCode::TarTrailer,
             }
         );
 
@@ -662,10 +818,10 @@ mod tests {
             invalid(None)
         );
         assert_eq!(
-            ArchiveError::violation("x".into()).ffi_kind(),
+            ArchiveError::from(Violation::EncryptedArchive).ffi_kind(),
             FfiKind::SecurityViolation {
                 relaxable_by: None,
-                sub_code: None,
+                sub_code: SecurityViolationSubCode::Encrypted,
             }
         );
         let wrapped = ArchiveError::PartialExtraction {
@@ -681,7 +837,7 @@ mod tests {
     #[test]
     fn test_partial_extraction_sets_partial() {
         let wrap = |writes| ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::violation("x".into())),
+            source: Box::new(ArchiveError::from(Violation::EncryptedArchive)),
             report: ExtractionReport::default(),
             writes,
         };

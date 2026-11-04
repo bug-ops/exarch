@@ -6,6 +6,8 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 
 use crate::closed_enum::closed_enum;
+use crate::types::Extension;
+use crate::types::PathComponentName;
 
 /// Marker type for a [`SecurityConfig`] whose invariants have not yet been
 /// checked.
@@ -64,6 +66,18 @@ pub struct AllowedFeatures {
     /// There is no CLI or binding opt-out, and the permissive preset does not
     /// enable it.
     pub windows_reserved_names: bool,
+}
+
+const DEFAULT_BANNED_PATH_COMPONENTS: [&str; 7] =
+    [".git", ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".env"];
+
+fn default_banned_path_components() -> Vec<PathComponentName> {
+    // The constants are valid by construction;
+    // `default_banned_components_are_all_usable` pins it.
+    DEFAULT_BANNED_PATH_COMPONENTS
+        .iter()
+        .filter_map(|name| PathComponentName::try_from(*name).ok())
+        .collect()
 }
 
 closed_enum! {
@@ -264,15 +278,15 @@ pub struct SecurityConfigFields {
 
     /// List of allowed file extensions (empty = allow all).
     ///
-    /// Extensions are matched case-insensitively (e.g., `"txt"` matches both
-    /// `file.txt` and `file.TXT`). The leading dot must be omitted.
+    /// Extensions are matched case-insensitively (e.g., `txt` matches both
+    /// `file.txt` and `file.TXT`); [`Extension`] normalizes a leading dot away.
     ///
     /// When this list is non-empty, files without a file extension are treated
     /// as not allowed and will be skipped during extraction.
-    pub allowed_extensions: Vec<String>,
+    pub allowed_extensions: Vec<Extension>,
 
     /// List of banned path components (e.g., ".git", ".ssh").
-    pub banned_path_components: Vec<String>,
+    pub banned_path_components: Vec<PathComponentName>,
 
     /// Allow extraction from solid 7z archives.
     ///
@@ -437,15 +451,7 @@ impl Default for SecurityConfigFields {
             allowed: AllowedFeatures::default(), // All false
             preserve_permissions: false,
             allowed_extensions: Vec::new(),
-            banned_path_components: vec![
-                ".git".to_string(),
-                ".ssh".to_string(),
-                ".gnupg".to_string(),
-                ".aws".to_string(),
-                ".kube".to_string(),
-                ".docker".to_string(),
-                ".env".to_string(),
-            ],
+            banned_path_components: default_banned_path_components(),
             allow_solid_archives: false,
             max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
             max_tar_metadata_bytes: 4 * 1024 * 1024,   // 4 MiB
@@ -619,9 +625,6 @@ impl SecurityConfig<Unvalidated> {
     /// - `max_tar_metadata_bytes` is zero or `u64::MAX` (the metadata budget
     ///   uses it as its disarmed marker)
     /// - `max_decoder_memory` is zero
-    /// - any entry in `allowed_extensions` or `banned_path_components` is
-    ///   empty, contains a null byte, or exceeds
-    ///   [`crate::MAX_CONFIG_ENTRY_LENGTH`] bytes
     ///
     /// # Examples
     ///
@@ -685,12 +688,6 @@ impl SecurityConfig<Unvalidated> {
             return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_decoder_memory must not be zero".into(),
             });
-        }
-        for extension in &self.fields.allowed_extensions {
-            crate::security::boundary::validate_config_entry(extension, "allowed extension")?;
-        }
-        for component in &self.fields.banned_path_components {
-            crate::security::boundary::validate_config_entry(component, "banned path component")?;
         }
         Ok(SecurityConfig {
             fields: self.fields,
@@ -932,15 +929,43 @@ impl SecurityConfig<Unvalidated> {
     /// use exarch_core::SecurityConfig;
     ///
     /// let config = SecurityConfig::default()
-    ///     .with_allowed_extensions(vec!["txt".to_string(), "pdf".to_string()]);
+    ///     .try_add_allowed_extension(".txt")?
+    ///     .try_add_allowed_extension("pdf")?;
     /// assert!(config.is_extension_allowed("txt"));
     /// assert!(!config.is_extension_allowed("exe"));
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_allowed_extensions(mut self, extensions: Vec<String>) -> Self {
+    pub fn with_allowed_extensions(mut self, extensions: Vec<Extension>) -> Self {
         self.fields.allowed_extensions = extensions;
         self
+    }
+
+    /// Appends one allowed extension, parsed by [`Extension`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] when `extension`
+    /// is not a usable extension.
+    pub fn try_add_allowed_extension(mut self, extension: &str) -> crate::Result<Self> {
+        self.fields
+            .allowed_extensions
+            .push(Extension::try_from(extension)?);
+        Ok(self)
+    }
+
+    /// Appends one banned path component, parsed by [`PathComponentName`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] when `component`
+    /// is not a usable path component name.
+    pub fn try_add_banned_path_component(mut self, component: &str) -> crate::Result<Self> {
+        self.fields
+            .banned_path_components
+            .push(PathComponentName::try_from(component)?);
+        Ok(self)
     }
 
     /// Sets the list of banned path components.
@@ -950,13 +975,16 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_banned_path_components(vec![".git".to_string()]);
+    /// let config = SecurityConfig::default()
+    ///     .with_banned_path_components(Vec::new())
+    ///     .try_add_banned_path_component(".git")?;
     /// assert!(!config.is_path_component_allowed(".git"));
     /// assert!(config.is_path_component_allowed(".ssh"));
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_banned_path_components(mut self, components: Vec<String>) -> Self {
+    pub fn with_banned_path_components(mut self, components: Vec<PathComponentName>) -> Self {
         self.fields.banned_path_components = components;
         self
     }
@@ -1108,7 +1136,7 @@ impl<State> SecurityConfig<State> {
         !self
             .banned_path_components
             .iter()
-            .any(|banned| banned.eq_ignore_ascii_case(component))
+            .any(|banned| banned.matches(component))
     }
 
     /// Validates whether a file extension is allowed.
@@ -1122,7 +1150,7 @@ impl<State> SecurityConfig<State> {
         }
         self.allowed_extensions
             .iter()
-            .any(|ext| ext.eq_ignore_ascii_case(extension))
+            .any(|ext| ext.matches(extension))
     }
 
     /// Returns `true` if a file with the given optional extension may be
@@ -1136,7 +1164,7 @@ impl<State> SecurityConfig<State> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+    /// let config = SecurityConfig::default().try_add_allowed_extension("txt")?;
     ///
     /// assert!(config.is_path_extension_allowed(Some("txt")));
     /// assert!(!config.is_path_extension_allowed(Some("exe")));
@@ -1146,6 +1174,7 @@ impl<State> SecurityConfig<State> {
     /// // Empty allowlist permits everything, including extension-less files.
     /// let permissive = SecurityConfig::default();
     /// assert!(permissive.is_path_extension_allowed(None));
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
     pub fn is_path_extension_allowed(&self, extension: Option<&str>) -> bool {
@@ -1573,7 +1602,10 @@ mod tests {
     #[test]
     fn test_extension_allowed_with_list() {
         let mut config = SecurityConfig::default();
-        config.allowed_extensions = vec!["txt".to_string(), "pdf".to_string()];
+        config.allowed_extensions = vec![
+            Extension::try_from("txt").unwrap(),
+            Extension::try_from("pdf").unwrap(),
+        ];
         assert!(config.is_extension_allowed("txt"));
         assert!(config.is_extension_allowed("TXT"));
         assert!(!config.is_extension_allowed("exe"));
@@ -1675,11 +1707,15 @@ mod tests {
             "should have banned components by default"
         );
         assert!(
-            config.banned_path_components.contains(&".git".to_string()),
+            config
+                .banned_path_components
+                .contains(&PathComponentName::try_from(".git").unwrap()),
             "should ban .git"
         );
         assert!(
-            config.banned_path_components.contains(&".ssh".to_string()),
+            config
+                .banned_path_components
+                .contains(&PathComponentName::try_from(".ssh").unwrap()),
             "should ban .ssh"
         );
     }
@@ -1895,8 +1931,9 @@ mod tests {
         );
     }
 
-    // Regression tests for #449: SecurityConfig::validate() must reject
-    // malformed allowed_extensions/banned_path_components entries.
+    // Regression tests for #449 and #871: malformed `allowed_extensions` /
+    // `banned_path_components` entries are refused at construction, so a
+    // config can never hold one.
 
     #[test]
     fn test_validate_permissive_is_ok() {
@@ -1910,28 +1947,48 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_empty_allowed_extension_entry() {
-        let cfg = SecurityConfig::default().with_allowed_extensions(vec![String::new()]);
-        assert!(cfg.validate().is_err());
+    fn test_try_add_refuses_unusable_entries() {
+        let long = "x".repeat(256);
+        for raw in ["", "bad\0ext", " gz", "tar.gz", "a/b", long.as_str()] {
+            assert!(
+                SecurityConfig::default()
+                    .try_add_allowed_extension(raw)
+                    .is_err(),
+                "{raw:?}"
+            );
+        }
+        for raw in ["", "bad\0", "a/b", "..", long.as_str()] {
+            assert!(
+                SecurityConfig::default()
+                    .try_add_banned_path_component(raw)
+                    .is_err(),
+                "{raw:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_validate_rejects_empty_banned_path_component_entry() {
-        let cfg = SecurityConfig::default().with_banned_path_components(vec![String::new()]);
-        assert!(cfg.validate().is_err());
+    fn test_dotted_extension_is_normalized_and_matches_any_case() {
+        let cfg = SecurityConfig::default()
+            .try_add_allowed_extension(".txt")
+            .unwrap()
+            .validate()
+            .unwrap();
+        assert!(cfg.is_path_extension_allowed(Some("txt")));
+        assert!(crate::formats::common::is_extension_allowed(
+            std::path::Path::new("A.TXT"),
+            &cfg
+        ));
+        assert!(cfg.is_path_extension_allowed(Some("TXT")));
+        assert!(!cfg.is_path_extension_allowed(Some("md")));
     }
 
     #[test]
-    fn test_validate_rejects_null_byte_in_allowed_extension() {
-        let cfg = SecurityConfig::default().with_allowed_extensions(vec!["bad\0ext".to_string()]);
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_overlong_banned_path_component() {
-        let long_component = "x".repeat(256);
-        let cfg = SecurityConfig::default().with_banned_path_components(vec![long_component]);
-        assert!(cfg.validate().is_err());
+    fn default_banned_components_are_all_usable() {
+        assert_eq!(
+            default_banned_path_components().len(),
+            DEFAULT_BANNED_PATH_COMPONENTS.len()
+        );
     }
 
     // Regression test for the C1 finding on #433/#434/#435: a

@@ -708,6 +708,7 @@ impl TryFrom<exarch_core::inspection::VerificationIssue> for VerificationIssue {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use exarch_core::Compressed;
     use std::time::Duration;
 
     #[test]
@@ -881,7 +882,7 @@ mod tests {
             exarch_core::inspection::ManifestEntryKind::File,
             1024,
         );
-        core_entry.compression = exarch_core::EntryCompression::Entry(512);
+        core_entry.compression = exarch_core::EntryCompression::Entry(Compressed(512));
         core_entry.mode = Some(0o644);
         core_entry.modified = Some(UNIX_EPOCH + std::time::Duration::from_secs(1000));
 
@@ -1128,7 +1129,7 @@ mod tests {
     #[test]
     fn test_archive_entry_saturates_compressed_size_at_i64_max() {
         let mut core_entry = sized_entry("test.txt", 1024);
-        core_entry.compression = exarch_core::EntryCompression::Entry(u64::MAX);
+        core_entry.compression = exarch_core::EntryCompression::Entry(Compressed(u64::MAX));
 
         let entry = ArchiveEntry::from(core_entry);
 

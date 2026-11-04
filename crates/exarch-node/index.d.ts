@@ -27,11 +27,12 @@ export interface ExarchErrorBase extends Error {
   /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
   relaxableBy?: PolicySetting
   /**
-   * Finer classification of an `INVALID_ARCHIVE` (`InvalidArchiveSubCode`) or
-   * `SECURITY_VIOLATION` (`SecurityViolationSubCode`) refusal, when it has one.
-   * The interfaces are discriminated by `writes`, not `code`, so the pairing is
-   * not narrowed per code: `INVALID_ARCHIVE` carries `'TAR_AMBIGUITY'` or
-   * `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries `'TAR_TRAILER'`.
+   * Finer classification of an `INVALID_ARCHIVE` (`InvalidArchiveSubCode`)
+   * failure, when it has one, and of every core `SECURITY_VIOLATION`
+   * (`SecurityViolationSubCode`). The interfaces are discriminated by `writes`,
+   * not `code`, so the pairing is not narrowed per code: `INVALID_ARCHIVE`
+   * carries `'TAR_AMBIGUITY'` or `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries
+   * one of the `SecurityViolationSubCode` values.
    */
   subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
   /**
@@ -229,7 +230,7 @@ export declare class CreationConfig {
   /** Finalizes the configuration (for API consistency). */
   build(): this
   /** Compression level (1-9). */
-  get compressionLevel(): number | null
+  get compressionLevel(): number
   /** Whether to preserve permissions. */
   get preservePermissions(): boolean
   /** Whether to follow symlinks. */
@@ -417,10 +418,12 @@ export declare class SecurityConfig {
   /**
    * Adds an allowed file extension.
    *
+   * A leading dot is accepted and removed, and the value is lowercased.
+   *
    * # Errors
    *
    * Returns error if the extension is empty, exceeds maximum length, or
-   * contains null bytes.
+   * contains a null byte, whitespace, a path separator or an inner dot.
    */
   addAllowedExtension(ext: string): this
   /**
@@ -429,7 +432,7 @@ export declare class SecurityConfig {
    * # Errors
    *
    * Returns error if the component is empty, exceeds maximum length, or
-   * contains null bytes.
+   * contains a null byte, a path separator, `.` or `..`.
    */
   addBannedComponent(component: string): this
   /**
@@ -1669,7 +1672,7 @@ export type PathModel = 'host' | 'portable'
 export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes'
 
 /** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
-export type SecurityViolationSubCode = 'TAR_TRAILER'
+export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH'
 
 /** Number of items left unverified for one reason. */
 export interface UnverifiedCount {

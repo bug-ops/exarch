@@ -2,14 +2,16 @@
 //! `ExtractionOptions`, and `VerificationOptions`.
 
 use exarch_core::DecompressionBudget;
+use exarch_core::Extension;
 use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::ParallelDecode;
+use exarch_core::PathComponentName;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
+use exarch_core::creation::CompressionLevel;
 use exarch_core::creation::CreationConfig as CoreCreationConfig;
-use exarch_core::validate_config_entry;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::num::NonZeroU64;
@@ -248,12 +250,14 @@ impl PySecurityConfig {
     /// # Errors
     ///
     /// Returns `ValueError` if the extension is empty, exceeds maximum
-    /// length, or contains null bytes.
+    /// length, or holds a null byte, whitespace, a separator or an inner dot.
+    /// A leading dot is accepted and removed, and the value is lowercased.
+    #[allow(clippy::needless_pass_by_value)]
     fn add_allowed_extension(
         mut slf: PyRefMut<'_, Self>,
         ext: String,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        validate_config_entry(&ext, "extension").map_err(convert_error)?;
+        let ext = Extension::try_from(ext.as_str()).map_err(convert_error)?;
         slf.inner.allowed_extensions.push(ext);
         Ok(slf)
     }
@@ -263,12 +267,13 @@ impl PySecurityConfig {
     /// # Errors
     ///
     /// Returns `ValueError` if the component is empty, exceeds maximum
-    /// length, or contains null bytes.
+    /// length, or holds a null byte, a path separator, `.` or `..`.
+    #[allow(clippy::needless_pass_by_value)]
     fn add_banned_component(
         mut slf: PyRefMut<'_, Self>,
         component: String,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        validate_config_entry(&component, "banned path component").map_err(convert_error)?;
+        let component = PathComponentName::try_from(component.as_str()).map_err(convert_error)?;
         slf.inner.banned_path_components.push(component);
         Ok(slf)
     }
@@ -441,12 +446,22 @@ impl PySecurityConfig {
     /// the extensions multiple times, cache the result in a local variable.
     #[getter]
     fn get_allowed_extensions(&self) -> Vec<String> {
-        self.inner.allowed_extensions.clone()
+        self.inner
+            .allowed_extensions
+            .iter()
+            .map(|ext| ext.as_str().to_owned())
+            .collect()
     }
 
     #[setter]
-    fn set_allowed_extensions(&mut self, value: Vec<String>) {
-        self.inner.allowed_extensions = value;
+    #[allow(clippy::needless_pass_by_value)]
+    fn set_allowed_extensions(&mut self, value: Vec<String>) -> PyResult<()> {
+        self.inner.allowed_extensions = value
+            .iter()
+            .map(|ext| Extension::try_from(ext.as_str()))
+            .collect::<Result<_, _>>()
+            .map_err(convert_error)?;
+        Ok(())
     }
 
     /// Returns a copy of the banned path components list.
@@ -457,12 +472,22 @@ impl PySecurityConfig {
     /// the components multiple times, cache the result in a local variable.
     #[getter]
     fn get_banned_path_components(&self) -> Vec<String> {
-        self.inner.banned_path_components.clone()
+        self.inner
+            .banned_path_components
+            .iter()
+            .map(|component| component.as_str().to_owned())
+            .collect()
     }
 
     #[setter]
-    fn set_banned_path_components(&mut self, value: Vec<String>) {
-        self.inner.banned_path_components = value;
+    #[allow(clippy::needless_pass_by_value)]
+    fn set_banned_path_components(&mut self, value: Vec<String>) -> PyResult<()> {
+        self.inner.banned_path_components = value
+            .iter()
+            .map(|component| PathComponentName::try_from(component.as_str()))
+            .collect::<Result<_, _>>()
+            .map_err(convert_error)?;
+        Ok(())
     }
 
     /// Returns a debug string representation.
@@ -587,12 +612,7 @@ impl PyCreationConfig {
         mut slf: PyRefMut<'_, Self>,
         level: u8,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        if !(1..=9).contains(&level) {
-            return Err(PyValueError::new_err(
-                "compression level must be in range 1-9",
-            ));
-        }
-        slf.inner.compression_level = Some(level);
+        slf.inner.compression_level = CompressionLevel::try_from(level).map_err(convert_error)?;
         Ok(slf)
     }
 
@@ -643,20 +663,18 @@ impl PyCreationConfig {
     // Property getters and setters
 
     #[getter]
-    fn get_compression_level(&self) -> Option<u8> {
-        self.inner.compression_level
+    fn get_compression_level(&self) -> u8 {
+        self.inner.compression_level.get()
     }
 
+    /// Sets the level; `None` resets it to the default, 6.
     #[setter]
     fn set_compression_level(&mut self, value: Option<u8>) -> PyResult<()> {
-        if let Some(level) = value
-            && !(1..=9).contains(&level)
-        {
-            return Err(PyValueError::new_err(
-                "compression level must be in range 1-9",
-            ));
-        }
-        self.inner.compression_level = value;
+        self.inner.compression_level = value
+            .map(CompressionLevel::try_from)
+            .transpose()
+            .map_err(convert_error)?
+            .unwrap_or_default();
         Ok(())
     }
 
@@ -1220,9 +1238,39 @@ mod tests {
 
             let extensions = py_config.borrow(py).get_allowed_extensions();
             assert!(
-                extensions.contains(&".txt".to_string()),
+                extensions.contains(&"txt".to_string()),
                 "Extension should be added to list"
             );
+        });
+    }
+
+    #[test]
+    fn test_add_allowed_extension_rejects_unusable_values() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            for raw in [" gz", "tar.gz", "a/b"] {
+                let py_config =
+                    Py::new(py, PySecurityConfig::new()).expect("Failed to create Py object");
+                let result = py_config
+                    .bind(py)
+                    .call_method1("add_allowed_extension", (raw,));
+                assert!(result.is_err(), "{raw:?} must be refused");
+            }
+        });
+    }
+
+    #[test]
+    fn test_add_banned_component_rejects_separators() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            for raw in ["a/b", ".."] {
+                let py_config =
+                    Py::new(py, PySecurityConfig::new()).expect("Failed to create Py object");
+                let result = py_config
+                    .bind(py)
+                    .call_method1("add_banned_component", (raw,));
+                assert!(result.is_err(), "{raw:?} must be refused");
+            }
         });
     }
 

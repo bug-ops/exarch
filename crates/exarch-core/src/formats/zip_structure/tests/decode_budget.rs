@@ -172,7 +172,12 @@ fn a_signature_spelled_by_compressed_data_is_cleared_by_the_recheck() {
     zstd.method = 93;
     zstd.data = zstd_raw_frame(&zstd_inner);
     for entry in [deflate_holding_a_header(), zstd] {
-        assert!(entry.data.windows(4).any(|window| window == LFH_SIGNATURE));
+        assert!(
+            entry
+                .data
+                .array_windows::<4>()
+                .any(|&window| window == LFH_SIGNATURE)
+        );
         let built = RawZip::new(vec![entry, RawEntry::stored("b.txt", b"world")]).build();
         let before = decoded_so_far();
         let found = findings_with_decode_budget(&built, 0);

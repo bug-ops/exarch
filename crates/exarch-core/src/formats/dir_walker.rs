@@ -25,9 +25,9 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
-use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Violation;
 use crate::config::Validated;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
@@ -171,12 +171,11 @@ impl DirWalker {
     ///
     /// Same as [`Self::ensure_parent`]; a missing component is an I/O error of
     /// kind `NotFound`.
-    pub(crate) fn open_parent<'r, 'p, P: ParentCheck>(
+    pub(crate) fn open_parent<'r, 'p>(
         self,
         root: &'r PinnedRoot,
-        rel: &'p SafePath<P>,
+        rel: &'p Path,
     ) -> Result<(DirRef<'r>, Leaf<'p>)> {
-        let rel = rel.as_path();
         let (parent, leaf) = Leaf::split(rel)?;
         let dir = self.descend(root, parent, rel, Missing::Fail, Links::Policy)?;
         Ok((dir, leaf))
@@ -284,10 +283,9 @@ impl DirWalker {
         ) {
             (LinkClass::Blocked(blocker), _) => Err(blocker.error(entry, walked)),
             (LinkClass::InsideDir(_), LinkPolicy::Refuse) => {
-                Err(ArchiveError::relaxable_violation(
-                    PolicySetting::Symlinks,
-                    format!("path component is a symlink: {}", walked.display()),
-                ))
+                Err(ArchiveError::from(Violation::SymlinkComponent {
+                    walked: walked.display().to_string().into(),
+                }))
             }
             (LinkClass::InsideDir(resolved), LinkPolicy::ContainedOnly) => {
                 let inside = resolved.strip_prefix(dest.as_path()).unwrap_or(&resolved);
@@ -301,6 +299,7 @@ impl DirWalker {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::PolicySetting;
     use crate::types::DestDir;
     use crate::types::safe_path::Resolved;
     use std::assert_matches;
@@ -420,7 +419,7 @@ mod tests {
         let (_root, dest, _) = dest_with_outside();
 
         let err = walker(false)
-            .open_parent(&dest, &sp("missing/f"))
+            .open_parent(&dest, sp("missing/f").as_path())
             .unwrap_err();
 
         assert_matches!(&err, ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::NotFound);

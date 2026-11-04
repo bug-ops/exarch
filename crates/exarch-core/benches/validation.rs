@@ -21,7 +21,11 @@
 use criterion::Criterion;
 use criterion::criterion_group;
 use criterion::criterion_main;
+use exarch_core::Compressed;
+use exarch_core::EntrySize;
+use exarch_core::RawMode;
 use exarch_core::SecurityConfig;
+use exarch_core::Uncompressed;
 use exarch_core::security::EntryValidator;
 use exarch_core::security::HardlinkTracker;
 use exarch_core::security::validate_compression_ratio;
@@ -260,8 +264,8 @@ fn benchmark_compression_ratio(c: &mut Criterion) {
         let uncompressed: u64 = 2000; // 2x ratio
         b.iter(|| {
             validate_compression_ratio(
-                black_box(compressed),
-                black_box(uncompressed),
+                Compressed(black_box(compressed)),
+                Uncompressed(black_box(uncompressed)),
                 black_box(&config),
             )
         });
@@ -273,8 +277,8 @@ fn benchmark_compression_ratio(c: &mut Criterion) {
         let uncompressed: u64 = 50000; // 50x ratio
         b.iter(|| {
             validate_compression_ratio(
-                black_box(compressed),
-                black_box(uncompressed),
+                Compressed(black_box(compressed)),
+                Uncompressed(black_box(uncompressed)),
                 black_box(&config),
             )
         });
@@ -286,8 +290,8 @@ fn benchmark_compression_ratio(c: &mut Criterion) {
         let uncompressed: u64 = 100_000_000; // 1M:1 ratio
         b.iter(|| {
             validate_compression_ratio(
-                black_box(compressed),
-                black_box(uncompressed),
+                Compressed(black_box(compressed)),
+                Uncompressed(black_box(uncompressed)),
                 black_box(&config),
             )
         });
@@ -311,9 +315,8 @@ fn benchmark_entry_validator(c: &mut Criterion) {
             validator.validate_entry(
                 black_box(Path::new("file.txt")),
                 black_box(&EntryType::File),
-                black_box(1024),
-                black_box(None),
-                black_box(Some(0o644)),
+                black_box(EntrySize::new(Uncompressed(1024), None)),
+                black_box(Some(RawMode::new(0o644))),
             )
         });
     });
@@ -325,9 +328,8 @@ fn benchmark_entry_validator(c: &mut Criterion) {
             validator.validate_entry(
                 black_box(Path::new("file.txt")),
                 black_box(&EntryType::File),
-                black_box(10240),
-                black_box(Some(5120)), // 2x compression
-                black_box(Some(0o644)),
+                black_box(EntrySize::new(Uncompressed(10240), Some(Compressed(5120)))),
+                black_box(Some(RawMode::new(0o644))),
             )
         });
     });
@@ -339,8 +341,7 @@ fn benchmark_entry_validator(c: &mut Criterion) {
             validator.validate_entry(
                 black_box(Path::new("subdir")),
                 black_box(&EntryType::Directory),
-                black_box(0),
-                black_box(None),
+                black_box(EntrySize::new(Uncompressed(0), None)),
                 black_box(None),
             )
         });
@@ -352,7 +353,12 @@ fn benchmark_entry_validator(c: &mut Criterion) {
             let mut validator = EntryValidator::new(&config, &dest);
             for i in 0..100 {
                 let path = PathBuf::from(format!("dir/file_{i}.txt"));
-                let _ = validator.validate_entry(&path, &EntryType::File, 1024, None, Some(0o644));
+                let _ = validator.validate_entry(
+                    &path,
+                    &EntryType::File,
+                    EntrySize::new(Uncompressed(1024), None),
+                    Some(RawMode::new(0o644)),
+                );
             }
             validator.finish()
         });
@@ -372,14 +378,23 @@ fn benchmark_entry_validator(c: &mut Criterion) {
             // Add directories
             for i in 0..10 {
                 let path = PathBuf::from(format!("dir_{i}"));
-                let _ = validator.validate_entry(&path, &EntryType::Directory, 0, None, None);
+                let _ = validator.validate_entry(
+                    &path,
+                    &EntryType::Directory,
+                    EntrySize::new(Uncompressed(0), None),
+                    None,
+                );
             }
 
             // Add files
             for i in 0..80 {
                 let path = PathBuf::from(format!("dir_{}/file_{}.txt", i % 10, i));
-                let _ =
-                    validator.validate_entry(&path, &EntryType::File, 1024, Some(512), Some(0o644));
+                let _ = validator.validate_entry(
+                    &path,
+                    &EntryType::File,
+                    EntrySize::new(Uncompressed(1024), Some(Compressed(512))),
+                    Some(RawMode::new(0o644)),
+                );
             }
 
             // Add symlinks
@@ -390,8 +405,7 @@ fn benchmark_entry_validator(c: &mut Criterion) {
                     &EntryType::Symlink {
                         target: PathBuf::from(format!("dir_0/file_{i}.txt")),
                     },
-                    0,
-                    None,
+                    EntrySize::new(Uncompressed(0), None),
                     None,
                 );
             }
@@ -404,8 +418,7 @@ fn benchmark_entry_validator(c: &mut Criterion) {
                     &EntryType::Hardlink {
                         target: PathBuf::from(format!("dir_1/file_{i}.txt")),
                     },
-                    0,
-                    None,
+                    EntrySize::new(Uncompressed(0), None),
                     None,
                 );
             }
@@ -435,7 +448,12 @@ fn benchmark_validation_throughput(c: &mut Criterion) {
         b.iter(|| {
             let mut validator = EntryValidator::new(&config, &dest);
             for path in &paths {
-                let _ = validator.validate_entry(path, &EntryType::File, 1024, None, Some(0o644));
+                let _ = validator.validate_entry(
+                    path,
+                    &EntryType::File,
+                    EntrySize::new(Uncompressed(1024), None),
+                    Some(RawMode::new(0o644)),
+                );
             }
             validator.finish()
         });

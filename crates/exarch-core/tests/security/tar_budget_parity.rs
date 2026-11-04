@@ -111,7 +111,7 @@ fn extract_via_budgeted_pipeline(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
         .with_max_file_size(u64::MAX)
         .validate()
         .unwrap();
-    let mut archive = TarArchive::new(Cursor::new(bytes.to_vec()));
+    let archive = TarArchive::new(Cursor::new(bytes.to_vec()));
     archive
         .extract(
             temp.path(),

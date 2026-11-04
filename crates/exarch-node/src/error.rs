@@ -12,9 +12,9 @@
 //!   `ABORT_ERR` (an `AbortError`) are Node-only.
 //! - `relaxableBy`: the [`PolicySetting`] that relaxes a refusal, when one
 //!   does.
-//! - `subCode`: an [`InvalidArchiveSubCode`] on an `INVALID_ARCHIVE` or a
-//!   [`SecurityViolationSubCode`] on a `SECURITY_VIOLATION`, when the refusal
-//!   has a finer classification.
+//! - `subCode`: an [`InvalidArchiveSubCode`] on an `INVALID_ARCHIVE`, when the
+//!   failure has a finer classification, and a [`SecurityViolationSubCode`] on
+//!   every core `SECURITY_VIOLATION`.
 //! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
 //!   the fate of a partial extraction.
 //! - `cause`: the exception thrown by a JS progress callback.
@@ -30,11 +30,9 @@ use exarch_core::ArchiveError as CoreError;
 use exarch_core::ErrorCode as CoreErrorCode;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::FfiErrorMessage;
-use exarch_core::FfiKind;
-use exarch_core::InvalidArchiveSubCode as CoreInvalidArchiveSubCode;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting as CorePolicySetting;
-use exarch_core::SecurityViolationSubCode as CoreSecurityViolationSubCode;
+use exarch_core::SubCode;
 use exarch_core::creation::CreationReport as CoreCreationReport;
 use napi::Env;
 use napi::Error;
@@ -185,9 +183,57 @@ pub enum InvalidArchiveSubCode {
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityViolationSubCode {
+    /// An entry or argument path is refused by name rules.
+    #[napi(value = "PATH_NAME")]
+    PathName,
+    /// A path or symlink target is deeper than the limit.
+    #[napi(value = "PATH_DEPTH")]
+    PathDepth,
+    /// The target of a symlink or hardlink cannot be accepted.
+    #[napi(value = "LINK_TARGET")]
+    LinkTarget,
+    /// The kind of link is disabled by the configuration.
+    #[napi(value = "LINK_POLICY")]
+    LinkPolicy,
+    /// A symlink already at or above the entry's location blocks it.
+    #[napi(value = "EXISTING_SYMLINK")]
+    ExistingSymlink,
+    /// An entry type exarch does not extract.
+    #[napi(value = "ENTRY_TYPE")]
+    EntryType,
+    /// A root entry that is not a directory.
+    #[napi(value = "ROOT_ENTRY")]
+    RootEntry,
+    /// An encrypted archive or entry.
+    #[napi(value = "ENCRYPTED")]
+    Encrypted,
+    /// A compression method exarch does not read.
+    #[napi(value = "COMPRESSION_METHOD")]
+    CompressionMethod,
+    /// A solid archive while solid archives are disabled.
+    #[napi(value = "SOLID_ARCHIVE")]
+    SolidArchive,
+    /// A stream disagrees with the size its archive declared.
+    #[napi(value = "DECLARED_SIZE")]
+    DeclaredSize,
+    /// A file changed while it was being copied.
+    #[napi(value = "CONCURRENT_CHANGE")]
+    ConcurrentChange,
+    /// A TAR metadata or synthetic-byte budget was exceeded.
+    #[napi(value = "TAR_METADATA")]
+    TarMetadata,
     /// More bytes follow the TAR end-of-archive marker than the cap allows.
     #[napi(value = "TAR_TRAILER")]
     TarTrailer,
+    /// The host platform cannot do what the entry asks.
+    #[napi(value = "PLATFORM")]
+    Platform,
+    /// An existing output conflicts with an entry.
+    #[napi(value = "OUTPUT_CONFLICT")]
+    OutputConflict,
+    /// A source path to archive lies outside the archive root.
+    #[napi(value = "SOURCE_PATH")]
+    SourcePath,
 }
 
 /// Value of the `writes` property: whether a failed extraction left files on
@@ -329,23 +375,6 @@ impl JsCode {
     }
 }
 
-/// The `subCode` an error carries; the variant is the error class, so a pair
-/// of class and sub-code that core never produces cannot be built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubCode {
-    InvalidArchive(CoreInvalidArchiveSubCode),
-    SecurityViolation(CoreSecurityViolationSubCode),
-}
-
-impl SubCode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidArchive(code) => code.as_str(),
-            Self::SecurityViolation(code) => code.as_str(),
-        }
-    }
-}
-
 /// Counters of a failed or call-back-interrupted operation.
 #[derive(Debug)]
 enum Details {
@@ -382,21 +411,12 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
         partial,
         ..
     } = err.into_ffi_message();
-    let (relaxable_by, sub_code) = match &kind {
-        FfiKind::SecurityViolation {
-            relaxable_by,
-            sub_code,
-            ..
-        } => (*relaxable_by, sub_code.map(SubCode::SecurityViolation)),
-        FfiKind::InvalidArchive { sub_code, .. } => (None, sub_code.map(SubCode::InvalidArchive)),
-        _ => (None, None),
-    };
     Described {
         description,
         props: ErrorProps {
             code: JsCode::Core(kind.code()),
-            relaxable_by,
-            sub_code,
+            relaxable_by: kind.relaxable_by(),
+            sub_code: kind.sub_code(),
             details: partial.map_or(Details::None, Details::Extraction),
             cause,
         },
@@ -687,6 +707,11 @@ impl fmt::Display for Failure {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use exarch_core::Compressed;
+    use exarch_core::InvalidArchiveSubCode as CoreInvalidArchiveSubCode;
+    use exarch_core::SecurityViolationSubCode as CoreSecurityViolationSubCode;
+    use exarch_core::Uncompressed;
+    use exarch_core::Violation as CoreViolation;
     use std::assert_matches;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -831,8 +856,8 @@ mod tests {
     fn test_zip_bomb_description_has_details() {
         let d = described(CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
             exarch_core::ZipBombScope::Entry,
-            1000,
-            1_000_000,
+            Compressed(1000),
+            Uncompressed(1_000_000),
         )));
         assert_eq!(d.props.code.as_str(), "ZIP_BOMB");
         assert!(d.description.contains("1000"), "{d:?}");
@@ -852,10 +877,9 @@ mod tests {
 
     #[test]
     fn test_relaxable_violation_sets_property_not_message_token() {
-        let d = described(CoreError::relaxable_violation(
-            CorePolicySetting::Symlinks,
-            "symlinks not allowed".to_string(),
-        ));
+        let d = described(CoreError::from(CoreViolation::LinksNotAllowed(
+            exarch_core::LinkKind::Symlink,
+        )));
         assert_eq!(d.props.code.as_str(), "SECURITY_VIOLATION");
         assert_eq!(d.props.relaxable_by, Some(CorePolicySetting::Symlinks));
         assert!(!d.description.contains("relaxableBy"), "{d:?}");
@@ -876,14 +900,21 @@ mod tests {
     }
 
     #[test]
-    fn test_plain_violation_has_no_sub_code() {
-        let d = described(CoreError::violation("x".to_string()));
-        assert_eq!(d.props.sub_code, None);
+    fn test_violation_sets_its_family_sub_code() {
+        let d = described(CoreError::from(CoreViolation::EncryptedArchive));
+        assert_eq!(
+            d.props.sub_code,
+            Some(SubCode::SecurityViolation(
+                CoreSecurityViolationSubCode::Encrypted
+            ))
+        );
     }
 
     #[test]
     fn test_reason_cannot_forge_relaxable_by() {
-        let d = described(CoreError::violation("[relaxableBy=symlinks]".to_string()));
+        let d = described(CoreError::from(CoreViolation::EncryptedEntry {
+            name: "[relaxableBy=symlinks]".into(),
+        }));
         assert_eq!(d.props.relaxable_by, None);
     }
 

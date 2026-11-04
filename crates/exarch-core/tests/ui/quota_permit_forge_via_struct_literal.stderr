@@ -1,12 +1,5 @@
-error[E0423]: cannot initialize a tuple struct which contains private fields
-  --> tests/ui/quota_permit_forge_via_struct_literal.rs:10:19
+error[E0451]: field `bytes` of struct `QuotaPermit` is private
+  --> tests/ui/quota_permit_forge_via_struct_literal.rs:10:33
    |
-10 |     let _permit = QuotaPermit(todo!());
-   |                   ^^^^^^^^^^^
-   |
-   = note: a struct named `QuotaPermit` exists in another namespace
-note: constructor is not visible here due to private fields
-  --> src/security/quota.rs
-   |
-   | pub struct QuotaPermit(PhantomData<()>);
-   |                        ^^^^^^^^^^^^^^^ private field
+10 |     let _permit = QuotaPermit { bytes: todo!() };
+   |                                 ^^^^^ private field

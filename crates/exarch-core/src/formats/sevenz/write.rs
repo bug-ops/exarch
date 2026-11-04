@@ -51,8 +51,8 @@ use std::path::Path;
 ///
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
-/// `expected_size` is `entry.size` — the declared uncompressed size read
-/// from 7z's own (attacker-controlled) archive metadata, the same value
+/// the permit's byte count is `entry.size` — the declared uncompressed size
+/// read from 7z's own (attacker-controlled) archive metadata, the same value
 /// already used to authorize `permit`. The copy goes through
 /// [`copy_with_buffer`], which enforces it as a hard streaming ceiling and
 /// an exact post-copy match rather than trusting it a second time, closing
@@ -62,14 +62,13 @@ use std::path::Path;
 ///
 /// Returns an error if file creation, the copy, or the underlying I/O fails,
 /// or if the actual decompressed byte count exceeds or falls short of
-/// `expected_size`.
+/// the permit's byte count.
 pub(super) fn write_file_direct(
     reader: &mut dyn Read,
     parent: &VettedDir,
     leaf: Leaf<'_>,
-    expected_size: u64,
     copy_buffer: &mut CopyBuffer,
-    _permit: QuotaPermit,
+    permit: QuotaPermit,
 ) -> Result<u64> {
     let file = parent.create_new(leaf, None)?;
     // A decode failure partway through the copy would otherwise leave a
@@ -86,7 +85,8 @@ pub(super) fn write_file_direct(
     // 64KiB write buffering to cut per-file syscall count (finding M2),
     // matching TAR/ZIP's common::extract_file_with_permit.
     let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
-    let bytes_written = copy_with_buffer(reader, &mut writer, copy_buffer, Some(expected_size))?;
+    let bytes_written =
+        copy_with_buffer(reader, &mut writer, copy_buffer, Some(permit.into_bytes()))?;
     writer.flush()?;
     guard.persist();
     Ok(bytes_written)
@@ -125,7 +125,7 @@ pub(super) fn write_file_direct(
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
 /// Same enforcement as [`write_file_direct`]: the copy runs through
-/// [`copy_with_buffer`] with `expected_size` (`entry.size`) as a hard
+/// [`copy_with_buffer`] with the permit's byte count (`entry.size`) as a hard
 /// streaming ceiling and exact post-copy match, not trusted metadata.
 ///
 /// # Errors
@@ -133,24 +133,15 @@ pub(super) fn write_file_direct(
 /// Returns an error if a unique temp file cannot be created within
 /// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
 /// fails, or if the actual decompressed byte count exceeds or falls short of
-/// `expected_size`.
+/// the permit's byte count.
 pub(super) fn write_file_with_permit(
     reader: &mut dyn Read,
     parent: &VettedDir,
     leaf: Leaf<'_>,
-    expected_size: u64,
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
 ) -> Result<u64> {
-    write_file_with_permit_using(
-        reader,
-        parent,
-        leaf,
-        expected_size,
-        copy_buffer,
-        permit,
-        TempLeaf::next,
-    )
+    write_file_with_permit_using(reader, parent, leaf, copy_buffer, permit, TempLeaf::next)
 }
 
 /// Implementation behind [`write_file_with_permit`], parameterized over the
@@ -167,22 +158,21 @@ pub(super) fn write_file_with_permit(
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
 /// Same enforcement as [`write_file_direct`]: the copy runs through
-/// [`copy_with_buffer`] with `expected_size` as a hard streaming ceiling and
-/// exact post-copy match, not trusted metadata.
+/// [`copy_with_buffer`] with the permit's byte count as a hard streaming
+/// ceiling and exact post-copy match, not trusted metadata.
 ///
 /// # Errors
 ///
 /// Returns an error if a unique temp file cannot be created within
 /// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
 /// fails, or if the actual decompressed byte count exceeds or falls short of
-/// `expected_size`.
+/// the permit's byte count.
 pub(super) fn write_file_with_permit_using(
     reader: &mut dyn Read,
     parent: &VettedDir,
     leaf: Leaf<'_>,
-    expected_size: u64,
     copy_buffer: &mut CopyBuffer,
-    _permit: QuotaPermit,
+    permit: QuotaPermit,
     next_candidate: impl FnMut() -> TempLeaf,
 ) -> Result<u64> {
     let (temp, temp_file) = common::create_temp_sibling(parent, leaf, None, next_candidate)?;
@@ -197,7 +187,8 @@ pub(super) fn write_file_with_permit_using(
     // adversarial review, finding M2), matching TAR/ZIP's
     // common::extract_file_with_permit.
     let mut writer = std::io::BufWriter::with_capacity(64 * 1024, temp_file);
-    let bytes_written = copy_with_buffer(reader, &mut writer, copy_buffer, Some(expected_size))?;
+    let bytes_written =
+        copy_with_buffer(reader, &mut writer, copy_buffer, Some(permit.into_bytes()))?;
     writer.flush()?;
     // Explicit close before rename: renaming a still-open file is fine on
     // Unix but the handle should not outlive its purpose regardless.

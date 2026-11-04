@@ -58,7 +58,7 @@ fn ghsa_5j8q_forged_small_uncompressed_size_aborts_and_cleans_up() {
     let real_payload = vec![0x41u8; 4 * 1024 * 1024];
     let data = build_forged_size_zip("bomb.txt", &real_payload, 50);
 
-    let mut archive = ZipArchive::new(Cursor::new(data)).unwrap();
+    let archive = ZipArchive::new(Cursor::new(data)).unwrap();
     let result = archive.extract(
         dest.path(),
         &config,
@@ -67,7 +67,8 @@ fn ghsa_5j8q_forged_small_uncompressed_size_aborts_and_cleans_up() {
     );
 
     match result {
-        Err(ArchiveError::SecurityViolation { reason, .. }) => {
+        Err(ArchiveError::SecurityViolation { kind, .. }) => {
+            let reason = kind.to_string();
             assert!(
                 reason.contains("50 bytes"),
                 "error must name the declared 50-byte ceiling, got: {reason:?}"
@@ -104,7 +105,7 @@ fn ghsa_5j8q_forged_oversized_declared_size_rejected_after_eof() {
     let declared = real_payload.len() as u32 * 2;
     let data = build_forged_size_zip("liar.txt", &real_payload, declared);
 
-    let mut archive = ZipArchive::new(Cursor::new(data)).unwrap();
+    let archive = ZipArchive::new(Cursor::new(data)).unwrap();
     let result = archive.extract(
         dest.path(),
         &config,
@@ -113,7 +114,8 @@ fn ghsa_5j8q_forged_oversized_declared_size_rejected_after_eof() {
     );
 
     match result {
-        Err(ArchiveError::SecurityViolation { reason, .. }) => {
+        Err(ArchiveError::SecurityViolation { kind, .. }) => {
+            let reason = kind.to_string();
             assert!(
                 reason.contains(&declared.to_string()),
                 "error must name the declared size ({declared}), got: {reason:?}"
@@ -144,7 +146,7 @@ fn forged_size_zip_builder_round_trips_when_size_is_accurate() {
     let declared = real_payload.len() as u32;
     let data = build_forged_size_zip("honest.txt", &real_payload, declared);
 
-    let mut archive = ZipArchive::new(Cursor::new(data)).unwrap();
+    let archive = ZipArchive::new(Cursor::new(data)).unwrap();
     let result = archive.extract(
         dest.path(),
         &config,

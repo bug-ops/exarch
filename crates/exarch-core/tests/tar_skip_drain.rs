@@ -113,7 +113,8 @@ fn tight_config() -> SecurityConfig {
     SecurityConfig::default()
         .with_max_file_size(FILE_LIMIT as u64)
         .with_max_compression_ratio(RATIO)
-        .with_allowed_extensions(vec!["txt".into()])
+        .try_add_allowed_extension("txt")
+        .unwrap()
 }
 
 /// Extracts a gzip-compressed `tar` into memory under `config`.

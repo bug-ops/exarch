@@ -6,10 +6,10 @@ use super::header::BlockIndex;
 use super::header::SevenZHeader;
 use crate::ArchiveError;
 use crate::EntryCompression;
-use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SolidBlock;
+use crate::Violation;
 use crate::config::Validated;
 use crate::error::QuotaResource;
 use crate::formats::common;
@@ -17,6 +17,8 @@ use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::UnverifiedReason;
 use crate::inspection::report::VerificationIssue;
+use crate::security::Compressed;
+use crate::security::Uncompressed;
 use crate::security::zipbomb::DeclaredCompressedBudget;
 use sevenz_rust2::BlockDecoder;
 use sevenz_rust2::Password;
@@ -82,7 +84,7 @@ pub fn sevenz_entry_compression(
     }
 
     let pack_sizes = archive.pack_sizes();
-    let block_compressed = |block: BlockIndex| -> Result<u64> {
+    let block_compressed = |block: BlockIndex| -> Result<Compressed> {
         let start = header.block_first_pack(block);
         let end = header.next_block_first_pack(block).unwrap_or_else(|| {
             start
@@ -92,6 +94,7 @@ pub fn sevenz_entry_compression(
         pack_sizes[start..end]
             .iter()
             .try_fold(0u64, |acc, &size| acc.checked_add(size))
+            .map(Compressed)
             .ok_or_else(|| ArchiveError::InvalidArchive("7z pack sizes overflow".into()))
     };
 
@@ -126,7 +129,7 @@ pub fn sevenz_entry_compression(
             if header.block_first_file(block) == index {
                 Ok(EntryCompression::SolidBlockStart(SolidBlock::new(
                     compressed,
-                    block_uncompressed[block.get()],
+                    Uncompressed(block_uncompressed[block.get()]),
                 )))
             } else {
                 Ok(EntryCompression::SolidBlockMember)
@@ -174,10 +177,7 @@ pub(super) fn check_solid_policy(
     if !config.allow_solid_archives {
         return Err(Refused::new(
             UnverifiedReason::SolidPolicy,
-            ArchiveError::relaxable_violation(
-                PolicySetting::SolidArchives,
-                "solid 7z archives are not allowed (enable allow_solid_archives)".into(),
-            ),
+            Violation::SolidArchive.into(),
         ));
     }
 

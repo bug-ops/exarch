@@ -7,7 +7,9 @@
 #![allow(clippy::unwrap_used)]
 
 use exarch_core::ArchiveError;
+use exarch_core::EntrySize;
 use exarch_core::SecurityConfig;
+use exarch_core::Uncompressed;
 use exarch_core::security::EntryValidator;
 use exarch_core::types::DestDir;
 use exarch_core::types::EntryType;
@@ -32,8 +34,7 @@ fn test_symlink_absolute_target() {
         &EntryType::Symlink {
             target: PathBuf::from("/etc/passwd"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -56,8 +57,7 @@ fn test_symlink_parent_traversal() {
         &EntryType::Symlink {
             target: PathBuf::from("../../etc/passwd"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -77,8 +77,7 @@ fn test_symlink_disabled_by_default() {
         &EntryType::Symlink {
             target: PathBuf::from("target.txt"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -101,8 +100,7 @@ fn test_symlink_relative_safe() {
         &EntryType::Symlink {
             target: PathBuf::from("../bar/target.txt"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -125,8 +123,7 @@ fn test_symlink_same_directory() {
         &EntryType::Symlink {
             target: PathBuf::from("target.txt"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 
@@ -150,8 +147,7 @@ fn test_symlink_chain_escape() {
         &EntryType::Symlink {
             target: PathBuf::from("../../../../etc/passwd"),
         },
-        0,
-        None,
+        EntrySize::new(Uncompressed(0), None),
         None,
     );
 

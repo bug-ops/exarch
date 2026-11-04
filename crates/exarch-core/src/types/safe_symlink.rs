@@ -1,10 +1,11 @@
 //! Validated safe symlink type.
 
 use crate::ArchiveError;
-use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Violation;
 use crate::config::Validated;
+use crate::security::fs_view::LinkKind;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -142,7 +143,7 @@ impl<P: ParentCheck> SafeSymlink<P> {
         // (some platforms would silently create a dangling symlink); reject
         // it explicitly rather than letting it through.
         if target.is_empty() {
-            return Err(ArchiveError::violation("symlink target is empty".into()));
+            return Err(Violation::LinkTargetEmpty(LinkKind::Symlink).into());
         }
 
         // 1.6. Reject null bytes in the target, matching the same check
@@ -151,9 +152,7 @@ impl<P: ParentCheck> SafeSymlink<P> {
         // structured `SecurityViolation`. The message intentionally omits
         // the raw target bytes so a NUL byte is never embedded in it.
         if super::safe_path::has_null_bytes(target) {
-            return Err(ArchiveError::violation(
-                "symlink target contains null bytes".into(),
-            ));
+            return Err(Violation::LinkTargetNul(LinkKind::Symlink).into());
         }
 
         // H-SEC-2: Reject Windows-specific absolute path components in the
@@ -187,23 +186,21 @@ impl<P: ParentCheck> SafeSymlink<P> {
                 check_component_for(view.path_model(), comp, config)?;
                 let comp_str = comp.to_string_lossy();
                 if !config.is_path_component_allowed(&comp_str) {
-                    return Err(ArchiveError::relaxable_violation(
-                        PolicySetting::BannedComponents,
-                        format!("symlink target contains banned component: {comp_str}"),
-                    ));
+                    return Err(Violation::LinkTargetBannedComponent {
+                        component: comp_str.as_ref().into(),
+                    }
+                    .into());
                 }
             }
         }
 
         // Validate target depth against max_path_depth
         if target_depth > config.max_path_depth {
-            return Err(ArchiveError::relaxable_violation(
-                PolicySetting::MaxPathDepth,
-                format!(
-                    "symlink target depth {target_depth} exceeds maximum {}",
-                    config.max_path_depth
-                ),
-            ));
+            return Err(Violation::SymlinkTargetDepth {
+                depth: target_depth,
+                max: config.max_path_depth,
+            }
+            .into());
         }
 
         // 3. Verify the parent directory chain (not the link itself, which
@@ -231,18 +228,10 @@ impl<P: ParentCheck> SafeSymlink<P> {
         })
     }
 
-    /// Returns the link path.
-    #[inline]
-    #[must_use]
-    pub fn link_path(&self) -> &Path {
-        self.link.as_path()
-    }
-
     /// Returns the validated link path.
-    #[cfg(unix)]
     #[inline]
     #[must_use]
-    pub(crate) fn link(&self) -> &SafePath<P> {
+    pub fn link(&self) -> &SafePath<P> {
         &self.link
     }
 
@@ -264,9 +253,10 @@ impl<P: ParentCheck> SafeSymlink<P> {
 /// Returns `SecurityViolation` ("symlinks not allowed") when symlinks are
 /// disabled.
 pub(crate) fn require_symlinks_allowed(config: &SecurityConfig<Validated>) -> Result<()> {
-    config.allowed.symlinks.ok_or_else(|| {
-        ArchiveError::relaxable_violation(PolicySetting::Symlinks, "symlinks not allowed".into())
-    })
+    config
+        .allowed
+        .symlinks
+        .ok_or_else(|| Violation::LinksNotAllowed(LinkKind::Symlink).into())
 }
 
 /// Returns `true` when `target` contains a `Prefix` or `RootDir` component.
@@ -462,7 +452,7 @@ mod tests {
         assert!(result.is_ok());
 
         let symlink = result.expect("symlink should be valid");
-        assert_eq!(symlink.link_path(), Path::new("dir/link"));
+        assert_eq!(symlink.link().as_path(), Path::new("dir/link"));
         assert_eq!(symlink.target_path(), Path::new("../file.txt"));
     }
 
@@ -927,7 +917,7 @@ mod tests {
             SafeSymlink::validate(&link, &target, &dest, &config).expect("symlink should be valid");
 
         // Test getters
-        assert_eq!(symlink.link_path(), Path::new("mylink"));
+        assert_eq!(symlink.link().as_path(), Path::new("mylink"));
         assert_eq!(symlink.target_path(), Path::new("target.txt"));
     }
 

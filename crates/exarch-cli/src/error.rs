@@ -10,7 +10,9 @@ use exarch_core::ArchiveError;
 use exarch_core::CompressionRatio;
 use exarch_core::ExtractionReport;
 use exarch_core::PartialWrites;
+use exarch_core::PathComponentName;
 use exarch_core::PolicySetting;
+use exarch_core::QuotaKind;
 use exarch_core::SecurityConfig;
 use exarch_core::TarTrailerRefusal;
 use exarch_core::ZipBombDetails;
@@ -199,7 +201,12 @@ fn relaxation_hint(relaxable_by: Option<PolicySetting>) -> String {
             "--banned-component replaces the whole default list. To keep the other bans, re-pass \
              the entries you still want banned (defaults: {}), leaving out only the component \
              that refused this entry.",
-            SecurityConfig::default().banned_path_components.join(", ")
+            SecurityConfig::default()
+                .banned_path_components
+                .iter()
+                .map(PathComponentName::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Some(PolicySetting::MaxPathDepth) => {
             "If this archive is from a trusted source, pass a larger --max-path-depth.".to_owned()
@@ -224,27 +231,49 @@ fn supported_formats() -> String {
         .join(", ")
 }
 
-fn quota_exceeded_context(
-    resource: &exarch_core::QuotaResource,
-    archive: TerminalPath<'_>,
-) -> String {
-    match resource {
-        exarch_core::QuotaResource::DecoderMemory { .. } => format!(
+fn quota_exceeded_context(kind: QuotaKind, archive: TerminalPath<'_>) -> String {
+    dedicated_quota_context(kind, archive).unwrap_or_else(|| {
+        format!("Extraction limit exceeded for '{archive}'\nNo CLI flag is known to relax it.")
+    })
+}
+
+/// The context for each quota dimension; `None` only for a dimension added to
+/// the `#[non_exhaustive]` [`QuotaKind`] after this match was written, which
+/// `test_every_quota_kind_has_a_dedicated_context` rejects.
+fn dedicated_quota_context(kind: QuotaKind, archive: TerminalPath<'_>) -> Option<String> {
+    let context = match kind {
+        QuotaKind::FileCount | QuotaKind::TotalSize | QuotaKind::FileSize => format!(
+            "Extraction limit exceeded for '{archive}'\n\
+             HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits."
+        ),
+        QuotaKind::DecoderMemory => format!(
             "Decoder memory limit exceeded for '{archive}'\n\
              The archive declares a decompression dictionary or window larger than the allowed \
              limit. No CLI flag relaxes this. Rust API only: \
              SecurityConfig::with_max_decoder_memory."
         ),
-        exarch_core::QuotaResource::CompressedMembers { .. } => format!(
+        QuotaKind::CompressedMembers => format!(
             "Compressed member limit exceeded for '{archive}'\n\
              The stream holds more gzip or bzip2 members than its output allows. No CLI flag \
              relaxes this. Rust API only: SecurityConfig::with_compressed_member_allowance."
         ),
-        _ => format!(
-            "Extraction limit exceeded for '{archive}'\n\
-             HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits."
+        QuotaKind::IntegerOverflow => format!(
+            "Quota accounting overflowed for '{archive}'\n\
+             The archive declares sizes or counts too large to track. No CLI flag relaxes this."
         ),
-    }
+        QuotaKind::TreeNodes => format!(
+            "Destination name budget exceeded for '{archive}'\n\
+             The archive spells more distinct names than the in-memory destination model admits. \
+             No CLI flag relaxes this. Rust API only: SecurityConfig::with_max_file_count and \
+             SecurityConfig::with_max_path_depth."
+        ),
+        QuotaKind::SinkCapacity => format!(
+            "In-memory sink capacity exceeded for '{archive}'\n\
+             No CLI flag relaxes this. Rust API only: the sink's capacity limit."
+        ),
+        _ => return None,
+    };
+    Some(context)
 }
 
 /// Converts `ArchiveError` to user-friendly anyhow error with context.
@@ -299,7 +328,9 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
              HINT: The archive may be crafted to show different content to different extractors. \
              Use --zip-consistency ignore only for archives from a trusted producer."
         ),
-        ArchiveError::QuotaExceeded { resource } => quota_exceeded_context(resource, archive),
+        ArchiveError::QuotaExceeded { resource } => {
+            quota_exceeded_context(resource.kind(), archive)
+        }
         ArchiveError::SymlinkEscape { .. } | ArchiveError::HardlinkEscape { .. } => format!(
             "Security violation: Archive '{archive}' has a link that escapes the destination\n\
              HINT: a link resolves outside the destination (an archive link or an existing \
@@ -368,6 +399,10 @@ pub fn add_archive_context<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exarch_core::Compressed;
+    use exarch_core::LinkKind;
+    use exarch_core::Uncompressed;
+    use exarch_core::Violation;
     use std::io;
     use std::path::PathBuf;
 
@@ -384,7 +419,11 @@ mod tests {
     }
 
     fn zip_bomb_message(scope: ZipBombScope, compressed: u64, uncompressed: u64) -> String {
-        let err = ArchiveError::ZipBomb(ZipBombDetails::new(scope, compressed, uncompressed));
+        let err = ArchiveError::ZipBomb(ZipBombDetails::new(
+            scope,
+            Compressed(compressed),
+            Uncompressed(uncompressed),
+        ));
         let converted = convert_extraction_error(err, Path::new("bomb.zip"));
         format!("{converted:?}")
     }
@@ -579,11 +618,13 @@ mod tests {
 
     #[test]
     fn test_security_violation_reason_appears_exactly_once() {
-        let err = ArchiveError::violation("absolute path detected".to_string());
+        let err = ArchiveError::from(Violation::EncryptedEntry {
+            name: "distinctive-entry".into(),
+        });
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert_eq!(
-            msg.matches("absolute path detected").count(),
+            msg.matches("distinctive-entry").count(),
             1,
             "reason should appear exactly once, got: {msg}"
         );
@@ -595,9 +636,7 @@ mod tests {
 
     #[test]
     fn test_security_violation_forged_size_hint_omits_policy_flags() {
-        let err = ArchiveError::violation(
-            "decompressed size exceeded the declared uncompressed size of 50 bytes".to_string(),
-        );
+        let err = ArchiveError::from(Violation::DeclaredSizeExceeded { declared: 50 });
         let converted = convert_extraction_error(err, Path::new("archive.zip"));
         let msg = format!("{converted:#}");
         assert!(
@@ -617,8 +656,25 @@ mod tests {
         }
     }
 
+    fn violation_for(setting: PolicySetting) -> Violation {
+        match setting {
+            PolicySetting::Symlinks => Violation::LinksNotAllowed(LinkKind::Symlink),
+            PolicySetting::Hardlinks => Violation::LinksNotAllowed(LinkKind::Hardlink),
+            PolicySetting::SolidArchives => Violation::SolidArchive,
+            PolicySetting::BannedComponents => Violation::BannedComponent {
+                component: ".git".into(),
+            },
+            PolicySetting::MaxPathDepth => Violation::PathDepth { depth: 2, max: 1 },
+            PolicySetting::WindowsReservedNames => Violation::ReservedDeviceName {
+                component: "CON".into(),
+            },
+            PolicySetting::MaxTarMetadataBytes => Violation::TarMetadataBudget { limit: 1 },
+            other => panic!("no sample violation for {other}"),
+        }
+    }
+
     fn hint_for(setting: PolicySetting) -> String {
-        let err = ArchiveError::relaxable_violation(setting, "refused".to_string());
+        let err = ArchiveError::from(violation_for(setting));
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         format!("{converted:#}")
     }
@@ -689,6 +745,24 @@ mod tests {
             assert!(msg.contains("Rust API only"), "got: {msg}");
             assert!(msg.contains(api), "got: {msg}");
             assert!(!msg.contains("--allow"), "no CLI flag exists: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_every_quota_kind_has_a_dedicated_context() {
+        let archive = Path::new("a.tar");
+        for &kind in QuotaKind::ALL {
+            let msg = dedicated_quota_context(kind, TerminalPath::new(archive))
+                .unwrap_or_else(|| panic!("{kind} took the wildcard arm"));
+            let raises_a_flag = msg.contains("HINT: Use --max-files");
+            let is_size_or_count = matches!(
+                kind,
+                QuotaKind::FileCount | QuotaKind::TotalSize | QuotaKind::FileSize
+            );
+            assert_eq!(
+                raises_a_flag, is_size_or_count,
+                "{kind} points at the wrong flags: {msg}"
+            );
         }
     }
 
@@ -775,10 +849,7 @@ mod tests {
         use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let inner = ArchiveError::relaxable_violation(
-            PolicySetting::Symlinks,
-            "symlinks not allowed by security policy".to_string(),
-        );
+        let inner = ArchiveError::from(Violation::LinksNotAllowed(LinkKind::Symlink));
         let report = ExtractionReport {
             files_extracted: 3,
             directories_created: 1,
@@ -804,8 +875,7 @@ mod tests {
             "category-specific HINT missing: {msg}"
         );
         assert_eq!(
-            msg.matches("symlinks not allowed by security policy")
-                .count(),
+            msg.matches("symlinks not allowed").count(),
             1,
             "inner error reason should appear exactly once, got: {msg}"
         );

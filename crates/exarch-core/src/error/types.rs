@@ -1,12 +1,16 @@
 //! Core error types for archive operations.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use thiserror::Error;
 
 use super::tar_ambiguity::TarAmbiguity;
 use super::tar_trailer::TarTrailerRefusal;
+use super::violation::Violation;
 use super::zip_inconsistency::ZipInconsistency;
 use crate::closed_enum::closed_enum;
+use crate::security::Compressed;
+use crate::security::Uncompressed;
 
 /// Result type alias using [`ArchiveError`].
 pub type Result<T> = std::result::Result<T, ArchiveError>;
@@ -114,28 +118,38 @@ impl std::fmt::Display for CompressionRatio {
 /// # Examples
 ///
 /// ```
+/// use exarch_core::Compressed;
 /// use exarch_core::CompressionRatio;
+/// use exarch_core::Uncompressed;
 /// use exarch_core::ZipBombDetails;
 /// use exarch_core::ZipBombScope;
 ///
-/// let details = ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000);
+/// let details = ZipBombDetails::new(
+///     ZipBombScope::Entry,
+///     Compressed(1000),
+///     Uncompressed(1_000_000),
+/// );
 /// assert_eq!(details.scope(), ZipBombScope::Entry);
 /// assert_eq!(details.ratio(), CompressionRatio::Finite(1000.0));
 ///
-/// let forged = ZipBombDetails::new(ZipBombScope::Entry, 0, 10);
+/// let forged = ZipBombDetails::new(ZipBombScope::Entry, Compressed(0), Uncompressed(10));
 /// assert_eq!(forged.ratio(), CompressionRatio::Unbounded);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZipBombDetails {
     scope: ZipBombScope,
-    compressed: u64,
-    uncompressed: u64,
+    compressed: Compressed,
+    uncompressed: Uncompressed,
 }
 
 impl ZipBombDetails {
     /// Creates details for a size pair measured over `scope`.
     #[must_use]
-    pub const fn new(scope: ZipBombScope, compressed: u64, uncompressed: u64) -> Self {
+    pub const fn new(
+        scope: ZipBombScope,
+        compressed: Compressed,
+        uncompressed: Uncompressed,
+    ) -> Self {
         Self {
             scope,
             compressed,
@@ -152,13 +166,13 @@ impl ZipBombDetails {
     /// Compressed size in bytes.
     #[must_use]
     pub const fn compressed(&self) -> u64 {
-        self.compressed
+        self.compressed.0
     }
 
     /// Uncompressed size in bytes.
     #[must_use]
     pub const fn uncompressed(&self) -> u64 {
-        self.uncompressed
+        self.uncompressed.0
     }
 
     /// Compression ratio of the recorded sizes.
@@ -168,7 +182,7 @@ impl ZipBombDetails {
         reason = "the ratio is approximate by design"
     )]
     pub fn ratio(&self) -> CompressionRatio {
-        match (self.compressed, self.uncompressed) {
+        match (self.compressed.0, self.uncompressed.0) {
             (0, 0) => CompressionRatio::Finite(0.0),
             (0, _) => CompressionRatio::Unbounded,
             (compressed, uncompressed) => {
@@ -183,8 +197,8 @@ impl std::fmt::Display for ZipBombDetails {
         write!(
             f,
             "compressed={} bytes, uncompressed={} bytes (ratio: {}, scope: {})",
-            self.compressed,
-            self.uncompressed,
+            self.compressed.0,
+            self.uncompressed.0,
             self.ratio(),
             self.scope
         )
@@ -244,6 +258,62 @@ pub enum QuotaResource {
         /// Maximum number of payload bytes the sink accepts.
         max: u64,
     },
+}
+
+closed_enum! {
+    /// Payload-free discriminant of a [`QuotaResource`].
+    ///
+    /// Front ends match on it instead of on the payload-carrying enum, and
+    /// iterate [`QuotaKind::ALL`] in a test so a new quota dimension fails a
+    /// test instead of silently taking a wildcard arm.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::QuotaKind;
+    /// use exarch_core::QuotaResource;
+    ///
+    /// let resource = QuotaResource::DecoderMemory { max: 1 };
+    /// assert_eq!(resource.kind(), QuotaKind::DecoderMemory);
+    /// assert!(QuotaKind::ALL.contains(&QuotaKind::TreeNodes));
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum QuotaKind {
+        /// [`QuotaResource::FileCount`].
+        FileCount => "file_count",
+        /// [`QuotaResource::TotalSize`].
+        TotalSize => "total_size",
+        /// [`QuotaResource::FileSize`].
+        FileSize => "file_size",
+        /// [`QuotaResource::IntegerOverflow`].
+        IntegerOverflow => "integer_overflow",
+        /// [`QuotaResource::DecoderMemory`].
+        DecoderMemory => "decoder_memory",
+        /// [`QuotaResource::CompressedMembers`].
+        CompressedMembers => "compressed_members",
+        /// [`QuotaResource::TreeNodes`].
+        TreeNodes => "tree_nodes",
+        /// [`QuotaResource::SinkCapacity`].
+        SinkCapacity => "sink_capacity",
+    }
+}
+
+impl QuotaResource {
+    /// The payload-free discriminant of this resource.
+    #[must_use]
+    pub const fn kind(&self) -> QuotaKind {
+        match self {
+            Self::FileCount { .. } => QuotaKind::FileCount,
+            Self::TotalSize { .. } => QuotaKind::TotalSize,
+            Self::FileSize { .. } => QuotaKind::FileSize,
+            Self::IntegerOverflow => QuotaKind::IntegerOverflow,
+            Self::DecoderMemory { .. } => QuotaKind::DecoderMemory,
+            Self::CompressedMembers { .. } => QuotaKind::CompressedMembers,
+            Self::TreeNodes { .. } => QuotaKind::TreeNodes,
+            Self::SinkCapacity { .. } => QuotaKind::SinkCapacity,
+        }
+    }
 }
 
 impl std::fmt::Display for QuotaResource {
@@ -406,17 +476,13 @@ pub enum ArchiveError {
 
     /// Operation not permitted by security policy.
     ///
-    /// Should be built through [`ArchiveError::violation`] and
-    /// [`ArchiveError::relaxable_violation`], so a refusal that a
-    /// `SecurityConfig` value can lift names that value.
-    #[error("operation denied by security policy: {reason}")]
+    /// The kind fixes the message, the sub-code and the `SecurityConfig`
+    /// setting that relaxes the refusal.
+    #[error("operation denied by security policy: {kind}")]
     #[non_exhaustive]
     SecurityViolation {
-        /// Reason for the violation.
-        reason: String,
-        /// The `SecurityConfig` setting whose current value refused the entry,
-        /// or `None` when no setting relaxes this refusal.
-        relaxable_by: Option<PolicySetting>,
+        /// Why the operation was denied.
+        kind: Violation,
     },
 
     /// Source path not found.
@@ -444,7 +510,7 @@ pub enum ArchiveError {
     #[error("invalid compression level {level}, must be 1-9")]
     InvalidCompressionLevel {
         /// The invalid compression level.
-        level: u8,
+        level: u32,
     },
 
     /// Cannot determine archive format.
@@ -524,6 +590,12 @@ impl From<std::io::Error> for ArchiveError {
     }
 }
 
+impl From<Violation> for ArchiveError {
+    fn from(kind: Violation) -> Self {
+        Self::SecurityViolation { kind }
+    }
+}
+
 impl From<TarTrailerRefusal> for ArchiveError {
     fn from(refusal: TarTrailerRefusal) -> Self {
         Self::TarTrailer(refusal)
@@ -537,46 +609,6 @@ impl From<TarAmbiguity> for ArchiveError {
 }
 
 impl ArchiveError {
-    /// Builds a [`Self::SecurityViolation`] that no `SecurityConfig` value
-    /// relaxes.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::ArchiveError;
-    ///
-    /// let err = ArchiveError::violation("encrypted entries are not supported".into());
-    /// assert_eq!(err.context(), Some("encrypted entries are not supported"));
-    /// ```
-    #[must_use]
-    pub const fn violation(reason: String) -> Self {
-        Self::SecurityViolation {
-            reason,
-            relaxable_by: None,
-        }
-    }
-
-    /// Builds a [`Self::SecurityViolation`] that `setting` refused and that
-    /// changing `setting` lifts.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::ArchiveError;
-    /// use exarch_core::PolicySetting;
-    ///
-    /// let err =
-    ///     ArchiveError::relaxable_violation(PolicySetting::Symlinks, "symlinks not allowed".into());
-    /// assert_eq!(err.relaxable_by(), Some(PolicySetting::Symlinks));
-    /// ```
-    #[must_use]
-    pub const fn relaxable_violation(setting: PolicySetting, reason: String) -> Self {
-        Self::SecurityViolation {
-            reason,
-            relaxable_by: Some(setting),
-        }
-    }
-
     /// Returns the `SecurityConfig` setting whose current value refused the
     /// entry, if this is a [`Self::SecurityViolation`] that a setting relaxes.
     ///
@@ -584,15 +616,40 @@ impl ArchiveError {
     ///
     /// ```
     /// use exarch_core::ArchiveError;
+    /// use exarch_core::Violation;
     ///
-    /// assert_eq!(ArchiveError::violation("x".into()).relaxable_by(), None);
+    /// assert_eq!(
+    ///     ArchiveError::from(Violation::EncryptedArchive).relaxable_by(),
+    ///     None
+    /// );
     /// ```
     #[must_use]
     pub fn relaxable_by(&self) -> Option<PolicySetting> {
         match self {
-            Self::SecurityViolation { relaxable_by, .. } => *relaxable_by,
+            Self::SecurityViolation { kind } => kind.relaxable_by(),
             Self::TarTrailer(refusal) => refusal.relaxable_by(),
             Self::PartialExtraction { source, .. } => source.relaxable_by(),
+            _ => None,
+        }
+    }
+
+    /// Returns the typed refusal of a [`Self::SecurityViolation`], looking
+    /// through [`Self::PartialExtraction`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::Violation;
+    ///
+    /// let err = ArchiveError::from(Violation::EncryptedArchive);
+    /// assert_eq!(err.security_violation(), Some(&Violation::EncryptedArchive));
+    /// ```
+    #[must_use]
+    pub fn security_violation(&self) -> Option<&Violation> {
+        match self {
+            Self::SecurityViolation { kind } => Some(kind),
+            Self::PartialExtraction { source, .. } => source.security_violation(),
             _ => None,
         }
     }
@@ -690,7 +747,7 @@ impl ArchiveError {
     /// use std::path::PathBuf;
     ///
     /// let err = ArchiveError::InvalidArchive("bad header".to_string());
-    /// assert_eq!(err.context(), Some("bad header"));
+    /// assert_eq!(err.context().as_deref(), Some("bad header"));
     ///
     /// let err = ArchiveError::UnknownFormat {
     ///     path: PathBuf::from("archive.rar"),
@@ -698,10 +755,10 @@ impl ArchiveError {
     /// assert_eq!(err.context(), None);
     /// ```
     #[must_use]
-    pub fn context(&self) -> Option<&str> {
+    pub fn context(&self) -> Option<Cow<'_, str>> {
         match self {
-            Self::InvalidArchive(msg) => Some(msg),
-            Self::SecurityViolation { reason, .. } => Some(reason),
+            Self::InvalidArchive(msg) => Some(Cow::Borrowed(msg)),
+            Self::SecurityViolation { kind } => Some(Cow::Owned(kind.to_string())),
             Self::PartialExtraction { source, .. } => source.context(),
             _ => None,
         }
@@ -756,9 +813,10 @@ impl ArchiveError {
     /// use exarch_core::ArchiveError;
     /// use exarch_core::ExtractionReport;
     /// use exarch_core::PartialWrites;
+    /// use exarch_core::Violation;
     ///
     /// let err = ArchiveError::PartialExtraction {
-    ///     source: Box::new(ArchiveError::violation("x".into())),
+    ///     source: Box::new(ArchiveError::from(Violation::EncryptedArchive)),
     ///     report: ExtractionReport::default(),
     ///     writes: PartialWrites::Kept,
     /// };
@@ -805,7 +863,7 @@ mod tests {
     #[test]
     fn test_discarded_marks_only_partial_extractions() {
         let partial = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::violation("x".into())),
+            source: Box::new(ArchiveError::from(Violation::EncryptedArchive)),
             report: crate::ExtractionReport::default(),
             writes: PartialWrites::Kept,
         };
@@ -817,7 +875,7 @@ mod tests {
             }
         );
         assert_matches!(
-            ArchiveError::violation("x".into()).discarded(),
+            ArchiveError::from(Violation::EncryptedArchive).discarded(),
             ArchiveError::SecurityViolation { .. }
         );
     }
@@ -844,7 +902,11 @@ mod tests {
 
     #[test]
     fn test_zip_bomb_error() {
-        let err = ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
+        let err = ArchiveError::ZipBomb(ZipBombDetails::new(
+            ZipBombScope::Entry,
+            Compressed(1000),
+            Uncompressed(1_000_000),
+        ));
         assert!(err.to_string().contains("zip bomb"));
         assert!(err.to_string().contains("1000"));
     }
@@ -869,10 +931,14 @@ mod tests {
         };
         assert!(err.is_security_violation());
 
-        let err = ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
+        let err = ArchiveError::ZipBomb(ZipBombDetails::new(
+            ZipBombScope::Entry,
+            Compressed(1000),
+            Uncompressed(1_000_000),
+        ));
         assert!(err.is_security_violation());
 
-        let err = ArchiveError::violation("test".into());
+        let err = ArchiveError::from(Violation::EncryptedArchive);
         assert!(err.is_security_violation());
 
         // Not security violations
@@ -893,7 +959,7 @@ mod tests {
         };
         assert!(err.is_recoverable());
 
-        let err = ArchiveError::violation("test".into());
+        let err = ArchiveError::from(Violation::EncryptedArchive);
         assert!(err.is_recoverable());
 
         // Non-recoverable errors
@@ -905,17 +971,24 @@ mod tests {
         };
         assert!(!err.is_recoverable());
 
-        let err = ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
+        let err = ArchiveError::ZipBomb(ZipBombDetails::new(
+            ZipBombScope::Entry,
+            Compressed(1000),
+            Uncompressed(1_000_000),
+        ));
         assert!(!err.is_recoverable());
     }
 
     #[test]
     fn test_context() {
         let err = ArchiveError::InvalidArchive("bad header".into());
-        assert_eq!(err.context(), Some("bad header"));
+        assert_eq!(err.context().as_deref(), Some("bad header"));
 
-        let err = ArchiveError::violation("not allowed".into());
-        assert_eq!(err.context(), Some("not allowed"));
+        let err = ArchiveError::from(Violation::SymlinksUnsupported);
+        assert_eq!(
+            err.context().as_deref(),
+            Some("symlinks are not supported on this platform")
+        );
 
         let err = ArchiveError::UnknownFormat {
             path: PathBuf::from("archive.rar"),
@@ -1036,21 +1109,27 @@ mod tests {
 
     #[test]
     fn test_zip_bomb_display_per_scope() {
-        let entry =
-            ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
+        let entry = ArchiveError::ZipBomb(ZipBombDetails::new(
+            ZipBombScope::Entry,
+            Compressed(1000),
+            Uncompressed(1_000_000),
+        ));
         assert_eq!(
             entry.to_string(),
             "potential zip bomb: compressed=1000 bytes, uncompressed=1000000 bytes (ratio: 1000.00, scope: entry)"
         );
 
-        let solid =
-            ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::SolidBlock, 10, 20_000));
+        let solid = ArchiveError::ZipBomb(ZipBombDetails::new(
+            ZipBombScope::SolidBlock,
+            Compressed(10),
+            Uncompressed(20_000),
+        ));
         assert!(solid.to_string().contains("scope: solid block"));
     }
 
     #[test]
     fn test_zip_bomb_zero_compressed_is_unbounded() {
-        let details = ZipBombDetails::new(ZipBombScope::Entry, 0, 1000);
+        let details = ZipBombDetails::new(ZipBombScope::Entry, Compressed(0), Uncompressed(1000));
         assert_eq!(details.ratio(), CompressionRatio::Unbounded);
         let err = ArchiveError::ZipBomb(details);
         assert!(err.is_security_violation());
@@ -1062,11 +1141,11 @@ mod tests {
     #[test]
     fn test_zip_bomb_ratio_is_derived_from_sizes() {
         assert_eq!(
-            ZipBombDetails::new(ZipBombScope::Entry, 1000, 1000).ratio(),
+            ZipBombDetails::new(ZipBombScope::Entry, Compressed(1000), Uncompressed(1000)).ratio(),
             CompressionRatio::Finite(1.0)
         );
         assert_eq!(
-            ZipBombDetails::new(ZipBombScope::Entry, 0, 0).ratio(),
+            ZipBombDetails::new(ZipBombScope::Entry, Compressed(0), Uncompressed(0)).ratio(),
             CompressionRatio::Finite(0.0)
         );
     }
@@ -1262,7 +1341,11 @@ mod tests {
     #[test]
     fn test_partial_extraction_delegates_error_code() {
         use crate::ExtractionReport;
-        let source = ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 100_000));
+        let source = ArchiveError::ZipBomb(ZipBombDetails::new(
+            ZipBombScope::Entry,
+            Compressed(100),
+            Uncompressed(100_000),
+        ));
         let err = ArchiveError::PartialExtraction {
             source: Box::new(source),
             report: ExtractionReport::new(),

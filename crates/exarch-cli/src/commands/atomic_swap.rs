@@ -33,6 +33,56 @@ pub(super) enum DestEntryKind {
     Other,
 }
 
+/// Identity of a directory entry, as reported by [`PinnedDir::entry_status`].
+///
+/// Deliberately does not implement `PartialEq`: where the platform offers no
+/// stable identity ([`Unknown`](Self::Unknown)), a derived `==` would make
+/// every comparison vacuously succeed. [`check`](Self::check) forces each
+/// caller to decide what an unverifiable identity means.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum FileIdentity {
+    /// A real `(dev, ino)` pair from the filesystem.
+    // Only constructed by the Unix `entry_status`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Known {
+        /// Device number.
+        dev: u64,
+        /// Inode number.
+        ino: u64,
+    },
+    /// The platform provides no stable identity.
+    // Only constructed by the non-Unix `entry_status` (and by tests).
+    #[cfg_attr(unix, allow(dead_code))]
+    Unknown,
+}
+
+/// Outcome of comparing two [`FileIdentity`] values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdentityCheck {
+    /// Both identities are known and equal.
+    Same,
+    /// Both identities are known and differ.
+    Different,
+    /// At least one identity is unknown, so nothing can be concluded.
+    Unknown,
+}
+
+impl FileIdentity {
+    /// Compares `self` (observed now) against `expected` (snapshotted earlier).
+    pub(super) const fn check(self, expected: Self) -> IdentityCheck {
+        match (self, expected) {
+            (Self::Known { dev: d1, ino: i1 }, Self::Known { dev: d2, ino: i2 }) => {
+                if d1 == d2 && i1 == i2 {
+                    IdentityCheck::Same
+                } else {
+                    IdentityCheck::Different
+                }
+            }
+            _ => IdentityCheck::Unknown,
+        }
+    }
+}
+
 /// A directory pinned by an open file descriptor.
 ///
 /// See the module docs for why path-relative operations are unsafe here.
@@ -76,7 +126,7 @@ impl PinnedDir {
     }
 
     /// Classifies the directory entry `name` inside the pinned directory and
-    /// returns its `(dev, ino)` identity, in the same syscall.
+    /// returns its [`FileIdentity`], in the same syscall.
     ///
     /// Uses `statat` rather than `openat` + `fstat` deliberately: `statat`
     /// only needs search permission on the pinned directory (already
@@ -102,7 +152,7 @@ impl PinnedDir {
     // unrepresentable values compare equal to each other, silently
     // defeating the identity check this feeds.
     #[allow(clippy::useless_conversion)]
-    pub(super) fn entry_status(&self, name: &OsStr) -> io::Result<(DestEntryKind, (u64, u64))> {
+    pub(super) fn entry_status(&self, name: &OsStr) -> io::Result<(DestEntryKind, FileIdentity)> {
         let stat = rustix::fs::statat(&self.0, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
         let kind = match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
             rustix::fs::FileType::Directory => DestEntryKind::Directory,
@@ -113,7 +163,7 @@ impl PinnedDir {
             u64::try_from(stat.st_dev).map_err(|_| io::Error::other("unrepresentable st_dev"))?;
         let ino =
             u64::try_from(stat.st_ino).map_err(|_| io::Error::other("unrepresentable st_ino"))?;
-        Ok((kind, (dev, ino)))
+        Ok((kind, FileIdentity::Known { dev, ino }))
     }
 
     /// Renames `from` to `to`, both resolved relative to the pinned
@@ -216,17 +266,17 @@ impl PinnedDir {
 
     /// Classifies the directory entry `name` and reports its identity.
     ///
-    /// Identity is always `(0, 0)`: verifying without re-walking the path is
-    /// exactly the capability this platform lacks, so the check is a no-op
-    /// here rather than a false guarantee. The *kind* classification is
-    /// real, though — [`is_reparse_point`] checks
+    /// Identity is always [`FileIdentity::Unknown`]: verifying without
+    /// re-walking the path is exactly the capability this platform lacks, so
+    /// callers must handle the unverifiable case explicitly. The *kind*
+    /// classification is real, though — [`is_reparse_point`] checks
     /// `FILE_ATTRIBUTE_REPARSE_POINT` tag-agnostically on Windows, so
     /// junctions and any other reparse point are reported as
     /// [`DestEntryKind::Symlink`], not just true symlinks.
     // `&self` is part of the shared signature with the Unix impl, which
     // does need it; this stub simply doesn't.
     #[allow(clippy::unused_self)]
-    pub(super) fn entry_status(&self, name: &OsStr) -> io::Result<(DestEntryKind, (u64, u64))> {
+    pub(super) fn entry_status(&self, name: &OsStr) -> io::Result<(DestEntryKind, FileIdentity)> {
         let metadata = std::fs::symlink_metadata(self.parent.join(name))?;
         let kind = if is_reparse_point(&metadata) {
             DestEntryKind::Symlink
@@ -235,7 +285,7 @@ impl PinnedDir {
         } else {
             DestEntryKind::Other
         };
-        Ok((kind, (0, 0)))
+        Ok((kind, FileIdentity::Unknown))
     }
 
     pub(super) fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
@@ -261,8 +311,8 @@ impl PinnedDir {
 /// Non-Unix fallback for [`current_path`]: no fd-to-path facility is
 /// implemented here, so this always returns `None` — the same "documented
 /// residual, not a false guarantee" pattern as [`PinnedDir`]'s non-Unix
-/// `entry_status` always reporting `(0, 0)`. Callers fall back to naming the
-/// logical path instead.
+/// `entry_status` always reporting [`FileIdentity::Unknown`]. Callers fall back
+/// to naming the logical path instead.
 #[cfg(not(unix))]
 pub(super) fn current_path(_fd: &std::fs::File) -> Option<std::path::PathBuf> {
     None
@@ -293,6 +343,8 @@ fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::DestEntryKind;
+    use super::FileIdentity;
+    use super::IdentityCheck;
     use super::PinnedDir;
     use super::current_path;
     use std::ffi::OsStr;
@@ -348,10 +400,39 @@ mod tests {
 
         let (kind, recheck) = pin.entry_status(name).expect("recheck identity");
         assert_eq!(kind, DestEntryKind::Directory);
-        assert_ne!(
-            snapshot, recheck,
+        assert_eq!(
+            recheck.check(snapshot),
+            IdentityCheck::Different,
             "identity must change when the destination entry is swapped for a new one"
         );
+    }
+
+    #[test]
+    fn entry_status_reports_a_known_identity_that_matches_itself() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        std::fs::create_dir(parent.join("dest")).expect("create dest");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let (_, first) = pin.entry_status(OsStr::new("dest")).expect("first");
+        let (_, second) = pin.entry_status(OsStr::new("dest")).expect("second");
+        assert!(matches!(first, FileIdentity::Known { .. }));
+        assert_eq!(second.check(first), IdentityCheck::Same);
+    }
+
+    #[test]
+    fn unknown_identity_never_compares_as_same_or_different() {
+        let known = FileIdentity::Known { dev: 1, ino: 2 };
+        let other = FileIdentity::Known { dev: 1, ino: 3 };
+        assert_eq!(known.check(known), IdentityCheck::Same);
+        assert_eq!(known.check(other), IdentityCheck::Different);
+        assert_eq!(
+            FileIdentity::Unknown.check(FileIdentity::Unknown),
+            IdentityCheck::Unknown
+        );
+        assert_eq!(FileIdentity::Unknown.check(known), IdentityCheck::Unknown);
+        assert_eq!(known.check(FileIdentity::Unknown), IdentityCheck::Unknown);
     }
 
     /// Unit-level pin (v3 spec) that `entry_status` classifies a symlink

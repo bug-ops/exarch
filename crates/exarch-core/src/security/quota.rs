@@ -6,17 +6,18 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::security::zipbomb::Uncompressed;
 
 /// Proof that a file's size was successfully reserved against a
 /// [`QuotaTracker`].
 ///
-/// This is a capability token, not a data type: it carries no payload and
-/// exists only so that code holding one can prove a tracker actually
-/// authorized the charge. Its only producers are [`QuotaTracker::reserve`] and
-/// the crate-private `QuotaTracker::charge` — the private field means no
-/// other code, in or out of this crate, can assemble one directly.
-/// `EntryValidator` exposes three ways to obtain one:
-/// [`EntryValidator::validate_entry`] embeds it in
+/// This is a capability token that records the byte count it reserved, so the
+/// write cap is read from the permit and cannot be re-supplied by a caller
+/// that reserved one quantity and enforces another (GHSA-5j8q). Its only
+/// producers are [`QuotaTracker::reserve`] and the crate-private
+/// `QuotaTracker::charge` — the private field means no other code, in or out of
+/// this crate, can assemble one directly. `EntryValidator` exposes three ways
+/// to obtain one: [`EntryValidator::validate_entry`] embeds it in
 /// [`ValidatedEntryType::File`] for the common case where path validation and
 /// quota reservation happen together; its crate-private `charge_hardlink`
 /// and `reserve_file` methods return it standalone for callers that must
@@ -26,9 +27,7 @@ use crate::config::Validated;
 /// skipped duplicate), respectively.
 ///
 /// Deliberately not `Clone`/`Copy`/`Default`: a permit represents a single
-/// reservation and must not be duplicated or spent more than once. Zero-sized
-/// (`PhantomData`-based), so wrapping it in `Result` costs nothing over
-/// `Result<()>`.
+/// reservation and must not be duplicated or spent more than once.
 ///
 /// [`ValidatedEntryType::File`]: crate::security::validator::ValidatedEntryType::File
 /// [`EntryValidator::validate_entry`]: crate::security::validator::EntryValidator::validate_entry
@@ -40,7 +39,9 @@ use crate::config::Validated;
 ///
 /// ```no_run
 /// use exarch_core::SecurityConfig;
+/// use exarch_core::security::EntrySize;
 /// use exarch_core::security::EntryValidator;
+/// use exarch_core::security::Uncompressed;
 /// use exarch_core::security::ValidatedEntryType;
 /// use exarch_core::types::DestDir;
 /// use exarch_core::types::EntryType;
@@ -55,9 +56,8 @@ use crate::config::Validated;
 /// let entry = validator.validate_entry(
 ///     Path::new("file.txt"),
 ///     &EntryType::File,
-///     1024, // uncompressed size
-///     None, // compressed size
-///     None, // mode
+///     EntrySize::new(Uncompressed(1024), None),
+///     None,
 /// )?;
 ///
 /// if let ValidatedEntryType::File(permit) = entry.entry_type() {
@@ -68,7 +68,23 @@ use crate::config::Validated;
 /// ```
 #[derive(Debug)]
 #[must_use]
-pub struct QuotaPermit(PhantomData<()>);
+pub struct QuotaPermit {
+    bytes: Uncompressed,
+}
+
+impl QuotaPermit {
+    const fn new(bytes: u64) -> Self {
+        Self {
+            bytes: Uncompressed(bytes),
+        }
+    }
+
+    /// Spends the permit, yielding the byte count it reserved, which is also
+    /// the write ceiling.
+    pub(crate) const fn into_bytes(self) -> u64 {
+        self.bytes.0
+    }
+}
 
 /// Proof that one entry was counted against `max_file_count` while its bytes
 /// are not yet charged.
@@ -89,7 +105,9 @@ pub struct QuotaPermit(PhantomData<()>);
 ///
 /// ```no_run
 /// use exarch_core::SecurityConfig;
+/// use exarch_core::security::EntrySize;
 /// use exarch_core::security::EntryValidator;
+/// use exarch_core::security::Uncompressed;
 /// use exarch_core::security::ValidatedEntryType;
 /// use exarch_core::types::DestDir;
 /// use exarch_core::types::EntryType;
@@ -108,8 +126,7 @@ pub struct QuotaPermit(PhantomData<()>);
 ///     &EntryType::Hardlink {
 ///         target: PathBuf::from("target.txt"),
 ///     },
-///     0,
-///     None,
+///     EntrySize::new(Uncompressed(0), None),
 ///     None,
 /// )?;
 ///
@@ -205,7 +222,7 @@ impl QuotaTracker {
         self.add_bytes(size)?;
         self.check_total_size(config)?;
 
-        Ok(QuotaPermit(PhantomData))
+        Ok(QuotaPermit::new(size))
     }
 
     /// Reserves quota capacity without enforcing the per-file size limit.
@@ -253,11 +270,11 @@ impl QuotaTracker {
                 }
             })?;
 
-            return Ok(QuotaPermit(PhantomData));
+            return Ok(QuotaPermit::new(size));
         }
 
         self.record_file_checked(size, max_file_size, config)?;
-        Ok(QuotaPermit(PhantomData))
+        Ok(QuotaPermit::new(size))
     }
 
     /// Internal implementation with full quota validation.

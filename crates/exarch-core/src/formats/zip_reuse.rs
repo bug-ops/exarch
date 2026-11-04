@@ -33,6 +33,8 @@ use super::zip::ZIP_INVALID_CHECKSUM;
 use crate::DecodeReuse;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::security::zipbomb::Compressed;
+use crate::security::zipbomb::Uncompressed;
 use crate::security::zipbomb::ratio_admitted;
 
 const SPOOL_BUFFER: usize = 64 * 1024;
@@ -76,7 +78,12 @@ impl ReusePlan {
     }
 
     fn admits(&self, key: &RetainKey) -> bool {
-        key.size <= self.max_entry && ratio_admitted(key.compressed, key.size, self.max_ratio)
+        key.size <= self.max_entry
+            && ratio_admitted(
+                Compressed(key.compressed),
+                Uncompressed(key.size),
+                self.max_ratio,
+            )
     }
 }
 
@@ -138,15 +145,15 @@ impl fmt::Debug for ReuseStore {
     }
 }
 
-#[cfg(not(target_os = "wasi"))]
-fn open_spool() -> Option<File> {
-    tempfile::tempfile().ok()
-}
-
-// std's `temp_dir` panics on WASI, so no temporary file is attempted there.
-#[cfg(target_os = "wasi")]
-const fn open_spool() -> Option<File> {
-    None
+/// Opens the anonymous spool file, or `None` where none can be created.
+///
+/// WASI has no temporary directory and `std::env::temp_dir` panics there, so
+/// no temporary file is attempted on that target.
+pub fn open_spool() -> Option<File> {
+    cfg_select! {
+        target_os = "wasi" => None,
+        _ => tempfile::tempfile().ok(),
+    }
 }
 
 impl ReuseStore {

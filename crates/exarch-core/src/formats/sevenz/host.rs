@@ -33,10 +33,12 @@ use crate::security::admitted::ValidatedHardlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
+use crate::security::hardlink::HardlinkTarget;
 use crate::security::validator::EntryPath;
 use crate::security::validator::FileScreen;
 use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatorCore;
+use crate::sink::DuplicatePolicy;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -156,7 +158,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let parent = parent.into_owned()?;
 
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
-        if occupancy.is_occupied() && tally.options.skip_duplicates {
+        if occupancy.is_occupied() && tally.options.duplicate_policy() == DuplicatePolicy::Skip {
             return tally.record_duplicate_skip().map(FileAdmission::Skipped);
         }
         let write_mode = occupancy.write_mode(safe_path.as_path())?;
@@ -201,7 +203,6 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         &mut self,
         reader: &mut R,
         admitted: SevenZAdmittedFile,
-        size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         let SevenZAdmittedFile {
@@ -212,22 +213,12 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let (path, permit, _mode) = file.into_parts();
         let (_, leaf) = Leaf::split(path.as_path())?;
         let written = match write_mode {
-            WriteMode::CreateNew => write_file_direct(
-                reader,
-                &parent,
-                leaf,
-                size,
-                self.inner.copy_buffer_mut(),
-                permit,
-            )?,
-            WriteMode::ReplaceRegular => write_file_with_permit(
-                reader,
-                &parent,
-                leaf,
-                size,
-                self.inner.copy_buffer_mut(),
-                permit,
-            )?,
+            WriteMode::CreateNew => {
+                write_file_direct(reader, &parent, leaf, self.inner.copy_buffer_mut(), permit)?
+            }
+            WriteMode::ReplaceRegular => {
+                write_file_with_permit(reader, &parent, leaf, self.inner.copy_buffer_mut(), permit)?
+            }
         };
         tally.record_file(written)
     }
@@ -239,7 +230,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
     fn hardlink(
         &mut self,
         link: &SafePath<HostParent>,
-        target: &SafePath<HostParent>,
+        target: &HardlinkTarget,
         counted: crate::security::quota::EntryCount,
         tally: &mut Tally<'_>,
         hardlink_duplicate_skips: &mut u64,
@@ -281,7 +272,7 @@ impl PrePass for HostPrePass<'_> {
     fn file(&mut self, safe_path: &SafePath, _path: &Path) -> Result<FilePlan> {
         let dest_path = self.dest.join(safe_path);
         let occupancy = DestOccupancy::probe_path(&dest_path)?;
-        if occupancy.is_occupied() && self.options.skip_duplicates {
+        if occupancy.is_occupied() && self.options.duplicate_policy() == DuplicatePolicy::Skip {
             return Ok(FilePlan::Skip);
         }
         // Fail here too, before any entry is written, so the pre-pass keeps

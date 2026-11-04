@@ -1,11 +1,10 @@
 //! Compression level conversion utilities.
 //!
-//! This module provides unified conversion from the user-friendly compression
-//! level scale (1-9) to codec-specific compression level types.
+//! This module maps the user-friendly [`CompressionLevel`] scale (1-9) to
+//! codec-specific compression levels. The range is guaranteed by the type, so
+//! no mapping has to handle an out-of-range value.
 //!
 //! # Level Mapping
-//!
-//! User levels follow a consistent scale:
 //!
 //! - **1-3**: Fast compression (lower CPU usage, larger files)
 //! - **6**: Default compression (balanced)
@@ -13,213 +12,104 @@
 //!
 //! Each codec maps these levels to its own internal scale.
 
-/// Converts user compression level (1-9) to flate2 compression level.
-///
-/// # Mapping
-///
-/// - `None` or `Some(6)`: Default compression
-/// - `1-3`: Fast compression
-/// - `7-9`: Best compression
-/// - Other values: Literal level (clamped to valid range)
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::creation::compression::compression_level_to_flate2;
-///
-/// let default_level = compression_level_to_flate2(None);
-/// let fast_level = compression_level_to_flate2(Some(1));
-/// let best_level = compression_level_to_flate2(Some(9));
-/// ```
-#[must_use]
-pub fn compression_level_to_flate2(level: Option<u8>) -> flate2::Compression {
-    match level {
-        None | Some(6) => flate2::Compression::default(),
-        Some(1..=3) => flate2::Compression::fast(),
-        Some(7..=9) => flate2::Compression::best(),
-        Some(n) => flate2::Compression::new(u32::from(n.min(9))),
-    }
-}
+use crate::creation::CompressionLevel;
 
-/// Converts user compression level (1-9) to bzip2 compression level.
-///
-/// # Mapping
-///
-/// - `None` or `Some(6)`: Default compression
-/// - `1`: Fast compression
-/// - `2-6`: Literal level
-/// - `7-9`: Best compression
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::creation::compression::compression_level_to_bzip2;
-///
-/// let default_level = compression_level_to_bzip2(None);
-/// let fast_level = compression_level_to_bzip2(Some(1));
-/// let best_level = compression_level_to_bzip2(Some(9));
-/// ```
-#[must_use]
-pub fn compression_level_to_bzip2(level: Option<u8>) -> bzip2::Compression {
-    match level {
-        None | Some(6) => bzip2::Compression::default(),
-        Some(1) => bzip2::Compression::fast(),
-        Some(7..=9) => bzip2::Compression::best(),
-        Some(n @ 2..=6) => bzip2::Compression::new(u32::from(n)),
-        Some(n) => bzip2::Compression::new(u32::from(n.min(9))),
+impl CompressionLevel {
+    /// The flate2 level: fast for 1-3, best for 7-9, the default for 4-6.
+    pub(crate) fn to_flate2(self) -> flate2::Compression {
+        match self.get() {
+            1..=3 => flate2::Compression::fast(),
+            7..=9 => flate2::Compression::best(),
+            n => flate2::Compression::new(u32::from(n)),
+        }
     }
-}
 
-/// Converts user compression level (1-9) to xz compression level.
-///
-/// # Mapping
-///
-/// - `None` or `Some(6)`: Level 6 (default)
-/// - Other values: Literal level (clamped to valid range 0-9)
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::creation::compression::compression_level_to_xz;
-///
-/// let default_level = compression_level_to_xz(None);
-/// let fast_level = compression_level_to_xz(Some(1));
-/// let best_level = compression_level_to_xz(Some(9));
-/// ```
-#[must_use]
-pub fn compression_level_to_xz(level: Option<u8>) -> u32 {
-    match level {
-        None | Some(6) => 6,
-        Some(n) => u32::from(n.min(9)),
+    /// The bzip2 level: fast for 1, best for 7-9, the literal level for 2-6.
+    pub(crate) fn to_bzip2(self) -> bzip2::Compression {
+        match self.get() {
+            1 => bzip2::Compression::fast(),
+            7..=9 => bzip2::Compression::best(),
+            n => bzip2::Compression::new(u32::from(n)),
+        }
     }
-}
 
-/// Converts user compression level (1-9) to zstd compression level.
-///
-/// # Mapping
-///
-/// Zstd has a wider range (1-22) than our user scale (1-9).
-/// We map user levels to strategic zstd levels:
-///
-/// - `None` or `Some(6)`: Level 3 (default, fast with good compression)
-/// - `1`: Level 1 (fastest)
-/// - `2`: Level 2 (fast)
-/// - `7`: Level 10 (good compression)
-/// - `8`: Level 15 (better compression)
-/// - `9`: Level 19 (best compression)
-/// - Other values: Level 3 (default)
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::creation::compression::compression_level_to_zstd;
-///
-/// let default_level = compression_level_to_zstd(None);
-/// assert_eq!(default_level, 3);
-///
-/// let fast_level = compression_level_to_zstd(Some(1));
-/// assert_eq!(fast_level, 1);
-///
-/// let best_level = compression_level_to_zstd(Some(9));
-/// assert_eq!(best_level, 19);
-/// ```
-#[expect(
-    clippy::match_same_arms,
-    reason = "arms are kept separate to document each level's meaning"
-)]
-#[must_use]
-pub fn compression_level_to_zstd(level: Option<u8>) -> i32 {
-    match level {
-        // Default compression level
-        None | Some(6) => 3,
-        Some(1) => 1,
-        Some(2) => 2,
-        Some(7) => 10,
-        Some(8) => 15,
-        Some(9) => 19,
-        // All other levels (3-5, 0, 10+) map to default
-        _ => 3,
+    /// The xz preset: the literal level.
+    pub(crate) fn to_xz(self) -> u32 {
+        u32::from(self.get())
+    }
+
+    /// The zstd level. Zstd spans 1-22, so the scale maps to strategic levels:
+    /// 1 to 1, 2 to 2, 7 to 10, 8 to 15, 9 to 19, and 3-6 to the default 3.
+    pub(crate) fn to_zstd(self) -> i32 {
+        match self.get() {
+            1 => 1,
+            2 => 2,
+            7 => 10,
+            8 => 15,
+            9 => 19,
+            _ => 3,
+        }
+    }
+
+    /// The deflate level the ZIP writer takes.
+    pub(crate) fn to_zip_level(self) -> i64 {
+        i64::from(self.get())
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_compression_level_to_flate2() {
-        // Default
-        let level = compression_level_to_flate2(None);
-        assert_eq!(level, flate2::Compression::default());
-
-        let level = compression_level_to_flate2(Some(6));
-        assert_eq!(level, flate2::Compression::default());
-
-        // Fast
-        let level = compression_level_to_flate2(Some(1));
-        assert_eq!(level, flate2::Compression::fast());
-
-        // Best
-        let level = compression_level_to_flate2(Some(9));
-        assert_eq!(level, flate2::Compression::best());
-
-        // Specific level
-        let level = compression_level_to_flate2(Some(5));
-        assert_eq!(level, flate2::Compression::new(5));
-    }
-
-    /// Regression test for #443: defense-in-depth clamping so this
-    /// primitive cannot panic even if called directly with an unvalidated
-    /// value, independent of the `CreationConfig` typestate guarantee.
-    #[test]
-    fn test_compression_level_to_flate2_out_of_range_does_not_panic() {
-        let level = compression_level_to_flate2(Some(200));
-        assert_eq!(level, flate2::Compression::new(9));
+    fn level(n: u8) -> CompressionLevel {
+        CompressionLevel::try_from(n).unwrap()
     }
 
     #[test]
-    fn test_compression_level_to_bzip2() {
-        // Default
-        let level = compression_level_to_bzip2(None);
-        assert_eq!(level, bzip2::Compression::default());
-
-        // Fast
-        let level = compression_level_to_bzip2(Some(1));
-        assert_eq!(level, bzip2::Compression::fast());
-
-        // Best
-        let level = compression_level_to_bzip2(Some(9));
-        assert_eq!(level, bzip2::Compression::best());
-
-        // Specific level
-        let level = compression_level_to_bzip2(Some(4));
-        assert_eq!(level, bzip2::Compression::new(4));
+    fn test_to_flate2() {
+        assert_eq!(
+            CompressionLevel::default().to_flate2(),
+            flate2::Compression::new(6)
+        );
+        assert_eq!(level(1).to_flate2(), flate2::Compression::fast());
+        assert_eq!(level(3).to_flate2(), flate2::Compression::fast());
+        assert_eq!(level(5).to_flate2(), flate2::Compression::new(5));
+        assert_eq!(level(9).to_flate2(), flate2::Compression::best());
     }
 
     #[test]
-    fn test_compression_level_to_xz() {
-        assert_eq!(compression_level_to_xz(None), 6);
-        assert_eq!(compression_level_to_xz(Some(6)), 6);
-        assert_eq!(compression_level_to_xz(Some(1)), 1);
-        assert_eq!(compression_level_to_xz(Some(9)), 9);
-    }
-
-    /// Regression test for #443: defense-in-depth clamping so this
-    /// primitive cannot panic even if called directly with an unvalidated
-    /// value, independent of the `CreationConfig` typestate guarantee.
-    #[test]
-    fn test_compression_level_to_xz_out_of_range_does_not_panic() {
-        assert_eq!(compression_level_to_xz(Some(200)), 9);
+    fn test_to_bzip2() {
+        assert_eq!(level(1).to_bzip2(), bzip2::Compression::fast());
+        for n in 2..=6u8 {
+            assert_eq!(level(n).to_bzip2(), bzip2::Compression::new(u32::from(n)));
+        }
+        for n in 7..=9u8 {
+            assert_eq!(level(n).to_bzip2(), bzip2::Compression::best());
+        }
     }
 
     #[test]
-    fn test_compression_level_to_zstd() {
-        assert_eq!(compression_level_to_zstd(None), 3);
-        assert_eq!(compression_level_to_zstd(Some(6)), 3);
-        assert_eq!(compression_level_to_zstd(Some(1)), 1);
-        assert_eq!(compression_level_to_zstd(Some(2)), 2);
-        assert_eq!(compression_level_to_zstd(Some(7)), 10);
-        assert_eq!(compression_level_to_zstd(Some(8)), 15);
-        assert_eq!(compression_level_to_zstd(Some(9)), 19);
+    fn test_to_xz_is_the_literal_level() {
+        assert_eq!(CompressionLevel::default().to_xz(), 6);
+        assert_eq!(level(1).to_xz(), 1);
+        assert_eq!(level(9).to_xz(), 9);
+    }
+
+    #[test]
+    fn test_to_zstd() {
+        assert_eq!(CompressionLevel::default().to_zstd(), 3);
+        assert_eq!(level(1).to_zstd(), 1);
+        assert_eq!(level(2).to_zstd(), 2);
+        assert_eq!(level(4).to_zstd(), 3);
+        assert_eq!(level(7).to_zstd(), 10);
+        assert_eq!(level(8).to_zstd(), 15);
+        assert_eq!(level(9).to_zstd(), 19);
+    }
+
+    #[test]
+    fn test_to_zip_level() {
+        assert_eq!(level(9).to_zip_level(), 9);
+        assert_eq!(CompressionLevel::default().to_zip_level(), 6);
     }
 }

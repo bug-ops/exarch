@@ -148,6 +148,19 @@ class TestSecurityConfig:
         with pytest.raises(ValueError, match="empty"):
             config.add_allowed_extension("")
 
+    def test_extension_is_normalized_and_unusable_values_are_refused(self):
+        """A dotted extension is stored without its dot; unusable ones fail."""
+        config = SecurityConfig()
+        config.add_allowed_extension(".TXT")
+        assert config.allowed_extensions == ["txt"]
+
+        for raw in (" gz", "tar.gz", "a/b", "..txt"):
+            with pytest.raises(ValueError):
+                config.add_allowed_extension(raw)
+
+        with pytest.raises(ValueError):
+            config.allowed_extensions = ["ok", "tar.gz"]
+
     def test_banned_component_validation(self):
         """Test banned path component string validation."""
         config = SecurityConfig()
@@ -166,3 +179,10 @@ class TestSecurityConfig:
         # Should reject empty strings
         with pytest.raises(ValueError, match="empty"):
             config.add_banned_component("")
+
+    def test_banned_component_refuses_separators_and_dots(self):
+        """A component that can never equal one path component is refused."""
+        config = SecurityConfig()
+        for raw in ("a/b", "a\\b", ".", ".."):
+            with pytest.raises(ValueError):
+                config.add_banned_component(raw)

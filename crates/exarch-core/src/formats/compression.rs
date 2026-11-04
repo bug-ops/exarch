@@ -20,10 +20,7 @@ use std::num::NonZeroU64;
 use crate::Result;
 use crate::Validated;
 use crate::config::SecurityConfig;
-use crate::creation::compression::compression_level_to_bzip2;
-use crate::creation::compression::compression_level_to_flate2;
-use crate::creation::compression::compression_level_to_xz;
-use crate::creation::compression::compression_level_to_zstd;
+use crate::creation::CompressionLevel;
 use crate::formats::tar_metadata_limit::CompressedMembersExceeded;
 use crate::formats::tar_metadata_limit::DecoderMemoryExceeded;
 use crate::formats::zstd_window::ZstdWindowLog;
@@ -243,27 +240,22 @@ impl CompressionCodec {
     ///
     /// Write-side mirror of [`decoder`](Self::decoder) and the only
     /// codec-to-encoder mapping used for creating TAR streams. `level` is the
-    /// user-facing 1-9 scale (`None` selects the codec default).
+    /// user-facing 1-9 scale.
     ///
     /// # Errors
     ///
     /// Returns an I/O error if the encoder cannot be initialised.
-    pub(crate) fn encoder<W: Write>(self, out: W, level: Option<u8>) -> Result<TarEncoder<W>> {
+    pub(crate) fn encoder<W: Write>(
+        self,
+        out: W,
+        level: CompressionLevel,
+    ) -> Result<TarEncoder<W>> {
         Ok(match self {
-            Self::Gzip => TarEncoder::Gzip(flate2::write::GzEncoder::new(
-                out,
-                compression_level_to_flate2(level),
-            )),
-            Self::Bzip2 => TarEncoder::Bzip2(bzip2::write::BzEncoder::new(
-                out,
-                compression_level_to_bzip2(level),
-            )),
-            Self::Xz => TarEncoder::Xz(liblzma::write::XzEncoder::new(
-                out,
-                compression_level_to_xz(level),
-            )),
+            Self::Gzip => TarEncoder::Gzip(flate2::write::GzEncoder::new(out, level.to_flate2())),
+            Self::Bzip2 => TarEncoder::Bzip2(bzip2::write::BzEncoder::new(out, level.to_bzip2())),
+            Self::Xz => TarEncoder::Xz(liblzma::write::XzEncoder::new(out, level.to_xz())),
             Self::Zstd => {
-                let mut enc = zstd::Encoder::new(out, compression_level_to_zstd(level))?;
+                let mut enc = zstd::Encoder::new(out, level.to_zstd())?;
                 enc.include_checksum(true)?;
                 TarEncoder::Zstd(enc)
             }
@@ -610,6 +602,7 @@ impl<W: Write> Write for TarEncoder<W> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::creation::CompressionLevel;
 
     #[test]
     fn test_codec_extension() {
@@ -678,7 +671,11 @@ mod tests {
     fn test_encoder_round_trips_every_codec_and_level() {
         let data = b"hello encoder ".repeat(1000);
         for codec in ALL_CODECS {
-            for level in [None, Some(1), Some(9)] {
+            for level in [
+                CompressionLevel::default(),
+                CompressionLevel::try_from(1u8).unwrap(),
+                CompressionLevel::try_from(9u8).unwrap(),
+            ] {
                 let mut enc = codec.encoder(Vec::new(), level).unwrap();
                 enc.write_all(&data).unwrap();
                 let encoded = enc.finish().unwrap();

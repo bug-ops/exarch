@@ -310,7 +310,7 @@ fn zstd_entry_with_window(log: u32) -> BuiltZip {
 }
 
 fn extract_with(
-    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    archive: ZipArchive<Cursor<Vec<u8>>>,
     config: &SecurityConfig<Validated>,
 ) -> crate::Result<()> {
     let temp = TempDir::new().unwrap();
@@ -334,13 +334,14 @@ fn the_census_does_not_decode_a_zstd_window_above_the_limit_it_runs_under() {
     assert_eq!(permissive.structure().zstd_census_decodes(), 1);
 
     let strict = config_with_memory(ZipConsistencyPolicy::Enforce, MIB);
-    let mut archive = ZipArchive::for_config(Cursor::new(built.bytes), &strict).unwrap();
+    let open = || ZipArchive::for_config(Cursor::new(built.bytes.clone()), &strict).unwrap();
+    let archive = open();
     assert_eq!(archive.structure().zstd_census_decodes(), 0);
     assert!(archive.structure().findings().is_empty());
-    assert_decoder_memory_refusal(&extract_with(&mut archive, &strict), "extract");
-    assert_decoder_memory_refusal(&archive.list(&strict), "list");
+    assert_decoder_memory_refusal(&extract_with(archive, &strict), "extract");
+    assert_decoder_memory_refusal(&open().list(&strict), "list");
     assert_decoder_memory_refusal(
-        &archive.verify(&strict, &VerificationOptions::default()),
+        &open().verify(&strict, &VerificationOptions::default()),
         "verify",
     );
 }
@@ -351,30 +352,30 @@ fn a_window_the_census_skipped_is_not_admitted_by_a_looser_config_under_enforce(
     let strict = config_with_memory(ZipConsistencyPolicy::Enforce, MIB);
     let looser = config_with_memory(ZipConsistencyPolicy::Enforce, 4 * MIB);
 
-    let mut archive = ZipArchive::for_config(Cursor::new(built.bytes), &strict).unwrap();
-    assert_eq!(archive.structure().zstd_census_decodes(), 0);
+    let open = || ZipArchive::for_config(Cursor::new(built.bytes.clone()), &strict).unwrap();
+    assert_eq!(open().structure().zstd_census_decodes(), 0);
     assert_matches!(
-        extract_with(&mut archive, &looser),
+        extract_with(open(), &looser),
         Err(ArchiveError::InvalidConfiguration { .. })
     );
     assert_matches!(
-        archive.list(&looser),
+        open().list(&looser),
         Err(ArchiveError::InvalidConfiguration { .. })
     );
-    assert_decoder_memory_refusal(&extract_with(&mut archive, &strict), "strict");
+    assert_decoder_memory_refusal(&extract_with(open(), &strict), "strict");
 }
 
 #[test]
 fn a_looser_config_after_new_or_under_ignore_admits_the_window() {
     let built = zstd_entry_with_window(21);
     let looser = config_with_memory(ZipConsistencyPolicy::Enforce, 4 * MIB);
-    let mut opened_default = open_bytes(built.bytes.clone());
-    extract_with(&mut opened_default, &looser).unwrap();
+    let opened_default = open_bytes(built.bytes.clone());
+    extract_with(opened_default, &looser).unwrap();
 
     let ignore = config_with_memory(ZipConsistencyPolicy::Ignore, MIB);
-    let mut opened_strict = ZipArchive::for_config(Cursor::new(built.bytes), &ignore).unwrap();
+    let opened_strict = ZipArchive::for_config(Cursor::new(built.bytes), &ignore).unwrap();
     let looser_ignore = config_with_memory(ZipConsistencyPolicy::Ignore, 4 * MIB);
-    extract_with(&mut opened_strict, &looser_ignore).unwrap();
+    extract_with(opened_strict, &looser_ignore).unwrap();
 }
 
 #[test]
@@ -385,10 +386,10 @@ fn the_windows_are_judged_at_the_power_of_two_boundary_of_the_limit() {
         for (memory, accepted) in [(at, true), (at - 1, false), (at + at / 2, true)] {
             for policy in [ZipConsistencyPolicy::Ignore, ZipConsistencyPolicy::Enforce] {
                 let config = config_with_memory(policy, memory);
-                let mut archive =
+                let archive =
                     ZipArchive::for_config(Cursor::new(built.bytes.clone()), &config).unwrap();
                 let label = format!("log {log} memory {memory} {policy:?}");
-                let extracted = extract_with(&mut archive, &config);
+                let extracted = extract_with(archive, &config);
                 if accepted {
                     extracted.expect(&label);
                 } else {

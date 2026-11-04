@@ -34,6 +34,10 @@ export function describeFailure(caught: unknown): string {
 export const badSubCode: InvalidArchiveSubCode = 'TAR_OTHER'
 
 export const trailerSubCode: SecurityViolationSubCode = 'TAR_TRAILER'
+export const pathNameSubCode: SecurityViolationSubCode = 'PATH_NAME'
+
+// @ts-expect-error a security sub-code is one of the core families
+export const badSecuritySubCode: SecurityViolationSubCode = 'TAR_OTHER'
 
 export function isCoreCode(err: ExarchError, wanted: ErrorCode): boolean {
   return err.code === wanted

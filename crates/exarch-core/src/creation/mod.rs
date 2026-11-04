@@ -15,6 +15,7 @@ pub mod tar;
 pub mod zip;
 
 // Re-exports for public API
+pub use config::CompressionLevel;
 pub use config::CreationConfig;
 pub use creator::ArchiveCreator;
 pub use report::CreationReport;

@@ -226,7 +226,9 @@ fn a_fault_inside_a_skipped_drain_is_io() {
         .append_data(&mut header, "ok.txt", &b"hi"[..])
         .unwrap();
     let bytes = builder.into_inner().unwrap();
-    let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".into()]);
+    let config = SecurityConfig::default()
+        .try_add_allowed_extension("txt")
+        .unwrap();
 
     // Every position inside the 100 000 skipped bytes is covered by the step.
     let marker = bytes.len() - 1024;

@@ -194,13 +194,13 @@ fn zip_window_27_is_accepted_by_default_and_28_refused() {
 fn zip_archive_handles_apply_the_limit_of_the_config_they_operate_under() {
     let at = 1u64 << 16;
     for policy in POLICIES {
-        let mut archive = ZipArchive::new(Cursor::new(zip_bytes(16, 0))).unwrap();
+        let open = || ZipArchive::new(Cursor::new(zip_bytes(16, 0))).unwrap();
         let strict = config(at - 1, policy).validate().unwrap();
         let loose = config(at, policy).validate().unwrap();
         let out = TempDir::new().unwrap();
 
         assert_decoder_memory(
-            archive
+            open()
                 .extract(
                     out.path(),
                     &strict,
@@ -211,20 +211,20 @@ fn zip_archive_handles_apply_the_limit_of_the_config_they_operate_under() {
             at - 1,
             "extract",
         );
-        assert_decoder_memory(archive.list(&strict).unwrap_err(), at - 1, "list");
+        assert_decoder_memory(open().list(&strict).unwrap_err(), at - 1, "list");
         assert_decoder_memory(
-            archive
+            open()
                 .verify(&strict, &VerificationOptions::default())
                 .unwrap_err(),
             at - 1,
             "verify",
         );
 
-        archive.list(&loose).unwrap();
-        archive
+        open().list(&loose).unwrap();
+        open()
             .verify(&loose, &VerificationOptions::default())
             .unwrap();
-        archive
+        open()
             .extract(
                 out.path(),
                 &loose,

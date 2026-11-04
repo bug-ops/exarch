@@ -275,6 +275,16 @@ describe('SecurityConfig', () => {
       assert.ok(config.allowedExtensions.includes('md'));
     });
 
+    it('should normalize a dotted extension and refuse unusable ones', () => {
+      const config = new SecurityConfig();
+      config.addAllowedExtension('.TXT');
+
+      assert.deepStrictEqual(config.allowedExtensions, ['txt']);
+      for (const raw of [' gz', 'tar.gz', 'a/b']) {
+        assert.throws(() => config.addAllowedExtension(raw), undefined, raw);
+      }
+    });
+
     it('should check extension allowed', () => {
       const config = new SecurityConfig();
       config.addAllowedExtension('txt');
@@ -297,6 +307,13 @@ describe('SecurityConfig', () => {
       config.addBannedComponent('.secret');
 
       assert.ok(config.bannedPathComponents.includes('.secret'));
+    });
+
+    it('should refuse components with separators or dots', () => {
+      const config = new SecurityConfig();
+      for (const raw of ['a/b', '..', '.']) {
+        assert.throws(() => config.addBannedComponent(raw), undefined, raw);
+      }
     });
 
     it('should check path component allowed', () => {

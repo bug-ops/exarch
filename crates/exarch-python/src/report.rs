@@ -594,6 +594,7 @@ impl From<VerificationReport> for PyVerificationReport {
 )]
 mod tests {
     use super::*;
+    use exarch_core::Compressed;
     use exarch_core::inspection::manifest::ManifestEntryKind;
     use std::time::Duration;
 
@@ -832,7 +833,7 @@ mod tests {
 
         let mut entry =
             ArchiveEntry::new(PathBuf::from("test/file.txt"), ManifestEntryKind::File, 512);
-        entry.compression = exarch_core::EntryCompression::Entry(256);
+        entry.compression = exarch_core::EntryCompression::Entry(Compressed(256));
         entry.mode = Some(0o644);
 
         let py_entry = PyArchiveEntry::from(entry);
@@ -994,9 +995,11 @@ mod tests {
     #[test]
     fn test_pyi_literal_aliases_match_core_enums() {
         use exarch_core::IntegrityStatus;
+        use exarch_core::InvalidArchiveSubCode;
         use exarch_core::PartialWrites;
         use exarch_core::PathModel;
         use exarch_core::PolicySetting;
+        use exarch_core::SecurityViolationSubCode;
         use exarch_core::UnverifiedReason;
         use exarch_core::ZipConsistencyPolicy;
         use exarch_core::formats::detect::ArchiveType;
@@ -1038,6 +1041,16 @@ mod tests {
             ),
             literal_line("_PartialWrites", PartialWrites::ALL, PartialWrites::as_str),
             literal_line("_PolicySetting", PolicySetting::ALL, PolicySetting::as_str),
+            literal_line(
+                "_SecurityViolationSubCode",
+                SecurityViolationSubCode::ALL,
+                SecurityViolationSubCode::as_str,
+            ),
+            literal_line(
+                "_InvalidArchiveSubCode",
+                InvalidArchiveSubCode::ALL,
+                InvalidArchiveSubCode::as_str,
+            ),
             literal_line("_PathModel", PathModel::ALL, PathModel::as_str),
         ];
         for line in expected {

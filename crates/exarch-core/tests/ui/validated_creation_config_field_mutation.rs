@@ -1,8 +1,7 @@
 //! Regression for #443: a legitimately obtained `CreationConfig<Validated>`
 //! must not be mutable afterward. If it were, `cfg.compression_level =
-//! Some(200)` here would reintroduce the exact panic the typestate exists to
-//! prevent — a forged out-of-range compression level reaching `flate2`'s or
-//! `liblzma`'s `assert!`/`unwrap()` instead of being rejected by `validate()`.
+//! ..` here would let a validated config change after the fact, which the
+//! typestate exists to prevent.
 //! `DerefMut` is implemented only for `CreationConfig<Unvalidated>`, so this
 //! must be a compile error.
 
@@ -12,5 +11,5 @@ fn main() {
         .validate()
         .unwrap();
 
-    cfg.compression_level = Some(200);
+    cfg.compression_level = Default::default();
 }

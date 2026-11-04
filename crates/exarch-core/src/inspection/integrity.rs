@@ -38,6 +38,7 @@ use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::UnverifiedReason;
 use crate::inspection::report::VerificationIssue;
+use crate::security::Uncompressed;
 use crate::security::quota::QuotaTracker;
 use crate::security::zipbomb::validate_entry_compression;
 
@@ -369,7 +370,8 @@ impl<'c> IntegrityPass<'c> {
     /// Returns the slot index, which equals the entry's manifest index.
     pub fn begin_entry(&mut self, size: u64, compression: &EntryCompression) -> Slot {
         let quota_ok = self.quota.reserve(size, self.config).is_ok();
-        let ratio_ok = validate_entry_compression(compression, size, self.config).is_ok();
+        let ratio_ok =
+            validate_entry_compression(compression, Uncompressed(size), self.config).is_ok();
         self.slots.push(EntrySlot {
             issues: Vec::new(),
             admitted: quota_ok && ratio_ok,

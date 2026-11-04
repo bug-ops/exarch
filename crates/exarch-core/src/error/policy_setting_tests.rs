@@ -122,10 +122,9 @@ fn constant_refusals_carry_no_setting() {
 #[test]
 fn partial_extraction_delegates_relaxable_by() {
     let err = ArchiveError::PartialExtraction {
-        source: Box::new(ArchiveError::relaxable_violation(
-            PolicySetting::Hardlinks,
-            "hardlinks not allowed".into(),
-        )),
+        source: Box::new(ArchiveError::from(super::Violation::LinksNotAllowed(
+            crate::LinkKind::Hardlink,
+        ))),
         report: crate::ExtractionReport::default(),
         writes: super::PartialWrites::Kept,
     };
@@ -134,7 +133,7 @@ fn partial_extraction_delegates_relaxable_by() {
         err.into_ffi_message().kind,
         super::FfiKind::SecurityViolation {
             relaxable_by: Some(PolicySetting::Hardlinks),
-            sub_code: None,
+            sub_code: super::SecurityViolationSubCode::LinkPolicy,
         }
     );
 }

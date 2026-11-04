@@ -334,7 +334,7 @@ fn anti_item_issue(count: u64) -> Option<VerificationIssue> {
 
 impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     fn extract(
-        &mut self,
+        mut self,
         output_dir: &Path,
         config: &SecurityConfig<Validated>,
         options: &ExtractionOptions,
@@ -348,7 +348,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     }
 
     fn list(
-        &mut self,
+        mut self,
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::ListPass;
@@ -362,15 +362,11 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     }
 
     fn verify(
-        &mut self,
+        mut self,
         config: &SecurityConfig<Validated>,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
         self.verify_with_progress(config, *options, &mut crate::NoopProgress)
-    }
-
-    fn format_name(&self) -> &'static str {
-        "7z"
     }
 }
 

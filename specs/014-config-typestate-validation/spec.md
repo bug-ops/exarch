@@ -9,7 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-08-04
-updated: 2026-10-26
+updated: 2026-11-04
 status: implemented
 related:
   - "[[constitution]]"
@@ -134,6 +134,7 @@ THEN the code does not compile — those functions require &CreationConfig<Valid
 | FR-009 | Fields SHALL be sealed behind a private inner fields struct (`SecurityConfigFields`, `CreationConfigFields` — the latter `#[non_exhaustive]`), reachable read-only via `Deref` for both typestates but mutable (`DerefMut`) only for `T<Unvalidated>`, so a `T<Validated>` cannot be mutated back into an invalid state after the fact while existing `cfg.max_file_size`-style field access keeps working for every caller | must |
 | FR-010 | `ValidatedEntry` (`security::validator`) SHALL become sealed as part of this hardening: private fields, `pub(crate)` constructor, `safe_path()`/`entry_type()`/`mode()` accessors replacing direct field access, assemblable only via `EntryValidator::validate_entry()` | must |
 | FR-011 | `exarch-cli`, `exarch-python`, and `exarch-node` SHALL require no changes: they only ever hold `SecurityConfig<Unvalidated>`/`CreationConfig<Unvalidated>` and pass it to the top-level API, which validates internally (`exarch-cli`'s `create` command, which previously built a `CreationConfig` via struct-literal syntax, is the one call site that needed updating) | must |
+| FR-012 | Since v0.8.0 `SecurityConfig` limits are typed (`Limit<NonZeroU64>`, `RatioLimit`, `NonZero*`), so a zero or non-finite limit is unrepresentable and `SecurityConfig::validate()` keeps its `Result<SecurityConfig<Validated>>` signature as the typestate transition but rejects nothing (see [[003-config-api/spec]] FR-032) (v0.8.0, #870, #894) | must |
 
 ## 4. Non-Functional Requirements
 

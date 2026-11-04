@@ -9,7 +9,7 @@ tags:
   - rust
   - inspection
 created: 2026-10-26
-updated: 2026-11-02
+updated: 2026-11-04
 status: implemented
 related:
   - "[[constitution]]"
@@ -198,6 +198,8 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | FR-052 | `list_reader`, `verify_reader`, `list_archive_with_progress`, `verify_archive_with_progress`, `list_reader_with_progress` and `verify_reader_with_progress` SHALL produce the manifest and report defined above for TAR, ZIP and 7z; the reader forms take an `ArchiveReader` instead of a path ([[020-reader-sink-and-in-memory-api/spec]]) and the progress forms follow [[004-progress-tracking/spec]] (#754, #771, #782, #790) | must |
 | FR-053 | The in-memory tree SHALL charge every distinct name against a node budget of `max_file_count * max_path_depth + 1` and fail with `QuotaExceeded { resource: TreeNodes { max } }` when it is exhausted; a link path that leaves the root and returns SHALL be an escape, though the host would resolve it inside (#778, #779, #787) | must |
 | FR-054 | A directory entry over a file or a symlink SHALL be refused with the same entry-naming message in `extract` and `verify` (#802, #803) | must |
+| FR-055 | WHEN `list_archive` applies the extension allowlist, a skipped entry SHALL be charged to `max_file_count` only and not to `max_total_size`, and its path SHALL be validated as in `extract`; WHEN `verify` runs with the integrity check on a compressed TAR, the decode of allowlist-skipped entries SHALL be bounded as in `extract` and `list` (`ZipBombScope::SkippedEntries`); a TAR header ambiguity SHALL be refused with `TarAmbiguity` by `list`, `verify` and `extract` alike (see [[002-format-handlers/spec]] FR-051, FR-053, FR-054) (v0.8.0, #820, #846, #868, #894) | must |
+| FR-056 | `list_archive_for_extraction` SHALL return a `ListedArchive` that keeps the list pass's decode for extraction (see [[020-reader-sink-and-in-memory-api/spec]] FR-100 to FR-103) (v0.8.0, #828, #884) | should |
 
 ## 4. Non-Functional Requirements
 

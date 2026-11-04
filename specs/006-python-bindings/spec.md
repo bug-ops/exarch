@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-02
+updated: 2026-11-04
 status: draft
 related:
   - "[[constitution]]"
@@ -161,6 +161,9 @@ THEN extraction respects those settings
 | FR-088 | THE SYSTEM SHALL expose in-memory functions that take and return bytes: `list_archive_bytes(data, config=None, format=None)`, `verify_archive_bytes(data, config=None, options=None, format=None)`, `extract_archive_to_memory(data, config=None, options=None, max_bytes=None, path_model=None, format=None)` returning `MemoryExtraction(report, entries)` of `MemoryEntry(path, kind, data, mode, target)`, and `create_archive_to_bytes(sources, format, config=None)` returning `CreatedArchive(data, report)`; `format` is detected from the leading bytes when `None`; `atomic` is unsupported for extraction; `max_bytes` defaults to the config's `max_total_size`; `path_model` is `"host"` or `"portable"`; `"SevenZ"` cannot be created; all validation is in `exarch-core` ([[020-reader-sink-and-in-memory-api/spec]]; v0.8.0, #776, #787, #790) | must |
 | FR-089 | THE SYSTEM SHALL expose `extract_archive_to_memory_with_progress`, `list_archive_bytes_with_progress` and `verify_archive_bytes_with_progress`, each taking a `progress` callback of `(path, total, current, bytes_written)` with the GIL held; the in-memory functions without a callback SHALL release the GIL. A callback that raises after the operation succeeded SHALL discard the result and raise the callback's exception with `progress_callback_error = True` (an in-memory extraction also carries `writes == "discarded"`); if the operation failed, the core error stays primary with the callback's exception as `__cause__` (v0.8.0, #783, #784, #790) | must |
 | FR-090 | A quota error for a single oversized file SHALL use the core wording `single file size` in the Python message (v0.8.0, #758, #768) | should |
+| FR-091 | `InvalidArchiveError` and `SecurityViolationError` SHALL carry a `sub_code` attribute (a string id, `None` when the failure is not classified) and `InvalidConfiguration` errors a `setting` attribute, from the same `FfiKind` as the CLI `--json` fields (v0.8.0, #865, #870, #887, #894, #946) | must |
+| FR-092 | The in-memory functions (`list_archive_bytes`, `verify_archive_bytes`, `extract_archive_to_memory`, their `_with_progress` variants and `extract_archive_to_callback`) SHALL accept `data` as bytes or as a binary file object, whose read failure surfaces unchanged (v0.8.0, #828) | must |
+| FR-093 | THE SYSTEM SHALL expose `extract_archive_to_callback(data, on_entry, config=None, options=None, path_model=None, format=None)`, delivering each verified entry to a callable through `extract_reader_to_callback` and re-raising the callable's exception unchanged; a non-callable `on_entry` is a `TypeError` (v0.8.0, #842, #860, #884) | must |
 
 ## 4. Non-Functional Requirements
 

@@ -96,6 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `extract` refuses an entry that lands above the host path limit through an archive symlink on every platform, before creating any directory below the link (#885, #894).
 - Core: `verify` with the integrity check bounds the decode of allowlist-skipped compressed TAR entries as `extract` and `list` do (#868, #894).
 - Docs and benches: the documented `validation` bench commands name `--features testing` (#883, #894).
+- Docs: specifications in `specs/` synced with the changes since v0.8.0, covering sub-codes, TAR ambiguity and ZIP descriptor refusals, pinned directory descriptors, callback and listing-for-extraction APIs, typed limits and config errors, and the binding surfaces (#948).
 
 
 ### Fixed

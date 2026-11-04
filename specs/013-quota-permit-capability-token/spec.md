@@ -9,7 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-08-04
-updated: 2026-11-02
+updated: 2026-11-04
 status: implemented
 related:
   - "[[constitution]]"
@@ -130,6 +130,7 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 | FR-008 | Since v0.8.0 (#793, #808) the TAR, ZIP and 7z handlers SHALL NOT match on `ValidatedEntryType`; each entry kind is admitted through its own `ExtractTarget::validate_*` method returning its own typed proof, and only `validate_file` yields a `ValidatedFile` carrying a permit, so a permit cannot be bound for another kind and the ZIP runtime fail-closed guard of v0.6.0 is no longer needed. `ValidatedEntryType` remains the result type of `EntryValidator::validate_entry` | must |
 | FR-009 | `EntryCount` SHALL be a zero-sized, non-`Clone`/non-`Copy`, non-`Default` token whose only producer is `QuotaTracker::reserve_count`; `ValidatedEntryType::Hardlink` SHALL carry it as `counted` (the variant is `#[non_exhaustive]`), so counting a hardlink against `max_file_count` twice, or never, is unrepresentable | must |
 | FR-010 | `max_file_count` SHALL count symlinks and hardlinks as well as files in `extract`: `ValidatorCore::reserve_symlink` charges a symlink's stored size and count through `QuotaTracker::reserve` and discards the permit, since no writer consumes one for a link | must |
+| FR-011 | `QuotaPermit` SHALL carry the reserved bytes as `Uncompressed`, so `ExtractTarget::file` takes no separate size and a write cannot disagree with what was charged; the ZIP and 7z extraction proof tokens SHALL be bound to their archive and the validated-file proof SHALL be built only by the validator (internal) (v0.8.0, #846, #869, #879, #888) | must |
 
 ## 4. Non-Functional Requirements
 

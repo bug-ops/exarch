@@ -1917,6 +1917,20 @@ mod tests {
     }
 
     #[test]
+    fn every_integrity_check_has_a_budget_rule() {
+        for check in [
+            IntegrityCheck::Skip,
+            IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT),
+        ] {
+            let expected = match check {
+                IntegrityCheck::Skip => None,
+                IntegrityCheck::DecodeToEof(budget) => Some(budget),
+            };
+            assert_eq!(check.budget(), expected);
+        }
+    }
+
+    #[test]
     fn admit_converts_to_and_from_a_bool() {
         assert_eq!(Admit::from_allowed(true), Admit::Allow);
         assert_eq!(Admit::from_allowed(false), Admit::Refuse);

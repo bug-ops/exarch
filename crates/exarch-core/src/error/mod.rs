@@ -39,6 +39,7 @@ pub use types::QuotaKind;
 pub use types::QuotaResource;
 pub use types::ReaderFormatError;
 pub use types::Result;
+pub use types::SolidMemoryScope;
 pub use types::ZipBombDetails;
 pub use types::ZipBombScope;
 pub use violation::KindSource;

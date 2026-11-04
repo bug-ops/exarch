@@ -12,6 +12,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::SolidArchives;
 use crate::SolidBlock;
+use crate::SolidMemoryScope;
 use crate::Violation;
 use crate::error::QuotaResource;
 use crate::formats::common;
@@ -212,8 +213,9 @@ impl Refused {
 /// Refuses with [`UnverifiedReason::SolidPolicy`] and
 /// [`ArchiveError::SecurityViolation`] when solid archives are not allowed, and
 /// with [`UnverifiedReason::ResourceLimit`] and
-/// [`QuotaResource::IntegerOverflow`], [`QuotaResource::SolidBlockMemory`] or
-/// [`QuotaResource::TotalSize`] when a size check fails.
+/// [`QuotaResource::IntegerOverflow`] or [`QuotaResource::SolidBlockMemory`]
+/// (scoped to one block, or to the archive while the total is unbounded) when a
+/// size check fails.
 pub(super) fn check_solid_policy(
     is_solid: bool,
     blocks: impl IntoIterator<Item = BlockTotal>,
@@ -243,6 +245,7 @@ pub(super) fn check_solid_policy(
         };
         if current > max {
             return Err(resource_limit(QuotaResource::SolidBlockMemory {
+                scope: SolidMemoryScope::Block,
                 current,
                 max,
             }));
@@ -252,7 +255,8 @@ pub(super) fn check_solid_policy(
             .ok_or_else(|| resource_limit(QuotaResource::IntegerOverflow))?;
     }
     if config.max_total_size == Limit::Unbounded && archive_total > max {
-        return Err(resource_limit(QuotaResource::TotalSize {
+        return Err(resource_limit(QuotaResource::SolidBlockMemory {
+            scope: SolidMemoryScope::Archive,
             current: archive_total,
             max,
         }));
@@ -559,6 +563,7 @@ mod tests {
             refused.error,
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::SolidBlockMemory {
+                    scope: SolidMemoryScope::Block,
                     current: 120,
                     max: 100
                 }
@@ -591,7 +596,8 @@ mod tests {
         assert_matches!(
             refused.error,
             ArchiveError::QuotaExceeded {
-                resource: QuotaResource::TotalSize {
+                resource: QuotaResource::SolidBlockMemory {
+                    scope: SolidMemoryScope::Archive,
                     current: 120,
                     max: 100
                 }

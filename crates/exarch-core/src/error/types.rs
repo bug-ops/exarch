@@ -36,7 +36,7 @@ closed_enum! {
     pub enum ZipBombScope {
         /// One archive entry, checked against `max_compression_ratio`.
         Entry => "entry",
-        /// A whole solid block, checked against `max_solid_compression_ratio`.
+        /// A whole solid block, checked against `SolidLimits::max_ratio`.
         SolidBlock => "solid block",
         /// The entries of a compressed TAR that were decoded only to be
         /// skipped, checked against `max_compression_ratio` over the input
@@ -261,14 +261,38 @@ pub enum QuotaResource {
         /// Maximum number of payload bytes the sink accepts.
         max: u64,
     },
-    /// A solid 7z block declares more decoded bytes than the solid limit
-    /// admits.
+    /// A solid 7z archive declares more decoded bytes than the solid block
+    /// limit admits.
     SolidBlockMemory {
-        /// Declared decoded size of the refused block in bytes.
+        /// What `current` was summed over.
+        scope: SolidMemoryScope,
+        /// Declared decoded size in bytes.
         current: u64,
-        /// Maximum decoded size of a solid block in bytes.
+        /// Maximum decoded size in bytes: the solid block limit.
         max: u64,
     },
+}
+
+closed_enum! {
+    /// What a refused solid decoded size was summed over.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SolidMemoryScope;
+    ///
+    /// assert_eq!(SolidMemoryScope::Block.as_str(), "block");
+    /// assert_eq!(SolidMemoryScope::ALL.len(), 2);
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum SolidMemoryScope {
+        /// One solid block, checked against the block limit.
+        Block => "block",
+        /// All blocks of the archive, held to the block limit while
+        /// `max_total_size` is unbounded.
+        Archive => "archive",
+    }
 }
 
 closed_enum! {
@@ -364,9 +388,19 @@ impl std::fmt::Display for QuotaResource {
             Self::SinkCapacity { max } => {
                 write!(f, "quota exceeded: sink capacity (> {max} bytes)")
             }
-            Self::SolidBlockMemory { current, max } => {
-                write!(f, "quota exceeded: solid block size ({current} > {max})")
-            }
+            Self::SolidBlockMemory {
+                scope: SolidMemoryScope::Block,
+                current,
+                max,
+            } => write!(f, "quota exceeded: solid block size ({current} > {max})"),
+            Self::SolidBlockMemory {
+                scope: SolidMemoryScope::Archive,
+                current,
+                max,
+            } => write!(
+                f,
+                "quota exceeded: solid archive size over all blocks ({current} > {max})"
+            ),
         }
     }
 }

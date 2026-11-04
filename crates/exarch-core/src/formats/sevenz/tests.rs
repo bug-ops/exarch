@@ -1678,7 +1678,7 @@ fn test_legit_solid_block_above_per_file_ratio_passes_extract_and_verify() {
     assert_eq!(report.files_extracted, 100);
 }
 
-/// Issue #626: a block over `max_solid_compression_ratio` is rejected by
+/// Issue #626: a block over `SolidLimits::max_ratio` is rejected by
 /// extract before any write and flagged by verify.
 #[test]
 fn test_solid_block_over_limit_rejected_by_extract_and_verify() {

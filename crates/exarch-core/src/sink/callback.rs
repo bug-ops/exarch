@@ -378,3 +378,41 @@ where
         (None, Err(err)) => Err(CallbackError::Archive(err)),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::SecurityConfig;
+
+    fn hardlink_target() -> SafePath {
+        SafePath::validate(
+            std::path::Path::new("target.txt"),
+            &crate::DestDir::new(std::env::temp_dir()).unwrap(),
+            &SecurityConfig::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_callback_entry_maps_to_a_memory_entry_kind() {
+        let entries = [
+            CallbackEntry::Stored(MemoryEntry::Directory),
+            CallbackEntry::Hardlink {
+                target: hardlink_target(),
+            },
+        ];
+        let mut seen = Vec::new();
+        for entry in &entries {
+            // A wildcard-free match: a new variant fails to compile here.
+            let expected = match entry {
+                CallbackEntry::Stored(stored) => stored.kind(),
+                CallbackEntry::Hardlink { .. } => MemoryEntryKind::Hardlink,
+            };
+            assert_eq!(entry.kind(), expected);
+            seen.push(entry.kind());
+        }
+        assert!(seen.contains(&MemoryEntryKind::Directory));
+        assert!(seen.contains(&MemoryEntryKind::Hardlink));
+    }
+}

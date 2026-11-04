@@ -88,6 +88,7 @@ pub use error::QuotaResource;
 pub use error::ReaderFormatError;
 pub use error::Result;
 pub use error::SecurityViolationSubCode;
+pub use error::SolidMemoryScope;
 pub use error::SpecialFile;
 pub use error::SubCode;
 pub use error::TarAmbiguity;

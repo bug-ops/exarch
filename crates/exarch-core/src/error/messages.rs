@@ -200,6 +200,25 @@ pub enum SubCode {
 }
 
 impl SubCode {
+    /// Every sub-code of a quota error, in [`QuotaKind::ALL`] order.
+    pub const QUOTA_ALL: &'static [Self] = &[
+        Self::Quota(QuotaKind::FileCount),
+        Self::Quota(QuotaKind::TotalSize),
+        Self::Quota(QuotaKind::FileSize),
+        Self::Quota(QuotaKind::IntegerOverflow),
+        Self::Quota(QuotaKind::DecoderMemory),
+        Self::Quota(QuotaKind::CompressedMembers),
+        Self::Quota(QuotaKind::TreeNodes),
+        Self::Quota(QuotaKind::SinkCapacity),
+        Self::Quota(QuotaKind::SolidBlockMemory),
+    ];
+    /// Every sub-code of a zip-bomb error, in [`ZipBombScope::ALL`] order.
+    pub const ZIP_BOMB_ALL: &'static [Self] = &[
+        Self::ZipBomb(ZipBombScope::Entry),
+        Self::ZipBomb(ZipBombScope::SolidBlock),
+        Self::ZipBomb(ZipBombScope::SkippedEntries),
+    ];
+
     /// The stable string form of the wrapped sub-code.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -979,7 +998,11 @@ mod tests {
     #[test]
     fn quota_and_zip_bomb_kinds_carry_their_sub_code() {
         let quota = ArchiveError::QuotaExceeded {
-            resource: QuotaResource::SolidBlockMemory { current: 2, max: 1 },
+            resource: QuotaResource::SolidBlockMemory {
+                scope: crate::SolidMemoryScope::Block,
+                current: 2,
+                max: 1,
+            },
         };
         assert_eq!(
             quota.ffi_kind().sub_code(),
@@ -989,5 +1012,16 @@ mod tests {
             quota.ffi_kind().sub_code().map(SubCode::as_str),
             Some("SOLID_BLOCK_MEMORY")
         );
+    }
+
+    #[test]
+    fn the_sub_code_constants_cover_every_kind_and_scope() {
+        let quotas: Vec<_> = QuotaKind::ALL.iter().map(|&k| SubCode::Quota(k)).collect();
+        assert_eq!(SubCode::QUOTA_ALL, quotas.as_slice());
+        let scopes: Vec<_> = ZipBombScope::ALL
+            .iter()
+            .map(|&s| SubCode::ZipBomb(s))
+            .collect();
+        assert_eq!(SubCode::ZIP_BOMB_ALL, scopes.as_slice());
     }
 }

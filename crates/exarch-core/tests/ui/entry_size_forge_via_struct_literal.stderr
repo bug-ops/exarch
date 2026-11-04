@@ -1,0 +1,9 @@
+error[E0451]: fields `uncompressed` and `compressed` of struct `EntrySize` are private
+  --> tests/ui/entry_size_forge_via_struct_literal.rs:10:9
+   |
+ 9 |     let _size = EntrySize {
+   |                 --------- in this type
+10 |         uncompressed: todo!(),
+   |         ^^^^^^^^^^^^ private field
+11 |         compressed: todo!(),
+   |         ^^^^^^^^^^ private field

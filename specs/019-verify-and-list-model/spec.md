@@ -26,6 +26,9 @@ related:
 
 # Feature: Verify and List Reporting Model
 
+> [!note] Revision 2026-11-04 (50-issue batch)
+> `ArchiveEntry` carries `size()` and a typed `mode` (#910); `VerificationIssue` holds a typed `Finding` with private fields (#899); `ArchiveEntry::utf8_path` (#925); `ArchiveManifest::landing_paths` (#933); verify shares the landing projection with extract (#945); entry points are request types (#912). See FR-057 to FR-064; rows that conflict are rewritten in place.
+
 > [!info] Metadata
 > **Subsystem**: exarch-core / `inspection` (`manifest`, `report`, `verify`, `list`, `integrity`),
 > `config` (`VerificationOptions`, `ListOptions`), `security::fs_view`
@@ -153,8 +156,8 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-020 | `verify_archive(path, config)` SHALL equal `verify_archive_with_options` with `VerificationOptions::default()`, whose `integrity` is `IntegrityCheck::Skip` | must |
-| FR-021 | `IntegrityCheck` SHALL be `#[non_exhaustive]` with `Skip` (default) and `DecodeToEof(DecompressionBudget)`, so a budget without a check is unrepresentable; `VerificationOptions` SHALL be `#[non_exhaustive]` with `with_integrity()` | must |
+| FR-020 | `verify_archive(path, config)` SHALL equal `VerifyRequest::new(config).verify(path)` with `VerificationOptions::default()`, whose `integrity` is `IntegrityCheck::Skip` (`verify_archive_with_options` was removed, #912) | must |
+| FR-021 | `IntegrityCheck` SHALL be `#[non_exhaustive]` with `Skip` (default) and `DecodeToEof(DecompressionBudget)`, so a budget without a check is unrepresentable; `VerificationOptions` SHALL be `#[non_exhaustive]` with `with_integrity()`; `IntegrityCheck::budget(self) -> Option<DecompressionBudget>` SHALL match exhaustively so bindings need no wildcard arm (#922) | must |
 | FR-022 | `DecompressionBudget` SHALL wrap a `NonZeroU64` (`try_from_bytes(0)` is `InvalidConfiguration`) with `DEFAULT` of 500 MiB, independent of `max_total_size`; it bounds decoding beyond what listing already does (ZIP entries and 7z blocks charged their declared size, TAR entry content and the compressed TAR tail after the end marker not charged; that tail is bounded by `max_tar_metadata_bytes`, at least 1 MiB, and a longer one fails the call) | must |
 | FR-023 | `IntegrityStatus` SHALL be `#[non_exhaustive]` with `Pass` ("OK"), `Fail` ("FAILED"), `Incomplete` ("INCOMPLETE"), `Skipped` ("SKIPPED"); derivation: any `CorruptData` issue gives `Fail`; otherwise no integrity request gives `Skipped`; otherwise any `IntegrityIncomplete` issue gives `Incomplete`; otherwise `Pass` | must |
 | FR-024 | `Pass` SHALL mean every payload byte was decoded and every checksum the format has matched; for formats without payload checksums (plain TAR, 7z entries without CRC, zstd frames without a content checksum) it means the data was complete and decodable | must |
@@ -162,13 +165,13 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | FR-026 | `UnverifiedReason` SHALL be `#[non_exhaustive]` with `OverBudget`, `ResourceLimit`, `SolidPolicy`, `SizeCeiling`, `UncoveredBlockCrc`, `NotDecodable`, `NoEndMarker`, `PathTooLong`, `DescriptorTail`, each with a stable snake_case string form shared by the CLI JSON and bindings and a `description()` | must |
 | FR-027 | `IntegrityGaps` SHALL derive from one value the counts, the listed entries and the issue message: `counts()` (reason order, absent when zero), `count(reason)`, `total()`, `is_empty()`, `entries()` (`UnverifiedEntry { path, reason }`, capped at 256) and `omitted()`; `integrity_gaps()` SHALL be `None` when no check was requested and an empty value when everything was verified | must |
 | FR-028 | With integrity requested, a TAR entry whose content fails to decode or is cut short SHALL fail the call with `ArchiveError::InvalidArchive` rather than yield a partial report; corruption in a TAR trailer (a gzip CRC, an xz index) SHALL be a `Fail` report | must |
-| FR-029 | The CLI SHALL map the option to `verify --check-integrity` with `--decompression-budget SIZE` (requires `--check-integrity`) and `--strict` (exit status 2 on warnings); exit code 0 SHALL NOT be read as integrity `OK` | must |
+| FR-029 | The CLI SHALL map the option to `verify --check-integrity` with `--decompression-budget SIZE` (requires `--check-integrity`) and `--strict` (exit status 3 on warnings, #932); exit code 0 SHALL NOT be read as integrity `OK` | must |
 
 ### 3.4 Listing options
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-030 | `list_archive(path, config)` SHALL equal `list_archive_with_options` with `ListOptions::default()` | must |
+| FR-030 | `list_archive(path, config)` SHALL equal `ListRequest::new(config).list(path)` with `ListOptions::default()` (`list_archive_with_options` was removed, #912) | must |
 | FR-031 | `ListOptions` SHALL be `#[non_exhaustive]` with `stored_targets: StoredTargets` and `with_stored_targets()`; `StoredTargets` SHALL be `#[non_exhaustive]` with `Skip` (default; 7z link targets stay `Unread`, no entry data decoded) and `Read` (decodes the blocks that hold the targets) | must |
 | FR-032 | Only 7z keeps link targets in compressed entry data; TAR and ZIP always report their targets. `StoredTargets` SHALL be a Rust API and CLI (`list --read-link-targets`) option; Python and Node `list_archive` skip 7z targets | must |
 | FR-033 | A 7z reparse point SHALL be `LinkTarget::Unreadable` in every listing | must |
@@ -195,11 +198,19 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-052 | `list_reader`, `verify_reader`, `list_archive_with_progress`, `verify_archive_with_progress`, `list_reader_with_progress` and `verify_reader_with_progress` SHALL produce the manifest and report defined above for TAR, ZIP and 7z; the reader forms take an `ArchiveReader` instead of a path ([[020-reader-sink-and-in-memory-api/spec]]) and the progress forms follow [[004-progress-tracking/spec]] (#754, #771, #782, #790) | must |
+| FR-052 | `ListRequest::{list, list_reader}` and `VerifyRequest::{verify, verify_reader}` (with or without `with_progress`) SHALL produce the manifest and report defined above for TAR, ZIP and 7z; the reader forms take an `ArchiveReader` instead of a path ([[020-reader-sink-and-in-memory-api/spec]]) and the progress forms follow [[004-progress-tracking/spec]] (#754, #771, #782, #790; the free functions `list_reader*`, `verify_reader*` and `*_with_progress` were removed, #912) | must |
 | FR-053 | The in-memory tree SHALL charge every distinct name against a node budget of `max_file_count * max_path_depth + 1` and fail with `QuotaExceeded { resource: TreeNodes { max } }` when it is exhausted; a link path that leaves the root and returns SHALL be an escape, though the host would resolve it inside (#778, #779, #787) | must |
 | FR-054 | A directory entry over a file or a symlink SHALL be refused with the same entry-naming message in `extract` and `verify` (#802, #803) | must |
 | FR-055 | WHEN `list_archive` applies the extension allowlist, a skipped entry SHALL be charged to `max_file_count` only and not to `max_total_size`, and its path SHALL be validated as in `extract`; WHEN `verify` runs with the integrity check on a compressed TAR, the decode of allowlist-skipped entries SHALL be bounded as in `extract` and `list` (`ZipBombScope::SkippedEntries`); a TAR header ambiguity SHALL be refused with `TarAmbiguity` by `list`, `verify` and `extract` alike (see [[002-format-handlers/spec]] FR-051, FR-053, FR-054) (v0.8.0, #820, #846, #868, #894) | must |
-| FR-056 | `list_archive_for_extraction` SHALL return a `ListedArchive` that keeps the list pass's decode for extraction (see [[020-reader-sink-and-in-memory-api/spec]] FR-100 to FR-103) (v0.8.0, #828, #884) | should |
+| FR-056 | `ListRequest::for_extraction(path, DecodeReuse)` SHALL return a `ListedArchive` that keeps the list pass's decode for extraction and the extraction config it will run under (see [[020-reader-sink-and-in-memory-api/spec]] FR-100 to FR-103) (v0.8.0, #828, #884; `list_archive_for_extraction` removed, #901, #912) | should |
+| FR-057 | `ManifestEntryKind::File` SHALL carry `size: Uncompressed`; `ArchiveEntry` SHALL NOT have a `size` field and SHALL expose `size()` (0 unless the entry is a regular file) and `mode: Option<RawMode>`; `ArchiveManifest::total_size()` SHALL sum regular files only (a ZIP symlink's data size no longer counts; list-time quota still charges raw sizes and symlink data is capped by the symlink-target limit); `InvalidPermissions` SHALL carry `mode: RawMode` (#910) | must |
+| FR-058 | `VerificationIssue` SHALL have private fields and hold a typed `Finding`: `Refusal { category, kind: FfiKind, message }` for a refusal (so its `FfiKind`, sub-code and `relaxable_by` survive to the front ends) or `Heuristic(Heuristic)`; `category()`, `message()` and `ffi_kind()` are derived; message texts are unchanged; `context` is removed (#899) | must |
+| FR-059 | `ArchiveEntry::utf8_path()` SHALL return the path as `&str` or `Malformation::EntryPathNotUtf8`, so a front end that needs text decides to refuse rather than to lose bytes (Python converts lossless with `os.fsdecode`, Node refuses in listings and escapes elsewhere; see [[006-python-bindings/spec]] FR-101 and [[007-node-bindings/spec]] FR-112) (#925) | must |
+| FR-060 | `ArchiveManifest::landing_paths(&self, &SecurityConfig) -> impl Iterator<Item = (&ArchiveEntry, LandingPath)>` SHALL give where each entry lands: destination-relative, normalized (`./`, `/`, `\` and drive prefixes handled as extraction does), projected through in-archive links with `VirtualTree::project_landing`; it SHALL cover all entry kinds and omit validation refusals, symlinks and hardlinks the config disallows, symlinks whose target is `Missing`, `Unread`, `Unreadable` or `Oversized`, placement conflicts, over-long landings and regular files skipped by the extension allowlist; a hardlink lands as a file without checking its target exists (verify defers that); differential tests prove the set of non-directory landings equals the set actually extracted for TAR (`./`, `/abs`, directory, symlinked parent), ZIP (`\`, `C:\`, `/abs`) and 7z (#933) | must |
+| FR-061 | `verify`, `extract` and the sinks SHALL agree on the projected landing length through one projection (`VirtualTree::project_landing` with `LandingLimits::{Enforced, Exempt}` and `projected_landing_within_limits`): verify no longer judges only an entry's own name length (it reported PASS for a landing through a symlink that `extract` refused with "file name too long"); an extension-skipped regular file stays exempt; a parity test (`d -> cc` plus a long tail) pins the verdict (#945, #903) | must |
+| FR-062 | `VerificationIssue` SHALL keep the typed refusal in every front end: CLI `--json` adds `code`, `sub_code`, `relaxable_by` and `setting`, Python `VerificationIssue` the same plus `mode`, Node `code`, `subCode`, `relaxableBy`, `setting` and `ioKind` (see [[005-cli/spec]] FR-120) (#899) | must |
+| FR-063 | `ManifestEntryType`, `CheckStatus`, `IssueSeverity` and `VerificationStatus` SHALL be closed enums (`closed_enum`) with `ALL`, documented as closed by design (#905) | must |
+| FR-064 | `inspection::{list,verify}::*_with_progress` SHALL be crate-private, taking options by value, with the public surface being the request types (#912) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -207,7 +218,7 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 |----|----------|-------------|
 | NFR-001 | Safety | Verification SHALL perform no write of archive content; no `unsafe` code is used |
 | NFR-002 | Resource bounds | Over-long names and targets keep only their length, issue lists for oversized entries are capped, and `IntegrityGaps` lists at most 256 entries, so a hostile archive cannot inflate the manifest or report |
-| NFR-003 | API stability | `ArchiveEntry`, `ManifestEntryKind`, `LinkTarget`, `EntryCompression`, `SolidBlock`, `OversizedEntry`, `IssueCategory`, `IntegrityStatus`, `UnverifiedReason`, `IntegrityCheck`, `VerificationOptions`, `ListOptions`, `StoredTargets` and `VerificationIssue` are `#[non_exhaustive]`; downstream matches need a wildcard arm |
+| NFR-003 | API stability | `ArchiveEntry`, `ManifestEntryKind`, `LinkTarget`, `EntryCompression`, `SolidBlock`, `OversizedEntry`, `IssueCategory`, `IntegrityStatus`, `UnverifiedReason`, `IntegrityCheck`, `VerificationOptions`, `ListOptions`, `StoredTargets`, `Heuristic` and `VerificationIssue` are `#[non_exhaustive]`; downstream matches need a wildcard arm; `ManifestEntryType`, `CheckStatus`, `IssueSeverity` and `VerificationStatus` are closed enums with `ALL` and a drift test in each consumer (#905) |
 | NFR-004 | Honesty | Every limit of the model (destination state, host fold approximation, overwrite semantics, destination prefix length) is documented on `verify_archive`; a `Pass` does not guarantee extraction into a non-empty destination succeeds |
 
 ## 5. Data Model
@@ -215,15 +226,17 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
 | `ArchiveManifest` | Listing result | private entries, oversized records, total size, `ArchiveType` |
-| `ArchiveEntry` | One listed entry | `path`, `kind`, `size`, `compression`, `mode`, `modified` |
-| `ManifestEntryKind` | Entry kind with its link target | `File`, `Directory`, `Symlink { target }`, `Hardlink { target }` |
+| `ArchiveEntry` | One listed entry | `path`, `kind`, `compression`, `mode: Option<RawMode>`, `modified`; `size()` (0 unless a regular file); `utf8_path() -> Result<&str, Malformation>` |
+| `ManifestEntryKind` | Entry kind with its link target | `File { size: Uncompressed }`, `Directory`, `Symlink { target }`, `Hardlink { target }` |
+| `LandingPath` | Destination-relative path an entry lands at, a lexical-stage newtype (not a `SafePath`; no containment claim) | `as_path()`, `into_path_buf()`, `AsRef<Path>` |
 | `ManifestEntryType` | Closed wire tag of a kind | `File`, `Directory`, `Symlink`, `Hardlink` |
 | `LinkTarget` | Target as far as listing kept it | `Recorded`, `Missing`, `Unread`, `Unreadable`, `Oversized { bytes }` |
 | `EntryCompression` / `SolidBlock` | Compressed-size attribution | `Unknown`, `Entry`, `SolidBlockStart`, `SolidBlockMember`; block `compressed`, `uncompressed` |
 | `OversizedEntry` | Entry dropped for path length | `index`, `bytes` |
 | `VerificationReport` | Derived-status report | issues, integrity scope, totals, format |
-| `VerificationIssue` | One finding | `severity`, `category`, `entry_path`, `message`, `context` |
-| `VerificationStatus` | Overall | `Pass` ("PASS"), `Fail` ("FAIL"), `Warning` ("WARNING") |
+| `VerificationIssue` | One finding; private fields (#899) | `severity()`, `entry_path()`, `finding()`, derived `category()`, `message()`, `ffi_kind() -> Option<&FfiKind>`; `context` was removed |
+| `Finding` / `Heuristic` | What a finding is: `Refusal { category, kind: FfiKind, message }` or `Heuristic(Heuristic)` (#899) | `Heuristic` is `#[non_exhaustive]`: `ExecutableFile { mode: RawMode }`, `SuspiciousExtension`, `NonUtf8Name`, `NameCollision`, `OverwriteConflict`, `UnreadSymlinkTargets`, `IntegrityIncomplete`, `CorruptData`, `AntiItemsSkipped`, `OmittedRefusals`, `OmittedStructureFindings` |
+| `VerificationStatus` | Overall; closed enum with `ALL` (a drift test per consumer, #905) | `Pass` ("PASS"), `Fail` ("FAIL"), `Warning` ("WARNING") |
 | `CheckStatus` | Security check | `Pass` ("OK"), `Fail` ("FAILED"), `Warning`, `Skipped` |
 | `IntegrityStatus` | Payload check | `Pass` ("OK"), `Fail` ("FAILED"), `Incomplete`, `Skipped` |
 | `IntegrityGaps` / `UnverifiedEntry` / `UnverifiedReason` | What the check left unverified | counts per reason, listed entries, `omitted` |
@@ -246,7 +259,7 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | Two empty directories folding equal | Low `NameCollision`, not counted by `security_status()`; if either later gains an entry it is reported at its real severity |
 | TAR stream without an end-of-archive marker, integrity requested | Gap reason `NoEndMarker`, integrity `Incomplete` |
 | Compressed TAR with more than the trailer cap after the end marker, integrity requested | `ArchiveError::TarTrailer(OverCap)` (reported as `SecurityViolation`, relaxable by `max_tar_metadata_bytes`), not a gap; plain `verify` does not read the tail |
-| Solid 7z with `allow_solid_archives` off, integrity requested | Gap reason `SolidPolicy`, integrity `Incomplete` |
+| Solid 7z with solid archives refused (`SolidArchives::Refuse`), integrity requested | Gap reason `SolidPolicy`, integrity `Incomplete` |
 
 ## 7. Success Criteria
 

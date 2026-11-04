@@ -22,6 +22,9 @@ related:
 
 # Feature: Node.js Bindings
 
+> [!note] Revision 2026-11-04 (50-issue batch)
+> `ExarchError` union, `IoKind`, `SinkOptions`, entry unions, number-to-limit boundary, `total: null`, skipped summary, injective path rendering and staged `createArchive`. See FR-106 to FR-113; rows that conflict (FR-090, FR-101) are rewritten in place.
+
 > [!info] Metadata
 > **Subsystem**: exarch-node
 > **MSRV**: Rust 1.98.0
@@ -135,7 +138,7 @@ THEN extraction respects those settings
 | FR-085 | `ExtractionReport`, `CreationReport`, `ArchiveManifest`, and `VerificationReport` SHALL be exposed as JavaScript objects with typed fields | must |
 | FR-088 | `ExtractionOptions` SHALL be exposed as a JavaScript class with builder methods `withAtomic(bool?)` and `withSkipDuplicates(bool?)`; both `extractArchive` and `extractArchiveWithProgress` SHALL accept an optional `options` parameter | must |
 | FR-089 | ALL async operations SHALL wrap the core call with `catch_unwind` inside `spawn_blocking`; panics in `exarch-core` SHALL be converted to JavaScript errors and SHALL NOT abort the Node.js process | must |
-| FR-090 | `extractArchiveWithProgress(archivePath, outputDir, config?, options?, progress?)` SHALL accept an optional `ThreadsafeFunction` callback with signature `(path: string, total: number, current: number, bytesWritten: number) => void`; numeric callback arguments are `number` (not `bigint`) | must |
+| FR-090 | `extractArchiveWithProgress(archivePath, outputDir, config?, options?, progress?)` SHALL accept an optional `ThreadsafeFunction` callback with signature `(path: string, total: number \| null, current: number, bytesWritten: number) => void` (`total` is `null` while the count is unknown, FR-110); numeric callback arguments are `number` (not `bigint`) | must |
 | FR-086 | napi-rs SHALL generate TypeScript `.d.ts` files for all exported functions and classes | must |
 | FR-087 | ALL path arguments SHALL accept `string` type in JavaScript | must |
 | FR-091 | `SecurityConfig.setAllowSymlinks`/`setAllowHardlinks`/`setAllowAbsolutePaths`/`setAllowWorldWritable`/`setAllowSolidArchives`/`setPreservePermissions`, `CreationConfig.setPreservePermissions`/`setFollowSymlinks`/`setIncludeHidden`, and `ExtractionOptions.withSkipDuplicates`/`withAtomic` SHALL take a mandatory `boolean` argument, not `Option<bool>` resolved via `.unwrap_or(true)`; omitting the argument, or passing explicit `undefined`/`null`, SHALL be a compile-time TypeScript error / runtime napi error rather than silently flipping the flag to the permissive `true` state (v0.6.0, #442, BREAKING) | must |
@@ -148,11 +151,19 @@ THEN extraction respects those settings
 | FR-098 | A `SECURITY_VIOLATION` that a `SecurityConfig` setting relaxes SHALL carry the property `relaxableBy` with `<id>` one of `symlinks`, `hardlinks`, `solid_archives`, `banned_components`, `max_path_depth`, `windows_reserved_names`, `max_tar_metadata_bytes` (`PolicySetting`); the property is absent when no setting relaxes the refusal and a violation reason cannot forge it. The `[relaxableBy=<id>]` message token of v0.7.0 no longer exists (v0.7.0, #741, #757; v0.8.0, #760, #768) | must |
 | FR-099 | Report size and duration getters SHALL clamp values above `i64::MAX` to `i64::MAX` instead of wrapping (v0.7.0, #583, #697) | must |
 | FR-100 | A progress callback that throws SHALL surface as the rejection or throw with `code` `PROGRESS_CALLBACK_ERROR`, the exception as `cause` (the `\| progressCallbackError` message marker is removed), and, when the operation itself succeeded, the counters: `filesExtracted`/`bytesWritten`/`filesSkipped`/`warnings` for an extraction (`writes: 'kept'`), `filesAdded` and `bytesWritten` for a creation, `writes: 'discarded'` for an in-memory extraction; if the operation failed, the core error stays primary with the callback's exception as `cause` (v0.8.0, #760, #768, #783, #790) | must |
-| FR-101 | THE SYSTEM SHALL expose in-memory functions on `Uint8Array` input: `listArchiveBytes(data, config?, format?)`, `verifyArchiveBytes(data, config?, options?, format?)`, `extractArchiveToMemory(data, config?, options?, maxBytes?, pathModel?, format?)` resolving `MemoryExtraction { report, entries }` of `MemoryEntry { path, kind, data?, mode?, target? }`, and `createArchiveToBytes(sources, format, config?)` resolving `CreatedArchive { data, report }`, each with a `Sync` counterpart; `listArchiveBytesWithProgress`, `verifyArchiveBytesWithProgress` and `extractArchiveToMemoryWithProgress` take the same `(err, [path, total, current, bytesWritten])` callback as the path-based progress functions. `data` is copied before the call returns; `maxBytes` must be a positive whole number (default the config's `maxTotalSize`); `pathModel` is `'host'` or `'portable'`; `atomic` is unsupported; `format` is detected from the leading bytes when omitted; `'SevenZ'` cannot be created (`INVALID_CONFIGURATION`); a `MemoryEntry.data` is a plain `Uint8Array`, not a `Buffer` ([[020-reader-sink-and-in-memory-api/spec]]; v0.8.0, #776, #787, #790) | must |
+| FR-101 | THE SYSTEM SHALL expose in-memory functions on `Uint8Array` input: `listArchiveBytes(data, config?, format?)`, `verifyArchiveBytes(data, config?, options?, format?)`, `extractArchiveToMemory(data, config?, options?, maxBytes?, pathModel?, format?)` (`options` is a `SinkOptions`, FR-107) resolving `MemoryExtraction { report, entries }` of `StoredMemoryEntry` unions (FR-108), and `createArchiveToBytes(sources, format, config?)` resolving `CreatedArchive { data, report }`, each with a `Sync` counterpart; `listArchiveBytesWithProgress`, `verifyArchiveBytesWithProgress` and `extractArchiveToMemoryWithProgress` take the same `(err, [path, total, current, bytesWritten])` callback as the path-based progress functions. `data` is copied before the call returns; `maxBytes` must be a positive whole number (default the config's `maxTotalSize`); `pathModel` is `'host'` or `'portable'`; `atomic` is unsupported; `format` is detected from the leading bytes when omitted; `'SevenZ'` cannot be created (`INVALID_CONFIGURATION`); a `MemoryEntry.data` is a plain `Uint8Array`, not a `Buffer` ([[020-reader-sink-and-in-memory-api/spec]]; v0.8.0, #776, #787, #790) | must |
 | FR-102 | Quota errors for a single oversized file SHALL use the core wording `single file size` (v0.8.0, #760, #768) | should |
 | FR-103 | THE SYSTEM SHALL expose `extractArchiveToCallback(data, onEntry, config?, options?, pathModel?, format?, signal?)` (Promise) and `extractArchiveToCallbackSync`, delivering each verified entry to `onEntry` (which may return a promise in the async form; the sync form fails with a `TypeError` for a promise) through `extract_reader_to_callback`; `data` MAY be an `AsyncIterable<Uint8Array>` (TAR family) in the async in-memory functions, read on a worker thread and closed with `return()` however the call ends; a throw or rejection of `onEntry` rejects with `ENTRY_CALLBACK_ERROR`, an iterable that throws with `STREAM_ERROR`, and the abort reason is kept when the abort is raised from `onEntry`; `index.d.ts` uses `AsyncIterable` and needs the `es2018` lib (v0.8.0, #842, #860, #884) | must |
 | FR-104 | The seven async in-memory functions that take an `AsyncIterable` SHALL accept an optional trailing `signal` (`AbortSignalLike`); aborting rejects with `ABORT_ERR` and frees the blocking worker, the abort being noticed when the job starts, while it waits for JavaScript, at every read of a `Uint8Array` archive and at each progress callback; a pending `onEntry` call is abandoned, not cancelled; a `signal` that is not an `AbortSignal` throws a `TypeError` synchronously (v0.8.0, #848, #856) | must |
 | FR-105 | THE SYSTEM SHALL expose `extractArchiveToMemoryWithProgressSync`, `listArchiveBytesWithProgressSync` and `verifyArchiveBytesWithProgressSync`, and every error SHALL carry `subCode` and `setting` as properties with typings when core supplies them (v0.8.0, #842, #865, #870) | should |
+| FR-106 | `ExarchError` SHALL be a discriminated union that pairs each `code` with its properties (`ExarchCoreError` = every shape but `ExarchNativeError`; `INVALID_ARCHIVE` with optional `InvalidArchiveSubCode`, `SECURITY_VIOLATION` with a required `SecurityViolationSubCode` and optional `relaxableBy`, `QUOTA_EXCEEDED` and `ZIP_BOMB` with a required `QuotaSubCode` or `ZipBombSubCode`, `INVALID_CONFIGURATION` with `setting`, `IO_ERROR` with a required `ioKind: IoKind`), crossed with `writes`; `IoKind` is a stable string enum of 24 `io::ErrorKind` values plus `Other`; mirror enums have reverse drift tests (`mirror_maps_to_core!`) and `InvalidArchiveSubCode` includes `TAR_READER` and `SEVENZ_READER` (#924, #920, #918, #930, #896) | must |
+| FR-107 | The in-memory and callback functions SHALL take a `SinkOptions` class (`setSkipDuplicates`, `skipDuplicates`; `decodeReuse` is not exposed) instead of `ExtractionOptions` (passing `ExtractionOptions` throws `InvalidArg` synchronously; `atomic` cannot be requested) (#926) | must |
+| FR-108 | `MemoryEntry` SHALL be a union discriminated by `kind` (`MemoryFileEntry`, `MemoryDirectoryEntry`, `MemorySymlinkEntry`, `MemoryHardlinkEntry`) and `MemoryExtraction.entries` SHALL be `StoredMemoryEntry[]` (no hardlink); `listArchive*` entries SHALL be `ArchiveEntry` = `ManifestFileEntry \| ManifestDirectoryEntry \| ManifestSymlinkEntry \| ManifestHardlinkEntry` discriminated by `entryType` with `size` only on files, `mode` the raw archive mode and links carrying `target: LinkTarget` (`recorded { path }`, `missing`, `unread`, `unreadable`, `oversized { bytes }`); `symlinkTarget` and `hardlinkTarget` are removed (#923, #910) | must |
+| FR-109 | `SecurityConfig` count, depth and size setters (and `CreationConfig.setMaxFileSize`) SHALL take a JS number through core `positive_from_f64`: negative, fractional, non-finite, zero and above 2^53-1 are `INVALID_CONFIGURATION` with `setting`; `maxFileCount` is `number \| null` (null is unbounded); `setParallelDecodeMemory`, `withIntegrityCheck` and `addExcludePattern` throw `INVALID_CONFIGURATION` with `parallel_decode_memory`, `decompression_budget` and `exclude_pattern`; `getMaxSolidBlockMemory` is `number \| null` and its setter throws `INVALID_CONFIGURATION` while solid archives are refused; every path argument goes through `BoundaryPath::parse` and only the parsed value reaches core (#917, #921, #927, #911) | must |
+| FR-110 | The progress callback tuple SHALL be `ProgressArgs = [path, total: number \| null, current, bytesWritten]` with `total` `null` while the count is unknown; reports SHALL carry `skipped: SkippedSummary { counts: { kind, count }[], sample: SkippedEntry[] }` (kind typed `SkipKind`, `ioKind?: IoKind`), `filesSkipped` is the total over all reasons, `warnings` stay `string[]`, and the error object's partial-extraction properties still carry only `filesSkipped` (#904, #906) | must |
+| FR-111 | `VerificationIssue` SHALL carry `code`, `subCode`, `relaxableBy`, `setting` and `ioKind` from the core finding (typed as the generated fields intersected with `ExarchErrorCodeDetail \| HeuristicIssueDetail`); `context` is removed and the executable-file `mode` is not exposed (#899) | must |
+| FR-112 | Listing SHALL refuse a non-UTF-8 entry name or link target with `INVALID_ARCHIVE` (`ENTRY_NAME`) through core `ArchiveEntry::utf8_path()`; verify issue paths, integrity gap paths, skip samples and progress paths SHALL use an injective `path_text` rendering (`\` is written `\x5C`, each invalid Unix byte `\xNN`, each unpaired UTF-16 unit `\uNNNN`), so a literal name `a\xFFb` and a name with the byte 0xFF stay distinct; a caller cannot recover the original bytes (no `pathBytes` field) (#925) | must |
+| FR-113 | `createArchive*` SHALL replace an existing output atomically through `OutputFile::replace` (a failed creation leaves any previous archive untouched; see [[021-create-staging-and-output-policy/spec]]); Node does not expose `OutputFormat::Explicit` or `OutputPolicy::CreateNew`; `addExcludePattern` parses with core `ExcludePattern::try_from` (#912, #915, #931, #916) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -174,8 +185,11 @@ THEN extraction respects those settings
 | `CreationReport` (JS object) | Result of creation | `filesAdded`, `bytesWritten`, `duration` |
 | `ArchiveManifest` (JS object) | Archive listing result | `totalEntries`, `totalSize`, `format`, `entries` |
 | `VerificationReport` (JS object) | Verification result | `status`, `integrityStatus`, `integrityGaps`, `securityStatus`, `issues`, `totalEntries`, `suspiciousEntries`, `totalSize`, `format` |
-| `MemoryExtraction` / `MemoryEntry` / `CreatedArchive` (JS objects) | Results of the in-memory functions (v0.8.0) | `report`, `entries` / `path`, `kind` (`'file'`, `'directory'`, `'symlink'`), `data`, `mode`, `target` / `data`, `report` |
-| `ExarchError` (TS type) | Union of the shapes a rejection or throw can have (v0.8.0) | discriminated on `writes`; `code: ErrorCode`, `relaxableBy?`, `cause?` |
+| `MemoryExtraction` / `MemoryEntry` / `CreatedArchive` (JS objects) | Results of the in-memory functions (v0.8.0; unions since #923) | `report`, `entries: StoredMemoryEntry[]` / `kind`-discriminated `MemoryFileEntry`, `MemoryDirectoryEntry`, `MemorySymlinkEntry`, `MemoryHardlinkEntry` / `data`, `report` |
+| `ArchiveEntry` (TS union) | Listing entries (#923, #910) | `ManifestFileEntry \| ManifestDirectoryEntry \| ManifestSymlinkEntry \| ManifestHardlinkEntry` by `entryType`; `target: LinkTarget` on links |
+| `SinkOptions` (JS class) | Options of the in-memory and callback functions (#926) | `setSkipDuplicates`, `skipDuplicates` |
+| `SkippedSummary` / `SkippedEntry` | Typed skips in reports (#906) | `counts`, `sample`; `kind: SkipKind`, `path`, `ioKind?` |
+| `ExarchError` (TS type) | Union of the shapes a rejection or throw can have (v0.8.0; per-`code` pairing since #924) | `ExarchCoreError` (code-paired details) crossed with `writes`, plus `ExarchNativeError`; `relaxableBy?`, `cause?`, `ioKind`, `subCode`, `setting` |
 | `VerificationOptions` (JS class) | Options for `verifyArchive` (v0.7.0, #670) | `withIntegrityCheck(budget?)`, `integrityCheck`, `decompressionBudget` |
 
 ### TypeScript API Surface
@@ -194,7 +208,7 @@ function extractArchiveWithProgress(
     outputDir: string,
     config?: SecurityConfig,
     options?: ExtractionOptions,
-    progress?: (err: Error | null, arg: [string, number, number, number]) => void
+    progress?: (err: Error | null, arg: [string, number | null, number, number]) => void
 ): Promise<ExtractionReport>
 
 function createArchive(
@@ -219,7 +233,7 @@ function verifyArchive(
 // extractArchiveToMemoryWithProgress take a trailing progress callback
 function listArchiveBytes(data: Uint8Array, config?: SecurityConfig, format?: ArchiveType): Promise<ArchiveManifest>
 function verifyArchiveBytes(data: Uint8Array, config?: SecurityConfig, options?: VerificationOptions, format?: ArchiveType): Promise<VerificationReport>
-function extractArchiveToMemory(data: Uint8Array, config?: SecurityConfig, options?: ExtractionOptions, maxBytes?: number, pathModel?: PathModel, format?: ArchiveType): Promise<MemoryExtraction>
+function extractArchiveToMemory(data: Uint8Array, config?: SecurityConfig, options?: SinkOptions, maxBytes?: number, pathModel?: PathModel, format?: ArchiveType): Promise<MemoryExtraction>
 function createArchiveToBytes(sources: string[], format: ArchiveType, config?: CreationConfig): Promise<CreatedArchive>
 
 class SecurityConfig {
@@ -233,7 +247,7 @@ class SecurityConfig {
     setAllowSolidArchives(allow: boolean): this
     setZipConsistency(policy: ZipConsistencyPolicy): this
     setParallelDecodeMemory(size?: number | null): this
-    setMaxSolidBlockMemory(size: number): this
+    setMaxSolidBlockMemory(size: number): this  // INVALID_CONFIGURATION while solid archives are refused
     // Getters
     get allowSymlinks(): boolean
     get allowHardlinks(): boolean
@@ -242,7 +256,12 @@ class SecurityConfig {
     get allowSolidArchives(): boolean
     get zipConsistency(): ZipConsistencyPolicy
     get parallelDecodeMemory(): number | null
-    get maxSolidBlockMemory(): number
+    get maxSolidBlockMemory(): number | null
+}
+
+class SinkOptions {
+    setSkipDuplicates(skip: boolean): this
+    get skipDuplicates(): boolean
 }
 
 class VerificationOptions {
@@ -286,7 +305,7 @@ class ExtractionOptions {
 
 > [!note] Unreleased (v0.6.0): `createArchiveWithProgress`/`createArchiveWithProgressSync` (#455, #456)
 > Mirror the existing `extractArchiveWithProgress` async/sync pattern, reusing
-> `exarch_core::create_archive_with_progress` and the existing `NodeProgressAdapter`
+> the core creation request (`CreateRequest::with_progress` since #912) and the existing `NodeProgressAdapter`
 > threadsafe-function bridge — no new core security logic. JS integration tests cover the
 > per-entry callback shape and the `progress=null`/omitted paths.
 
@@ -299,15 +318,15 @@ Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.
 | `PathTraversal` | `PATH_TRAVERSAL` |
 | `SymlinkEscape` | `SYMLINK_ESCAPE` |
 | `HardlinkEscape` | `HARDLINK_ESCAPE` |
-| `ZipBomb` | `ZIP_BOMB` (also an entry claiming data from zero compressed bytes, v0.7.0, #653) |
+| `ZipBomb` | `ZIP_BOMB` (also an entry claiming data from zero compressed bytes, v0.7.0, #653), with a `subCode` (`ZipBombSubCode`: `ENTRY`, `SOLID_BLOCK`, `SKIPPED_ENTRIES`) |
 | `ZipInconsistency` | `ZIP_INCONSISTENCY` (v0.7.0, #671) |
 | `InvalidPermissions` | `INVALID_PERMISSIONS` |
-| `QuotaExceeded` | `QUOTA_EXCEEDED` |
+| `QuotaExceeded` | `QUOTA_EXCEEDED`, with a `subCode` (`QuotaSubCode`, nine values including `SOLID_BLOCK_MEMORY`) |
 | `SecurityViolation` | `SECURITY_VIOLATION`, with `relaxableBy` set only when a setting relaxes the refusal (v0.7.0, #741, #757) and `subCode` always set to a `SecurityViolationSubCode` (v0.8.0, #865); a path rejected at the JS boundary (null byte, too long) is also `SECURITY_VIOLATION` |
 | `UnknownFormat`, `ReaderFormat(Unrecognized)` | `UNKNOWN_FORMAT` |
 | `InvalidConfiguration`, `ReaderFormat(NeedsSeek \| NotAtStart)` | `INVALID_CONFIGURATION` (also a rejected setter value), with `setting` naming the `ConfigSetting` when it names one (v0.8.0, #870, #894) |
-| `InvalidArchive` | `INVALID_ARCHIVE`, with `subCode` (an `InvalidArchiveSubCode`) set when the failure is classified: `TAR_AMBIGUITY`, `TAR_TRAILER`, `LINK_TARGET`, `DUPLICATE_ENTRY`, `ENTRY_NAME`, `DECLARED_SIZE`, `INTEGRITY` or `ZIP_READER` (#865, #887, #889, #894, #946; see [[001-security-pipeline/spec]] FR-028) |
-| `Io` | `IO_ERROR` |
+| `InvalidArchive` | `INVALID_ARCHIVE`, with `subCode` (an `InvalidArchiveSubCode`) set when the failure is classified: `TAR_AMBIGUITY`, `TAR_TRAILER`, `LINK_TARGET`, `DUPLICATE_ENTRY`, `ENTRY_NAME`, `DECLARED_SIZE`, `INTEGRITY`, `ZIP_READER`, `TAR_READER` or `SEVENZ_READER` (#865, #887, #889, #894, #946; see [[001-security-pipeline/spec]] FR-028) |
+| `Io` | `IO_ERROR`, with `ioKind` (an `IoKind`, fallback `'Other'`) |
 | `SourceNotFound`, `SourceNotAccessible`, `OutputExists`, `InvalidCompressionLevel` | `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`, `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL` |
 | `PartialExtraction` | The inner error's `code`; `writes` is `'kept'` with `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` set, `'rolled_back'` after an atomic rollback, or `'discarded'` after an in-memory extraction, the last two without counters (v0.6.0, #508; v0.7.0, #735, #747; v0.8.0, #760, #800) |
 | progress callback threw | `PROGRESS_CALLBACK_ERROR` (Node-only), the throw as `cause` (FR-100) |
@@ -331,7 +350,10 @@ Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | Path is `null` or `undefined` | TypeError thrown by napi-rs before boundary check |
-| Path contains null byte | Synchronous `Error` thrown before Promise creation |
+| Path contains null byte | Synchronous `Error` thrown before Promise creation (`BoundaryPath::parse`, #927) |
+| A limit setter given a negative, fractional, non-finite, zero or above-2^53-1 number | `INVALID_CONFIGURATION` with `setting` (#917) |
+| `listArchive` of an archive with a non-UTF-8 entry name | Rejects with `INVALID_ARCHIVE` (`ENTRY_NAME`); verify and progress paths escape the bytes instead (#925) |
+| `createArchive` fails midway over an existing output | The previous archive is untouched (#931) |
 | Path exceeds 4096 bytes | Synchronous `Error` thrown before Promise creation |
 | Rust returns `ArchiveError::PathTraversal` | Promise rejects with an `Error` whose `code` is `PATH_TRAVERSAL` |
 | Rust returns `ArchiveError::PartialExtraction` | Promise rejects with the inner error's `code` (e.g. `SYMLINK_ESCAPE`); `writes: 'kept'` with `filesExtracted`, `bytesWritten`, `filesSkipped` and `warnings` properties (v0.6.0, #508; properties since v0.8.0, #760), or only `writes: 'rolled_back'` after an atomic rollback (v0.7.0, #747) or `'discarded'` after an in-memory extraction (v0.8.0) |
@@ -391,5 +413,6 @@ Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.
 - [[001-security-pipeline/spec]] — security pipeline invoked by Node.js bindings
 - [[003-config-api/spec]] — `SecurityConfig` and `CreationConfig` types
 - [[020-reader-sink-and-in-memory-api/spec]] — core API behind the in-memory functions
+- [[021-create-staging-and-output-policy/spec]] — staged `createArchive` and `addExcludePattern` shapes
 - [[004-progress-tracking/spec]] — `ProgressCallback` and `NodeProgressAdapter` (progress callbacks supported via `ThreadsafeFunction` since v0.4.1; creation-side progress and callback-throw hardening since v0.6.0)
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

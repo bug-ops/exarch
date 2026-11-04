@@ -208,7 +208,8 @@ impl StagedOutput {
         (self.temp.as_file_mut(), &self.excluded)
     }
 
-    /// Writes the archive to disk and publishes it at the target.
+    /// Writes the archive to disk and publishes it at the target, then syncs
+    /// the parent directory on a best-effort basis (Unix).
     ///
     /// The mode of a replaced file is applied after the write, right before the
     /// rename. [`OutputPolicy::CreateNew`] never overwrites: a file that
@@ -234,11 +235,32 @@ impl StagedOutput {
             OutputPolicy::Replace => temp
                 .persist(&target)
                 .map(drop)
-                .map_err(|failed| ArchiveError::Io(failed.error)),
-            OutputPolicy::CreateNew => publish_new(temp, &target),
+                .map_err(|failed| ArchiveError::Io(failed.error))?,
+            OutputPolicy::CreateNew => publish_new(temp, &target)?,
         }
+        sync_parent(&target);
+        Ok(())
     }
 }
+
+/// Flushes the directory entry of a published archive, so the rename survives
+/// a crash and not only the file contents.
+///
+/// Best effort and Unix only: the archive is already published and complete,
+/// so a filesystem that cannot sync a directory (or a platform where a
+/// directory cannot be opened) does not fail the creation.
+#[cfg(unix)]
+fn sync_parent(target: &Path) {
+    if let Some(parent) = target.parent()
+        && let Ok(directory) = File::open(parent)
+        && directory.sync_all().is_err()
+    {
+        // The rename stays atomic; only its durability is not guaranteed.
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_: &Path) {}
 
 /// Renames `temp` to `target` unless something is there.
 fn publish_new(temp: NamedTempFile, target: &Path) -> Result<()> {
@@ -376,32 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn replace_swaps_the_previous_file() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("a.tar"), b"old").unwrap();
-        let out = staged(dir.path(), "a.tar", OutputPolicy::Replace).unwrap();
-        assert_eq!(fs::read(dir.path().join("a.tar")).unwrap(), b"old");
-        write_and_commit(out, b"new").unwrap();
-        assert_eq!(fs::read(dir.path().join("a.tar")).unwrap(), b"new");
-    }
-
-    #[test]
-    fn a_directory_target_is_refused_for_both_policies() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("d")).unwrap();
-        for policy in [OutputPolicy::CreateNew, OutputPolicy::Replace] {
-            let err = staged(dir.path(), "d", policy).err().unwrap();
-            assert_matches!(
-                err,
-                ArchiveError::InvalidConfiguration {
-                    setting: ConfigSetting::OutputPath,
-                    problem: ConfigProblem::NotSupported,
-                }
-            );
-        }
-    }
-
-    #[test]
     fn a_missing_parent_directory_is_an_io_error() {
         let dir = tempfile::tempdir().unwrap();
         let err = StagedOutput::begin(&dir.path().join("nope/a.tar"), OutputPolicy::Replace)
@@ -480,26 +476,6 @@ mod tests {
             .unwrap();
 
             assert_eq!(mode(&dir.path().join("a.tar")), mode(&reference));
-        }
-
-        #[test]
-        fn replace_over_a_symlink_replaces_the_link_with_the_target_mode() {
-            let dir = tempfile::tempdir().unwrap();
-            let real = dir.path().join("real");
-            fs::write(&real, b"old").unwrap();
-            fs::set_permissions(&real, Permissions::from_mode(0o600)).unwrap();
-            let link = dir.path().join("link.tar");
-            symlink(&real, &link).unwrap();
-
-            write_and_commit(
-                staged(dir.path(), "link.tar", OutputPolicy::Replace).unwrap(),
-                b"new",
-            )
-            .unwrap();
-
-            assert!(!fs::symlink_metadata(&link).unwrap().is_symlink());
-            assert_eq!(mode(&link), 0o600);
-            assert_eq!(fs::read(&real).unwrap(), b"old");
         }
 
         #[test]

@@ -501,6 +501,19 @@ pub trait ProgressCallback: Send {
     /// Implementors must not rely on this method for cleanup — use `Drop`
     /// instead.
     fn on_complete(&mut self);
+
+    /// Whether the operation should stop, polled by archive creation between
+    /// entries and once more before the archive is published.
+    ///
+    /// The callbacks above cannot fail, so a callback that hit an error of its
+    /// own (a raising script callback, a closed channel) reports it here:
+    /// creation then stops with an [`ArchiveError::Io`] of kind
+    /// [`Interrupted`](std::io::ErrorKind::Interrupted), the staged output is
+    /// discarded and a previous archive at the output path stays untouched.
+    /// The default never cancels.
+    fn is_cancelled(&mut self) -> bool {
+        false
+    }
 }
 
 /// No-op implementation of `ProgressCallback` that does nothing.

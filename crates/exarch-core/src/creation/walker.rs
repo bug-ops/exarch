@@ -48,7 +48,10 @@ use walkdir::WalkDir;
 pub struct FilteredWalker<'a> {
     root: &'a Path,
     config: &'a CreationConfig,
+    excluded: &'a ExcludedOutput,
 }
+
+static NOTHING_EXCLUDED: ExcludedOutput = ExcludedOutput::none();
 
 impl<'a> FilteredWalker<'a> {
     /// Creates a new filtered walker for the given root directory.
@@ -65,7 +68,19 @@ impl<'a> FilteredWalker<'a> {
     /// ```
     #[must_use]
     pub fn new(root: &'a Path, config: &'a CreationConfig) -> Self {
-        Self { root, config }
+        Self {
+            root,
+            config,
+            excluded: &NOTHING_EXCLUDED,
+        }
+    }
+
+    /// Leaves out the staged output file and its target before any filter
+    /// rule sees them, so they are neither archived nor counted as skipped.
+    #[must_use]
+    pub const fn excluding(mut self, excluded: &'a ExcludedOutput) -> Self {
+        self.excluded = excluded;
+        self
     }
 
     /// Returns an iterator over filtered directory entries.
@@ -102,6 +117,9 @@ impl<'a> FilteredWalker<'a> {
     ///
     /// Returns `Ok(None)` for the walk root, which is no entry of the archive.
     fn visit(&self, entry: &walkdir::DirEntry) -> Result<Option<WalkItem>> {
+        if self.excluded.excludes(entry.path()) {
+            return Ok(None);
+        }
         let relative = filters::compute_archive_path(entry.path(), self.root, self.config)?;
         match ArchiveEntryName::from_relative(&relative) {
             Some(name) => filters::skip_reason(&name, self.config).map_or_else(
@@ -338,14 +356,10 @@ pub fn collect_entries<P: AsRef<Path>>(
         // that config — otherwise the single-entry branch would try to
         // open the symlink as a regular file and fail with an I/O error.
         if metadata.is_dir() || (config.follow_symlinks && path.is_dir()) {
-            let walker = FilteredWalker::new(path, config);
+            let walker = FilteredWalker::new(path, config).excluding(excluded);
             for item in walker.walk() {
                 match item? {
-                    WalkItem::Entry(entry) => {
-                        if !excluded.excludes(&entry.path) {
-                            collected.entries.push(entry);
-                        }
-                    }
+                    WalkItem::Entry(entry) => collected.entries.push(entry),
                     WalkItem::Skipped(skip) => collected.skipped.record(skip)?,
                 }
             }

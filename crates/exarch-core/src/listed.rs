@@ -21,9 +21,10 @@
 //! - the decoded stream is larger than [`REPLAY_LIMIT`], or a spool write
 //!   failed;
 //! - the codec decodes faster than a disk round trip (zstd) or is absent (plain
-//!   TAR);
-//! - the extraction's `max_decoder_memory` is below the one the list pass
-//!   decoded under, so the decode must be redone under the stricter bound.
+//!   TAR).
+//!
+//! The extraction runs under the policy the archive was listed for, so a
+//! different `max_decoder_memory` can never ask for a second decode.
 //!
 //! A fallback is chosen by the archive's size and contents, so it is never a
 //! security property: the replay holds the bytes the same decoder produced,

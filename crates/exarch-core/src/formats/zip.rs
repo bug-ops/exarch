@@ -733,11 +733,17 @@ impl<R: Read + Seek> ZipArchive<R> {
         &mut self,
         config: &SecurityConfig,
     ) -> Result<AdmittedZip<'_, R>> {
-        debug_assert!(
-            config.zip_consistency != ZipConsistencyPolicy::Enforce
-                || self.structure.checks() == zip_structure::StreamChecks::Run,
-            "an archive is only operated on under the policy it was opened for"
-        );
+        if config.zip_consistency == ZipConsistencyPolicy::Enforce
+            && self.structure.checks() != zip_structure::StreamChecks::Run
+        {
+            debug_assert!(
+                false,
+                "a handle is operated on under the policy it was opened for"
+            );
+            return Err(ArchiveError::unclassified(
+                "the ZIP archive was opened without the stream checks its policy needs",
+            ));
+        }
         self.check_count(config)?;
         self.check_zstd_windows(config)?;
         Ok(AdmittedZip { archive: self })

@@ -184,6 +184,70 @@ fn never_archived_inside_a_source_directory() {
 }
 
 #[test]
+fn the_staged_file_is_neither_archived_nor_counted_as_a_skipped_hidden_entry() {
+    for name in OUTPUTS {
+        let src = source();
+        let output = src.path().join(name);
+
+        let report = create(&OutputFile::create_new(&output), &[src.path()]).unwrap();
+        assert_eq!(report.files_skipped(), 0, "{name}: {:?}", report.skipped);
+
+        let report = create(&OutputFile::replace(&output), &[src.path()]).unwrap();
+        assert_eq!(report.files_skipped(), 0, "{name}: {:?}", report.skipped);
+        assert_eq!(entries(&output), [PathBuf::from("a.txt")], "{name}");
+    }
+}
+
+#[derive(Default)]
+struct CancelAfterFirstEntry {
+    started: usize,
+}
+
+impl exarch_core::ProgressCallback for CancelAfterFirstEntry {
+    fn on_entry_start(&mut self, _: &Path, _: exarch_core::EntryPosition) {
+        self.started += 1;
+    }
+
+    fn on_bytes_written(&mut self, _: u64) {}
+
+    fn on_entry_complete(&mut self, _: &Path) {}
+
+    fn on_complete(&mut self) {}
+
+    fn is_cancelled(&mut self) -> bool {
+        self.started >= 1
+    }
+}
+
+#[test]
+fn a_cancelling_progress_callback_discards_the_staged_file_and_keeps_the_previous_archive() {
+    for name in OUTPUTS {
+        let src = TempDir::new().unwrap();
+        fs::write(src.path().join("a.txt"), b"alpha").unwrap();
+        fs::write(src.path().join("b.txt"), b"bravo").unwrap();
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join(name);
+        create(
+            &OutputFile::create_new(&output),
+            &[&src.path().join("a.txt")],
+        )
+        .unwrap();
+        let before = fs::read(&output).unwrap();
+
+        let config = CreationConfig::default();
+        let mut progress = CancelAfterFirstEntry::default();
+        let err = CreateRequest::new(&config)
+            .with_progress(&mut progress)
+            .create(&OutputFile::replace(&output), &[src.path()])
+            .unwrap_err();
+
+        assert_matches!(err, ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::Interrupted);
+        assert_eq!(fs::read(&output).unwrap(), before, "{name}");
+        assert_eq!(dir_names(dir.path()), [name], "{name}");
+    }
+}
+
+#[test]
 fn the_output_given_as_a_source_file_is_skipped() {
     let src = source();
     let output = src.path().join("out.tar");
@@ -251,27 +315,12 @@ mod unix {
     }
 
     #[test]
-    fn replace_keeps_the_previous_narrower_mode() {
-        let src = source();
-        let dir = TempDir::new().unwrap();
-        let output = dir.path().join("out.tar.gz");
-        create(&OutputFile::create_new(&output), &[src.path()]).unwrap();
-        fs::set_permissions(&output, fs::Permissions::from_mode(0o600)).unwrap();
-
-        create(&OutputFile::replace(&output), &[src.path()]).unwrap();
-
-        assert_eq!(
-            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
-    #[test]
     fn replace_over_a_symlink_replaces_the_link_and_spares_its_destination() {
         let src = source();
         let dir = TempDir::new().unwrap();
         let real = dir.path().join("real.bin");
         fs::write(&real, b"unrelated").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
         let link = dir.path().join("out.tar");
         symlink(&real, &link).unwrap();
 
@@ -279,6 +328,10 @@ mod unix {
 
         assert!(!fs::symlink_metadata(&link).unwrap().is_symlink());
         assert_eq!(fs::read(&real).unwrap(), b"unrelated");
+        assert_eq!(
+            fs::metadata(&link).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert_eq!(entries(&link), [PathBuf::from("a.txt")]);
     }
 

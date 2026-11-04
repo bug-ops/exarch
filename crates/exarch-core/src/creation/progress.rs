@@ -125,6 +125,16 @@ impl<'a> ProgressTracker<'a> {
     pub fn on_complete(&mut self) {
         self.progress.on_complete();
     }
+
+    /// Stops creation when the callback asks for it; see
+    /// [`ProgressCallback::is_cancelled`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ArchiveError::Io`] of kind `Interrupted` when cancelled.
+    pub fn check_cancelled(&mut self) -> crate::Result<()> {
+        check_cancelled(&mut *self.progress)
+    }
 }
 
 /// Wrapper reader that tracks bytes read and reports progress.
@@ -299,6 +309,21 @@ impl<R> Drop for ProgressReader<'_, R> {
     fn drop(&mut self) {
         self.flush_progress();
     }
+}
+
+/// The error of a creation a progress callback cancelled.
+///
+/// # Errors
+///
+/// Returns it when `progress` is cancelled.
+pub fn check_cancelled(progress: &mut dyn ProgressCallback) -> crate::Result<()> {
+    if progress.is_cancelled() {
+        return Err(crate::ArchiveError::Io(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "creation cancelled by the progress callback",
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

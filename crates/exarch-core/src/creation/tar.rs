@@ -107,6 +107,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
             }
         }
         guard.complete();
+        tracker.check_cancelled()?;
     }
 
     // Finish writing TAR

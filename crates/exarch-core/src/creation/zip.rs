@@ -113,6 +113,7 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
             }
         }
         guard.complete();
+        tracker.check_cancelled()?;
     }
 
     // Finish writing ZIP

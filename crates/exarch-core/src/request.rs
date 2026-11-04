@@ -33,6 +33,7 @@ use crate::api::extract_validated;
 use crate::api::resolve_output_format;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
+use crate::creation::progress::check_cancelled;
 use crate::creation::staged::StagedOutput;
 use crate::creation::tar::write_tar;
 use crate::creation::zip::warn_on_extraction_ratio;
@@ -562,11 +563,24 @@ pub enum OutputFormat {
 ///
 /// Replacing keeps the permission bits of the file that is replaced (a symlink
 /// is resolved first), never wider than before and without setuid, setgid or
-/// sticky bits; a new file gets `0o666` filtered by the umask. Owner, ACLs and
-/// extended attributes of a replaced file are not preserved.
+/// sticky bits; a new file gets `0o666` filtered by the umask. Owner, group,
+/// ACLs and extended attributes of a replaced file are not preserved: the new
+/// file belongs to the creating user and to the group the filesystem gives a
+/// new file in that directory (the directory's group on macOS and BSD), so a
+/// file that was shared through its group can become readable by another group
+/// under the same mode bits.
 ///
 /// The staged file and the target are never archived, even when a source
-/// directory contains them.
+/// directory contains them. They are recognized by file name and canonical
+/// parent directory, so an alias of the output directory that canonicalization
+/// does not resolve (a bind or `nullfs` mount of it inside a source tree) is
+/// not recognized and the output may be archived into itself. Do not put such
+/// a mount under a source.
+///
+/// A [`ProgressCallback`] that reports
+/// [`is_cancelled`](ProgressCallback::is_cancelled) stops the creation: nothing
+/// is published and a previous output stays as it was. After the archive is
+/// published the parent directory is synced on a best-effort basis (Unix).
 ///
 /// # Examples
 ///
@@ -726,8 +740,11 @@ impl<'a> CreateRequest<'a> {
         let Self { config, progress } = self;
         let format = resolve_output_format(output)?;
         let mut staged = StagedOutput::begin(output.path(), output.policy())?;
-        let report = progress
-            .run(|progress| write_staged(&mut staged, format, sources, config, progress))?;
+        let report = progress.run(|progress| -> Result<CreationReport> {
+            let report = write_staged(&mut staged, format, sources, config, progress)?;
+            check_cancelled(progress)?;
+            Ok(report)
+        })?;
         staged.commit()?;
         Ok(report)
     }

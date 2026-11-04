@@ -538,9 +538,11 @@ mod tests {
         let paths: Vec<_> = collected
             .entries
             .iter()
-            .map(|e| e.archive_path.to_str().unwrap().to_owned())
+            .map(|e| e.archive_path.to_path_buf())
             .collect();
-        assert!(paths.contains(&"build/keep.txt".to_owned()));
+        // Path comparison is by component, so the host separator does not
+        // matter.
+        assert!(paths.contains(&PathBuf::from("build/keep.txt")));
         assert!(!paths.iter().any(|p| p.starts_with("build/out")));
         assert_eq!(collected.skipped.count(SkipKind::Excluded), 2);
     }

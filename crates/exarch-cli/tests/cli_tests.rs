@@ -453,7 +453,7 @@ fn listed_files(archive: &std::path::Path) -> Vec<String> {
         .expect("entries")
         .iter()
         .filter_map(|e| e["path"].as_str())
-        .map(str::to_owned)
+        .map(|path| path.replace('\\', "/"))
         .collect();
     names.sort();
     names

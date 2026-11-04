@@ -235,13 +235,22 @@ impl std::str::FromStr for ExcludePattern {
 }
 
 impl fmt::Display for ExcludePattern {
-    /// Writes the pattern text it was parsed from, normalized.
+    /// Writes the pattern text it was parsed from, normalized; a path pattern
+    /// always uses `/` between components, whatever the host separator.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Exact { name } => f.write_str(name),
             Self::Prefix { prefix } => write!(f, "{prefix}*"),
             Self::Suffix { suffix } => write!(f, "*{suffix}"),
-            Self::Path { relative } => write!(f, "{}", relative.display()),
+            Self::Path { relative } => {
+                let mut components = relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy());
+                if let Some(first) = components.next() {
+                    f.write_str(&first)?;
+                }
+                components.try_for_each(|component| write!(f, "/{component}"))
+            }
         }
     }
 }

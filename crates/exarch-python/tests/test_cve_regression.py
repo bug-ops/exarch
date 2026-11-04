@@ -306,8 +306,7 @@ def test_partial_extraction_carries_files_skipped_and_warnings(temp_dir):
     err = exc_info.value
     assert err.files_extracted >= 1
     assert err.files_skipped > 0
-    assert err.warnings
-    assert any("disallowed extension" in w for w in err.warnings)
+    assert err.warnings == []
 
 
 def test_partial_extraction_skip_only_carries_files_skipped_and_warnings(temp_dir):
@@ -349,8 +348,8 @@ def test_partial_extraction_skip_only_carries_files_skipped_and_warnings(temp_di
     assert err.files_extracted == 0
     assert err.bytes_written == 0
     assert err.files_skipped > 0
-    assert err.warnings
-    assert any("disallowed extension" in w for w in err.warnings)
+    assert err.skipped.count("extension_not_allowed") == err.files_skipped
+    assert err.skipped.counts == {"extension_not_allowed": err.files_skipped}
 
 
 def test_progress_bytes_written_not_stale(temp_dir):

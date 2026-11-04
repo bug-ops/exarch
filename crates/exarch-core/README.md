@@ -55,18 +55,24 @@ let config = SecurityConfig::default()
     .with_allowed_extensions(vec![".tar".into(), ".gz".into()]); // optional allowlist
 ```
 
-Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_max_solid_compression_ratio`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`, `with_decode_reuse`.
+Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_solid_archives`, `with_solid_limits`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`, `with_decode_reuse`.
 
-### Builder Pattern
+### Request Values
+
+Optional inputs (options, progress) are setters on a request value instead of more functions:
 
 ```rust
-use exarch_core::ArchiveBuilder;
+use exarch_core::{ExtractRequest, ExtractionOptions, NoopProgress, SecurityConfig};
 
-let report = ArchiveBuilder::new()
-    .archive("archive.tar.gz")
-    .output_dir("/output/path")
-    .extract()?;
+let config = SecurityConfig::default();
+let mut progress = NoopProgress;
+let report = ExtractRequest::new(&config)
+    .with_options(ExtractionOptions::default().with_atomic(true))
+    .with_progress(&mut progress)
+    .extract("archive.tar.gz", "/output/path")?;
 ```
+
+`ListRequest`, `VerifyRequest`, `SinkExtractRequest` and `CreateRequest` follow the same shape.
 
 ## Security Features
 
@@ -103,21 +109,24 @@ let report = create_archive("backup.tar.gz", &["src/", "Cargo.toml"], &config)?;
 println!("Created {} files", report.files_added);
 ```
 
-### Builder Pattern
+### Output Files
+
+`create_archive` replaces an existing output atomically once the archive is complete; a failed creation leaves the output as it was. Use `CreateRequest` with an `OutputFile` to refuse an existing file or to state the format:
 
 ```rust
-use exarch_core::ArchiveCreator;
+use exarch_core::{CreateRequest, CreationConfig, OutputFile};
+use exarch_core::creation::CompressionLevel;
 
-let report = ArchiveCreator::new()
-    .output("project.tar.gz")
-    .add_source("src/")
-    .add_source("Cargo.toml")
-    .add_source("README.md")
-    .compression_level(9)
-    .exclude("*.log")
-    .exclude("target/")
-    .create()?;
+let config = CreationConfig::default()
+    .with_compression_level(CompressionLevel::try_from(9u8)?)
+    .with_exclude_patterns(vec!["*.log".into(), "target/".into()]);
+let report = CreateRequest::new(&config).create(
+    &OutputFile::create_new("project.tar.gz"),
+    &["src/", "Cargo.toml", "README.md"],
+)?;
 ```
+
+The output is staged in a temporary file in its directory (which must be writable), is never archived into itself, and must be absent, a regular file or a symlink to one.
 
 ### CreationConfig Options
 
@@ -144,7 +153,7 @@ let report = ArchiveCreator::new()
 | `.7z` | 7z | LZMA/LZMA2 | ✅ | — | ✅ | ✅ |
 
 > [!NOTE]
-> ZIP-family formats share the ZIP container but add extra structure — signing (`.apk`/`.aab`/`.ipa`/`.appx`/`.msix`), checksum manifests (`.whl`), ordering rules (`.epub`), or descriptor files (`.war`/`.ear`/`.vsix`/`.nbm`) — which exarch-core doesn't produce. Creation is rejected to avoid silently emitting a bare ZIP with a misleading extension; callers who want that can set `CreationConfig::format = Some(ArchiveType::Zip)` explicitly.
+> ZIP-family formats share the ZIP container but add extra structure — signing (`.apk`/`.aab`/`.ipa`/`.appx`/`.msix`), checksum manifests (`.whl`), ordering rules (`.epub`), or descriptor files (`.war`/`.ear`/`.vsix`/`.nbm`) — which exarch-core doesn't produce. Creation is rejected to avoid silently emitting a bare ZIP with a misleading extension; callers who want that can state `CreatableFormat::Zip` with `OutputFile::with_format`.
 
 > [!NOTE]
 > 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. A 7z archive holding a Windows reparse point is refused as a whole; a Unix `S_IFLNK` symlink is read and validated through the symlink policy, so it is created only with symlinks allowed, and a 7z FIFO, socket or device node is refused.
@@ -161,24 +170,25 @@ let report = ArchiveCreator::new()
 | [`extract_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.extract_archive.html) | High-level extraction function |
 | [`create_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.create_archive.html) | High-level archive creation function |
 | [`list_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.list_archive.html) | List archive contents |
-| [`list_archive_with_options`](https://docs.rs/exarch-core/latest/exarch_core/fn.list_archive_with_options.html) | List archive contents with `ListOptions`, e.g. reading 7z link targets on request |
 | [`verify_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.verify_archive.html) | Verify archive security without extracting |
-| [`verify_archive_with_options`](https://docs.rs/exarch-core/latest/exarch_core/fn.verify_archive_with_options.html) | Verify with `VerificationOptions`, e.g. decoding the payload to check integrity |
-| [`Archive`](https://docs.rs/exarch-core/latest/exarch_core/struct.Archive.html) | Archive handle for extraction |
-| [`ArchiveBuilder`](https://docs.rs/exarch-core/latest/exarch_core/struct.ArchiveBuilder.html) | Builder for configuring extraction |
-| [`ArchiveCreator`](https://docs.rs/exarch-core/latest/exarch_core/struct.ArchiveCreator.html) | Builder for configuring archive creation |
+| [`ExtractRequest`](https://docs.rs/exarch-core/latest/exarch_core/struct.ExtractRequest.html) | Extraction with options and progress |
+| [`ListRequest`](https://docs.rs/exarch-core/latest/exarch_core/struct.ListRequest.html) | Listing with `ListOptions` and progress, from a path or a reader; `for_extraction` keeps what extraction can reuse |
+| [`VerifyRequest`](https://docs.rs/exarch-core/latest/exarch_core/struct.VerifyRequest.html) | Verification with `VerificationOptions` (e.g. decoding the payload to check integrity) and progress |
+| [`SinkExtractRequest`](https://docs.rs/exarch-core/latest/exarch_core/struct.SinkExtractRequest.html) | Extraction into an `EntrySink` |
+| [`CreateRequest`](https://docs.rs/exarch-core/latest/exarch_core/struct.CreateRequest.html) | Creation into an `OutputFile`, a writer or memory |
+| [`OutputFile`](https://docs.rs/exarch-core/latest/exarch_core/struct.OutputFile.html) | The archive file to create: path, replace policy, format |
 | [`SecurityConfig`](https://docs.rs/exarch-core/latest/exarch_core/struct.SecurityConfig.html) | Security configuration for extraction |
 | [`CreationConfig`](https://docs.rs/exarch-core/latest/exarch_core/struct.CreationConfig.html) | Configuration for archive creation |
 | [`ExtractionReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.ExtractionReport.html) | Extraction statistics, warnings, and skipped-entry counts |
 | [`CreationReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.CreationReport.html) | Creation statistics and results |
 | [`ArchiveError`](https://docs.rs/exarch-core/latest/exarch_core/enum.ArchiveError.html) | Error types for all operations |
-| [`ValidationReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.ValidationReport.html) | Per-entry verification result (re-exported at crate root) |
+| [`VerificationIssue`](https://docs.rs/exarch-core/latest/exarch_core/struct.VerificationIssue.html) | One typed `verify` finding with its code, sub-code and message |
 
 ### Readers, Sinks and Writers
 
-Archives that are not files on disk go through the same validation pipeline. `ArchiveReader` wraps a TAR stream or a seekable ZIP/7z source, and `ArchiveReader::detect` / `detect_stream` pick the format from the leading bytes. `list_reader` and `verify_reader` list and verify such a source without a temporary directory. `extract_to_sink` and `extract_to_sink_with_progress` take a `SinkOptions` and deliver validated entries to an `EntrySink` instead of a directory; `MemorySink` keeps them in memory under a `MemoryLimit` that counts payload, path bytes and a fixed per-entry overhead, and a full sink fails with `QuotaExceeded` (`SinkCapacity`), and an error that wrote nothing reports `PartialWrites::Discarded`. `PathModel::Portable` makes a sink validate against the strictest rules of every platform on every host. 7z archives are accepted by sinks too.
+Archives that are not files on disk go through the same validation pipeline. `ArchiveReader` wraps a TAR stream or a seekable ZIP/7z source, and `ArchiveReader::detect` / `detect_stream` pick the format from the leading bytes. `ListRequest::list_reader` and `VerifyRequest::verify_reader` list and verify such a source without a temporary directory. `SinkExtractRequest` takes a `SinkOptions` and delivers validated entries to an `EntrySink` instead of a directory; `MemorySink` keeps them in memory under a `MemoryLimit` that counts payload, path bytes and a fixed per-entry overhead, and a full sink fails with `QuotaExceeded` (`SinkCapacity`), and an error that wrote nothing reports `PartialWrites::Discarded`. `PathModel::Portable` makes a sink validate against the strictest rules of every platform on every host. 7z archives are accepted by sinks too.
 
-In the other direction `ArchiveWriter` with `create_to_writer` / `create_to_writer_with_progress` builds a TAR (any codec) or ZIP into any `Write` (and `Seek` for ZIP) instead of a file; `ArchiveWriter::of_type` takes a `CreatableFormat`, so a format that cannot be created is unrepresentable. `list_archive_with_progress`, `verify_archive_with_progress` and the reader variants report per-entry progress.
+In the other direction `ArchiveWriter` with `CreateRequest::write` builds a TAR (any codec) or ZIP into any `Write` (and `Seek` for ZIP) instead of a file; `ArchiveWriter::of_type` takes a `CreatableFormat`, so a format that cannot be created is unrepresentable. Every request reports per-entry progress.
 
 ### Error Handling
 

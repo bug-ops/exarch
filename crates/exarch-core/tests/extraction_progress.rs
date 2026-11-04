@@ -8,9 +8,9 @@ mod sink_support;
 use std::path::Path;
 
 use exarch_core::Extension;
+use exarch_core::ExtractRequest;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_progress;
 use sink_support::tar_archive;
 use sink_support::tar_file;
 use sink_support::tar_symlink;
@@ -23,7 +23,7 @@ struct Counter {
 }
 
 impl ProgressCallback for Counter {
-    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+    fn on_entry_start(&mut self, _path: &Path, _position: exarch_core::EntryPosition) {
         self.starts += 1;
     }
 
@@ -41,8 +41,9 @@ fn extract(entries: &[Vec<u8>], config: &SecurityConfig) -> (Counter, bool) {
     let archive = work.path().join("a.tar");
     std::fs::write(&archive, tar_archive(entries)).unwrap();
     let mut progress = Counter::default();
-    let result =
-        extract_archive_with_progress(&archive, work.path().join("out"), config, &mut progress);
+    let result = ExtractRequest::new(config)
+        .with_progress(&mut progress)
+        .extract(&archive, work.path().join("out"));
     (progress, result.is_ok())
 }
 

@@ -72,13 +72,13 @@ fn run(entries: &[Vec<u8>]) -> Outcome {
     let issue = report
         .issues()
         .iter()
-        .find(|issue| issue.message.contains("refusing to create"))
+        .find(|issue| issue.message().contains("refusing to create"))
         .unwrap_or_else(|| panic!("no blocked-parent issue: {:?}", report.issues()));
     Outcome {
         extract_code: error.error_code(),
         extract_message: error.to_string(),
-        verify_category: issue.category,
-        verify_message: issue.message.clone(),
+        verify_category: issue.category(),
+        verify_message: issue.message(),
     }
 }
 

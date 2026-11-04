@@ -8,7 +8,7 @@ tags:
   - progress
   - rust
 created: 2026-05-20
-updated: 2026-11-02
+updated: 2026-11-04
 status: draft
 related:
   - "[[constitution]]"
@@ -22,6 +22,9 @@ related:
 ---
 
 # Feature: Progress Tracking
+
+> [!note] Revision 2026-11-04 (50-issue batch)
+> `on_entry_start` takes an `EntryPosition` (#904); skips are typed and counted per kind in the reports (#906); the progress-variant free functions became `with_progress` on request types (#912); reports are `#[non_exhaustive]` (#905); the CLI bar for `create` follows the real total (#942).
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / report, io
@@ -74,7 +77,7 @@ SO THAT I can update a progress bar in real time
 **Acceptance criteria:**
 ```
 GIVEN a custom ProgressCallback implementation
-WHEN extract_archive_with_progress() is called
+WHEN ExtractRequest::with_progress(..).extract(..) is called
 THEN on_entry_start is called before writing the entry,
      on_bytes_written is called once per written file with that file's byte count,
      on_entry_complete is called when the entry is finished, including an entry that failed
@@ -101,13 +104,13 @@ THEN on_complete has been called exactly once
 
 ### US-004: Creation Progress
 
-AS A developer using create_archive_with_progress()
+AS A developer using CreateRequest::with_progress()
 I WANT progress callbacks during archive creation
 SO THAT I can report file-packing progress to the user
 
 **Acceptance criteria:**
 ```
-GIVEN a custom ProgressCallback and create_archive_with_progress()
+GIVEN a custom ProgressCallback passed to CreateRequest::with_progress()
 WHEN archive creation runs
 THEN on_entry_start and on_entry_complete are called for each source file added
 ```
@@ -116,18 +119,22 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-040 | THE SYSTEM SHALL expose a `ProgressCallback` trait with methods: `on_entry_start(path, total, current)`, `on_bytes_written(bytes)`, `on_entry_complete(path)`, `on_complete()` | must |
+| FR-040 | THE SYSTEM SHALL expose a `ProgressCallback` trait with methods: `on_entry_start(path, position: EntryPosition)`, `on_bytes_written(bytes)`, `on_entry_complete(path)`, `on_complete()` | must |
 | FR-041 | THE SYSTEM SHALL provide a `NoopProgress` implementation that satisfies `ProgressCallback` with no runtime overhead | must |
 | FR-042 | `on_complete` SHALL NOT be called if extraction fails or is partial | must |
 | FR-043 | `ProgressCallback` SHALL be `Send` so it can be used across thread boundaries (Node.js, Python) | must |
 | FR-044 | Format handlers SHALL accept `&mut dyn ProgressCallback` and call it consistently for each entry; callbacks SHALL fire per-entry interleaved with actual I/O (not batched before or after), and every `on_entry_start` SHALL be paired with exactly one `on_entry_complete`, also when the entry fails | must |
 | FR-045 | `on_bytes_written` SHALL be called with the number of bytes written for the entry just extracted (once per written file), not a cumulative total | must |
-| FR-046 | `on_entry_start` SHALL receive the total number of entries (if known) and the current entry index | must |
-| FR-047 | `list_archive_with_progress`, `list_reader_with_progress`, `verify_archive_with_progress` and `verify_reader_with_progress` SHALL announce each listed or verified entry with `on_entry_start` and close it with `on_entry_complete`, and call `on_complete` once after the result was built; `on_complete` SHALL NOT fire on failure and every `on_entry_start` is still paired with an `on_entry_complete` (v0.8.0, #782, #790) | must |
-| FR-048 | In listing and verification `total` SHALL be 0 for TAR (the count is unknown until the stream ends) and the entry count the file table declares for ZIP and 7z (which can exceed the announced entries: 7z anti-items and entries dropped for their path are never announced); `on_bytes_written` SHALL never be called (v0.8.0, #782, #790) | must |
+| FR-046 | `on_entry_start` SHALL receive an `EntryPosition { current: NonZeroUsize, total: EntryTotal }` (`Copy`, `#[non_exhaustive]`, built by `new` or `at_index(0-based, total)`), where `current` is 1-based and `EntryTotal` is `Known(usize)` or `Unknown`; a stream whose count is not known up front reports `Unknown`, never 0 (#904) | must |
+| FR-047 | `ListRequest::with_progress` (`list`, `list_reader`, `for_extraction`) and `VerifyRequest::with_progress` (`verify`, `verify_reader`) SHALL announce each listed or verified entry with `on_entry_start` and close it with `on_entry_complete`, and call `on_complete` once after the result was built; `on_complete` SHALL NOT fire on failure and every `on_entry_start` is still paired with an `on_entry_complete` (v0.8.0, #782, #790) | must |
+| FR-048 | In listing and verification the total SHALL be `EntryTotal::Unknown` for TAR (the count is unknown until the stream ends, and stays unknown until `set_total`) and `Known` with the entry count the file table declares for ZIP and 7z (which can exceed the announced entries: 7z anti-items and entries dropped for their path are never announced); `on_bytes_written` SHALL never be called (v0.8.0, #782, #790) | must |
 | FR-049 | With `IntegrityCheck::DecodeToEof` the verification events SHALL fire while each payload is decoded; without it they fire at metadata-scan speed; for 7z the entries that carry no payload are announced first, then the payloads in decode order. The events of a 7z listing fire while the file table is walked, and reading link targets (`StoredTargets::Read`) decodes afterwards without further events (v0.8.0, #790) | must |
-| FR-050 | `extract_to_sink_with_progress` and `create_to_writer_with_progress` SHALL follow the same contract as `extract_archive_with_progress` and `create_archive_with_progress` (v0.8.0, #778, #787) | must |
-| FR-051 | WHEN an archive is created, THE SYSTEM SHALL NOT report the source root as an entry, so `total_entries` and the progress count drop by one per source directory; a file or symlink emptied by `strip_prefix` is `InvalidConfiguration` (`ConfigProblem::RemovesWholeName`) and an emptied directory is skipped; the callbacks SHALL be paired by one `EntryCompleteGuard` (`ProgressTracker::begin`) that fires `on_entry_complete` for every started entry, including a failed one, replacing the manual `on_entry_start`/`on_entry_complete` calls (v0.8.0, #874, #880, #888) | must |
+| FR-050 | `SinkExtractRequest::with_progress` and `CreateRequest::with_progress` (`write`, `to_bytes`) SHALL follow the same contract as `ExtractRequest::with_progress` (v0.8.0, #778, #787; request types since #912) | must |
+| FR-051 | WHEN an archive is created, THE SYSTEM SHALL NOT report the source root as an entry, so `total_entries` and the progress count drop by one per source directory; a file or symlink emptied by `strip_prefix` is `InvalidConfiguration` (`ConfigProblem::RemovesWholeName`) and an emptied directory is skipped; the callbacks SHALL be paired by one `EntryCompleteGuard` (`ProgressTracker::begin`) that fires `on_entry_complete` for every started entry, including a failed one, replacing the manual `on_entry_start`/`on_entry_complete` calls; TAR extraction SHALL use the same guard, so a TAR entry that fails is also closed (v0.8.0, #874, #880, #888; #904) | must |
+| FR-052 | `ExtractionReport` and `CreationReport` SHALL be `#[non_exhaustive]` and SHALL carry `skipped: Skips` instead of a skipped-file counter and skip warning strings; `files_skipped()` is derived from it (#905, #906) | must |
+| FR-053 | `SkipKind` SHALL be a closed `#[non_exhaustive]` enum with seven kinds (`Duplicate`, `ExtensionNotAllowed`, `Excluded`, `Hidden`, `OverMaxFileSize`, `SymlinkUnsupported`, `Unreadable`); `Skip { kind, path, io_kind: Option<io::ErrorKind> }`; `Skips` SHALL keep a count per kind plus a sample bounded by `Skips::SAMPLE_CAP` (64) and expose `total()`, `count(kind)`, `sample()`, `is_empty()`; recording a skip SHALL fail closed with `QuotaExceeded { IntegerOverflow }` on counter overflow (`Unreadable` has no producer yet) (#906) | must |
+| FR-054 | The remaining report warnings SHALL be typed `#[non_exhaustive]` enums with `Display` that keeps the former text: `ExtractionWarning::{AntiItemsSkipped { count }, BackupCleanupFailed { path, identity_unverified, error }}` and `CreationWarning::{ZipRatioOverDefaultLimit, ZipRatioCheckFailed}`; a skipped entry SHALL NOT also appear as a warning string (#906) | must |
+| FR-055 | `ProgressCallback::is_cancelled(&mut self) -> bool` (default `false`) SHALL let a callback that hit an error of its own (a raising script callback, a closed channel) stop a creation: creation checks it and then returns `ArchiveError::Io` of kind `Interrupted`, the staged output is discarded and a previous archive at the output path stays untouched; the Python adapter reports a raised exception through it (the callback's exception wins over the core `Interrupted`, `KeyboardInterrupt` included) and the Node adapter does the same for a throwing callback (`PROGRESS_CALLBACK_ERROR`); extraction keeps the former behavior (it runs to completion and the callback error is raised after success) (#931) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -144,13 +151,15 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 |--------|-------------|----------------|
 | `ProgressCallback` | Trait for receiving archive operation progress events | Methods: `on_entry_start`, `on_bytes_written`, `on_entry_complete`, `on_complete` |
 | `NoopProgress` | Zero-overhead implementation of `ProgressCallback` | All methods are no-ops; intended as the default |
+| `EntryPosition` / `EntryTotal` | Position passed to `on_entry_start` (#904) | `current: NonZeroUsize`; `total: Known(usize) \| Unknown` |
+| `SkipKind` / `Skip` / `Skips` | Typed skip accounting in `ExtractionReport` and `CreationReport` (#906) | counts per kind, bounded sample, `total()`, `count()`, `sample()` |
 | `ExtractionContext` | Per-extraction state passed through TAR helper functions to reduce arity | Holds references to config, options, output dir, and progress callback |
 
 ### Trait Signature
 
 ```
 ProgressCallback: Send
-  on_entry_start(&mut self, path: &Path, total: usize, current: usize)
+  on_entry_start(&mut self, path: &Path, position: EntryPosition)
   on_bytes_written(&mut self, bytes: u64)
   on_entry_complete(&mut self, path: &Path)
   on_complete(&mut self)  // NOT called on failure; called only on full success
@@ -174,10 +183,10 @@ ProgressCallback: Send
 | Extraction fails after N successful entries | `on_entry_complete` called for the N successful entries and for the failing one; `on_complete` NOT called |
 | 7z anti-item (a deletion marker `extract` skips) | No callbacks fire for it |
 | `on_bytes_written` called with 0 bytes | Allowed; implementations must handle gracefully |
-| Archive with unknown total entry count | `total` argument to `on_entry_start` is 0 (TAR in extraction, listing and verification) |
+| Archive with unknown total entry count | `EntryPosition::total` is `EntryTotal::Unknown` (TAR in extraction, listing and verification); Python passes `total=None`, Node `total: null`; the CLI bar then counts entries instead of showing a length |
 | Listing or verification progress for an entry | `on_bytes_written` is never called (FR-048) |
 | Progress callback panics | Panic propagates as normal Rust panic; not caught by exarch |
-| Creation progress for large directories | `on_entry_start` called for each file; total is file count from walk |
+| Creation progress for large directories | `on_entry_start` called for each file; the total is `Known` with the file count from the walk; the CLI `create` bar starts unsized and resizes from that total (`BarLength::Discover`) |
 | Python progress callback raises an exception (v0.6.0, #489) | Captured, not silently swallowed (previously discarded via `let _ = ...`); the `ProgressCallback` contract has no cancellation signal, so the operation still runs to completion, and if it otherwise succeeded the callback's exception now propagates to the caller carrying `files_extracted`/`files_added`, `bytes_written`, and a `progress_callback_error = True` marker attribute — see [[006-python-bindings/spec]] |
 | Python or Node.js progress callback raises during an in-memory list, verify or extract (v0.8.0, #784, #783, #790) | Handled like the path-based calls: if the operation failed, its error is primary with the callback's exception chained (`__cause__` / `cause`); if it succeeded, the result is discarded and the callback's exception is raised (Python: `progress_callback_error = True`; Node: `code` `PROGRESS_CALLBACK_ERROR`); an in-memory extraction additionally carries `writes: discarded` and no counters — see [[006-python-bindings/spec]] and [[007-node-bindings/spec]] |
 | Node.js progress callback throws an `Error`/object (v0.6.0, #465) | Captured via `call_async_catch` instead of routing through `napi_fatal_exception` (which previously crashed the process uncatchably even inside `try`/`catch`); rejects the returned Promise instead — see [[007-node-bindings/spec]] |
@@ -190,7 +199,7 @@ ProgressCallback: Send
 | SC-001 | `on_complete` not called on failure | Regression test (issue #170, fixed in v0.4.0) |
 | SC-002 | Progress overhead vs no-progress | < 5% throughput penalty (measured in bench) |
 | SC-003 | All format handlers (TAR, ZIP, 7z) call progress callbacks per-entry | Fixed in v0.4.0 (#170, #191) |
-| SC-004 | Node.js creation progress parity with extraction | `createArchiveWithProgress`/`createArchiveWithProgressSync` added (v0.6.0, #455), reusing `exarch_core::create_archive_with_progress` and the existing `NodeProgressAdapter`; JS integration tests cover the per-entry callback shape and `progress=null`/omitted paths (#456) |
+| SC-004 | Node.js creation progress parity with extraction | `createArchiveWithProgress`/`createArchiveWithProgressSync` added (v0.6.0, #455), reusing the core creation request (`CreateRequest::with_progress` since #912) and the existing `NodeProgressAdapter`; JS integration tests cover the per-entry callback shape and `progress=null`/omitted paths (#456) |
 
 ## 8. Agent Boundaries
 
@@ -202,6 +211,7 @@ ProgressCallback: Send
 
 ### Ask First
 - Adding new methods to `ProgressCallback` (trait breaking change)
+- Adding a variant to `SkipKind` (closed enum: every consumer mirrors it and has an `ALL` drift test)
 - Adding cancellation support (architectural decision)
 
 ### Never
@@ -220,6 +230,7 @@ ProgressCallback: Send
 - [[MOC-specs]] — all specifications
 - [[002-format-handlers/spec]] — format handlers that call progress callbacks
 - [[005-cli/spec]] — indicatif-based `ProgressCallback` implementation
+- [[021-create-staging-and-output-policy/spec]] — creation skips (`Excluded`, `Hidden`, `OverMaxFileSize`, `SymlinkUnsupported`)
 - [[006-python-bindings/spec]] — `PyProgressAdapter` and GIL interaction; callback exception propagation
 - [[007-node-bindings/spec]] — `NodeProgressAdapter`, `createArchiveWithProgress`/`Sync`, primitive-throw hardening
 - [[019-verify-and-list-model/spec]] — listing and verification passes that report progress

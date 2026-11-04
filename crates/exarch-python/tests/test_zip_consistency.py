@@ -43,9 +43,9 @@ def test_policy_builder_and_setter():
 
 @pytest.mark.parametrize("value", ["off", "Enforce", "", "true"])
 def test_policy_rejects_other_strings(value):
-    with pytest.raises(ValueError, match="zip_consistency must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.SecurityConfig().with_zip_consistency(value)
-    with pytest.raises(ValueError, match="zip_consistency must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.SecurityConfig().zip_consistency = value
 
 

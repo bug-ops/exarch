@@ -1,17 +1,26 @@
 //! JSON output formatter for machine-readable results.
 
+use super::formatter::Envelope;
+use super::formatter::JsonError;
+use super::formatter::JsonExtractionCounts;
 use super::formatter::JsonId;
-use super::formatter::JsonOutput;
+use super::formatter::JsonKind;
 use super::formatter::JsonPartialReport;
+use super::formatter::JsonRefusal;
+use super::formatter::JsonSkips;
+use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use crate::error::PartialExtractionContext;
+use crate::operation::Operation;
 use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
-use exarch_core::ErrorCode;
 use exarch_core::ExtractionReport;
+use exarch_core::LinkTarget;
+use exarch_core::ManifestEntryKind;
 use exarch_core::VerificationReport;
+use exarch_core::path_text;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Stdout;
@@ -19,29 +28,48 @@ use std::io::Write;
 use std::io::{self};
 use std::path::Path;
 
-const GENERIC_KIND: &str = "Error";
+/// A link entry's target as `--json` reports it: its state, with the path
+/// only when the archive recorded one.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum JsonLinkTarget {
+    Recorded {
+        path: String,
+    },
+    Missing,
+    Unread,
+    Unreadable,
+    Oversized {
+        bytes: usize,
+    },
+    /// A state added to the `#[non_exhaustive]` core enum after this match
+    /// was written; `every_link_target_state_has_a_dedicated_json_state`
+    /// rejects it for every state that exists today.
+    Unknown,
+}
 
-fn kind_name(code: ErrorCode) -> &'static str {
-    match code {
-        ErrorCode::IoError => "IoError",
-        ErrorCode::SecurityViolation => "SecurityViolation",
-        ErrorCode::InvalidArchive => "InvalidArchive",
-        ErrorCode::PathTraversal => "PathTraversal",
-        ErrorCode::SymlinkEscape => "SymlinkEscape",
-        ErrorCode::HardlinkEscape => "HardlinkEscape",
-        ErrorCode::ZipBomb => "ZipBomb",
-        ErrorCode::ZipInconsistency => "ZipInconsistency",
-        ErrorCode::InvalidPermissions => "InvalidPermissions",
-        ErrorCode::QuotaExceeded => "QuotaExceeded",
-        ErrorCode::SourceNotFound => "SourceNotFound",
-        ErrorCode::SourceNotAccessible => "SourceNotAccessible",
-        ErrorCode::OutputExists => "OutputExists",
-        ErrorCode::InvalidCompressionLevel => "InvalidCompressionLevel",
-        ErrorCode::UnknownFormat => "UnknownFormat",
-        ErrorCode::InvalidConfiguration => "InvalidConfiguration",
-        // Wildcard only for `#[non_exhaustive]`;
-        // `every_error_code_has_a_kind_name` fails if it is ever taken.
-        _ => GENERIC_KIND,
+impl From<&LinkTarget> for JsonLinkTarget {
+    fn from(target: &LinkTarget) -> Self {
+        match target {
+            LinkTarget::Recorded(path) => Self::Recorded {
+                path: path_text(path),
+            },
+            LinkTarget::Missing => Self::Missing,
+            LinkTarget::Unread => Self::Unread,
+            LinkTarget::Unreadable => Self::Unreadable,
+            LinkTarget::Oversized { bytes } => Self::Oversized { bytes: *bytes },
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// The target state of a link entry; `None` for a file or directory.
+fn link_target_of(kind: &ManifestEntryKind) -> Option<JsonLinkTarget> {
+    match kind {
+        ManifestEntryKind::Symlink { target } | ManifestEntryKind::Hardlink { target } => {
+            Some(JsonLinkTarget::from(target))
+        }
+        _ => None,
     }
 }
 
@@ -79,33 +107,102 @@ impl<W: Write> JsonFormatter<W> {
         writeln!(self.out, "{json}")?;
         Ok(())
     }
+
+    fn success<T: Serialize>(&mut self, operation: Operation, data: T) -> Result<()> {
+        self.output(&Envelope::Success { operation, data })
+    }
+}
+
+fn short_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
+    #[derive(Serialize)]
+    struct ManifestEntry {
+        path: String,
+    }
+
+    #[derive(Serialize)]
+    struct ManifestOutput {
+        format: &'static str,
+        total_entries: usize,
+        entries: Vec<ManifestEntry>,
+    }
+
+    ManifestOutput {
+        format: manifest.format().as_str(),
+        total_entries: manifest.total_entries(),
+        entries: manifest
+            .entries()
+            .iter()
+            .map(|e| ManifestEntry {
+                path: path_text(&e.path),
+            })
+            .collect(),
+    }
+}
+
+fn long_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
+    #[derive(Serialize)]
+    struct ManifestEntry {
+        path: String,
+        entry_type: &'static str,
+        size: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        compressed_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        modified: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        link_target: Option<JsonLinkTarget>,
+    }
+
+    #[derive(Serialize)]
+    struct ManifestOutput {
+        format: &'static str,
+        total_entries: usize,
+        total_size: u64,
+        entries: Vec<ManifestEntry>,
+    }
+
+    ManifestOutput {
+        format: manifest.format().as_str(),
+        total_entries: manifest.total_entries(),
+        total_size: manifest.total_size(),
+        entries: manifest
+            .entries()
+            .iter()
+            .map(|e| ManifestEntry {
+                path: path_text(&e.path),
+                entry_type: e.kind.entry_type().as_str(),
+                size: e.size(),
+                compressed_size: e.compressed_size(),
+                mode: e.mode.map(exarch_core::RawMode::get),
+                modified: e.modified.and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                }),
+                link_target: link_target_of(&e.kind),
+            })
+            .collect(),
+    }
 }
 
 impl<W: Write> OutputFormatter for JsonFormatter<W> {
     fn format_extraction_result(&mut self, report: &ExtractionReport) -> Result<()> {
         #[derive(Serialize)]
         struct ExtractionOutput {
-            files_extracted: usize,
-            directories_created: usize,
-            symlinks_created: usize,
-            bytes_written: u64,
-            files_skipped: usize,
+            #[serde(flatten)]
+            counts: JsonExtractionCounts,
             duration_ms: u128,
-            warnings: Vec<String>,
         }
 
-        let data = ExtractionOutput {
-            files_extracted: report.files_extracted,
-            directories_created: report.directories_created,
-            symlinks_created: report.symlinks_created,
-            bytes_written: report.bytes_written,
-            files_skipped: report.files_skipped,
-            duration_ms: report.duration.as_millis(),
-            warnings: report.warnings.clone(),
-        };
-
-        let output = JsonOutput::success("extract", data);
-        self.output(&output)
+        self.success(
+            Operation::Extract,
+            ExtractionOutput {
+                counts: JsonExtractionCounts::from(report),
+                duration_ms: report.duration.as_millis(),
+            },
+        )
     }
 
     fn format_creation_result(
@@ -123,159 +220,70 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             bytes_compressed: u64,
             compression_ratio: f64,
             compression_percentage: f64,
-            files_skipped: usize,
+            #[serde(flatten)]
+            skips: JsonSkips,
             duration_ms: u128,
             warnings: Vec<String>,
         }
 
-        let data = CreationOutput {
-            output_path: output_path.display().to_string(),
-            files_added: report.files_added,
-            directories_added: report.directories_added,
-            symlinks_added: report.symlinks_added,
-            bytes_written: report.bytes_written,
-            bytes_compressed: report.bytes_compressed,
-            compression_ratio: report.compression_ratio(),
-            compression_percentage: report.compression_percentage(),
-            files_skipped: report.files_skipped,
-            duration_ms: report.duration.as_millis(),
-            warnings: report.warnings.clone(),
-        };
-
-        let output = JsonOutput::success("create", data);
-        self.output(&output)
+        self.success(
+            Operation::Create,
+            CreationOutput {
+                output_path: output_path.display().to_string(),
+                files_added: report.files_added,
+                directories_added: report.directories_added,
+                symlinks_added: report.symlinks_added,
+                bytes_written: report.bytes_written,
+                bytes_compressed: report.bytes_compressed,
+                compression_ratio: report.compression_ratio(),
+                compression_percentage: report.compression_percentage(),
+                skips: JsonSkips::from(&report.skipped),
+                duration_ms: report.duration.as_millis(),
+                warnings: report.warnings.iter().map(ToString::to_string).collect(),
+            },
+        )
     }
 
-    fn format_error(&mut self, operation: &str, error: &anyhow::Error) {
+    fn format_verification_failed(&mut self) {}
+
+    fn format_error(&mut self, operation: Operation, error: &anyhow::Error) {
         let extraction_err = error.chain().find_map(|e| e.downcast_ref::<ArchiveError>());
 
         let ffi_kind = extraction_err.map(ArchiveError::ffi_kind);
         let kind = ffi_kind
             .as_ref()
-            .map_or(GENERIC_KIND, |kind| kind_name(kind.code()))
-            .to_string();
-        let message = format!("{error:#}");
+            .map_or(JsonKind::Generic, |kind| JsonKind::Code(kind.code()));
 
-        // PartialExtraction is converted by convert_extraction_error into a
+        // The message is the exact text: archive-derived parts are escaped
+        // only when a terminal formatter renders them.
+        let mut json_error = JsonError::new(kind, format!("{error:#}"));
+
+        // PartialExtraction is converted by convert_error into a
         // PartialExtractionContext attached via `.context()`, so the partial
         // report must be recovered with a direct top-level downcast: anyhow
         // sees through `.context()` layers for the context type itself, but
         // `.chain()` yields the wrapper's Display/Debug impl, never the
         // context value, so `.chain().find_map(downcast_ref)` never matches.
-        let partial_report =
-            error
-                .downcast_ref::<PartialExtractionContext>()
-                .map(|ctx| JsonPartialReport {
-                    files_extracted: ctx.report.files_extracted,
-                    directories_created: ctx.report.directories_created,
-                    symlinks_created: ctx.report.symlinks_created,
-                    bytes_written: ctx.report.bytes_written,
-                    files_skipped: ctx.report.files_skipped,
-                    warnings: ctx.report.warnings.clone(),
-                    writes: JsonId(ctx.writes),
-                });
-
-        let output = if let Some(pr) = partial_report {
-            JsonOutput::<()>::error_with_partial(operation, kind, message, pr)
-        } else {
-            JsonOutput::<()>::error(operation, kind, message)
-        };
-        let output = match &ffi_kind {
-            Some(kind) => output.with_ffi_kind(kind),
-            None => output,
-        };
-        let _ = self.output(&output);
+        if let Some(ctx) = error.downcast_ref::<PartialExtractionContext>() {
+            json_error = json_error.with_partial(JsonPartialReport {
+                counts: JsonExtractionCounts::from(&ctx.report),
+                writes: JsonId(ctx.writes),
+            });
+        }
+        if let Some(kind) = &ffi_kind {
+            json_error = json_error.with_ffi_kind(kind);
+        }
+        let _ = self.output(&Envelope::<()>::Error {
+            operation,
+            error: json_error,
+        });
     }
 
-    fn format_manifest_short(&mut self, manifest: &ArchiveManifest) -> Result<()> {
-        #[derive(Serialize)]
-        struct ManifestEntry {
-            path: String,
+    fn format_manifest(&mut self, manifest: &ArchiveManifest, view: ManifestView) -> Result<()> {
+        match view {
+            ManifestView::Short => self.success(Operation::List, short_manifest(manifest)),
+            ManifestView::Long(_) => self.success(Operation::List, long_manifest(manifest)),
         }
-
-        #[derive(Serialize)]
-        struct ManifestOutput {
-            format: &'static str,
-            total_entries: usize,
-            entries: Vec<ManifestEntry>,
-        }
-
-        let entries = manifest
-            .entries()
-            .iter()
-            .map(|e| ManifestEntry {
-                path: e.path.display().to_string(),
-            })
-            .collect();
-
-        let data = ManifestOutput {
-            format: manifest.format().as_str(),
-            total_entries: manifest.total_entries(),
-            entries,
-        };
-
-        let output = JsonOutput::success("list", data);
-        self.output(&output)
-    }
-
-    fn format_manifest_long(
-        &mut self,
-        manifest: &ArchiveManifest,
-        _human_readable: bool,
-    ) -> Result<()> {
-        #[derive(Serialize)]
-        struct ManifestEntry {
-            path: String,
-            entry_type: &'static str,
-            size: u64,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            compressed_size: Option<u64>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            mode: Option<u32>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            modified: Option<u64>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            symlink_target: Option<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            hardlink_target: Option<String>,
-        }
-
-        #[derive(Serialize)]
-        struct ManifestOutput {
-            format: &'static str,
-            total_entries: usize,
-            total_size: u64,
-            entries: Vec<ManifestEntry>,
-        }
-
-        let entries = manifest
-            .entries()
-            .iter()
-            .map(|e| ManifestEntry {
-                path: e.path.display().to_string(),
-                entry_type: e.kind.entry_type().as_str(),
-                size: e.size,
-                compressed_size: e.compressed_size(),
-                mode: e.mode,
-                modified: e.modified.and_then(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .map(|d| d.as_secs())
-                }),
-                symlink_target: e.kind.symlink_target().map(|p| p.display().to_string()),
-                hardlink_target: e.kind.hardlink_target().map(|p| p.display().to_string()),
-            })
-            .collect();
-
-        let data = ManifestOutput {
-            format: manifest.format().as_str(),
-            total_entries: manifest.total_entries(),
-            total_size: manifest.total_size(),
-            entries,
-        };
-
-        let output = JsonOutput::success("list", data);
-        self.output(&output)
     }
 
     fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()> {
@@ -285,7 +293,12 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             category: &'static str,
             entry_path: Option<String>,
             message: String,
-            context: Option<String>,
+            /// The raw mode of an executable file or of an invalid-permissions
+            /// refusal.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            mode: Option<u32>,
+            #[serde(flatten)]
+            refusal: Option<JsonRefusal>,
         }
 
         #[derive(Serialize)]
@@ -318,11 +331,12 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .issues()
             .iter()
             .map(|i| VerificationIssue {
-                severity: i.severity.as_str(),
-                category: i.category.as_str(),
-                entry_path: i.entry_path.as_ref().map(|p| p.display().to_string()),
-                message: i.message.clone(),
-                context: i.context.clone(),
+                severity: i.severity().as_str(),
+                category: i.category().as_str(),
+                entry_path: i.entry_path().map(path_text),
+                message: i.message(),
+                mode: i.mode().map(exarch_core::RawMode::get),
+                refusal: i.ffi_kind().map(JsonRefusal::from),
             })
             .collect();
 
@@ -338,7 +352,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                     .entries()
                     .iter()
                     .map(|e| UnverifiedEntry {
-                        path: e.path().display().to_string(),
+                        path: path_text(e.path()),
                         reason: e.reason().as_str(),
                     })
                     .collect(),
@@ -352,8 +366,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             issues,
         };
 
-        let output = JsonOutput::success("verify", data);
-        self.output(&output)
+        self.success(Operation::Verify, data)
     }
 }
 
@@ -361,20 +374,26 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::output::formatter::SizeUnits;
     use exarch_core::Compressed;
+    use exarch_core::ErrorCode;
     use exarch_core::QuotaResource;
     use exarch_core::Uncompressed;
     use exarch_core::Violation;
     use std::path::PathBuf;
 
     fn extraction_error_kind(err: &ArchiveError) -> String {
-        kind_name(err.ffi_kind().code()).to_string()
+        JsonKind::Code(err.ffi_kind().code()).name().to_string()
     }
 
     #[test]
     fn every_error_code_has_a_kind_name() {
         for &code in ErrorCode::ALL {
-            assert_ne!(kind_name(code), GENERIC_KIND, "{code:?}");
+            assert_ne!(
+                JsonKind::Code(code).name(),
+                JsonKind::Generic.name(),
+                "{code:?}"
+            );
         }
     }
 
@@ -384,7 +403,10 @@ mod tests {
 
     #[test]
     fn test_json_error_output_structure() {
-        let output = JsonOutput::<()>::error("extract", "ZipBomb", "zip bomb detected");
+        let output = Envelope::<()>::Error {
+            operation: Operation::Extract,
+            error: JsonError::new(JsonKind::Code(ErrorCode::ZipBomb), "zip bomb detected"),
+        };
         let json = serde_json::to_string(&output).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -397,7 +419,13 @@ mod tests {
 
     #[test]
     fn test_json_error_no_data_field() {
-        let output = JsonOutput::<()>::error("extract", "PathTraversal", "traversal attempt");
+        let output = Envelope::<()>::Error {
+            operation: Operation::Extract,
+            error: JsonError::new(
+                JsonKind::Code(ErrorCode::PathTraversal),
+                "traversal attempt",
+            ),
+        };
         let json = serde_json::to_string(&output).unwrap();
         // data field should be absent (skip_serializing_if = None)
         assert!(!json.contains("\"data\""));
@@ -498,8 +526,10 @@ mod tests {
 
     fn envelope_for(err: &ArchiveError) -> serde_json::Value {
         let kind = err.ffi_kind();
-        let output = JsonOutput::<()>::error("extract", kind_name(kind.code()), "denied")
-            .with_ffi_kind(&kind);
+        let output = Envelope::<()>::Error {
+            operation: Operation::Extract,
+            error: JsonError::new(JsonKind::Code(kind.code()), "denied").with_ffi_kind(&kind),
+        };
         serde_json::to_value(&output).unwrap()
     }
 
@@ -591,7 +621,8 @@ mod tests {
 
     #[test]
     fn test_json_message_quota_exceeded_no_duplication() {
-        use crate::error::convert_extraction_error;
+        use crate::error::convert_error;
+        use crate::operation::Operation;
         use exarch_core::QuotaResource;
         use std::path::Path;
 
@@ -603,7 +634,7 @@ mod tests {
         };
         // ArchiveError::Display emits "quota exceeded: file count (11 > 10)"
         let display_text = err.to_string();
-        let anyhow_err = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let anyhow_err = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let message = format!("{anyhow_err:#}");
 
         // The context must NOT repeat the Display text verbatim
@@ -616,7 +647,8 @@ mod tests {
 
     #[test]
     fn test_json_message_zip_bomb_no_duplication() {
-        use crate::error::convert_extraction_error;
+        use crate::error::convert_error;
+        use crate::operation::Operation;
         use std::path::Path;
 
         let err = ArchiveError::ZipBomb(exarch_core::ZipBombDetails::new(
@@ -626,7 +658,7 @@ mod tests {
         ));
         // ArchiveError::Display emits the ratio info
         let display_text = err.to_string();
-        let anyhow_err = convert_extraction_error(err, Path::new("bomb.zip"));
+        let anyhow_err = convert_error(Operation::Extract, err, Path::new("bomb.zip"));
         let message = format!("{anyhow_err:#}");
 
         let display_occurrences = message.matches(&display_text).count();
@@ -643,13 +675,14 @@ mod tests {
     #[test]
     fn format_extraction_result_writes_success_envelope() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        let report = ExtractionReport {
-            files_extracted: 3,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 2048,
-            duration: std::time::Duration::from_secs(1),
-            ..Default::default()
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 3;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 2048;
+            r.duration = std::time::Duration::from_secs(1);
+            r
         };
         f.format_extraction_result(&report).unwrap();
         let v = parsed(&f);
@@ -662,35 +695,44 @@ mod tests {
     #[test]
     fn format_extraction_result_includes_warnings_and_files_skipped() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        let report = ExtractionReport {
-            files_extracted: 3,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 2048,
-            files_skipped: 2,
-            duration: std::time::Duration::from_secs(1),
-            warnings: vec!["skipped 2 entries with disallowed extensions".to_string()],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 3;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 2048;
+            r.skipped = crate::test_support::skips(2);
+            r.duration = std::time::Duration::from_secs(1);
+            r.warnings = vec![crate::test_support::extraction_warning(
+                "skipped 2 entries with disallowed extensions",
+            )];
+            r
         };
         f.format_extraction_result(&report).unwrap();
         let v = parsed(&f);
         assert_eq!(v["data"]["files_skipped"], 2);
-        assert_eq!(
-            v["data"]["warnings"][0],
-            "skipped 2 entries with disallowed extensions"
+        assert!(
+            v["data"]["warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("skipped 2 entries with disallowed extensions")
         );
+        assert_eq!(v["data"]["skipped_by_kind"]["duplicate"], 2);
+        assert_eq!(v["data"]["skipped_sample"][0]["kind"], "duplicate");
     }
 
     #[test]
     fn format_creation_result_writes_success_envelope() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        let report = CreationReport {
-            files_added: 2,
-            directories_added: 1,
-            symlinks_added: 0,
-            bytes_written: 1024,
-            bytes_compressed: 0,
-            duration: std::time::Duration::from_secs(1),
-            ..Default::default()
+        let report = {
+            let mut r = exarch_core::CreationReport::new();
+            r.files_added = 2;
+            r.directories_added = 1;
+            r.symlinks_added = 0;
+            r.bytes_written = 1024;
+            r.bytes_compressed = 0;
+            r.duration = std::time::Duration::from_secs(1);
+            r
         };
         f.format_creation_result(Path::new("out.tar.gz"), &report)
             .unwrap();
@@ -711,7 +753,7 @@ mod tests {
                 Uncompressed(1_000_000)
             )
         ));
-        f.format_error("extract", &err);
+        f.format_error(Operation::Extract, &err);
         let v = parsed(&f);
         assert_eq!(v["operation"], "extract");
         assert_eq!(v["status"], "error");
@@ -720,35 +762,41 @@ mod tests {
 
     #[test]
     fn format_error_writes_partial_report_with_skipped_and_warnings() {
-        use crate::error::convert_extraction_error;
-        use exarch_core::ExtractionReport;
+        use crate::error::convert_error;
+        use crate::operation::Operation;
 
         let mut f = JsonFormatter::with_writer(Vec::new());
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("escaped"),
         };
-        let report = ExtractionReport {
-            files_extracted: 2,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 512,
-            duration: std::time::Duration::from_millis(0),
-            files_skipped: 3,
-            warnings: vec!["skipped disallowed extension".to_string()],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 2;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 512;
+            r.duration = std::time::Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(3);
+            r.warnings = vec![crate::test_support::extraction_warning(
+                "skipped disallowed extension",
+            )];
+            r
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: exarch_core::PartialWrites::Kept,
-        };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
-        f.format_error("extract", &converted);
+            exarch_core::PartialWrites::Kept,
+        ));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
+        f.format_error(Operation::Extract, &converted);
         let v = parsed(&f);
         assert_eq!(v["error"]["partial_report"]["files_skipped"], 3);
         assert_eq!(v["error"]["partial_report"]["writes"], "kept");
-        assert_eq!(
-            v["error"]["partial_report"]["warnings"][0],
-            "skipped disallowed extension"
+        assert!(
+            v["error"]["partial_report"]["warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("skipped disallowed extension")
         );
     }
 
@@ -757,8 +805,13 @@ mod tests {
         use exarch_core::ManifestEntryKind;
         use exarch_core::formats::detect::ArchiveType;
 
-        let mut entry = ArchiveEntry::new(PathBuf::from("file.txt"), ManifestEntryKind::File, 1024);
-        entry.mode = Some(0o644);
+        let mut entry = ArchiveEntry::new(
+            PathBuf::from("file.txt"),
+            ManifestEntryKind::File {
+                size: exarch_core::Uncompressed(1024),
+            },
+        );
+        entry.mode = Some(exarch_core::RawMode::new(0o644));
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         manifest.add_entry(entry).unwrap();
         manifest
@@ -767,7 +820,8 @@ mod tests {
     #[test]
     fn format_manifest_short_writes_paths_only() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        f.format_manifest_short(&sample_manifest()).unwrap();
+        f.format_manifest(&sample_manifest(), ManifestView::Short)
+            .unwrap();
         let v = parsed(&f);
         assert_eq!(v["operation"], "list");
         assert_eq!(v["data"]["entries"][0]["path"], "file.txt");
@@ -777,7 +831,8 @@ mod tests {
     #[test]
     fn format_manifest_long_writes_full_detail() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        f.format_manifest_long(&sample_manifest(), true).unwrap();
+        f.format_manifest(&sample_manifest(), ManifestView::Long(SizeUnits::Human))
+            .unwrap();
         let v = parsed(&f);
         assert_eq!(v["data"]["entries"][0]["size"], 1024);
         assert_eq!(v["data"]["entries"][0]["entry_type"], "File");
@@ -795,7 +850,12 @@ mod tests {
         for i in 0..5 {
             let path = PathBuf::from(format!("f{i}.txt"));
             manifest
-                .add_entry(ArchiveEntry::new(path, ManifestEntryKind::File, 0))
+                .add_entry(ArchiveEntry::new(
+                    path,
+                    ManifestEntryKind::File {
+                        size: exarch_core::Uncompressed(0),
+                    },
+                ))
                 .unwrap();
         }
         let report = VerificationReport::from_entry_issues(&manifest, |_| Vec::new());
@@ -803,5 +863,160 @@ mod tests {
         let v = parsed(&f);
         assert_eq!(v["operation"], "verify");
         assert_eq!(v["data"]["total_entries"], 5);
+    }
+
+    #[test]
+    fn envelope_wire_format_is_pinned() {
+        let success = serde_json::to_value(Envelope::Success {
+            operation: Operation::List,
+            data: serde_json::json!({"n": 1}),
+        })
+        .unwrap();
+        assert_eq!(
+            success,
+            serde_json::json!({"status": "success", "operation": "list", "data": {"n": 1}})
+        );
+
+        let error = serde_json::to_value(Envelope::<()>::Error {
+            operation: Operation::Verify,
+            error: JsonError::new(JsonKind::Generic, "boom"),
+        })
+        .unwrap();
+        assert_eq!(
+            error,
+            serde_json::json!({
+                "status": "error",
+                "operation": "verify",
+                "error": {"kind": "Error", "message": "boom"}
+            })
+        );
+    }
+
+    #[test]
+    fn every_link_target_state_has_a_dedicated_json_state() {
+        let samples = [
+            LinkTarget::Recorded(PathBuf::from("t")),
+            LinkTarget::Missing,
+            LinkTarget::Unread,
+            LinkTarget::Unreadable,
+            LinkTarget::Oversized { bytes: 9 },
+        ];
+        let mut seen = Vec::new();
+        for target in &samples {
+            let json = JsonLinkTarget::from(target);
+            assert_ne!(json, JsonLinkTarget::Unknown, "{target:?}");
+            let value = serde_json::to_value(&json).unwrap();
+            seen.push(value["state"].as_str().unwrap().to_owned());
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            samples.len(),
+            "states must be distinct: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn long_listing_reports_every_link_state_and_none_for_other_entries() {
+        use exarch_core::ArchiveEntry;
+        use exarch_core::formats::detect::ArchiveType;
+
+        let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
+        let kinds = [
+            (
+                "plain",
+                ManifestEntryKind::File {
+                    size: exarch_core::Uncompressed(0),
+                },
+            ),
+            (
+                "rec",
+                ManifestEntryKind::Symlink {
+                    target: LinkTarget::Recorded(PathBuf::from("t")),
+                },
+            ),
+            (
+                "miss",
+                ManifestEntryKind::Symlink {
+                    target: LinkTarget::Missing,
+                },
+            ),
+            (
+                "big",
+                ManifestEntryKind::Hardlink {
+                    target: LinkTarget::Oversized { bytes: 5000 },
+                },
+            ),
+        ];
+        for (path, kind) in kinds {
+            manifest
+                .add_entry(ArchiveEntry::new(PathBuf::from(path), kind))
+                .unwrap();
+        }
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        f.format_manifest(&manifest, ManifestView::Long(SizeUnits::Bytes))
+            .unwrap();
+        let v = parsed(&f);
+        let entries = &v["data"]["entries"];
+        assert!(entries[0].get("link_target").is_none());
+        assert_eq!(
+            entries[1]["link_target"],
+            serde_json::json!({"state": "recorded", "path": "t"})
+        );
+        assert_eq!(
+            entries[2]["link_target"],
+            serde_json::json!({"state": "missing"})
+        );
+        assert_eq!(
+            entries[3]["link_target"],
+            serde_json::json!({"state": "oversized", "bytes": 5000})
+        );
+        assert!(entries[1].get("symlink_target").is_none());
+    }
+
+    #[test]
+    fn partial_report_and_success_share_the_extraction_counters() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 4;
+            r.skipped = crate::test_support::skips(1);
+            r
+        };
+        f.format_extraction_result(&report).unwrap();
+        let v = parsed(&f);
+        for key in [
+            "files_extracted",
+            "directories_created",
+            "symlinks_created",
+            "bytes_written",
+            "files_skipped",
+            "warnings",
+            "duration_ms",
+        ] {
+            assert!(v["data"].get(key).is_some(), "{key}");
+        }
+    }
+
+    #[test]
+    fn error_message_keeps_archive_text_exact() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let err = crate::error::convert_error(
+            Operation::Extract,
+            ArchiveError::PathTraversal {
+                path: PathBuf::from("a"),
+            },
+            Path::new("we\x1bird.tar"),
+        );
+        f.format_error(Operation::Extract, &err);
+        let v = parsed(&f);
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("we\x1bird.tar"),
+            "{v}"
+        );
     }
 }

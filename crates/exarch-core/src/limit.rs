@@ -174,6 +174,95 @@ pub fn non_zero_u64(setting: ConfigSetting, value: u64) -> Result<NonZeroU64> {
     })
 }
 
+/// Parses a signed integer from a binding, refusing zero, negative values and
+/// values above `u64::MAX`.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::InvalidConfiguration`] naming `setting` with
+/// [`ConfigProblem::Negative`], [`ConfigProblem::Zero`] or
+/// [`ConfigProblem::TooLarge`].
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ConfigSetting;
+/// use exarch_core::positive_from_i128;
+///
+/// assert_eq!(positive_from_i128(ConfigSetting::MaxBytes, 7)?.get(), 7);
+/// assert!(positive_from_i128(ConfigSetting::MaxBytes, -1).is_err());
+/// assert!(positive_from_i128(ConfigSetting::MaxBytes, 0).is_err());
+/// assert!(positive_from_i128(ConfigSetting::MaxBytes, i128::from(u64::MAX) + 1).is_err());
+/// # Ok::<(), exarch_core::ArchiveError>(())
+/// ```
+pub fn positive_from_i128(setting: ConfigSetting, value: i128) -> Result<NonZeroU64> {
+    let refuse = |problem| ArchiveError::InvalidConfiguration { setting, problem };
+    if value < 0 {
+        return Err(refuse(ConfigProblem::Negative));
+    }
+    let value =
+        u64::try_from(value).map_err(|_| refuse(ConfigProblem::TooLarge { max: u64::MAX }))?;
+    non_zero_u64(setting, value)
+}
+
+/// The largest whole number an `f64` holds exactly (2^53 - 1), which is also
+/// `Number.MAX_SAFE_INTEGER`.
+const MAX_EXACT_F64: u64 = (1 << 53) - 1;
+
+/// Parses a floating-point number from a binding (a JavaScript number) into a
+/// positive whole count of at most 2^53 - 1.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::InvalidConfiguration`] naming `setting` with
+/// [`ConfigProblem::NotFinite`], [`ConfigProblem::Negative`],
+/// [`ConfigProblem::Zero`], [`ConfigProblem::NotWholeNumber`] or
+/// [`ConfigProblem::TooLarge`].
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ConfigSetting;
+/// use exarch_core::positive_from_f64;
+///
+/// assert_eq!(positive_from_f64(ConfigSetting::MaxBytes, 12.0)?.get(), 12);
+/// for bad in [
+///     f64::NAN,
+///     f64::INFINITY,
+///     -1.0,
+///     0.0,
+///     1.5,
+///     9_007_199_254_740_992.0,
+/// ] {
+///     assert!(positive_from_f64(ConfigSetting::MaxBytes, bad).is_err());
+/// }
+/// # Ok::<(), exarch_core::ArchiveError>(())
+/// ```
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "value is a whole number in 1..=2^53-1 after the checks"
+)]
+pub fn positive_from_f64(setting: ConfigSetting, value: f64) -> Result<NonZeroU64> {
+    let refuse = |problem| ArchiveError::InvalidConfiguration { setting, problem };
+    if !value.is_finite() {
+        return Err(refuse(ConfigProblem::NotFinite));
+    }
+    if value < 0.0 {
+        return Err(refuse(ConfigProblem::Negative));
+    }
+    if value == 0.0 {
+        return Err(refuse(ConfigProblem::Zero));
+    }
+    if value.fract() != 0.0 {
+        return Err(refuse(ConfigProblem::NotWholeNumber));
+    }
+    if value > MAX_EXACT_F64 as f64 {
+        return Err(refuse(ConfigProblem::TooLarge { max: MAX_EXACT_F64 }));
+    }
+    non_zero_u64(setting, value as u64)
+}
+
 /// Parses a runtime count, refusing zero.
 ///
 /// # Errors
@@ -210,12 +299,17 @@ impl RatioLimit {
     /// # Errors
     ///
     /// Returns [`ArchiveError::InvalidConfiguration`] naming `setting` when
-    /// `ratio` is not finite or not greater than zero.
+    /// `ratio` is not finite ([`ConfigProblem::NotFinite`]), is negative
+    /// ([`ConfigProblem::Negative`]) or is zero ([`ConfigProblem::Zero`]).
     pub fn parse(setting: ConfigSetting, ratio: f64) -> Result<Self> {
-        Self::new(ratio).ok_or(ArchiveError::InvalidConfiguration {
-            setting,
-            problem: ConfigProblem::NotPositive,
-        })
+        let problem = if !ratio.is_finite() {
+            ConfigProblem::NotFinite
+        } else if ratio < 0.0 {
+            ConfigProblem::Negative
+        } else {
+            ConfigProblem::Zero
+        };
+        Self::new(ratio).ok_or(ArchiveError::InvalidConfiguration { setting, problem })
     }
 
     /// The ratio.

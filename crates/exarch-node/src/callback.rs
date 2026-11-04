@@ -4,7 +4,6 @@ use exarch_core::CallbackError;
 use exarch_core::MemoryExtractRequest;
 use exarch_core::NoopProgress;
 use exarch_core::PathModel as CorePathModel;
-use exarch_core::SinkOptions;
 use exarch_core::extract_reader_to_callback;
 use napi::Env;
 use napi::JsValue;
@@ -26,17 +25,17 @@ use tokio::runtime::Handle;
 use crate::CoreResult;
 use crate::abort::AbortBinding;
 use crate::abort::Aborted;
-use crate::config::ExtractionOptions;
 use crate::config::SecurityConfig;
+use crate::config::SinkOptions;
 use crate::error::Failure;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise_with;
 use crate::memory::MemoryEntry;
 use crate::memory::PathModel;
+use crate::memory::callback_entry;
 use crate::report::ArchiveType;
 use crate::report::ExtractionReport;
-use crate::report::unknown_variant;
 use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
 use crate::stream::IntoSource;
@@ -122,7 +121,7 @@ impl FromNapiValue for EntryCallback {
 /// threads.
 struct CallbackJob {
     config: exarch_core::SecurityConfig,
-    options: exarch_core::ExtractionOptions,
+    options: exarch_core::SinkOptions,
     path_model: CorePathModel,
     format: Option<ArchiveType>,
 }
@@ -130,13 +129,13 @@ struct CallbackJob {
 impl CallbackJob {
     fn new(
         config: Option<&SecurityConfig>,
-        options: Option<&ExtractionOptions>,
+        options: Option<&SinkOptions>,
         path_model: Option<PathModel>,
         format: Option<ArchiveType>,
     ) -> Self {
         Self {
             config: config.map_or_default(|c| c.as_core().clone()),
-            options: options.map_or_default(|o| o.as_core().clone()),
+            options: options.map_or_default(SinkOptions::to_core),
             path_model: path_model.map_or(CorePathModel::Host, Into::into),
             format,
         }
@@ -149,31 +148,20 @@ impl CallbackJob {
         source: impl IntoSource,
         mut deliver: impl FnMut(MemoryEntry) -> std::result::Result<(), Failure>,
     ) -> CoreResult<exarch_core::ExtractionReport> {
-        let options = match SinkOptions::try_from(&self.options) {
-            Ok(options) => options,
-            Err(err) => {
-                source.abandon();
-                return Err(err.into());
-            }
-        };
         let request = MemoryExtractRequest::default()
             .with_config(self.config)
-            .with_options(options)
+            .with_options(self.options)
             .with_path_model(self.path_model);
         source.run(self.format, |reader| {
             extract_reader_to_callback(
                 reader,
                 &request,
-                |path, entry| {
-                    MemoryEntry::try_from((path.as_path().to_path_buf(), entry))
-                        .and_then(&mut deliver)
-                },
+                |path, entry| callback_entry(path.as_path(), entry).and_then(&mut deliver),
                 &mut NoopProgress,
             )
             .map_err(|err| match err {
                 CallbackError::Callback(failure) => failure,
                 CallbackError::Archive(err) => err.into(),
-                _ => Failure::Native(unknown_variant("callback error", "unknown")),
             })
         })
     }
@@ -210,7 +198,7 @@ impl CallbackJob {
 ///   and closed (`return()`) however the call ends
 /// * `onEntry` - Called with each entry; may return a promise
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
-/// * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+/// * `options` - Optional `SinkOptions`
 /// * `pathModel` - `'host'` (default) or `'portable'`
 /// * `format` - The archive format; detected from the leading bytes if omitted
 /// * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
@@ -254,7 +242,7 @@ pub fn extract_archive_to_callback<'env>(
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     #[napi(ts_arg_type = "(entry: MemoryEntry) => void | Promise<void>")] on_entry: EntryCallback,
     config: Option<&SecurityConfig>,
-    options: Option<&ExtractionOptions>,
+    options: Option<&SinkOptions>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
@@ -312,7 +300,10 @@ pub fn extract_archive_to_callback<'env>(
 /// extractArchiveToCallbackSync(fs.readFileSync('a.zip'), (entry) => names.push(entry.path));
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn extract_archive_to_callback_sync<'env>(
     env: Env,
     data: Uint8Array,
@@ -322,7 +313,7 @@ pub fn extract_archive_to_callback_sync<'env>(
         Unknown<'env>,
     >,
     config: Option<&SecurityConfig>,
-    options: Option<&ExtractionOptions>,
+    options: Option<&SinkOptions>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
 ) -> Result<ExtractionReport> {

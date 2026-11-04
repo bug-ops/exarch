@@ -64,7 +64,10 @@ fn list_reports_reparse_directory_as_symlink() {
     let kinds: Vec<_> = manifest.entries().iter().map(|e| &e.kind).collect();
     assert_matches!(
         kinds.as_slice(),
-        [ManifestEntryKind::File, ManifestEntryKind::Symlink { .. }]
+        [
+            ManifestEntryKind::File { .. },
+            ManifestEntryKind::Symlink { .. }
+        ]
     );
 }
 

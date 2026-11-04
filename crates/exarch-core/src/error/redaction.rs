@@ -102,14 +102,11 @@ pub fn sanitize_path_for_error(path: &Path) -> String {
 /// use std::path::Path;
 ///
 /// let path = Path::new("../../etc/passwd");
-/// assert_eq!(
-///     format_entry_path_for_error(path),
-///     path.display().to_string()
-/// );
+/// assert_eq!(format_entry_path_for_error(path), "../../etc/passwd");
 /// ```
 #[must_use]
 pub fn format_entry_path_for_error(path: &Path) -> String {
-    path.display().to_string()
+    crate::path_text(path)
 }
 
 /// Sanitizes I/O error messages for FFI error reporting.
@@ -221,7 +218,7 @@ impl ArchiveError {
             | Self::OutputExists { path }
             | Self::UnknownFormat { path } => Some(sanitize_path_for_error(path)),
 
-            Self::PartialExtraction { source, .. } => source.redacted_path(),
+            Self::PartialExtraction(partial) => partial.cause().redacted_path(),
 
             Self::Io(_)
             | Self::InvalidArchive(_)
@@ -340,7 +337,7 @@ mod tests {
             },
             ArchiveError::InvalidPermissions {
                 path: attacker_path,
-                mode: 0o777,
+                mode: crate::RawMode::new(0o777),
             },
         ];
 
@@ -413,13 +410,13 @@ mod tests {
     /// its `source`'s redaction policy rather than exposing a path itself.
     #[test]
     fn test_partial_extraction_delegates_to_source() {
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::PathTraversal {
+        let err = ArchiveError::PartialExtraction(crate::Partial::new(
+            ArchiveError::PathTraversal {
                 path: PathBuf::from("../../etc/passwd"),
-            }),
-            report: ExtractionReport::new(),
-            writes: crate::PartialWrites::Kept,
-        };
+            },
+            ExtractionReport::new(),
+            crate::PartialWrites::Kept,
+        ));
         assert_eq!(err.redacted_path().as_deref(), Some("../../etc/passwd"));
     }
 }

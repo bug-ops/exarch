@@ -55,7 +55,8 @@
 //!   server resolves the names. Third-party filesystem drivers are unverified.
 //! - Only NTFS is exercised in CI; `ReFS` and Dev Drive are untested.
 //! - Following a pre-existing symlink under `ContainedOnly` stays path-based
-//!   through `classify_link`, as on Unix.
+//!   through `classify_link` on Windows. On Unix it is resolved with
+//!   `readlinkat` and `openat` on the held handles instead.
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -742,7 +743,7 @@ mod tests {
     fn create_new_applies_the_exact_mode_and_refuses_an_existing_name() {
         let temp = TempDir::new().unwrap();
         let dir = pinned(&temp);
-        let config = crate::SecurityConfig::default().validate().unwrap();
+        let config = crate::SecurityConfig::default();
         let mode = crate::security::permissions::sanitize_permissions(RawMode::new(0o640), &config);
 
         dir.create_new(leaf("f"), Some(mode)).unwrap();

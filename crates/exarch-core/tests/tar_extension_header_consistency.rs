@@ -114,7 +114,7 @@ fn number_error(field: TarHeaderField) -> Expected {
 
 fn assert_ambiguous(error: &ArchiveError, expected: &Expected) {
     let source = match error {
-        ArchiveError::PartialExtraction { source, .. } => source,
+        ArchiveError::PartialExtraction(partial) => partial.cause(),
         other => other,
     };
     assert_eq!(source.error_code(), ErrorCode::InvalidArchive, "{source}");

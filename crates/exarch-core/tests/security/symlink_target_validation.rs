@@ -63,14 +63,10 @@ fn extract_with_symlinks_allowed(
     tar_data: Vec<u8>,
 ) -> exarch_core::Result<exarch_core::ExtractionReport> {
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data));
-    let config = SecurityConfig::default()
-        .with_allow_symlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+    let archive = TarArchive::new(Cursor::new(tar_data), &config);
     archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     )
@@ -80,14 +76,10 @@ fn extract_with_hardlinks_allowed(
     tar_data: Vec<u8>,
 ) -> exarch_core::Result<exarch_core::ExtractionReport> {
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data));
-    let config = SecurityConfig::default()
-        .with_allow_hardlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
+    let archive = TarArchive::new(Cursor::new(tar_data), &config);
     archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     )

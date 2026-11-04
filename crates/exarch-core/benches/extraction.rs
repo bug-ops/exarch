@@ -76,9 +76,9 @@ fn benchmark_config() -> SecurityConfig {
 
 /// Validated variant of [`benchmark_config`] for direct
 /// `ArchiveFormat::extract` trait calls, which require
-/// `SecurityConfig<Validated>`.
-fn benchmark_config_validated() -> SecurityConfig<exarch_core::Validated> {
-    benchmark_config().validate().unwrap()
+/// `SecurityConfig`.
+fn benchmark_config_validated() -> SecurityConfig {
+    benchmark_config()
 }
 
 /// Returns fixture path if it exists, otherwise None.
@@ -262,11 +262,10 @@ fn benchmark_many_small_files(c: &mut Criterion) {
 
                         let start = Instant::now();
                         let cursor = Cursor::new(data.clone());
-                        let archive = ZipArchive::new(cursor).unwrap();
+                        let archive = ZipArchive::new(cursor, &SecurityConfig::default()).unwrap();
                         archive
                             .extract(
                                 temp.path(),
-                                &SecurityConfig::default().validate().unwrap(),
                                 &ExtractionOptions::default(),
                                 &mut exarch_core::NoopProgress,
                             )
@@ -292,10 +291,7 @@ fn benchmark_zip_inspection(c: &mut Criterion) {
     const ENTRIES: usize = 10_000;
     let mut group = c.benchmark_group("zip_inspection");
     let data = create_many_small_files_zip(ENTRIES);
-    let config = SecurityConfig::default()
-        .with_max_file_count(exarch_core::non_zero!(ENTRIES * 2))
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(ENTRIES * 2));
     group.throughput(Throughput::Elements(ENTRIES as u64));
 
     group.bench_function("baseline_plain_scan", |b| {
@@ -307,21 +303,21 @@ fn benchmark_zip_inspection(c: &mut Criterion) {
         });
     });
     group.bench_function("open", |b| {
-        b.iter(|| ZipArchive::new(Cursor::new(&data[..])).unwrap());
+        b.iter(|| ZipArchive::new(Cursor::new(&data[..]), &SecurityConfig::default()).unwrap());
     });
     group.bench_function("open_and_list", |b| {
         b.iter(|| {
-            ZipArchive::new(Cursor::new(&data[..]))
+            ZipArchive::new(Cursor::new(&data[..]), &config)
                 .unwrap()
-                .list(&config)
+                .list()
                 .unwrap()
         });
     });
     group.bench_function("open_and_verify", |b| {
         b.iter(|| {
-            ZipArchive::new(Cursor::new(&data[..]))
+            ZipArchive::new(Cursor::new(&data[..]), &config)
                 .unwrap()
-                .verify(&config, &VerificationOptions::default())
+                .verify(&VerificationOptions::default())
                 .unwrap()
         });
     });
@@ -329,17 +325,17 @@ fn benchmark_zip_inspection(c: &mut Criterion) {
     let described = create_stored_descriptor_zip(ENTRIES, 256);
     group.bench_function("stored_descriptor_open_and_list", |b| {
         b.iter(|| {
-            ZipArchive::new(Cursor::new(&described[..]))
+            ZipArchive::new(Cursor::new(&described[..]), &config)
                 .unwrap()
-                .list(&config)
+                .list()
                 .unwrap()
         });
     });
     group.bench_function("stored_descriptor_open_and_verify", |b| {
         b.iter(|| {
-            ZipArchive::new(Cursor::new(&described[..]))
+            ZipArchive::new(Cursor::new(&described[..]), &config)
                 .unwrap()
-                .verify(&config, &VerificationOptions::default())
+                .verify(&VerificationOptions::default())
                 .unwrap()
         });
     });
@@ -362,19 +358,16 @@ fn benchmark_large_files(c: &mut Criterion) {
                 b.iter(|| {
                     let temp = TempDir::new().unwrap();
                     let cursor = Cursor::new(data.clone());
-                    let archive = ZipArchive::new(cursor).unwrap();
-
-                    // Use config with increased limits for benchmarks
                     let config = SecurityConfig::default()
                         .with_max_file_size(exarch_core::non_zero!(200 * 1024 * 1024))
-                        .with_max_total_size(exarch_core::non_zero!(500 * 1024 * 1024))
-                        .validate()
-                        .unwrap();
+                        .with_max_total_size(exarch_core::non_zero!(500 * 1024 * 1024));
+                    let archive = ZipArchive::new(cursor, &config).unwrap();
+
+                    // Use config with increased limits for benchmarks
 
                     archive
                         .extract(
                             temp.path(),
-                            &config,
                             &ExtractionOptions::default(),
                             &mut exarch_core::NoopProgress,
                         )
@@ -398,11 +391,10 @@ fn benchmark_nested_directories(c: &mut Criterion) {
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
-                let archive = ZipArchive::new(cursor).unwrap();
+                let archive = ZipArchive::new(cursor, &SecurityConfig::default()).unwrap();
                 archive
                     .extract(
                         temp.path(),
-                        &SecurityConfig::default().validate().unwrap(),
                         &ExtractionOptions::default(),
                         &mut exarch_core::NoopProgress,
                     )
@@ -430,11 +422,10 @@ fn benchmark_compression_methods(c: &mut Criterion) {
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
-                let archive = ZipArchive::new(cursor).unwrap();
+                let archive = ZipArchive::new(cursor, &config).unwrap();
                 archive
                     .extract(
                         temp.path(),
-                        &config,
                         &ExtractionOptions::default(),
                         &mut exarch_core::NoopProgress,
                     )
@@ -452,11 +443,10 @@ fn benchmark_compression_methods(c: &mut Criterion) {
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
-                let archive = ZipArchive::new(cursor).unwrap();
+                let archive = ZipArchive::new(cursor, &config).unwrap();
                 archive
                     .extract(
                         temp.path(),
-                        &config,
                         &ExtractionOptions::default(),
                         &mut exarch_core::NoopProgress,
                     )
@@ -489,11 +479,10 @@ fn benchmark_sevenz_simple(c: &mut Criterion) {
         b.iter(|| {
             let temp = TempDir::new().unwrap();
             let cursor = Cursor::new(simple_data.clone());
-            let archive = SevenZArchive::new(cursor).unwrap();
+            let archive = SevenZArchive::new(cursor, &SecurityConfig::default()).unwrap();
             archive
                 .extract(
                     temp.path(),
-                    &SecurityConfig::default().validate().unwrap(),
                     &ExtractionOptions::default(),
                     &mut exarch_core::NoopProgress,
                 )
@@ -514,11 +503,10 @@ fn benchmark_sevenz_nested_dirs(c: &mut Criterion) {
         b.iter(|| {
             let temp = TempDir::new().unwrap();
             let cursor = Cursor::new(nested_data.clone());
-            let archive = SevenZArchive::new(cursor).unwrap();
+            let archive = SevenZArchive::new(cursor, &SecurityConfig::default()).unwrap();
             archive
                 .extract(
                     temp.path(),
-                    &SecurityConfig::default().validate().unwrap(),
                     &ExtractionOptions::default(),
                     &mut exarch_core::NoopProgress,
                 )
@@ -541,11 +529,10 @@ fn benchmark_sevenz_large_file(c: &mut Criterion) {
         b.iter(|| {
             let temp = TempDir::new().unwrap();
             let cursor = Cursor::new(large_data.clone());
-            let archive = SevenZArchive::new(cursor).unwrap();
+            let archive = SevenZArchive::new(cursor, &config).unwrap();
             archive
                 .extract(
                     temp.path(),
-                    &config,
                     &ExtractionOptions::default(),
                     &mut exarch_core::NoopProgress,
                 )
@@ -580,7 +567,7 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
         let count_u64 = count as u64;
         group.throughput(Throughput::Elements(count_u64));
         group.bench_with_input(BenchmarkId::new("files", count), &zip_data, |b, data| {
-            let config = SecurityConfig::default().validate().unwrap();
+            let config = SecurityConfig::default();
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
@@ -588,11 +575,10 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
 
                     let start = Instant::now();
                     let cursor = Cursor::new(data.clone());
-                    let archive = ZipArchive::new(cursor).unwrap();
+                    let archive = ZipArchive::new(cursor, &config).unwrap();
                     archive
                         .extract(
                             temp.path(),
-                            &config,
                             &ExtractionOptions::default(),
                             &mut exarch_core::NoopProgress,
                         )
@@ -639,11 +625,10 @@ fn benchmark_depth_scaling(c: &mut Criterion) {
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
-                let archive = ZipArchive::new(cursor).unwrap();
+                let archive = ZipArchive::new(cursor, &config).unwrap();
                 archive
                     .extract(
                         temp.path(),
-                        &config,
                         &ExtractionOptions::default(),
                         &mut exarch_core::NoopProgress,
                     )
@@ -777,9 +762,10 @@ fn benchmark_permission_optimization(_c: &mut Criterion) {
 fn benchmark_sevenz_vs_reference(c: &mut Criterion) {
     let mut group = c.benchmark_group("sevenz_vs_reference");
     // generate_fixtures.sh's `7z a` defaults to solid compression.
-    let config = benchmark_config()
-        .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(exarch_core::non_zero!(256 * 1024 * 1024));
+    let config = benchmark_config().with_solid_archives(exarch_core::SolidArchives::Allow(
+        exarch_core::SolidLimits::DEFAULT
+            .with_max_block_memory(exarch_core::non_zero!(256 * 1024 * 1024)),
+    ));
 
     for fixture_name in ["small_files.7z", "medium_files.7z"] {
         let Some(fixture) = get_fixture(fixture_name) else {
@@ -827,11 +813,10 @@ fn benchmark_sevenz_vs_reference(c: &mut Criterion) {
 /// extraction so every entry hits the `existing.is_some()` branch.
 fn benchmark_sevenz_overwrite(c: &mut Criterion) {
     let mut group = c.benchmark_group("sevenz_overwrite");
-    let config = benchmark_config()
-        .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(exarch_core::non_zero!(256 * 1024 * 1024))
-        .validate()
-        .unwrap();
+    let config = benchmark_config().with_solid_archives(exarch_core::SolidArchives::Allow(
+        exarch_core::SolidLimits::DEFAULT
+            .with_max_block_memory(exarch_core::non_zero!(256 * 1024 * 1024)),
+    ));
     let overwrite_options = ExtractionOptions::default().with_skip_duplicates(false);
 
     for fixture_name in ["small_files.7z", "medium_files.7z"] {
@@ -855,11 +840,11 @@ fn benchmark_sevenz_overwrite(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let temp = TempDir::new().unwrap();
-                        let archive = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
+                        let archive =
+                            SevenZArchive::new(Cursor::new(data.clone()), &config).unwrap();
                         archive
                             .extract(
                                 temp.path(),
-                                &config,
                                 &ExtractionOptions::default(),
                                 &mut exarch_core::NoopProgress,
                             )
@@ -867,11 +852,10 @@ fn benchmark_sevenz_overwrite(c: &mut Criterion) {
                         (temp, data.clone())
                     },
                     |(temp, data)| {
-                        let archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+                        let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
                         archive
                             .extract(
                                 temp.path(),
-                                &config,
                                 &overwrite_options,
                                 &mut exarch_core::NoopProgress,
                             )

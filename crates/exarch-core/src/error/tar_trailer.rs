@@ -178,8 +178,8 @@ mod tests {
             &ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: 9 }),
             None,
         );
-        assert_eq!(issue.category, IssueCategory::SecurityPolicy);
-        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category(), IssueCategory::SecurityPolicy);
+        assert_eq!(issue.severity(), IssueSeverity::High);
 
         for refusal in [corrupt(), TarTrailerRefusal::Truncated] {
             let error = ArchiveError::TarTrailer(refusal.clone());
@@ -194,8 +194,8 @@ mod tests {
                 }
             );
             let issue = VerificationIssue::from_error(&ArchiveError::TarTrailer(refusal), None);
-            assert_eq!(issue.category, IssueCategory::InvalidArchive);
-            assert_eq!(issue.severity, IssueSeverity::High);
+            assert_eq!(issue.category(), IssueCategory::InvalidArchive);
+            assert_eq!(issue.severity(), IssueSeverity::High);
         }
     }
 
@@ -205,13 +205,11 @@ mod tests {
         use crate::ExtractionReport;
         use crate::PartialWrites;
 
-        let wrapped = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::TarTrailer(TarTrailerRefusal::OverCap {
-                cap: 1,
-            })),
-            report: ExtractionReport::default(),
-            writes: PartialWrites::Kept,
-        };
+        let wrapped = ArchiveError::PartialExtraction(crate::Partial::new(
+            ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: 1 }),
+            ExtractionReport::default(),
+            PartialWrites::Kept,
+        ));
         assert!(wrapped.is_security_violation());
         assert_eq!(
             wrapped.relaxable_by(),

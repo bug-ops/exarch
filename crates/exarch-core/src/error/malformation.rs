@@ -169,6 +169,52 @@ pub enum Malformation {
     ZipDataRangeUnrepresentable,
     /// The zstd entries could not be walked within the archive extent.
     ZipZstdWalkIncomplete,
+    /// The `tar` crate cannot read a PAX header of an entry.
+    TarPaxHeaderUnreadable {
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The `tar` crate cannot start reading the entries while an archive is
+    /// extracted.
+    TarEntriesUnreadable {
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The `tar` crate cannot start reading the entries while an archive is
+    /// listed.
+    TarListEntriesUnreadable {
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The `tar` crate fails while reading toward the next entry.
+    TarEntryUnreadable {
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The TAR reader was asked for an entry after one was abandoned.
+    TarReadAfterAbandonedEntry,
+    /// A 7z block uses a coder exarch does not decode or malformed coder
+    /// properties.
+    SevenZUnsupportedCoder,
+    /// The 7z header lists pack streams without a stream-map offset for each.
+    SevenZPackStreamOffsetMismatch {
+        /// Number of stream-map offsets.
+        offsets: usize,
+        /// Number of pack streams.
+        pack_streams: usize,
+    },
+    /// `sevenz-rust2` cannot parse the 7z header.
+    SevenZHeaderUnreadable {
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The link entries of a 7z archive are not in ascending file order.
+    SevenZLinkEntriesOutOfOrder,
+    /// `sevenz-rust2` fails in a way that has no kind of its own.
+    SevenZLibraryError {
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
     /// A refusal with no family of its own.
     Unclassified(Unclassified),
 }
@@ -210,12 +256,23 @@ impl Malformation {
             | Self::ZipCensusDisagreement
             | Self::ZipDataRangeUnrepresentable
             | Self::ZipZstdWalkIncomplete => Some(C::ZipReader),
+            Self::TarPaxHeaderUnreadable { .. }
+            | Self::TarEntriesUnreadable { .. }
+            | Self::TarListEntriesUnreadable { .. }
+            | Self::TarEntryUnreadable { .. }
+            | Self::TarReadAfterAbandonedEntry => Some(C::TarReader),
+            Self::SevenZUnsupportedCoder
+            | Self::SevenZPackStreamOffsetMismatch { .. }
+            | Self::SevenZHeaderUnreadable { .. }
+            | Self::SevenZLinkEntriesOutOfOrder
+            | Self::SevenZLibraryError { .. } => Some(C::SevenZReader),
             Self::Unclassified(_) => None,
         }
     }
 }
 
 impl fmt::Display for Malformation {
+    #[expect(clippy::too_many_lines, reason = "one arm per kind")]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LinkTargetMissing(kind) => write!(f, "{kind} missing target"),
@@ -234,17 +291,27 @@ impl fmt::Display for Malformation {
                 write!(f, "{kind} target too long: {bytes} bytes")
             }
             Self::HardlinkTargetAbsent { target } => {
-                write!(f, "hardlink target does not exist: {}", target.display())
+                write!(
+                    f,
+                    "hardlink target does not exist: {}",
+                    crate::path_text(target)
+                )
             }
             Self::HardlinkTargetDirectory { target } => {
-                write!(f, "hardlink target is a directory: {}", target.display())
+                write!(
+                    f,
+                    "hardlink target is a directory: {}",
+                    crate::path_text(target)
+                )
             }
             Self::HardlinkTargetNotRegular { target } => write!(
                 f,
                 "hardlink target is not a regular file: {}",
-                target.display()
+                crate::path_text(target)
             ),
-            Self::DuplicateEntry { path } => write!(f, "duplicate entry: {}", path.display()),
+            Self::DuplicateEntry { path } => {
+                write!(f, "duplicate entry: {}", crate::path_text(path))
+            }
             Self::EntryPathUnreadable { detail } => write!(f, "invalid path: {detail}"),
             Self::EntryNameUnreadable {
                 index: Some(index),
@@ -255,7 +322,11 @@ impl fmt::Display for Malformation {
                 detail,
             } => write!(f, "invalid entry name: {detail}"),
             Self::EntryPathNotUtf8 { path } => {
-                write!(f, "entry path is not valid UTF-8: {}", path.display())
+                write!(
+                    f,
+                    "entry path is not valid UTF-8: {}",
+                    crate::path_text(path)
+                )
             }
             Self::DeclaredCompressedExceedsArchive => {
                 f.write_str("declared compressed size exceeds archive length")
@@ -292,6 +363,33 @@ impl fmt::Display for Malformation {
             Self::ZipZstdWalkIncomplete => {
                 f.write_str("ZIP zstd entries could not be walked within the archive extent")
             }
+            Self::TarPaxHeaderUnreadable { detail } => {
+                write!(f, "failed to read PAX header: {detail}")
+            }
+            Self::TarEntriesUnreadable { detail } => write!(f, "failed to read entries: {detail}"),
+            Self::TarListEntriesUnreadable { detail } => {
+                write!(f, "failed to read TAR entries: {detail}")
+            }
+            Self::TarEntryUnreadable { detail } => write!(f, "failed to read TAR entry: {detail}"),
+            Self::TarReadAfterAbandonedEntry => {
+                f.write_str("TAR read continued after an abandoned entry")
+            }
+            Self::SevenZUnsupportedCoder => {
+                f.write_str("7z block uses an unsupported coder or malformed coder properties")
+            }
+            Self::SevenZPackStreamOffsetMismatch {
+                offsets,
+                pack_streams,
+            } => write!(
+                f,
+                "failed to open 7z archive: the pack stream offsets have {offsets} entries for \
+                 {pack_streams} pack streams"
+            ),
+            Self::SevenZHeaderUnreadable { detail } => {
+                write!(f, "failed to open 7z archive: {detail}")
+            }
+            Self::SevenZLinkEntriesOutOfOrder => f.write_str("7z link entries are out of order"),
+            Self::SevenZLibraryError { detail } => write!(f, "7z error: {detail}"),
             Self::Unclassified(Unclassified(reason)) => f.write_str(reason),
         }
     }
@@ -485,6 +583,72 @@ mod tests {
                 "ZIP zstd entries could not be walked within the archive extent",
                 Some(C::ZipReader),
             ),
+            (
+                Malformation::TarPaxHeaderUnreadable {
+                    detail: "bad".into(),
+                },
+                "failed to read PAX header: bad",
+                Some(C::TarReader),
+            ),
+            (
+                Malformation::TarEntriesUnreadable {
+                    detail: "bad".into(),
+                },
+                "failed to read entries: bad",
+                Some(C::TarReader),
+            ),
+            (
+                Malformation::TarListEntriesUnreadable {
+                    detail: "bad".into(),
+                },
+                "failed to read TAR entries: bad",
+                Some(C::TarReader),
+            ),
+            (
+                Malformation::TarEntryUnreadable {
+                    detail: "bad".into(),
+                },
+                "failed to read TAR entry: bad",
+                Some(C::TarReader),
+            ),
+            (
+                Malformation::TarReadAfterAbandonedEntry,
+                "TAR read continued after an abandoned entry",
+                Some(C::TarReader),
+            ),
+            (
+                Malformation::SevenZUnsupportedCoder,
+                "7z block uses an unsupported coder or malformed coder properties",
+                Some(C::SevenZReader),
+            ),
+            (
+                Malformation::SevenZPackStreamOffsetMismatch {
+                    offsets: 1,
+                    pack_streams: 2,
+                },
+                "failed to open 7z archive: the pack stream offsets have 1 entries for 2 pack \
+                 streams",
+                Some(C::SevenZReader),
+            ),
+            (
+                Malformation::SevenZHeaderUnreadable {
+                    detail: "bad".into(),
+                },
+                "failed to open 7z archive: bad",
+                Some(C::SevenZReader),
+            ),
+            (
+                Malformation::SevenZLinkEntriesOutOfOrder,
+                "7z link entries are out of order",
+                Some(C::SevenZReader),
+            ),
+            (
+                Malformation::SevenZLibraryError {
+                    detail: "bad".into(),
+                },
+                "7z error: bad",
+                Some(C::SevenZReader),
+            ),
             (Malformation::unclassified("anything"), "anything", None),
         ]
     }
@@ -511,6 +675,8 @@ mod tests {
             C::DeclaredSize,
             C::Integrity,
             C::ZipReader,
+            C::TarReader,
+            C::SevenZReader,
         ] {
             assert!(produced.contains(&code), "{code:?}");
         }

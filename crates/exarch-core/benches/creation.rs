@@ -22,6 +22,7 @@ use criterion::criterion_main;
 use exarch_core::create_archive;
 use exarch_core::creation::CompressionLevel;
 use exarch_core::creation::CreationConfig;
+use exarch_core::creation::ExcludePattern;
 use exarch_core::creation::filters;
 use exarch_core::formats::detect::CreatableFormat;
 use std::fs;
@@ -148,10 +149,10 @@ fn benchmark_create_tar_formats(c: &mut Criterion) {
     ];
 
     for (name, format) in formats {
-        group.bench_with_input(BenchmarkId::new("format", name), &format, |b, format| {
+        group.bench_with_input(BenchmarkId::new("format", name), &format, |b, _format| {
             b.iter(|| {
                 let output = temp.path().join(format!("output.{}", name));
-                let config = CreationConfig::default().with_format(Some(*format));
+                let config = CreationConfig::default();
                 let _ = create_archive(
                     black_box(&output),
                     black_box(&[&source_dir]),
@@ -196,7 +197,6 @@ fn benchmark_compression_levels(c: &mut Criterion) {
                 b.iter(|| {
                     let output = temp.path().join("output.tar.gz");
                     let config = CreationConfig::default()
-                        .with_format(Some(CreatableFormat::TarGz))
                         .with_compression_level(CompressionLevel::try_from(*level).unwrap());
                     let _ = create_archive(
                         black_box(&output),
@@ -342,32 +342,35 @@ fn benchmark_path_filtering(c: &mut Criterion) {
         b.iter(|| filters::is_hidden(black_box(hidden_path)));
     });
 
-    // Benchmark matches_pattern
+    // Benchmark ExcludePattern::matches
+    let exact = ExcludePattern::try_from(".gitignore").unwrap();
+    let suffix = ExcludePattern::try_from("*.tmp").unwrap();
+    let prefix = ExcludePattern::try_from("file*").unwrap();
     group.bench_function("matches_pattern_exact", |b| {
-        b.iter(|| filters::matches_pattern(black_box(hidden_path), black_box(".gitignore")));
+        b.iter(|| exact.matches(black_box(hidden_path)));
     });
 
     group.bench_function("matches_pattern_extension", |b| {
-        b.iter(|| filters::matches_pattern(black_box(temp_path), black_box("*.tmp")));
+        b.iter(|| suffix.matches(black_box(temp_path)));
     });
 
     group.bench_function("matches_pattern_prefix", |b| {
-        b.iter(|| filters::matches_pattern(black_box(temp_path), black_box("file*")));
+        b.iter(|| prefix.matches(black_box(temp_path)));
     });
 
-    // Benchmark should_skip
+    // Benchmark skip_reason
     let config = CreationConfig::default();
 
-    group.bench_function("should_skip_visible", |b| {
-        b.iter(|| filters::should_skip(black_box(visible_path), black_box(&config)));
+    group.bench_function("skip_reason_visible", |b| {
+        b.iter(|| filters::skip_reason(black_box(visible_path), black_box(&config)));
     });
 
-    group.bench_function("should_skip_hidden", |b| {
-        b.iter(|| filters::should_skip(black_box(hidden_path), black_box(&config)));
+    group.bench_function("skip_reason_hidden", |b| {
+        b.iter(|| filters::skip_reason(black_box(hidden_path), black_box(&config)));
     });
 
-    group.bench_function("should_skip_excluded", |b| {
-        b.iter(|| filters::should_skip(black_box(temp_path), black_box(&config)));
+    group.bench_function("skip_reason_excluded", |b| {
+        b.iter(|| filters::skip_reason(black_box(temp_path), black_box(&config)));
     });
 
     group.finish();

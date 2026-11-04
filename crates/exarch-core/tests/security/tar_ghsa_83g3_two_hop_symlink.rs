@@ -99,17 +99,14 @@ fn two_hop_symlink_chain_is_rejected() {
     let dest = TempDir::new().expect("temp dir");
     let config = SecurityConfig::default()
         .with_allow_symlinks(true)
-        .with_allow_hardlinks(true)
-        .validate()
-        .expect("valid config");
+        .with_allow_hardlinks(true);
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);
-    let archive = TarArchive::new(cursor);
+    let archive = TarArchive::new(cursor, &config);
 
     let result = archive.extract(
         dest.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -125,7 +122,7 @@ fn two_hop_symlink_chain_is_rejected() {
     // hardlink escape, not an unrelated I/O error.
     let err = result.unwrap_err();
     let source = match &err {
-        ArchiveError::PartialExtraction { source, .. } => source.as_ref(),
+        ArchiveError::PartialExtraction(partial) => partial.cause(),
         other => other,
     };
     assert_matches!(
@@ -146,15 +143,14 @@ fn two_hop_symlink_chain_is_rejected() {
 #[test]
 fn two_hop_chain_rejected_when_symlinks_disabled() {
     let dest = TempDir::new().expect("temp dir");
-    let config = SecurityConfig::default().validate().expect("valid config"); // symlinks = false
+    let config = SecurityConfig::default(); // symlinks = false
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);
-    let archive = TarArchive::new(cursor);
+    let archive = TarArchive::new(cursor, &config);
 
     let result = archive.extract(
         dest.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );

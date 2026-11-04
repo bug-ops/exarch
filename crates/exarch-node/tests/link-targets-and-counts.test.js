@@ -7,7 +7,12 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { extractArchiveSync, listArchiveSync, SecurityConfig } = require('../index.js');
+const {
+  extractArchiveSync,
+  listArchiveSync,
+  verifyArchiveSync,
+  SecurityConfig,
+} = require('../index.js');
 
 // Written with sevenz-rust2: `a.txt` and a Unix-mode symlink `link` -> `a.txt`.
 const SYMLINK_7Z = path.join(__dirname, '..', '..', '..', 'tests', 'fixtures', 'symlink-mode.7z');
@@ -47,12 +52,53 @@ describe('7z symlink targets and link counting', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('listArchive leaves a 7z symlink target unset', () => {
+  it('listArchive leaves a 7z symlink target unread', () => {
     const manifest = listArchiveSync(SYMLINK_7Z);
 
     const link = manifest.entries.find((entry) => entry.entryType === 'Symlink');
     assert.strictEqual(link.path, 'link');
-    assert.strictEqual(link.symlinkTarget ?? null, null);
+    assert.deepStrictEqual(link.target, { state: 'unread' });
+    assert.strictEqual(link.size, undefined);
+  });
+
+  it('listArchive reports a recorded target and keeps size to files', () => {
+    const archive = path.join(tempDir, 'one.tar');
+    fs.writeFileSync(archive, tarWithSymlinks(1));
+    const [link] = listArchiveSync(archive).entries;
+
+    assert.strictEqual(link.entryType, 'Symlink');
+    assert.deepStrictEqual(link.target, { state: 'recorded', path: 'target' });
+    assert.strictEqual(link.size, undefined);
+  });
+
+  it('listArchive refuses a non-UTF-8 entry name instead of rendering it lossily', () => {
+    const archive = path.join(tempDir, 'bytes.tar');
+    const tar = tarWithSymlinks(1);
+    tar.write('ÿ', 0, 'latin1');
+    const sum = tar
+      .subarray(0, 512)
+      .reduce((total, byte, i) => total + (i >= 148 && i < 156 ? 32 : byte), 0);
+    tar.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
+    fs.writeFileSync(archive, tar);
+
+    assert.throws(() => listArchiveSync(archive), {
+      code: 'INVALID_ARCHIVE',
+      subCode: 'ENTRY_NAME',
+      nonUtf8EntryPath: '\\xFFink0',
+    });
+  });
+
+  it('verifyArchive reports the typed refusal behind a finding', () => {
+    const archive = path.join(tempDir, 'verify.tar');
+    fs.writeFileSync(archive, tarWithSymlinks(1));
+    const report = verifyArchiveSync(archive);
+
+    const issue = report.issues.find((i) => i.code !== undefined);
+    assert.ok(issue, JSON.stringify(report.issues));
+    assert.strictEqual(issue.code, 'SECURITY_VIOLATION');
+    assert.strictEqual(issue.subCode, 'LINK_POLICY');
+    assert.strictEqual(issue.relaxableBy, 'symlinks');
+    assert.strictEqual('context' in issue, false);
   });
 
   it('extractArchive counts symlinks against maxFileCount', () => {

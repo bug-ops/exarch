@@ -1,14 +1,15 @@
 //! Archives read from a caller-supplied reader instead of a path.
 //!
-//! [`ArchiveReader`] is the input of [`list_reader`](crate::list_reader),
-//! [`verify_reader`](crate::verify_reader) and
-//! [`extract_to_sink`](crate::extract_to_sink). The constructors encode what
-//! each format needs: a TAR stream is forward-only, so any `Read` will do,
-//! while ZIP and 7z read a directory at the end of the archive and need `Seek`.
-//! The caller states the format with [`ArchiveReader::tar`],
-//! [`ArchiveReader::seekable`] or [`ArchiveReader::of_type`], or has it
-//! sniffed from the leading bytes by [`ArchiveReader::detect`] and
-//! [`ArchiveReader::detect_stream`].
+//! [`ArchiveReader`] is the input of
+//! [`ListRequest::list_reader`](crate::ListRequest::list_reader),
+//! [`VerifyRequest::verify_reader`](crate::VerifyRequest::verify_reader) and
+//! [`SinkExtractRequest::extract`](crate::SinkExtractRequest::extract). The
+//! constructors encode what each format needs: a TAR stream is forward-only, so
+//! any `Read` will do, while ZIP and 7z read a directory at the end of the
+//! archive and need `Seek`. The caller states the format with
+//! [`ArchiveReader::tar`], [`ArchiveReader::seekable`] or
+//! [`ArchiveReader::of_type`], or has it sniffed from the leading bytes by
+//! [`ArchiveReader::detect`] and [`ArchiveReader::detect_stream`].
 
 use std::io::BufReader;
 use std::io::Cursor;
@@ -22,7 +23,6 @@ use crate::ReaderFormatError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
-use crate::config::Validated;
 use crate::formats::SevenZArchive;
 use crate::formats::TarArchive;
 use crate::formats::ZipArchive;
@@ -346,7 +346,7 @@ impl<'a> ArchiveReader<'a> {
 
     pub(crate) fn list(
         self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         listing: &mut ListPass<'_, '_>,
     ) -> Result<ArchiveManifest> {
         let format = self.format();
@@ -359,7 +359,7 @@ impl<'a> ArchiveReader<'a> {
             Source::Seekable {
                 reader,
                 format: SeekableFormat::Zip,
-            } => ZipArchive::for_config(reader, config)?.list_with(config, listing),
+            } => ZipArchive::new(reader, config)?.list_with(config, listing),
             Source::Seekable {
                 reader,
                 format: SeekableFormat::SevenZ,
@@ -369,7 +369,7 @@ impl<'a> ArchiveReader<'a> {
 
     pub(crate) fn verify(
         self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: VerificationOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<VerificationReport> {
@@ -385,12 +385,13 @@ impl<'a> ArchiveReader<'a> {
             Source::Seekable {
                 reader,
                 format: SeekableFormat::Zip,
-            } => ZipArchive::for_config(reader, config)?
-                .verify_with_progress(config, options, progress),
+            } => ZipArchive::new(reader, config)?.verify_with_progress(config, options, progress),
             Source::Seekable {
                 reader,
                 format: SeekableFormat::SevenZ,
-            } => SevenZArchive::new(reader)?.verify_with_progress(config, options, progress),
+            } => {
+                SevenZArchive::new(reader, config)?.verify_with_progress(config, options, progress)
+            }
         }
     }
 }
@@ -432,11 +433,11 @@ pub(crate) fn decode_tar_stream<'r, R: Read + Send + 'r>(
 pub(crate) fn tar_archive<'r, R: Read + Send + 'r>(
     reader: R,
     codec: Option<CompressionCodec>,
-    limits: DecoderLimits,
+    config: &SecurityConfig,
 ) -> Result<TarArchive<Box<dyn Read + Send + 'r>>> {
     let trailer = TarTrailer::for_codec(codec);
-    decode_tar_stream(reader, codec, limits)
-        .map(|decoded| TarArchive::from_stream(decoded, trailer))
+    decode_tar_stream(reader, codec, DecoderLimits::of(config))
+        .map(|decoded| TarArchive::from_stream(decoded, trailer, config))
 }
 
 #[cfg(test)]

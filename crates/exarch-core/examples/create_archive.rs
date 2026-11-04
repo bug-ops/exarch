@@ -3,8 +3,9 @@
 //! Run with: `cargo run --example create_archive`
 #![allow(clippy::disallowed_methods)]
 
-use exarch_core::ArchiveCreator;
+use exarch_core::CreateRequest;
 use exarch_core::CreationConfig;
+use exarch_core::OutputFile;
 use exarch_core::create_archive;
 use exarch_core::creation::CompressionLevel;
 
@@ -26,13 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cleanup
     std::fs::remove_file("example.tar.gz")?;
 
-    // Example 2: Builder pattern with options
-    println!("\nExample 2: Builder pattern");
-    let report = ArchiveCreator::new()
-        .output("example.zip")
-        .add_source("example_file.txt")
-        .compression_level(CompressionLevel::try_from(9u8)?)
-        .create()?;
+    // Example 2: Request with options
+    println!("\nExample 2: Request with options");
+    let config = CreationConfig::default().with_compression_level(CompressionLevel::try_from(9u8)?);
+    let report = CreateRequest::new(&config).create(
+        &OutputFile::create_new("example.zip"),
+        &["example_file.txt"],
+    )?;
     println!("  Created ZIP with {} files", report.files_added);
 
     // Cleanup

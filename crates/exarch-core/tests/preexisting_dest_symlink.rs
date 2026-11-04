@@ -12,11 +12,10 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options;
-use exarch_core::extract_archive_with_options_and_progress;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
 use tempfile::TempDir;
@@ -156,7 +155,9 @@ impl Sandbox {
             .path()
             .join(format!("a.{}", format.extension()));
         std::fs::write(&archive, format.build(items)).unwrap();
-        extract_archive_with_options(&archive, &self.dest, config, options)
+        ExtractRequest::new(config)
+            .with_options(options.clone())
+            .extract(&archive, &self.dest)
     }
 
     fn outside_entries(&self) -> Vec<String> {
@@ -361,7 +362,7 @@ struct SwapDirForLink {
 }
 
 impl ProgressCallback for SwapDirForLink {
-    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+    fn on_entry_start(&mut self, _path: &Path, _position: exarch_core::EntryPosition) {}
 
     fn on_bytes_written(&mut self, _bytes: u64) {}
 
@@ -397,13 +398,10 @@ fn directory_swapped_for_a_symlink_mid_run_is_refused() {
             outside: sandbox.outside.clone(),
         };
 
-        let result = extract_archive_with_options_and_progress(
-            &archive,
-            &sandbox.dest,
-            &SecurityConfig::default(),
-            &ExtractionOptions::default(),
-            &mut swapper,
-        );
+        let result = ExtractRequest::new(&SecurityConfig::default())
+            .with_options(ExtractionOptions::default())
+            .with_progress(&mut swapper)
+            .extract(&archive, &sandbox.dest);
 
         assert!(result.is_err(), "{format:?}: extraction must be refused");
         assert_eq!(
@@ -442,13 +440,10 @@ fn allow_symlinks_still_writes_through_a_link_the_archive_created() {
     let archive = sandbox.archive_dir.path().join("links.tar");
     std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
 
-    extract_archive_with_options(
-        &archive,
-        &sandbox.dest,
-        &SecurityConfig::default().with_allow_symlinks(true),
-        &ExtractionOptions::default(),
-    )
-    .unwrap();
+    ExtractRequest::new(&SecurityConfig::default().with_allow_symlinks(true))
+        .with_options(ExtractionOptions::default())
+        .extract(&archive, &sandbox.dest)
+        .unwrap();
 
     assert_eq!(
         std::fs::read(sandbox.dest.join("real/f.txt")).unwrap(),
@@ -472,13 +467,10 @@ fn symlinked_destination_root_is_still_accepted() {
         )
         .unwrap();
 
-        extract_archive_with_options(
-            &archive,
-            Path::new(&link),
-            &SecurityConfig::default(),
-            &ExtractionOptions::default(),
-        )
-        .unwrap();
+        ExtractRequest::new(&SecurityConfig::default())
+            .with_options(ExtractionOptions::default())
+            .extract(&archive, Path::new(&link))
+            .unwrap();
 
         assert_eq!(std::fs::read(sandbox.dest.join("a/b.txt")).unwrap(), b"ok");
     }

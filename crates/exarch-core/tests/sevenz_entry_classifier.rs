@@ -12,13 +12,13 @@ use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::IssueSeverity;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationStatus;
 use exarch_core::extract_archive;
-use exarch_core::extract_archive_with_options;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use sevenz_rust2::ArchiveEntry;
@@ -189,7 +189,9 @@ fn anti_item_never_truncates_an_existing_file_even_with_overwrite() {
     std::fs::write(out.path().join("gone.txt"), b"precious").unwrap();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    extract_archive_with_options(&archive, out.path(), &SecurityConfig::default(), &options)
+    ExtractRequest::new(&SecurityConfig::default())
+        .with_options(options)
+        .extract(&archive, out.path())
         .unwrap();
 
     assert_eq!(
@@ -228,7 +230,7 @@ fn extract_warns_once_with_the_number_of_skipped_anti_items() {
 
     assert_eq!(
         report.warnings,
-        ["skipped 3 7z anti-items (deletion markers are not applied)"]
+        [exarch_core::ExtractionWarning::AntiItemsSkipped { count: 3 }]
     );
 }
 
@@ -242,7 +244,7 @@ fn extract_of_only_anti_items_still_warns() {
 
     assert_eq!(
         report.warnings,
-        ["skipped 1 7z anti-item (deletion markers are not applied)"]
+        [exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 }]
     );
 }
 
@@ -273,9 +275,9 @@ fn verify_reports_skipped_anti_items_as_info_and_still_passes() {
     let [issue] = report.issues() else {
         panic!("expected one finding, got {:?}", report.issues());
     };
-    assert_eq!(issue.severity, IssueSeverity::Info);
+    assert_eq!(issue.severity(), IssueSeverity::Info);
     assert_eq!(
-        issue.message,
+        issue.message(),
         "2 7z anti-items skipped (deletion markers are not applied)"
     );
 }
@@ -295,16 +297,18 @@ fn anti_item_warning_survives_a_failing_extract() {
     std::fs::create_dir(out.path().join("b.txt")).unwrap();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let err =
-        extract_archive_with_options(&archive, out.path(), &SecurityConfig::default(), &options)
-            .unwrap_err();
+    let err = ExtractRequest::new(&SecurityConfig::default())
+        .with_options(options)
+        .extract(&archive, out.path())
+        .unwrap_err();
 
-    let ArchiveError::PartialExtraction { report, .. } = err else {
+    let ArchiveError::PartialExtraction(partial) = &err else {
         panic!("expected a partial extraction, got {err}");
     };
+    let report = partial.report();
     assert_eq!(
         report.warnings,
-        ["skipped 1 7z anti-item (deletion markers are not applied)"]
+        [exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 }]
     );
 }
 
@@ -335,7 +339,7 @@ fn verify_anti_item_info_does_not_mask_a_failing_issue() {
         report
             .issues()
             .iter()
-            .any(|i| i.severity == IssueSeverity::Info && i.message.contains("anti-item")),
+            .any(|i| i.severity() == IssueSeverity::Info && i.message().contains("anti-item")),
         "{:?}",
         report.issues()
     );
@@ -347,8 +351,9 @@ struct Recorder {
 }
 
 impl ProgressCallback for Recorder {
-    fn on_entry_start(&mut self, _path: &Path, total: usize, current: usize) {
-        self.starts.push((total, current));
+    fn on_entry_start(&mut self, _path: &Path, position: exarch_core::EntryPosition) {
+        let total = position.total.known().unwrap_or(0);
+        self.starts.push((total, position.current.get()));
     }
 
     fn on_bytes_written(&mut self, _bytes: u64) {}
@@ -372,13 +377,10 @@ fn progress_total_excludes_anti_items_and_indexes_are_contiguous() {
     let out = TempDir::new().unwrap();
     let mut recorder = Recorder::default();
 
-    exarch_core::extract_archive_with_progress(
-        &archive,
-        out.path(),
-        &SecurityConfig::default(),
-        &mut recorder,
-    )
-    .unwrap();
+    exarch_core::ExtractRequest::new(&SecurityConfig::default())
+        .with_progress(&mut recorder)
+        .extract(&archive, out.path())
+        .unwrap();
 
     assert_eq!(recorder.starts, [(2, 1), (2, 2)]);
 }

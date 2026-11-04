@@ -431,6 +431,32 @@ fn test_create_with_include_hidden() {
         .success();
 
     assert!(archive.exists());
+    let names = listed_files(&archive);
+    assert!(names.contains(&".hidden".to_owned()), "{names:?}");
+    assert!(names.contains(&"visible.txt".to_owned()), "{names:?}");
+}
+
+/// Paths of the entries of `archive`, sorted, from `list --json`.
+fn listed_files(archive: &std::path::Path) -> Vec<String> {
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("list")
+        .arg(archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    let mut names: Vec<String> = json["data"]["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter_map(|e| e["path"].as_str())
+        .map(|path| path.replace('\\', "/"))
+        .collect();
+    names.sort();
+    names
 }
 
 #[test]
@@ -504,8 +530,11 @@ fn test_create_excludes_hidden_by_default() {
         .assert()
         .success();
 
-    // Archive should exist
+    // Archive should exist and hold only the visible file
     assert!(archive.exists());
+    let names = listed_files(&archive);
+    assert!(names.contains(&"visible.txt".to_owned()), "{names:?}");
+    assert!(!names.iter().any(|n| n.contains(".hidden")), "{names:?}");
 }
 
 #[test]
@@ -861,6 +890,75 @@ fn test_create_directory_with_only_hidden_files() {
         .success();
 
     assert!(archive.exists());
+    let names = listed_files(&archive);
+    assert!(!names.iter().any(|n| n.contains(".hidden")), "{names:?}");
+}
+
+/// A hidden directory is skipped whole: it is counted once, however many
+/// files it holds, and nothing inside it is archived (`--include-hidden`
+/// brings it back).
+#[test]
+fn test_create_skips_hidden_directories_whole_and_counts_each_once() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let src = temp.path().join("src");
+    for file in [
+        "visible.txt",
+        ".ssh/id_rsa",
+        ".ssh/keys/more",
+        "sub/.aws/credentials",
+        "sub/.aws/visible_inside.txt",
+    ] {
+        let path = src.join(file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+        std::fs::write(path, "payload").expect("write file");
+    }
+
+    let archive = temp.path().join("default.tar.gz");
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("create")
+        .arg(&archive)
+        .arg(&src)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["data"]["files_skipped"], 2, "{json}");
+    assert_eq!(json["data"]["skipped_by_kind"]["hidden"], 2, "{json}");
+    let names = listed_files(&archive);
+    assert!(names.contains(&"visible.txt".to_owned()), "{names:?}");
+    let skipped_parts = [
+        ".ssh",
+        ".aws",
+        "id_rsa",
+        "credentials",
+        "visible_inside",
+        "more",
+    ];
+    let archived = skipped_parts
+        .iter()
+        .position(|part| names.iter().any(|n| n.contains(part)));
+    assert!(
+        archived.is_none(),
+        "an entry below a skipped hidden directory was archived (part {archived:?}): {names:?}"
+    );
+
+    let included = temp.path().join("included.tar.gz");
+    exarch_cmd()
+        .arg("create")
+        .arg("--include-hidden")
+        .arg(&included)
+        .arg(&src)
+        .assert()
+        .success();
+    let names = listed_files(&included);
+    assert!(names.contains(&".ssh/id_rsa".to_owned()), "{names:?}");
+    assert!(
+        names.contains(&"sub/.aws/credentials".to_owned()),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -1143,6 +1241,38 @@ fn test_verify_archive_safe() {
         .stdout(predicates::str::contains("Archive verification"));
 }
 
+/// `list` and `verify` give a core refusal the archive name and a hint naming
+/// only flags those subcommands accept (#937).
+#[test]
+fn test_list_and_verify_errors_carry_archive_context_and_valid_hints() {
+    for subcommand in ["list", "verify"] {
+        exarch_cmd()
+            .arg(subcommand)
+            .arg("--max-total-size")
+            .arg("1")
+            .arg(fixture_path("sample.tar.gz"))
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("Extraction limit exceeded for"))
+            .stderr(predicates::str::contains("sample.tar.gz"))
+            .stderr(predicates::str::contains(
+                "HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
+            ));
+    }
+}
+
+#[test]
+fn test_verify_missing_archive_names_it_in_the_error() {
+    exarch_cmd()
+        .arg("verify")
+        .arg("does-not-exist.tar.gz")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Failed to process 'does-not-exist.tar.gz'",
+        ));
+}
+
 #[test]
 fn test_verify_strict_passes_on_clean_archive() {
     exarch_cmd()
@@ -1177,11 +1307,11 @@ fn create_setuid_tar_gz(path: &std::path::Path) {
 }
 
 /// On Unix, an archive containing a setuid file produces a Warning-severity
-/// verification report. With --strict, the CLI must exit with code 2 and
+/// verification report. With --strict, the CLI must exit with code 3 and
 /// must not write any unstructured text to stderr.
 #[test]
 #[cfg(unix)]
-fn test_verify_strict_exits_2_on_warning() {
+fn test_verify_strict_exits_3_on_warning() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let archive_path = temp.path().join("setuid.tar.gz");
     create_setuid_tar_gz(&archive_path);
@@ -1191,7 +1321,7 @@ fn test_verify_strict_exits_2_on_warning() {
         .arg("--strict")
         .arg(&archive_path)
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::is_empty());
 }
 
@@ -1225,7 +1355,7 @@ fn test_verify_strict_quiet_produces_no_stderr() {
         .arg("--strict")
         .arg(&archive_path)
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::is_empty());
 }
 
@@ -1244,7 +1374,7 @@ fn test_verify_strict_json_produces_no_stderr() {
         .arg("--strict")
         .arg(&archive_path)
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::is_empty());
 }
 
@@ -1365,7 +1495,7 @@ fn test_verify_check_integrity_corrupt_zip_fails_with_exit_1_even_under_strict()
 }
 
 #[test]
-fn test_verify_check_integrity_solid_7z_fails_like_extract_and_strict_exits_2_when_incomplete() {
+fn test_verify_check_integrity_solid_7z_fails_like_extract_and_strict_exits_3_when_incomplete() {
     let archive = workspace_fixture("solid.7z");
 
     exarch_cmd()
@@ -1395,7 +1525,7 @@ fn test_verify_check_integrity_solid_7z_fails_like_extract_and_strict_exits_2_wh
         .arg("--strict")
         .arg(&budgeted)
         .assert()
-        .code(2);
+        .code(3);
 
     exarch_cmd()
         .arg("verify")
@@ -1456,8 +1586,10 @@ fn test_parallel_decode_memory_zero_is_rejected() {
         .arg("0")
         .arg(workspace_fixture("simple.7z"))
         .assert()
-        .code(2)
-        .stderr(predicates::str::contains("greater than zero"));
+        .code(1)
+        .stderr(predicates::str::contains(
+            "parallel decode memory must not be zero",
+        ));
 }
 
 #[test]
@@ -1481,8 +1613,956 @@ fn test_verify_decompression_budget_zero_is_rejected() {
         .arg("0")
         .arg(fixture_path("sample.tar.gz"))
         .assert()
+        .code(1)
+        .stderr(predicates::str::contains("must not be zero"));
+}
+
+/// Value refusals are one boundary: exit 1 with the JSON envelope naming the
+/// setting, never a clap usage error (#938).
+#[test]
+fn test_limit_value_refusals_are_json_safe_with_exit_1() {
+    for (subcommand, flag, value, setting) in [
+        ("extract", "--max-files", "0", "max_file_count"),
+        ("list", "--max-total-size", "0", "max_total_size"),
+        ("verify", "--max-file-size", "0", "max_file_size"),
+        (
+            "extract",
+            "--max-compression-ratio",
+            "0",
+            "max_compression_ratio",
+        ),
+        (
+            "list",
+            "--max-compression-ratio",
+            "0",
+            "max_compression_ratio",
+        ),
+        (
+            "verify",
+            "--max-compression-ratio",
+            "0",
+            "max_compression_ratio",
+        ),
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let mut cmd = exarch_cmd();
+        cmd.arg("--json").arg(subcommand).arg(flag).arg(value);
+        cmd.arg(fixture_path("sample.tar.gz"));
+        if subcommand == "extract" {
+            cmd.arg(temp.path().join("out"));
+        }
+        let output = cmd.assert().code(1).get_output().stdout.clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+        assert_eq!(json["status"], "error", "{subcommand} {flag}");
+        assert_eq!(json["error"]["kind"], "InvalidConfiguration");
+        assert_eq!(json["error"]["setting"], setting, "{subcommand} {flag}");
+    }
+}
+
+/// `-H` only changes the long listing, so it requires `-l` instead of being
+/// silently ignored (#943).
+#[test]
+fn test_list_human_readable_requires_long() {
+    exarch_cmd()
+        .arg("list")
+        .arg("-H")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
         .code(2)
-        .stderr(predicates::str::contains("greater than zero"));
+        .stderr(predicates::str::contains("--long"));
+
+    exarch_cmd()
+        .arg("list")
+        .arg("-lH")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .success();
+}
+
+/// A listed extraction (ZIP, 7z, non-fresh TAR) runs under the policy the user
+/// passed, not the narrowed one the list pass uses (#901).
+#[cfg(unix)]
+#[test]
+fn test_listed_extraction_honors_the_policy_flags() {
+    let entries = vec![
+        RawEntry::stored("a.txt", b"hi"),
+        RawEntry {
+            date: 0,
+            external_attributes: SYMLINK_MODE << 16,
+            ..RawEntry::stored("link", b"a.txt")
+        },
+    ];
+    let bytes = RawZip::new(entries).build().bytes;
+
+    for flags in [
+        vec!["--allow-symlinks"],
+        vec!["--allow-symlinks", "--preserve-permissions"],
+        vec!["--allow-symlinks", "--allow-hardlinks"],
+        vec!["--allow-symlinks", "--allow-world-writable"],
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let archive = temp.path().join("l.zip");
+        std::fs::write(&archive, &bytes).expect("write zip");
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("existing destination");
+
+        exarch_cmd()
+            .arg("extract")
+            .args(&flags)
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .success();
+
+        let link = std::fs::symlink_metadata(out.join("link")).expect("link extracted");
+        assert!(link.file_type().is_symlink(), "{flags:?}");
+        assert_eq!(std::fs::read(out.join("a.txt")).expect("file"), b"hi");
+    }
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("l.zip");
+    std::fs::write(&archive, &bytes).expect("write zip");
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(temp.path().join("denied"))
+        .assert()
+        .failure();
+}
+
+/// `create` stages the archive and renames it into place: without `--force` an
+/// existing output is refused untouched, with it the file is replaced, and a
+/// failed run leaves the previous archive as it was (#931).
+#[test]
+fn test_create_output_policy_and_failure_keep_the_previous_archive() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let out = temp.path().join("out.tar.gz");
+    std::fs::write(&out, b"previous").expect("existing output");
+
+    exarch_cmd()
+        .arg("create")
+        .arg(&out)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("already exists"))
+        .stderr(predicates::str::contains("--force"));
+    assert_eq!(std::fs::read(&out).expect("untouched"), b"previous");
+
+    exarch_cmd()
+        .arg("create")
+        .arg("--force")
+        .arg(&out)
+        .arg(temp.path().join("missing-source"))
+        .assert()
+        .failure();
+    assert_eq!(std::fs::read(&out).expect("kept on failure"), b"previous");
+    let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(leftovers, vec![std::ffi::OsString::from("out.tar.gz")]);
+
+    exarch_cmd()
+        .arg("create")
+        .arg("--force")
+        .arg(&out)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .success();
+    assert_ne!(std::fs::read(&out).expect("replaced"), b"previous");
+}
+
+#[test]
+fn test_create_refuses_a_directory_output_and_reports_a_json_kind() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dir = temp.path().join("d.tar.gz");
+    std::fs::create_dir(&dir).expect("directory output");
+
+    for force in [false, true] {
+        let mut cmd = exarch_cmd();
+        cmd.arg("--json").arg("create");
+        if force {
+            cmd.arg("--force");
+        }
+        let output = cmd
+            .arg(&dir)
+            .arg(fixture_path("sample.txt"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+        assert_eq!(json["operation"], "create");
+        assert!(dir.is_dir(), "the directory must survive");
+    }
+
+    let file = temp.path().join("f.tar.gz");
+    std::fs::write(&file, b"x").expect("existing");
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("create")
+        .arg(&file)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["error"]["kind"], "OutputExists");
+}
+
+/// A quota refusal carries the finer sub-code core derives from the limit that
+/// was hit (#918).
+#[test]
+fn test_quota_and_ratio_refusals_report_their_sub_code() {
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("list")
+        .arg("--max-total-size")
+        .arg("1")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["error"]["kind"], "QuotaExceeded");
+    assert_eq!(json["error"]["sub_code"], "TOTAL_SIZE");
+}
+
+#[cfg(target_os = "macos")]
+const HOST_PATH_LIMIT: usize = 1023;
+#[cfg(all(unix, not(target_os = "macos")))]
+const HOST_PATH_LIMIT: usize = 4095;
+
+/// A tail of exactly `len` bytes made of components of at most 200 bytes.
+#[cfg(unix)]
+fn tail_of_len(len: usize) -> String {
+    let mut name = String::new();
+    while name.len() < len {
+        if !name.is_empty() {
+            name.push('/');
+        }
+        let room = len - name.len();
+        name.push_str(&"n".repeat(room.min(200)));
+    }
+    name
+}
+
+/// `verify` and `extract` agree on the projected landing of an entry written
+/// through an in-archive symlink: `d -> cc` plus a tail lands at `cc/<tail>`,
+/// and the host path limit applies to that, not to the entry's own name (#945).
+#[cfg(unix)]
+#[test]
+fn test_verify_and_extract_agree_at_the_projected_landing_limit() {
+    let landing_prefix = "cc/".len();
+    for (tail_len, accepted) in [
+        (HOST_PATH_LIMIT - landing_prefix, true),
+        (HOST_PATH_LIMIT - landing_prefix + 1, false),
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let archive = temp.path().join("landing.tar");
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut dir = tar::Header::new_gnu();
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_mode(0o755);
+        dir.set_size(0);
+        builder
+            .append_data(&mut dir, "cc/", std::io::empty())
+            .expect("dir entry");
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_mode(0o777);
+        link.set_size(0);
+        builder
+            .append_link(&mut link, "d", "cc")
+            .expect("link entry");
+        let mut file = tar::Header::new_gnu();
+        file.set_entry_type(tar::EntryType::Regular);
+        file.set_mode(0o644);
+        file.set_size(1);
+        let name = format!("d/{}", tail_of_len(tail_len));
+        builder
+            .append_data(&mut file, &name, &b"x"[..])
+            .expect("file entry");
+        std::fs::write(&archive, builder.into_inner().expect("tar bytes")).expect("write tar");
+
+        let mut verify = exarch_cmd();
+        verify.arg("verify").arg("--allow-symlinks").arg(&archive);
+        let mut extract = exarch_cmd();
+        extract
+            .arg("extract")
+            .arg("--allow-symlinks")
+            .arg(&archive)
+            .arg(temp.path().join("out"));
+        if accepted {
+            verify.assert().success();
+            extract.assert().success();
+        } else {
+            verify
+                .assert()
+                .code(1)
+                .stdout(predicates::str::contains("file name too long"));
+            extract
+                .assert()
+                .code(1)
+                .stderr(predicates::str::contains("file name too long"));
+        }
+    }
+}
+
+/// A skip is reported by kind, with exact counts and a sample (#906).
+#[test]
+fn test_skips_are_reported_per_kind_in_text_and_json() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("mixed.tar.gz");
+    make_mixed_extension_archive(&archive, 3, 2);
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allowed-extensions")
+        .arg("txt")
+        .arg(&archive)
+        .arg(temp.path().join("out-text"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Files skipped: 2"))
+        .stdout(predicates::str::contains("extension_not_allowed: 2"));
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("extract")
+        .arg("--allowed-extensions")
+        .arg("txt")
+        .arg(&archive)
+        .arg(temp.path().join("out-json"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["data"]["files_skipped"], 2);
+    assert_eq!(json["data"]["skipped_by_kind"]["extension_not_allowed"], 2);
+    assert_eq!(
+        json["data"]["skipped_sample"].as_array().map(Vec::len),
+        Some(2)
+    );
+}
+
+/// An exclude pattern the matcher cannot honor is refused, not silently
+/// matched against nothing (#916).
+#[test]
+fn test_create_refuses_unsupported_exclude_patterns() {
+    for pattern in ["build/*", "a*b", "*", "..", ""] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let out = temp.path().join("o.tar.gz");
+        let output = exarch_cmd()
+            .arg("--json")
+            .arg("create")
+            .arg("-x")
+            .arg(pattern)
+            .arg(&out)
+            .arg(fixture_path("sample.txt"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+        assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{pattern:?}");
+        assert_eq!(json["error"]["setting"], "exclude_pattern", "{pattern:?}");
+        assert!(!out.exists(), "{pattern:?} must not create an archive");
+    }
+}
+
+/// The conflict pre-check asks the core where each entry lands, so `./` names,
+/// links, dangling-link occupants and directories are all judged by what
+/// extraction would do (#933).
+#[cfg(unix)]
+#[test]
+fn test_conflict_precheck_follows_the_landing_of_every_entry_kind() {
+    type TarEntries<'a> = Vec<(&'a str, tar::EntryType, &'a str)>;
+    let cases: Vec<(TarEntries<'_>, &str, bool)> = vec![
+        (
+            vec![("./a.txt", tar::EntryType::Regular, "x")],
+            "a.txt",
+            true,
+        ),
+        (vec![("l", tar::EntryType::Symlink, "t")], "l", true),
+        (vec![("d/", tar::EntryType::Directory, "")], "d", false),
+        (vec![("f", tar::EntryType::Regular, "x")], "f", true),
+    ];
+    for (entries, occupant, conflicts) in cases {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let archive = temp.path().join("c.tar");
+        tar_entries_archive(&archive, &entries);
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("create destination");
+        if occupant == "d" {
+            std::fs::create_dir(out.join(occupant)).expect("occupant dir");
+        } else if occupant == "f" {
+            std::os::unix::fs::symlink("nowhere", out.join(occupant)).expect("dangling occupant");
+        } else {
+            std::fs::write(out.join(occupant), "old").expect("occupant file");
+        }
+
+        let mut cmd = exarch_cmd();
+        cmd.arg("extract")
+            .arg("--allow-symlinks")
+            .arg(&archive)
+            .arg(&out);
+        if conflicts {
+            let expected = if occupant == "f" {
+                "refusing to replace the existing symlink"
+            } else {
+                "already exist"
+            };
+            cmd.assert()
+                .code(1)
+                .stderr(predicates::str::contains(expected));
+        } else {
+            cmd.assert().success();
+        }
+    }
+}
+
+/// Under `--force` a file may replace a file, but a directory can never replace
+/// a file, so a non-directory at an implied parent is refused before anything
+/// is written, as without `--force` (#933).
+#[cfg(unix)]
+#[test]
+fn test_force_still_refuses_a_non_directory_at_an_implied_parent_before_writing() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("p.tar");
+    tar_entries_archive(
+        &archive,
+        &[
+            ("first.txt", tar::EntryType::Regular, "x"),
+            ("a/b.txt", tar::EntryType::Regular, "x"),
+        ],
+    );
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+    std::fs::write(out.join("a"), "file").expect("occupant file");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--force")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let text = String::from_utf8(output).expect("utf-8 stderr");
+    assert!(text.contains("already exist"), "{text}");
+    assert!(text.contains("out/a"), "{text}");
+    assert!(
+        !out.join("first.txt").exists(),
+        "nothing may be written first"
+    );
+    assert_eq!(std::fs::read(out.join("a")).expect("kept"), b"file");
+}
+
+/// Under `--force` a symlink sitting at a file landing is refused, never
+/// replaced and never written through to its target.
+#[cfg(unix)]
+#[test]
+fn test_force_refuses_a_symlink_at_a_file_landing_and_writes_nothing_through_it() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("f.tar");
+    tar_entries_archive(&archive, &[("f.txt", tar::EntryType::Regular, "new")]);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+    let outside = temp.path().join("outside.txt");
+    std::fs::write(&outside, "keep").expect("outside file");
+    std::os::unix::fs::symlink(&outside, out.join("f.txt")).expect("occupying symlink");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--force")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains(
+            "refusing to replace the existing symlink at f.txt",
+        ));
+
+    let landed = std::fs::symlink_metadata(out.join("f.txt")).expect("landing");
+    assert!(landed.file_type().is_symlink(), "the link is left in place");
+    assert_eq!(
+        std::fs::read(&outside).expect("target untouched"),
+        b"keep",
+        "nothing may be written through the link"
+    );
+}
+
+/// The conflict pre-check does not depend on the destination's absolute
+/// length: an entry whose landing is under the host path limit extracts even
+/// when destination plus landing is over it (#895, #945).
+#[cfg(unix)]
+#[test]
+fn test_deep_destination_does_not_abort_the_conflict_pre_check() {
+    let landing = tail_of_len(954);
+    let name_len = landing.len();
+    for zip in [false, true] {
+        for force in [false, true] {
+            let temp = TempDir::new().expect("failed to create temp dir");
+            let archive = temp.path().join(if zip { "deep.zip" } else { "deep.tar" });
+            if zip {
+                let bytes = RawZip::new(vec![RawEntry::stored(&landing, b"x")])
+                    .build()
+                    .bytes;
+                std::fs::write(&archive, bytes).expect("write zip");
+            } else {
+                let mut builder = tar::Builder::new(Vec::new());
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_mode(0o644);
+                header.set_size(1);
+                builder
+                    .append_data(&mut header, &landing, &b"x"[..])
+                    .expect("deep entry");
+                std::fs::write(&archive, builder.into_inner().expect("tar bytes"))
+                    .expect("write tar");
+            }
+
+            let mut parent = temp.path().to_path_buf();
+            let mut index = 0;
+            while parent.as_os_str().len() + 1 + name_len + 8 <= HOST_PATH_LIMIT {
+                parent.push(format!("pad{index:0>37}"));
+                index += 1;
+            }
+            std::fs::create_dir_all(&parent).expect("deep parent");
+            let dest = parent.join("out");
+            assert!(
+                dest.as_os_str().len() + 1 + name_len > HOST_PATH_LIMIT,
+                "the absolute landing must be over the host limit"
+            );
+
+            let mut cmd = exarch_cmd();
+            cmd.arg("--json").arg("extract");
+            if force {
+                cmd.arg("--force");
+            }
+            let output = cmd
+                .arg(&archive)
+                .arg(&dest)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            let json: serde_json::Value =
+                serde_json::from_slice(&output).expect("one JSON document");
+            assert_eq!(
+                json["data"]["files_extracted"], 1,
+                "zip={zip} force={force}: {json}"
+            );
+        }
+    }
+}
+
+/// A verify issue carries the same code, sub-code and policy setting a failed
+/// extraction reports (#899).
+#[test]
+fn test_verify_issues_carry_typed_refusal_fields() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("l.tar");
+    tar_entries_archive(&archive, &[("l", tar::EntryType::Symlink, "t")]);
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("verify")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    let issue = &json["data"]["issues"][0];
+    assert_eq!(issue["code"], "SecurityViolation");
+    assert_eq!(issue["sub_code"], "LINK_POLICY");
+    assert_eq!(issue["relaxable_by"], "symlinks");
+    assert!(issue.get("context").is_none());
+}
+
+/// A refused exclude pattern is named, and a missing source gets a hint about
+/// the source with its path printed once (#916).
+#[test]
+fn test_create_errors_name_the_pattern_and_the_source_once() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("create")
+        .arg("-x")
+        .arg("build/*")
+        .arg(temp.path().join("o.tar.gz"))
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("exclude pattern \"build/*\""));
+
+    let missing = temp.path().join("missing-source");
+    let output = exarch_cmd()
+        .arg("create")
+        .arg(temp.path().join("o.tar.gz"))
+        .arg(&missing)
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("Verify the source path exists"))
+        .get_output()
+        .stderr
+        .clone();
+    let text = String::from_utf8(output).expect("utf-8 stderr");
+    assert_eq!(text.matches("missing-source").count(), 1, "{text}");
+}
+
+/// The staged temp file is not archived as a hidden entry when the output
+/// lies inside a source directory (#931, #906).
+#[test]
+fn test_create_inside_the_source_reports_no_skipped_staging_file() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let src = temp.path().join("src");
+    std::fs::create_dir(&src).expect("source dir");
+    std::fs::write(src.join("a.txt"), "a").expect("source file");
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("create")
+        .arg(src.join("o.tar.gz"))
+        .arg(&src)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["data"]["files_skipped"], 0, "{json}");
+    assert!(json["data"]["skipped_by_kind"].get("hidden").is_none());
+
+    // The archive itself is readable and holds exactly the source file, not
+    // the staging file or the archive being written.
+    let listing = exarch_cmd()
+        .arg("--json")
+        .arg("list")
+        .arg(src.join("o.tar.gz"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listing: serde_json::Value = serde_json::from_slice(&listing).expect("one JSON document");
+    let paths: Vec<_> = listing["data"]["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter_map(|e| e["path"].as_str())
+        .filter(|p| !p.ends_with('/'))
+        .collect();
+    assert_eq!(paths.len(), 1, "{listing}");
+    assert!(paths[0].ends_with("a.txt"), "{listing}");
+    exarch_cmd()
+        .arg("verify")
+        .arg(src.join("o.tar.gz"))
+        .assert()
+        .success();
+}
+
+/// A file or a link where the archive needs a directory is reported at that
+/// path, before anything is written (#933).
+#[cfg(unix)]
+#[test]
+fn test_conflict_at_an_implied_parent_is_reported_there_before_any_write() {
+    for (occupant, entries) in [
+        (
+            "a",
+            vec![
+                ("first.txt", tar::EntryType::Regular, "x"),
+                ("a/b.txt", tar::EntryType::Regular, "x"),
+            ],
+        ),
+        (
+            "link",
+            vec![
+                ("first.txt", tar::EntryType::Regular, "x"),
+                ("link/x", tar::EntryType::Regular, "x"),
+            ],
+        ),
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let archive = temp.path().join("p.tar");
+        tar_entries_archive(&archive, &entries);
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("create destination");
+        if occupant == "a" {
+            std::fs::write(out.join("a"), "file").expect("occupant file");
+        } else {
+            std::os::unix::fs::symlink("../elsewhere", out.join("link")).expect("occupant link");
+        }
+
+        let output = exarch_cmd()
+            .arg("extract")
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .code(1)
+            .get_output()
+            .stderr
+            .clone();
+        let text = String::from_utf8(output).expect("utf-8 stderr");
+        if occupant == "a" {
+            assert!(text.contains("already exist"), "{text}");
+            assert!(text.contains(&format!("out/{occupant}")), "{text}");
+            assert!(
+                !text.contains(&format!("out/{occupant}/")),
+                "reported below the occupant: {text}"
+            );
+        } else {
+            // A link keeps the library's typed security refusal.
+            assert!(!text.contains("already exist"), "{text}");
+            assert!(text.contains("symlink") || text.contains("link"), "{text}");
+        }
+        assert!(
+            !out.join("first.txt").exists(),
+            "nothing may be written first"
+        );
+    }
+}
+
+/// Two names that differ only in invalid bytes stay distinct in every text and
+/// JSON output, and U+FFFD never appears (#925).
+#[cfg(unix)]
+#[test]
+fn test_non_utf8_names_render_injectively_everywhere() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("raw.tar");
+    let mut builder = tar::Builder::new(Vec::new());
+    for raw in [&b"caf\xe9"[..], &b"caf\xe8"[..]] {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_mode(0o777);
+        header.set_size(0);
+        builder
+            .append_link(
+                &mut header,
+                std::path::Path::new(OsStr::from_bytes(raw)),
+                "t",
+            )
+            .expect("raw entry");
+    }
+    std::fs::write(&archive, builder.into_inner().expect("tar bytes")).expect("write tar");
+
+    for json_mode in [false, true] {
+        for command in ["list", "verify"] {
+            let mut cmd = exarch_cmd();
+            if json_mode {
+                cmd.arg("--json");
+            }
+            cmd.arg(command);
+            if command == "list" {
+                cmd.arg("-l");
+            }
+            let output = cmd.arg(&archive).assert().get_output().stdout.clone();
+            let text = String::from_utf8(output).expect("utf-8 output");
+            // JSON writes the escape's backslash as `\\`.
+            let (first, second) = if json_mode {
+                ("caf\\\\xE9", "caf\\\\xE8")
+            } else {
+                ("caf\\xE9", "caf\\xE8")
+            };
+            assert!(text.contains(first), "{command} json={json_mode}: {text}");
+            assert!(text.contains(second), "{command} json={json_mode}: {text}");
+            assert!(
+                !text.contains('\u{fffd}'),
+                "{command} json={json_mode}: {text}"
+            );
+        }
+    }
+
+    // APFS refuses to create a file with a non-UTF-8 name, so the parts that
+    // need one on disk run where the filesystem allows it.
+    #[cfg(target_os = "linux")]
+    {
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("destination");
+        std::fs::write(out.join(OsStr::from_bytes(b"caf\xe9")), "x").expect("occupant");
+        let stderr = exarch_cmd()
+            .arg("extract")
+            .arg("--allow-symlinks")
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .code(1)
+            .get_output()
+            .stderr
+            .clone();
+        let text = String::from_utf8(stderr).expect("utf-8 stderr");
+        assert!(
+            text.contains("caf\\xE9") && !text.contains('\u{fffd}'),
+            "{text}"
+        );
+
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("source dir");
+        std::fs::write(src.join(OsStr::from_bytes(b".caf\xe9")), "x").expect("hidden raw file");
+        std::fs::write(src.join(OsStr::from_bytes(b".caf\xe8")), "x").expect("hidden raw file");
+        let output = exarch_cmd()
+            .arg("--json")
+            .arg("create")
+            .arg(temp.path().join("c.tar.gz"))
+            .arg(&src)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(output).expect("utf-8 output");
+        assert!(
+            text.contains(".caf\\\\xE9") && text.contains(".caf\\\\xE8"),
+            "{text}"
+        );
+        assert!(!text.contains('\u{fffd}'), "{text}");
+    }
+}
+
+/// An invalid-permissions refusal carries its raw mode as a number (#899).
+#[cfg(unix)]
+#[test]
+fn test_verify_json_reports_the_mode_of_an_invalid_permissions_refusal() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("setuid.tar.gz");
+    create_setuid_tar_gz(&archive);
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("verify")
+        .arg(&archive)
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    let modes: Vec<_> = json["data"]["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter_map(|issue| issue["mode"].as_u64())
+        .collect();
+    assert_eq!(modes, vec![0o4755, 0o4755], "{json}");
+}
+
+/// Each refused shape is a typed core refusal that names the pattern and its
+/// reason; the CLI adds no text of its own (#916).
+#[test]
+fn test_create_refuses_each_exclude_shape_with_the_core_reason() {
+    for (pattern, reason) in [
+        ("?.txt", "not glob syntax"),
+        ("[a", "not glob syntax"),
+        ("{a,b}", "contains a comma"),
+        ("!a.txt", "not glob syntax"),
+        (" .env", "whitespace"),
+        ("a,b", "contains a comma"),
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let out = temp.path().join("o.tar.gz");
+        let output = exarch_cmd()
+            .arg("--json")
+            .arg("create")
+            .arg("-x")
+            .arg(pattern)
+            .arg(&out)
+            .arg(fixture_path("sample.txt"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+        assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{pattern:?}");
+        assert_eq!(json["error"]["setting"], "exclude_pattern", "{pattern:?}");
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains(&format!("{pattern:?}")),
+            "{pattern:?}: {message}"
+        );
+        assert!(message.contains(reason), "{pattern:?}: {message}");
+        assert!(!out.exists(), "{pattern:?} must not create an archive");
+    }
+}
+
+/// Exclude matching works on raw name bytes, so `*.key` drops a file whose
+/// name is not valid UTF-8 (#916).
+#[cfg(unix)]
+#[test]
+fn test_exclude_pattern_matches_a_non_utf8_name() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let src = temp.path().join("src");
+    std::fs::create_dir(&src).expect("source dir");
+    std::fs::write(src.join("ok.txt"), "x").expect("source file");
+    if std::fs::write(src.join(OsStr::from_bytes(b"\xff.key")), "payload").is_err() {
+        eprintln!("skipping: this filesystem refuses non-UTF-8 names");
+        return;
+    }
+
+    let archive = temp.path().join("o.tar");
+    exarch_cmd()
+        .arg("create")
+        .arg("-x")
+        .arg("*.key")
+        .arg(&archive)
+        .arg(&src)
+        .assert()
+        .success();
+    let listing = exarch_cmd()
+        .arg("list")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(listing).expect("utf-8 listing");
+    assert!(text.contains("ok.txt"), "{text}");
+    assert!(!text.contains(".key"), "{text}");
+}
+
+#[test]
+fn test_fractional_compression_ratio_is_accepted() {
+    exarch_cmd()
+        .arg("list")
+        .arg("--max-compression-ratio")
+        .arg("2.5")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_create_compression_level_refusal_is_exit_1() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("create")
+        .arg("-l")
+        .arg("0")
+        .arg(temp.path().join("t.tar.gz"))
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("between 1 and 9"));
 }
 
 #[test]
@@ -2777,10 +3857,7 @@ fn test_extract_reports_files_skipped_and_warnings_for_disallowed_extensions() {
         .success()
         .stdout(
             predicate::str::contains("Files skipped: 2")
-                .and(predicate::str::contains("Warnings:"))
-                .and(predicate::str::contains(
-                    "skipped 2 entries with disallowed extensions",
-                )),
+                .and(predicate::str::contains("Warnings:").not()),
         );
 }
 
@@ -2812,10 +3889,7 @@ fn test_extract_json_reports_files_skipped_and_warnings_for_disallowed_extension
 
     let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
     assert_eq!(json["data"]["files_skipped"], 2);
-    assert_eq!(
-        json["data"]["warnings"][0],
-        "skipped 2 entries with disallowed extensions"
-    );
+    assert_eq!(json["data"]["warnings"], serde_json::json!([]));
 }
 
 fn make_sevenz_with_anti_item(archive: &std::path::Path) {
@@ -2934,9 +4008,13 @@ fn test_list_json_long_symlink_target() {
         .expect("expected a Symlink entry in the listing");
 
     assert_eq!(
-        symlink["symlink_target"].as_str(),
-        Some("target.txt"),
-        "symlink_target must equal the link target stored in the archive"
+        symlink["link_target"],
+        serde_json::json!({"state": "recorded", "path": "target.txt"}),
+        "link_target must equal the link target stored in the archive"
+    );
+    assert!(
+        symlink.get("symlink_target").is_none(),
+        "the old symlink_target field is gone"
     );
 }
 
@@ -2975,12 +4053,8 @@ fn test_list_json_long_regular_file_omits_link_fields() {
         .expect("expected a File entry in the listing");
 
     assert!(
-        file_entry.get("symlink_target").is_none(),
-        "regular file entry must not contain symlink_target key"
-    );
-    assert!(
-        file_entry.get("hardlink_target").is_none(),
-        "regular file entry must not contain hardlink_target key"
+        file_entry.get("link_target").is_none(),
+        "regular file entry must not contain a link_target key"
     );
 }
 
@@ -4742,11 +5816,14 @@ fn test_sevenz_unix_symlink_needs_allow_symlinks() {
             .expect("entries")
             .iter()
             .find(|e| e["entry_type"] == "Symlink")
-            .expect("symlink entry")["symlink_target"]
+            .expect("symlink entry")["link_target"]
             .clone()
     };
-    assert_eq!(listed_target(&[]), serde_json::Value::Null);
-    assert_eq!(listed_target(&["--read-link-targets"]), "a.txt");
+    assert_eq!(listed_target(&[]), serde_json::json!({"state": "unread"}));
+    assert_eq!(
+        listed_target(&["--read-link-targets"]),
+        serde_json::json!({"state": "recorded", "path": "a.txt"})
+    );
 }
 
 /// `list -l` shows a 7z link target only on request and marks a link whose
@@ -4873,7 +5950,7 @@ fn test_sevenz_unix_symlink_escape_is_blocked() {
         .arg("--strict")
         .arg(&archive)
         .assert()
-        .code(2);
+        .code(3);
 }
 
 /// A 7z archive with a file followed by a symlink whose target escapes the
@@ -5637,7 +6714,8 @@ fn test_extract_directory_over_file_names_the_entry() {
 }
 
 /// Regression test for #802: the occupant may be a file the destination
-/// already held.
+/// already held. The pre-check names it, since a non-directory at the landing
+/// of a directory entry is a conflict (#933).
 #[test]
 fn test_extract_directory_over_preexisting_file_names_the_entry() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -5654,7 +6732,11 @@ fn test_extract_directory_over_preexisting_file_names_the_entry() {
         .assert()
         .code(1)
         .stderr(
-            predicate::str::contains("refusing to replace the existing file at x")
+            predicate::str::contains("already exists")
+                .and(predicate::str::contains(format!(
+                    "out{}x",
+                    std::path::MAIN_SEPARATOR
+                )))
                 .and(predicate::str::contains("os error").not()),
         );
 }
@@ -5996,6 +7078,12 @@ fn test_extract_under_unadmittable_existing_symlink_does_not_suggest_allow_symli
             .clone();
         let stderr = String::from_utf8(stderr).expect("UTF-8 stderr");
         assert!(!stderr.contains("--allow-symlinks"), "{link}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "refusing to create {link}/x under the existing symlink at {link}"
+            )),
+            "{link}: {stderr}"
+        );
 
         let stdout = exarch_cmd()
             .arg("extract")

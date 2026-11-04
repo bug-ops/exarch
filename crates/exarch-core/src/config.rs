@@ -1,10 +1,7 @@
 //! Security configuration for archive extraction.
 
-use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
-use std::ops::Deref;
-use std::ops::DerefMut;
 
 use crate::ConfigProblem;
 use crate::ConfigSetting;
@@ -12,58 +9,74 @@ use crate::Limit;
 use crate::RatioLimit;
 use crate::closed_enum::closed_enum;
 use crate::non_zero;
+use crate::non_zero_u64;
 use crate::types::Extension;
 use crate::types::PathComponentName;
 
-/// Marker type for a [`SecurityConfig`] whose invariants have not yet been
-/// checked.
-///
-/// This is the default type parameter for [`SecurityConfig`]. The fluent
-/// `with_*` builder methods and [`SecurityConfig::validate`] are only
-/// available in this state.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Unvalidated;
+closed_enum! {
+    /// Whether an archive feature is admitted.
+    ///
+    /// Names the stored state of each [`AllowedFeatures`] field instead of an
+    /// unlabeled `bool`. The default is [`Refuse`](Admit::Refuse), the
+    /// deny-by-default policy.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::Admit;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// assert_eq!(SecurityConfig::default().allowed.symlinks, Admit::Refuse);
+    /// let config = SecurityConfig::default().with_allow_symlinks(true);
+    /// assert!(config.allowed.symlinks.is_allowed());
+    /// assert_eq!(Admit::from_allowed(false), Admit::Refuse);
+    /// ```
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+    pub enum Admit {
+        /// The feature is refused
+        #[default]
+        Refuse => "refuse",
 
-/// Marker type for a [`SecurityConfig`] whose invariants have been checked.
-///
-/// Reachable only through [`SecurityConfig::validate`]. Every entry point
-/// that performs security-sensitive work — the
-/// [`ArchiveFormat`](crate::formats::traits::ArchiveFormat) trait and
-/// everything it calls — requires a `SecurityConfig<Validated>`, so an
-/// unvalidated configuration (e.g. one with `max_file_size == 0`) can never
-/// reach extraction, listing, or verification. The compiler enforces this;
-/// it is not a convention callers must remember to follow.
-///
-/// Once validated, a config's fields can still be *read* (via [`Deref`]) but
-/// no longer *written*: [`DerefMut`] is implemented only for
-/// `SecurityConfig<Unvalidated>`, so `cfg.max_compression_ratio = f64::NAN`
-/// on a `SecurityConfig<Validated>` is a compile error, not a runtime
-/// invariant violation. This is what makes the typestate airtight — without
-/// it, a caller could validate a config and then mutate it back into an
-/// invalid state before passing it to `ArchiveFormat::extract`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Validated;
+        /// The feature is admitted
+        Allow => "allow",
+    }
+}
+
+impl Admit {
+    /// Returns `true` for [`Allow`](Admit::Allow).
+    #[must_use]
+    pub const fn is_allowed(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+
+    /// [`Allow`](Admit::Allow) when `allowed` is `true`, otherwise
+    /// [`Refuse`](Admit::Refuse).
+    #[must_use]
+    pub const fn from_allowed(allowed: bool) -> Self {
+        if allowed { Self::Allow } else { Self::Refuse }
+    }
+}
 
 /// Feature flags controlling what archive features are allowed during
 /// extraction.
 ///
-/// All features default to `false` (deny-by-default security policy).
+/// All features default to [`Admit::Refuse`] (deny-by-default security policy).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AllowedFeatures {
     /// Allow symlinks in extracted archives.
-    pub symlinks: bool,
+    pub symlinks: Admit,
 
     /// Allow hardlinks in extracted archives.
-    pub hardlinks: bool,
+    pub hardlinks: Admit,
 
     /// Allow absolute paths in archive entries.
-    pub absolute_paths: bool,
+    pub absolute_paths: Admit,
 
     /// Allow world-writable files (mode 0o002).
     ///
     /// World-writable files pose security risks in multi-user environments.
-    pub world_writable: bool,
+    pub world_writable: Admit,
 
     /// Allow Windows reserved device names (`CON`, `NUL`, `COM1`, ...) as path
     /// components.
@@ -71,7 +84,7 @@ pub struct AllowedFeatures {
     /// Only consulted when extracting on Windows; has no effect elsewhere.
     /// There is no CLI or binding opt-out, and the permissive preset does not
     /// enable it.
-    pub windows_reserved_names: bool,
+    pub windows_reserved_names: Admit,
 }
 
 const DEFAULT_BANNED_PATH_COMPONENTS: [&str; 7] =
@@ -126,6 +139,195 @@ closed_enum! {
     }
 }
 
+/// Limits applied to a solid 7z archive that is admitted.
+///
+/// A solid block compresses several files into one stream, so no per-file
+/// ratio exists: `max_ratio` replaces
+/// [`max_compression_ratio`](SecurityConfig::max_compression_ratio) for its
+/// members. The limits exist only inside [`SolidArchives::Allow`], so they
+/// cannot be set while solid archives are refused.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::SolidLimits;
+///
+/// let limits = SolidLimits::DEFAULT.with_max_block_memory(exarch_core::non_zero!(1 << 20));
+/// assert_eq!(limits.max_block_memory.get(), 1 << 20);
+/// assert_eq!(limits.max_ratio, SolidLimits::DEFAULT.max_ratio);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct SolidLimits {
+    /// Maximum decoded size of a solid archive, in bytes.
+    ///
+    /// Solid members share one compressed stream, so a crafted block can
+    /// declare a far larger decoded size than its compressed size suggests.
+    /// The check compares the declared uncompressed sizes of the archive's
+    /// files with this value before any data is decoded.
+    pub max_block_memory: NonZeroU64,
+
+    /// Maximum compression ratio of a whole solid block (summed uncompressed
+    /// size of its files / compressed size of its pack streams).
+    pub max_ratio: RatioLimit,
+}
+
+impl SolidLimits {
+    /// 512 MiB of block memory and a ratio of 1000: the limits of
+    /// [`SecurityConfig::default`] once solid archives are allowed.
+    pub const DEFAULT: Self = Self {
+        max_block_memory: non_zero!(512 * 1024 * 1024),
+        max_ratio: crate::ratio_limit!(1000.0),
+    };
+    /// 1 GiB of block memory and a ratio of 10,000, as in
+    /// [`SecurityConfig::permissive`].
+    pub const PERMISSIVE: Self = Self {
+        max_block_memory: non_zero!(1024 * 1024 * 1024),
+        max_ratio: crate::ratio_limit!(10_000.0),
+    };
+
+    /// Limits from explicit values.
+    #[must_use]
+    pub const fn new(max_block_memory: NonZeroU64, max_ratio: RatioLimit) -> Self {
+        Self {
+            max_block_memory,
+            max_ratio,
+        }
+    }
+
+    /// Replaces [`max_block_memory`](Self::max_block_memory).
+    #[must_use]
+    pub const fn with_max_block_memory(mut self, max_block_memory: NonZeroU64) -> Self {
+        self.max_block_memory = max_block_memory;
+        self
+    }
+
+    /// Replaces [`max_ratio`](Self::max_ratio).
+    #[must_use]
+    pub const fn with_max_ratio(mut self, max_ratio: RatioLimit) -> Self {
+        self.max_ratio = max_ratio;
+        self
+    }
+}
+
+impl Default for SolidLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Whether solid 7z archives are extracted, and under which limits.
+///
+/// Solid archives compress several files into one block, so extracting any
+/// file requires decoding the block. A crafted archive can declare a huge
+/// block, which makes admitting solid archives a memory and CPU risk: enable
+/// them only for trusted input. The limits live in [`Allow`](Self::Allow), so
+/// they cannot be set and then ignored while the policy is
+/// [`Refuse`](Self::Refuse).
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::SolidArchives;
+/// use exarch_core::SolidLimits;
+///
+/// assert_eq!(
+///     SecurityConfig::default().solid_archives,
+///     SolidArchives::Refuse
+/// );
+/// let config = SecurityConfig::default().with_allow_solid_archives(true);
+/// assert_eq!(config.solid_archives.limits(), Some(SolidLimits::DEFAULT));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[non_exhaustive]
+pub enum SolidArchives {
+    /// Solid archives are rejected
+    #[default]
+    Refuse,
+
+    /// Solid archives are extracted within these limits
+    Allow(SolidLimits),
+}
+
+impl SolidArchives {
+    /// The limits of an admitted policy, or `None` under
+    /// [`Refuse`](Self::Refuse).
+    #[must_use]
+    pub const fn limits(self) -> Option<SolidLimits> {
+        match self {
+            Self::Refuse => None,
+            Self::Allow(limits) => Some(limits),
+        }
+    }
+
+    /// Returns `true` for [`Allow`](Self::Allow).
+    #[must_use]
+    pub const fn is_allowed(self) -> bool {
+        matches!(self, Self::Allow(_))
+    }
+
+    /// Admits or refuses solid archives.
+    ///
+    /// `true` keeps the limits of an already admitted policy and otherwise
+    /// admits under [`SolidLimits::DEFAULT`]; `false` refuses and drops any
+    /// limits.
+    #[must_use]
+    pub const fn with_allowed(self, allow: bool) -> Self {
+        match (allow, self) {
+            (true, admitted @ Self::Allow(_)) => admitted,
+            (true, Self::Refuse) => Self::Allow(SolidLimits::DEFAULT),
+            (false, _) => Self::Refuse,
+        }
+    }
+
+    /// Replaces the limits of an admitted policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::MaxSolidBlockMemory`] under [`Refuse`](Self::Refuse),
+    /// because the limits would be silently ignored.
+    pub fn with_limits(self, limits: SolidLimits) -> crate::Result<Self> {
+        match self {
+            Self::Allow(_) => Ok(Self::Allow(limits)),
+            Self::Refuse => Err(crate::ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::MaxSolidBlockMemory,
+                problem: ConfigProblem::NotSupported,
+            }),
+        }
+    }
+
+    /// Replaces only the block memory limit of an admitted policy, keeping its
+    /// ratio.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`with_limits`](Self::with_limits) does.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SolidArchives;
+    /// use exarch_core::SolidLimits;
+    ///
+    /// let memory = exarch_core::non_zero!(1 << 20);
+    /// assert!(SolidArchives::Refuse.with_max_block_memory(memory).is_err());
+    ///
+    /// let allowed = SolidArchives::Allow(SolidLimits::PERMISSIVE).with_max_block_memory(memory)?;
+    /// let limits = allowed.limits().expect("an admitted policy has limits");
+    /// assert_eq!(limits.max_block_memory, memory);
+    /// assert_eq!(limits.max_ratio, SolidLimits::PERMISSIVE.max_ratio);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn with_max_block_memory(self, max_block_memory: NonZeroU64) -> crate::Result<Self> {
+        match self {
+            Self::Allow(limits) => Ok(Self::Allow(limits.with_max_block_memory(max_block_memory))),
+            Self::Refuse => self.with_limits(SolidLimits::DEFAULT),
+        }
+    }
+}
+
 /// How much extra memory a 7z block may use to decode LZMA2 runs ahead on
 /// worker threads.
 ///
@@ -134,7 +336,7 @@ closed_enum! {
 /// Decoded runs wait in memory until the consumer reaches them, so the
 /// lookahead is bounded: `Bounded(n)` lets in-flight runs hold at most `n`
 /// bytes on top of the decoder window that
-/// [`max_decoder_memory`](SecurityConfigFields::max_decoder_memory) already
+/// [`max_decoder_memory`](SecurityConfig::max_decoder_memory) already
 /// admits. `Sequential` decodes on the calling thread only.
 ///
 /// Archives written with runs of a few MiB decode within about 10% of an
@@ -179,20 +381,12 @@ pub enum ParallelDecode {
     Bounded(NonZeroU64),
 }
 
-/// Builds a non-zero constant; a zero literal fails compilation.
-const fn non_zero(n: u64) -> NonZeroU64 {
-    match NonZeroU64::new(n) {
-        Some(n) => n,
-        None => panic!("constant must be non-zero"),
-    }
-}
-
 /// Default base of the compressed member allowance.
-pub(crate) const DEFAULT_MEMBER_ALLOWANCE: NonZeroU64 = non_zero(10_000);
+pub(crate) const DEFAULT_MEMBER_ALLOWANCE: NonZeroU64 = non_zero!(10_000);
 
 impl ParallelDecode {
     /// Default lookahead: 128 MiB.
-    pub const DEFAULT_BYTES: NonZeroU64 = non_zero(128 * 1024 * 1024);
+    pub const DEFAULT_BYTES: NonZeroU64 = non_zero!(128 * 1024 * 1024);
 
     /// The lookahead memory in bytes, or `None` for [`Sequential`].
     ///
@@ -218,10 +412,36 @@ impl ParallelDecode {
     }
 }
 
+impl ParallelDecode {
+    /// The mode for an optional lookahead: `None` is
+    /// [`Sequential`](Self::Sequential).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroU64;
+    ///
+    /// use exarch_core::ParallelDecode;
+    ///
+    /// assert_eq!(ParallelDecode::from_bytes(None), ParallelDecode::Sequential);
+    /// let bytes = NonZeroU64::MIN;
+    /// assert_eq!(
+    ///     ParallelDecode::from_bytes(Some(bytes)),
+    ///     ParallelDecode::Bounded(bytes)
+    /// );
+    /// ```
+    #[must_use]
+    pub const fn from_bytes(lookahead: Option<NonZeroU64>) -> Self {
+        match lookahead {
+            Some(bytes) => Self::Bounded(bytes),
+            None => Self::Sequential,
+        }
+    }
+}
+
 impl From<Option<NonZeroU64>> for ParallelDecode {
-    /// `None` is [`ParallelDecode::Sequential`].
     fn from(lookahead: Option<NonZeroU64>) -> Self {
-        lookahead.map_or(Self::Sequential, Self::Bounded)
+        Self::from_bytes(lookahead)
     }
 }
 
@@ -231,22 +451,35 @@ impl Default for ParallelDecode {
     }
 }
 
-/// The field data of a [`SecurityConfig`], reachable via [`Deref`]/[`DerefMut`]
-/// regardless of (or gated by) validation state.
+/// Security configuration with default-deny settings.
 ///
-/// This type is not itself part of the sealing boundary — it is a plain data
-/// bag with `pub` fields, and nothing stops external code from naming it or
-/// cloning one out of a `&SecurityConfig`. The boundary is
-/// [`SecurityConfig`]'s own private `fields` member: there is no public API
-/// that takes a bare `SecurityConfigFields` and wraps it back into a
-/// `SecurityConfig<Validated>`, so an externally-forged or externally-mutated
-/// `SecurityConfigFields` value can never be smuggled into a `Validated`
-/// config. It exists purely so [`SecurityConfig`] can implement `Deref`/
-/// `DerefMut` and keep `cfg.max_file_size`-style field access working for
-/// every existing caller instead of forcing a getter-method migration.
+/// This configuration controls various security checks performed during
+/// archive extraction to prevent common vulnerabilities.
+///
+/// # Performance Note
+///
+/// This struct contains heap-allocated collections
+/// (`Vec<Extension>`/`Vec<PathComponentName>`). For performance, pass by
+/// reference (`&SecurityConfig`) rather than cloning. If shared ownership is
+/// needed across threads, consider wrapping in `Arc<SecurityConfig>`.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::SecurityConfig;
+///
+/// // Use secure defaults
+/// let config = SecurityConfig::default();
+///
+/// // Customize via fluent builder
+/// let custom = SecurityConfig::default()
+///     .with_max_file_size(exarch_core::non_zero!(100 * 1024 * 1024))
+///     .with_max_total_size(exarch_core::non_zero!(1024 * 1024 * 1024))
+///     .with_allow_symlinks(true);
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct SecurityConfigFields {
+pub struct SecurityConfig {
     /// Maximum size for a single file in bytes.
     pub max_file_size: Limit<NonZeroU64>,
 
@@ -255,14 +488,6 @@ pub struct SecurityConfigFields {
 
     /// Maximum compression ratio allowed (uncompressed / compressed).
     pub max_compression_ratio: RatioLimit,
-
-    /// Maximum compression ratio of a whole solid 7z block (summed
-    /// uncompressed size of its files / compressed size of its pack streams).
-    ///
-    /// Solid members share one compressed stream, so no per-file ratio exists;
-    /// this limit replaces `max_compression_ratio` for them. It is not exposed
-    /// by the CLI or the Python/Node bindings.
-    pub max_solid_compression_ratio: RatioLimit,
 
     /// Maximum number of entries that can be extracted.
     ///
@@ -294,46 +519,25 @@ pub struct SecurityConfigFields {
     /// List of banned path components (e.g., ".git", ".ssh").
     pub banned_path_components: Vec<PathComponentName>,
 
-    /// Allow extraction from solid 7z archives.
+    /// Whether solid 7z archives are extracted, and under which limits.
     ///
     /// Solid archives compress multiple files together as a single block.
     /// While this provides better compression ratios, it has security
     /// implications:
     ///
-    /// - **Memory exhaustion**: Extracting a single file requires decompressing
-    ///   the entire solid block into memory
-    /// - **Denial of service**: Malicious archives can create large solid
-    ///   blocks that exhaust available memory
+    /// - **Denial of service**: a malicious archive can declare very large
+    ///   solid blocks that exhaust CPU time and disk space
+    /// - **Decoded volume**: the block limit bounds the decoded size of the
+    ///   archive's files, not resident memory; decoding streams, and the memory
+    ///   of parallel decoding is bounded by
+    ///   [`parallel_decode`](Self::parallel_decode)
     ///
     /// **Security Recommendation**: Only enable for trusted archives.
     ///
-    /// Default: `false` (solid archives rejected)
-    pub allow_solid_archives: bool,
-
-    /// Maximum memory for solid archive extraction (bytes).
-    ///
-    /// **7z Solid Archive Memory Model:**
-    ///
-    /// Solid compression in 7z stores multiple files in a single compressed
-    /// block. Extracting ANY file requires decompressing the ENTIRE solid block
-    /// into memory, which can cause memory exhaustion attacks.
-    ///
-    /// **Validation Strategy:**
-    /// - Pre-validates total uncompressed size of all files in archive
-    /// - This is a conservative heuristic (assumes single solid block)
-    /// - Reason: `sevenz-rust2` v0.20 doesn't expose solid block boundaries
-    ///
-    /// **Security Guarantee:**
-    /// - Total uncompressed data cannot exceed this limit
-    /// - Combined with `max_file_size`, prevents unbounded memory growth
-    /// - Enforced ONLY when `allow_solid_archives` is `true`
-    ///
-    /// **Note**: Only applies when `allow_solid_archives` is `true`.
-    ///
-    /// Default: 512 MB (536,870,912 bytes)
-    ///
-    /// **Recommendation:** Set to 1-2x available RAM for trusted archives only.
-    pub max_solid_block_memory: NonZeroU64,
+    /// Default: [`SolidArchives::Refuse`] (solid archives rejected). The limits
+    /// of an admitted policy default to [`SolidLimits::DEFAULT`] (512 MiB,
+    /// ratio 1000).
+    pub solid_archives: SolidArchives,
 
     /// Maximum bytes the TAR reader may consume for headers and metadata
     /// records in the gap between two consecutive entries.
@@ -445,120 +649,21 @@ pub struct SecurityConfigFields {
     pub zip_consistency: ZipConsistencyPolicy,
 }
 
-impl Default for SecurityConfigFields {
-    fn default() -> Self {
-        Self {
-            max_file_size: Limit::Bounded(non_zero!(50 * 1024 * 1024)), // 50 MB
-            max_total_size: Limit::Bounded(non_zero!(500 * 1024 * 1024)), // 500 MB
-            max_compression_ratio: crate::ratio_limit!(100.0),
-            max_solid_compression_ratio: crate::ratio_limit!(1000.0),
-            max_file_count: Limit::Bounded(non_zero!(10_000)),
-            max_path_depth: non_zero!(32),
-            allowed: AllowedFeatures::default(), // All false
-            preserve_permissions: false,
-            allowed_extensions: Vec::new(),
-            banned_path_components: default_banned_path_components(),
-            allow_solid_archives: false,
-            max_solid_block_memory: non_zero!(512 * 1024 * 1024), // 512 MB
-            max_tar_metadata_bytes: non_zero!(4 * 1024 * 1024),   // 4 MiB
-            max_decoder_memory: non_zero!(256 * 1024 * 1024),     // 256 MiB
-            compressed_member_allowance: DEFAULT_MEMBER_ALLOWANCE,
-            parallel_decode: ParallelDecode::Bounded(ParallelDecode::DEFAULT_BYTES),
-            zip_consistency: ZipConsistencyPolicy::Enforce,
-        }
-    }
-}
-
-/// Security configuration with default-deny settings.
-///
-/// This configuration controls various security checks performed during
-/// archive extraction to prevent common vulnerabilities.
-///
-/// # Performance Note
-///
-/// This struct contains heap-allocated collections (`Vec<String>`). For
-/// performance, pass by reference (`&SecurityConfig`) rather than cloning. If
-/// shared ownership is needed across threads, consider wrapping in
-/// `Arc<SecurityConfig>`.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::SecurityConfig;
-///
-/// // Use secure defaults
-/// let config = SecurityConfig::default();
-///
-/// // Customize via fluent builder
-/// let custom = SecurityConfig::default()
-///     .with_max_file_size(exarch_core::non_zero!(100 * 1024 * 1024))
-///     .with_max_total_size(exarch_core::non_zero!(1024 * 1024 * 1024))
-///     .with_allow_symlinks(true);
-/// ```
-///
-/// # Typestate
-///
-/// `SecurityConfig` carries a phantom `State` type parameter — [`Unvalidated`]
-/// (the default) or [`Validated`] — that tracks whether
-/// [`validate`](SecurityConfig::validate) has been called. Builder methods
-/// are only available in the `Unvalidated` state; security-sensitive APIs
-/// (the [`ArchiveFormat`](crate::formats::traits::ArchiveFormat) trait and
-/// everything downstream of it) require `SecurityConfig<Validated>`. This
-/// makes skipping validation a compile error instead of a runtime gap.
-///
-/// # Sealing
-///
-/// Fields are private and reachable only through
-/// <code>[Deref]<Target = [SecurityConfigFields]></code>, so
-/// `cfg.max_file_size` continues to work as plain field access for both states.
-/// [`DerefMut`] is implemented only for
-/// `SecurityConfig<Unvalidated>`, so a `SecurityConfig<Validated>`'s fields
-/// cannot be reassigned after the fact — the only way to produce one is
-/// [`validate`](SecurityConfig::validate) itself, and it stays that way for
-/// its entire lifetime.
-#[derive(Debug, Clone)]
-pub struct SecurityConfig<State = Unvalidated> {
-    fields: SecurityConfigFields,
-
-    /// Typestate marker — see the "Typestate" section on the type-level docs.
-    _marker: PhantomData<State>,
-}
-
-impl<State> Deref for SecurityConfig<State> {
-    type Target = SecurityConfigFields;
-
-    #[inline]
-    fn deref(&self) -> &SecurityConfigFields {
-        &self.fields
-    }
-}
-
-/// Only `Unvalidated` configs are mutable — see the "Sealing" section on
-/// [`SecurityConfig`]'s type-level docs for why this is the crux of the
-/// typestate guarantee.
-impl DerefMut for SecurityConfig<Unvalidated> {
-    fn deref_mut(&mut self) -> &mut SecurityConfigFields {
-        &mut self.fields
-    }
-}
-
-impl Default for SecurityConfig<Unvalidated> {
+impl Default for SecurityConfig {
     /// Creates a `SecurityConfig` with secure default settings.
     ///
     /// Default values:
     /// - `max_file_size`: 50 MB
     /// - `max_total_size`: 500 MB
     /// - `max_compression_ratio`: 100.0
-    /// - `max_solid_compression_ratio`: 1000.0
     /// - `max_file_count`: 10,000
     /// - `max_path_depth`: 32
-    /// - `allowed`: All features disabled (deny-by-default)
+    /// - `allowed`: All features refused (deny-by-default)
     /// - `preserve_permissions`: false
     /// - `allowed_extensions`: empty (allow all)
     /// - `banned_path_components`: `[".git", ".ssh", ".gnupg", ".aws", ".kube",
     ///   ".docker", ".env"]`
-    /// - `allow_solid_archives`: false (solid archives rejected)
-    /// - `max_solid_block_memory`: 512 MB
+    /// - `solid_archives`: [`SolidArchives::Refuse`] (solid archives rejected)
     /// - `max_tar_metadata_bytes`: 4 MiB
     /// - `max_decoder_memory`: 256 MiB
     /// - `compressed_member_allowance`: 10,000
@@ -566,16 +671,29 @@ impl Default for SecurityConfig<Unvalidated> {
     /// - `zip_consistency`: `Enforce`
     fn default() -> Self {
         Self {
-            fields: SecurityConfigFields::default(),
-            _marker: PhantomData,
+            max_file_size: Limit::Bounded(non_zero!(50 * 1024 * 1024)), // 50 MB
+            max_total_size: Limit::Bounded(non_zero!(500 * 1024 * 1024)), // 500 MB
+            max_compression_ratio: crate::ratio_limit!(100.0),
+            max_file_count: Limit::Bounded(non_zero!(10_000)),
+            max_path_depth: non_zero!(32),
+            allowed: AllowedFeatures::default(), // All false
+            preserve_permissions: false,
+            allowed_extensions: Vec::new(),
+            banned_path_components: default_banned_path_components(),
+            solid_archives: SolidArchives::Refuse,
+            max_tar_metadata_bytes: non_zero!(4 * 1024 * 1024), // 4 MiB
+            max_decoder_memory: non_zero!(256 * 1024 * 1024),   // 256 MiB
+            compressed_member_allowance: DEFAULT_MEMBER_ALLOWANCE,
+            parallel_decode: ParallelDecode::Bounded(ParallelDecode::DEFAULT_BYTES),
+            zip_consistency: ZipConsistencyPolicy::Enforce,
         }
     }
 }
 
 /// Lookahead memory of [`SecurityConfig::permissive`]: 1 GiB.
-const PERMISSIVE_PARALLEL_DECODE: NonZeroU64 = non_zero(1024 * 1024 * 1024);
+const PERMISSIVE_PARALLEL_DECODE: NonZeroU64 = non_zero!(1024 * 1024 * 1024);
 
-impl SecurityConfig<Unvalidated> {
+impl SecurityConfig {
     /// Creates a permissive configuration for trusted archives.
     ///
     /// This configuration allows symlinks, hardlinks, absolute paths, and
@@ -583,58 +701,23 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     pub fn permissive() -> Self {
         Self {
-            fields: SecurityConfigFields {
-                allowed: AllowedFeatures {
-                    symlinks: true,
-                    hardlinks: true,
-                    absolute_paths: true,
-                    world_writable: true,
-                    windows_reserved_names: false,
-                },
-                preserve_permissions: true,
-                max_compression_ratio: crate::ratio_limit!(1000.0),
-                max_solid_compression_ratio: crate::ratio_limit!(10_000.0),
-                banned_path_components: Vec::new(),
-                allow_solid_archives: true,
-                max_solid_block_memory: non_zero!(1024 * 1024 * 1024), // 1 GB for permissive
-                max_tar_metadata_bytes: non_zero!(16 * 1024 * 1024),   // 16 MiB for permissive
-                max_decoder_memory: non_zero!(1024 * 1024 * 1024),     // 1 GiB for permissive
-                compressed_member_allowance: non_zero(100_000),
-                parallel_decode: ParallelDecode::Bounded(PERMISSIVE_PARALLEL_DECODE),
-                ..SecurityConfigFields::default()
+            allowed: AllowedFeatures {
+                symlinks: Admit::Allow,
+                hardlinks: Admit::Allow,
+                absolute_paths: Admit::Allow,
+                world_writable: Admit::Allow,
+                windows_reserved_names: Admit::Refuse,
             },
-            _marker: PhantomData,
+            preserve_permissions: true,
+            max_compression_ratio: crate::ratio_limit!(1000.0),
+            banned_path_components: Vec::new(),
+            solid_archives: SolidArchives::Allow(SolidLimits::PERMISSIVE),
+            max_tar_metadata_bytes: non_zero!(16 * 1024 * 1024), // 16 MiB for permissive
+            max_decoder_memory: non_zero!(1024 * 1024 * 1024),   // 1 GiB for permissive
+            compressed_member_allowance: non_zero!(100_000),
+            parallel_decode: ParallelDecode::Bounded(PERMISSIVE_PARALLEL_DECODE),
+            ..Self::default()
         }
-    }
-
-    /// Validates that the configuration values are logically consistent,
-    /// transitioning to the [`Validated`] typestate on success.
-    ///
-    /// Every limit is already a positive typed value, so nothing is left to
-    /// refuse today; the check stays the single gate to the `Validated` state
-    /// for list and cross-field rules. Consumes `self`: the only way to obtain
-    /// a `SecurityConfig<Validated>`, which is what every security-sensitive
-    /// API in this crate requires. Once returned, the `Validated` config's
-    /// fields can no longer be reassigned (see the "Sealing" section on the
-    /// type-level docs), so this check can never be silently invalidated
-    /// afterward.
-    ///
-    /// # Errors
-    ///
-    /// Currently never fails.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::SecurityConfig;
-    ///
-    /// assert!(SecurityConfig::default().validate().is_ok());
-    /// ```
-    pub fn validate(self) -> crate::Result<SecurityConfig<Validated>> {
-        Ok(SecurityConfig {
-            fields: self.fields,
-            _marker: PhantomData,
-        })
     }
 
     /// Sets the maximum size for a single extracted file in bytes.
@@ -651,7 +734,7 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_max_file_size(mut self, size: impl Into<Limit<NonZeroU64>>) -> Self {
-        self.fields.max_file_size = size.into();
+        self.max_file_size = size.into();
         self
     }
 
@@ -669,7 +752,7 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_max_total_size(mut self, size: impl Into<Limit<NonZeroU64>>) -> Self {
-        self.fields.max_total_size = size.into();
+        self.max_total_size = size.into();
         self
     }
 
@@ -687,25 +770,7 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_max_compression_ratio(mut self, ratio: RatioLimit) -> Self {
-        self.fields.max_compression_ratio = ratio;
-        self
-    }
-
-    /// Sets the maximum compression ratio of a whole solid 7z block.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::SecurityConfig;
-    ///
-    /// let config = SecurityConfig::default()
-    ///     .with_max_solid_compression_ratio(exarch_core::ratio_limit!(5000.0));
-    /// assert_eq!(config.max_solid_compression_ratio.get(), 5000.0);
-    /// ```
-    #[must_use]
-    #[inline]
-    pub fn with_max_solid_compression_ratio(mut self, ratio: RatioLimit) -> Self {
-        self.fields.max_solid_compression_ratio = ratio;
+        self.max_compression_ratio = ratio;
         self
     }
 
@@ -722,7 +787,7 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_max_file_count(mut self, count: impl Into<Limit<NonZeroUsize>>) -> Self {
-        self.fields.max_file_count = count.into();
+        self.max_file_count = count.into();
         self
     }
 
@@ -739,7 +804,7 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_max_path_depth(mut self, depth: NonZeroUsize) -> Self {
-        self.fields.max_path_depth = depth;
+        self.max_path_depth = depth;
         self
     }
 
@@ -753,12 +818,12 @@ impl SecurityConfig<Unvalidated> {
     ///
     /// let features = AllowedFeatures::default();
     /// let config = SecurityConfig::default().with_allowed(features);
-    /// assert!(!config.allowed.symlinks);
+    /// assert!(!config.allowed.symlinks.is_allowed());
     /// ```
     #[must_use]
     #[inline]
     pub fn with_allowed(mut self, allowed: AllowedFeatures) -> Self {
-        self.fields.allowed = allowed;
+        self.allowed = allowed;
         self
     }
 
@@ -770,12 +835,12 @@ impl SecurityConfig<Unvalidated> {
     /// use exarch_core::SecurityConfig;
     ///
     /// let config = SecurityConfig::default().with_allow_symlinks(true);
-    /// assert!(config.allowed.symlinks);
+    /// assert!(config.allowed.symlinks.is_allowed());
     /// ```
     #[must_use]
     #[inline]
     pub fn with_allow_symlinks(mut self, allow: bool) -> Self {
-        self.fields.allowed.symlinks = allow;
+        self.allowed.symlinks = Admit::from_allowed(allow);
         self
     }
 
@@ -787,12 +852,12 @@ impl SecurityConfig<Unvalidated> {
     /// use exarch_core::SecurityConfig;
     ///
     /// let config = SecurityConfig::default().with_allow_hardlinks(true);
-    /// assert!(config.allowed.hardlinks);
+    /// assert!(config.allowed.hardlinks.is_allowed());
     /// ```
     #[must_use]
     #[inline]
     pub fn with_allow_hardlinks(mut self, allow: bool) -> Self {
-        self.fields.allowed.hardlinks = allow;
+        self.allowed.hardlinks = Admit::from_allowed(allow);
         self
     }
 
@@ -804,12 +869,12 @@ impl SecurityConfig<Unvalidated> {
     /// use exarch_core::SecurityConfig;
     ///
     /// let config = SecurityConfig::default().with_allow_absolute_paths(true);
-    /// assert!(config.allowed.absolute_paths);
+    /// assert!(config.allowed.absolute_paths.is_allowed());
     /// ```
     #[must_use]
     #[inline]
     pub fn with_allow_absolute_paths(mut self, allow: bool) -> Self {
-        self.fields.allowed.absolute_paths = allow;
+        self.allowed.absolute_paths = Admit::from_allowed(allow);
         self
     }
 
@@ -821,12 +886,12 @@ impl SecurityConfig<Unvalidated> {
     /// use exarch_core::SecurityConfig;
     ///
     /// let config = SecurityConfig::default().with_allow_world_writable(true);
-    /// assert!(config.allowed.world_writable);
+    /// assert!(config.allowed.world_writable.is_allowed());
     /// ```
     #[must_use]
     #[inline]
     pub fn with_allow_world_writable(mut self, allow: bool) -> Self {
-        self.fields.allowed.world_writable = allow;
+        self.allowed.world_writable = Admit::from_allowed(allow);
         self
     }
 
@@ -839,12 +904,12 @@ impl SecurityConfig<Unvalidated> {
     /// use exarch_core::SecurityConfig;
     ///
     /// let config = SecurityConfig::default().with_allow_windows_reserved_names(true);
-    /// assert!(config.allowed.windows_reserved_names);
+    /// assert!(config.allowed.windows_reserved_names.is_allowed());
     /// ```
     #[must_use]
     #[inline]
     pub fn with_allow_windows_reserved_names(mut self, allow: bool) -> Self {
-        self.fields.allowed.windows_reserved_names = allow;
+        self.allowed.windows_reserved_names = Admit::from_allowed(allow);
         self
     }
 
@@ -861,7 +926,7 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_preserve_permissions(mut self, preserve: bool) -> Self {
-        self.fields.preserve_permissions = preserve;
+        self.preserve_permissions = preserve;
         self
     }
 
@@ -877,14 +942,14 @@ impl SecurityConfig<Unvalidated> {
     /// let config = SecurityConfig::default()
     ///     .try_add_allowed_extension(".txt")?
     ///     .try_add_allowed_extension("pdf")?;
-    /// assert!(config.is_extension_allowed("txt"));
-    /// assert!(!config.is_extension_allowed("exe"));
+    /// assert!(config.is_extension_allowed(Some("txt")));
+    /// assert!(!config.is_extension_allowed(Some("exe")));
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
     #[inline]
     pub fn with_allowed_extensions(mut self, extensions: Vec<Extension>) -> Self {
-        self.fields.allowed_extensions = extensions;
+        self.allowed_extensions = extensions;
         self
     }
 
@@ -895,8 +960,7 @@ impl SecurityConfig<Unvalidated> {
     /// Returns [`crate::ArchiveError::InvalidConfiguration`] when `extension`
     /// is not a usable extension.
     pub fn try_add_allowed_extension(mut self, extension: &str) -> crate::Result<Self> {
-        self.fields
-            .allowed_extensions
+        self.allowed_extensions
             .push(Extension::try_from(extension)?);
         Ok(self)
     }
@@ -908,8 +972,7 @@ impl SecurityConfig<Unvalidated> {
     /// Returns [`crate::ArchiveError::InvalidConfiguration`] when `component`
     /// is not a usable path component name.
     pub fn try_add_banned_path_component(mut self, component: &str) -> crate::Result<Self> {
-        self.fields
-            .banned_path_components
+        self.banned_path_components
             .push(PathComponentName::try_from(component)?);
         Ok(self)
     }
@@ -931,11 +994,36 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_banned_path_components(mut self, components: Vec<PathComponentName>) -> Self {
-        self.fields.banned_path_components = components;
+        self.banned_path_components = components;
+        self
+    }
+
+    /// Sets the solid 7z archive policy together with its limits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::SolidArchives;
+    /// use exarch_core::SolidLimits;
+    ///
+    /// let limits = SolidLimits::DEFAULT.with_max_block_memory(exarch_core::non_zero!(1 << 30));
+    /// let config = SecurityConfig::default().with_solid_archives(SolidArchives::Allow(limits));
+    /// assert_eq!(config.solid_archives.limits(), Some(limits));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_solid_archives(mut self, solid: SolidArchives) -> Self {
+        self.solid_archives = solid;
         self
     }
 
     /// Enables or disables extraction from solid 7z archives.
+    ///
+    /// `true` keeps the limits of an already admitted policy and otherwise
+    /// admits solid archives under [`SolidLimits::DEFAULT`]; a previous
+    /// [`Refuse`](SolidArchives::Refuse) therefore never carries limits over.
+    /// `false` refuses solid archives and drops any limits.
     ///
     /// # Examples
     ///
@@ -943,34 +1031,41 @@ impl SecurityConfig<Unvalidated> {
     /// use exarch_core::SecurityConfig;
     ///
     /// let config = SecurityConfig::default().with_allow_solid_archives(true);
-    /// assert!(config.allow_solid_archives);
+    /// assert!(config.solid_archives.is_allowed());
     /// ```
     #[must_use]
     #[inline]
     pub fn with_allow_solid_archives(mut self, allow: bool) -> Self {
-        self.fields.allow_solid_archives = allow;
+        self.solid_archives = self.solid_archives.with_allowed(allow);
         self
     }
 
-    /// Sets the maximum memory for solid archive extraction in bytes.
+    /// Sets the limits of an already admitted solid archive policy.
     ///
-    /// Only applies when `allow_solid_archives` is `true`.
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::MaxSolidBlockMemory`] when solid archives are refused,
+    /// because the limits would be silently ignored.
     ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::SecurityConfig;
+    /// use exarch_core::SolidLimits;
+    ///
+    /// let limits = SolidLimits::DEFAULT.with_max_block_memory(exarch_core::non_zero!(1 << 30));
+    /// assert!(SecurityConfig::default().with_solid_limits(limits).is_err());
     ///
     /// let config = SecurityConfig::default()
     ///     .with_allow_solid_archives(true)
-    ///     .with_max_solid_block_memory(exarch_core::non_zero!(1024 * 1024 * 1024));
-    /// assert_eq!(config.max_solid_block_memory.get(), 1024 * 1024 * 1024);
+    ///     .with_solid_limits(limits)?;
+    /// assert_eq!(config.solid_archives.limits(), Some(limits));
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
-    #[must_use]
-    #[inline]
-    pub fn with_max_solid_block_memory(mut self, size: NonZeroU64) -> Self {
-        self.fields.max_solid_block_memory = size;
-        self
+    pub fn with_solid_limits(mut self, limits: SolidLimits) -> crate::Result<Self> {
+        self.solid_archives = self.solid_archives.with_limits(limits)?;
+        Ok(self)
     }
 
     /// Sets the maximum bytes the TAR reader may consume for headers and
@@ -989,7 +1084,7 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_max_tar_metadata_bytes(mut self, size: NonZeroU64) -> Self {
-        self.fields.max_tar_metadata_bytes = size;
+        self.max_tar_metadata_bytes = size;
         self
     }
 
@@ -1008,14 +1103,14 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_max_decoder_memory(mut self, size: NonZeroU64) -> Self {
-        self.fields.max_decoder_memory = size;
+        self.max_decoder_memory = size;
         self
     }
 
     /// Sets the base number of gzip members or bzip2 streams a compressed TAR
     /// may hold, before the allowance of one more per 16 KiB of output.
     ///
-    /// See [`compressed_member_allowance`](SecurityConfigFields::compressed_member_allowance).
+    /// See [`compressed_member_allowance`](SecurityConfig::compressed_member_allowance).
     ///
     /// # Examples
     ///
@@ -1031,7 +1126,7 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_compressed_member_allowance(mut self, base: NonZeroU64) -> Self {
-        self.fields.compressed_member_allowance = base;
+        self.compressed_member_allowance = base;
         self
     }
 
@@ -1049,7 +1144,7 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_parallel_decode(mut self, mode: ParallelDecode) -> Self {
-        self.fields.parallel_decode = mode;
+        self.parallel_decode = mode;
         self
     }
 
@@ -1067,14 +1162,13 @@ impl SecurityConfig<Unvalidated> {
     #[must_use]
     #[inline]
     pub fn with_zip_consistency(mut self, policy: ZipConsistencyPolicy) -> Self {
-        self.fields.zip_consistency = policy;
+        self.zip_consistency = policy;
         self
     }
 }
 
-/// Read-only queries and crate-internal helpers available regardless of
-/// validation state.
-impl<State> SecurityConfig<State> {
+/// Read-only queries.
+impl SecurityConfig {
     /// Validates whether a path component is allowed.
     ///
     /// Comparison is case-insensitive to prevent bypass on case-insensitive
@@ -1087,25 +1181,13 @@ impl<State> SecurityConfig<State> {
             .any(|banned| banned.matches(component))
     }
 
-    /// Validates whether a file extension is allowed.
-    ///
-    /// When `allowed_extensions` is empty, all extensions are permitted.
-    /// When it is non-empty, only listed extensions are permitted.
-    #[must_use]
-    pub fn is_extension_allowed(&self, extension: &str) -> bool {
-        if self.allowed_extensions.is_empty() {
-            return true;
-        }
-        self.allowed_extensions
-            .iter()
-            .any(|ext| ext.matches(extension))
-    }
-
     /// Returns `true` if a file with the given optional extension may be
     /// extracted.
     ///
-    /// When `allowed_extensions` is non-empty and `extension` is `None`
-    /// (the file has no extension), the file is treated as not allowed.
+    /// When `allowed_extensions` is empty, all files are permitted. When it is
+    /// non-empty, only listed extensions are permitted (ignoring ASCII case),
+    /// and `extension` being `None` (the file has no extension) is not
+    /// allowed.
     ///
     /// # Examples
     ///
@@ -1114,22 +1196,32 @@ impl<State> SecurityConfig<State> {
     ///
     /// let config = SecurityConfig::default().try_add_allowed_extension("txt")?;
     ///
-    /// assert!(config.is_path_extension_allowed(Some("txt")));
-    /// assert!(!config.is_path_extension_allowed(Some("exe")));
+    /// assert!(config.is_extension_allowed(Some("txt")));
+    /// assert!(!config.is_extension_allowed(Some("exe")));
     /// // Files without an extension are blocked when the allowlist is non-empty.
-    /// assert!(!config.is_path_extension_allowed(None));
+    /// assert!(!config.is_extension_allowed(None));
     ///
     /// // Empty allowlist permits everything, including extension-less files.
     /// let permissive = SecurityConfig::default();
-    /// assert!(permissive.is_path_extension_allowed(None));
+    /// assert!(permissive.is_extension_allowed(None));
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
-    pub fn is_path_extension_allowed(&self, extension: Option<&str>) -> bool {
-        if self.allowed_extensions.is_empty() {
-            return true;
-        }
-        extension.is_some_and(|ext| self.is_extension_allowed(ext))
+    pub fn is_extension_allowed(&self, extension: Option<&str>) -> bool {
+        self.allowed_extensions.is_empty()
+            || extension.is_some_and(|ext| self.allowed_extensions.iter().any(|a| a.matches(ext)))
+    }
+
+    /// The config of a list pass that precedes extraction: the same quota,
+    /// path, allowlist and decoder limits, with the flags that only matter once
+    /// bytes are written reset to their deny-by-default values.
+    pub(crate) fn for_listing(&self) -> Self {
+        let mut listing = self.clone();
+        listing.allowed.symlinks = Admit::Refuse;
+        listing.allowed.hardlinks = Admit::Refuse;
+        listing.allowed.world_writable = Admit::Refuse;
+        listing.preserve_permissions = false;
+        listing
     }
 }
 
@@ -1259,18 +1351,10 @@ pub struct ReuseLimit(NonZeroU64);
 impl ReuseLimit {
     /// 32 MiB: covers a typical source archive and stays below the
     /// per-extraction decoder ceilings.
-    pub const DEFAULT: Self = Self(Self::nonzero(Self::DEFAULT_BYTES));
-    const DEFAULT_BYTES: u64 = 32 * 1024 * 1024;
+    pub const DEFAULT: Self = Self(non_zero!(32 * 1024 * 1024));
     /// 256 MiB, the most the structural check decodes in its first pass.
-    pub const MAX: Self = Self(Self::nonzero(Self::MAX_BYTES));
-    pub(crate) const MAX_BYTES: u64 = 256 * 1024 * 1024;
-
-    const fn nonzero(bytes: u64) -> NonZeroU64 {
-        match NonZeroU64::new(bytes) {
-            Some(n) => n,
-            None => NonZeroU64::MIN,
-        }
-    }
+    pub const MAX: Self = Self(non_zero!(256 * 1024 * 1024));
+    pub(crate) const MAX_BYTES: u64 = Self::MAX.0.get();
 
     /// A limit of `bytes`, clamped to [`ReuseLimit::MAX`].
     #[must_use]
@@ -1353,7 +1437,10 @@ pub enum DecodeReuse {
     /// and 1.18x for 300 MiB decoded (a 140 MB ZIP). Most of the excess is
     /// system time; user time rose by about 0.05 s of the 0.13 s excess on the
     /// larger archive. [`Memory`](Self::Memory) measures 1.07x on the 100 MiB
-    /// one.
+    /// one. Writing the decoder's 256 KiB chunks to the file without the
+    /// 64 KiB buffer measured no faster, and a memory-mapped spool is ruled
+    /// out by the crate's `unsafe` ban, so this is the floor of the design.
+    /// Linux (ext4, tmpfs) is not measured.
     TempFile(ReuseLimit),
 }
 
@@ -1389,10 +1476,7 @@ pub struct DecompressionBudget(std::num::NonZeroU64);
 
 impl DecompressionBudget {
     /// The default budget: 500 MiB.
-    pub const DEFAULT: Self = match std::num::NonZeroU64::new(500 * 1024 * 1024) {
-        Some(bytes) => Self(bytes),
-        None => unreachable!(),
-    };
+    pub const DEFAULT: Self = Self(non_zero!(500 * 1024 * 1024));
 
     /// Creates a budget from a non-zero byte count.
     #[must_use]
@@ -1407,12 +1491,7 @@ impl DecompressionBudget {
     /// Returns [`ArchiveError::InvalidConfiguration`](crate::ArchiveError) when
     /// `bytes` is zero.
     pub fn try_from_bytes(bytes: u64) -> crate::Result<Self> {
-        std::num::NonZeroU64::new(bytes).map(Self).ok_or(
-            crate::ArchiveError::InvalidConfiguration {
-                setting: ConfigSetting::DecompressionBudget,
-                problem: ConfigProblem::NotGreaterThanZero,
-            },
-        )
+        non_zero_u64(ConfigSetting::DecompressionBudget, bytes).map(Self)
     }
 
     /// Returns the budget in bytes.
@@ -1442,6 +1521,32 @@ pub enum IntegrityCheck {
     /// Decode payload to the decoder's EOF so checksums and codec framing are
     /// verified, spending at most the given budget on extra decoding.
     DecodeToEof(DecompressionBudget),
+}
+
+impl IntegrityCheck {
+    /// The decompression budget of the check, or `None` for
+    /// [`Skip`](Self::Skip).
+    ///
+    /// The one exhaustive match over the variants, so a new check mode fails to
+    /// compile here instead of reading as "enabled, no budget" in a front end.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DecompressionBudget;
+    /// use exarch_core::IntegrityCheck;
+    ///
+    /// assert_eq!(IntegrityCheck::Skip.budget(), None);
+    /// let check = IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT);
+    /// assert_eq!(check.budget(), Some(DecompressionBudget::DEFAULT));
+    /// ```
+    #[must_use]
+    pub const fn budget(self) -> Option<DecompressionBudget> {
+        match self {
+            Self::Skip => None,
+            Self::DecodeToEof(budget) => Some(budget),
+        }
+    }
 }
 
 /// Options controlling `verify` behavior.
@@ -1541,30 +1646,32 @@ impl ListOptions {
     clippy::field_reassign_with_default
 )]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     #[test]
     fn test_default_config() {
         let config = SecurityConfig::default();
-        assert!(!config.allowed.symlinks);
-        assert!(!config.allowed.hardlinks);
-        assert!(!config.allowed.absolute_paths);
+        assert!(!config.allowed.symlinks.is_allowed());
+        assert!(!config.allowed.hardlinks.is_allowed());
+        assert!(!config.allowed.absolute_paths.is_allowed());
         assert_eq!(config.max_file_size.ceiling(), 50 * 1024 * 1024);
     }
 
     #[test]
     fn test_permissive_config() {
         let config = SecurityConfig::permissive();
-        assert!(config.allowed.symlinks);
-        assert!(config.allowed.hardlinks);
-        assert!(config.allowed.absolute_paths);
+        assert!(config.allowed.symlinks.is_allowed());
+        assert!(config.allowed.hardlinks.is_allowed());
+        assert!(config.allowed.absolute_paths.is_allowed());
     }
 
     #[test]
     fn test_extension_allowed_empty_list() {
         let config = SecurityConfig::default();
-        assert!(config.is_extension_allowed("txt"));
-        assert!(config.is_extension_allowed("pdf"));
+        assert!(config.is_extension_allowed(Some("txt")));
+        assert!(config.is_extension_allowed(Some("pdf")));
     }
 
     #[test]
@@ -1574,9 +1681,9 @@ mod tests {
             Extension::try_from("txt").unwrap(),
             Extension::try_from("pdf").unwrap(),
         ];
-        assert!(config.is_extension_allowed("txt"));
-        assert!(config.is_extension_allowed("TXT"));
-        assert!(!config.is_extension_allowed("exe"));
+        assert!(config.is_extension_allowed(Some("txt")));
+        assert!(config.is_extension_allowed(Some("TXT")));
+        assert!(!config.is_extension_allowed(Some("exe")));
     }
 
     #[test]
@@ -1601,15 +1708,15 @@ mod tests {
         // All security-sensitive flags should be false by default
         // (deny-by-default)
         assert!(
-            !config.allowed.symlinks,
+            !config.allowed.symlinks.is_allowed(),
             "symlinks should be denied by default"
         );
         assert!(
-            !config.allowed.hardlinks,
+            !config.allowed.hardlinks.is_allowed(),
             "hardlinks should be denied by default"
         );
         assert!(
-            !config.allowed.absolute_paths,
+            !config.allowed.absolute_paths.is_allowed(),
             "absolute paths should be denied by default"
         );
         assert!(
@@ -1617,7 +1724,7 @@ mod tests {
             "permissions should not be preserved by default"
         );
         assert!(
-            !config.allowed.world_writable,
+            !config.allowed.world_writable.is_allowed(),
             "world-writable should be denied by default"
         );
     }
@@ -1627,10 +1734,16 @@ mod tests {
         let config = SecurityConfig::permissive();
 
         // Permissive config should allow all features
-        assert!(config.allowed.symlinks, "permissive allows symlinks");
-        assert!(config.allowed.hardlinks, "permissive allows hardlinks");
         assert!(
-            config.allowed.absolute_paths,
+            config.allowed.symlinks.is_allowed(),
+            "permissive allows symlinks"
+        );
+        assert!(
+            config.allowed.hardlinks.is_allowed(),
+            "permissive allows hardlinks"
+        );
+        assert!(
+            config.allowed.absolute_paths.is_allowed(),
             "permissive allows absolute paths"
         );
         assert!(
@@ -1638,7 +1751,7 @@ mod tests {
             "permissive preserves permissions"
         );
         assert!(
-            config.allowed.world_writable,
+            config.allowed.world_writable.is_allowed(),
             "permissive allows world-writable"
         );
     }
@@ -1702,12 +1815,13 @@ mod tests {
         let config = SecurityConfig::default();
 
         // Solid archives should be denied by default (security)
-        assert!(
-            !config.allow_solid_archives,
+        assert_eq!(
+            config.solid_archives,
+            SolidArchives::Refuse,
             "solid archives should be denied by default"
         );
         assert_eq!(
-            config.max_solid_block_memory.get(),
+            SolidLimits::DEFAULT.max_block_memory.get(),
             512 * 1024 * 1024,
             "max solid block memory should be 512 MB"
         );
@@ -1718,12 +1832,13 @@ mod tests {
         let config = SecurityConfig::permissive();
 
         // Permissive config should allow solid archives
-        assert!(
-            config.allow_solid_archives,
+        assert_eq!(
+            config.solid_archives,
+            SolidArchives::Allow(SolidLimits::PERMISSIVE),
             "permissive config should allow solid archives"
         );
         assert_eq!(
-            config.max_solid_block_memory.get(),
+            SolidLimits::PERMISSIVE.max_block_memory.get(),
             1024 * 1024 * 1024,
             "permissive should have 1 GB solid block limit"
         );
@@ -1756,21 +1871,89 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_default_is_ok() {
-        assert!(SecurityConfig::default().validate().is_ok());
+    fn test_solid_compression_ratio_defaults() {
+        assert_eq!(SolidLimits::DEFAULT.max_ratio.get(), 1000.0);
+        assert_eq!(SolidLimits::PERMISSIVE.max_ratio.get(), 10_000.0);
     }
 
     #[test]
-    fn test_solid_compression_ratio_defaults() {
+    fn allowing_solid_archives_keeps_admitted_limits_and_resets_a_refusal() {
+        let custom = SolidLimits::DEFAULT.with_max_block_memory(crate::non_zero!(4096));
+        let kept = SecurityConfig::default()
+            .with_solid_archives(SolidArchives::Allow(custom))
+            .with_allow_solid_archives(true);
+        assert_eq!(kept.solid_archives, SolidArchives::Allow(custom));
+
+        let reset = SecurityConfig::default().with_allow_solid_archives(true);
         assert_eq!(
-            SecurityConfig::default().max_solid_compression_ratio.get(),
-            1000.0
+            reset.solid_archives,
+            SolidArchives::Allow(SolidLimits::DEFAULT)
+        );
+
+        let refused = SecurityConfig::default()
+            .with_solid_archives(SolidArchives::Allow(custom))
+            .with_allow_solid_archives(false);
+        assert_eq!(refused.solid_archives, SolidArchives::Refuse);
+    }
+
+    #[test]
+    fn solid_limits_cannot_be_set_while_solid_archives_are_refused() {
+        let err = SecurityConfig::default()
+            .with_solid_limits(SolidLimits::DEFAULT)
+            .unwrap_err();
+        assert_matches!(
+            err,
+            crate::ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::MaxSolidBlockMemory,
+                problem: ConfigProblem::NotSupported,
+            }
+        );
+        let custom = SolidLimits::DEFAULT.with_max_block_memory(crate::non_zero!(4096));
+        let config = SecurityConfig::default()
+            .with_allow_solid_archives(true)
+            .with_solid_limits(custom)
+            .unwrap();
+        assert_eq!(config.solid_archives.limits(), Some(custom));
+    }
+
+    #[test]
+    fn every_integrity_check_has_a_budget_rule() {
+        for check in [
+            IntegrityCheck::Skip,
+            IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT),
+        ] {
+            let expected = match check {
+                IntegrityCheck::Skip => None,
+                IntegrityCheck::DecodeToEof(budget) => Some(budget),
+            };
+            assert_eq!(check.budget(), expected);
+        }
+    }
+
+    #[test]
+    fn admit_converts_to_and_from_a_bool() {
+        assert_eq!(Admit::from_allowed(true), Admit::Allow);
+        assert_eq!(Admit::from_allowed(false), Admit::Refuse);
+        assert!(Admit::Allow.is_allowed());
+        assert!(!Admit::Refuse.is_allowed());
+        assert_eq!(Admit::default(), Admit::Refuse);
+    }
+
+    #[test]
+    fn for_listing_resets_write_time_flags_only() {
+        let listing = SecurityConfig::permissive().for_listing();
+        assert_eq!(listing.allowed.symlinks, Admit::Refuse);
+        assert_eq!(listing.allowed.hardlinks, Admit::Refuse);
+        assert_eq!(listing.allowed.world_writable, Admit::Refuse);
+        assert!(!listing.preserve_permissions);
+        assert_eq!(listing.allowed.absolute_paths, Admit::Allow);
+        assert_eq!(
+            listing.solid_archives,
+            SecurityConfig::permissive().solid_archives
         );
         assert_eq!(
-            SecurityConfig::permissive()
-                .max_solid_compression_ratio
-                .get(),
-            10_000.0
+            listing.max_decoder_memory,
+            SecurityConfig::permissive().max_decoder_memory
         );
     }
 
@@ -1815,17 +1998,6 @@ mod tests {
     // config can never hold one.
 
     #[test]
-    fn test_validate_permissive_is_ok() {
-        assert!(SecurityConfig::permissive().validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_accepts_empty_allowed_extensions_vec() {
-        let cfg = SecurityConfig::default().with_allowed_extensions(Vec::new());
-        assert!(cfg.validate().is_ok());
-    }
-
-    #[test]
     fn test_try_add_refuses_unusable_entries() {
         let long = "x".repeat(256);
         for raw in ["", "bad\0ext", " gz", "tar.gz", "a/b", long.as_str()] {
@@ -1850,16 +2022,14 @@ mod tests {
     fn test_dotted_extension_is_normalized_and_matches_any_case() {
         let cfg = SecurityConfig::default()
             .try_add_allowed_extension(".txt")
-            .unwrap()
-            .validate()
             .unwrap();
-        assert!(cfg.is_path_extension_allowed(Some("txt")));
+        assert!(cfg.is_extension_allowed(Some("txt")));
         assert!(crate::formats::common::is_extension_allowed(
             std::path::Path::new("A.TXT"),
             &cfg
         ));
-        assert!(cfg.is_path_extension_allowed(Some("TXT")));
-        assert!(!cfg.is_path_extension_allowed(Some("md")));
+        assert!(cfg.is_extension_allowed(Some("TXT")));
+        assert!(!cfg.is_extension_allowed(Some("md")));
     }
 
     #[test]
@@ -1868,20 +2038,5 @@ mod tests {
             default_banned_path_components().len(),
             DEFAULT_BANNED_PATH_COMPONENTS.len()
         );
-    }
-
-    // Regression test for the C1 finding on #433/#434/#435: a
-    // `SecurityConfig<Validated>` must not be mutable. `DerefMut` is only
-    // implemented for `SecurityConfig<Unvalidated>`, so this is enforced at
-    // compile time — see `tests/ui/validated_config_field_mutation.rs` for
-    // the corresponding compile-fail fixture. This test only pins the
-    // read-side behavior: fields remain readable after validation.
-    #[test]
-    fn test_validated_config_fields_remain_readable() {
-        let validated = SecurityConfig::default()
-            .with_max_file_size(crate::non_zero!(123))
-            .validate()
-            .expect("valid config");
-        assert_eq!(validated.max_file_size.ceiling(), 123);
     }
 }

@@ -3,14 +3,18 @@
 use clap::Parser;
 use clap::Subcommand;
 use clap_complete::Shell;
+use exarch_core::ArchiveError;
+use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
-use exarch_core::DecompressionBudget;
+use exarch_core::Limit;
 use exarch_core::ParallelDecode;
+use exarch_core::RatioLimit;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::ZipConsistencyPolicy;
-use exarch_core::creation::CompressionLevel;
+use exarch_core::non_zero_u64;
 use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -82,6 +86,79 @@ impl LinkPolicyArgs {
     }
 }
 
+/// Quota and ratio flags shared by `extract`, `list` and `verify`.
+///
+/// clap checks syntax only into raw values: a whole number, with a K/M/G/T
+/// suffix for sizes, or a number for the ratio. A value that does not parse
+/// (`--max-files 2.5`, `--max-total-size abc`) is a usage error with exit
+/// status 2. [`apply`](Self::apply) hands what parsed to core, which refuses
+/// zero and a ratio that is zero, negative or not finite as
+/// `InvalidConfiguration`, so every such refusal is one JSON-safe error with
+/// exit status 1. A flag that is omitted leaves the core default in place.
+#[derive(clap::Args, Clone, Copy)]
+pub struct LimitArgs {
+    /// Maximum number of entries
+    #[arg(long, value_name = "COUNT")]
+    pub max_files: Option<usize>,
+
+    /// Maximum total size in bytes (K, M, G, T suffixes)
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
+    pub max_total_size: Option<u64>,
+
+    /// Maximum size of any single entry in bytes (K, M, G, T suffixes)
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
+    pub max_file_size: Option<u64>,
+
+    /// Maximum compression ratio, fractions allowed (not applied to solid 7z
+    /// blocks, fixed 1000x)
+    #[arg(long, value_name = "RATIO", value_parser = parse_ratio)]
+    pub max_compression_ratio: Option<f64>,
+
+    /// Allow solid 7z archives (multiple files compressed as one block)
+    #[arg(long)]
+    pub allow_solid_archives: bool,
+}
+
+impl LimitArgs {
+    /// Applies the flags that were given to `config`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidConfiguration` naming the setting for a zero count or
+    /// size, and for a ratio that is zero, negative or not finite.
+    pub fn apply(self, config: SecurityConfig) -> Result<SecurityConfig, ArchiveError> {
+        let mut config = config;
+        if let Some(count) = self.max_files {
+            config = config.with_max_file_count(Limit::<NonZeroUsize>::parse(
+                ConfigSetting::MaxFileCount,
+                count,
+            )?);
+        }
+        if let Some(bytes) = self.max_total_size {
+            config = config.with_max_total_size(Limit::<NonZeroU64>::parse(
+                ConfigSetting::MaxTotalSize,
+                bytes,
+            )?);
+        }
+        if let Some(bytes) = self.max_file_size {
+            config = config.with_max_file_size(Limit::<NonZeroU64>::parse(
+                ConfigSetting::MaxFileSize,
+                bytes,
+            )?);
+        }
+        if let Some(ratio) = self.max_compression_ratio {
+            config = config.with_max_compression_ratio(RatioLimit::parse(
+                ConfigSetting::MaxCompressionRatio,
+                ratio,
+            )?);
+        }
+        if self.allow_solid_archives {
+            config = config.with_allow_solid_archives(true);
+        }
+        Ok(config)
+    }
+}
+
 /// How ZIP archives whose structure different readers interpret differently
 /// are handled.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,16 +227,39 @@ pub struct ParallelDecodeArgs {
     /// (default: 128M). A stock 7-Zip archive has 64 MiB runs, about 100 MiB
     /// per extra concurrent run; archives with small runs need far less.
     #[arg(long, value_name = "SIZE|off", value_parser = parse_parallel_decode)]
-    pub parallel_decode_memory: Option<ParallelDecode>,
+    pub parallel_decode_memory: Option<ParallelDecodeValue>,
+}
+
+/// The raw value of `--parallel-decode-memory`: `off`, or a byte count that
+/// core still has to accept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParallelDecodeValue {
+    /// Decode on one thread.
+    Off,
+    /// A lookahead memory of this many bytes.
+    Bytes(u64),
 }
 
 impl ParallelDecodeArgs {
     /// Applies the flag to `config`, leaving the default when it is omitted.
-    pub fn apply(self, config: SecurityConfig) -> SecurityConfig {
-        match self.parallel_decode_memory {
-            Some(mode) => config.with_parallel_decode(mode),
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidConfiguration` naming `parallel_decode_memory` for a
+    /// size of zero (`off` is the way to decode on one thread).
+    pub fn apply(self, config: SecurityConfig) -> Result<SecurityConfig, ArchiveError> {
+        Ok(match self.parallel_decode_memory {
             None => config,
-        }
+            Some(ParallelDecodeValue::Off) => {
+                config.with_parallel_decode(ParallelDecode::Sequential)
+            }
+            Some(ParallelDecodeValue::Bytes(bytes)) => {
+                config.with_parallel_decode(ParallelDecode::from_bytes(Some(non_zero_u64(
+                    ConfigSetting::ParallelDecodeMemory,
+                    bytes,
+                )?)))
+            }
+        })
     }
 }
 
@@ -173,21 +273,8 @@ pub struct ExtractArgs {
     #[arg(value_name = "OUTPUT_DIR")]
     pub output_dir: Option<PathBuf>,
 
-    /// Maximum number of files to extract
-    #[arg(long, default_value = "10000")]
-    pub max_files: usize,
-
-    /// Maximum total extracted size in bytes
-    #[arg(long, value_parser = parse_byte_size)]
-    pub max_total_size: Option<u64>,
-
-    /// Maximum single file size in bytes
-    #[arg(long, value_parser = parse_byte_size)]
-    pub max_file_size: Option<u64>,
-
-    /// Maximum compression ratio (not applied to solid 7z blocks, fixed 1000x)
-    #[arg(long, default_value = "100", value_parser = clap::value_parser!(u32).range(1..))]
-    pub max_compression_ratio: u32,
+    #[command(flatten)]
+    pub limits: LimitArgs,
 
     #[command(flatten)]
     pub links: LinkPolicyArgs,
@@ -209,25 +296,27 @@ pub struct ExtractArgs {
     #[arg(long, value_enum, value_name = "MODE")]
     pub decode_reuse: Option<DecodeReuseArg>,
 
-    /// Maximum path depth allowed (default: 32, minimum: 1)
-    #[arg(long, default_value = "32")]
-    pub max_path_depth: usize,
+    /// Maximum path depth allowed (minimum: 1; the security policy default
+    /// applies when omitted)
+    #[arg(long, value_name = "DEPTH")]
+    pub max_path_depth: Option<usize>,
 
     /// Banned path component; can be repeated or comma-separated.
     ///
     /// When specified, replaces the default ban list (.git, .ssh, .gnupg,
     /// .aws, .kube, .docker, .env). Use an exactly empty value ("") to allow
     /// all components; a value that is only commas or blanks is an error.
-    #[arg(long = "banned-component", value_name = "COMPONENT")]
-    pub banned_components: Vec<String>,
+    #[arg(
+        long = "banned-component",
+        value_name = "COMPONENT",
+        value_delimiter = ',',
+        value_parser = parse_list_token
+    )]
+    pub banned_components: Vec<ListToken>,
 
     /// Allow absolute paths in archive entries
     #[arg(long)]
     pub allow_absolute_paths: bool,
-
-    /// Allow solid 7z archives (multiple files compressed as one block)
-    #[arg(long)]
-    pub allow_solid_archives: bool,
 
     /// Allow world-writable files in extracted archives
     #[arg(long)]
@@ -260,8 +349,13 @@ pub struct ExtractArgs {
     /// comma-separated (`--allowed-extensions txt,pdf`). The leading dot is
     /// optional and matching is case-insensitive. When omitted, all extensions
     /// are allowed.
-    #[arg(long = "allowed-extensions", value_name = "EXT")]
-    pub allowed_extensions: Vec<String>,
+    #[arg(
+        long = "allowed-extensions",
+        value_name = "EXT",
+        value_delimiter = ',',
+        value_parser = parse_list_token
+    )]
+    pub allowed_extensions: Vec<ListToken>,
 }
 
 #[derive(clap::Args)]
@@ -275,8 +369,8 @@ pub struct CreateArgs {
     pub sources: Vec<PathBuf>,
 
     /// Compression level (1-9)
-    #[arg(short = 'l', long, value_parser = parse_compression_level)]
-    pub compression_level: Option<CompressionLevel>,
+    #[arg(short = 'l', long, value_name = "LEVEL")]
+    pub compression_level: Option<u32>,
 
     /// Follow symbolic links
     #[arg(long)]
@@ -286,7 +380,8 @@ pub struct CreateArgs {
     #[arg(long)]
     pub include_hidden: bool,
 
-    /// Exclude pattern (glob, can be repeated)
+    /// Exclude pattern, can be repeated: a name, `name*`, `*name` (one path
+    /// component) or a relative path with separators (that path and below)
     #[arg(long = "exclude", short = 'x', value_name = "PATTERN")]
     pub exclude: Vec<String>,
 
@@ -320,25 +415,12 @@ pub struct ListArgs {
     #[arg(short, long)]
     pub long: bool,
 
-    /// Show sizes in human-readable format
-    #[arg(short = 'H', long)]
+    /// Show sizes in human-readable format (requires --long)
+    #[arg(short = 'H', long, requires = "long")]
     pub human_readable: bool,
 
-    /// Maximum number of entries to list
-    #[arg(long, default_value = "10000")]
-    pub max_files: usize,
-
-    /// Maximum total size of entries in bytes (supports K, M, G, T suffixes)
-    #[arg(long, value_parser = parse_byte_size)]
-    pub max_total_size: Option<u64>,
-
-    /// Maximum size of any single entry in bytes (supports K, M, G, T suffixes)
-    #[arg(long, value_parser = parse_byte_size)]
-    pub max_file_size: Option<u64>,
-
-    /// Allow solid 7z archives (higher memory usage during listing)
-    #[arg(long)]
-    pub allow_solid_archives: bool,
+    #[command(flatten)]
+    pub limits: LimitArgs,
 
     /// Read 7z symlink targets, which decodes the blocks that hold them
     #[arg(long)]
@@ -354,17 +436,8 @@ pub struct VerifyArgs {
     #[arg(value_name = "ARCHIVE")]
     pub archive: PathBuf,
 
-    /// Maximum number of entries to verify
-    #[arg(long, default_value = "10000")]
-    pub max_files: usize,
-
-    /// Maximum total size of entries in bytes (supports K, M, G, T suffixes)
-    #[arg(long, value_parser = parse_byte_size)]
-    pub max_total_size: Option<u64>,
-
-    /// Maximum size of any single entry in bytes (supports K, M, G, T suffixes)
-    #[arg(long, value_parser = parse_byte_size)]
-    pub max_file_size: Option<u64>,
+    #[command(flatten)]
+    pub limits: LimitArgs,
 
     #[command(flatten)]
     pub links: LinkPolicyArgs,
@@ -375,16 +448,12 @@ pub struct VerifyArgs {
     #[command(flatten)]
     pub parallel: ParallelDecodeArgs,
 
-    /// Allow solid 7z archives (higher memory usage during verification)
-    #[arg(long)]
-    pub allow_solid_archives: bool,
-
     /// Decode the payload to its end to verify checksums and codec framing
     ///
     /// Integrity is INCOMPLETE when part of the payload could not be verified
     /// (budget, resource limit, solid 7z without --allow-solid-archives, TAR
     /// without an end-of-archive marker). Exit code 0 does not mean integrity
-    /// OK: use --strict to exit with status 2 on INCOMPLETE.
+    /// OK: use --strict to exit with status 3 on INCOMPLETE.
     #[arg(long)]
     pub check_integrity: bool,
 
@@ -393,36 +462,75 @@ pub struct VerifyArgs {
     #[arg(
         long,
         value_name = "SIZE",
-        value_parser = parse_decompression_budget,
+        value_parser = parse_byte_size,
         requires = "check_integrity"
     )]
-    pub decompression_budget: Option<DecompressionBudget>,
+    pub decompression_budget: Option<u64>,
 
-    /// Treat warnings as errors and exit with status code 2
+    /// Treat warnings as errors and exit with status code 3
     #[arg(long)]
     pub strict: bool,
 }
 
-fn parse_compression_level(s: &str) -> Result<CompressionLevel, String> {
-    let level: u32 = s
-        .trim()
-        .parse()
-        .map_err(|_| format!("`{s}` is not a whole number"))?;
-    CompressionLevel::try_from(level).map_err(|_| format!("{level} is not in 1..=9"))
+/// One comma-separated item of a list flag, trimmed.
+///
+/// clap splits and trims; whether an item is a valid value, and what a list
+/// with no usable item means, is decided by the command so the refusal is
+/// the same JSON-safe error as every other flag value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListToken {
+    /// A non-blank item.
+    Item(String),
+    /// An item that is exactly empty (`--flag ""`).
+    Empty,
+    /// An item of whitespace only.
+    Blank,
 }
 
-fn parse_parallel_decode(s: &str) -> Result<ParallelDecode, String> {
-    if s.trim().eq_ignore_ascii_case("off") {
-        return Ok(ParallelDecode::Sequential);
+#[expect(clippy::unnecessary_wraps, reason = "clap value parsers return Result")]
+fn parse_list_token(s: &str) -> Result<ListToken, String> {
+    let trimmed = s.trim();
+    Ok(if s.is_empty() {
+        ListToken::Empty
+    } else if trimmed.is_empty() {
+        ListToken::Blank
+    } else {
+        ListToken::Item(trimmed.to_owned())
+    })
+}
+
+/// What `--banned-component` asks for: the default ban list, or a list that
+/// replaces it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BannedComponentsArg {
+    /// The flag was not given.
+    Default,
+    /// The flag's own components, possibly none (`--banned-component ""`).
+    Replace(Vec<ListToken>),
+}
+
+impl BannedComponentsArg {
+    /// Classifies the raw items of the flag.
+    pub fn of(tokens: &[ListToken]) -> Self {
+        if tokens.is_empty() {
+            Self::Default
+        } else {
+            Self::Replace(tokens.to_vec())
+        }
     }
-    NonZeroU64::new(parse_byte_size(s)?)
-        .map(ParallelDecode::Bounded)
-        .ok_or_else(|| "parallel decode memory must be greater than zero (use off)".to_string())
 }
 
-fn parse_decompression_budget(s: &str) -> Result<DecompressionBudget, String> {
-    DecompressionBudget::try_from_bytes(parse_byte_size(s)?)
-        .map_err(|_| "decompression budget must be greater than zero".to_string())
+fn parse_ratio(s: &str) -> Result<f64, String> {
+    s.trim()
+        .parse()
+        .map_err(|_| format!("`{s}` is not a number"))
+}
+
+fn parse_parallel_decode(s: &str) -> Result<ParallelDecodeValue, String> {
+    if s.trim().eq_ignore_ascii_case("off") {
+        return Ok(ParallelDecodeValue::Off);
+    }
+    parse_byte_size(s).map(ParallelDecodeValue::Bytes)
 }
 
 /// Parse byte size with optional suffix (K, M, G, T)
@@ -500,6 +608,97 @@ mod tests {
         );
     }
 
+    fn limits_of(args: &[&str]) -> LimitArgs {
+        let Commands::Extract(args) = Cli::parse_from(args).command else {
+            panic!("expected extract command");
+        };
+        args.limits
+    }
+
+    #[test]
+    fn limits_leave_the_core_defaults_when_no_flag_is_given() {
+        let config = limits_of(&["exarch", "extract", "a.zip"])
+            .apply(SecurityConfig::default())
+            .unwrap();
+        let defaults = SecurityConfig::default();
+        assert_eq!(config.max_file_count, defaults.max_file_count);
+        assert_eq!(config.max_total_size, defaults.max_total_size);
+        assert_eq!(config.max_file_size, defaults.max_file_size);
+        assert_eq!(config.max_compression_ratio, defaults.max_compression_ratio);
+    }
+
+    #[test]
+    fn limits_apply_only_what_was_given() {
+        let defaults = SecurityConfig::default();
+        let config = limits_of(&[
+            "exarch",
+            "extract",
+            "a.zip",
+            "--max-total-size",
+            "1K",
+            "--max-compression-ratio",
+            "2.5",
+        ])
+        .apply(SecurityConfig::default())
+        .unwrap();
+        assert_eq!(config.max_total_size.ceiling(), 1024);
+        assert_eq!(config.max_compression_ratio.get(), 2.5);
+        assert_eq!(config.max_file_count, defaults.max_file_count);
+        assert_eq!(config.max_file_size, defaults.max_file_size);
+    }
+
+    #[test]
+    fn limits_refuse_zero_and_non_finite_values_naming_the_setting() {
+        for (flag, value, setting) in [
+            ("--max-files", "0", "max_file_count"),
+            ("--max-total-size", "0", "max_total_size"),
+            ("--max-file-size", "0", "max_file_size"),
+            ("--max-compression-ratio", "0", "max_compression_ratio"),
+            ("--max-compression-ratio", "nan", "max_compression_ratio"),
+            ("--max-compression-ratio", "-1", "max_compression_ratio"),
+        ] {
+            let flag = format!("{flag}={value}");
+            let cli = Cli::try_parse_from(["exarch", "extract", "a.zip", flag.as_str()]).unwrap();
+            let Commands::Extract(args) = cli.command else {
+                panic!("expected extract command");
+            };
+            let err = args.limits.apply(SecurityConfig::default()).unwrap_err();
+            assert_eq!(err.ffi_kind().setting().unwrap().as_str(), setting);
+        }
+    }
+
+    #[test]
+    fn every_limit_flag_is_shared_by_extract_list_and_verify() {
+        for sub in ["extract", "list", "verify"] {
+            let cli = Cli::try_parse_from([
+                "exarch",
+                sub,
+                "a.zip",
+                "--max-files",
+                "7",
+                "--max-total-size",
+                "1M",
+                "--max-file-size",
+                "2K",
+                "--max-compression-ratio",
+                "1.5",
+                "--allow-solid-archives",
+            ])
+            .unwrap();
+            let limits = match cli.command {
+                Commands::Extract(a) => a.limits,
+                Commands::List(a) => a.limits,
+                Commands::Verify(a) => a.limits,
+                _ => panic!("unexpected command"),
+            };
+            assert_eq!(limits.max_files, Some(7));
+            assert_eq!(limits.max_total_size, Some(1 << 20));
+            assert_eq!(limits.max_file_size, Some(2048));
+            assert_eq!(limits.max_compression_ratio, Some(1.5));
+            assert!(limits.allow_solid_archives);
+        }
+    }
+
     #[test]
     fn test_allow_solid_archives_flag() {
         let cli =
@@ -507,7 +706,7 @@ mod tests {
         let Commands::Extract(args) = cli.command else {
             panic!("expected Extract command");
         };
-        assert!(args.allow_solid_archives);
+        assert!(args.limits.allow_solid_archives);
     }
 
     #[test]
@@ -516,7 +715,7 @@ mod tests {
         let Commands::Extract(args) = cli.command else {
             panic!("expected Extract command");
         };
-        assert_eq!(args.max_path_depth, 32);
+        assert_eq!(args.max_path_depth, None);
     }
 
     #[test]
@@ -531,7 +730,7 @@ mod tests {
         let Commands::Extract(args) = cli.command else {
             panic!("expected Extract command");
         };
-        assert_eq!(args.max_path_depth, 8);
+        assert_eq!(args.max_path_depth, Some(8));
     }
 
     #[test]
@@ -548,7 +747,13 @@ mod tests {
         let Commands::Extract(args) = cli.command else {
             panic!("expected Extract command");
         };
-        assert_eq!(args.banned_components, vec![".secrets", ".private"]);
+        assert_eq!(
+            args.banned_components,
+            vec![
+                ListToken::Item(".secrets".to_owned()),
+                ListToken::Item(".private".to_owned())
+            ]
+        );
     }
 
     #[test]
@@ -558,6 +763,41 @@ mod tests {
             panic!("expected Extract command");
         };
         assert!(args.banned_components.is_empty());
+    }
+
+    #[test]
+    fn list_flags_split_on_commas_and_trim() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "extract",
+            "--allowed-extensions",
+            " txt ,pdf,, ",
+            "--allowed-extensions",
+            "",
+            "archive.tar.gz",
+        ]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected Extract command");
+        };
+        assert_eq!(
+            args.allowed_extensions,
+            vec![
+                ListToken::Item("txt".to_owned()),
+                ListToken::Item("pdf".to_owned()),
+                ListToken::Empty,
+                ListToken::Blank,
+                ListToken::Empty,
+            ]
+        );
+    }
+
+    #[test]
+    fn banned_components_arg_tells_absent_from_present() {
+        assert_eq!(BannedComponentsArg::of(&[]), BannedComponentsArg::Default);
+        assert_eq!(
+            BannedComponentsArg::of(&[ListToken::Empty]),
+            BannedComponentsArg::Replace(vec![ListToken::Empty])
+        );
     }
 
     #[test]
@@ -597,8 +837,8 @@ mod tests {
         let Commands::List(args) = cli.command else {
             panic!("expected list command");
         };
-        assert_eq!(args.max_files, 10000);
-        assert!(args.max_total_size.is_none());
+        assert_eq!(args.limits.max_files, None);
+        assert!(args.limits.max_total_size.is_none());
     }
 
     #[test]
@@ -607,7 +847,7 @@ mod tests {
         let Commands::List(args) = cli.command else {
             panic!("expected list command");
         };
-        assert_eq!(args.max_files, 99999);
+        assert_eq!(args.limits.max_files, Some(99999));
     }
 
     #[test]
@@ -616,7 +856,7 @@ mod tests {
         let Commands::List(args) = cli.command else {
             panic!("expected list command");
         };
-        assert_eq!(args.max_total_size, Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(args.limits.max_total_size, Some(2 * 1024 * 1024 * 1024));
     }
 
     #[test]
@@ -625,8 +865,8 @@ mod tests {
         let Commands::Verify(args) = cli.command else {
             panic!("expected verify command");
         };
-        assert_eq!(args.max_files, 10000);
-        assert!(args.max_total_size.is_none());
+        assert_eq!(args.limits.max_files, None);
+        assert!(args.limits.max_total_size.is_none());
     }
 
     #[test]
@@ -635,7 +875,7 @@ mod tests {
         let Commands::Verify(args) = cli.command else {
             panic!("expected verify command");
         };
-        assert_eq!(args.max_files, 65537);
+        assert_eq!(args.limits.max_files, Some(65537));
     }
 
     #[test]
@@ -650,7 +890,7 @@ mod tests {
         let Commands::Verify(args) = cli.command else {
             panic!("expected verify command");
         };
-        assert_eq!(args.max_total_size, Some(500 * 1024 * 1024));
+        assert_eq!(args.limits.max_total_size, Some(500 * 1024 * 1024));
     }
 
     #[test]
@@ -667,10 +907,7 @@ mod tests {
             panic!("expected verify command");
         };
         assert!(args.check_integrity);
-        assert_eq!(
-            args.decompression_budget.map(DecompressionBudget::get),
-            Some(2 * 1024 * 1024)
-        );
+        assert_eq!(args.decompression_budget, Some(2 * 1024 * 1024));
     }
 
     #[test]
@@ -696,16 +933,20 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_zero_budget_is_rejected() {
-        let result = Cli::try_parse_from([
+    fn test_verify_zero_budget_parses_and_is_refused_by_core() {
+        let Commands::Verify(args) = Cli::parse_from([
             "exarch",
             "verify",
             "--check-integrity",
             "--decompression-budget",
             "0",
             "archive.zip",
-        ]);
-        assert!(result.is_err());
+        ])
+        .command
+        else {
+            panic!("expected verify command");
+        };
+        assert_eq!(args.decompression_budget, Some(0));
     }
 
     #[test]
@@ -714,7 +955,7 @@ mod tests {
         let Commands::List(args) = cli.command else {
             panic!("expected list command");
         };
-        assert_eq!(args.max_file_size, Some(100 * 1024 * 1024));
+        assert_eq!(args.limits.max_file_size, Some(100 * 1024 * 1024));
     }
 
     #[test]
@@ -723,21 +964,34 @@ mod tests {
         let Commands::Verify(args) = cli.command else {
             panic!("expected verify command");
         };
-        assert_eq!(args.max_file_size, Some(100 * 1024 * 1024));
+        assert_eq!(args.limits.max_file_size, Some(100 * 1024 * 1024));
     }
 
     #[test]
     fn test_parallel_decode_memory_parses_sizes_and_off() {
         assert_eq!(
             parse_parallel_decode("256M"),
-            Ok(ParallelDecode::Bounded(
-                NonZeroU64::new(256 * 1024 * 1024).unwrap()
-            ))
+            Ok(ParallelDecodeValue::Bytes(256 * 1024 * 1024))
         );
-        assert_eq!(parse_parallel_decode("off"), Ok(ParallelDecode::Sequential));
-        assert_eq!(parse_parallel_decode("OFF"), Ok(ParallelDecode::Sequential));
-        assert!(parse_parallel_decode("0").is_err());
+        assert_eq!(parse_parallel_decode("off"), Ok(ParallelDecodeValue::Off));
+        assert_eq!(parse_parallel_decode("OFF"), Ok(ParallelDecodeValue::Off));
+        assert_eq!(
+            parse_parallel_decode("0"),
+            Ok(ParallelDecodeValue::Bytes(0))
+        );
         assert!(parse_parallel_decode("lots").is_err());
+    }
+
+    #[test]
+    fn a_zero_parallel_decode_memory_is_refused_by_core_naming_its_setting() {
+        let args = ParallelDecodeArgs {
+            parallel_decode_memory: Some(ParallelDecodeValue::Bytes(0)),
+        };
+        let err = args.apply(SecurityConfig::default()).unwrap_err();
+        assert_eq!(
+            err.ffi_kind().setting().unwrap().as_str(),
+            "parallel_decode_memory"
+        );
     }
 
     #[test]
@@ -749,6 +1003,7 @@ mod tests {
         assert_eq!(
             args.parallel
                 .apply(SecurityConfig::default())
+                .unwrap()
                 .parallel_decode,
             default
         );
@@ -764,7 +1019,7 @@ mod tests {
         else {
             panic!("expected extract command");
         };
-        let config = args.parallel.apply(SecurityConfig::default());
+        let config = args.parallel.apply(SecurityConfig::default()).unwrap();
         assert_eq!(config.parallel_decode, ParallelDecode::Sequential);
 
         let Commands::Verify(args) =
@@ -772,7 +1027,7 @@ mod tests {
         else {
             panic!("expected verify command");
         };
-        let config = args.parallel.apply(SecurityConfig::default());
+        let config = args.parallel.apply(SecurityConfig::default()).unwrap();
         assert_eq!(
             config.parallel_decode,
             ParallelDecode::Bounded(NonZeroU64::new(1 << 30).unwrap())
@@ -793,8 +1048,8 @@ mod tests {
         let Commands::List(args) = cli.command else {
             panic!("expected list command");
         };
-        assert_eq!(args.max_files, 1_000_000);
-        assert_eq!(args.max_total_size, Some(10 * 1024 * 1024 * 1024));
+        assert_eq!(args.limits.max_files, Some(1_000_000));
+        assert_eq!(args.limits.max_total_size, Some(10 * 1024 * 1024 * 1024));
     }
 
     #[test]

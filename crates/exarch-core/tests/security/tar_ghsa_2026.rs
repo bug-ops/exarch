@@ -108,10 +108,9 @@ fn pax_header(out: &mut Vec<u8>, records: &[u8]) {
 
 fn extract(bytes: &[u8]) -> (exarch_core::Result<exarch_core::ExtractionReport>, TempDir) {
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(bytes.to_vec()));
+    let archive = TarArchive::new(Cursor::new(bytes.to_vec()), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default().validate().unwrap(),
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -120,13 +119,12 @@ fn extract(bytes: &[u8]) -> (exarch_core::Result<exarch_core::ExtractionReport>,
 
 fn extract_with_config(
     bytes: &[u8],
-    config: &SecurityConfig<exarch_core::Validated>,
+    config: &SecurityConfig,
 ) -> (exarch_core::Result<exarch_core::ExtractionReport>, TempDir) {
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(bytes.to_vec()));
+    let archive = TarArchive::new(Cursor::new(bytes.to_vec()), config);
     let result = archive.extract(
         temp.path(),
-        config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -451,10 +449,7 @@ fn ghsa_23hp_declared_size_respects_small_quota_despite_large_payload() {
     pad(&mut t, &vec![b'C'; 100_000]);
     eof(&mut t);
 
-    let config = SecurityConfig::default()
-        .with_max_file_size(exarch_core::non_zero!(64))
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_max_file_size(exarch_core::non_zero!(64));
     let (result, temp) = extract_with_config(&t, &config);
     assert_not_quota_rejected(&result);
     let written = std::fs::metadata(temp.path().join("liar2.txt"))

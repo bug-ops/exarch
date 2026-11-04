@@ -50,7 +50,9 @@ def test_round_trips_files_and_directories():
 
     assert result.report.files_extracted == 2
     assert entries["d"].kind == "directory"
-    assert entries["d"].data is None
+    assert isinstance(entries["d"], exarch.MemoryDirectory)
+    assert not hasattr(entries["d"], "data")
+    assert isinstance(entries["d/a.txt"], exarch.MemoryFile)
     assert entries["d/a.txt"].kind == "file"
     assert entries["d/a.txt"].data == b"alpha"
     assert isinstance(entries["b.txt"].data, bytes)
@@ -73,7 +75,7 @@ def test_seven_z_is_extracted_to_memory():
     result = exarch.extract_archive_to_memory(SOLID_7Z.read_bytes(), config)
 
     assert result.report.files_extracted > 0
-    assert any(entry.kind == "file" and entry.data for entry in result.entries)
+    assert any(isinstance(entry, exarch.MemoryFile) and entry.data for entry in result.entries)
 
 
 def test_symlinks_need_the_config_to_allow_them():
@@ -91,8 +93,9 @@ def test_symlinks_need_the_config_to_allow_them():
     link = _by_path(exarch.extract_archive_to_memory(data, config))["l"]
 
     assert link.kind == "symlink"
+    assert isinstance(link, exarch.MemorySymlink)
     assert link.target == "a.txt"
-    assert link.data is None
+    assert not hasattr(link, "data")
 
 
 def test_setuid_and_setgid_bits_are_stripped():
@@ -136,7 +139,7 @@ def test_non_positive_or_oversized_max_bytes_is_a_value_error(max_bytes):
 
 @pytest.mark.parametrize("name", ["", "Host", "windows"])
 def test_unknown_path_model_is_a_value_error(name):
-    with pytest.raises(ValueError, match="path_model must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.extract_archive_to_memory(_tar([_file("a", b"x")]), path_model=name)
 
 
@@ -174,14 +177,75 @@ def test_failure_after_delivered_entries_reports_discarded_writes():
 
 
 def test_unknown_format_name_and_undetectable_bytes():
-    with pytest.raises(ValueError, match="format must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.extract_archive_to_memory(b"", format="rar")
     with pytest.raises(exarch.UnknownFormatError):
         exarch.extract_archive_to_memory(b"not an archive")
 
 
-def test_atomic_options_are_refused():
+def test_path_extraction_options_are_not_accepted():
     options = exarch.ExtractionOptions().with_atomic(True)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         exarch.extract_archive_to_memory(_tar([_file("a", b"x")]), options=options)
+
+
+def test_every_entry_class_derives_from_memory_entry():
+    for cls in (
+        exarch.MemoryFile,
+        exarch.MemoryDirectory,
+        exarch.MemorySymlink,
+        exarch.MemoryHardlink,
+    ):
+        assert issubclass(cls, exarch.MemoryEntry)
+
+
+def test_sink_options_default_and_getters():
+    options = exarch.SinkOptions()
+
+    assert options.skip_duplicates is True
+    assert options.decode_reuse == "off"
+    assert options.decode_reuse_limit is None
+
+
+def test_sink_options_skip_duplicates_selects_the_surviving_entry():
+    data = _tar([_file("a", b"1"), _file("a", b"2")])
+
+    kept = exarch.extract_archive_to_memory(data, options=exarch.SinkOptions())
+    assert [(e.path, e.data) for e in kept.entries] == [("a", b"1")]
+
+    replaced = exarch.extract_archive_to_memory(
+        data, options=exarch.SinkOptions(skip_duplicates=False)
+    )
+    assert [(e.path, e.data) for e in replaced.entries] == [("a", b"2")]
+
+
+def test_sink_options_decode_reuse_modes():
+    assert exarch.SinkOptions(decode_reuse="memory").decode_reuse_limit == 32 * 1024 * 1024
+    temp = exarch.SinkOptions(decode_reuse="temp_file", decode_reuse_limit=1024)
+    assert (temp.decode_reuse, temp.decode_reuse_limit) == ("temp_file", 1024)
+    huge = exarch.SinkOptions(decode_reuse="memory", decode_reuse_limit=2**40)
+    assert huge.decode_reuse_limit == 256 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "setting", "problem"),
+    [
+        ({"decode_reuse": "disk"}, "decode_reuse", "not one of the allowed values"),
+        ({"decode_reuse_limit": 1024}, "decode_reuse_limit", "is not supported"),
+        ({"decode_reuse": "memory", "decode_reuse_limit": 0}, "decode_reuse_limit", "zero"),
+        ({"decode_reuse": "memory", "decode_reuse_limit": -1}, "decode_reuse_limit", "negative"),
+        ({"decode_reuse": "memory", "decode_reuse_limit": 2**200}, "decode_reuse_limit", "exceed"),
+    ],
+)
+def test_sink_options_refuse_invalid_combinations(kwargs, setting, problem):
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        exarch.SinkOptions(**kwargs)
+
+    assert info.value.setting == setting
+    assert problem in str(info.value)
+
+
+def test_sink_options_limit_refuses_bool():
+    with pytest.raises(TypeError):
+        exarch.SinkOptions(decode_reuse="memory", decode_reuse_limit=True)

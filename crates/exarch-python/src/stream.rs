@@ -35,11 +35,9 @@ impl FailureSlot {
     }
 
     fn ensure_clear(&self) -> io::Result<()> {
-        if self.lock().is_some() {
-            Err(io::Error::other("file object failed earlier"))
-        } else {
-            Ok(())
-        }
+        self.lock()
+            .is_none()
+            .ok_or_else(|| io::Error::other("file object failed earlier"))
     }
 
     /// Replaces `result` by the recorded failure, if any: the core turns read
@@ -50,45 +48,13 @@ impl FailureSlot {
     }
 }
 
-/// A Python binary file object read as an archive.
-///
-/// The archive starts at the object's position when it was passed in, which
-/// is offset 0 for the core. A failed `read` or `seek` is sticky: no later call
-/// reaches Python.
-pub struct PyFileReader {
+/// A Python binary file object and the slot that holds what it raised.
+struct PyHandle {
     obj: Py<PyAny>,
-    base: u64,
-    seekable: bool,
     failure: FailureSlot,
 }
 
-impl PyFileReader {
-    fn new(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
-        if !obj.hasattr("read")? {
-            return Err(PyTypeError::new_err(
-                "data must be bytes or a binary file object",
-            ));
-        }
-        // Only a missing `seekable` means a plain stream; an exception from it
-        // (KeyboardInterrupt included) propagates.
-        let seekable = if obj.hasattr("seekable")? {
-            obj.call_method0("seekable")?.is_truthy()?
-        } else {
-            false
-        };
-        let base = if seekable {
-            obj.call_method0("tell")?.extract()?
-        } else {
-            0
-        };
-        Ok(Self {
-            obj: obj.clone().unbind(),
-            base,
-            seekable,
-            failure: FailureSlot::default(),
-        })
-    }
-
+impl PyHandle {
     fn read_py(&self, py: Python<'_>, buf: &mut [u8]) -> PyResult<usize> {
         let chunk = self.obj.bind(py).call_method1("read", (buf.len(),))?;
         let chunk: PyBackedBytes = chunk.extract().map_err(|_| {
@@ -103,6 +69,26 @@ impl PyFileReader {
         Ok(chunk.len())
     }
 
+    fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.failure.ensure_clear()?;
+        Python::attach(|py| self.read_py(py, buf)).map_err(|err| self.failure.record(err))
+    }
+}
+
+/// A seekable Python binary file object read as an archive.
+///
+/// The archive starts at the object's position when it was passed in, which
+/// is offset 0 for the core. A failed `read` or `seek` is sticky: no later call
+/// reaches Python.
+pub struct SeekableFile {
+    handle: PyHandle,
+    base: u64,
+}
+
+impl SeekableFile {
     fn seek_py(&self, py: Python<'_>, pos: SeekFrom) -> PyResult<u64> {
         let (offset, whence) = match pos {
             SeekFrom::Start(n) => (i128::from(self.base) + i128::from(n), 0_u8),
@@ -110,6 +96,7 @@ impl PyFileReader {
             SeekFrom::End(n) => (i128::from(n), 2),
         };
         let at: u64 = self
+            .handle
             .obj
             .bind(py)
             .call_method1("seek", (offset, whence))?
@@ -119,20 +106,71 @@ impl PyFileReader {
     }
 }
 
-impl Read for PyFileReader {
+impl Read for SeekableFile {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        self.failure.ensure_clear()?;
-        Python::attach(|py| self.read_py(py, buf)).map_err(|err| self.failure.record(err))
+        self.handle.read(buf)
     }
 }
 
-impl Seek for PyFileReader {
+impl Seek for SeekableFile {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.failure.ensure_clear()?;
-        Python::attach(|py| self.seek_py(py, pos)).map_err(|err| self.failure.record(err))
+        self.handle.failure.ensure_clear()?;
+        Python::attach(|py| self.seek_py(py, pos)).map_err(|err| self.handle.failure.record(err))
+    }
+}
+
+/// A forward-only Python binary file object. It has no `Seek` implementation,
+/// so a seek on it cannot be attempted, let alone fail at run time.
+pub struct StreamFile {
+    handle: PyHandle,
+}
+
+impl Read for StreamFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.handle.read(buf)
+    }
+}
+
+/// A Python binary file object, seekable or forward-only, chosen once when
+/// the object is received.
+pub enum FileInput {
+    /// A file object whose `seekable()` is true.
+    Seekable(SeekableFile),
+    /// A file object without `seekable()`, or whose `seekable()` is false.
+    Stream(StreamFile),
+}
+
+impl FileInput {
+    fn new(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if !obj.hasattr("read")? {
+            return Err(PyTypeError::new_err(
+                "data must be bytes or a binary file object",
+            ));
+        }
+        // Only a missing `seekable` means a plain stream; an exception from it
+        // (KeyboardInterrupt included) propagates.
+        let seekable = if obj.hasattr("seekable")? {
+            obj.call_method0("seekable")?.is_truthy()?
+        } else {
+            false
+        };
+        let handle = PyHandle {
+            obj: obj.clone().unbind(),
+            failure: FailureSlot::default(),
+        };
+        if seekable {
+            let base = obj.call_method0("tell")?.extract()?;
+            Ok(Self::Seekable(SeekableFile { handle, base }))
+        } else {
+            Ok(Self::Stream(StreamFile { handle }))
+        }
+    }
+
+    fn failure(&self) -> &FailureSlot {
+        match self {
+            Self::Seekable(file) => &file.handle.failure,
+            Self::Stream(file) => &file.handle.failure,
+        }
     }
 }
 
@@ -142,7 +180,7 @@ pub enum ArchiveInput {
     /// The archive bytes.
     Bytes(PyBackedBytes),
     /// A binary file object, read as the archive.
-    File(PyFileReader),
+    File(FileInput),
 }
 
 impl<'a, 'py> FromPyObject<'a, 'py> for ArchiveInput {
@@ -150,7 +188,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for ArchiveInput {
 
     fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
         obj.extract::<PyBackedBytes>().map_or_else(
-            |_| PyFileReader::new(&obj).map(Self::File),
+            |_| FileInput::new(&obj).map(Self::File),
             |bytes| Ok(Self::Bytes(bytes)),
         )
     }
@@ -161,7 +199,7 @@ impl ArchiveInput {
     pub fn failure_slot(&self) -> FailureSlot {
         match self {
             Self::Bytes(_) => FailureSlot::default(),
-            Self::File(file) => file.failure.clone(),
+            Self::File(file) => file.failure().clone(),
         }
     }
 
@@ -173,12 +211,14 @@ impl ArchiveInput {
     ) -> exarch_core::Result<ArchiveReader<'static>> {
         match (self, format) {
             (Self::Bytes(bytes), format) => ArchiveReader::from_bytes(bytes, format),
-            (Self::File(file), format) if file.seekable => match format {
-                Some(format) => Ok(ArchiveReader::of_type(file, format)),
-                None => ArchiveReader::detect(file),
-            },
-            (Self::File(file), Some(format)) => ArchiveReader::of_stream(file, format),
-            (Self::File(file), None) => ArchiveReader::detect_stream(file),
+            (Self::File(FileInput::Seekable(file)), Some(format)) => {
+                Ok(ArchiveReader::of_type(file, format))
+            }
+            (Self::File(FileInput::Seekable(file)), None) => ArchiveReader::detect(file),
+            (Self::File(FileInput::Stream(file)), Some(format)) => {
+                ArchiveReader::of_stream(file, format)
+            }
+            (Self::File(FileInput::Stream(file)), None) => ArchiveReader::detect_stream(file),
         }
     }
 }

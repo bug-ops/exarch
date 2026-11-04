@@ -21,6 +21,9 @@ related:
 
 # Feature: Atomic-Force Destination Swap Hardening
 
+> [!note] Revision 2026-11-04 (50-issue batch)
+> The swap is now planned once (`WriteMode`, `ExtractPlan::Replace`), names are a single-component `EntryName`, and the displaced destination is held by a `DisplacedDestination` guard that restores it on any early exit (#935, #936). FR-014 to FR-016 add these; FR-001 to FR-013 are unchanged.
+
 > [!info] Metadata
 > **Subsystem**: exarch-cli (`crates/exarch-cli/src/commands/extract.rs`, `commands/atomic_swap.rs`)
 > **Priority**: P0 (security)
@@ -164,6 +167,9 @@ THEN the error output includes the directory's actual current path, resolved via
 | FR-011 | A pre-existing destination that exists but is not a directory (e.g. a regular file) SHALL be rejected with an explicit error, not silently replaced | must |
 | FR-012 | WHEN `--atomic --force` extraction fails inside the temp directory, THE SYSTEM SHALL report the failure as `ArchiveError::PartialExtraction` with `writes` set to `PartialWrites::RolledBack` (`err.rolled_back()`), and the `--json` `error.partial_report.writes` SHALL be `rolled_back`, so the counters are not presented as leftovers on disk (v0.7.0, #725, #728); since v0.8.0 the CLI takes the same atomic path implicitly, with the same `rolled_back` outcome, for a TAR extracted into a destination that does not exist (see [[005-cli/spec]] FR-097, #799, #808) | must |
 | FR-013 | THE SYSTEM SHALL compare directory identities through a typed `FileIdentity` (`Known { dev, ino }` or an explicit `Unknown`, deliberately without `PartialEq`), so a platform with no stable identity cannot make a comparison succeed vacuously and each caller decides what an unverifiable identity means (v0.8.0, #878, #888) | must |
+| FR-014 | Names passed to `PinnedDir` methods and the destination name SHALL be an `EntryName(OsString)`: `EntryName::of(&Path)` returns `None` for `.`, `..` and anything with a separator, and `EntryName::temp(prefix)` builds the generated temp and backup names, so the `*at` calls can never be given a multi-component name (#935) | must |
+| FR-015 | A destination displaced for the swap (renamed aside to the backup) SHALL be held by a `DisplacedDestination` guard: `Drop` restores it best-effort and stores a failure in a caller-provided `Cell<Option<io::Error>>` slot that the command reports; `restore()` and `discard()` consume the guard and disarm it; an early `?` between displace and swap therefore restores the destination (#936) | must |
+| FR-016 | The write mode SHALL be decided once into `WriteMode` and planned as `ExtractPlan::{Stream { options }, Listed { listed, conflicts }, Replace { target, source }}`, deriving the extraction options per variant, so the atomic and non-atomic paths cannot disagree about what they extract with (#936) | must |
 
 ## 4. Non-Functional Requirements
 

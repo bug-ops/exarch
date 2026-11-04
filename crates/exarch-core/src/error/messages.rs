@@ -10,7 +10,9 @@ use super::redaction::sanitize_io_error_for_error;
 use super::types::ArchiveError;
 use super::types::PartialWrites;
 use super::types::PolicySetting;
+use super::types::QuotaKind;
 use super::types::ReaderFormatError;
+use super::types::ZipBombScope;
 use crate::ExtractionReport;
 use crate::closed_enum::closed_enum;
 
@@ -108,6 +110,14 @@ closed_enum! {
         /// preferred, but as this code when extraction, listing or the
         /// descriptor-tail re-read hit it.
         ZipReader => "ZIP_READER",
+        /// A failure of the TAR reader: an entry, its PAX header or the entry
+        /// stream cannot be read, or the reader was used after an entry was
+        /// abandoned.
+        TarReader => "TAR_READER",
+        /// A failure of the 7z reader: the header cannot be parsed or is
+        /// inconsistent, a block uses an unsupported coder, or `sevenz-rust2`
+        /// reports an error with no kind of its own.
+        SevenZReader => "SEVENZ_READER",
     }
 }
 
@@ -183,16 +193,67 @@ pub enum SubCode {
     InvalidArchive(InvalidArchiveSubCode),
     /// Refines [`ErrorCode::SecurityViolation`].
     SecurityViolation(SecurityViolationSubCode),
+    /// Refines [`ErrorCode::QuotaExceeded`] with the quota that was exceeded.
+    Quota(QuotaKind),
+    /// Refines [`ErrorCode::ZipBomb`] with what the ratio was measured over.
+    ZipBomb(ZipBombScope),
 }
 
 impl SubCode {
+    /// Every sub-code of a quota error, in [`QuotaKind::ALL`] order.
+    pub const QUOTA_ALL: &'static [Self] = &[
+        Self::Quota(QuotaKind::FileCount),
+        Self::Quota(QuotaKind::TotalSize),
+        Self::Quota(QuotaKind::FileSize),
+        Self::Quota(QuotaKind::IntegerOverflow),
+        Self::Quota(QuotaKind::DecoderMemory),
+        Self::Quota(QuotaKind::CompressedMembers),
+        Self::Quota(QuotaKind::TreeNodes),
+        Self::Quota(QuotaKind::SinkCapacity),
+        Self::Quota(QuotaKind::SolidBlockMemory),
+    ];
+    /// Every sub-code of a zip-bomb error, in [`ZipBombScope::ALL`] order.
+    pub const ZIP_BOMB_ALL: &'static [Self] = &[
+        Self::ZipBomb(ZipBombScope::Entry),
+        Self::ZipBomb(ZipBombScope::SolidBlock),
+        Self::ZipBomb(ZipBombScope::SkippedEntries),
+    ];
+
     /// The stable string form of the wrapped sub-code.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidArchive(code) => code.as_str(),
             Self::SecurityViolation(code) => code.as_str(),
+            Self::Quota(kind) => quota_sub_code(kind),
+            Self::ZipBomb(scope) => zip_bomb_sub_code(scope),
         }
+    }
+}
+
+/// The `SCREAMING_SNAKE` sub-code of a quota, distinct from the `snake_case`
+/// [`QuotaKind::as_str`] that the CLI and Python/Node `kind` fields use.
+const fn quota_sub_code(kind: QuotaKind) -> &'static str {
+    match kind {
+        QuotaKind::FileCount => "FILE_COUNT",
+        QuotaKind::TotalSize => "TOTAL_SIZE",
+        QuotaKind::FileSize => "FILE_SIZE",
+        QuotaKind::IntegerOverflow => "INTEGER_OVERFLOW",
+        QuotaKind::DecoderMemory => "DECODER_MEMORY",
+        QuotaKind::CompressedMembers => "COMPRESSED_MEMBERS",
+        QuotaKind::TreeNodes => "TREE_NODES",
+        QuotaKind::SinkCapacity => "SINK_CAPACITY",
+        QuotaKind::SolidBlockMemory => "SOLID_BLOCK_MEMORY",
+    }
+}
+
+/// The `SCREAMING_SNAKE` sub-code of a zip-bomb scope, distinct from the
+/// human-readable [`ZipBombScope::as_str`] used in messages.
+const fn zip_bomb_sub_code(scope: ZipBombScope) -> &'static str {
+    match scope {
+        ZipBombScope::Entry => "ENTRY",
+        ZipBombScope::SolidBlock => "SOLID_BLOCK",
+        ZipBombScope::SkippedEntries => "SKIPPED_ENTRIES",
     }
 }
 
@@ -240,11 +301,19 @@ pub enum FfiKind {
     /// Hardlink target escapes the destination.
     HardlinkEscape,
     /// Compression ratio limit exceeded.
-    ZipBomb,
+    #[non_exhaustive]
+    ZipBomb {
+        /// What the refused ratio was measured over.
+        scope: ZipBombScope,
+    },
     /// ZIP structure is ambiguous or self-contradictory.
     ZipInconsistency,
     /// A quota was exceeded.
-    QuotaExceeded,
+    #[non_exhaustive]
+    QuotaExceeded {
+        /// The quota dimension that was exceeded.
+        kind: QuotaKind,
+    },
     /// Denied by security policy.
     #[non_exhaustive]
     SecurityViolation {
@@ -293,9 +362,9 @@ impl FfiKind {
             Self::PathTraversal
             | Self::SymlinkEscape
             | Self::HardlinkEscape
-            | Self::ZipBomb
+            | Self::ZipBomb { .. }
             | Self::ZipInconsistency
-            | Self::QuotaExceeded
+            | Self::QuotaExceeded { .. }
             | Self::InvalidArchive { .. }
             | Self::Io(_)
             | Self::InvalidPermissions
@@ -326,13 +395,13 @@ impl FfiKind {
             Self::InvalidArchive {
                 sub_code: Some(code),
             } => Some(SubCode::InvalidArchive(*code)),
+            Self::ZipBomb { scope } => Some(SubCode::ZipBomb(*scope)),
+            Self::QuotaExceeded { kind } => Some(SubCode::Quota(*kind)),
             Self::InvalidArchive { sub_code: None }
             | Self::PathTraversal
             | Self::SymlinkEscape
             | Self::HardlinkEscape
-            | Self::ZipBomb
             | Self::ZipInconsistency
-            | Self::QuotaExceeded
             | Self::Io(_)
             | Self::InvalidPermissions
             | Self::SourceNotFound
@@ -351,9 +420,9 @@ impl FfiKind {
             Self::PathTraversal => ErrorCode::PathTraversal,
             Self::SymlinkEscape => ErrorCode::SymlinkEscape,
             Self::HardlinkEscape => ErrorCode::HardlinkEscape,
-            Self::ZipBomb => ErrorCode::ZipBomb,
+            Self::ZipBomb { .. } => ErrorCode::ZipBomb,
             Self::ZipInconsistency => ErrorCode::ZipInconsistency,
-            Self::QuotaExceeded => ErrorCode::QuotaExceeded,
+            Self::QuotaExceeded { .. } => ErrorCode::QuotaExceeded,
             Self::SecurityViolation { .. } => ErrorCode::SecurityViolation,
             Self::InvalidArchive { .. } => ErrorCode::InvalidArchive,
             Self::Io(_) => ErrorCode::IoError,
@@ -459,12 +528,8 @@ impl ArchiveError {
     /// ```
     #[must_use]
     pub fn into_ffi_message(self) -> FfiErrorMessage {
-        if let Self::PartialExtraction {
-            source,
-            report,
-            writes,
-        } = self
-        {
+        if let Self::PartialExtraction(partial) = self {
+            let (source, report, writes) = partial.into_parts();
             let mut msg = source.into_ffi_message();
             msg.partial = Some(match writes {
                 PartialWrites::Kept => PartialOutcome::Kept(report),
@@ -498,9 +563,13 @@ impl ArchiveError {
             Self::PathTraversal { .. } => FfiKind::PathTraversal,
             Self::SymlinkEscape { .. } => FfiKind::SymlinkEscape,
             Self::HardlinkEscape { .. } => FfiKind::HardlinkEscape,
-            Self::ZipBomb(_) => FfiKind::ZipBomb,
+            Self::ZipBomb(details) => FfiKind::ZipBomb {
+                scope: details.scope(),
+            },
             Self::ZipInconsistency(_) => FfiKind::ZipInconsistency,
-            Self::QuotaExceeded { .. } => FfiKind::QuotaExceeded,
+            Self::QuotaExceeded { resource } => FfiKind::QuotaExceeded {
+                kind: resource.kind(),
+            },
             Self::SecurityViolation { kind } => FfiKind::SecurityViolation {
                 relaxable_by: kind.relaxable_by(),
                 sub_code: kind.sub_code(),
@@ -536,7 +605,7 @@ impl ArchiveError {
                 setting: Some(*setting),
             },
             Self::ReaderFormat(_) => FfiKind::InvalidConfiguration { setting: None },
-            Self::PartialExtraction { source, .. } => source.ffi_kind(),
+            Self::PartialExtraction(partial) => partial.cause().ffi_kind(),
         }
     }
 
@@ -562,7 +631,7 @@ impl ArchiveError {
             Self::InvalidArchive(reason) => format!("invalid archive: {reason}"),
             Self::Io(io_err) => sanitize_io_error_for_error(io_err),
             Self::InvalidPermissions { mode, .. } => {
-                format!("invalid permissions for {path}: {mode:#o}")
+                format!("invalid permissions for {path}: {:#o}", mode.get())
             }
             Self::SourceNotFound { .. } => format!("source path not found: {path}"),
             Self::SourceNotAccessible { .. } => {
@@ -580,7 +649,7 @@ impl ArchiveError {
                 super::config_error::message(*setting, problem)
             ),
             Self::ReaderFormat(reason) => reason.to_string(),
-            Self::PartialExtraction { source, .. } => source.ffi_description(),
+            Self::PartialExtraction(partial) => partial.cause().ffi_description(),
         }
     }
 
@@ -613,6 +682,8 @@ mod tests {
     use super::super::types::ZipBombScope;
     use super::super::violation::Violation;
     use super::*;
+    use std::collections::HashSet;
+
     use crate::security::Compressed;
     use crate::security::Uncompressed;
     use std::assert_matches;
@@ -636,7 +707,14 @@ mod tests {
         };
         assert_eq!(kind.relaxable_by(), None);
         assert_eq!(kind.sub_code().map(SubCode::as_str), Some("TAR_AMBIGUITY"));
-        assert_eq!(FfiKind::ZipBomb.sub_code(), None);
+        assert_eq!(
+            FfiKind::ZipBomb {
+                scope: ZipBombScope::Entry
+            }
+            .sub_code()
+            .map(SubCode::as_str),
+            Some("ENTRY")
+        );
     }
 
     /// Regression test for #462: `PathTraversal` carries an
@@ -737,7 +815,7 @@ mod tests {
             ArchiveError::Io(std::io::Error::other("test")),
             ArchiveError::InvalidPermissions {
                 path: PathBuf::from("test"),
-                mode: 0o777,
+                mode: crate::RawMode::new(0o777),
             },
             ArchiveError::SourceNotFound {
                 path: PathBuf::from("test"),
@@ -868,22 +946,22 @@ mod tests {
                 sub_code: SecurityViolationSubCode::Encrypted,
             }
         );
-        let wrapped = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::TarAmbiguity(
-                super::super::tar_ambiguity::TarAmbiguity::SparseEntry,
-            )),
-            report: ExtractionReport::default(),
-            writes: PartialWrites::Kept,
-        };
+        let wrapped = ArchiveError::PartialExtraction(crate::Partial::new(
+            ArchiveError::TarAmbiguity(super::super::tar_ambiguity::TarAmbiguity::SparseEntry),
+            ExtractionReport::default(),
+            PartialWrites::Kept,
+        ));
         assert_eq!(wrapped.ffi_kind(), invalid(ambiguity));
     }
 
     #[test]
     fn test_partial_extraction_sets_partial() {
-        let wrap = |writes| ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::from(Violation::EncryptedArchive)),
-            report: ExtractionReport::default(),
-            writes,
+        let wrap = |writes| {
+            ArchiveError::PartialExtraction(crate::Partial::new(
+                ArchiveError::from(Violation::EncryptedArchive),
+                ExtractionReport::default(),
+                writes,
+            ))
         };
         let kept = wrap(PartialWrites::Kept).into_ffi_message();
         assert_matches!(kept.partial, Some(PartialOutcome::Kept(_)));
@@ -893,5 +971,57 @@ mod tests {
         let discarded = wrap(PartialWrites::Discarded).into_ffi_message();
         assert_matches!(discarded.partial, Some(PartialOutcome::Discarded));
         assert_eq!(PartialOutcome::Discarded.writes(), PartialWrites::Discarded);
+    }
+
+    #[test]
+    fn quota_and_zip_bomb_sub_codes_are_screaming_and_unique() {
+        let quotas: Vec<_> = QuotaKind::ALL
+            .iter()
+            .map(|&kind| SubCode::Quota(kind).as_str())
+            .collect();
+        let scopes: Vec<_> = ZipBombScope::ALL
+            .iter()
+            .map(|&scope| SubCode::ZipBomb(scope).as_str())
+            .collect();
+        for set in [&quotas, &scopes] {
+            let unique: HashSet<_> = set.iter().collect();
+            assert_eq!(unique.len(), set.len(), "{set:?}");
+            for code in set {
+                assert!(
+                    code.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+                    "{code}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quota_and_zip_bomb_kinds_carry_their_sub_code() {
+        let quota = ArchiveError::QuotaExceeded {
+            resource: QuotaResource::SolidBlockMemory {
+                scope: crate::SolidMemoryScope::Block,
+                current: 2,
+                max: 1,
+            },
+        };
+        assert_eq!(
+            quota.ffi_kind().sub_code(),
+            Some(SubCode::Quota(QuotaKind::SolidBlockMemory))
+        );
+        assert_eq!(
+            quota.ffi_kind().sub_code().map(SubCode::as_str),
+            Some("SOLID_BLOCK_MEMORY")
+        );
+    }
+
+    #[test]
+    fn the_sub_code_constants_cover_every_kind_and_scope() {
+        let quotas: Vec<_> = QuotaKind::ALL.iter().map(|&k| SubCode::Quota(k)).collect();
+        assert_eq!(SubCode::QUOTA_ALL, quotas.as_slice());
+        let scopes: Vec<_> = ZipBombScope::ALL
+            .iter()
+            .map(|&s| SubCode::ZipBomb(s))
+            .collect();
+        assert_eq!(SubCode::ZIP_BOMB_ALL, scopes.as_slice());
     }
 }

@@ -52,10 +52,6 @@ closed_enum! {
         AllowedExtension => "allowed_extension",
         /// An entry of the banned path component list.
         BannedPathComponent => "banned_path_component",
-        /// The path of the archive to read.
-        ArchivePath => "archive_path",
-        /// The directory to extract into.
-        OutputDirectory => "output_directory",
         /// The path of the archive to create.
         OutputPath => "output_path",
         /// The paths to add to an archive.
@@ -66,12 +62,27 @@ closed_enum! {
         CreationFormat => "creation_format",
         /// Atomic extraction.
         AtomicExtraction => "atomic_extraction",
-        /// A ZIP archive opened for extraction.
-        ZipArchive => "zip_archive",
         /// The writer a ZIP archive is created into.
         ZipOutputWriter => "zip_output_writer",
         /// The byte cap of an in-memory extraction.
         MaxBytes => "max_bytes",
+        /// `SecurityConfig::parallel_decode`, the lookahead memory of parallel
+        /// 7z decoding.
+        ParallelDecodeMemory => "parallel_decode_memory",
+        /// An entry of the creation exclude patterns.
+        ExcludePattern => "exclude_pattern",
+        /// The ZIP structure policy.
+        ZipConsistency => "zip_consistency",
+        /// The path model of a sink extraction.
+        PathModel => "path_model",
+        /// The archive format of an extraction or listing.
+        ArchiveFormat => "archive_format",
+        /// The decode reuse mode of an extraction.
+        DecodeReuse => "decode_reuse",
+        /// The byte limit of a decode reuse mode.
+        DecodeReuseLimit => "decode_reuse_limit",
+        /// The kind of an entry skip.
+        SkipKind => "skip_kind",
     }
 }
 
@@ -103,15 +114,30 @@ impl ConfigSetting {
             Self::DecompressionBudget => "decompression budget",
             Self::AllowedExtension => "allowed extension",
             Self::BannedPathComponent => "banned path component",
-            Self::ArchivePath => "archive path",
-            Self::OutputDirectory => "output directory",
             Self::OutputPath => "output path",
             Self::SourcePaths => "source paths",
             Self::CreationFormat => "7z archive creation",
             Self::AtomicExtraction => "atomic extraction",
-            Self::ZipArchive => "ZIP archive",
             Self::ZipOutputWriter => "ZIP output writer",
-            other => other.as_str(),
+            Self::ParallelDecodeMemory => "parallel decode memory",
+            Self::ExcludePattern => "exclude pattern",
+            Self::ZipConsistency => "zip consistency",
+            Self::PathModel => "path model",
+            Self::ArchiveFormat => "archive format",
+            Self::DecodeReuse => "decode reuse",
+            Self::DecodeReuseLimit => "decode reuse limit",
+            Self::SkipKind => "skip kind",
+            Self::MaxFileSize
+            | Self::MaxTotalSize
+            | Self::MaxFileCount
+            | Self::MaxPathDepth
+            | Self::MaxCompressionRatio
+            | Self::MaxSolidCompressionRatio
+            | Self::MaxSolidBlockMemory
+            | Self::MaxTarMetadataBytes
+            | Self::MaxDecoderMemory
+            | Self::StripPrefix
+            | Self::MaxBytes => self.as_str(),
         }
     }
 }
@@ -130,14 +156,17 @@ impl ConfigSetting {
 pub enum ConfigProblem {
     /// A limit is zero.
     Zero,
-    /// A ratio is not a positive, finite number.
-    NotPositive,
     /// A byte count is negative.
     Negative,
-    /// A budget is not greater than zero.
-    NotGreaterThanZero,
-    /// A byte count is not a positive whole number.
-    NotPositiveWholeNumber,
+    /// A number is NaN or infinite.
+    NotFinite,
+    /// A number has a fractional part.
+    NotWholeNumber,
+    /// A number is above the largest accepted value.
+    TooLarge {
+        /// The largest accepted value.
+        max: u64,
+    },
     /// A required input is missing.
     NotSet,
     /// No input of this kind was given.
@@ -148,10 +177,6 @@ pub enum ConfigProblem {
     NotSupported,
     /// Atomic extraction cannot target a sink.
     CannotTargetSink,
-    /// The ZIP archive was opened for a policy that skips stream checks.
-    OpenedForOtherPolicy,
-    /// The ZIP archive was opened under a smaller zstd window limit.
-    OpenedUnderSmallerZstdWindow,
     /// The prefix would remove the whole name of this path.
     RemovesWholeName {
         /// The path that would be left without a name.
@@ -171,6 +196,8 @@ pub enum ConfigProblem {
     InnerDot,
     /// The entry is `.` or `..`.
     DotEntry,
+    /// The value is not one of the allowed values.
+    NotOneOf,
     /// The entry is longer than the maximum.
     TooLong {
         /// The longest accepted length in bytes.
@@ -180,27 +207,93 @@ pub enum ConfigProblem {
     },
     /// The entry contains a NUL byte.
     ContainsNul,
+    /// A creation exclude pattern the matcher does not support.
+    ExcludePatternRefused {
+        /// The refused pattern text, cut to the maximum entry length.
+        pattern: String,
+        /// Why the pattern is refused.
+        reason: ExcludeRefusal,
+    },
+}
+
+closed_enum! {
+    /// Why a creation exclude pattern is refused.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ExcludeRefusal;
+    ///
+    /// assert_eq!(ExcludeRefusal::GlobMetacharacter.as_str(), "glob_metacharacter");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ExcludeRefusal {
+        /// The pattern is empty
+        Empty => "empty",
+        /// The pattern is longer than the maximum entry length
+        TooLong => "too_long",
+        /// The pattern contains a NUL byte
+        ContainsNul => "contains_nul",
+        /// A path component is `.` or `..`
+        DotEntry => "dot_entry",
+        /// The pattern is an absolute path
+        Absolute => "absolute",
+        /// The wildcard shape is not one of `name`, `name*` and `*name`
+        UnsupportedWildcard => "unsupported_wildcard",
+        /// A `*` is combined with a path separator
+        WildcardWithSeparator => "wildcard_with_separator",
+        /// The pattern holds `?`, `[`, `]`, `{`, `}` or `!`, which would be
+        /// matched literally
+        GlobMetacharacter => "glob_metacharacter",
+        /// The pattern starts or ends with whitespace or a control character
+        PaddedWithBlank => "padded_with_blank",
+        /// The pattern holds a comma, which reads as a list separator
+        ContainsComma => "contains_comma",
+    }
+}
+
+impl ExcludeRefusal {
+    /// A short explanation for a message.
+    #[must_use]
+    pub const fn explanation(self) -> &'static str {
+        match self {
+            Self::Empty => "is empty",
+            Self::TooLong => "is longer than the maximum entry length",
+            Self::ContainsNul => "contains a null byte",
+            Self::DotEntry => "has a `.` or `..` component",
+            Self::Absolute => {
+                "is an absolute path; patterns match archive paths, which are relative"
+            }
+            Self::UnsupportedWildcard => {
+                "uses an unsupported `*` shape; only `name`, `name*` and `*name` are supported"
+            }
+            Self::WildcardWithSeparator => {
+                "combines `*` with a path separator (for `build/*` write `build`)"
+            }
+            Self::GlobMetacharacter => {
+                "contains `?`, `[`, `]`, `{`, `}` or `!`, which are not glob syntax here and would match literally"
+            }
+            Self::PaddedWithBlank => "starts or ends with whitespace",
+            Self::ContainsComma => "contains a comma; give one pattern per option",
+        }
+    }
 }
 
 impl fmt::Display for ConfigProblem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Zero => f.write_str("must not be zero"),
-            Self::NotPositive => f.write_str("must be positive"),
             Self::Negative => f.write_str("must not be negative"),
-            Self::NotGreaterThanZero => f.write_str("must be greater than zero"),
-            Self::NotPositiveWholeNumber => f.write_str("must be a positive whole number of bytes"),
+            Self::NotOneOf => f.write_str("is not one of the allowed values"),
+            Self::NotFinite => f.write_str("must be a finite number"),
+            Self::NotWholeNumber => f.write_str("must be a whole number"),
+            Self::TooLarge { max } => write!(f, "must not exceed {max}"),
             Self::NotSet => f.write_str("not set"),
             Self::NoneProvided => f.write_str("none provided"),
             Self::NoParent => f.write_str("has no parent"),
             Self::NotSupported => f.write_str("is not supported"),
             Self::CannotTargetSink => f.write_str("renames a directory and cannot target a sink"),
-            Self::OpenedForOtherPolicy => {
-                f.write_str("was opened for a policy that skips stream checks")
-            }
-            Self::OpenedUnderSmallerZstdWindow => {
-                f.write_str("was opened under a smaller zstd window limit than its config allows")
-            }
             Self::RemovesWholeName { path } => {
                 write!(f, "removes the whole name of {}", path.display())
             }
@@ -221,6 +314,9 @@ impl fmt::Display for ConfigProblem {
                 write!(f, "exceeds maximum length of {max} bytes (got {got} bytes)")
             }
             Self::ContainsNul => f.write_str("contains null bytes - potential security issue"),
+            Self::ExcludePatternRefused { pattern, reason } => {
+                write!(f, "{pattern:?} {}", reason.explanation())
+            }
         }
     }
 }
@@ -249,6 +345,15 @@ mod tests {
     }
 
     #[test]
+    fn a_host_path_keeps_its_native_spelling() {
+        let problem = ConfigProblem::RemovesWholeName {
+            path: PathBuf::from("C:\\src\\a"),
+        };
+        let text = problem.to_string();
+        assert!(text.ends_with("C:\\src\\a"), "{text}");
+    }
+
+    #[test]
     fn messages_keep_their_established_text() {
         let cases = [
             (
@@ -258,18 +363,13 @@ mod tests {
             ),
             (
                 ConfigSetting::MaxCompressionRatio,
-                ConfigProblem::NotPositive,
-                "max_compression_ratio must be positive",
+                ConfigProblem::NotFinite,
+                "max_compression_ratio must be a finite number",
             ),
             (
                 ConfigSetting::DecompressionBudget,
-                ConfigProblem::NotGreaterThanZero,
-                "decompression budget must be greater than zero",
-            ),
-            (
-                ConfigSetting::ArchivePath,
-                ConfigProblem::NotSet,
-                "archive path not set",
+                ConfigProblem::Zero,
+                "decompression budget must not be zero",
             ),
             (
                 ConfigSetting::SourcePaths,
@@ -277,9 +377,9 @@ mod tests {
                 "no source paths provided",
             ),
             (
-                ConfigSetting::OutputDirectory,
+                ConfigSetting::OutputPath,
                 ConfigProblem::NoParent,
-                "output directory has no parent",
+                "output path has no parent",
             ),
             (
                 ConfigSetting::CreationFormat,
@@ -292,14 +392,9 @@ mod tests {
                 "atomic extraction renames a directory and cannot target a sink",
             ),
             (
-                ConfigSetting::ZipArchive,
-                ConfigProblem::OpenedForOtherPolicy,
-                "ZIP archive was opened for a policy that skips stream checks",
-            ),
-            (
-                ConfigSetting::ZipArchive,
-                ConfigProblem::OpenedUnderSmallerZstdWindow,
-                "ZIP archive was opened under a smaller zstd window limit than its config allows",
+                ConfigSetting::DecodeReuse,
+                ConfigProblem::NotOneOf,
+                "decode reuse is not one of the allowed values",
             ),
             (
                 ConfigSetting::StripPrefix,

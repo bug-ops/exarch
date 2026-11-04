@@ -14,9 +14,9 @@
 //! subsystem behind this repo's two closed P0 advisories, GHSA-x8wr and
 //! GHSA-j9wj -- is what a security-focused fuzz harness should spend its
 //! cycles on, and it is unreachable unless these are enabled. Likewise,
-//! `allow_solid_archives` gates `sevenz.rs`'s solid-block decode path, which
-//! is what `with_max_solid_block_memory` below is meant to bound; left at
-//! its default `false`, that bound would be dead configuration.
+//! `SolidArchives::Allow` gates `sevenz.rs`'s solid-block decode path, which
+//! is what the solid block limit below is meant to bound; left at its default
+//! `Refuse`, that bound would not exist.
 
 use std::num::NonZeroU64;
 use std::sync::OnceLock;
@@ -24,54 +24,37 @@ use std::sync::OnceLock;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::SecurityConfig;
-use exarch_core::Unvalidated;
-use exarch_core::Validated;
+use exarch_core::SolidArchives;
+use exarch_core::SolidLimits;
 use exarch_core::VerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
 
-fn base_config() -> SecurityConfig<Unvalidated> {
+fn base_config() -> SecurityConfig {
     SecurityConfig::default()
         .with_max_file_size(exarch_core::non_zero!(1024 * 1024))
         .with_max_total_size(exarch_core::non_zero!(4 * 1024 * 1024))
         .with_max_file_count(exarch_core::non_zero!(64))
         .with_max_tar_metadata_bytes(exarch_core::non_zero!(64 * 1024))
-        .with_max_solid_block_memory(exarch_core::non_zero!(1024 * 1024))
         .with_allow_symlinks(true)
         .with_allow_hardlinks(true)
-        .with_allow_solid_archives(true)
+        .with_solid_archives(SolidArchives::Allow(
+            SolidLimits::DEFAULT.with_max_block_memory(exarch_core::non_zero!(1024 * 1024)),
+        ))
 }
 
-/// For targets calling `ArchiveFormat::list`/`verify` directly, which require
-/// an already-validated config.
+/// The harness config every target reuses.
 #[allow(dead_code)]
-pub fn validated() -> &'static SecurityConfig<Validated> {
-    static CONFIG: OnceLock<SecurityConfig<Validated>> = OnceLock::new();
-    CONFIG.get_or_init(|| {
-        base_config()
-            .validate()
-            .expect("fuzz harness SecurityConfig must be internally consistent")
-    })
-}
-
-/// Like [`validated`], but with the ZIP structure policy relaxed so the
-/// archives `Enforce` rejects early still reach listing and verification.
-#[allow(dead_code)]
-pub fn validated_ignoring_zip_structure() -> &'static SecurityConfig<Validated> {
-    static CONFIG: OnceLock<SecurityConfig<Validated>> = OnceLock::new();
-    CONFIG.get_or_init(|| {
-        base_config()
-            .with_zip_consistency(ZipConsistencyPolicy::Ignore)
-            .validate()
-            .expect("fuzz harness SecurityConfig must be internally consistent")
-    })
-}
-
-/// For `extract_archive`, which clones and validates its config internally
-/// on every call.
-#[allow(dead_code)]
-pub fn unvalidated() -> &'static SecurityConfig<Unvalidated> {
-    static CONFIG: OnceLock<SecurityConfig<Unvalidated>> = OnceLock::new();
+pub fn config() -> &'static SecurityConfig {
+    static CONFIG: OnceLock<SecurityConfig> = OnceLock::new();
     CONFIG.get_or_init(base_config)
+}
+
+/// Like [`config`], but with the ZIP structure policy relaxed so the archives
+/// `Enforce` rejects early still reach listing and verification.
+#[allow(dead_code)]
+pub fn config_ignoring_zip_structure() -> &'static SecurityConfig {
+    static CONFIG: OnceLock<SecurityConfig> = OnceLock::new();
+    CONFIG.get_or_init(|| base_config().with_zip_consistency(ZipConsistencyPolicy::Ignore))
 }
 
 /// `verify` options with the integrity pass enabled under a small budget, so

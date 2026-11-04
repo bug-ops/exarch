@@ -1,6 +1,72 @@
 //! Archive creation operation reporting.
 
+use std::fmt;
 use std::time::Duration;
+
+use crate::Skips;
+
+/// A condition of a creation worth surfacing that is not a skipped entry.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::creation::CreationWarning;
+///
+/// let warning = CreationWarning::ZipRatioCheckFailed {
+///     reason: "invalid Zip archive".into(),
+/// };
+/// assert!(
+///     warning
+///         .to_string()
+///         .starts_with("could not check the ZIP entries")
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum CreationWarning {
+    /// Default extraction would refuse entries of the finished ZIP archive as
+    /// a zip bomb, because their compression ratio is over the default limit.
+    ZipRatioOverDefaultLimit {
+        /// How many entries are over the limit.
+        entries: usize,
+        /// The default extraction ratio limit.
+        limit: f64,
+        /// The smallest ratio limit that admits every entry.
+        needed_ratio: f64,
+    },
+
+    /// The finished ZIP archive could not be read back to check its entries
+    /// against the default extraction ratio limit.
+    ZipRatioCheckFailed {
+        /// Why the archive could not be read back.
+        reason: String,
+    },
+}
+
+impl fmt::Display for CreationWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZipRatioOverDefaultLimit {
+                entries,
+                limit,
+                needed_ratio,
+            } => {
+                let noun = if *entries == 1 { "entry" } else { "entries" };
+                write!(
+                    f,
+                    "ZIP archive has {entries} {noun} over the default extraction ratio limit of \
+                     {limit}x; default extraction refuses it as a zip bomb unless the maximum \
+                     compression ratio is at least {needed_ratio}"
+                )
+            }
+            Self::ZipRatioCheckFailed { reason } => write!(
+                f,
+                "could not check the ZIP entries against the default extraction ratio limit: \
+                 {reason}"
+            ),
+        }
+    }
+}
 
 /// Report of an archive creation operation.
 ///
@@ -20,6 +86,7 @@ use std::time::Duration;
 /// assert_eq!(report.compression_percentage(), 50.0);
 /// ```
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct CreationReport {
     /// Number of files added to the archive.
     pub files_added: usize,
@@ -39,11 +106,11 @@ pub struct CreationReport {
     /// Duration of the creation operation.
     pub duration: Duration,
 
-    /// Number of files skipped (due to filters or errors).
-    pub files_skipped: usize,
+    /// Entries left out of the archive, by reason.
+    pub skipped: Skips,
 
-    /// Warnings generated during creation.
-    pub warnings: Vec<String>,
+    /// Conditions worth surfacing that are not skipped entries.
+    pub warnings: Vec<CreationWarning>,
 }
 
 impl CreationReport {
@@ -53,19 +120,36 @@ impl CreationReport {
         Self::default()
     }
 
-    /// Adds a warning message to the report.
+    /// Adds a warning to the report.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::creation::CreationWarning;
+    ///
+    /// let mut report = CreationReport::new();
+    /// report.add_warning(CreationWarning::ZipRatioCheckFailed {
+    ///     reason: "unreadable".into(),
+    /// });
+    /// assert!(report.has_warnings());
+    /// ```
+    pub fn add_warning(&mut self, warning: CreationWarning) {
+        self.warnings.push(warning);
+    }
+
+    /// Returns how many entries were left out, over all reasons.
     ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::creation::CreationReport;
     ///
-    /// let mut report = CreationReport::new();
-    /// report.add_warning("File too large, skipped");
-    /// assert!(report.has_warnings());
+    /// assert_eq!(CreationReport::new().files_skipped(), 0);
     /// ```
-    pub fn add_warning(&mut self, msg: impl Into<String>) {
-        self.warnings.push(msg.into());
+    #[must_use]
+    pub fn files_skipped(&self) -> usize {
+        self.skipped.total()
     }
 
     /// Returns whether any warnings were generated.
@@ -78,7 +162,11 @@ impl CreationReport {
     /// let mut report = CreationReport::new();
     /// assert!(!report.has_warnings());
     ///
-    /// report.add_warning("test warning");
+    /// report.add_warning(
+    ///     exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
+    ///         reason: "test".into(),
+    ///     },
+    /// );
     /// assert!(report.has_warnings());
     /// ```
     #[must_use]
@@ -172,8 +260,11 @@ impl CreationReport {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
+    use crate::Skip;
+    use crate::SkipKind;
 
     #[test]
     fn test_creation_report_default() {
@@ -184,7 +275,7 @@ mod tests {
         assert_eq!(report.bytes_written, 0);
         assert_eq!(report.bytes_compressed, 0);
         assert_eq!(report.duration, Duration::default());
-        assert_eq!(report.files_skipped, 0);
+        assert_eq!(report.files_skipped(), 0);
         assert!(report.warnings.is_empty());
         assert!(!report.has_warnings());
     }
@@ -278,18 +369,27 @@ mod tests {
         let mut report = CreationReport::new();
         assert!(!report.has_warnings());
 
-        report.add_warning("Warning 1");
+        let warning = CreationWarning::ZipRatioCheckFailed {
+            reason: "Warning 1".into(),
+        };
+        report.add_warning(warning.clone());
         assert!(report.has_warnings());
-        assert_eq!(report.warnings.len(), 1);
-        assert_eq!(report.warnings[0], "Warning 1");
+        assert_eq!(report.warnings, vec![warning]);
+    }
 
-        report.add_warning("Warning 2".to_string());
-        assert_eq!(report.warnings.len(), 2);
-        assert_eq!(report.warnings[1], "Warning 2");
-
-        let string_ref = String::from("Warning 3");
-        report.add_warning(&string_ref);
-        assert_eq!(report.warnings.len(), 3);
+    #[test]
+    fn test_creation_warning_text() {
+        let over = CreationWarning::ZipRatioOverDefaultLimit {
+            entries: 2,
+            limit: 100.0,
+            needed_ratio: 250.0,
+        };
+        assert_eq!(
+            over.to_string(),
+            "ZIP archive has 2 entries over the default extraction ratio limit of 100x; default \
+             extraction refuses it as a zip bomb unless the maximum compression ratio is at \
+             least 250"
+        );
     }
 
     #[test]
@@ -315,9 +415,17 @@ mod tests {
         report.bytes_written = 10 * 1024 * 1024; // 10 MB
         report.bytes_compressed = 3 * 1024 * 1024; // 3 MB
         report.duration = Duration::from_secs(2);
-        report.files_skipped = 3;
-        report.add_warning("Skipped 3 files due to size limit");
+        for i in 0..3 {
+            report
+                .skipped
+                .record(Skip::new(SkipKind::OverMaxFileSize, format!("big{i}")))
+                .unwrap();
+        }
+        report.add_warning(CreationWarning::ZipRatioCheckFailed {
+            reason: "unreadable".into(),
+        });
 
+        assert_eq!(report.files_skipped(), 3);
         assert_eq!(report.total_items(), 125);
         assert!(report.has_warnings());
         assert_eq!(report.warnings.len(), 1);

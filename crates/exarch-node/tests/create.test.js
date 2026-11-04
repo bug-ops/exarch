@@ -134,3 +134,106 @@ describe('createArchiveSync', () => {
     assert.strictEqual(logEntries.length, 0);
   });
 });
+
+describe('createArchive output handling', () => {
+  let tempDir;
+  let sourceDir;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    sourceDir = path.join(tempDir, 'source');
+    fs.mkdirSync(sourceDir);
+    createTestFiles(sourceDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('leaves no archive behind when a source is missing', () => {
+    const outputPath = path.join(tempDir, 'failed.tar.gz');
+    assert.throws(() => createArchiveSync(outputPath, [path.join(tempDir, 'nope')]));
+    assert.strictEqual(fs.existsSync(outputPath), false);
+  });
+
+  it('keeps an existing archive when creation fails', () => {
+    const outputPath = path.join(tempDir, 'keep.tar.gz');
+    fs.writeFileSync(outputPath, 'previous');
+    assert.throws(() => createArchiveSync(outputPath, [path.join(tempDir, 'nope')]));
+    assert.strictEqual(fs.readFileSync(outputPath, 'utf8'), 'previous');
+  });
+
+  it('reports excluded entries by reason', () => {
+    fs.writeFileSync(path.join(sourceDir, 'debug.log'), 'log content');
+    const config = new CreationConfig();
+    config.addExcludePattern('*.log');
+    const report = createArchiveSync(path.join(tempDir, 'skips.tar.gz'), [sourceDir], config);
+    assert.ok(report.filesSkipped >= 1);
+    assert.deepStrictEqual(
+      report.skipped.counts.find((c) => c.kind === 'excluded'),
+      { kind: 'excluded', count: report.filesSkipped }
+    );
+    assert.ok(
+      report.skipped.sample.some((s) => s.path.endsWith('debug.log') && s.kind === 'excluded')
+    );
+  });
+
+  for (const shape of ['*.m*', '?.txt', '[a', '{a,b}', '!a.txt', ' .env', 'a,b', '', '../x']) {
+    it(`refuses the exclude pattern ${JSON.stringify(shape)} instead of silently excluding nothing`, () => {
+      const config = new CreationConfig();
+      const before = config.excludePatterns;
+      assert.throws(() => config.addExcludePattern(shape), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'exclude_pattern',
+      });
+      assert.deepStrictEqual(config.excludePatterns, before);
+    });
+  }
+
+  it('accepts the documented exclude pattern shapes', () => {
+    const config = new CreationConfig();
+    for (const shape of ['.git', 'temp*', '*.tmp', 'build/out']) {
+      config.addExcludePattern(shape);
+    }
+    assert.ok(config.excludePatterns.includes('build/out'));
+  });
+
+  it('replaces an existing archive on success', () => {
+    const outputPath = path.join(tempDir, 'replace.tar.gz');
+    fs.writeFileSync(outputPath, 'previous');
+    createArchiveSync(outputPath, [sourceDir]);
+    assert.ok(listArchiveSync(outputPath).entries.length > 0);
+  });
+
+  it('overwrite: false refuses an existing output with OUTPUT_EXISTS', async () => {
+    const outputPath = path.join(tempDir, 'exists.tar.gz');
+    fs.writeFileSync(outputPath, 'previous');
+    assert.throws(() => createArchiveSync(outputPath, [sourceDir], null, { overwrite: false }), {
+      code: 'OUTPUT_EXISTS',
+    });
+    await assert.rejects(createArchive(outputPath, [sourceDir], null, { overwrite: false }), {
+      code: 'OUTPUT_EXISTS',
+    });
+    assert.strictEqual(fs.readFileSync(outputPath, 'utf8'), 'previous');
+  });
+
+  it('overwrite: false creates a new output', () => {
+    const outputPath = path.join(tempDir, 'fresh.tar.gz');
+    createArchiveSync(outputPath, [sourceDir], null, { overwrite: false });
+    assert.ok(listArchiveSync(outputPath).entries.length > 0);
+  });
+
+  it('format overrides the extension, so a ZIP-based name is written as a plain ZIP', () => {
+    const outputPath = path.join(tempDir, 'bundle.apk');
+    assert.throws(() => createArchiveSync(outputPath, [sourceDir]));
+    createArchiveSync(outputPath, [sourceDir], null, { format: 'Zip' });
+    assert.strictEqual(listArchiveSync(outputPath).format, 'Zip');
+  });
+
+  it('format SevenZ cannot be created', () => {
+    assert.throws(
+      () => createArchiveSync(path.join(tempDir, 'a.7z'), [sourceDir], null, { format: 'SevenZ' }),
+      (err) => typeof err.code === 'string' && err.code !== 'GenericFailure'
+    );
+  });
+});

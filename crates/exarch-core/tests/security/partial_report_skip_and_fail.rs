@@ -9,11 +9,11 @@
 #![allow(clippy::disallowed_methods)]
 
 use exarch_core::ArchiveError;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::PartialWrites;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
-use exarch_core::extract_archive_with_options;
 use std::assert_matches;
 use tempfile::TempDir;
 
@@ -60,14 +60,16 @@ fn skip_only_report_still_wraps_as_partial_extraction_on_later_failure() {
     let result = extract_archive(&archive_path, dest.path(), &config);
 
     match result {
-        Err(ArchiveError::PartialExtraction { source, report, .. }) => {
+        Err(ArchiveError::PartialExtraction(partial)) => {
+            let (source, report) = (partial.cause(), partial.report());
             assert_matches!(
-                *source,
+                source,
                 ArchiveError::SymlinkEscape { .. },
                 "expected SymlinkEscape source, got: {source:?}"
             );
             assert_eq!(
-                report.files_skipped, 1,
+                report.files_skipped(),
+                1,
                 "payload.bin must be counted as skipped for its disallowed extension"
             );
             assert_eq!(
@@ -75,9 +77,12 @@ fn skip_only_report_still_wraps_as_partial_extraction_on_later_failure() {
                 0,
                 "no entry was ever written before the failure"
             );
-            assert!(
-                report.has_warnings(),
-                "the extension-skip warning must survive on the wrapped report"
+            assert_eq!(
+                report
+                    .skipped
+                    .count(exarch_core::SkipKind::ExtensionNotAllowed),
+                1,
+                "the typed extension skip must survive on the wrapped report"
             );
         }
         other => panic!("expected PartialExtraction wrapping the skip-only report, got: {other:?}"),
@@ -111,7 +116,7 @@ fn write_file_then_escape_tar(dir: &TempDir) -> std::path::PathBuf {
 
 fn partial_writes_of(result: exarch_core::Result<exarch_core::ExtractionReport>) -> PartialWrites {
     match result {
-        Err(ArchiveError::PartialExtraction { writes, .. }) => writes,
+        Err(ArchiveError::PartialExtraction(partial)) => partial.writes(),
         other => panic!("expected PartialExtraction, got: {other:?}"),
     }
 }
@@ -138,9 +143,11 @@ fn atomic_failure_reports_writes_rolled_back() {
     let config = SecurityConfig::default().with_allow_symlinks(true);
     let options = ExtractionOptions::default().with_atomic(true);
 
-    let writes = partial_writes_of(extract_archive_with_options(
-        &archive, &dest, &config, &options,
-    ));
+    let writes = partial_writes_of(
+        ExtractRequest::new(&config)
+            .with_options(options)
+            .extract(&archive, &dest),
+    );
 
     assert_eq!(writes, PartialWrites::RolledBack);
     assert!(!dest.exists());

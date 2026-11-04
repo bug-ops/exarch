@@ -10,7 +10,9 @@ tags:
   - typestate
 created: 2026-08-04
 updated: 2026-11-04
-status: implemented
+status: obsolete
+superseded_by: "[[003-config-api/spec]]"
+obsolete_reason: "The Unvalidated/Validated typestate, validate() and the phantom markers were removed in the 50-issue batch (#898); SecurityConfig and CreationConfig are plain structs with public fields. Remove this spec at the next release."
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -20,6 +22,9 @@ related:
 ---
 
 # Feature: Config Typestate Validation
+
+> [!danger] Obsolete
+> Removed by #898 (2026-11-04). `SecurityConfigFields` was renamed `SecurityConfig` and `CreationConfigFields` `CreationConfig`; both are `#[non_exhaustive]` structs with public typed fields, no `Deref`, no `validate()`. `Unvalidated`, `Validated` and every `<State>` parameter are gone, and the entry points borrow the config without cloning it. `validate()` held no logic (it always returned `Ok`), so no check was lost; the compression-level contract is enforced by `CompressionLevel::try_from`. See [[003-config-api/spec]]. The text below is kept only until the next release removes this spec.
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / config, creation

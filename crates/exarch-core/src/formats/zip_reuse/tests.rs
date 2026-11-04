@@ -16,7 +16,6 @@ use crate::ExtractionOptions;
 use crate::NoopProgress;
 use crate::ReuseLimit;
 use crate::SecurityConfig;
-use crate::config::Validated;
 use crate::formats::zip::ZipArchive;
 use crate::formats::zip::ZipMethod;
 use crate::sink::SinkUsage;
@@ -26,7 +25,7 @@ fn limit(bytes: u64) -> ReuseLimit {
 }
 
 fn plan(mode: DecodeReuse) -> ReusePlan {
-    ReusePlan::of(mode, &SecurityConfig::default().validate().unwrap())
+    ReusePlan::of(mode, &SecurityConfig::default())
 }
 
 fn key_of(data: &[u8]) -> RetainKey {
@@ -280,7 +279,7 @@ fn zip_of(entries: usize, method: zip::CompressionMethod) -> Vec<u8> {
 struct Opened {
     archive: ZipArchive<Counting<Cursor<Vec<u8>>>>,
     read: Arc<AtomicU64>,
-    config: SecurityConfig<Validated>,
+    config: SecurityConfig,
 }
 
 fn mixed_zip() -> Vec<u8> {
@@ -305,7 +304,7 @@ fn mixed_zip() -> Vec<u8> {
 
 fn open(bytes: &[u8], reuse: DecodeReuse) -> Opened {
     let read = Arc::new(AtomicU64::new(0));
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let reader = Counting {
         inner: Cursor::new(bytes.to_vec()),
         read: Arc::clone(&read),
@@ -412,11 +411,9 @@ fn an_archive_opened_for_another_policy_is_not_served() {
     let bytes = deflated_zip(1);
     let opened = open(&bytes, DecodeReuse::Off);
     assert!(opened.archive.serves(&opened.config));
-    let ignoring = SecurityConfig::default()
-        .with_zip_consistency(crate::ZipConsistencyPolicy::Ignore)
-        .validate()
-        .unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let ignoring =
+        SecurityConfig::default().with_zip_consistency(crate::ZipConsistencyPolicy::Ignore);
+    let config = SecurityConfig::default();
     let skipped =
         ZipArchive::for_extraction(Cursor::new(bytes), &ignoring, DecodeReuse::Off).unwrap();
     assert!(skipped.serves(&ignoring));
@@ -447,7 +444,7 @@ impl Seek for FailsAfter {
 #[test]
 fn a_source_fault_while_opening_keeps_its_errno() {
     let bytes = deflated_zip(4);
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
     let mut seen = false;
     for reads_left in 0..40 {
         let reader = FailsAfter {
@@ -474,10 +471,7 @@ fn an_entry_the_limits_would_refuse_is_not_captured() {
         };
         assert!(store.capture(bomb).is_none(), "ratio");
 
-        let config = SecurityConfig::default()
-            .with_max_file_size(crate::non_zero!(1024))
-            .validate()
-            .unwrap();
+        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(1024));
         let mut small =
             ReuseStore::new(ReusePlan::of(DecodeReuse::Memory(limit(1 << 20)), &config)).unwrap();
         assert!(small.capture(key_of(&data)).is_none(), "max_file_size");
@@ -500,10 +494,7 @@ fn a_capture_stops_once_it_passes_the_declared_size() {
 
 #[test]
 fn the_limit_follows_the_decoder_memory_of_the_config() {
-    let config = SecurityConfig::default()
-        .with_max_decoder_memory(crate::non_zero!(1024))
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_max_decoder_memory(crate::non_zero!(1024));
     let plan = ReusePlan::of(DecodeReuse::Memory(ReuseLimit::MAX), &config);
     let mut store = ReuseStore::new(plan).unwrap();
     let data = b"y".repeat(2048);
@@ -551,10 +542,8 @@ fn a_temp_file_store_is_never_made_on_wasi() {
 
 #[test]
 fn nothing_is_kept_when_the_policy_skips_the_stream_checks() {
-    let config = SecurityConfig::default()
-        .with_zip_consistency(crate::ZipConsistencyPolicy::Ignore)
-        .validate()
-        .unwrap();
+    let config =
+        SecurityConfig::default().with_zip_consistency(crate::ZipConsistencyPolicy::Ignore);
     let mut archive = ZipArchive::for_extraction(
         Cursor::new(deflated_zip(3)),
         &config,
@@ -610,13 +599,10 @@ fn extraction_into_memory_decodes_each_entry_once_and_keeps_the_same_files() {
 
         let (reader, plain_reads) = counted_zip_reader(&bytes);
         let mut plain = crate::MemorySink::default();
-        crate::extract_to_sink(
-            reader,
-            &mut plain,
-            &SecurityConfig::default(),
-            &crate::SinkOptions::default(),
-        )
-        .unwrap();
+        crate::SinkExtractRequest::new(&SecurityConfig::default())
+            .with_options(crate::SinkOptions::default())
+            .extract(reader, &mut plain)
+            .unwrap();
 
         let (reader, reads) = counted_zip_reader(&bytes);
         let (report, memory) = crate::extract_reader_to_memory(
@@ -638,7 +624,7 @@ fn extraction_into_memory_decodes_each_entry_once_and_keeps_the_same_files() {
 
 fn sink_capacity_of(error: &crate::ArchiveError) -> Option<u64> {
     match error {
-        crate::ArchiveError::PartialExtraction { source, .. } => sink_capacity_of(source),
+        crate::ArchiveError::PartialExtraction(partial) => sink_capacity_of(partial.cause()),
         crate::ArchiveError::QuotaExceeded {
             resource: crate::QuotaResource::SinkCapacity { max },
         } => Some(*max),
@@ -666,12 +652,9 @@ fn a_replayed_entry_meets_the_sink_limit_at_the_same_byte_as_a_decoded_one() {
 
         let mut plain = crate::MemorySink::new(limit);
         let (reader, _) = counted_zip_reader(&bytes);
-        let decoded = crate::extract_to_sink(
-            reader,
-            &mut plain,
-            &SecurityConfig::default(),
-            &crate::SinkOptions::default(),
-        );
+        let decoded = crate::SinkExtractRequest::new(&SecurityConfig::default())
+            .with_options(crate::SinkOptions::default())
+            .extract(reader, &mut plain);
 
         assert_eq!(reused.is_ok(), fits);
         assert_eq!(decoded.is_ok(), fits);

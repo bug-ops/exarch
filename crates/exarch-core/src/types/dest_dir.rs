@@ -35,7 +35,10 @@ use std::path::PathBuf;
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DestDir(PathBuf);
+pub struct DestDir {
+    canonical: PathBuf,
+    written: PathBuf,
+}
 
 impl DestDir {
     /// Creates a new `DestDir` after validating the path.
@@ -162,7 +165,8 @@ impl DestDir {
             }
         }
 
-        Ok(Self(canonical))
+        let written = std::path::absolute(&path).unwrap_or_else(|_| canonical.clone());
+        Ok(Self { canonical, written })
     }
 
     /// Creates a new `DestDir`, creating the directory (and all parents) if it
@@ -203,7 +207,18 @@ impl DestDir {
     #[inline]
     #[must_use]
     pub fn as_path(&self) -> &Path {
-        &self.0
+        &self.canonical
+    }
+
+    /// The destination as the caller wrote it, made absolute but with no link
+    /// resolved (`/var/x` where [`as_path`](Self::as_path) says
+    /// `/private/var/x`). Only an absolute symlink target is ever read
+    /// through it, to recognize a link the destination already holds.
+    #[cfg(unix)]
+    #[inline]
+    #[must_use]
+    pub(crate) fn written(&self) -> &Path {
+        &self.written
     }
 
     /// Joins a `SafePath` to this destination directory.
@@ -224,7 +239,7 @@ impl DestDir {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-    /// let config = SecurityConfig::default().validate()?;
+    /// let config = SecurityConfig::default();
     /// let safe = SafePath::validate(&PathBuf::from("foo/bar.txt"), &dest, &config)?;
     ///
     /// let final_path = dest.join(&safe);
@@ -234,7 +249,7 @@ impl DestDir {
     #[inline]
     #[must_use]
     pub fn join(&self, safe_path: &super::SafePath) -> PathBuf {
-        self.0.join(safe_path.as_path())
+        self.canonical.join(safe_path.as_path())
     }
 
     /// Names `rel` below this destination for a read-only probe.
@@ -245,14 +260,14 @@ impl DestDir {
     #[inline]
     #[must_use]
     pub(crate) fn probe(&self, rel: &Path) -> ProbePath {
-        ProbePath(self.0.join(rel).components().collect())
+        ProbePath(self.canonical.join(rel).components().collect())
     }
 
     /// Converts into the inner `PathBuf`.
     #[inline]
     #[must_use]
     pub fn into_path_buf(self) -> PathBuf {
-        self.0
+        self.canonical
     }
 }
 
@@ -446,7 +461,7 @@ mod tests {
         symlink(&real_dir, &link_path).expect("failed to create symlink");
 
         let dest = DestDir::new(link_path).expect("should create from symlink");
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         // Positive case: a legitimate path under the symlinked root resolves
         // successfully. With a non-canonical dest, the parent-canonicalize

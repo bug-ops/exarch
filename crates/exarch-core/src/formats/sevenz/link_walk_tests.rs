@@ -75,12 +75,15 @@ fn parse(bytes: &[u8]) -> Parsed {
     }
 }
 
-fn config(solid: bool) -> SecurityConfig<Validated> {
-    SecurityConfig::default()
-        .with_allow_solid_archives(solid)
-        .with_max_solid_block_memory(crate::non_zero!(100 * 1024 * 1024))
-        .validate()
-        .unwrap()
+fn config(solid: bool) -> SecurityConfig {
+    let solid_archives = if solid {
+        crate::SolidArchives::Allow(
+            crate::SolidLimits::DEFAULT.with_max_block_memory(crate::non_zero!(100 * 1024 * 1024)),
+        )
+    } else {
+        crate::SolidArchives::Refuse
+    };
+    SecurityConfig::default().with_solid_archives(solid_archives)
 }
 
 fn table(indices: &[usize]) -> LinkTable<()> {
@@ -94,7 +97,7 @@ fn table(indices: &[usize]) -> LinkTable<()> {
 fn walk(
     parsed: &Parsed,
     source: Vec<u8>,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     links: &[usize],
 ) -> Vec<(usize, LinkOutcome)> {
     let mut seen = Vec::new();
@@ -202,12 +205,11 @@ fn a_block_over_the_ratio_limit_is_not_decoded() {
     let zeros = vec![0u8; 64 * 1024];
     let bytes = solid(&[("zeros", &zeros), ("link", b"a")], false);
     let parsed = parse(&bytes);
-    let strict = SecurityConfig::default()
-        .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(crate::non_zero!(100 * 1024 * 1024))
-        .with_max_solid_compression_ratio(crate::ratio_limit!(10.0))
-        .validate()
-        .unwrap();
+    let strict = SecurityConfig::default().with_solid_archives(crate::SolidArchives::Allow(
+        crate::SolidLimits::DEFAULT
+            .with_max_block_memory(crate::non_zero!(100 * 1024 * 1024))
+            .with_max_ratio(crate::ratio_limit!(10.0)),
+    ));
 
     let seen = walk(&parsed, Vec::new(), &strict, &[1]);
 
@@ -366,17 +368,16 @@ mod bytes_read {
         let (source, read) = counting(bytes);
         let config = SecurityConfig::default()
             .with_allow_symlinks(true)
-            .with_allow_solid_archives(true)
-            .with_max_solid_block_memory(crate::non_zero!(100 * 1024 * 1024))
-            .validate()
-            .unwrap();
+            .with_solid_archives(crate::SolidArchives::Allow(
+                crate::SolidLimits::DEFAULT
+                    .with_max_block_memory(crate::non_zero!(100 * 1024 * 1024)),
+            ));
         let out = tempfile::TempDir::new().unwrap();
 
-        let report = SevenZArchive::new(source)
+        let report = SevenZArchive::new(source, &config)
             .unwrap()
             .extract(
                 out.path(),
-                &config,
                 &ExtractionOptions::default(),
                 &mut crate::NoopProgress,
             )

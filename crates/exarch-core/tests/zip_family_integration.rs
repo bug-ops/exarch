@@ -12,6 +12,8 @@
 )]
 
 use exarch_core::ArchiveError;
+use exarch_core::CreateRequest;
+use exarch_core::OutputFile;
 use exarch_core::SecurityConfig;
 use exarch_core::create_archive;
 use exarch_core::creation::CreationConfig;
@@ -178,16 +180,18 @@ fn plain_zip_is_still_creatable() {
 
 #[test]
 fn explicit_format_override_allows_zip_family_creation() {
-    // Escape hatch: a caller who sets CreationConfig::format = Some(Zip)
+    // Escape hatch: a caller who states CreatableFormat::Zip on the OutputFile
     // takes responsibility for producing a spec-valid file, so we let
     // them through.
     let dest = TempDir::new().unwrap();
     let src = dest.path().join("source.txt");
     std::fs::write(&src, b"hello").unwrap();
-    let mut config = CreationConfig::default();
-    config.format = Some(CreatableFormat::Zip);
     let output = dest.path().join("out.apk");
-    create_archive(&output, &[&src], &config)
+    CreateRequest::new(&CreationConfig::default())
+        .create(
+            &OutputFile::replace(&output).with_format(CreatableFormat::Zip),
+            &[&src],
+        )
         .expect("explicit CreatableFormat::Zip should bypass the guard");
     assert!(output.exists());
 }
@@ -226,9 +230,10 @@ fn zip_partial_extraction_stops_on_path_traversal() {
     let result = extract_archive(&archive_path, dest.path(), &config);
 
     match result {
-        Err(ArchiveError::PartialExtraction { source, report, .. }) => {
+        Err(ArchiveError::PartialExtraction(partial)) => {
+            let (source, report) = (partial.cause(), partial.report());
             assert_matches!(
-                *source,
+                source,
                 ArchiveError::PathTraversal { .. },
                 "source error must be PathTraversal, got: {source:?}"
             );

@@ -58,7 +58,7 @@ def test_seven_z_cannot_be_created(source_tree):
 
 
 def test_unknown_format_is_a_value_error(source_tree):
-    with pytest.raises(ValueError, match="format must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.create_archive_to_bytes([source_tree], "Rar")
 
 
@@ -73,6 +73,7 @@ def tar_gz_bytes(source_tree):
 
 
 def _assert_numbered(calls, expected_total):
+    """`expected_total` is None for a TAR stream, whose entry count is not known up front."""
     assert [current for _, _, current, _ in calls] == list(range(1, len(calls) + 1))
     assert {total for _, total, _, _ in calls} == {expected_total}
 
@@ -88,7 +89,7 @@ def test_memory_progress_reports_every_entry(source_tree, format):
 
     plain = exarch.extract_archive_to_memory(data)
     assert len(calls) == len(plain.entries)
-    _assert_numbered(calls, 0 if format == "TarGz" else len(calls))
+    _assert_numbered(calls, None if format == "TarGz" else len(calls))
     assert {path.rstrip("/") for path, *_ in calls} == {entry.path for entry in result.entries}
     assert [entry.path for entry in result.entries] == [entry.path for entry in plain.entries]
 
@@ -150,7 +151,7 @@ class TestInspectionProgress:
         call(data, lambda *args: calls.append(args))
 
         names = [entry.path for entry in exarch.list_archive_bytes(data).entries]
-        _assert_numbered(calls, 0 if format == "TarGz" else len(names))
+        _assert_numbered(calls, None if format == "TarGz" else len(names))
         assert len(calls) == len(names)
         assert sorted(path.rstrip("/") for path, *_ in calls) == sorted(
             n.rstrip("/") for n in names

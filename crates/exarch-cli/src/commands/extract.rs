@@ -1,47 +1,56 @@
 //! Extract command implementation.
 
+use crate::cli::BannedComponentsArg;
 use crate::cli::DecodeReuseArg;
 use crate::cli::ExtractArgs;
-use crate::commands::apply_size_limits;
+use crate::cli::ListToken;
+use crate::commands::CommandResult;
+use crate::commands::Outcome;
 use crate::commands::atomic_swap;
 use crate::commands::atomic_swap::DestEntryKind;
+use crate::commands::atomic_swap::EntryName;
 use crate::commands::atomic_swap::FileIdentity;
 use crate::commands::atomic_swap::IdentityCheck;
 use crate::commands::atomic_swap::PinnedDir;
 use crate::error::CliContext;
+use crate::error::Message;
 use crate::error::add_archive_context;
-use crate::error::convert_extraction_error;
+use crate::error::convert_error;
+use crate::operation::Flag;
+use crate::operation::Operation;
 use crate::output::OutputFormatter;
-use crate::output::Verbosity;
-use crate::output::terminal::TerminalPath;
-use crate::progress::CliProgress;
-use crate::progress::VerboseProgress;
+use crate::output::OutputMode;
+use crate::progress::BarLength;
+use crate::progress::progress_for;
 use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ArchiveEntry;
+use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
 use exarch_core::Extension;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
+use exarch_core::ExtractionWarning;
+use exarch_core::LandingKind;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use exarch_core::ListedArchive;
+use exarch_core::ListedExtractOptions;
 use exarch_core::ManifestEntryKind;
-use exarch_core::NoopProgress;
 use exarch_core::PathComponentName;
 use exarch_core::ProgressCallback;
-use exarch_core::RatioLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::StoredTargets;
-use exarch_core::extract_archive_with_options_and_progress;
+use exarch_core::Violation;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::detect_format;
-use exarch_core::list_archive_for_extraction;
 use exarch_core::non_zero_usize;
+use exarch_core::path_text;
+use std::cell::Cell;
 use std::env;
-use std::ffi::OsStr;
-use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -73,16 +82,22 @@ fn run_extraction(
     staging: Staging,
 ) -> Result<ExtractionReport> {
     let result = match source {
-        Source::Archive => extract_archive_with_options_and_progress(
-            archive, output_dir, config, options, progress,
-        ),
-        Source::Listed(listed) => listed.extract(output_dir, config, options, progress),
+        Source::Archive => ExtractRequest::new(config)
+            .with_options(options.clone())
+            .with_progress(progress)
+            .extract(archive, output_dir),
+        Source::Listed(listed) => {
+            let listed_options = ListedExtractOptions::default()
+                .with_atomic(options.atomic)
+                .with_skip_duplicates(options.skip_duplicates);
+            listed.extract(output_dir, &listed_options, progress)
+        }
     }
     .map_err(|err| match staging {
         Staging::Direct => err,
         Staging::Discarded => err.rolled_back(),
     });
-    add_archive_context(result, archive)
+    add_archive_context(Operation::Extract, result, archive)
 }
 
 /// Everything [`run_atomic_force_extraction`] needs, resolved and pinned by
@@ -90,10 +105,9 @@ fn run_extraction(
 struct AtomicForceTarget {
     /// The destination's parent, pinned by an open file descriptor.
     pin: PinnedDir,
-    /// The destination's final path component, resolved via
-    /// [`Path::file_name`] — never a raw path fragment. See the invariant
-    /// note at its point of derivation in [`resolve_atomic_force_replace`].
-    dest_name: OsString,
+    /// The destination's final path component, a single-component
+    /// [`EntryName`] so no pinned operation can leave the pinned directory.
+    dest_name: EntryName,
     /// The [`FileIdentity`] `entry_status` reported for `dest_name`
     /// when it confirmed the destination was a directory, carried forward
     /// rather than re-derived so the kind/identity pair snapshotted here is
@@ -137,6 +151,31 @@ fn run_atomic_force_extraction(
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
+    let restore_failure = RestoreSlot::new(None);
+    extract_and_swap(
+        archive,
+        source,
+        target,
+        config,
+        options,
+        progress,
+        &restore_failure,
+    )
+    .map_err(|err| match restore_failure.take() {
+        Some(failure) => err.context(failure.describe()),
+        None => err,
+    })
+}
+
+fn extract_and_swap(
+    archive: &Path,
+    source: Source,
+    target: AtomicForceTarget,
+    config: &SecurityConfig,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+    restore_failure: &RestoreSlot,
+) -> Result<ExtractionReport> {
     let AtomicForceTarget {
         pin,
         dest_name,
@@ -157,19 +196,20 @@ fn run_atomic_force_extraction(
     })?;
     // Derived now, before any destructive operation below, so that a
     // (practically unreachable, `tempfile` always yields a named path)
-    // `file_name()` failure can never surface *after* the destination has
-    // already been moved aside with no way to name the replacement.
-    let temp_name = temp_dir
-        .path()
-        .file_name()
-        .map(OsStr::to_os_string)
-        .with_context(|| format!("temp path has no file name: {}", temp_dir.path().display()))?;
+    // name failure can never surface *after* the destination has already
+    // been moved aside with no way to name the replacement.
+    let temp_name = EntryName::of(temp_dir.path()).with_context(|| {
+        format!(
+            "temp path has no usable file name: {}",
+            temp_dir.path().display()
+        )
+    })?;
     // Captured fd-relative through `pin` rather than by re-resolving a path:
     // a `canonicalize`-based check here would be a no-op for the same
     // structural reason it was pre-#535 (`parent_display` is already fully
     // resolved), so it could never detect the parent redirect issue #530 is
     // about. This identity is what every disclosure check below confirms
-    // against — "is *our* directory still present under `temp_name`", not
+    // against - "is *our* directory still present under `temp_name`", not
     // just "is something present under that name".
     let (_, temp_id) = pin.entry_status(&temp_name).with_context(|| {
         format!(
@@ -196,142 +236,201 @@ fn run_atomic_force_extraction(
     )
     .with_context(|| temp_ref.disclose("extraction interrupted"))?;
 
-    // Extraction succeeded.
-    let (backup_path, backup_name, backup_id) =
-        move_destination_to_backup(&temp_ref, &dest_name, dest_id, &dest_display)?;
+    let displaced = DisplacedDestination::displace(
+        &temp_ref,
+        &dest_name,
+        dest_id,
+        &dest_display,
+        restore_failure,
+    )?;
 
     if let Err(e) = pin.rename(&temp_name, &dest_name) {
-        // Restore the original destination; the new extraction is discarded.
         // The restore's own outcome must be checked, not assumed: claiming
         // "restored" when the rename-back itself failed would tell the user
         // their data is safe while it actually sits at an unprinted temp path.
-        let restore_result = pin.rename(&backup_name, &dest_name);
+        let backup_path = displaced.backup_path().to_path_buf();
+        let restore_result = displaced.restore();
         return Err(e).with_context(|| {
             describe_final_swap_failure(&temp_ref, &dest_display, &backup_path, restore_result)
         });
     }
 
-    cleanup_backup_or_warn(&mut report, &pin, &backup_name, backup_id, &backup_path);
+    displaced.discard(&mut report);
 
     Ok(report)
 }
 
-/// Reserves a unique, currently-vacant sibling path in `temp.parent_display`
-/// to hold the pre-existing destination, then renames it there — returning
-/// the backup's resolved path, entry name, and [`FileIdentity`] once the
-/// original destination is confirmed safely at that name.
-///
-/// Renaming onto an existing path (even an empty directory) is unsupported
-/// on Windows, so the reserved path is freed (removed) again immediately
-/// after creation, before the destination is renamed onto it. Every error
-/// here also runs [`disclose_if_orphaned`] on the temp directory identified
-/// by `temp`, since the extraction that landed there has already succeeded
-/// by the time this is called.
-fn move_destination_to_backup(
-    temp: &TempOrphanRef<'_>,
-    dest_name: &OsStr,
-    dest_id: FileIdentity,
-    dest_display: &Path,
-) -> Result<(PathBuf, OsString, Option<FileIdentity>)> {
-    let backup_dir = tempfile::tempdir_in(temp.parent_display).with_context(|| {
-        temp.disclose(&format!(
-            "failed to reserve backup path in {}",
-            temp.parent_display.display()
-        ))
-    })?;
-    let backup_path = backup_dir.keep();
-    let backup_name = backup_path
-        .file_name()
-        .with_context(|| {
-            temp.disclose(&format!(
-                "backup path has no file name: {}",
-                backup_path.display()
-            ))
-        })?
-        .to_os_string();
-    temp.pin.remove_dir(&backup_name).with_context(|| {
-        temp.disclose(&format!(
-            "failed to free backup path: {}",
-            backup_path.display()
-        ))
-    })?;
-
-    verify_destination_unchanged(temp.pin, dest_name, dest_id, dest_display).with_context(
-        || temp.disclose("extraction already completed; destination changed underneath it"),
-    )?;
-
-    temp.pin.rename(dest_name, &backup_name).with_context(|| {
-        temp.disclose(&format!(
-            "failed to move existing destination {} aside before replacing it",
-            dest_display.display()
-        ))
-    })?;
-    // Captured now, right after the destination genuinely landed at
-    // `backup_name` (before this rename it was `backup_dir`'s empty
-    // placeholder, whose identity is irrelevant): the same fd-relative
-    // pattern as `temp_id`, used by the caller so a failure to remove this
-    // backup after a successful swap can be disclosed instead of silently
-    // discarded (M2 from the prior review round).
-    //
-    // Best-effort, not `?`: by this point the destination has already been
-    // renamed to `backup_name` — inside the destructive window, past the
-    // point of an easy return. A failure to *inspect* the backup (`statat`
-    // failing on an entry `renameat` just created — exactly this issue's
-    // adversarial threat model) must never abort an otherwise-successful
-    // swap over and above what actually failed; it would propagate with
-    // neither a restore attempt nor a `disclose_if_orphaned` call, leaving
-    // the destination displaced under a `.tmpXXXX` name (S1, review of #530
-    // round 4). `cleanup_backup_or_warn` simply skips its warning if this
-    // identity was never captured, the same "don't claim without
-    // confirmation" principle `survival_clause`'s mismatch arm already
-    // applies.
-    let backup_id = temp.pin.entry_status(&backup_name).ok().map(|(_, id)| id);
-
-    Ok((backup_path, backup_name, backup_id))
+/// Why a displaced destination could not be put back by
+/// [`DisplacedDestination`]'s drop, and where its content then is.
+#[derive(Debug)]
+struct RestoreFailure {
+    error: io::Error,
+    backup_path: PathBuf,
 }
 
-/// Best-effort removes `backup_path` after a successful swap; if that fails
-/// and the entry at `backup_name` still identifies as `backup_id` (i.e. the
-/// removal genuinely didn't reach it, not just raced with something else
-/// occupying the name), records a warning on `report` instead of silently
-/// discarding the failure — the same disclosure principle as
-/// [`disclose_if_orphaned`], applied to the backup instead of the temp
-/// directory (M2 from the prior review round). Path-based, but safe for the
-/// same CVE-2022-21658 (`O_NOFOLLOW`-rooted, fd-recursive `remove_dir_all`)
-/// reason as every other best-effort removal in this module.
+impl RestoreFailure {
+    fn describe(&self) -> String {
+        format!(
+            "the original destination could NOT be restored ({}) - its original contents are \
+             preserved at {} and must be recovered manually",
+            self.error,
+            self.backup_path.display()
+        )
+    }
+}
+
+/// Where a dropped [`DisplacedDestination`] records a failed restore, for the
+/// command to report.
+type RestoreSlot = Cell<Option<RestoreFailure>>;
+
+/// The pre-existing destination, moved aside to a backup name until the swap
+/// completes.
 ///
-/// `backup_id` is `None` when [`move_destination_to_backup`] could not
-/// capture the backup's identity (its own best-effort inspection, per S1 of
-/// the #530 round 4 review) — in that case there is nothing to confirm the
-/// removal missed against, so this silently declines to warn rather than
-/// claiming a match it cannot verify, same as [`survival_clause`]'s
-/// mismatch arm.
-fn cleanup_backup_or_warn(
-    report: &mut ExtractionReport,
-    pin: &PinnedDir,
-    backup_name: &OsStr,
+/// A guard: dropping it while armed (an early `?`, a panic) renames the
+/// backup back to the destination name, best effort, and records a failure in
+/// the caller's [`RestoreSlot`]. [`restore`](Self::restore) and
+/// [`discard`](Self::discard) consume it and disarm the drop.
+#[must_use = "dropping a displaced destination restores it"]
+struct DisplacedDestination<'a> {
+    pin: &'a PinnedDir,
+    dest_name: &'a EntryName,
+    backup_name: EntryName,
+    backup_path: PathBuf,
     backup_id: Option<FileIdentity>,
-    backup_path: &Path,
-) {
-    let Err(cleanup_err) = std::fs::remove_dir_all(backup_path) else {
-        return;
-    };
-    let Some(backup_id) = backup_id else {
-        return;
-    };
-    let Ok((_, observed)) = pin.entry_status(backup_name) else {
-        return;
-    };
-    let qualifier = match observed.check(backup_id) {
-        IdentityCheck::Same => "",
-        IdentityCheck::Unknown => " (its identity could not be verified on this platform)",
-        IdentityCheck::Different => return,
-    };
-    report.warnings.push(format!(
-        "failed to remove backup of the original destination at {}{qualifier} ({cleanup_err}); \
-         it must be cleaned up manually",
-        backup_path.display()
-    ));
+    failure: &'a RestoreSlot,
+    armed: bool,
+}
+
+impl<'a> DisplacedDestination<'a> {
+    /// Reserves a unique, currently-vacant sibling path in
+    /// `temp.parent_display` to hold the pre-existing destination, then
+    /// renames it there, returning the guard once the original destination is
+    /// confirmed safely at that name.
+    ///
+    /// Renaming onto an existing path (even an empty directory) is
+    /// unsupported on Windows, so the reserved path is freed (removed) again
+    /// immediately after creation, before the destination is renamed onto it.
+    /// Every error before the rename also runs [`disclose_if_orphaned`] on
+    /// the temp directory identified by `temp`, since the extraction that
+    /// landed there has already succeeded by the time this is called.
+    fn displace(
+        temp: &TempOrphanRef<'a>,
+        dest_name: &'a EntryName,
+        dest_id: FileIdentity,
+        dest_display: &Path,
+        failure: &'a RestoreSlot,
+    ) -> Result<Self> {
+        let backup_dir = tempfile::tempdir_in(temp.parent_display).with_context(|| {
+            temp.disclose(&format!(
+                "failed to reserve backup path in {}",
+                temp.parent_display.display()
+            ))
+        })?;
+        let backup_path = backup_dir.keep();
+        let backup_name = EntryName::of(&backup_path).with_context(|| {
+            temp.disclose(&format!(
+                "backup path has no usable file name: {}",
+                backup_path.display()
+            ))
+        })?;
+        temp.pin.remove_dir(&backup_name).with_context(|| {
+            temp.disclose(&format!(
+                "failed to free backup path: {}",
+                backup_path.display()
+            ))
+        })?;
+
+        verify_destination_unchanged(temp.pin, dest_name, dest_id, dest_display).with_context(
+            || temp.disclose("extraction already completed; destination changed underneath it"),
+        )?;
+
+        temp.pin.rename(dest_name, &backup_name).with_context(|| {
+            temp.disclose(&format!(
+                "failed to move existing destination {} aside before replacing it",
+                dest_display.display()
+            ))
+        })?;
+        // Captured right after the destination genuinely landed at
+        // `backup_name` (before this rename it was `backup_dir`'s empty
+        // placeholder, whose identity is irrelevant): the same fd-relative
+        // pattern as `temp_id`, used so a failure to remove this backup after
+        // a successful swap can be disclosed instead of silently discarded.
+        //
+        // Best-effort, not `?`: the destination has already been renamed to
+        // `backup_name`, past the point of an easy return. A failure to
+        // *inspect* the backup must never abort an otherwise-successful swap;
+        // `discard` simply skips its warning if the identity was never
+        // captured, the same "don't claim without confirmation" principle
+        // `survival_clause`'s mismatch arm applies.
+        let backup_id = temp.pin.entry_status(&backup_name).ok().map(|(_, id)| id);
+
+        Ok(Self {
+            pin: temp.pin,
+            dest_name,
+            backup_name,
+            backup_path,
+            backup_id,
+            failure,
+            armed: true,
+        })
+    }
+
+    fn backup_path(&self) -> &Path {
+        &self.backup_path
+    }
+
+    /// Renames the backup back to the destination name and disarms the guard.
+    fn restore(mut self) -> io::Result<()> {
+        self.armed = false;
+        self.pin.rename(&self.backup_name, self.dest_name)
+    }
+
+    /// Removes the backup after a successful swap and disarms the guard; if
+    /// removal fails and the entry at the backup name still identifies as the
+    /// backup, records a warning on `report` instead of silently discarding
+    /// the failure. Path-based, but safe for the same CVE-2022-21658
+    /// (`O_NOFOLLOW`-rooted, fd-recursive `remove_dir_all`) reason as every
+    /// other best-effort removal in this module.
+    ///
+    /// With no captured backup identity there is nothing to confirm the
+    /// removal missed against, so this declines to warn rather than claiming a
+    /// match it cannot verify.
+    fn discard(mut self, report: &mut ExtractionReport) {
+        self.armed = false;
+        let Err(cleanup_err) = std::fs::remove_dir_all(&self.backup_path) else {
+            return;
+        };
+        let Some(backup_id) = self.backup_id else {
+            return;
+        };
+        let Ok((_, observed)) = self.pin.entry_status(&self.backup_name) else {
+            return;
+        };
+        let identity_unverified = match observed.check(backup_id) {
+            IdentityCheck::Same => false,
+            IdentityCheck::Unknown => true,
+            IdentityCheck::Different => return,
+        };
+        report.add_warning(ExtractionWarning::BackupCleanupFailed {
+            path: self.backup_path.clone(),
+            identity_unverified,
+            error: cleanup_err.to_string(),
+        });
+    }
+}
+
+impl Drop for DisplacedDestination<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Err(error) = self.pin.rename(&self.backup_name, self.dest_name) {
+            self.failure.set(Some(RestoreFailure {
+                error,
+                backup_path: self.backup_path.clone(),
+            }));
+        }
+    }
 }
 
 /// Returns a disclosure clause naming where surviving content can be found,
@@ -354,7 +453,7 @@ fn cleanup_backup_or_warn(
 /// unavailable (non-Linux, non-macOS) or itself fails.
 fn survival_clause(
     pin: &PinnedDir,
-    name: &OsStr,
+    name: &EntryName,
     expected_id: FileIdentity,
     parent_display: &Path,
 ) -> Option<String> {
@@ -387,7 +486,7 @@ fn survival_clause(
 /// resolving its real path from an fd on the entry itself.
 fn surviving_content_clause(
     pin: &PinnedDir,
-    name: &OsStr,
+    name: &EntryName,
     expected_id: FileIdentity,
     parent_display: &Path,
 ) -> String {
@@ -420,7 +519,7 @@ fn surviving_content_clause(
 fn unresolved_survival_message(
     expected_id: FileIdentity,
     parent_display: &Path,
-    name: &OsStr,
+    name: &EntryName,
 ) -> String {
     match expected_id {
         FileIdentity::Known { dev, ino } => format!(
@@ -472,7 +571,7 @@ fn unresolved_survival_message(
 /// reports with a caveat instead of a verified match).
 fn disclose_if_orphaned(
     pin: &PinnedDir,
-    name: &OsStr,
+    name: &EntryName,
     expected_id: FileIdentity,
     parent_display: &Path,
     base_message: &str,
@@ -492,7 +591,7 @@ fn disclose_if_orphaned(
 /// against.
 struct TempOrphanRef<'a> {
     pin: &'a PinnedDir,
-    name: &'a OsStr,
+    name: &'a EntryName,
     id: FileIdentity,
     parent_display: &'a Path,
 }
@@ -550,7 +649,7 @@ fn describe_final_swap_failure(
 /// message (it is expected to be the same path `name` was resolved from).
 fn verify_destination_unchanged(
     pin: &PinnedDir,
-    name: &OsStr,
+    name: &EntryName,
     expected: FileIdentity,
     display: &Path,
 ) -> Result<()> {
@@ -597,17 +696,17 @@ fn verify_destination_unchanged(
 /// destination does not yet exist — the pin below is unconditional, unlike
 /// the old `exists()`-gated flow (see `PinnedDir::open`'s doc comment).
 fn resolve_atomic_force_replace(
-    args: &ExtractArgs,
+    mode: WriteMode,
     output_dir: &Path,
 ) -> Result<Option<AtomicForceTarget>> {
-    if !(args.atomic && args.force) {
+    if mode != WriteMode::AtomicReplace {
         return Ok(None);
     }
 
     // `dest_name` must stay `file_name()`-derived: `file_name()` strips a
     // trailing separator, and a trailing separator makes even
     // `SYMLINK_NOFOLLOW` resolve through the symlink (`"link/"` -> target).
-    let (parent_path, dest_name): (PathBuf, OsString) = match output_dir.file_name() {
+    let (parent_path, dest_name): (PathBuf, EntryName) = match EntryName::of(output_dir) {
         Some(name) => {
             // `parent()` is `None` only for the root or an empty path, both
             // of which have no `file_name()` either — this branch is only
@@ -618,7 +717,7 @@ fn resolve_atomic_force_replace(
                 Some(p) if !p.is_empty() => p.to_path_buf(),
                 _ => PathBuf::from("."),
             };
-            (parent, name.to_os_string())
+            (parent, name)
         }
         // `output_dir` is/ends in `.`, `..`, or `/`: there is no
         // `file_name()`-derivable final component to take by path, so
@@ -632,12 +731,9 @@ fn resolve_atomic_force_replace(
                         format!("destination has no parent: {}", output_dir.display())
                     })?
                     .to_path_buf();
-                let dest_name = canonical
-                    .file_name()
-                    .with_context(|| {
-                        format!("destination has no file name: {}", output_dir.display())
-                    })?
-                    .to_os_string();
+                let dest_name = EntryName::of(&canonical).with_context(|| {
+                    format!("destination has no file name: {}", output_dir.display())
+                })?;
                 (parent, dest_name)
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -698,13 +794,17 @@ fn resolve_atomic_force_replace(
     match kind {
         DestEntryKind::Directory => {}
         DestEntryKind::Symlink => anyhow::bail!(
-            "cannot use --atomic --force: destination {} is a symlink; pass the resolved \
+            "cannot use {atomic} {force}: destination {} is a symlink; pass the resolved \
              target path instead",
-            dest_display.display()
+            dest_display.display(),
+            atomic = Flag::Atomic.long(),
+            force = Flag::Force.long(),
         ),
         DestEntryKind::Other => anyhow::bail!(
-            "cannot use --atomic --force: destination {} already exists and is not a directory",
-            dest_display.display()
+            "cannot use {atomic} {force}: destination {} already exists and is not a directory",
+            dest_display.display(),
+            atomic = Flag::Atomic.long(),
+            force = Flag::Force.long(),
         ),
     }
 
@@ -717,31 +817,34 @@ fn resolve_atomic_force_replace(
     }))
 }
 
-/// Expands a list of extension tokens that may contain comma-separated values
-/// into [`Extension`]s: each token is trimmed, empty tokens are dropped, and
-/// the rest is parsed by the core constructor.
+/// Parses the `--allowed-extensions` items into [`Extension`]s: blank items
+/// are dropped and the rest are parsed by the core constructor.
 ///
 /// # Errors
 ///
-/// Returns the core refusal, naming the offending token, for an entry that
+/// Returns the core refusal, naming the offending item, for an entry that
 /// can never match (for example `tar.gz` or `a/b`), and an error when values
 /// were given but hold no extension at all (an empty list would allow every
 /// extension).
-fn parse_extensions(raw: &[String]) -> Result<Vec<Extension>> {
-    let parsed = raw
-        .iter()
-        .flat_map(|s| s.split(','))
-        .map(str::trim)
-        .filter(|ext| !ext.is_empty())
+fn parse_extensions(tokens: &[ListToken]) -> Result<Vec<Extension>> {
+    let parsed = items(tokens)
         .map(|ext| {
-            Extension::try_from(ext)
-                .with_context(|| format!("invalid --allowed-extensions value {ext:?}"))
+            Extension::try_from(ext).with_context(|| {
+                format!("invalid {} value {ext:?}", Flag::AllowedExtensions.long())
+            })
         })
         .collect::<Result<Vec<_>>>()?;
-    if parsed.is_empty() && !raw.is_empty() {
-        anyhow::bail!("--allowed-extensions {raw:?} names no extension");
+    if parsed.is_empty() && !tokens.is_empty() {
+        anyhow::bail!("{} names no extension", Flag::AllowedExtensions.long());
     }
     Ok(parsed)
+}
+
+fn items(tokens: &[ListToken]) -> impl Iterator<Item = &str> {
+    tokens.iter().filter_map(|token| match token {
+        ListToken::Item(item) => Some(item.as_str()),
+        ListToken::Empty | ListToken::Blank => None,
+    })
 }
 
 /// Maximum number of conflicting destination paths listed individually in
@@ -749,7 +852,7 @@ fn parse_extensions(raw: &[String]) -> Result<Vec<Extension>> {
 /// single "... and N more" summary line.
 const MAX_LISTED_CONFLICTS: usize = 10;
 
-/// Builds the pre-flight destination-conflict error message for `conflicts`.
+/// Builds the pre-flight destination-conflict message for `conflicts`.
 ///
 /// Caps the number of individually listed paths at [`MAX_LISTED_CONFLICTS`]
 /// so an archive with many same-named pre-existing files (up to
@@ -757,71 +860,86 @@ const MAX_LISTED_CONFLICTS: usize = 10;
 /// conflict. `conflicts` is sorted before truncation so "first N shown" is a
 /// deterministic, reproducible subset rather than whatever order the archive
 /// manifest happened to yield.
-fn conflict_error_message(conflicts: &[std::path::PathBuf]) -> String {
+fn conflict_message(conflicts: &[PathBuf], mode: WriteMode, output_dir: &Path) -> Message {
     let count = conflicts.len();
     let noun = if count == 1 { "file" } else { "files" };
     let verb = if count == 1 { "exists" } else { "exist" };
+    let force = Flag::Force.long();
 
-    let mut sorted: Vec<&std::path::PathBuf> = conflicts.iter().collect();
+    let mut sorted: Vec<&PathBuf> = conflicts.iter().collect();
     sorted.sort();
 
-    let list = sorted
-        .into_iter()
-        .take(MAX_LISTED_CONFLICTS)
-        .map(|p| format!("  {}", TerminalPath::new(p)))
-        .collect::<Vec<_>>()
-        .join("\n");
-
     let remaining = count.saturating_sub(MAX_LISTED_CONFLICTS);
-    if remaining == 0 {
-        format!("{count} destination {noun} already {verb} (use --force to overwrite):\n{list}")
+    let advice = if mode == WriteMode::Force {
+        format!("{force} cannot replace it with a directory")
     } else {
-        format!(
-            "{count} destination {noun} already {verb} (use --force to overwrite); \
-             first {MAX_LISTED_CONFLICTS} shown:\n{list}\n  ... and {remaining} more"
-        )
+        format!("use {force} to overwrite")
+    };
+    let mut message = if remaining == 0 {
+        Message::default().text(format!(
+            "{count} destination {noun} already {verb} ({advice}):"
+        ))
+    } else {
+        Message::default().text(format!(
+            "{count} destination {noun} already {verb} ({advice}); first \
+             {MAX_LISTED_CONFLICTS} shown:"
+        ))
+    };
+    // The destination keeps its native spelling; the entry part is rendered
+    // the way the archive names it.
+    let destination = output_dir.join("");
+    for path in sorted.into_iter().take(MAX_LISTED_CONFLICTS) {
+        message = message.lit("\n  ").path(&destination).entry(path);
     }
+    if remaining > 0 {
+        message = message
+            .lit("\n  ... and ")
+            .text(remaining.to_string())
+            .lit(" more");
+    }
+    message
 }
 
-/// Wraps [`conflict_error_message`] in a [`CliContext`] so the formatter keeps
-/// its line breaks.
-fn conflict_error(conflicts: &[std::path::PathBuf]) -> anyhow::Error {
-    anyhow::Error::new(CliContext::new(conflict_error_message(conflicts)))
+fn conflict_error(conflicts: &[PathBuf], mode: WriteMode, output_dir: &Path) -> anyhow::Error {
+    anyhow::Error::new(CliContext::new(
+        conflict_message(conflicts, mode, output_dir).into_parts(),
+    ))
 }
 
-/// Expands raw `--banned-component` values into [`PathComponentName`]s: each
-/// value is split on commas like `--allowed-extensions`, tokens are trimmed
-/// and empty tokens are dropped.
+/// The ban list `--banned-component` asks for: `None` keeps the default list.
 ///
-/// `SecurityConfig::validate()` rejects empty entries, but an empty value is
-/// the documented idiom for disabling the default ban list (see the
-/// `--banned-component` clap help), so it must never reach `validate()`.
-/// The caller keeps checking `args.banned_components.is_empty()` on the raw,
-/// unfiltered values to decide whether to override the default ban list at
-/// all; this only strips empties out of the values passed once that
-/// decision is made.
+/// A lone empty value (`--banned-component ""`) is the documented idiom for
+/// disabling the default ban list. Any other list must name a component, so a
+/// typo such as `,` can never switch the bans off.
 ///
 /// # Errors
 ///
 /// Returns the core refusal, naming the offending value, for a component that
 /// can never equal a single path component (for example `a/b` or `..`), and
-/// an error for a non-empty value that names no component (`,` or a blank):
-/// only the exact empty string disables the list.
-fn filter_banned_components(raw: &[String]) -> Result<Vec<PathComponentName>> {
-    let mut components = Vec::new();
-    for value in raw {
-        let before = components.len();
-        for component in value.split(',').map(str::trim).filter(|c| !c.is_empty()) {
-            components.push(
-                PathComponentName::try_from(component)
-                    .with_context(|| format!("invalid --banned-component value {component:?}"))?,
-            );
+/// an error for a list that names no component other than a lone `""`.
+fn banned_components(tokens: &[ListToken]) -> Result<Option<Vec<PathComponentName>>> {
+    match BannedComponentsArg::of(tokens) {
+        BannedComponentsArg::Default => Ok(None),
+        BannedComponentsArg::Replace(tokens) if tokens == [ListToken::Empty] => {
+            Ok(Some(Vec::new()))
         }
-        if components.len() == before && !value.is_empty() {
-            anyhow::bail!("--banned-component {value:?} names no component");
+        BannedComponentsArg::Replace(tokens) => {
+            let components = items(&tokens)
+                .map(|component| {
+                    PathComponentName::try_from(component).with_context(|| {
+                        format!(
+                            "invalid {} value {component:?}",
+                            Flag::BannedComponent.long()
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if components.is_empty() {
+                anyhow::bail!("{} names no component", Flag::BannedComponent.long());
+            }
+            Ok(Some(components))
         }
     }
-    Ok(components)
 }
 
 /// Lists the archive before extraction: for conflict detection and the entry
@@ -840,8 +958,10 @@ fn list_for_extract(
     reuse: DecodeReuse,
 ) -> Result<ListedArchive> {
     let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
-    list_archive_for_extraction(archive, config, &options, reuse)
-        .map_err(|err| convert_extraction_error(err, archive))
+    ListRequest::new(config)
+        .with_options(options)
+        .for_extraction(archive, reuse)
+        .map_err(|err| convert_error(Operation::Extract, err, archive))
 }
 
 /// Whether nothing can exist at `output_dir` yet and its parent is an existing
@@ -868,33 +988,14 @@ fn is_fresh_destination(output_dir: &Path) -> bool {
 /// second decode; ZIP and 7z list from their headers, and their list pass also
 /// carries header-level diagnostics that extraction reports differently.
 fn is_tar_archive(archive: &Path) -> bool {
-    matches!(
-        detect_format(archive),
-        Ok(ArchiveType::Tar
-            | ArchiveType::TarGz
-            | ArchiveType::TarBz2
-            | ArchiveType::TarXz
-            | ArchiveType::TarZst)
-    )
-}
-
-/// The extraction config for the list pass: the same quota, path, allowlist
-/// and decoder limits, with the flags that only matter once bytes are written
-/// reset to their deny-by-default values.
-fn list_config_for(config: &SecurityConfig) -> SecurityConfig {
-    let mut list_config = config.clone();
-    list_config.allowed.symlinks = false;
-    list_config.allowed.hardlinks = false;
-    list_config.allowed.world_writable = false;
-    list_config.preserve_permissions = false;
-    list_config
+    detect_format(archive).is_ok_and(ArchiveType::is_tar)
 }
 
 /// Whether extraction will write `entry` as a file: a file whose extension the
 /// allowlist admits is written, any other is skipped.
 fn is_extracted_file(entry: &ArchiveEntry, config: &SecurityConfig) -> bool {
-    entry.kind == ManifestEntryKind::File
-        && config.is_path_extension_allowed(entry.path.extension().and_then(|s| s.to_str()))
+    matches!(entry.kind, ManifestEntryKind::File { .. })
+        && config.is_extension_allowed(entry.path.extension().and_then(|s| s.to_str()))
 }
 
 /// Number of entries the progress bar counts: every listed entry, or only the
@@ -906,43 +1007,341 @@ fn listed_entry_count(manifest: &ArchiveManifest, config: &SecurityConfig) -> us
         manifest
             .entries()
             .iter()
-            .filter(|e| e.kind == ManifestEntryKind::File)
+            .filter(|e| matches!(e.kind, ManifestEntryKind::File { .. }))
             .filter(|e| is_extracted_file(e, config))
             .count()
     }
 }
 
-/// The configuration the size, count, depth and ratio flags describe; a zero
-/// limit is refused here, as `InvalidConfiguration` naming the flag's setting.
-fn limited_config(args: &ExtractArgs) -> Result<SecurityConfig> {
-    let refused = |err| convert_extraction_error(err, &args.archive);
-    Ok(args
-        .parallel
-        .apply(
-            args.zip.apply(
-                args.links.apply(
-                    apply_size_limits(args.max_files, args.max_total_size, args.max_file_size)
-                        .map_err(refused)?,
-                ),
+/// The configuration the size, count, depth and ratio flags describe; a value
+/// core refuses is returned as `InvalidConfiguration` naming the flag's
+/// setting.
+fn limited_config(args: &ExtractArgs) -> Result<SecurityConfig, ArchiveError> {
+    let config = args.parallel.apply(
+        args.zip.apply(
+            args.links
+                .apply(args.limits.apply(SecurityConfig::default())?),
+        ),
+    )?;
+    match args.max_path_depth {
+        Some(depth) => {
+            Ok(config.with_max_path_depth(non_zero_usize(ConfigSetting::MaxPathDepth, depth)?))
+        }
+        None => Ok(config),
+    }
+}
+
+/// How `--force` and `--atomic` combine, resolved once from the arguments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteMode {
+    /// Neither flag: existing files are conflicts and are refused up front.
+    Safe,
+    /// `--force`: existing files are overwritten in place.
+    Force,
+    /// `--atomic`: extraction is staged and renamed into place on success.
+    Atomic,
+    /// Both: staged, and swapped over an existing destination directory.
+    AtomicReplace,
+}
+
+impl WriteMode {
+    const fn of(args: &ExtractArgs) -> Self {
+        match (args.force, args.atomic) {
+            (false, false) => Self::Safe,
+            (true, false) => Self::Force,
+            (false, true) => Self::Atomic,
+            (true, true) => Self::AtomicReplace,
+        }
+    }
+
+    const fn overwrites(self) -> bool {
+        matches!(self, Self::Force | Self::AtomicReplace)
+    }
+
+    const fn stages(self) -> bool {
+        matches!(self, Self::Atomic | Self::AtomicReplace)
+    }
+}
+
+/// Proof that the destination was checked for files the archive would
+/// overwrite, or that the mode makes the check moot.
+struct ConflictsChecked(());
+
+impl ConflictsChecked {
+    /// Refuses, before anything is written, a destination that cannot hold the
+    /// archive.
+    ///
+    /// The core says every path extraction creates, the implied parent
+    /// directories included, in the order it creates them, resolving absolute
+    /// and Windows-prefixed names, `.` components and paths through earlier
+    /// links as extraction does. Each landing is probed with
+    /// `symlink_metadata`, so a conflict is reported at the path that holds
+    /// it: a file at an implied parent is named there, not at the entry below
+    /// it.
+    ///
+    /// In [`WriteMode::Safe`] anything at the landing of a file, link or
+    /// hardlink conflicts, and so does a non-directory at the landing of a
+    /// directory. In [`WriteMode::Force`] files are replaced by files, but a
+    /// non-directory can never be replaced by a directory, so only landings
+    /// that must be directories are checked. Staged modes write nothing into
+    /// the destination until the end and are not checked.
+    ///
+    /// A symlink at a landing is not turned into a generic conflict: the
+    /// refusal is the library's own typed one (an escaping link is a
+    /// `SymlinkEscape`, a link that does not lead to a directory is refused
+    /// like extraction does), and a link to a directory inside the destination
+    /// is left to extraction, which accepts it under `--allow-symlinks` or
+    /// refuses with that hint.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, or a failure to inspect a landing other than its absence.
+    fn check(
+        mode: WriteMode,
+        manifest: &ArchiveManifest,
+        config: &SecurityConfig,
+        output_dir: &Path,
+        archive: &Path,
+    ) -> Result<Self> {
+        if !matches!(mode, WriteMode::Safe | WriteMode::Force) {
+            return Ok(Self(()));
+        }
+        let root = output_dir.canonicalize().ok();
+        let mut conflicts = Vec::new();
+        let landings: Vec<_> = manifest.landings(config).collect();
+        for (index, landing) in landings.iter().enumerate() {
+            let must_be_directory = matches!(
+                landing.kind(),
+                LandingKind::ImplicitParent
+                    | LandingKind::Entry(ArchiveEntry {
+                        kind: ManifestEntryKind::Directory,
+                        ..
+                    })
+            );
+            if mode == WriteMode::Force && !must_be_directory {
+                continue;
+            }
+            let target = output_dir.join(landing.path().as_path());
+            let occupant = match target.symlink_metadata() {
+                Ok(occupant) => occupant,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                // The absolute path is over the host limit: extraction places
+                // the entry through directory handles and does not depend on
+                // the destination's length, so it decides, and Safe mode never
+                // overwrites what it finds.
+                Err(err) if err.kind() == io::ErrorKind::InvalidFilename => continue,
+                // Below a conflict already reported at an ancestor.
+                Err(err) if err.kind() == io::ErrorKind::NotADirectory && !conflicts.is_empty() => {
+                    continue;
+                }
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("failed to inspect {}", target.display()));
+                }
+            };
+            if occupant.file_type().is_symlink() {
+                let rel = landing.path().as_path();
+                let entry_below = landings[index + 1..]
+                    .iter()
+                    .map(|later| later.path().as_path())
+                    .find(|later| *later != rel && later.starts_with(rel));
+                if let Some(refusal) = symlink_refusal(
+                    rel,
+                    &target,
+                    must_be_directory,
+                    entry_below,
+                    root.as_deref(),
+                ) {
+                    return Err(convert_error(Operation::Extract, refusal, archive));
+                }
+            } else if !(must_be_directory && occupant.is_dir()) {
+                conflicts.push(landing.path().as_path().to_path_buf());
+            }
+        }
+
+        if conflicts.is_empty() {
+            Ok(Self(()))
+        } else {
+            Err(conflict_error(&conflicts, mode, output_dir))
+        }
+    }
+}
+
+/// The library's refusal for a symlink at the landing `rel`, or `None` when
+/// the link leads to a directory inside `root` and the landing must be a
+/// directory: whether extraction may write through it is extraction's call.
+///
+/// `entry_below` is the first landing under `rel`, the entry that needs the
+/// link to be a directory; it is `None` when `rel` is itself a directory entry,
+/// which would replace the link.
+fn symlink_refusal(
+    rel: &Path,
+    target: &Path,
+    must_be_directory: bool,
+    entry_below: Option<&Path>,
+    root: Option<&Path>,
+) -> Option<ArchiveError> {
+    let resolved = target.canonicalize().ok();
+    let inside_root = resolved
+        .as_deref()
+        .zip(root)
+        .is_some_and(|(resolved, root)| resolved.starts_with(root));
+    if !must_be_directory {
+        return Some(ArchiveError::from(Violation::ReplacesSymlink {
+            rel: path_text(rel).into(),
+        }));
+    }
+    match resolved {
+        Some(resolved) if inside_root && resolved.is_dir() => None,
+        Some(_) if !inside_root => Some(ArchiveError::SymlinkEscape {
+            path: rel.to_path_buf(),
+        }),
+        _ => Some(ArchiveError::from(entry_below.map_or_else(
+            || Violation::ReplacesSymlink {
+                rel: path_text(rel).into(),
+            },
+            |entry| Violation::SymlinkParent {
+                entry: path_text(entry).into(),
+                parent: path_text(rel).into(),
+            },
+        ))),
+    }
+}
+
+/// How an extraction runs, decided once from the write mode and the
+/// destination; each variant fixes its own [`ExtractionOptions`], so core's
+/// atomic staging cannot disagree with the CLI's own swap.
+enum ExtractPlan {
+    /// One streaming pass over the archive, staged by core.
+    Stream { options: ExtractionOptions },
+    /// Extraction from a listing, with the destination checked for conflicts.
+    Listed {
+        listed: ListedArchive,
+        options: ExtractionOptions,
+    },
+    /// Extraction into a temp directory, then a swap over the existing
+    /// destination; core staging is off.
+    Replace {
+        target: AtomicForceTarget,
+        source: Source,
+        options: ExtractionOptions,
+    },
+}
+
+impl ExtractPlan {
+    fn listed(
+        listed: ListedArchive,
+        options: ExtractionOptions,
+        _conflicts: ConflictsChecked,
+    ) -> Self {
+        Self::Listed { listed, options }
+    }
+
+    fn manifest(&self) -> Option<&ArchiveManifest> {
+        match self {
+            Self::Listed { listed, .. }
+            | Self::Replace {
+                source: Source::Listed(listed),
+                ..
+            } => Some(listed.manifest()),
+            Self::Stream { .. }
+            | Self::Replace {
+                source: Source::Archive,
+                ..
+            } => None,
+        }
+    }
+
+    fn run(
+        self,
+        archive: &Path,
+        output_dir: &Path,
+        config: &SecurityConfig,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<ExtractionReport> {
+        match self {
+            Self::Stream { options } => run_extraction(
+                archive,
+                Source::Archive,
+                output_dir,
+                config,
+                &options,
+                progress,
+                Staging::Direct,
             ),
-        )
-        .with_max_compression_ratio(
-            RatioLimit::parse(
-                ConfigSetting::MaxCompressionRatio,
-                f64::from(args.max_compression_ratio),
-            )
-            .map_err(refused)?,
-        )
-        .with_max_path_depth(
-            non_zero_usize(ConfigSetting::MaxPathDepth, args.max_path_depth).map_err(refused)?,
-        ))
+            Self::Listed { listed, options } => run_extraction(
+                archive,
+                Source::Listed(listed),
+                output_dir,
+                config,
+                &options,
+                progress,
+                Staging::Direct,
+            ),
+            Self::Replace {
+                target,
+                source,
+                options,
+            } => run_atomic_force_extraction(archive, source, target, config, &options, progress),
+        }
+    }
+}
+
+fn plan_extraction(
+    args: &ExtractArgs,
+    mode: WriteMode,
+    output_dir: &Path,
+    config: &SecurityConfig,
+) -> Result<ExtractPlan> {
+    let reuse = DecodeReuseArg::resolve(args.decode_reuse);
+
+    // Under `--atomic` the list pass would only size the progress bar: no
+    // conflict check runs and the staged extraction refuses on its own.
+    let single_pass =
+        is_tar_archive(&args.archive) && (mode.stages() || is_fresh_destination(output_dir));
+    let listing = if single_pass {
+        None
+    } else {
+        let listed = list_for_extract(&args.archive, config, reuse)?;
+        let conflicts =
+            ConflictsChecked::check(mode, listed.manifest(), config, output_dir, &args.archive)?;
+        Some((listed, conflicts))
+    };
+
+    // --atomic + --force over a pre-existing destination needs a swap that
+    // core's `extract_atomic` doesn't perform itself (it refuses to replace
+    // an existing directory, by design, so a pre-existing destination is
+    // never touched if extraction fails). The CLI performs that swap only
+    // after extraction has already fully succeeded; see
+    // `run_atomic_force_extraction`.
+    let target = resolve_atomic_force_replace(mode, output_dir)?;
+
+    let options = |atomic: bool| {
+        ExtractionOptions::default()
+            .with_atomic(atomic)
+            .with_skip_duplicates(!mode.overwrites())
+            .with_decode_reuse(reuse)
+    };
+    Ok(match (target, listing) {
+        (Some(target), listing) => ExtractPlan::Replace {
+            target,
+            source: listing.map_or(Source::Archive, |(listed, _)| Source::Listed(listed)),
+            options: options(false),
+        },
+        (None, Some((listed, conflicts))) => {
+            ExtractPlan::listed(listed, options(mode.stages()), conflicts)
+        }
+        (None, None) => ExtractPlan::Stream {
+            options: options(true),
+        },
+    })
 }
 
 pub fn execute(
     args: &ExtractArgs,
     formatter: &mut dyn OutputFormatter,
-    verbosity: Verbosity,
-) -> Result<()> {
+    mode: OutputMode,
+) -> CommandResult {
     let output_dir = match &args.output_dir {
         Some(dir) => dir.clone(),
         None => env::current_dir().context("failed to get current directory")?,
@@ -954,97 +1353,23 @@ pub fn execute(
         .with_allow_absolute_paths(args.allow_absolute_paths)
         .with_allow_world_writable(args.allow_world_writable)
         .with_preserve_permissions(args.preserve_permissions)
-        .with_allow_solid_archives(args.allow_solid_archives)
         .with_allowed_extensions(allowed_extensions);
 
-    let config = if args.banned_components.is_empty() {
-        config
-    } else {
-        config.with_banned_path_components(filter_banned_components(&args.banned_components)?)
+    let config = match banned_components(&args.banned_components)? {
+        Some(components) => config.with_banned_path_components(components),
+        None => config,
     };
 
-    let list_config = list_config_for(&config);
-    let reuse = DecodeReuseArg::resolve(args.decode_reuse);
-
-    // Under `--atomic` the list pass would only size the progress bar: no
-    // conflict check runs and the staged extraction refuses on its own.
-    let single_pass =
-        is_tar_archive(&args.archive) && (args.atomic || is_fresh_destination(&output_dir));
-    let listed = if single_pass {
-        None
-    } else {
-        Some(list_for_extract(&args.archive, &list_config, reuse)?)
-    };
-    let manifest = listed.as_ref().map(ListedArchive::manifest);
-
-    if let Some(manifest) = manifest.filter(|_| !args.force && !args.atomic) {
-        let conflicts: Vec<_> = manifest
-            .entries()
-            .iter()
-            .filter(|e| is_extracted_file(e, &config))
-            .map(|e| {
-                let relative = if args.allow_absolute_paths && e.path.is_absolute() {
-                    e.path.strip_prefix("/").unwrap_or(&e.path)
-                } else {
-                    &e.path
-                };
-                output_dir.join(relative)
-            })
-            .filter(|p| p.exists())
-            .collect();
-
-        if !conflicts.is_empty() {
-            return Err(conflict_error(&conflicts));
-        }
-    }
-
-    // --atomic + --force over a pre-existing destination needs a swap that
-    // core's `extract_atomic` doesn't perform itself (it refuses to replace
-    // an existing directory, by design, so a pre-existing destination is
-    // never touched if extraction fails). The CLI performs that swap only
-    // after extraction has already fully succeeded; see
-    // `run_atomic_force_extraction`.
-    let atomic_force_target = resolve_atomic_force_replace(args, &output_dir)?;
-
-    let options = ExtractionOptions::default()
-        .with_atomic((args.atomic || single_pass) && atomic_force_target.is_none())
-        .with_skip_duplicates(!args.force)
-        .with_decode_reuse(reuse);
-
-    let mut progress: Box<dyn ProgressCallback> = match verbosity {
-        Verbosity::Verbose => Box::new(VerboseProgress::new()),
-        Verbosity::Normal if CliProgress::should_show() => Box::new(manifest.map_or_else(
-            || CliProgress::counting("Extracting"),
-            |manifest| CliProgress::new(listed_entry_count(manifest, &config), "Extracting"),
-        )),
-        Verbosity::Quiet | Verbosity::Normal => Box::new(NoopProgress),
-    };
-
-    let source = listed.map_or(Source::Archive, Source::Listed);
-    let report = if let Some(target) = atomic_force_target {
-        run_atomic_force_extraction(
-            &args.archive,
-            source,
-            target,
-            &config,
-            &options,
-            progress.as_mut(),
-        )?
-    } else {
-        run_extraction(
-            &args.archive,
-            source,
-            &output_dir,
-            &config,
-            &options,
-            progress.as_mut(),
-            Staging::Direct,
-        )?
-    };
+    let plan = plan_extraction(args, WriteMode::of(args), &output_dir, &config)?;
+    let length = plan.manifest().map_or(BarLength::Discover, |manifest| {
+        BarLength::Known(listed_entry_count(manifest, &config))
+    });
+    let mut progress = progress_for(mode, length, Operation::Extract);
+    let report = plan.run(&args.archive, &output_dir, &config, progress.as_mut())?;
 
     formatter.format_extraction_result(&report)?;
 
-    Ok(())
+    Ok(Outcome::Ok)
 }
 
 #[cfg(test)]
@@ -1052,6 +1377,12 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    #[allow(clippy::expect_used)]
+    fn entry(name: &str) -> EntryName {
+        EntryName::of(Path::new(name)).expect("single component")
+    }
 
     /// Regression test for critic finding S2: the identity-mismatch abort
     /// branch in [`run_atomic_force_extraction`] previously had zero test
@@ -1072,7 +1403,7 @@ mod tests {
         std::fs::create_dir(&dest).expect("create dest");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
-        let dest_name = OsStr::new("dest");
+        let dest_name = &entry("dest");
         let (_, expected) = pin.entry_status(dest_name).expect("snapshot identity");
 
         verify_destination_unchanged(&pin, dest_name, expected, &dest)
@@ -1110,7 +1441,7 @@ mod tests {
         std::fs::create_dir(&decoy).expect("create decoy");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
-        let dest_name = OsStr::new("dest");
+        let dest_name = &entry("dest");
         let (_, expected) = pin.entry_status(dest_name).expect("snapshot identity");
 
         std::fs::remove_dir(&dest).expect("remove dest");
@@ -1141,7 +1472,7 @@ mod tests {
         std::fs::create_dir(&decoy).expect("create decoy");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
-        let dest_name = OsStr::new("dest");
+        let dest_name = &entry("dest");
 
         verify_destination_unchanged(&pin, dest_name, FileIdentity::Unknown, &dest)
             .expect("a directory with unverifiable identity must pass on kind alone");
@@ -1163,7 +1494,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let parent = root.path().join("parent");
         std::fs::create_dir(&parent).expect("create parent");
-        let name = OsStr::new("temp_dir");
+        let name = &entry("temp_dir");
         std::fs::create_dir(parent.join(name)).expect("create temp dir");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
@@ -1187,7 +1518,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let parent = root.path().join("parent");
         std::fs::create_dir(&parent).expect("create parent");
-        let name = OsStr::new("temp_dir");
+        let name = &entry("temp_dir");
         std::fs::create_dir(parent.join(name)).expect("create temp dir");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
@@ -1218,7 +1549,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let parent = root.path().join("parent");
         std::fs::create_dir(&parent).expect("create parent");
-        let name = OsStr::new("temp_dir");
+        let name = &entry("temp_dir");
         let target = parent.join(name);
         std::fs::create_dir(&target).expect("create temp dir");
         std::fs::write(target.join("payload.txt"), b"partial content").expect("write payload");
@@ -1272,7 +1603,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let parent = root.path().join("parent");
         std::fs::create_dir(&parent).expect("create parent");
-        let name = OsStr::new("temp_dir");
+        let name = &entry("temp_dir");
         let target = parent.join(name);
         std::fs::create_dir(&target).expect("create original temp dir");
 
@@ -1343,7 +1674,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let real_parent = root.path().join("real_parent");
         std::fs::create_dir(&real_parent).expect("create real parent");
-        let name = OsStr::new("temp_dir");
+        let name = &entry("temp_dir");
         let target = real_parent.join(name);
         std::fs::create_dir(&target).expect("create temp dir");
         std::fs::write(target.join("payload.txt"), b"partial content").expect("write payload");
@@ -1384,9 +1715,25 @@ mod tests {
         );
     }
 
+    /// The items clap would produce for the given raw flag values.
+    fn tokens(raw: &[&str]) -> Vec<ListToken> {
+        raw.iter()
+            .flat_map(|value| value.split(','))
+            .map(|item| {
+                if item.is_empty() {
+                    ListToken::Empty
+                } else if item.trim().is_empty() {
+                    ListToken::Blank
+                } else {
+                    ListToken::Item(item.trim().to_owned())
+                }
+            })
+            .collect()
+    }
+
     #[allow(clippy::unwrap_used)]
-    fn extension_names(raw: &[String]) -> Vec<String> {
-        parse_extensions(raw)
+    fn extension_names(raw: &[&str]) -> Vec<String> {
+        parse_extensions(&tokens(raw))
             .unwrap()
             .iter()
             .map(|e| e.as_str().to_owned())
@@ -1395,33 +1742,32 @@ mod tests {
 
     #[test]
     fn parse_extensions_comma_split() {
-        let raw = vec!["zip,tar,gz".to_string()];
-        assert_eq!(extension_names(&raw), vec!["zip", "tar", "gz"]);
+        assert_eq!(extension_names(&["zip,tar,gz"]), vec!["zip", "tar", "gz"]);
     }
 
     #[test]
     fn parse_extensions_strips_leading_dot() {
-        let raw = vec![".zip".to_string(), ".TAR".to_string()];
-        assert_eq!(extension_names(&raw), vec!["zip", "tar"]);
+        assert_eq!(extension_names(&[".zip", ".TAR"]), vec!["zip", "tar"]);
     }
 
     #[test]
     fn parse_extensions_trims_whitespace() {
-        let raw = vec![" zip , tar ".to_string(), " gz".to_string()];
-        assert_eq!(extension_names(&raw), vec!["zip", "tar", "gz"]);
+        assert_eq!(
+            extension_names(&[" zip , tar ", " gz"]),
+            vec!["zip", "tar", "gz"]
+        );
     }
 
     #[test]
     fn parse_extensions_lowercases() {
-        let raw = vec!["ZIP".to_string(), "Txt".to_string()];
-        assert_eq!(extension_names(&raw), vec!["zip", "txt"]);
+        assert_eq!(extension_names(&["ZIP", "Txt"]), vec!["zip", "txt"]);
     }
 
     #[test]
     #[allow(clippy::unwrap_used)]
     fn parse_extensions_refuses_an_inner_dot() {
         for raw in ["tar.gz", "A.TXT", "a/b"] {
-            let err = parse_extensions(&[raw.to_string()]).unwrap_err();
+            let err = parse_extensions(&tokens(&[raw])).unwrap_err();
             assert!(format!("{err:#}").contains(raw), "{err:#}");
         }
     }
@@ -1434,76 +1780,86 @@ mod tests {
     #[test]
     fn parse_extensions_refuses_values_without_any_extension() {
         for raw in [",", " ", ""] {
-            assert!(parse_extensions(&[raw.to_string()]).is_err(), "{raw:?}");
+            assert!(parse_extensions(&tokens(&[raw])).is_err(), "{raw:?}");
         }
     }
 
     #[test]
     fn parse_extensions_filters_empty_tokens() {
-        let raw = vec!["zip,,tar, ,".to_string()];
-        assert_eq!(extension_names(&raw), vec!["zip", "tar"]);
+        assert_eq!(extension_names(&["zip,,tar, ,"]), vec!["zip", "tar"]);
     }
 
     #[test]
     fn parse_extensions_mixed_repeatable_and_comma() {
-        let raw = vec!["zip,tar".to_string(), ".GZ".to_string()];
-        assert_eq!(extension_names(&raw), vec!["zip", "tar", "gz"]);
+        assert_eq!(
+            extension_names(&["zip,tar", ".GZ"]),
+            vec!["zip", "tar", "gz"]
+        );
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn banned_names(raw: &[&str]) -> Option<Vec<String>> {
+        banned_components(&tokens(raw))
+            .unwrap()
+            .map(|c| c.iter().map(|n| n.as_str().to_owned()).collect())
+    }
+
+    #[test]
+    fn banned_components_absent_keeps_the_default_list() {
+        assert_eq!(banned_names(&[]), None);
+    }
+
+    #[test]
+    fn banned_components_lone_empty_value_disables_the_list() {
+        assert_eq!(banned_names(&[""]), Some(Vec::new()));
+    }
+
+    #[test]
+    fn banned_components_keep_non_empty_entries() {
+        assert_eq!(
+            banned_names(&[".git", "", ".ssh"]),
+            Some(vec![".git".to_owned(), ".ssh".to_owned()])
+        );
     }
 
     #[test]
     #[allow(clippy::unwrap_used)]
-    fn filter_banned_components_drops_empty_entries() {
-        let raw = vec![String::new()];
-        assert!(filter_banned_components(&raw).unwrap().is_empty());
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn filter_banned_components_keeps_non_empty_entries() {
-        let raw = vec![".git".to_string(), String::new(), ".ssh".to_string()];
-        let kept = filter_banned_components(&raw).unwrap();
-        let names: Vec<_> = kept.iter().map(PathComponentName::as_str).collect();
-        assert_eq!(names, vec![".git", ".ssh"]);
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn filter_banned_components_refuses_a_separator() {
+    fn banned_components_refuse_a_separator() {
         for raw in ["a/b", ".."] {
-            let err = filter_banned_components(&[raw.to_string()]).unwrap_err();
+            let err = banned_components(&tokens(&[raw])).unwrap_err();
             assert!(format!("{err:#}").contains("--banned-component"), "{err:#}");
         }
     }
 
     #[test]
-    fn filter_banned_components_refuses_a_value_without_any_component() {
+    fn banned_components_refuse_a_list_without_any_component() {
         for raw in [",", " ", " , "] {
-            assert!(
-                filter_banned_components(&[raw.to_string()]).is_err(),
-                "{raw:?}"
-            );
+            assert!(banned_components(&tokens(&[raw])).is_err(), "{raw:?}");
         }
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
-    fn filter_banned_components_splits_on_commas_and_trims() {
-        let raw = vec![".git, .ssh ,,.env".to_string()];
-        let kept = filter_banned_components(&raw).unwrap();
-        let names: Vec<_> = kept.iter().map(PathComponentName::as_str).collect();
-        assert_eq!(names, vec![".git", ".ssh", ".env"]);
+    fn banned_components_split_on_commas_and_trim() {
+        assert_eq!(
+            banned_names(&[".git, .ssh ,,.env"]),
+            Some(vec![
+                ".git".to_owned(),
+                ".ssh".to_owned(),
+                ".env".to_owned()
+            ])
+        );
     }
 
     #[test]
     fn conflict_error_message_escapes_hostile_paths() {
-        let conflicts = vec![std::path::PathBuf::from("a\x1b[2J\nforged")];
+        let conflicts = vec![PathBuf::from("a\x1b[2J\nforged")];
         let msg = conflict_error_message(&conflicts);
         assert!(msg.ends_with("  a\\x1b[2J\\x0aforged"), "{msg:?}");
     }
 
     #[test]
     fn conflict_error_message_singular() {
-        let conflicts = vec![std::path::PathBuf::from("a.txt")];
+        let conflicts = vec![PathBuf::from("a.txt")];
         let msg = conflict_error_message(&conflicts);
         assert!(msg.starts_with("1 destination file already exists"));
         assert!(msg.contains("a.txt"));
@@ -1512,9 +1868,7 @@ mod tests {
 
     #[test]
     fn conflict_error_message_under_cap_lists_all_without_truncation_note() {
-        let conflicts: Vec<_> = (0..5)
-            .map(|i| std::path::PathBuf::from(format!("f{i}.txt")))
-            .collect();
+        let conflicts: Vec<_> = (0..5).map(|i| PathBuf::from(format!("f{i}.txt"))).collect();
         let msg = conflict_error_message(&conflicts);
         assert!(msg.starts_with("5 destination files already exist"));
         for i in 0..5 {
@@ -1527,7 +1881,7 @@ mod tests {
     #[test]
     fn conflict_error_message_at_cap_lists_all_without_truncation_note() {
         let conflicts: Vec<_> = (0..MAX_LISTED_CONFLICTS)
-            .map(|i| std::path::PathBuf::from(format!("f{i}.txt")))
+            .map(|i| PathBuf::from(format!("f{i}.txt")))
             .collect();
         let msg = conflict_error_message(&conflicts);
         assert!(msg.starts_with("10 destination files already exist"));
@@ -1545,7 +1899,7 @@ mod tests {
         // sorted-first-10, not an insertion-order-first-10.
         let conflicts: Vec<_> = (0..25)
             .rev()
-            .map(|i| std::path::PathBuf::from(format!("f{i:02}.txt")))
+            .map(|i| PathBuf::from(format!("f{i:02}.txt")))
             .collect();
         let msg = conflict_error_message(&conflicts);
         assert!(msg.starts_with("25 destination files already exist"));
@@ -1563,7 +1917,7 @@ mod tests {
     fn conflict_error_message_lists_shown_entries_in_sorted_order() {
         let conflicts: Vec<_> = ["c.txt", "a.txt", "b.txt"]
             .iter()
-            .map(std::path::PathBuf::from)
+            .map(PathBuf::from)
             .collect();
         let msg = conflict_error_message(&conflicts);
         let find = |needle: &str| {
@@ -1579,7 +1933,7 @@ mod tests {
     #[test]
     fn conflict_error_message_is_deterministic_across_input_permutations() {
         let ascending: Vec<_> = (0..15)
-            .map(|i| std::path::PathBuf::from(format!("f{i:02}.txt")))
+            .map(|i| PathBuf::from(format!("f{i:02}.txt")))
             .collect();
         let mut reversed = ascending.clone();
         reversed.reverse();
@@ -1589,5 +1943,165 @@ mod tests {
             conflict_error_message(&reversed),
             "the message must not depend on the order conflicts were discovered in"
         );
+    }
+
+    fn conflict_error_message(conflicts: &[PathBuf]) -> String {
+        crate::error::terminal(
+            &conflict_message(conflicts, WriteMode::Safe, Path::new("")).into_parts(),
+        )
+    }
+
+    #[test]
+    fn write_mode_is_resolved_from_both_flags() {
+        let mode = |force, atomic| {
+            let mut args = extract_args();
+            args.force = force;
+            args.atomic = atomic;
+            WriteMode::of(&args)
+        };
+        assert_eq!(mode(false, false), WriteMode::Safe);
+        assert_eq!(mode(true, false), WriteMode::Force);
+        assert_eq!(mode(false, true), WriteMode::Atomic);
+        assert_eq!(mode(true, true), WriteMode::AtomicReplace);
+        assert!(WriteMode::Force.overwrites() && !WriteMode::Force.stages());
+        assert!(WriteMode::Atomic.stages() && !WriteMode::Atomic.overwrites());
+    }
+
+    fn extract_args() -> ExtractArgs {
+        use clap::Parser as _;
+        let crate::cli::Commands::Extract(args) =
+            crate::cli::Cli::parse_from(["exarch", "extract", "a.tar"]).command
+        else {
+            panic!("expected extract command");
+        };
+        args
+    }
+
+    /// A destination displaced into a backup, in a parent holding the temp
+    /// directory the extracted content would have been staged in.
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn displaced_setup() -> (tempfile::TempDir, PathBuf, EntryName, EntryName) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        std::fs::create_dir(parent.join("dest")).expect("create dest");
+        std::fs::write(parent.join("dest").join("keep.txt"), b"original").expect("write");
+        std::fs::create_dir(parent.join("temp")).expect("create temp");
+        (root, parent, entry("dest"), entry("temp"))
+    }
+
+    /// An early `?` between displacing the destination and swapping the new
+    /// content in must put the original destination back.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn dropping_a_displaced_destination_restores_it() {
+        let (_root, parent, dest_name, temp_name) = displaced_setup();
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let (_, dest_id) = pin.entry_status(&dest_name).expect("dest identity");
+        let (_, temp_id) = pin.entry_status(&temp_name).expect("temp identity");
+        let temp_ref = TempOrphanRef {
+            pin: &pin,
+            name: &temp_name,
+            id: temp_id,
+            parent_display: &parent,
+        };
+        let slot = RestoreSlot::new(None);
+
+        let swap = || -> Result<()> {
+            let _displaced = DisplacedDestination::displace(
+                &temp_ref,
+                &dest_name,
+                dest_id,
+                &parent.join("dest"),
+                &slot,
+            )?;
+            assert!(
+                !parent.join("dest").exists(),
+                "destination must be displaced"
+            );
+            anyhow::bail!("step between displace and swap failed");
+        };
+        swap().expect_err("the step fails");
+
+        assert_eq!(
+            std::fs::read(parent.join("dest").join("keep.txt")).expect("restored content"),
+            b"original"
+        );
+        assert!(slot.take().is_none(), "a clean restore records no failure");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn restore_and_discard_disarm_the_drop_guard() {
+        let (_root, parent, dest_name, temp_name) = displaced_setup();
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let (_, dest_id) = pin.entry_status(&dest_name).expect("dest identity");
+        let (_, temp_id) = pin.entry_status(&temp_name).expect("temp identity");
+        let temp_ref = TempOrphanRef {
+            pin: &pin,
+            name: &temp_name,
+            id: temp_id,
+            parent_display: &parent,
+        };
+        let slot = RestoreSlot::new(None);
+
+        let displaced = DisplacedDestination::displace(
+            &temp_ref,
+            &dest_name,
+            dest_id,
+            &parent.join("dest"),
+            &slot,
+        )
+        .expect("displace");
+        pin.rename(&temp_name, &dest_name)
+            .expect("swap new content in");
+        let mut report = ExtractionReport::default();
+        displaced.discard(&mut report);
+
+        assert!(parent.join("dest").exists(), "the swapped-in content stays");
+        assert!(
+            !parent.join("dest").join("keep.txt").exists(),
+            "the discarded drop must not restore the old destination over the new"
+        );
+        assert!(slot.take().is_none());
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn a_failed_drop_restore_is_recorded_for_the_command() {
+        let (_root, parent, dest_name, temp_name) = displaced_setup();
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let (_, dest_id) = pin.entry_status(&dest_name).expect("dest identity");
+        let (_, temp_id) = pin.entry_status(&temp_name).expect("temp identity");
+        let temp_ref = TempOrphanRef {
+            pin: &pin,
+            name: &temp_name,
+            id: temp_id,
+            parent_display: &parent,
+        };
+        let slot = RestoreSlot::new(None);
+
+        let displaced = DisplacedDestination::displace(
+            &temp_ref,
+            &dest_name,
+            dest_id,
+            &parent.join("dest"),
+            &slot,
+        )
+        .expect("displace");
+        // Something else took the destination name, so the rename-back fails
+        // onto a non-empty directory.
+        std::fs::create_dir(parent.join("dest")).expect("occupy destination name");
+        std::fs::write(parent.join("dest").join("squatter"), b"x").expect("write");
+        drop(displaced);
+
+        let failure = slot.take().expect("the failed restore is recorded");
+        assert!(failure.describe().contains("could NOT be restored"));
+        assert!(failure.backup_path.join("keep.txt").exists());
     }
 }

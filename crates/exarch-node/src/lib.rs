@@ -104,11 +104,15 @@ use error::Failure;
 use error::ProgressCallbackError;
 use error::run_sync;
 use error::spawn_blocking_promise;
+use exarch_core::BoundaryPath;
 use report::ArchiveManifest;
+use report::ArchiveType;
 use report::CreationReport;
 use report::ExtractionReport;
 use report::VerificationReport;
-use utils::validate_path;
+use utils::boundary_path;
+use utils::boundary_paths;
+use utils::path_text;
 
 /// Result of the binding-internal operations, before conversion to a JS error.
 type CoreResult<T> = std::result::Result<T, Failure>;
@@ -180,8 +184,10 @@ const _: () = assert!(
 ///   Changing the setting removes that refusal only; the entry can still fail a
 ///   later check. `windows_reserved_names` and `max_tar_metadata_bytes` have no
 ///   setter in this binding (Rust API only).
-/// - `subCode`: the family of an `INVALID_ARCHIVE` or `SECURITY_VIOLATION`
-///   refusal, when it has one.
+/// - `subCode`: the finer classification of an `INVALID_ARCHIVE` (when it has
+///   one), the family of every `SECURITY_VIOLATION`, the quota of every
+///   `QUOTA_EXCEEDED` and the scope of every `ZIP_BOMB`.
+/// - `ioKind`: the kind of an `IO_ERROR`, such as `NotFound`.
 /// - `setting`: set on an `INVALID_CONFIGURATION` that names the refused
 ///   setting or input, as a `snake_case` id such as `max_file_count`.
 /// - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
@@ -206,7 +212,10 @@ const _: () = assert!(
 /// const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn extract_archive<'env>(
     env: &'env Env,
     archive_path: String,
@@ -242,14 +251,11 @@ fn extract_core(
     config: &exarch_core::SecurityConfig,
     options: &exarch_core::ExtractionOptions,
 ) -> CoreResult<exarch_core::ExtractionReport> {
-    validate_path(archive_path)?;
-    validate_path(output_dir)?;
-    Ok(exarch_core::extract_archive_with_options(
-        archive_path,
-        output_dir,
-        config,
-        options,
-    )?)
+    let archive_path = boundary_path(archive_path)?;
+    let output_dir = boundary_path(output_dir)?;
+    Ok(exarch_core::ExtractRequest::new(config)
+        .with_options(options.clone())
+        .extract(&archive_path, &output_dir)?)
 }
 
 /// Extract an archive to the specified directory (sync).
@@ -284,7 +290,10 @@ fn extract_core(
 /// const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn extract_archive_sync(
     env: Env,
     archive_path: String,
@@ -303,6 +312,41 @@ pub fn extract_archive_sync(
         extract_core(&archive_path, &output_dir, config_ref, options_ref)
     })
     .map(ExtractionReport::from)
+}
+
+/// Options of `createArchive` and its variants.
+///
+/// `overwrite` follows the same default as the Python binding: `true`
+/// replaces an existing output when creation succeeds (a failed creation
+/// leaves the previous output untouched); `false` refuses an existing output
+/// with `OUTPUT_EXISTS`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct CreateOptions {
+    /// The archive format, instead of the one the output extension names (how
+    /// a `.apk` or `.whl` is written as a plain ZIP). `'SevenZ'` cannot be
+    /// created.
+    pub format: Option<ArchiveType>,
+    /// Whether an existing output may be replaced. Defaults to `true`.
+    pub overwrite: Option<bool>,
+}
+
+/// The output of a creation as the core request takes it.
+fn output_file(
+    output_path: &BoundaryPath,
+    options: &CreateOptions,
+) -> CoreResult<exarch_core::OutputFile> {
+    let file = if options.overwrite.unwrap_or(true) {
+        exarch_core::OutputFile::replace(output_path.as_str())
+    } else {
+        exarch_core::OutputFile::create_new(output_path.as_str())
+    };
+    Ok(match options.format {
+        Some(format) => file.with_format(exarch_core::formats::detect::CreatableFormat::try_from(
+            exarch_core::formats::detect::ArchiveType::from(format),
+        )?),
+        None => file,
+    })
 }
 
 /// Create an archive from source files and directories (async).
@@ -334,44 +378,45 @@ pub fn extract_archive_sync(
 /// const report = await createArchive('output.tar.gz', ['src/'], config);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive<'env>(
     env: &'env Env,
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
+    options: Option<CreateOptions>,
 ) -> Result<PromiseRaw<'env, CreationReport>> {
     let config_owned: exarch_core::creation::CreationConfig =
         config.map_or_default(|c| c.as_core().clone());
+    let options = options.unwrap_or_default();
 
     spawn_blocking_promise(
         env,
         "archive creation",
-        move || create_core(&output_path, &sources, &config_owned),
+        move || create_core(&output_path, &sources, &config_owned, &options),
         |report| Ok(CreationReport::from(report)),
     )
 }
 
-fn validate_create_paths(output_path: &str, sources: &[String]) -> CoreResult<()> {
-    validate_path(output_path)?;
-    sources
-        .iter()
-        .try_for_each(|source| validate_path(source))?;
-    Ok(())
+fn boundary_create_paths(
+    output_path: &str,
+    sources: &[String],
+) -> CoreResult<(BoundaryPath, Vec<BoundaryPath>)> {
+    Ok((boundary_path(output_path)?, boundary_paths(sources)?))
 }
 
 fn create_core(
     output_path: &str,
     sources: &[String],
     config: &exarch_core::creation::CreationConfig,
+    options: &CreateOptions,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
-    validate_create_paths(output_path, sources)?;
-    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-    Ok(exarch_core::create_archive(
-        output_path,
-        &sources_refs,
-        config,
-    )?)
+    let (output_path, sources) = boundary_create_paths(output_path, sources)?;
+    let output = output_file(&output_path, options)?;
+    Ok(exarch_core::CreateRequest::new(config).create(&output, &sources)?)
 }
 
 /// Create an archive from source files and directories (sync).
@@ -402,18 +447,23 @@ fn create_core(
 /// console.log(`Created archive with ${report.filesAdded} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive_sync(
     env: Env,
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
+    options: Option<CreateOptions>,
 ) -> Result<CreationReport> {
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let options = options.unwrap_or_default();
 
     run_sync(env, "archive creation", || {
-        create_core(&output_path, &sources, config_ref)
+        create_core(&output_path, &sources, config_ref, &options)
     })
     .map(CreationReport::from)
 }
@@ -474,7 +524,7 @@ const WRAP_PROGRESS_CALLBACK_JS: &str = js_with_normalizer!(
 /// Argument extraction, by contrast, always runs synchronously on the JS
 /// thread before the future is constructed, which is exactly where
 /// `Env`/`Function` access is valid.
-pub struct ProgressCallback(ThreadsafeFunction<(String, i64, i64, i64)>);
+pub struct ProgressCallback(ThreadsafeFunction<ProgressArgs>);
 
 impl TypeName for ProgressCallback {
     fn type_name() -> &'static str {
@@ -513,7 +563,7 @@ impl FromNapiValue for ProgressCallback {
             Env::from_raw(env).run_script(WRAP_PROGRESS_CALLBACK_JS)?;
         let wrapped = factory.call(callback.to_unknown())?;
         let tsfn = wrapped
-            .build_threadsafe_function::<(String, i64, i64, i64)>()
+            .build_threadsafe_function::<ProgressArgs>()
             .callee_handled::<true>()
             .build_callback(|ctx| Ok(ctx.value))?;
         Ok(Self(tsfn))
@@ -528,7 +578,8 @@ impl FromNapiValue for ProgressCallback {
 /// function calling convention: `err` is always `null`, the entry data
 /// arrives as a single array argument) where:
 /// - `path` — entry path being added to the archive
-/// - `total` — total number of entries as `number`
+/// - `total` — total number of entries as `number`, or `null` while the count
+///   is not known
 /// - `current` — 1-based index of the current entry as `number`
 /// - `bytesWritten` — always `0`. The callback only fires from the entry-start
 ///   event, which resets the running per-entry byte counter immediately before
@@ -538,13 +589,21 @@ impl FromNapiValue for ProgressCallback {
 /// Creation runs on the tokio blocking thread pool. The progress callback is
 /// dispatched back to the JavaScript thread via a threadsafe function.
 ///
+/// A callback that throws cancels the creation: nothing is published and a
+/// previous output stays untouched, and the promise rejects with
+/// `PROGRESS_CALLBACK_ERROR` and the throw as `cause`. Cancellation is noticed
+/// at the start of the next entry, so a failure of the entry whose callback
+/// threw is an independent core error and wins (the throw is then its
+/// `cause`).
+///
 /// # Arguments
 ///
 /// * `output_path` - Path to output archive file
 /// * `sources` - Array of source files/directories to include
 /// * `config` - Optional `CreationConfig` (uses defaults if omitted)
 /// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
-///   string, total: number, current: number, bytesWritten: number]) => void`
+///   string, total: number | null, current: number, bytesWritten: number]) =>
+///   void`
 ///
 /// # Returns
 ///
@@ -599,20 +658,23 @@ impl FromNapiValue for ProgressCallback {
 /// console.log(`Created archive with ${report.filesAdded} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive_with_progress<'env>(
     env: &'env Env,
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
-    #[napi(
-        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
-    )]
+    #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
+    options: Option<CreateOptions>,
 ) -> Result<PromiseRaw<'env, CreationReport>> {
     let config_owned: exarch_core::creation::CreationConfig =
         config.map_or_default(|c| c.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
+    let options = options.unwrap_or_default();
 
     spawn_blocking_promise(
         env,
@@ -622,6 +684,7 @@ pub fn create_archive_with_progress<'env>(
                 &output_path,
                 &sources,
                 &config_owned,
+                &options,
                 progress,
                 ProgressDispatch::Awaited,
             )
@@ -634,12 +697,13 @@ fn create_with_progress_core(
     output_path: &str,
     sources: &[String],
     config: &exarch_core::creation::CreationConfig,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    options: &CreateOptions,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
-    validate_create_paths(output_path, sources)?;
-    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-    run_create_with_optional_progress(output_path, &sources_refs, config, progress, dispatch)
+    let (output_path, sources) = boundary_create_paths(output_path, sources)?;
+    let output = output_file(&output_path, options)?;
+    run_create_with_optional_progress(&output, &sources, config, progress, dispatch)
         .map_err(Failure::Callback)
 }
 
@@ -669,7 +733,9 @@ fn create_with_progress_core(
 /// `uncaughtException` on the turn that delivered the call, observable via
 /// `process.on('uncaughtException', ...)`. It is never merged into a
 /// `PROGRESS_CALLBACK_ERROR` result the way `createArchiveWithProgress` merges
-/// it, and it cannot be caught by wrapping this call in `try`/`catch`.
+/// it, and it cannot be caught by wrapping this call in `try`/`catch`. For the
+/// same reason a throw cannot cancel the creation (`createArchiveWithProgress`
+/// does): the archive is already written and committed when the callback runs.
 ///
 /// The primitive-throw crash documented on `createArchiveWithProgress` does
 /// **not** apply here: that defect lives in the await-the-result dispatch path,
@@ -684,9 +750,10 @@ fn create_with_progress_core(
 /// * `sources` - Array of source files/directories to include
 /// * `config` - Optional `CreationConfig` (uses defaults if omitted)
 /// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
-///   string, total: number, current: number, bytesWritten: number]) => void`.
-///   See the sections above: calls arrive only after this function returns, and
-///   a throw becomes an `uncaughtException` rather than an error from here.
+///   string, total: number | null, current: number, bytesWritten: number]) =>
+///   void`. See the sections above: calls arrive only after this function
+///   returns, and a throw becomes an `uncaughtException` rather than an error
+///   from here.
 ///
 /// # Returns
 ///
@@ -712,22 +779,28 @@ fn create_with_progress_core(
 /// console.log(`Created archive with ${report.filesAdded} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive_with_progress_sync(
     env: Env,
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
+    options: Option<CreateOptions>,
 ) -> Result<CreationReport> {
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let options = options.unwrap_or_default();
 
     run_sync(env, "archive creation with progress", || {
         create_with_progress_core(
             &output_path,
             &sources,
             config_ref,
+            &options,
             progress,
             ProgressDispatch::Deferred,
         )
@@ -744,16 +817,18 @@ pub fn create_archive_with_progress_sync(
 /// [`ProgressDispatch::Deferred`] no throw is ever observable here — the
 /// callback runs only after the caller has returned.
 fn run_create_with_optional_progress(
-    output_path: &str,
-    sources: &[&str],
+    output: &exarch_core::OutputFile,
+    sources: &[BoundaryPath],
     config: &exarch_core::creation::CreationConfig,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
 ) -> std::result::Result<exarch_core::creation::CreationReport, Box<ProgressCallbackError>> {
     progress.map_or_else(
         || {
             let mut noop = exarch_core::NoopProgress;
-            exarch_core::create_archive_with_progress(output_path, sources, config, &mut noop)
+            exarch_core::CreateRequest::new(config)
+                .with_progress(&mut noop)
+                .create(output, sources)
                 .map_err(|source| {
                     Box::new(ProgressCallbackError::Core {
                         source,
@@ -763,18 +838,22 @@ fn run_create_with_optional_progress(
         },
         |tsfn| {
             let mut callback = NodeProgressAdapter::new(tsfn, dispatch, AbortHandle::NONE);
-            let result = exarch_core::create_archive_with_progress(
-                output_path,
-                sources,
-                config,
-                &mut callback,
-            );
+            let result = exarch_core::CreateRequest::new(config)
+                .with_progress(&mut callback)
+                .create(output, sources);
             match (result, callback.into_callback_error()) {
                 (Ok(report), None) => Ok(report),
                 (Ok(report), Some(source)) => {
                     Err(Box::new(ProgressCallbackError::CreationCallback {
                         source,
                         report,
+                    }))
+                }
+                (Err(exarch_core::ArchiveError::Io(io)), Some(source))
+                    if io.kind() == std::io::ErrorKind::Interrupted =>
+                {
+                    Err(Box::new(ProgressCallbackError::CreationCancelled {
+                        source,
                     }))
                 }
                 (Err(source), callback) => {
@@ -810,7 +889,10 @@ fn run_create_with_optional_progress(
 /// }
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn list_archive<'env>(
     env: &'env Env,
     archive_path: String,
@@ -822,16 +904,16 @@ pub fn list_archive<'env>(
         env,
         "archive listing",
         move || list_core(&archive_path, &config_owned),
-        ArchiveManifest::try_from,
+        Ok,
     )
 }
 
 fn list_core(
     archive_path: &str,
     config: &exarch_core::SecurityConfig,
-) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
-    validate_path(archive_path)?;
-    Ok(exarch_core::list_archive(archive_path, config)?)
+) -> CoreResult<ArchiveManifest> {
+    let archive_path = boundary_path(archive_path)?;
+    ArchiveManifest::try_from(exarch_core::ListRequest::new(config).list(&archive_path)?)
 }
 
 /// List archive contents without extracting (sync).
@@ -862,7 +944,10 @@ fn list_core(
 /// }
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn list_archive_sync(
     env: Env,
     archive_path: String,
@@ -871,11 +956,9 @@ pub fn list_archive_sync(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let manifest = run_sync(env, "archive listing", || {
+    run_sync(env, "archive listing", || {
         list_core(&archive_path, config_ref)
-    })?;
-
-    ArchiveManifest::try_from(manifest)
+    })
 }
 
 /// Verify archive security (async).
@@ -912,7 +995,10 @@ pub fn list_archive_sync(
 /// }
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn verify_archive<'env>(
     env: &'env Env,
     archive_path: String,
@@ -926,7 +1012,7 @@ pub fn verify_archive<'env>(
         env,
         "archive verification",
         move || verify_core(&archive_path, &config_owned, options_owned),
-        VerificationReport::try_from,
+        Ok,
     )
 }
 
@@ -934,13 +1020,13 @@ fn verify_core(
     archive_path: &str,
     config: &exarch_core::SecurityConfig,
     options: exarch_core::VerificationOptions,
-) -> CoreResult<exarch_core::inspection::VerificationReport> {
-    validate_path(archive_path)?;
-    Ok(exarch_core::verify_archive_with_options(
-        archive_path,
-        config,
-        &options,
-    )?)
+) -> CoreResult<VerificationReport> {
+    let archive_path = boundary_path(archive_path)?;
+    VerificationReport::try_from(
+        exarch_core::VerifyRequest::new(config)
+            .with_options(options)
+            .verify(&archive_path)?,
+    )
 }
 
 /// Verify archive security (sync).
@@ -972,7 +1058,10 @@ fn verify_core(
 /// }
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn verify_archive_sync(
     env: Env,
     archive_path: String,
@@ -984,11 +1073,9 @@ pub fn verify_archive_sync(
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = run_sync(env, "archive verification", || {
+    run_sync(env, "archive verification", || {
         verify_core(&archive_path, config_ref, *options_ref)
-    })?;
-
-    VerificationReport::try_from(report)
+    })
 }
 
 /// Extract an archive to the specified directory with a progress callback
@@ -1017,7 +1104,8 @@ pub fn verify_archive_sync(
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
 /// * `options` - Optional `ExtractionOptions` (uses defaults if omitted)
 /// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
-///   string, total: number, current: number, bytesWritten: number]) => void`
+///   string, total: number | null, current: number, bytesWritten: number]) =>
+///   void`
 ///
 /// # Returns
 ///
@@ -1085,16 +1173,17 @@ pub fn verify_archive_sync(
 /// console.log(`Extracted ${report.filesExtracted} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn extract_archive_with_progress<'env>(
     env: &'env Env,
     archive_path: String,
     output_dir: String,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
-    #[napi(
-        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
-    )]
+    #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
 ) -> Result<PromiseRaw<'env, ExtractionReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
@@ -1106,8 +1195,8 @@ pub fn extract_archive_with_progress<'env>(
         env,
         "archive extraction with progress",
         move || {
-            validate_path(&archive_path)?;
-            validate_path(&output_dir)?;
+            let archive_path = boundary_path(&archive_path)?;
+            let output_dir = boundary_path(&output_dir)?;
             run_extract_with_optional_progress(
                 &archive_path,
                 &output_dir,
@@ -1128,39 +1217,33 @@ pub fn extract_archive_with_progress<'env>(
 /// run; both are carried out of here so neither is silently dropped (see the
 /// `From<ProgressCallbackError>` impl for how they merge into one rejection).
 fn run_extract_with_optional_progress(
-    archive_path: &str,
-    output_dir: &str,
+    archive_path: &BoundaryPath,
+    output_dir: &BoundaryPath,
     config: &exarch_core::SecurityConfig,
     options: &exarch_core::ExtractionOptions,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
 ) -> std::result::Result<exarch_core::ExtractionReport, Box<ProgressCallbackError>> {
     progress.map_or_else(
         || {
             let mut noop = exarch_core::NoopProgress;
-            exarch_core::extract_archive_with_options_and_progress(
-                archive_path,
-                output_dir,
-                config,
-                options,
-                &mut noop,
-            )
-            .map_err(|source| {
-                Box::new(ProgressCallbackError::Core {
-                    source,
-                    callback: None,
+            exarch_core::ExtractRequest::new(config)
+                .with_options(options.clone())
+                .with_progress(&mut noop)
+                .extract(archive_path, output_dir)
+                .map_err(|source| {
+                    Box::new(ProgressCallbackError::Core {
+                        source,
+                        callback: None,
+                    })
                 })
-            })
         },
         |tsfn| {
             let mut callback =
                 NodeProgressAdapter::new(tsfn, ProgressDispatch::Awaited, AbortHandle::NONE);
-            let result = exarch_core::extract_archive_with_options_and_progress(
-                archive_path,
-                output_dir,
-                config,
-                options,
-                &mut callback,
-            );
+            let result = exarch_core::ExtractRequest::new(config)
+                .with_options(options.clone())
+                .with_progress(&mut callback)
+                .extract(archive_path, output_dir);
             match (result, callback.into_callback_error()) {
                 (Ok(report), None) => Ok(report),
                 (Ok(report), Some(source)) => {
@@ -1176,6 +1259,11 @@ fn run_extract_with_optional_progress(
         },
     )
 }
+
+/// The value a progress callback receives: path, entry count (`None` while the
+/// archive's entry count is unknown, as for a TAR stream), 1-based index and
+/// bytes written for the entry.
+pub(crate) type ProgressArgs = (String, Option<i64>, i64, i64);
 
 /// Adapter that calls a JavaScript progress callback from a Rust worker thread.
 ///
@@ -1194,10 +1282,9 @@ fn run_extract_with_optional_progress(
 /// so extraction/creation keeps running, but there is no value in repeatedly
 /// invoking a callback already known to be broken.
 struct NodeProgressAdapter {
-    tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
+    tsfn: ThreadsafeFunction<ProgressArgs>,
     dispatch: ProgressDispatch,
     current_entry_bytes: i64,
-    total: usize,
     callback_error: Option<Error>,
     abort: AbortHandle,
 }
@@ -1210,7 +1297,7 @@ struct NodeProgressAdapter {
 /// which receives the successful value so it can keep its counters; the value
 /// itself is discarded.
 fn run_with_optional_progress<T>(
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
     abort: AbortHandle,
     run: impl FnOnce(&mut dyn exarch_core::ProgressCallback) -> CoreResult<T>,
@@ -1251,7 +1338,7 @@ enum ProgressDispatch {
 
 impl NodeProgressAdapter {
     fn new(
-        tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
+        tsfn: ThreadsafeFunction<ProgressArgs>,
         dispatch: ProgressDispatch,
         abort: AbortHandle,
     ) -> Self {
@@ -1260,7 +1347,6 @@ impl NodeProgressAdapter {
             tsfn,
             dispatch,
             current_entry_bytes: 0,
-            total: 0,
             callback_error: None,
         }
     }
@@ -1273,14 +1359,15 @@ impl NodeProgressAdapter {
 }
 
 impl exarch_core::ProgressCallback for NodeProgressAdapter {
-    fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
+    fn on_entry_start(&mut self, path: &std::path::Path, position: exarch_core::EntryPosition) {
+        let total = position.total.known();
+        let current = position.current.get();
         if self.callback_error.is_some() || self.abort.check().is_err() {
             return;
         }
         self.current_entry_bytes = 0;
-        self.total = total;
-        let path_str = path.to_string_lossy().into_owned();
-        let total_i64 = i64::try_from(total).unwrap_or(i64::MAX);
+        let path_str = path_text(path);
+        let total_i64 = total.map(|total| i64::try_from(total).unwrap_or(i64::MAX));
         let current_i64 = i64::try_from(current).unwrap_or(i64::MAX);
         let value = Ok((path_str, total_i64, current_i64, self.current_entry_bytes));
         match self.dispatch {
@@ -1313,6 +1400,10 @@ impl exarch_core::ProgressCallback for NodeProgressAdapter {
     fn on_entry_complete(&mut self, _path: &std::path::Path) {}
 
     fn on_complete(&mut self) {}
+
+    fn is_cancelled(&mut self) -> bool {
+        self.callback_error.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -1396,12 +1487,22 @@ mod tests {
     fn test_create_rejects_null_byte_in_output_and_sources() {
         let sources = vec!["source/".to_string()];
         assert_boundary_violation(
-            create_core("/tmp/out\0x.tar", &sources, &creation()),
+            create_core(
+                "/tmp/out\0x.tar",
+                &sources,
+                &creation(),
+                &CreateOptions::default(),
+            ),
             "null bytes",
         );
         let bad_sources = vec!["ok/".to_string(), "src\0x".to_string()];
         assert_boundary_violation(
-            create_core("/tmp/out.tar", &bad_sources, &creation()),
+            create_core(
+                "/tmp/out.tar",
+                &bad_sources,
+                &creation(),
+                &CreateOptions::default(),
+            ),
             "null bytes",
         );
     }
@@ -1410,11 +1511,21 @@ mod tests {
     fn test_create_rejects_excessively_long_paths() {
         let long = long_path();
         assert_boundary_violation(
-            create_core(&long, &["source/".to_string()], &creation()),
+            create_core(
+                &long,
+                &["source/".to_string()],
+                &creation(),
+                &CreateOptions::default(),
+            ),
             "maximum length",
         );
         assert_boundary_violation(
-            create_core("/tmp/out.tar", &[long], &creation()),
+            create_core(
+                "/tmp/out.tar",
+                &[long],
+                &creation(),
+                &CreateOptions::default(),
+            ),
             "maximum length",
         );
     }
@@ -1425,6 +1536,7 @@ mod tests {
             "/tmp/exarch-empty-sources.tar",
             &[],
             &creation(),
+            &CreateOptions::default(),
         ));
     }
 
@@ -1434,6 +1546,7 @@ mod tests {
             "/tmp/out\0x.tar",
             &[],
             &creation(),
+            &CreateOptions::default(),
             None,
             ProgressDispatch::Deferred,
         );

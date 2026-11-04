@@ -1,0 +1,37 @@
+//! Builders for the report values the formatter tests feed in.
+//!
+//! The core reports are `#[non_exhaustive]`, so a test cannot write a struct
+//! literal; these keep the call sites short.
+
+use exarch_core::ExtractionWarning;
+use exarch_core::Skip;
+use exarch_core::SkipKind;
+use exarch_core::Skips;
+use exarch_core::creation::CreationWarning;
+use std::path::PathBuf;
+
+/// `count` skipped duplicates.
+pub fn skips(count: usize) -> Skips {
+    let mut skips = Skips::default();
+    for i in 0..count {
+        let skip = Skip::new(SkipKind::Duplicate, format!("f{i}"));
+        assert!(skips.record(skip).is_ok());
+    }
+    skips
+}
+
+/// An extraction warning whose text contains `text`.
+pub fn extraction_warning(text: &str) -> ExtractionWarning {
+    ExtractionWarning::BackupCleanupFailed {
+        path: PathBuf::from("backup"),
+        identity_unverified: false,
+        error: text.to_string(),
+    }
+}
+
+/// A creation warning whose text contains `text`.
+pub fn creation_warning(text: &str) -> CreationWarning {
+    CreationWarning::ZipRatioCheckFailed {
+        reason: text.to_string(),
+    }
+}

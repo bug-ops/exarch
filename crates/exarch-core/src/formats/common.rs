@@ -14,8 +14,7 @@
 //! - [`copy_file_content_with_permit`]: Hardlink content copy between
 //!   already-open source/destination handles
 //! - [`is_extension_allowed`]: Extension allowlist predicate
-//! - [`push_disallowed_extension_warning`]: Aggregated disallowed-extension
-//!   skip warning
+//! - [`record_skip`]: Counts an entry left out of the extraction
 //!
 //! Every write below the destination goes through a
 //! [`VettedDir`](crate::formats::pinned_dir::VettedDir), so no path is
@@ -29,15 +28,17 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
+use crate::EntryPosition;
 use crate::ExtractionReport;
 use crate::Malformation;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
+use crate::Skip;
+use crate::SkipKind;
 pub use crate::SpecialFile;
 use crate::Violation;
-use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
 use crate::copy::copy_bounded;
@@ -91,10 +92,9 @@ impl<'a> EntryCompleteGuard<'a> {
     pub fn start(
         progress: &'a mut dyn ProgressCallback,
         path: &'a std::path::Path,
-        total: usize,
-        current: usize,
+        position: EntryPosition,
     ) -> Self {
-        progress.on_entry_start(path, total, current);
+        progress.on_entry_start(path, position);
         Self {
             progress,
             path,
@@ -161,75 +161,6 @@ pub fn encrypted_archive_error() -> ArchiveError {
     Violation::EncryptedArchive.into()
 }
 
-/// Appends a single aggregated warning for `count` skipped duplicate
-/// entries, choosing `noun_singular`/`noun_plural` based on `count`.
-///
-/// Shared by the TAR, ZIP, and 7z extractors (#499) so a single warning is
-/// pushed once extraction completes instead of one warning per skipped
-/// duplicate. A no-op when `count` is zero.
-///
-/// # Examples
-///
-/// ```ignore
-/// # use exarch_core::formats::common::push_duplicate_skip_warning;
-/// # use exarch_core::ExtractionReport;
-/// let mut report = ExtractionReport::new();
-/// push_duplicate_skip_warning(&mut report, 3, "entry", "entries");
-/// assert_eq!(
-///     report.warnings,
-///     vec!["skipped 3 entries as pre-existing duplicates".to_string()]
-/// );
-/// ```
-pub fn push_duplicate_skip_warning(
-    report: &mut ExtractionReport,
-    count: u64,
-    noun_singular: &str,
-    noun_plural: &str,
-) {
-    if count > 0 {
-        let noun = if count == 1 {
-            noun_singular
-        } else {
-            noun_plural
-        };
-        report
-            .warnings
-            .push(format!("skipped {count} {noun} as pre-existing duplicates"));
-    }
-}
-
-/// Appends a single aggregated warning for `count` entries skipped due to a
-/// disallowed extension.
-///
-/// Mirrors [`push_duplicate_skip_warning`]'s aggregation pattern so
-/// `report.warnings` grows once per extraction instead of once per rejected
-/// entry (issue #495). A no-op when `count` is zero.
-///
-/// # Examples
-///
-/// ```ignore
-/// # use exarch_core::formats::common::push_disallowed_extension_warning;
-/// # use exarch_core::ExtractionReport;
-/// let mut report = ExtractionReport::new();
-/// push_disallowed_extension_warning(&mut report, 3);
-/// assert_eq!(
-///     report.warnings,
-///     vec!["skipped 3 entries with disallowed extensions".to_string()]
-/// );
-/// ```
-pub fn push_disallowed_extension_warning(report: &mut ExtractionReport, count: u64) {
-    if count > 0 {
-        let (noun, ext_noun) = if count == 1 {
-            ("entry", "extension")
-        } else {
-            ("entries", "extensions")
-        };
-        report
-            .warnings
-            .push(format!("skipped {count} {noun} with disallowed {ext_noun}"));
-    }
-}
-
 /// Adds `n` to a byte counter.
 ///
 /// # Errors
@@ -254,36 +185,26 @@ pub fn checked_add_count(total: usize, n: usize) -> Result<usize> {
     })
 }
 
-/// Increments `report.files_skipped`, failing closed with
-/// `QuotaExceeded { resource: IntegerOverflow }` instead of wrapping if the
-/// counter is already at its maximum.
+/// Records `path` in `report.skipped` as skipped for `kind`.
 ///
-/// Shared by the TAR and ZIP extractors' duplicate-file, duplicate-symlink,
-/// and duplicate-hardlink skip paths, which all perform this exact checked
-/// increment before recording the skip in their own per-cause counter (issue
-/// #518). 7z performs the same guard inline in `sevenz.rs` because it must
-/// return a `sevenz_rust2::Error`, not this function's `Result`.
+/// The one place an extraction counts a skip, so the counter fails closed
+/// instead of wrapping (#515).
 ///
 /// # Errors
 ///
-/// Returns [`ArchiveError::QuotaExceeded`] with
-/// [`QuotaResource::IntegerOverflow`] if `report.files_skipped` is already at
-/// its maximum value.
+/// Returns `QuotaExceeded { resource: IntegerOverflow }` when the counter
+/// would overflow.
+pub fn record_skip(report: &mut ExtractionReport, kind: SkipKind, path: &Path) -> Result<()> {
+    report.skipped.record(Skip::new(kind, path))
+}
+
+/// Records `path` as a pre-existing duplicate the skip-duplicates policy kept.
 ///
-/// # Examples
+/// # Errors
 ///
-/// ```ignore
-/// # use exarch_core::formats::common::checked_increment_files_skipped;
-/// # use exarch_core::ExtractionReport;
-/// let mut report = ExtractionReport::new();
-/// checked_increment_files_skipped(&mut report)?;
-/// assert_eq!(report.files_skipped, 1);
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
-#[inline]
-pub fn checked_increment_files_skipped(report: &mut ExtractionReport) -> Result<()> {
-    report.files_skipped = checked_add_count(report.files_skipped, 1)?;
-    Ok(())
+/// See [`record_skip`].
+pub fn record_duplicate_skip(report: &mut ExtractionReport, path: &Path) -> Result<()> {
+    record_skip(report, SkipKind::Duplicate, path)
 }
 
 /// Whether the extension allowlist admits `path`.
@@ -291,8 +212,8 @@ pub fn checked_increment_files_skipped(report: &mut ExtractionReport) -> Result<
 /// The one definition of the rule, applied by the validator's file screen and
 /// by the passes that must agree with it on which files are skipped.
 #[must_use]
-pub fn is_extension_allowed(path: &Path, config: &SecurityConfig<Validated>) -> bool {
-    config.is_path_extension_allowed(path.extension().and_then(|e| e.to_str()))
+pub fn is_extension_allowed(path: &Path, config: &SecurityConfig) -> bool {
+    config.is_extension_allowed(path.extension().and_then(|e| e.to_str()))
 }
 
 /// Refuses an entry name `model` cannot hold.
@@ -309,7 +230,7 @@ pub fn check_entry_name_limits(
     model: PathModel,
     path: &Path,
     regular_file: bool,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
 ) -> std::io::Result<()> {
     if regular_file && !is_extension_allowed(path, config) {
         return Ok(());
@@ -385,10 +306,8 @@ pub fn check_entry_name_limits(
 /// * `copy_buffer` - Reusable buffer for I/O operations
 /// * `dirs` - Creates and vets the parent directories
 /// * `options` - Duplicate-handling policy for a pre-existing destination path
-/// * `duplicate_skips` - Counter incremented (not pushed as a warning string)
-///   when a duplicate entry is skipped; the caller aggregates it into a single
-///   warning after extraction completes, mirroring 7z's `duplicate_skips`
-///   accumulator (issue #490)
+///
+/// A skipped duplicate entry is recorded in `report.skipped`.
 ///
 /// # Errors
 ///
@@ -414,7 +333,6 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     copy_buffer: &mut CopyBuffer,
     dirs: DirWalker,
     options: SinkOptions,
-    duplicate_skips: &mut u64,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
     let duplicates = options.duplicate_policy();
@@ -434,9 +352,7 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
         written_at,
     }) = open_output_slot(&parent, leaf, safe_path.as_path(), mode, duplicates)?
     else {
-        checked_increment_files_skipped(report)?;
-        *duplicate_skips = duplicate_skips.saturating_add(1);
-        return Ok(());
+        return record_duplicate_skip(report, safe_path.as_path());
     };
 
     // Removes the partial file when the copy aborts (forged `expected_size`);
@@ -516,7 +432,7 @@ pub fn create_temp_sibling(
         std::io::ErrorKind::AlreadyExists,
         format!(
             "failed to create a unique temp file for {} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
-            Path::new(entry.as_os_str()).display()
+            crate::path_text(Path::new(entry.as_os_str()))
         ),
     ))
 }
@@ -604,7 +520,7 @@ fn replace_error(rel: &Path, err: &std::io::Error) -> std::io::Error {
         err.kind(),
         format!(
             "cannot replace the existing file at {}: {err}",
-            rel.display()
+            crate::path_text(rel)
         ),
     )
 }
@@ -692,14 +608,12 @@ fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Re
         return Ok(());
     }
     if file_type.is_symlink() {
-        return if probe.lands_in_dir(dest) {
-            Ok(())
-        } else {
-            Err(Violation::ReplacesSymlink {
+        return probe.lands_in_dir(dest).ok_or_else(|| {
+            Violation::ReplacesSymlink {
                 rel: normalized_display(rel).into(),
             }
-            .into())
-        };
+            .into()
+        });
     }
     Err(occupant_at_dest_error(rel, Occupant::File).into())
 }
@@ -728,10 +642,8 @@ fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Re
 /// * `report` - Extraction statistics (updated)
 /// * `dirs` - Creates and vets the parent directories
 /// * `options` - Duplicate-handling policy for a pre-existing destination path
-/// * `duplicate_skips` - Counter incremented (not pushed as a warning string)
-///   when a duplicate symlink is skipped; the caller aggregates it into a
-///   single warning after extraction completes, mirroring 7z's
-///   `duplicate_skips` accumulator (issue #490)
+///
+/// A skipped duplicate symlink is recorded in `report.skipped`.
 ///
 /// # Errors
 ///
@@ -756,7 +668,6 @@ pub fn create_symlink<P: ParentCheck>(
     report: &mut ExtractionReport,
     dirs: DirWalker,
     options: SinkOptions,
-    duplicate_skips: &mut u64,
 ) -> Result<()> {
     let duplicates = options.duplicate_policy();
     #[cfg(unix)]
@@ -767,16 +678,13 @@ pub fn create_symlink<P: ParentCheck>(
 
         if let Some(existing) = parent.probe(leaf)? {
             if duplicates == DuplicatePolicy::Skip {
-                checked_increment_files_skipped(report)?;
-                *duplicate_skips = duplicate_skips.saturating_add(1);
-                return Ok(());
+                return record_duplicate_skip(report, safe_symlink.link().as_path());
             }
             if existing == Occupant::Symlink {
                 // An unchanged link re-points nothing; a different target could
                 // re-point a path that an earlier link's `..` resolved through.
                 if parent.read_link(leaf)? == target_path {
-                    checked_increment_files_skipped(report)?;
-                    return Ok(());
+                    return record_duplicate_skip(report, safe_symlink.link().as_path());
                 }
                 return Err(symlink_at_dest_error(safe_symlink.link().as_path()).into());
             }
@@ -1043,12 +951,12 @@ mod tests {
     /// carry setuid/setgid/world-writable bits, so sanitizing with the
     /// default config never changes the value.
     fn sanitized(mode: u32) -> SanitizedMode {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         sanitize_permissions(RawMode::new(mode), &config)
     }
 
     fn test_walker() -> DirWalker {
-        DirWalker::new(&SecurityConfig::default().validate().expect("valid config"))
+        DirWalker::new(&SecurityConfig::default())
     }
 
     fn pinned(dest: &DestDir) -> PinnedRoot {
@@ -1084,10 +992,29 @@ mod tests {
                 err.to_string(),
                 format!(
                     "refusing to replace the existing {noun} at {}",
-                    rel.components().collect::<PathBuf>().display()
+                    normalized_display(rel)
                 )
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_refusals_of_names_differing_in_invalid_bytes_differ() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let message =
+            |bytes: &[u8]| replace_error(Path::new(OsStr::from_bytes(bytes)), &io).to_string();
+        let (a, b) = (message(b"caf\xe9"), message(b"caf\xe8"));
+        assert_ne!(a, b);
+        assert!(!a.contains('\u{FFFD}'), "{a}");
+
+        let occupant = |bytes: &[u8]| {
+            occupant_at_dest_error(Path::new(OsStr::from_bytes(bytes)), Occupant::File).to_string()
+        };
+        assert_ne!(occupant(b"caf\xe9"), occupant(b"caf\xe8"));
     }
 
     #[test]
@@ -1129,10 +1056,7 @@ mod tests {
         name: &str,
         allow_symlinks: bool,
     ) -> crate::Result<ExtractionReport> {
-        let config = SecurityConfig::default()
-            .with_allow_symlinks(allow_symlinks)
-            .validate()
-            .expect("valid config");
+        let config = SecurityConfig::default().with_allow_symlinks(allow_symlinks);
         let safe_path = SafePath::validate(&PathBuf::from(name), dest, &config).expect("safe path");
         let mut report = ExtractionReport::default();
         create_directory(
@@ -1214,7 +1138,7 @@ mod tests {
 
         // Try to extract a file with size that would overflow
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         // A 200-byte reservation would overflow when added to bytes_written
         let permit = QuotaTracker::new()
             .reserve(200, &config)
@@ -1234,7 +1158,6 @@ mod tests {
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
-            &mut 0u64,
             &mut NoopProgress,
         );
 
@@ -1267,13 +1190,11 @@ mod tests {
         let mut report = ExtractionReport::default();
         let mut copy_buffer = CopyBuffer::new();
         let dirs = test_walker();
-        let mut duplicate_skips = 0u64;
-
-        // Set files_skipped to usize::MAX so the duplicate-skip path's
+        // Saturate the duplicate counter so the duplicate-skip path's
         // increment would overflow.
-        report.files_skipped = usize::MAX;
+        report.skipped = crate::Skips::with_saturated_count(crate::SkipKind::Duplicate);
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         // A 200-byte reservation would overflow when added to bytes_written
         let permit = QuotaTracker::new()
             .reserve(200, &config)
@@ -1298,7 +1219,6 @@ mod tests {
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
-            &mut duplicate_skips,
             &mut NoopProgress,
         );
 
@@ -1324,7 +1244,7 @@ mod tests {
         let mut copy_buffer = CopyBuffer::new();
         let dirs = test_walker();
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         // Declares 50 bytes, mirroring the PoC's forged uncompressed_size.
         let permit = QuotaTracker::new()
             .reserve(50, &config)
@@ -1346,7 +1266,6 @@ mod tests {
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
-            &mut 0u64,
             &mut NoopProgress,
         );
 
@@ -1372,7 +1291,7 @@ mod tests {
         let mut copy_buffer = CopyBuffer::new();
         let dirs = test_walker();
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         let permit = QuotaTracker::new()
             .reserve(1000, &config)
             .expect("reservation should succeed");
@@ -1391,7 +1310,6 @@ mod tests {
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
-            &mut 0u64,
             &mut NoopProgress,
         );
 
@@ -1421,7 +1339,7 @@ mod tests {
         std::fs::write(temp.path().join("target.txt"), b"pre-existing content")
             .expect("failed to seed file");
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         let permit = QuotaTracker::new()
             .reserve(50, &config)
             .expect("reservation should succeed");
@@ -1441,7 +1359,6 @@ mod tests {
             &mut copy_buffer,
             dirs,
             SinkOptions::default().with_skip_duplicates(false),
-            &mut 0u64,
             &mut NoopProgress,
         );
 
@@ -1482,7 +1399,7 @@ mod tests {
     #[test]
     fn hardlink_copy_fails_closed_when_the_target_changes_size() {
         let temp = TempDir::new().expect("temp dir");
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
         let source = temp.path().join("source");
         std::fs::write(&source, vec![b'x'; 100_000]).expect("seed source");
 
@@ -1660,7 +1577,7 @@ mod tests {
         let mut copy_buffer = CopyBuffer::new();
         let dirs = test_walker();
 
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         // Mode 0o777 in archive, sanitized to 0o775 (world-writable stripped)
         let sanitized_mode = sanitize_permissions(RawMode::new(0o777), &config);
@@ -1682,7 +1599,6 @@ mod tests {
             &mut copy_buffer,
             dirs,
             SinkOptions::default(),
-            &mut 0u64,
             &mut NoopProgress,
         )
         .expect("extraction should succeed");
@@ -1747,10 +1663,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default()
-            .with_allow_symlinks(true)
-            .validate()
-            .expect("valid config");
+        let config = SecurityConfig::default().with_allow_symlinks(true);
 
         std::fs::write(temp.path().join("target.txt"), b"data").expect("write target");
 
@@ -1769,7 +1682,6 @@ mod tests {
             &mut report,
             dirs,
             SinkOptions::default().with_skip_duplicates(false),
-            &mut 0u64,
         )
         .expect("first create_symlink should succeed");
         assert_eq!(report.symlinks_created, 1);
@@ -1781,11 +1693,10 @@ mod tests {
             &mut report,
             dirs,
             SinkOptions::default().with_skip_duplicates(false),
-            &mut 0u64,
         )
         .expect("an identical link is an unchanged duplicate");
         assert_eq!(report.symlinks_created, unchanged);
-        assert_eq!(report.files_skipped, 1);
+        assert_eq!(report.files_skipped(), 1);
 
         std::fs::write(temp.path().join("other.txt"), b"data").expect("write other");
         let other_safe_symlink =
@@ -1797,7 +1708,6 @@ mod tests {
             &mut report,
             dirs,
             SinkOptions::default().with_skip_duplicates(false),
-            &mut 0u64,
         )
         .expect_err("a link with another target must not be replaced");
         assert_matches!(
@@ -1820,10 +1730,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default()
-            .with_allow_symlinks(true)
-            .validate()
-            .expect("valid config");
+        let config = SecurityConfig::default().with_allow_symlinks(true);
 
         std::fs::write(temp.path().join("target.txt"), b"data").expect("write target");
         std::fs::write(temp.path().join("link.txt"), b"old").expect("write file");
@@ -1841,7 +1748,6 @@ mod tests {
             &mut report,
             test_walker(),
             SinkOptions::default().with_skip_duplicates(false),
-            &mut 0u64,
         )
         .expect("a file is replaced");
         assert_eq!(report.symlinks_created, 1);
@@ -1852,7 +1758,7 @@ mod tests {
     fn test_record_file_written_counts_bytes_and_reports_progress_once() {
         struct Bytes(Vec<u64>);
         impl ProgressCallback for Bytes {
-            fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
+            fn on_entry_start(&mut self, _: &Path, _position: crate::EntryPosition) {}
 
             fn on_bytes_written(&mut self, bytes: u64) {
                 self.0.push(bytes);
@@ -1890,49 +1796,25 @@ mod tests {
         );
     }
 
-    /// Pins the exact aggregated warning message text produced by
-    /// `push_disallowed_extension_warning` for both singular and plural
-    /// counts, and confirms it is a no-op for a zero count.
     #[test]
-    fn test_push_disallowed_extension_warning_text() {
+    fn test_record_skip_counts_by_kind_and_keeps_the_path() {
         let mut report = ExtractionReport::default();
-        push_disallowed_extension_warning(&mut report, 0);
-        assert!(report.warnings.is_empty(), "zero count must be a no-op");
+        record_duplicate_skip(&mut report, Path::new("a/b")).expect("count duplicate");
+        record_skip(
+            &mut report,
+            SkipKind::ExtensionNotAllowed,
+            Path::new("c.exe"),
+        )
+        .expect("count extension skip");
+        record_duplicate_skip(&mut report, Path::new("d")).expect("count duplicate");
 
-        push_disallowed_extension_warning(&mut report, 1);
+        assert_eq!(report.files_skipped(), 3);
+        assert_eq!(report.skipped.count(SkipKind::Duplicate), 2);
+        assert_eq!(report.skipped.count(SkipKind::ExtensionNotAllowed), 1);
+        let paths: Vec<_> = report.skipped.sample().iter().map(|s| &s.path).collect();
         assert_eq!(
-            report.warnings,
-            vec!["skipped 1 entry with disallowed extension".to_string()]
-        );
-
-        report.warnings.clear();
-        push_disallowed_extension_warning(&mut report, 3);
-        assert_eq!(
-            report.warnings,
-            vec!["skipped 3 entries with disallowed extensions".to_string()]
-        );
-    }
-
-    /// Pins the exact aggregated warning message text produced by
-    /// `push_duplicate_skip_warning` for both singular and plural counts,
-    /// and confirms it is a no-op for a zero count.
-    #[test]
-    fn test_push_duplicate_skip_warning_text() {
-        let mut report = ExtractionReport::default();
-        push_duplicate_skip_warning(&mut report, 0, "entry", "entries");
-        assert!(report.warnings.is_empty(), "zero count must be a no-op");
-
-        push_duplicate_skip_warning(&mut report, 1, "entry", "entries");
-        assert_eq!(
-            report.warnings,
-            vec!["skipped 1 entry as pre-existing duplicates".to_string()]
-        );
-
-        report.warnings.clear();
-        push_duplicate_skip_warning(&mut report, 3, "entry", "entries");
-        assert_eq!(
-            report.warnings,
-            vec!["skipped 3 entries as pre-existing duplicates".to_string()]
+            paths,
+            [Path::new("a/b"), Path::new("c.exe"), Path::new("d")]
         );
     }
 
@@ -1943,7 +1825,7 @@ mod tests {
 
         struct Panicking(u32);
         impl ProgressCallback for Panicking {
-            fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
+            fn on_entry_start(&mut self, _: &Path, _position: crate::EntryPosition) {}
 
             fn on_bytes_written(&mut self, _: u64) {}
 
@@ -1958,7 +1840,12 @@ mod tests {
         let mut progress = Panicking(0);
         let path = PathBuf::from("f");
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            EntryCompleteGuard::start(&mut progress, &path, 1, 1).complete();
+            EntryCompleteGuard::start(
+                &mut progress,
+                &path,
+                crate::EntryPosition::at_index(0, crate::EntryTotal::Known(1)),
+            )
+            .complete();
         }));
         assert!(outcome.is_err());
         assert_eq!(progress.0, 1, "Drop must not fire the callback again");

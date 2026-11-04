@@ -11,6 +11,8 @@
 //! - **`ProgressReader`**: Wrapper reader that reports bytes read to progress
 //!   callback
 
+use crate::EntryPosition;
+use crate::EntryTotal;
 use crate::ProgressCallback;
 use crate::formats::common::EntryCompleteGuard;
 use std::io::Read;
@@ -34,6 +36,7 @@ use std::path::Path;
 /// # Examples
 ///
 /// ```ignore
+/// use exarch_core::EntryPosition;
 /// use exarch_core::ProgressCallback;
 /// use exarch_core::creation::progress::ProgressTracker;
 /// use std::path::Path;
@@ -41,8 +44,8 @@ use std::path::Path;
 /// struct SimpleProgress;
 ///
 /// impl ProgressCallback for SimpleProgress {
-///     fn on_entry_start(&mut self, path: &Path, total: usize, current: usize) {
-///         println!("[{}/{}] Processing: {}", current, total, path.display());
+///     fn on_entry_start(&mut self, path: &Path, position: EntryPosition) {
+///         println!("[{}] Processing: {}", position.current, path.display());
 ///     }
 ///
 ///     fn on_bytes_written(&mut self, bytes: u64) {}
@@ -80,13 +83,14 @@ impl<'a> ProgressTracker<'a> {
     /// # Examples
     ///
     /// ```ignore
+    /// use exarch_core::EntryPosition;
     /// use exarch_core::ProgressCallback;
     /// use exarch_core::creation::progress::ProgressTracker;
     /// use std::path::Path;
     ///
     /// # struct DummyProgress;
     /// # impl ProgressCallback for DummyProgress {
-    /// #     fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
+    /// #     fn on_entry_start(&mut self, _: &Path, _: EntryPosition) {}
     /// #     fn on_bytes_written(&mut self, _: u64) {}
     /// #     fn on_entry_complete(&mut self, _: &Path) {}
     /// #     fn on_complete(&mut self) {}
@@ -108,13 +112,10 @@ impl<'a> ProgressTracker<'a> {
     ///
     /// Automatically increments the current entry counter.
     pub fn begin<'p>(&'p mut self, path: &'p Path) -> EntryCompleteGuard<'p> {
+        let position =
+            EntryPosition::at_index(self.current_entry, EntryTotal::Known(self.total_entries));
         self.current_entry += 1;
-        EntryCompleteGuard::start(
-            &mut *self.progress,
-            path,
-            self.total_entries,
-            self.current_entry,
-        )
+        EntryCompleteGuard::start(&mut *self.progress, path, position)
     }
 
     /// Reports that the entire operation completed.
@@ -123,6 +124,16 @@ impl<'a> ProgressTracker<'a> {
     /// processed.
     pub fn on_complete(&mut self) {
         self.progress.on_complete();
+    }
+
+    /// Stops creation when the callback asks for it; see
+    /// [`ProgressCallback::is_cancelled`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ArchiveError::Io`] of kind `Interrupted` when cancelled.
+    pub fn check_cancelled(&mut self) -> crate::Result<()> {
+        check_cancelled(&mut *self.progress)
     }
 }
 
@@ -154,7 +165,7 @@ impl<'a> ProgressTracker<'a> {
 ///
 /// # struct DummyProgress;
 /// # impl ProgressCallback for DummyProgress {
-/// #     fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
+/// #     fn on_entry_start(&mut self, _: &Path, _position: crate::EntryPosition) {}
 /// #     fn on_bytes_written(&mut self, _: u64) {}
 /// #     fn on_entry_complete(&mut self, _: &Path) {}
 /// #     fn on_complete(&mut self) {}
@@ -204,7 +215,7 @@ impl<'a, R> ProgressReader<'a, R> {
     ///
     /// # struct DummyProgress;
     /// # impl ProgressCallback for DummyProgress {
-    /// #     fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
+    /// #     fn on_entry_start(&mut self, _: &Path, _: EntryPosition) {}
     /// #     fn on_bytes_written(&mut self, _: u64) {}
     /// #     fn on_entry_complete(&mut self, _: &Path) {}
     /// #     fn on_complete(&mut self) {}
@@ -242,7 +253,7 @@ impl<'a, R> ProgressReader<'a, R> {
     ///
     /// # struct DummyProgress;
     /// # impl ProgressCallback for DummyProgress {
-    /// #     fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
+    /// #     fn on_entry_start(&mut self, _: &Path, _: EntryPosition) {}
     /// #     fn on_bytes_written(&mut self, _: u64) {}
     /// #     fn on_entry_complete(&mut self, _: &Path) {}
     /// #     fn on_complete(&mut self) {}
@@ -300,6 +311,21 @@ impl<R> Drop for ProgressReader<'_, R> {
     }
 }
 
+/// The error of a creation a progress callback cancelled.
+///
+/// # Errors
+///
+/// Returns it when `progress` is cancelled.
+pub fn check_cancelled(progress: &mut dyn ProgressCallback) -> crate::Result<()> {
+    if progress.is_cancelled() {
+        return Err(crate::ArchiveError::Io(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "creation cancelled by the progress callback",
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::unused_io_amount)]
 mod tests {
@@ -315,7 +341,7 @@ mod tests {
     }
 
     impl ProgressCallback for TestProgress {
-        fn on_entry_start(&mut self, path: &Path, _total: usize, _current: usize) {
+        fn on_entry_start(&mut self, path: &Path, _position: crate::EntryPosition) {
             self.entries_started
                 .push(path.to_string_lossy().to_string());
         }

@@ -9,9 +9,9 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ErrorCode;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options;
 use tempfile::TempDir;
 
 fn tar_entry(name: &str, kind: tar::EntryType, data: &[u8], link: Option<&str>) -> Vec<u8> {
@@ -43,8 +43,10 @@ fn force_options() -> ExtractionOptions {
 }
 
 fn extract_forced(archive: &Path, out: &TempDir, config: &SecurityConfig) -> String {
-    let error =
-        extract_archive_with_options(archive, out.path(), config, &force_options()).unwrap_err();
+    let error = ExtractRequest::new(config)
+        .with_options(force_options())
+        .extract(archive, out.path())
+        .unwrap_err();
     assert_eq!(error.error_code(), ErrorCode::IoError, "{error}");
     error.to_string()
 }
@@ -126,13 +128,10 @@ fn tar_open_failure_without_dir_or_symlink_keeps_the_original_error() {
         return;
     }
 
-    let error = extract_archive_with_options(
-        &archive,
-        out.path(),
-        &SecurityConfig::default(),
-        &force_options(),
-    )
-    .unwrap_err();
+    let error = ExtractRequest::new(&SecurityConfig::default())
+        .with_options(force_options())
+        .extract(&archive, out.path())
+        .unwrap_err();
 
     let message = error.to_string();
     assert!(!message.contains("refusing to replace"), "{message}");

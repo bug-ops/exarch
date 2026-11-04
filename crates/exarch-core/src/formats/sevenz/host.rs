@@ -17,7 +17,6 @@ use super::write::write_file_with_permit;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
-use crate::config::Validated;
 use crate::formats::common;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
@@ -127,7 +126,7 @@ pub(super) struct SevenZHostTarget<'a> {
 
 impl<'a> SevenZHostTarget<'a> {
     /// Creates `output_dir` if needed and a target writing into it.
-    pub(super) fn create(output_dir: &Path, config: &'a SecurityConfig<Validated>) -> Result<Self> {
+    pub(super) fn create(output_dir: &Path, config: &'a SecurityConfig) -> Result<Self> {
         Ok(Self {
             inner: HostTarget::create(output_dir, config)?,
         })
@@ -145,7 +144,9 @@ impl ExtractTarget for SevenZHostTarget<'_> {
     ) -> Result<FileAdmission<SevenZAdmittedFile>> {
         let pending = match self.inner.screen_file(request)? {
             FileScreen::DisallowedExtension => {
-                return tally.record_extension_skip().map(FileAdmission::Skipped);
+                return tally
+                    .record_extension_skip(request.path)
+                    .map(FileAdmission::Skipped);
             }
             FileScreen::Pending(pending) => pending,
         };
@@ -159,7 +160,9 @@ impl ExtractTarget for SevenZHostTarget<'_> {
 
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
         if occupancy.is_occupied() && tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-            return tally.record_duplicate_skip().map(FileAdmission::Skipped);
+            return tally
+                .record_duplicate_skip(safe_path.as_path())
+                .map(FileAdmission::Skipped);
         }
         let write_mode = occupancy.write_mode(safe_path.as_path())?;
 
@@ -233,10 +236,8 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         target: &HardlinkTarget,
         counted: crate::security::quota::EntryCount,
         tally: &mut Tally<'_>,
-        hardlink_duplicate_skips: &mut u64,
     ) -> Result<()> {
-        self.inner
-            .hardlink(link, target, counted, tally, hardlink_duplicate_skips)
+        self.inner.hardlink(link, target, counted, tally)
     }
 }
 
@@ -244,7 +245,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
 struct HostPrePass<'a> {
     core: ValidatorCore<'a>,
     dest: &'a DestDir,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
     options: SinkOptions,
 }
 
@@ -293,7 +294,7 @@ impl PrePass for HostPrePass<'_> {
 impl SevenZTarget for SevenZHostTarget<'_> {
     fn with_pre_pass(
         &self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         options: SinkOptions,
         run: &mut dyn FnMut(&mut dyn PrePass) -> Result<()>,
     ) -> Result<()> {

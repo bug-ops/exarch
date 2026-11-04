@@ -13,9 +13,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::disallowed_methods)]
 
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
 use std::io::Write as _;
@@ -72,7 +72,9 @@ fn tar_skip_duplicates_true_keeps_first_entry() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default(); // skip_duplicates = true
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=true must succeed");
 
     assert_eq!(
@@ -80,17 +82,13 @@ fn tar_skip_duplicates_true_keeps_first_entry() {
         "only the first entry is extracted"
     );
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "second entry must be counted as skipped"
     );
-    // TAR aggregates all pre-existing-duplicate skips into a single warning
-    // without per-path text, to keep `report.warnings` bounded regardless of
-    // how many entries are skipped (see #490, mirroring 7z's #484).
-    assert_eq!(
-        report.warnings,
-        vec!["skipped 1 entry as pre-existing duplicates".to_string()],
-        "TAR now emits one aggregated duplicate-skip warning, not a per-path one"
-    );
+    // The skip is typed and keeps the path, with nothing left to warn about.
+    assert_eq!(report.skipped.count(exarch_core::SkipKind::Duplicate), 1);
+    assert!(report.warnings.is_empty());
 
     let content = std::fs::read(dest.path().join("file.txt")).unwrap();
     assert_eq!(content, b"first", "first entry content must be preserved");
@@ -107,14 +105,16 @@ fn tar_skip_duplicates_false_overwrites_with_last_entry() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=false must succeed");
 
     assert_eq!(
         report.files_extracted, 2,
         "both entries must be counted as extracted (second overwrites first)"
     );
-    assert_eq!(report.files_skipped, 0, "no entries must be skipped");
+    assert_eq!(report.files_skipped(), 0, "no entries must be skipped");
 
     let content = std::fs::read(dest.path().join("file.txt")).unwrap();
     assert_eq!(
@@ -188,7 +188,9 @@ fn sevenz_skip_duplicates_true_keeps_first_entry() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default(); // skip_duplicates = true
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=true must succeed");
 
     assert_eq!(
@@ -196,18 +198,13 @@ fn sevenz_skip_duplicates_true_keeps_first_entry() {
         "only the first entry is extracted"
     );
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "second entry must be counted as skipped"
     );
-    // 7z aggregates all pre-existing-duplicate skips into a single warning
-    // without per-path text, to keep `report.warnings` bounded regardless of
-    // how many entries are skipped (see #484; TAR/ZIP do the same as of #490,
-    // asserted above).
-    assert_eq!(
-        report.warnings,
-        vec!["skipped 1 entry as pre-existing duplicates".to_string()],
-        "7z emits one aggregated duplicate-skip warning, not a per-path one"
-    );
+    // The skip is typed and keeps the path, with nothing left to warn about.
+    assert_eq!(report.skipped.count(exarch_core::SkipKind::Duplicate), 1);
+    assert!(report.warnings.is_empty());
 
     let content = std::fs::read(dest.path().join("file.txt")).unwrap();
     assert_eq!(content, b"first", "first entry content must be preserved");
@@ -222,14 +219,16 @@ fn sevenz_skip_duplicates_false_overwrites_with_last_entry() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=false must succeed");
 
     assert_eq!(
         report.files_extracted, 2,
         "both entries must be counted as extracted (second overwrites first)"
     );
-    assert_eq!(report.files_skipped, 0, "no entries must be skipped");
+    assert_eq!(report.files_skipped(), 0, "no entries must be skipped");
 
     let content = std::fs::read(dest.path().join("file.txt")).unwrap();
     assert_eq!(
@@ -249,11 +248,13 @@ fn tar_skip_duplicates_false_overwrites_nested_path() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("extraction with skip_duplicates=false must succeed for nested paths");
 
     assert_eq!(report.files_extracted, 2);
-    assert_eq!(report.files_skipped, 0);
+    assert_eq!(report.files_skipped(), 0);
 
     let content = std::fs::read(dest.path().join("subdir/nested.txt")).unwrap();
     assert_eq!(content, b"overwritten");
@@ -298,11 +299,14 @@ fn tar_dangling_symlink_at_destination_skipped_not_followed() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default(); // skip_duplicates = true (default)
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("skip_duplicates=true must skip the symlinked path, not error");
 
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "the symlinked path must be counted as skipped"
     );
     assert_eq!(report.files_extracted, 0);
@@ -343,7 +347,9 @@ fn tar_dangling_symlink_at_destination_rejected_when_overwrite_requested() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let result = extract_archive_with_options(archive.path(), dest.path(), &config, &options);
+    let result = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path());
 
     assert!(
         result.is_err(),
@@ -392,7 +398,9 @@ fn sevenz_dangling_symlink_at_destination_rejected_when_overwrite_requested() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let result = extract_archive_with_options(archive.path(), dest.path(), &config, &options);
+    let result = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path());
 
     assert!(
         result.is_err(),
@@ -438,11 +446,14 @@ fn sevenz_dangling_symlink_at_destination_quota_not_consumed_when_skipped() {
     let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(1));
     let options = ExtractionOptions::default(); // skip_duplicates = true (default)
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("a skipped duplicate must not permanently consume the file-count quota");
 
     assert_eq!(
-        report.files_skipped, 1,
+        report.files_skipped(),
+        1,
         "the symlinked path must be counted as skipped"
     );
     assert_eq!(
@@ -470,7 +481,9 @@ fn sevenz_regular_file_at_destination_still_overwritten_when_overwrite_requested
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+    let report = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path())
         .expect("overwriting a pre-existing regular file must still succeed");
 
     assert_eq!(report.files_extracted, 1);
@@ -498,7 +511,9 @@ fn sevenz_live_symlink_at_destination_rejected_when_overwrite_requested() {
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
-    let result = extract_archive_with_options(archive.path(), dest.path(), &config, &options);
+    let result = ExtractRequest::new(&config)
+        .with_options(options)
+        .extract(archive.path(), dest.path());
 
     assert!(
         result.is_err(),

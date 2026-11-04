@@ -302,7 +302,7 @@ fn the_ignore_policy_decodes_nothing_and_finds_nothing_in_entry_data() {
     )])
     .build();
     let before = decoded_so_far();
-    let archive = ZipArchive::for_config(
+    let archive = ZipArchive::new(
         Cursor::new(archive_bytes.bytes.clone()),
         &config(ZipConsistencyPolicy::Ignore),
     )
@@ -310,7 +310,7 @@ fn the_ignore_policy_decodes_nothing_and_finds_nothing_in_entry_data() {
     assert_eq!(decoded_so_far(), before);
     assert!(archive.structure().findings().is_empty());
 
-    let archive = ZipArchive::for_config(
+    let archive = ZipArchive::new(
         Cursor::new(archive_bytes.bytes),
         &config(ZipConsistencyPolicy::Enforce),
     )
@@ -320,47 +320,15 @@ fn the_ignore_policy_decodes_nothing_and_finds_nothing_in_entry_data() {
 }
 
 #[test]
-fn an_archive_opened_without_stream_checks_is_refused_under_enforce() {
-    let built = RawZip::new(vec![known_size_entry("a.bin", 8, PAYLOAD, &[])]).build();
-    let mut archive = ZipArchive::for_config(
-        Cursor::new(built.bytes),
-        &config(ZipConsistencyPolicy::Ignore),
-    )
-    .unwrap();
-    assert_matches!(
-        archive.check_structure(&config(ZipConsistencyPolicy::Enforce)),
-        Err(ArchiveError::InvalidConfiguration { .. })
-    );
-    assert!(
-        archive
-            .check_structure(&config(ZipConsistencyPolicy::Ignore))
-            .is_ok()
-    );
-}
-
-#[test]
-fn verify_refuses_an_archive_opened_without_stream_checks_under_enforce() {
+fn an_archive_opened_without_stream_checks_does_not_serve_enforce() {
     let built = RawZip::new(vec![known_size_entry("a.bin", 8, PAYLOAD, &[])]).build();
     let open = || {
-        ZipArchive::for_config(
+        ZipArchive::new(
             Cursor::new(built.bytes.clone()),
             &config(ZipConsistencyPolicy::Ignore),
         )
         .unwrap()
     };
-    assert_matches!(
-        open().verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default()
-        ),
-        Err(ArchiveError::InvalidConfiguration { .. })
-    );
-    assert!(
-        open()
-            .verify(
-                &config(ZipConsistencyPolicy::Ignore),
-                &VerificationOptions::default()
-            )
-            .is_ok()
-    );
+    assert!(!open().serves(&config(ZipConsistencyPolicy::Enforce)));
+    assert!(open().serves(&config(ZipConsistencyPolicy::Ignore)));
 }

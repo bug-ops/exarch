@@ -19,9 +19,11 @@ use crate::SecurityConfig;
 use crate::closed_enum::closed_enum;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
+use crate::security::quota::AdmittedSize;
 use crate::sink::EntrySink;
 use crate::sink::SinkFull;
 use crate::sink::SinkOptions;
+use crate::types::CheckedLinkTarget;
 use crate::types::SafePath;
 
 const DEFAULT_LIMIT_BYTES: u64 = 500 * 1024 * 1024;
@@ -76,7 +78,7 @@ impl MemoryLimit {
     /// assert_eq!(MemoryLimit::from_config(&config).bytes().get(), 4096);
     /// ```
     #[must_use]
-    pub fn from_config<State>(config: &SecurityConfig<State>) -> Self {
+    pub fn from_config(config: &SecurityConfig) -> Self {
         Self(match config.max_total_size {
             crate::Limit::Bounded(bytes) => bytes,
             crate::Limit::Unbounded => NonZeroU64::MAX,
@@ -263,7 +265,7 @@ impl MemoryExtractRequest {
 /// # Errors
 ///
 /// Returns the errors of
-/// [`extract_to_sink_with_progress`](crate::extract_to_sink_with_progress).
+/// [`SinkExtractRequest::extract`](crate::SinkExtractRequest::extract).
 ///
 /// # Examples
 ///
@@ -379,11 +381,11 @@ impl Write for MemoryFile {
 /// use std::path::Path;
 ///
 /// use exarch_core::ArchiveReader;
+/// use exarch_core::SinkExtractRequest;
 /// use exarch_core::SinkOptions;
 /// use exarch_core::MemoryEntry;
 /// use exarch_core::MemorySink;
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::extract_to_sink;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = tar::Builder::new(Vec::new());
@@ -395,12 +397,10 @@ impl Write for MemoryFile {
 ///
 /// let mut sink = MemorySink::default();
 /// let reader = ArchiveReader::tar(io::Cursor::new(archive), None);
-/// extract_to_sink(
-///     reader,
-///     &mut sink,
-///     &SecurityConfig::default(),
-///     &SinkOptions::default(),
-/// )?;
+/// let config = SecurityConfig::default();
+/// SinkExtractRequest::new(&config)
+///     .with_options(SinkOptions::default())
+///     .extract(reader, &mut sink)?;
 /// assert_matches!(
 ///     sink.get(Path::new("docs/hello.txt")),
 ///     Some(MemoryEntry::File { data, .. }) if data == b"hello"
@@ -563,19 +563,20 @@ impl EntrySink for MemorySink {
         &mut self,
         path: &SafePath,
         mode: Option<SanitizedMode>,
-        size: u64,
+        size: AdmittedSize,
     ) -> io::Result<MemoryFile> {
-        self.reserve_file(path, size)?;
-        Ok(MemoryFile::with_size(size, mode))
+        self.reserve_file(path, size.get())?;
+        Ok(MemoryFile::with_size(size.get(), mode))
     }
 
     fn create_file_from(
         &mut self,
         path: &SafePath,
         mode: Option<SanitizedMode>,
+        size: AdmittedSize,
         bytes: Vec<u8>,
     ) -> io::Result<MemoryFile> {
-        self.reserve_file(path, bytes.len() as u64)?;
+        self.reserve_file(path, size.get())?;
         Ok(MemoryFile::from_vec(bytes, mode))
     }
 
@@ -583,11 +584,11 @@ impl EntrySink for MemorySink {
         self.store(path, file.into_entry())
     }
 
-    fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()> {
+    fn create_symlink(&mut self, link: &SafePath, target: CheckedLinkTarget<'_>) -> io::Result<()> {
         self.store(
             link,
             MemoryEntry::Symlink {
-                target: target.to_path_buf(),
+                target: target.as_path().to_path_buf(),
             },
         )
     }

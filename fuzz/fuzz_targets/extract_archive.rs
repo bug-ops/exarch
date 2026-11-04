@@ -2,7 +2,7 @@
 
 use std::io::Write as _;
 
-use exarch_core::extract_archive_with_options;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use libfuzzer_sys::fuzz_target;
 use tempfile::NamedTempFile;
@@ -12,7 +12,7 @@ use tempfile::TempDir;
 mod common;
 
 fuzz_target!(|data: &[u8]| {
-    let config = common::unvalidated();
+    let config = common::config();
     // Atomic extraction (rename-into-place) is also this pipeline's default
     // in most callers and was the path GHSA-x8wr lived in; exercise it here
     // rather than only the non-atomic write-in-place path.
@@ -40,7 +40,9 @@ fuzz_target!(|data: &[u8]| {
     };
     let output = iteration_root.path().join("out");
 
-    let _ = extract_archive_with_options(input.path(), &output, config, &options);
+    let _ = ExtractRequest::new(config)
+        .with_options(options.clone())
+        .extract(input.path(), &output);
 
     let mut entries = std::fs::read_dir(iteration_root.path())
         .into_iter()

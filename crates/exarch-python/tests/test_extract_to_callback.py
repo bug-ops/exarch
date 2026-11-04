@@ -51,11 +51,17 @@ def test_every_entry_kind_is_delivered_in_order():
         ("s", "symlink"),
         ("h", "hardlink"),
     ]
+    assert [type(e) for e in seen] == [
+        exarch.MemoryDirectory,
+        exarch.MemoryFile,
+        exarch.MemorySymlink,
+        exarch.MemoryHardlink,
+    ]
     assert seen[1].data == b"alpha"
     assert seen[1].mode == 0o644
     assert seen[2].target == "d/a.txt"
     assert seen[3].target == "d/a.txt"
-    assert seen[3].data is None
+    assert not hasattr(seen[3], "data")
     assert report.files_extracted >= 1
 
 

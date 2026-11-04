@@ -9,7 +9,6 @@ use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
-use crate::config::Validated;
 use crate::security::fs_view::FsView;
 #[cfg(any(test, feature = "testing"))]
 use crate::security::fs_view::HostFs;
@@ -37,14 +36,15 @@ pub fn hardlink_target_missing(target: &Path) -> ArchiveError {
 ///
 /// Returns `SecurityViolation` ("hardlinks not allowed") when hardlinks are
 /// disabled.
-pub fn require_hardlinks_allowed(config: &SecurityConfig<Validated>) -> Result<()> {
+pub fn require_hardlinks_allowed(config: &SecurityConfig) -> Result<()> {
     config
         .allowed
         .hardlinks
+        .is_allowed()
         .ok_or_else(|| Violation::LinksNotAllowed(LinkKind::Hardlink).into())
 }
 
-/// A hardlink target that passed [`HardlinkTracker`] validation.
+/// A hardlink target that passed `HardlinkTracker` validation.
 ///
 /// The path is relative, non-empty and free of NUL bytes, root and prefix
 /// components; every normal component passed the component checks, and the
@@ -54,7 +54,7 @@ pub fn require_hardlinks_allowed(config: &SecurityConfig<Validated>) -> Result<(
 /// not a proof about what is on disk at that time.
 ///
 /// There is no public constructor: the only producer is
-/// [`HardlinkTracker`]'s validation, so a hardlink target cannot be assembled
+/// `HardlinkTracker`'s validation, so a hardlink target cannot be assembled
 /// from an unchecked path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HardlinkTarget(PathBuf);
@@ -134,7 +134,7 @@ impl HardlinkTarget {
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
 /// let mut config = SecurityConfig::default();
-/// config.allowed.hardlinks = true;
+/// config.allowed.hardlinks = exarch_core::Admit::Allow;
 ///
 /// let mut tracker = HardlinkTracker::new();
 /// let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)?;
@@ -186,7 +186,7 @@ impl HardlinkTracker {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
     /// let mut config = SecurityConfig::default();
-    /// config.allowed.hardlinks = true;
+    /// config.allowed.hardlinks = exarch_core::Admit::Allow;
     ///
     /// let mut tracker = HardlinkTracker::new();
     /// let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)?;
@@ -202,7 +202,7 @@ impl HardlinkTracker {
         link_path: &SafePath,
         target: &Path,
         dest: &DestDir,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<HardlinkTarget> {
         self.validate_hardlink_in(link_path, target, dest, config, &HostFs)
     }
@@ -217,7 +217,7 @@ impl HardlinkTracker {
         link_path: &SafePath<P>,
         target: &Path,
         root: &V::Root,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         view: &V,
     ) -> Result<HardlinkTarget> {
         let dest = root.as_path();
@@ -285,7 +285,7 @@ impl HardlinkTracker {
     }
 
     /// Returns the number of tracked hardlinks.
-    #[inline]
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn count(&self) -> usize {
         self.seen_targets.len()
@@ -326,8 +326,7 @@ mod tests {
     fn test_validate_hardlink_allowed() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -344,7 +343,7 @@ mod tests {
     #[test]
     fn test_validate_hardlink_disabled() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default().validate().expect("valid config"); // hardlinks disabled by default
+        let config = SecurityConfig::default(); // hardlinks disabled by default
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -361,8 +360,7 @@ mod tests {
     fn test_validate_hardlink_absolute_target() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -376,8 +374,7 @@ mod tests {
     fn test_validate_hardlink_escape() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -391,8 +388,7 @@ mod tests {
     fn test_hardlink_tracker_multiple() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         let mut tracker = HardlinkTracker::new();
 
@@ -413,8 +409,7 @@ mod tests {
     fn test_hardlink_tracker_has_target() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -432,8 +427,7 @@ mod tests {
     fn test_hardlink_tracker_relative_safe() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("foo/link"), &dest, &config).unwrap();
@@ -448,8 +442,7 @@ mod tests {
     fn test_validated_target_keeps_the_validated_path_and_reports_parent_dir() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
         std::fs::create_dir(dest.as_path().join("d")).unwrap();
 
         let mut tracker = HardlinkTracker::new();
@@ -473,8 +466,7 @@ mod tests {
     fn test_duplicate_hardlink_to_same_target() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         let mut tracker = HardlinkTracker::new();
         let target = PathBuf::from("target.txt");
@@ -504,8 +496,7 @@ mod tests {
     fn test_hardlink_different_targets() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         let mut tracker = HardlinkTracker::new();
 
@@ -540,8 +531,7 @@ mod tests {
 
         let (temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
 
         // Simulate on-disk state after extracting the two symlink entries.
         let a = temp.path().join("a");
@@ -571,8 +561,7 @@ mod tests {
     fn test_hardlink_rejects_windows_hazards_in_target() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
 
         for target in ["dir/foo.", "dir/foo ", "dir/a:b", "sub/NUL"] {
@@ -589,8 +578,7 @@ mod tests {
     fn test_hardlink_rejects_slash_unc_target() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
 
         assert_matches!(
@@ -612,8 +600,7 @@ mod tests {
     fn test_hardlink_rejects_unc_and_device_targets_windows() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
-        let config = config.validate().expect("valid config");
+        config.allowed.hardlinks = crate::Admit::Allow;
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
 
         for target in [

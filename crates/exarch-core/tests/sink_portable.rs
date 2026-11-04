@@ -14,8 +14,8 @@ use exarch_core::ExtractionReport;
 use exarch_core::MemorySink;
 use exarch_core::PathModel;
 use exarch_core::SecurityConfig;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
-use exarch_core::extract_to_sink;
 use sink_support::tar_archive;
 use sink_support::tar_file;
 use sink_support::tar_symlink;
@@ -26,12 +26,9 @@ fn run(
     config: &SecurityConfig,
 ) -> (Result<ExtractionReport, ArchiveError>, MemorySink) {
     let mut sink = MemorySink::default().with_path_model(model);
-    let result = extract_to_sink(
-        ArchiveReader::tar(Cursor::new(archive), None),
-        &mut sink,
-        config,
-        &SinkOptions::default(),
-    );
+    let result = SinkExtractRequest::new(config)
+        .with_options(SinkOptions::default())
+        .extract(ArchiveReader::tar(Cursor::new(archive), None), &mut sink);
     (result, sink)
 }
 
@@ -202,7 +199,7 @@ fn portable_case_variants_are_one_name_on_every_host() {
         tar_file("dir/a", b"second"),
     ]));
     let report = result.unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     let paths: Vec<_> = sink.iter().map(|(p, _)| p.to_path_buf()).collect();
     assert_eq!(paths, [std::path::PathBuf::from("Dir/A")]);
 }
@@ -213,7 +210,7 @@ fn portable_canonically_equivalent_names_are_one_name_on_every_host() {
         tar_file("caf\u{e9}", b"first"),
         tar_file("cafe\u{301}", b"second"),
     ]));
-    assert_eq!(result.unwrap().files_skipped, 1);
+    assert_eq!(result.unwrap().files_skipped(), 1);
     assert_eq!(sink.iter().count(), 1);
 }
 
@@ -225,7 +222,7 @@ fn the_linux_host_model_keeps_case_variants_apart() {
         PathModel::Host,
         &SecurityConfig::default(),
     );
-    assert_eq!(result.unwrap().files_skipped, 0);
+    assert_eq!(result.unwrap().files_skipped(), 0);
     assert_eq!(sink.iter().count(), 2);
 }
 
@@ -242,8 +239,8 @@ fn portable_case_variant_directories_charge_the_node_budget() {
         .with_max_path_depth(exarch_core::non_zero!(2));
     let (result, _) = run(tar_archive(&entries), PathModel::Portable, &config);
     let mut error = &result.unwrap_err();
-    while let ArchiveError::PartialExtraction { source, .. } = error {
-        error = source;
+    while let ArchiveError::PartialExtraction(partial) = error {
+        error = partial.cause();
     }
     assert_matches!(
         error,
@@ -263,7 +260,7 @@ fn portable_symlink_chain_leaving_the_root_is_refused() {
     );
     assert_matches!(
         result.unwrap_err(),
-        ArchiveError::SymlinkEscape { .. } | ArchiveError::PartialExtraction { .. },
+        ArchiveError::SymlinkEscape { .. } | ArchiveError::PartialExtraction(_),
         "escape not refused"
     );
     assert!(sink.get(std::path::Path::new("d")).is_none());
@@ -275,7 +272,7 @@ fn all_links() -> SecurityConfig {
 
 fn root_cause(error: &ArchiveError) -> &ArchiveError {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => root_cause(source),
+        ArchiveError::PartialExtraction(partial) => root_cause(partial.cause()),
         other => other,
     }
 }

@@ -8,11 +8,11 @@ use std::num::NonZeroU64;
 
 use exarch_core::ArchiveReader;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use exarch_core::MemoryExtractRequest;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_reader_to_memory;
-use exarch_core::list_reader;
 
 fn pax_tar() -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
@@ -36,7 +36,10 @@ fn maximal() -> SecurityConfig {
 #[test]
 fn a_pax_tar_lists_under_the_maximal_budget() {
     let reader = ArchiveReader::from_bytes(pax_tar(), None).unwrap();
-    let manifest = list_reader(reader, &maximal(), &ListOptions::default()).unwrap();
+    let manifest = ListRequest::new(&maximal())
+        .with_options(ListOptions::default())
+        .list_reader(reader)
+        .unwrap();
     assert_eq!(manifest.total_entries(), 1);
 }
 

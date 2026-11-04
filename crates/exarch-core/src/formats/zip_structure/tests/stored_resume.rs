@@ -73,7 +73,7 @@ fn stored_dd_in_data_header_is_fatal_under_enforce_with_plain_verify() {
         .0
         .bytes;
     assert_matches!(
-        open_bytes(bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(
             ZipInconsistency::HiddenLocalHeader {
                 region: HiddenRegion::DescriptorTail,
@@ -81,17 +81,14 @@ fn stored_dd_in_data_header_is_fatal_under_enforce_with_plain_verify() {
             }
         ))
     );
-    let report = open_bytes(bytes.clone())
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_eq!(hidden_issues(&report).len(), 1);
     assert!(
-        open_bytes(bytes)
-            .list(&config(ZipConsistencyPolicy::Ignore))
+        open_bytes(bytes, &config(ZipConsistencyPolicy::Ignore))
+            .list()
             .is_ok()
     );
 }
@@ -220,7 +217,12 @@ fn stored_streaming_writer_archive_has_no_findings() {
         zip.write_all(&vec![b'k'; len]).unwrap();
     }
     let bytes = zip.finish().unwrap().into_inner();
-    assert!(open_bytes(bytes).structure().findings().is_empty());
+    assert!(
+        open_bytes(bytes, &SecurityConfig::default())
+            .structure()
+            .findings()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -351,7 +353,11 @@ fn stored_dd_duplicate_names_without_a_header_report_no_hidden_header() {
 
 #[test]
 fn stored_dd_duplicate_names_probe_a_bounded_number_of_times() {
-    let reads_of = |bytes: Vec<u8>| open_bytes(bytes).structure().gap_reads();
+    let reads_of = |bytes: Vec<u8>| {
+        open_bytes(bytes, &SecurityConfig::default())
+            .structure()
+            .gap_reads()
+    };
     let with_signature = duplicate_names_with_header_at(None);
     let plain = RawZip::new(vec![
         RawEntry::stored("a.txt", b"first"),
@@ -391,8 +397,8 @@ fn open_metered(bytes: Vec<u8>) -> (usize, u64) {
         largest: Rc::clone(&largest),
         total: Rc::clone(&total),
     };
-    let (_, structure) = open(reader).unwrap();
-    assert!(structure.findings().is_empty());
+    let archive = ZipArchive::new(reader, &SecurityConfig::default()).unwrap();
+    assert!(archive.structure().findings().is_empty());
     (largest.get(), total.get())
 }
 

@@ -84,7 +84,7 @@ fn config(memory: u64, policy: ZipConsistencyPolicy) -> SecurityConfig {
 
 fn unwrapped(err: ArchiveError) -> ArchiveError {
     match err {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => other,
     }
 }
@@ -191,46 +191,38 @@ fn zip_window_27_is_accepted_by_default_and_28_refused() {
 }
 
 #[test]
-fn zip_archive_handles_apply_the_limit_of_the_config_they_operate_under() {
+fn zip_archive_handles_apply_the_limit_of_the_config_they_are_opened_under() {
     let at = 1u64 << 16;
     for policy in POLICIES {
-        let open = || ZipArchive::new(Cursor::new(zip_bytes(16, 0))).unwrap();
-        let strict = config(at - 1, policy).validate().unwrap();
-        let loose = config(at, policy).validate().unwrap();
+        let strict = config(at - 1, policy);
+        let loose = config(at, policy);
+        let open = |config: &SecurityConfig| {
+            ZipArchive::new(Cursor::new(zip_bytes(16, 0)), config).unwrap()
+        };
         let out = TempDir::new().unwrap();
 
         assert_decoder_memory(
-            open()
-                .extract(
-                    out.path(),
-                    &strict,
-                    &ExtractionOptions::default(),
-                    &mut NoopProgress,
-                )
+            open(&strict)
+                .extract(out.path(), &ExtractionOptions::default(), &mut NoopProgress)
                 .unwrap_err(),
             at - 1,
             "extract",
         );
-        assert_decoder_memory(open().list(&strict).unwrap_err(), at - 1, "list");
+        assert_decoder_memory(open(&strict).list().unwrap_err(), at - 1, "list");
         assert_decoder_memory(
-            open()
-                .verify(&strict, &VerificationOptions::default())
+            open(&strict)
+                .verify(&VerificationOptions::default())
                 .unwrap_err(),
             at - 1,
             "verify",
         );
 
-        open().list(&loose).unwrap();
-        open()
-            .verify(&loose, &VerificationOptions::default())
+        open(&loose).list().unwrap();
+        open(&loose)
+            .verify(&VerificationOptions::default())
             .unwrap();
-        open()
-            .extract(
-                out.path(),
-                &loose,
-                &ExtractionOptions::default(),
-                &mut NoopProgress,
-            )
+        open(&loose)
+            .extract(out.path(), &ExtractionOptions::default(), &mut NoopProgress)
             .unwrap();
     }
 }

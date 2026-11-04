@@ -6,6 +6,11 @@ use std::path::Path;
 use exarch_core::ArchiveError;
 use exarch_core::CallbackEntry;
 use exarch_core::CallbackError;
+use exarch_core::ConfigProblem;
+use exarch_core::ConfigSetting;
+use exarch_core::CreateRequest;
+use exarch_core::DecodeReuse;
+use exarch_core::ListRequest;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
 use exarch_core::MemoryExtractRequest;
@@ -13,14 +18,15 @@ use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PartialWrites;
 use exarch_core::PathModel;
+use exarch_core::ReuseLimit;
 use exarch_core::SanitizedMode;
+use exarch_core::VerifyRequest;
 use exarch_core::extract_reader_to_callback;
 use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::CreatableFormat;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyTypeError;
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -28,12 +34,12 @@ use crate::PyProgressAdapter;
 use crate::catch_panic_as_py_err;
 use crate::catch_panic_as_py_result;
 use crate::config::PyCreationConfig;
-use crate::config::PyExtractionOptions;
+use crate::config::PyInteger;
 use crate::config::PySecurityConfig;
 use crate::config::PyVerificationOptions;
 use crate::error::convert_error;
 use crate::merge_progress_result;
-use crate::path_to_string;
+use crate::path_to_boundary;
 use crate::report::PyArchiveManifest;
 use crate::report::PyCreationReport;
 use crate::report::PyExtractionReport;
@@ -41,8 +47,13 @@ use crate::report::PyVerificationReport;
 use crate::stream::ArchiveInput;
 
 /// Parses the string form of a closed core enum (`ALL` and `as_str`).
-fn parse_one<T: Copy>(
-    what: &str,
+///
+/// # Errors
+///
+/// `InvalidConfigurationError` naming `setting` with `NotOneOf` for any other
+/// string.
+pub fn parse_one<T: Copy>(
+    setting: ConfigSetting,
     all: &[T],
     as_str: fn(T) -> &'static str,
     value: &str,
@@ -51,57 +62,70 @@ fn parse_one<T: Copy>(
         .copied()
         .find(|variant| as_str(*variant) == value)
         .ok_or_else(|| {
-            let allowed: Vec<_> = all.iter().map(|variant| as_str(*variant)).collect();
-            PyValueError::new_err(format!(
-                "{what} must be one of {}, got {value:?}",
-                allowed.join(", ")
-            ))
+            convert_error(ArchiveError::InvalidConfiguration {
+                setting,
+                problem: ConfigProblem::NotOneOf,
+            })
         })
 }
 
 /// Parses an optional string form of a closed core enum.
 fn parse_variant<T: Copy>(
-    what: &str,
+    setting: ConfigSetting,
     all: &[T],
     as_str: fn(T) -> &'static str,
     value: Option<&str>,
 ) -> PyResult<Option<T>> {
     value
-        .map(|value| parse_one(what, all, as_str, value))
+        .map(|value| parse_one(setting, all, as_str, value))
         .transpose()
+}
+
+/// Parses the string form of a format that can be created.
+pub fn parse_creatable_format(format: &str) -> PyResult<CreatableFormat> {
+    let format = parse_one(
+        ConfigSetting::CreationFormat,
+        ArchiveType::ALL,
+        ArchiveType::as_str,
+        format,
+    )?;
+    CreatableFormat::try_from(format).map_err(convert_error)
 }
 
 /// Parses the string form shared with `ArchiveType::as_str`.
 fn parse_format(format: Option<&str>) -> PyResult<Option<ArchiveType>> {
-    parse_variant("format", ArchiveType::ALL, ArchiveType::as_str, format)
+    parse_variant(
+        ConfigSetting::ArchiveFormat,
+        ArchiveType::ALL,
+        ArchiveType::as_str,
+        format,
+    )
 }
 
 /// Parses the string form shared with `PathModel::as_str`.
 fn parse_path_model(path_model: Option<&str>) -> PyResult<Option<PathModel>> {
-    parse_variant("path_model", PathModel::ALL, PathModel::as_str, path_model)
+    parse_variant(
+        ConfigSetting::PathModel,
+        PathModel::ALL,
+        PathModel::as_str,
+        path_model,
+    )
 }
 
 /// An entry extracted into memory.
 ///
+/// The concrete class tells what the entry holds: `MemoryFile`,
+/// `MemoryDirectory`, `MemorySymlink` or `MemoryHardlink` (the last only from
+/// `extract_archive_to_callback`). Each carries only the attributes of its
+/// kind.
+///
 /// # Attributes
 ///
 /// * `path` - Entry path, relative, as delivered by extraction
-/// * `kind` - `"file"`, `"directory"`, `"symlink"` or `"hardlink"` (the last
-///   only from `extract_archive_to_callback`)
-/// * `data` - The file's bytes (`None` unless `kind` is `"file"`)
-/// * `mode` - Permission bits after setuid and setgid were stripped (`None`
-///   unless a file whose archive carries a mode)
-/// * `target` - For `"symlink"`, the target as the archive spells it, relative
-///   to the link; for `"hardlink"`, the root-relative resolved path of an
-///   already delivered entry, a file or an earlier hardlink (`None` for other
-///   kinds)
-#[pyclass(name = "MemoryEntry", frozen)]
+/// * `kind` - `"file"`, `"directory"`, `"symlink"` or `"hardlink"`
+#[pyclass(name = "MemoryEntry", subclass, frozen)]
 pub struct PyMemoryEntry {
     path: String,
-    kind: MemoryEntryKind,
-    data: Option<Py<PyBytes>>,
-    mode: Option<u32>,
-    target: Option<String>,
 }
 
 #[pymethods]
@@ -110,15 +134,31 @@ impl PyMemoryEntry {
     fn path(&self) -> &str {
         &self.path
     }
+}
 
-    #[getter]
-    fn kind(&self) -> &'static str {
-        self.kind.as_str()
+/// A regular file extracted into memory.
+///
+/// # Attributes
+///
+/// * `data` - The file's bytes
+/// * `mode` - Permission bits after setuid and setgid were stripped (`None`
+///   unless the archive carries a mode)
+#[pyclass(name = "MemoryFile", extends = PyMemoryEntry, frozen)]
+pub struct PyMemoryFile {
+    data: Py<PyBytes>,
+    mode: Option<u32>,
+}
+
+#[pymethods]
+impl PyMemoryFile {
+    #[classattr]
+    fn kind() -> &'static str {
+        MemoryEntryKind::File.as_str()
     }
 
     #[getter]
-    fn data(&self, py: Python<'_>) -> Option<Py<PyBytes>> {
-        self.data.as_ref().map(|data| data.clone_ref(py))
+    fn data(&self, py: Python<'_>) -> Py<PyBytes> {
+        self.data.clone_ref(py)
     }
 
     #[getter]
@@ -126,48 +166,117 @@ impl PyMemoryEntry {
         self.mode
     }
 
-    #[getter]
-    fn target(&self) -> Option<&str> {
-        self.target.as_deref()
+    fn __repr__(slf: &Bound<'_, Self>) -> String {
+        format!("MemoryFile(path={:?})", slf.as_super().get().path)
+    }
+}
+
+/// A directory the archive names explicitly, extracted into memory.
+#[pyclass(name = "MemoryDirectory", extends = PyMemoryEntry, frozen)]
+pub struct PyMemoryDirectory;
+
+#[pymethods]
+impl PyMemoryDirectory {
+    #[classattr]
+    fn kind() -> &'static str {
+        MemoryEntryKind::Directory.as_str()
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "MemoryEntry(path={:?}, kind={:?})",
-            self.path,
-            self.kind.as_str()
-        )
+    fn __repr__(slf: &Bound<'_, Self>) -> String {
+        format!("MemoryDirectory(path={:?})", slf.as_super().get().path)
+    }
+}
+
+/// A symbolic link stored as data.
+///
+/// # Attributes
+///
+/// * `target` - The target as the archive spells it, relative to the link
+#[pyclass(name = "MemorySymlink", extends = PyMemoryEntry, frozen)]
+pub struct PyMemorySymlink {
+    target: String,
+}
+
+#[pymethods]
+impl PyMemorySymlink {
+    #[classattr]
+    fn kind() -> &'static str {
+        MemoryEntryKind::Symlink.as_str()
+    }
+
+    #[getter]
+    fn target(&self) -> &str {
+        &self.target
+    }
+
+    fn __repr__(slf: &Bound<'_, Self>) -> String {
+        format!("MemorySymlink(path={:?})", slf.as_super().get().path)
+    }
+}
+
+/// A hard link to an already delivered entry, by reference.
+///
+/// # Attributes
+///
+/// * `target` - The root-relative resolved path of an already delivered entry,
+///   a file or an earlier hardlink
+#[pyclass(name = "MemoryHardlink", extends = PyMemoryEntry, frozen)]
+pub struct PyMemoryHardlink {
+    target: String,
+}
+
+#[pymethods]
+impl PyMemoryHardlink {
+    #[classattr]
+    fn kind() -> &'static str {
+        MemoryEntryKind::Hardlink.as_str()
+    }
+
+    #[getter]
+    fn target(&self) -> &str {
+        &self.target
+    }
+
+    fn __repr__(slf: &Bound<'_, Self>) -> String {
+        format!("MemoryHardlink(path={:?})", slf.as_super().get().path)
     }
 }
 
 impl PyMemoryEntry {
-    fn new(py: Python<'_>, path: &Path, entry: CallbackEntry) -> PyResult<Self> {
-        let path = utf8(path)?;
-        let kind = entry.kind();
-        let (data, mode, target) = match entry {
-            CallbackEntry::Stored(MemoryEntry::File { data, mode }) => (
-                Some(PyBytes::new(py, &data).unbind()),
-                mode.map(SanitizedMode::as_u32),
-                None,
-            ),
-            CallbackEntry::Stored(MemoryEntry::Symlink { target }) => {
-                (None, None, Some(utf8(&target)?))
-            }
-            CallbackEntry::Hardlink { target } => (None, None, Some(utf8(target.as_path())?)),
-            CallbackEntry::Stored(MemoryEntry::Directory) => (None, None, None),
-            _ => {
-                return Err(PyRuntimeError::new_err(
-                    "exarch-python is older than exarch-core: unknown memory entry kind",
-                ));
-            }
-        };
-        Ok(Self {
-            path,
-            kind,
-            data,
-            mode,
-            target,
-        })
+    fn new(py: Python<'_>, path: &Path, entry: CallbackEntry) -> PyResult<Py<Self>> {
+        let base = Self { path: utf8(path)? };
+        match entry {
+            CallbackEntry::Stored(MemoryEntry::File { data, mode }) => Bound::new(
+                py,
+                PyClassInitializer::from(base).add_subclass(PyMemoryFile {
+                    data: PyBytes::new(py, &data).unbind(),
+                    mode: mode.map(SanitizedMode::as_u32),
+                }),
+            )
+            .map(|entry| entry.into_super().unbind()),
+            CallbackEntry::Stored(MemoryEntry::Directory) => Bound::new(
+                py,
+                PyClassInitializer::from(base).add_subclass(PyMemoryDirectory),
+            )
+            .map(|entry| entry.into_super().unbind()),
+            CallbackEntry::Stored(MemoryEntry::Symlink { target }) => Bound::new(
+                py,
+                PyClassInitializer::from(base).add_subclass(PyMemorySymlink {
+                    target: utf8(&target)?,
+                }),
+            )
+            .map(|entry| entry.into_super().unbind()),
+            CallbackEntry::Hardlink { target } => Bound::new(
+                py,
+                PyClassInitializer::from(base).add_subclass(PyMemoryHardlink {
+                    target: utf8(target.as_path())?,
+                }),
+            )
+            .map(|entry| entry.into_super().unbind()),
+            _ => Err(PyRuntimeError::new_err(
+                "exarch-python is older than exarch-core: unknown memory entry kind",
+            )),
+        }
     }
 }
 
@@ -183,20 +292,172 @@ fn utf8(path: &Path) -> PyResult<String> {
     })
 }
 
-/// Validates `max_bytes`: a positive count that fits in 64 bits.
-fn parse_max_bytes(max_bytes: Option<i128>) -> PyResult<Option<NonZeroU64>> {
-    max_bytes
-        .map(|bytes| {
-            u64::try_from(bytes)
-                .ok()
-                .and_then(NonZeroU64::new)
-                .ok_or_else(|| {
-                    convert_error(ArchiveError::InvalidConfiguration {
-                        setting: exarch_core::ConfigSetting::MaxBytes,
-                        problem: exarch_core::ConfigProblem::NotPositiveWholeNumber,
-                    })
-                })
+/// The string form of [`ReuseSetting`]'s mode, as
+/// `SinkOptions(decode_reuse=...)` spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReuseKind {
+    Off,
+    Memory,
+    TempFile,
+}
+
+impl ReuseKind {
+    pub const ALL: &'static [Self] = &[Self::Off, Self::Memory, Self::TempFile];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Memory => "memory",
+            Self::TempFile => "temp_file",
+        }
+    }
+}
+
+/// Where a ZIP extraction keeps decoded output, with the limit only the
+/// modes that keep something have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReuseSetting {
+    Off,
+    Memory(ReuseLimit),
+    TempFile(ReuseLimit),
+}
+
+impl ReuseSetting {
+    fn new(kind: ReuseKind, limit: Option<PyInteger>) -> PyResult<Self> {
+        let limit = limit
+            .map(|bytes| {
+                bytes
+                    .positive(ConfigSetting::DecodeReuseLimit)
+                    .map(ReuseLimit::new)
+            })
+            .transpose()?;
+        match (kind, limit) {
+            (ReuseKind::Off, None) => Ok(Self::Off),
+            (ReuseKind::Off, Some(_)) => Err(convert_error(ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::DecodeReuseLimit,
+                problem: ConfigProblem::NotSupported,
+            })),
+            (ReuseKind::Memory, limit) => Ok(Self::Memory(limit.unwrap_or(ReuseLimit::DEFAULT))),
+            (ReuseKind::TempFile, limit) => {
+                Ok(Self::TempFile(limit.unwrap_or(ReuseLimit::DEFAULT)))
+            }
+        }
+    }
+
+    const fn kind(self) -> ReuseKind {
+        match self {
+            Self::Off => ReuseKind::Off,
+            Self::Memory(_) => ReuseKind::Memory,
+            Self::TempFile(_) => ReuseKind::TempFile,
+        }
+    }
+
+    const fn limit(self) -> Option<ReuseLimit> {
+        match self {
+            Self::Off => None,
+            Self::Memory(limit) | Self::TempFile(limit) => Some(limit),
+        }
+    }
+
+    const fn as_core(self) -> DecodeReuse {
+        match self {
+            Self::Off => DecodeReuse::Off,
+            Self::Memory(limit) => DecodeReuse::Memory(limit),
+            Self::TempFile(limit) => DecodeReuse::TempFile(limit),
+        }
+    }
+}
+
+/// What the in-memory and callback extraction functions honour of the options
+/// of path-based extraction.
+///
+/// Atomic extraction renames a directory, which an in-memory extraction does
+/// not have, so only the duplicate policy and the ZIP decode reuse remain.
+///
+/// # Arguments
+///
+/// * `skip_duplicates` - Skip an entry whose path an earlier entry already
+///   holds instead of failing (default: `True`)
+/// * `decode_reuse` - `"off"` (default), `"memory"` or `"temp_file"`: where a
+///   ZIP extraction keeps the output of its structural check so deflate entries
+///   are decoded once instead of twice. `"temp_file"` writes the plaintext of
+///   the archive to the temporary directory until the extraction ends.
+/// * `decode_reuse_limit` - The most bytes kept, at most 256 MiB (default 32
+///   MiB); only with `"memory"` or `"temp_file"`
+#[pyclass(name = "SinkOptions", frozen)]
+#[derive(Clone)]
+pub struct PySinkOptions {
+    skip_duplicates: bool,
+    reuse: ReuseSetting,
+}
+
+#[pymethods]
+impl PySinkOptions {
+    #[new]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pyo3 cannot extract `&str` under abi3-py39"
+    )]
+    #[pyo3(signature = (skip_duplicates=true, decode_reuse="off".to_owned(), decode_reuse_limit=None))]
+    #[pyo3(text_signature = "(skip_duplicates=True, decode_reuse='off', decode_reuse_limit=None)")]
+    fn new(
+        skip_duplicates: bool,
+        decode_reuse: String,
+        decode_reuse_limit: Option<PyInteger>,
+    ) -> PyResult<Self> {
+        let kind = parse_one(
+            ConfigSetting::DecodeReuse,
+            ReuseKind::ALL,
+            ReuseKind::as_str,
+            &decode_reuse,
+        )?;
+        Ok(Self {
+            skip_duplicates,
+            reuse: ReuseSetting::new(kind, decode_reuse_limit)?,
         })
+    }
+
+    #[getter]
+    const fn skip_duplicates(&self) -> bool {
+        self.skip_duplicates
+    }
+
+    #[getter]
+    const fn decode_reuse(&self) -> &'static str {
+        self.reuse.kind().as_str()
+    }
+
+    #[getter]
+    fn decode_reuse_limit(&self) -> Option<u64> {
+        self.reuse.limit().map(ReuseLimit::get)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SinkOptions(skip_duplicates={}, decode_reuse={:?}, decode_reuse_limit={:?})",
+            if self.skip_duplicates {
+                "True"
+            } else {
+                "False"
+            },
+            self.decode_reuse(),
+            self.decode_reuse_limit(),
+        )
+    }
+}
+
+impl PySinkOptions {
+    fn as_core(&self) -> exarch_core::SinkOptions {
+        exarch_core::SinkOptions::default()
+            .with_skip_duplicates(self.skip_duplicates)
+            .with_decode_reuse(self.reuse.as_core())
+    }
+}
+
+/// Validates `max_bytes`: a positive count that fits in 64 bits.
+fn parse_max_bytes(max_bytes: Option<PyInteger>) -> PyResult<Option<NonZeroU64>> {
+    max_bytes
+        .map(|bytes| bytes.positive(exarch_core::ConfigSetting::MaxBytes))
         .transpose()
 }
 
@@ -237,7 +498,7 @@ impl PyMemoryExtraction {
 ///
 /// * `data` - The archive bytes
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
-/// * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+/// * `options` - Optional `SinkOptions`
 /// * `max_bytes` - The most bytes to keep: payload (file data, hardlink copies
 ///   and symlink targets) plus path bytes plus 256 per entry; defaults to the
 ///   config's `max_total_size`
@@ -275,8 +536,8 @@ pub fn extract_archive_to_memory(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<&PySecurityConfig>,
-    options: Option<&PyExtractionOptions>,
-    max_bytes: Option<i128>,
+    options: Option<&PySinkOptions>,
+    max_bytes: Option<PyInteger>,
     path_model: Option<String>,
     format: Option<String>,
 ) -> PyResult<PyMemoryExtraction> {
@@ -306,7 +567,7 @@ pub fn extract_archive_to_memory(
 /// * `data` - The archive bytes
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
 /// * `progress` - Optional progress callback function
-/// * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+/// * `options` - Optional `SinkOptions`
 /// * `max_bytes` - See `extract_archive_to_memory`
 /// * `path_model` - See `extract_archive_to_memory`
 /// * `format` - The archive format; detected from the leading bytes if None
@@ -357,8 +618,8 @@ pub fn extract_archive_to_memory_with_progress(
     data: ArchiveInput,
     config: Option<&PySecurityConfig>,
     progress: Option<Py<PyAny>>,
-    options: Option<&PyExtractionOptions>,
-    max_bytes: Option<i128>,
+    options: Option<&PySinkOptions>,
+    max_bytes: Option<PyInteger>,
     path_model: Option<String>,
     format: Option<String>,
 ) -> PyResult<PyMemoryExtraction> {
@@ -412,8 +673,9 @@ fn run_with_optional_progress<T: Send>(
 /// List the contents of an archive held in memory, with a progress callback.
 ///
 /// Same as `list_archive_bytes`, plus `progress`, called once per entry with
-/// `(path: str, total: int, current: int, bytes_written: int)`. `total` is 0
-/// for TAR, and `bytes_written` is always 0.
+/// `(path: str, total: int | None, current: int, bytes_written: int)`. `total`
+/// is `None` for TAR (the count is not known up front), and `bytes_written` is
+/// always 0.
 ///
 /// # Arguments
 ///
@@ -461,7 +723,6 @@ pub fn list_archive_bytes_with_progress(
     let format = parse_format(format.as_deref())?;
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let options = exarch_core::ListOptions::default();
 
     let slot = data.failure_slot();
     let result = run_with_optional_progress(
@@ -470,7 +731,9 @@ pub fn list_archive_bytes_with_progress(
         progress,
         |progress| {
             let reader = data.into_reader(format)?;
-            exarch_core::list_reader_with_progress(reader, config_ref, &options, progress)
+            ListRequest::new(config_ref)
+                .with_progress(progress)
+                .list_reader(reader)
         },
         |_, _| {},
     );
@@ -482,8 +745,9 @@ pub fn list_archive_bytes_with_progress(
 /// Verify the security of an archive held in memory, with a progress callback.
 ///
 /// Same as `verify_archive_bytes`, plus `progress`, called once per entry with
-/// `(path: str, total: int, current: int, bytes_written: int)`. `total` is 0
-/// for TAR, and `bytes_written` is always 0.
+/// `(path: str, total: int | None, current: int, bytes_written: int)`. `total`
+/// is `None` for TAR (the count is not known up front), and `bytes_written` is
+/// always 0.
 ///
 /// # Arguments
 ///
@@ -544,7 +808,10 @@ pub fn verify_archive_bytes_with_progress(
         progress,
         |progress| {
             let reader = data.into_reader(format)?;
-            exarch_core::verify_reader_with_progress(reader, config_ref, options_ref, progress)
+            VerifyRequest::new(config_ref)
+                .with_options(*options_ref)
+                .with_progress(progress)
+                .verify_reader(reader)
         },
         |_, _| {},
     );
@@ -566,7 +833,7 @@ pub fn verify_archive_bytes_with_progress(
 /// * `data` - The archive bytes, or a binary file object
 /// * `on_entry` - Called with each `MemoryEntry`; its return value is ignored
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
-/// * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+/// * `options` - Optional `SinkOptions`
 /// * `path_model` - `"host"` (default) or `"portable"`
 /// * `format` - The archive format; detected from the leading bytes if None
 ///
@@ -599,7 +866,7 @@ pub fn verify_archive_bytes_with_progress(
 /// other entry: its `target` is the root-relative resolved path of an entry
 /// that was already delivered, a file or an earlier hardlink (a chain is
 /// delivered link by link), and no bytes are repeated. With
-/// `ExtractionOptions().with_skip_duplicates(False)` one path can be
+/// `SinkOptions(skip_duplicates=False)` one path can be
 /// delivered more than once and a hardlink refers to the latest delivery.
 /// Implicit parent directories are not delivered. The GIL is released during
 /// I/O and taken once per entry.
@@ -628,7 +895,7 @@ pub fn extract_archive_to_callback(
     data: ArchiveInput,
     on_entry: Py<PyAny>,
     config: Option<&PySecurityConfig>,
-    options: Option<&PyExtractionOptions>,
+    options: Option<&PySinkOptions>,
     path_model: Option<String>,
     format: Option<String>,
 ) -> PyResult<PyExtractionReport> {
@@ -654,8 +921,7 @@ pub fn extract_archive_to_callback(
                 &request.request,
                 |path, entry| {
                     Python::attach(|py| {
-                        let entry = PyMemoryEntry::new(py, path.as_path(), entry)
-                            .and_then(|entry| Py::new(py, entry))?;
+                        let entry = PyMemoryEntry::new(py, path.as_path(), entry)?;
                         on_entry.call1(py, (entry,)).map(drop)
                     })
                 },
@@ -664,9 +930,6 @@ pub fn extract_archive_to_callback(
                 Ok(report) => Ok(Ok(report)),
                 Err(CallbackError::Callback(err)) => Ok(Err(err)),
                 Err(CallbackError::Archive(err)) => Err(convert_error(err)),
-                Err(_) => Err(PyRuntimeError::new_err(
-                    "exarch-python is older than exarch-core: unknown callback error",
-                )),
             }
         })
     });
@@ -687,8 +950,8 @@ struct MemoryRequest {
 impl MemoryRequest {
     fn parse(
         config: Option<&PySecurityConfig>,
-        options: Option<&PyExtractionOptions>,
-        max_bytes: Option<i128>,
+        options: Option<&PySinkOptions>,
+        max_bytes: Option<PyInteger>,
         path_model: Option<&str>,
         format: Option<&str>,
     ) -> PyResult<Self> {
@@ -698,12 +961,8 @@ impl MemoryRequest {
         let config = config.map_or_else(exarch_core::SecurityConfig::default, |c| {
             c.as_core().clone()
         });
-        let options = options
-            .map_or_else(
-                || Ok(exarch_core::SinkOptions::default()),
-                |o| exarch_core::SinkOptions::try_from(o.as_core()),
-            )
-            .map_err(convert_error)?;
+        let options =
+            options.map_or_else(exarch_core::SinkOptions::default, PySinkOptions::as_core);
         let mut request = MemoryExtractRequest::default()
             .with_config(config)
             .with_options(options)
@@ -732,7 +991,7 @@ fn into_py_extraction(
     let entries = sink
         .into_entries()
         .into_iter()
-        .map(|(path, entry)| Py::new(py, PyMemoryEntry::new(py, &path, entry.into())?))
+        .map(|(path, entry)| PyMemoryEntry::new(py, &path, entry.into()))
         .collect::<PyResult<_>>()?;
     Ok(PyMemoryExtraction {
         report: PyExtractionReport::from(report),
@@ -808,18 +1067,17 @@ pub fn create_archive_to_bytes(
     format: String,
     config: Option<&PyCreationConfig>,
 ) -> PyResult<PyCreatedArchive> {
-    let format = parse_one("format", ArchiveType::ALL, ArchiveType::as_str, &format)?;
-    let format = CreatableFormat::try_from(format).map_err(convert_error)?;
+    let format = parse_creatable_format(&format)?;
     let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
-    let source_paths: Vec<String> = sources_list
+    let source_paths: Vec<exarch_core::BoundaryPath> = sources_list
         .iter()
-        .map(|source| path_to_string(py, source))
+        .map(|source| path_to_boundary(py, source))
         .collect::<PyResult<_>>()?;
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
     let (bytes, report) = catch_panic_as_py_err("archive creation", || {
-        py.detach(|| exarch_core::create_to_bytes(&source_paths, format, config_ref))
+        py.detach(|| CreateRequest::new(config_ref).to_bytes(format, &source_paths))
     })?;
 
     Ok(PyCreatedArchive {
@@ -871,13 +1129,12 @@ pub fn list_archive_bytes(
     let format = parse_format(format.as_deref())?;
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let options = exarch_core::ListOptions::default();
 
     let slot = data.failure_slot();
     let result = catch_panic_as_py_err("archive listing", || {
         py.detach(|| {
             let reader = data.into_reader(format)?;
-            exarch_core::list_reader(reader, config_ref, &options)
+            ListRequest::new(config_ref).list_reader(reader)
         })
     });
     let manifest = slot.surface(result)?;
@@ -934,7 +1191,9 @@ pub fn verify_archive_bytes(
     let result = catch_panic_as_py_err("archive verification", || {
         py.detach(|| {
             let reader = data.into_reader(format)?;
-            exarch_core::verify_reader(reader, config_ref, options_ref)
+            VerifyRequest::new(config_ref)
+                .with_options(*options_ref)
+                .verify_reader(reader)
         })
     });
     let report = slot.surface(result)?;

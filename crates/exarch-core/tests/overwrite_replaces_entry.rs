@@ -9,9 +9,9 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options;
 use tempfile::TempDir;
 
 const NEW_CONTENT: &[u8] = b"new content";
@@ -42,13 +42,10 @@ fn zip_archive(dir: &TempDir, name: &str) -> PathBuf {
 }
 
 fn force(archive: &Path, out: &Path) {
-    extract_archive_with_options(
-        archive,
-        out,
-        &SecurityConfig::default(),
-        &ExtractionOptions::default().with_skip_duplicates(false),
-    )
-    .unwrap();
+    ExtractRequest::new(&SecurityConfig::default())
+        .with_options(ExtractionOptions::default().with_skip_duplicates(false))
+        .extract(archive, out)
+        .unwrap();
 }
 
 fn assert_hardlink_overwrite_leaves_outside_untouched(make: MakeArchive) {

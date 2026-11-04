@@ -7,6 +7,7 @@ use napi::bindgen_prelude::Uint8Array;
 use napi_derive::napi;
 
 use crate::CoreResult;
+use crate::ProgressArgs;
 use crate::ProgressCallback;
 use crate::ProgressDispatch;
 use crate::abort::AbortBinding;
@@ -28,13 +29,9 @@ fn list_core(
     data: impl IntoSource,
     config: &exarch_core::SecurityConfig,
     format: Option<ArchiveType>,
-) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
+) -> CoreResult<ArchiveManifest> {
     data.run(format, |reader| {
-        Ok(exarch_core::list_reader(
-            reader,
-            config,
-            &exarch_core::ListOptions::default(),
-        )?)
+        ArchiveManifest::try_from(exarch_core::ListRequest::new(config).list_reader(reader)?)
     })
 }
 
@@ -43,9 +40,13 @@ fn verify_core(
     config: &exarch_core::SecurityConfig,
     options: exarch_core::VerificationOptions,
     format: Option<ArchiveType>,
-) -> CoreResult<exarch_core::inspection::VerificationReport> {
+) -> CoreResult<VerificationReport> {
     data.run(format, |reader| {
-        Ok(exarch_core::verify_reader(reader, config, &options)?)
+        VerificationReport::try_from(
+            exarch_core::VerifyRequest::new(config)
+                .with_options(options)
+                .verify_reader(reader)?,
+        )
     })
 }
 
@@ -53,21 +54,20 @@ fn list_with_progress_core(
     data: impl IntoSource,
     config: &exarch_core::SecurityConfig,
     format: Option<ArchiveType>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
-) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
+) -> CoreResult<ArchiveManifest> {
     run_with_optional_progress(
         progress,
         dispatch,
         data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
-                Ok(exarch_core::list_reader_with_progress(
-                    reader,
-                    config,
-                    &exarch_core::ListOptions::default(),
-                    progress,
-                )?)
+                ArchiveManifest::try_from(
+                    exarch_core::ListRequest::new(config)
+                        .with_progress(progress)
+                        .list_reader(reader)?,
+                )
             })
         },
         |source, _| ProgressCallbackError::ListCallback { source },
@@ -79,18 +79,21 @@ fn verify_with_progress_core(
     config: &exarch_core::SecurityConfig,
     options: exarch_core::VerificationOptions,
     format: Option<ArchiveType>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
-) -> CoreResult<exarch_core::inspection::VerificationReport> {
+) -> CoreResult<VerificationReport> {
     run_with_optional_progress(
         progress,
         dispatch,
         data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
-                Ok(exarch_core::verify_reader_with_progress(
-                    reader, config, &options, progress,
-                )?)
+                VerificationReport::try_from(
+                    exarch_core::VerifyRequest::new(config)
+                        .with_options(options)
+                        .with_progress(progress)
+                        .verify_reader(reader)?,
+                )
             })
         },
         |source, _| ProgressCallbackError::VerifyCallback { source },
@@ -129,7 +132,10 @@ fn verify_with_progress_core(
 /// const manifest = await listArchiveBytes(fs.readFileSync('archive.tar.gz'));
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn list_archive_bytes<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -144,7 +150,7 @@ pub fn list_archive_bytes<'env>(
         env,
         "archive listing",
         move || list_core(data, &config_owned, format),
-        ArchiveManifest::try_from,
+        Ok,
         move |env| detach.run(env),
     )
 }
@@ -173,7 +179,10 @@ pub fn list_archive_bytes<'env>(
 /// const manifest = listArchiveBytesSync(fs.readFileSync('archive.zip'));
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn list_archive_bytes_sync(
     env: Env,
     data: Uint8Array,
@@ -183,11 +192,9 @@ pub fn list_archive_bytes_sync(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let manifest = run_sync(env, "archive listing", || {
+    run_sync(env, "archive listing", || {
         list_core(&*data, config_ref, format)
-    })?;
-
-    ArchiveManifest::try_from(manifest)
+    })
 }
 
 /// Verify the security of an archive held in memory (async).
@@ -214,7 +221,10 @@ pub fn list_archive_bytes_sync(
 /// const report = await verifyArchiveBytes(fs.readFileSync('archive.zip'));
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn verify_archive_bytes<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -231,7 +241,7 @@ pub fn verify_archive_bytes<'env>(
         env,
         "archive verification",
         move || verify_core(data, &config_owned, options_owned, format),
-        VerificationReport::try_from,
+        Ok,
         move |env| detach.run(env),
     )
 }
@@ -262,7 +272,10 @@ pub fn verify_archive_bytes<'env>(
 /// const report = verifyArchiveBytesSync(fs.readFileSync('archive.zip'));
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn verify_archive_bytes_sync(
     env: Env,
     data: Uint8Array,
@@ -275,11 +288,9 @@ pub fn verify_archive_bytes_sync(
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = run_sync(env, "archive verification", || {
+    run_sync(env, "archive verification", || {
         verify_core(&*data, config_ref, *options_ref, format)
-    })?;
-
-    VerificationReport::try_from(report)
+    })
 }
 
 /// List the contents of an archive held in memory with a progress callback
@@ -319,15 +330,16 @@ pub fn verify_archive_bytes_sync(
 /// );
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn list_archive_bytes_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
     format: Option<ArchiveType>,
-    #[napi(
-        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
-    )]
+    #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
@@ -347,7 +359,7 @@ pub fn list_archive_bytes_with_progress<'env>(
                 ProgressDispatch::Awaited,
             )
         },
-        ArchiveManifest::try_from,
+        Ok,
         move |env| detach.run(env),
     )
 }
@@ -390,16 +402,17 @@ pub fn list_archive_bytes_with_progress<'env>(
 /// );
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn verify_archive_bytes_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
     format: Option<ArchiveType>,
-    #[napi(
-        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
-    )]
+    #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, VerificationReport>> {
@@ -421,7 +434,7 @@ pub fn verify_archive_bytes_with_progress<'env>(
                 ProgressDispatch::Awaited,
             )
         },
-        VerificationReport::try_from,
+        Ok,
         move |env| detach.run(env),
     )
 }
@@ -460,18 +473,21 @@ pub fn verify_archive_bytes_with_progress<'env>(
 /// );
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn list_archive_bytes_with_progress_sync(
     env: Env,
     data: Uint8Array,
     config: Option<&SecurityConfig>,
     format: Option<ArchiveType>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let manifest = run_sync(env, "archive listing with progress", move || {
+    run_sync(env, "archive listing with progress", move || {
         list_with_progress_core(
             &*data,
             config_ref,
@@ -479,9 +495,7 @@ pub fn list_archive_bytes_with_progress_sync(
             progress,
             ProgressDispatch::Deferred,
         )
-    })?;
-
-    ArchiveManifest::try_from(manifest)
+    })
 }
 
 /// Verify the security of an archive held in memory with a progress callback
@@ -519,21 +533,24 @@ pub fn list_archive_bytes_with_progress_sync(
 /// );
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn verify_archive_bytes_with_progress_sync(
     env: Env,
     data: Uint8Array,
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
     format: Option<ArchiveType>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
 ) -> Result<VerificationReport> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = run_sync(env, "archive verification with progress", move || {
+    run_sync(env, "archive verification with progress", move || {
         verify_with_progress_core(
             &*data,
             config_ref,
@@ -542,7 +559,5 @@ pub fn verify_archive_bytes_with_progress_sync(
             progress,
             ProgressDispatch::Deferred,
         )
-    })?;
-
-    VerificationReport::try_from(report)
+    })
 }

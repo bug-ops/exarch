@@ -9,6 +9,7 @@
 //! blocks, is closed in `SevenZHeader::check`.
 
 use crate::ArchiveError;
+use crate::Malformation;
 use crate::Result;
 use crate::formats::common;
 use sevenz_rust2::Archive;
@@ -62,10 +63,12 @@ impl SevenZHeader {
         let offsets = archive.stream_map.pack_stream_offsets().len();
         let pack_streams = archive.pack_sizes().len();
         if offsets != pack_streams {
-            return Err(ArchiveError::unclassified(format!(
-                "failed to open 7z archive: the pack stream offsets have {offsets} entries for \
-                 {pack_streams} pack streams"
-            )));
+            return Err(ArchiveError::from(
+                Malformation::SevenZPackStreamOffsetMismatch {
+                    offsets,
+                    pack_streams,
+                },
+            ));
         }
         Ok(Self { archive })
     }
@@ -166,9 +169,9 @@ pub fn read_sevenz_header<R: Read + Seek>(source: &mut R) -> Result<SevenZHeader
         Ok(archive) => SevenZHeader::check(archive),
         Err(e) if super::is_password_error(&e) => Err(common::encrypted_archive_error()),
         Err(e) if is_empty_sevenz_archive(&e, source) => Ok(SevenZHeader::empty()),
-        Err(e) => Err(ArchiveError::unclassified(format!(
-            "failed to open 7z archive: {e}"
-        ))),
+        Err(e) => Err(ArchiveError::from(Malformation::SevenZHeaderUnreadable {
+            detail: e.to_string().into(),
+        })),
     }
 }
 

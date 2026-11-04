@@ -13,10 +13,15 @@
 //! - `relaxableBy`: the [`PolicySetting`] that relaxes a refusal, when one
 //!   does.
 //! - `subCode`: an [`InvalidArchiveSubCode`] on an `INVALID_ARCHIVE`, when the
-//!   failure has a finer classification, and a [`SecurityViolationSubCode`] on
-//!   every core `SECURITY_VIOLATION`.
-//! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
-//!   the fate of a partial extraction.
+//!   failure has a finer classification, a [`SecurityViolationSubCode`] on
+//!   every core `SECURITY_VIOLATION`, a [`QuotaSubCode`] on every
+//!   `QUOTA_EXCEEDED` and a [`ZipBombSubCode`] on every `ZIP_BOMB`.
+//! - `setting`: the [`ConfigSetting`] an `INVALID_CONFIGURATION` refused.
+//! - `ioKind`: the [`IoKind`] of an `IO_ERROR`.
+//! - `nonUtf8EntryPath`: the injectively escaped path of an `INVALID_ARCHIVE`
+//!   (`ENTRY_NAME`) refusal of an entry name that is not valid UTF-8.
+//! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`,
+//!   `warnings`: the fate of a partial extraction.
 //! - `cause`: the exception thrown by a JS progress callback.
 //!
 //! Errors raised by the binding itself (a Rust panic, a join
@@ -30,6 +35,7 @@ use exarch_core::ArchiveError as CoreError;
 use exarch_core::ErrorCode as CoreErrorCode;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::FfiErrorMessage;
+use exarch_core::FfiKind;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting as CorePolicySetting;
 use exarch_core::SubCode;
@@ -42,6 +48,7 @@ use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::ToNapiValue;
 use napi_derive::napi;
 
+use crate::report::SkippedSummary;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
 
@@ -193,6 +200,66 @@ pub enum InvalidArchiveSubCode {
     /// A failure of the ZIP reader or of the structural check built on it.
     #[napi(value = "ZIP_READER")]
     ZipReader,
+    /// A failure of the TAR reader.
+    #[napi(value = "TAR_READER")]
+    TarReader,
+    /// A failure of the 7z reader.
+    #[napi(value = "SEVENZ_READER")]
+    SevenZReader,
+}
+
+/// Value of the `subCode` property of a `QUOTA_EXCEEDED` error: the quota
+/// that was exceeded.
+// Generates the TypeScript union only; runtime values come from core's
+// `SubCode::as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaSubCode {
+    /// The number of entries.
+    #[napi(value = "FILE_COUNT")]
+    FileCount,
+    /// The summed size of every entry.
+    #[napi(value = "TOTAL_SIZE")]
+    TotalSize,
+    /// The size of one entry.
+    #[napi(value = "FILE_SIZE")]
+    FileSize,
+    /// A size or count that overflowed its integer type.
+    #[napi(value = "INTEGER_OVERFLOW")]
+    IntegerOverflow,
+    /// The memory a decoder may use.
+    #[napi(value = "DECODER_MEMORY")]
+    DecoderMemory,
+    /// The number of compressed members.
+    #[napi(value = "COMPRESSED_MEMBERS")]
+    CompressedMembers,
+    /// The number of nodes of the entry tree.
+    #[napi(value = "TREE_NODES")]
+    TreeNodes,
+    /// The capacity of an in-memory or custom sink.
+    #[napi(value = "SINK_CAPACITY")]
+    SinkCapacity,
+    /// The summed decoded size of a solid 7z block.
+    #[napi(value = "SOLID_BLOCK_MEMORY")]
+    SolidBlockMemory,
+}
+
+/// Value of the `subCode` property of a `ZIP_BOMB` error: what the refused
+/// ratio was measured over.
+// Generates the TypeScript union only; runtime values come from core's
+// `SubCode::as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZipBombSubCode {
+    /// One archive entry.
+    #[napi(value = "ENTRY")]
+    Entry,
+    /// A whole solid block.
+    #[napi(value = "SOLID_BLOCK")]
+    SolidBlock,
+    /// The TAR entries that were decoded only to be skipped.
+    #[napi(value = "SKIPPED_ENTRIES")]
+    SkippedEntries,
 }
 
 /// Value of the `setting` property of an `INVALID_CONFIGURATION` error.
@@ -237,12 +304,6 @@ pub enum ConfigSetting {
     /// `banned_path_component`.
     #[napi(value = "banned_path_component")]
     BannedPathComponent,
-    /// `archive_path`.
-    #[napi(value = "archive_path")]
-    ArchivePath,
-    /// `output_directory`.
-    #[napi(value = "output_directory")]
-    OutputDirectory,
     /// `output_path`.
     #[napi(value = "output_path")]
     OutputPath,
@@ -258,15 +319,251 @@ pub enum ConfigSetting {
     /// `atomic_extraction`.
     #[napi(value = "atomic_extraction")]
     AtomicExtraction,
-    /// `zip_archive`.
-    #[napi(value = "zip_archive")]
-    ZipArchive,
     /// `zip_output_writer`.
     #[napi(value = "zip_output_writer")]
     ZipOutputWriter,
     /// `max_bytes`.
     #[napi(value = "max_bytes")]
     MaxBytes,
+    /// `parallel_decode_memory`.
+    #[napi(value = "parallel_decode_memory")]
+    ParallelDecodeMemory,
+    /// `exclude_pattern`.
+    #[napi(value = "exclude_pattern")]
+    ExcludePattern,
+    /// `zip_consistency`.
+    #[napi(value = "zip_consistency")]
+    ZipConsistency,
+    /// `path_model`.
+    #[napi(value = "path_model")]
+    PathModel,
+    /// `archive_format`.
+    #[napi(value = "archive_format")]
+    ArchiveFormat,
+    /// `decode_reuse`.
+    #[napi(value = "decode_reuse")]
+    DecodeReuse,
+    /// `decode_reuse_limit`.
+    #[napi(value = "decode_reuse_limit")]
+    DecodeReuseLimit,
+    /// `skip_kind`.
+    #[napi(value = "skip_kind")]
+    SkipKind,
+}
+
+/// Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
+/// core reported, so a caller can tell "not found" from "permission denied"
+/// without parsing the message.
+///
+/// A kind with no entry here, and `ErrorKind::Other`, is `Other`.
+// Generates the TypeScript union only; the runtime spelling is `as_str`,
+// guarded by a unit test that maps every value back to its core kind.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoKind {
+    /// `ErrorKind::NotFound`.
+    #[napi(value = "NotFound")]
+    NotFound,
+    /// `ErrorKind::PermissionDenied`.
+    #[napi(value = "PermissionDenied")]
+    PermissionDenied,
+    /// `ErrorKind::AlreadyExists`.
+    #[napi(value = "AlreadyExists")]
+    AlreadyExists,
+    /// `ErrorKind::NotADirectory`.
+    #[napi(value = "NotADirectory")]
+    NotADirectory,
+    /// `ErrorKind::IsADirectory`.
+    #[napi(value = "IsADirectory")]
+    IsADirectory,
+    /// `ErrorKind::DirectoryNotEmpty`.
+    #[napi(value = "DirectoryNotEmpty")]
+    DirectoryNotEmpty,
+    /// `ErrorKind::ReadOnlyFilesystem`.
+    #[napi(value = "ReadOnlyFilesystem")]
+    ReadOnlyFilesystem,
+    /// `ErrorKind::StorageFull`.
+    #[napi(value = "StorageFull")]
+    StorageFull,
+    /// `ErrorKind::QuotaExceeded`.
+    #[napi(value = "QuotaExceeded")]
+    QuotaExceeded,
+    /// `ErrorKind::FileTooLarge`.
+    #[napi(value = "FileTooLarge")]
+    FileTooLarge,
+    /// `ErrorKind::InvalidInput`.
+    #[napi(value = "InvalidInput")]
+    InvalidInput,
+    /// `ErrorKind::InvalidData`.
+    #[napi(value = "InvalidData")]
+    InvalidData,
+    /// `ErrorKind::InvalidFilename`.
+    #[napi(value = "InvalidFilename")]
+    InvalidFilename,
+    /// `ErrorKind::TimedOut`.
+    #[napi(value = "TimedOut")]
+    TimedOut,
+    /// `ErrorKind::Interrupted`.
+    #[napi(value = "Interrupted")]
+    Interrupted,
+    /// `ErrorKind::UnexpectedEof`.
+    #[napi(value = "UnexpectedEof")]
+    UnexpectedEof,
+    /// `ErrorKind::WriteZero`.
+    #[napi(value = "WriteZero")]
+    WriteZero,
+    /// `ErrorKind::Unsupported`.
+    #[napi(value = "Unsupported")]
+    Unsupported,
+    /// `ErrorKind::CrossesDevices`.
+    #[napi(value = "CrossesDevices")]
+    CrossesDevices,
+    /// `ErrorKind::TooManyLinks`.
+    #[napi(value = "TooManyLinks")]
+    TooManyLinks,
+    /// `ErrorKind::ResourceBusy`.
+    #[napi(value = "ResourceBusy")]
+    ResourceBusy,
+    /// `ErrorKind::BrokenPipe`.
+    #[napi(value = "BrokenPipe")]
+    BrokenPipe,
+    /// `ErrorKind::OutOfMemory`.
+    #[napi(value = "OutOfMemory")]
+    OutOfMemory,
+    /// `ErrorKind::WouldBlock`.
+    #[napi(value = "WouldBlock")]
+    WouldBlock,
+    /// `ErrorKind::Other`.
+    #[napi(value = "Other")]
+    Other,
+}
+
+impl IoKind {
+    /// Every value, in declaration order.
+    pub const ALL: [Self; 25] = [
+        Self::NotFound,
+        Self::PermissionDenied,
+        Self::AlreadyExists,
+        Self::NotADirectory,
+        Self::IsADirectory,
+        Self::DirectoryNotEmpty,
+        Self::ReadOnlyFilesystem,
+        Self::StorageFull,
+        Self::QuotaExceeded,
+        Self::FileTooLarge,
+        Self::InvalidInput,
+        Self::InvalidData,
+        Self::InvalidFilename,
+        Self::TimedOut,
+        Self::Interrupted,
+        Self::UnexpectedEof,
+        Self::WriteZero,
+        Self::Unsupported,
+        Self::CrossesDevices,
+        Self::TooManyLinks,
+        Self::ResourceBusy,
+        Self::BrokenPipe,
+        Self::OutOfMemory,
+        Self::WouldBlock,
+        Self::Other,
+    ];
+
+    /// The spelling JavaScript sees.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "NotFound",
+            Self::PermissionDenied => "PermissionDenied",
+            Self::AlreadyExists => "AlreadyExists",
+            Self::NotADirectory => "NotADirectory",
+            Self::IsADirectory => "IsADirectory",
+            Self::DirectoryNotEmpty => "DirectoryNotEmpty",
+            Self::ReadOnlyFilesystem => "ReadOnlyFilesystem",
+            Self::StorageFull => "StorageFull",
+            Self::QuotaExceeded => "QuotaExceeded",
+            Self::FileTooLarge => "FileTooLarge",
+            Self::InvalidInput => "InvalidInput",
+            Self::InvalidData => "InvalidData",
+            Self::InvalidFilename => "InvalidFilename",
+            Self::TimedOut => "TimedOut",
+            Self::Interrupted => "Interrupted",
+            Self::UnexpectedEof => "UnexpectedEof",
+            Self::WriteZero => "WriteZero",
+            Self::Unsupported => "Unsupported",
+            Self::CrossesDevices => "CrossesDevices",
+            Self::TooManyLinks => "TooManyLinks",
+            Self::ResourceBusy => "ResourceBusy",
+            Self::BrokenPipe => "BrokenPipe",
+            Self::OutOfMemory => "OutOfMemory",
+            Self::WouldBlock => "WouldBlock",
+            Self::Other => "Other",
+        }
+    }
+
+    /// The core kind this value mirrors.
+    #[cfg(test)]
+    const fn to_core(self) -> std::io::ErrorKind {
+        use std::io::ErrorKind as K;
+        match self {
+            Self::NotFound => K::NotFound,
+            Self::PermissionDenied => K::PermissionDenied,
+            Self::AlreadyExists => K::AlreadyExists,
+            Self::NotADirectory => K::NotADirectory,
+            Self::IsADirectory => K::IsADirectory,
+            Self::DirectoryNotEmpty => K::DirectoryNotEmpty,
+            Self::ReadOnlyFilesystem => K::ReadOnlyFilesystem,
+            Self::StorageFull => K::StorageFull,
+            Self::QuotaExceeded => K::QuotaExceeded,
+            Self::FileTooLarge => K::FileTooLarge,
+            Self::InvalidInput => K::InvalidInput,
+            Self::InvalidData => K::InvalidData,
+            Self::InvalidFilename => K::InvalidFilename,
+            Self::TimedOut => K::TimedOut,
+            Self::Interrupted => K::Interrupted,
+            Self::UnexpectedEof => K::UnexpectedEof,
+            Self::WriteZero => K::WriteZero,
+            Self::Unsupported => K::Unsupported,
+            Self::CrossesDevices => K::CrossesDevices,
+            Self::TooManyLinks => K::TooManyLinks,
+            Self::ResourceBusy => K::ResourceBusy,
+            Self::BrokenPipe => K::BrokenPipe,
+            Self::OutOfMemory => K::OutOfMemory,
+            Self::WouldBlock => K::WouldBlock,
+            Self::Other => K::Other,
+        }
+    }
+}
+
+impl From<std::io::ErrorKind> for IoKind {
+    fn from(kind: std::io::ErrorKind) -> Self {
+        use std::io::ErrorKind as K;
+        match kind {
+            K::NotFound => Self::NotFound,
+            K::PermissionDenied => Self::PermissionDenied,
+            K::AlreadyExists => Self::AlreadyExists,
+            K::NotADirectory => Self::NotADirectory,
+            K::IsADirectory => Self::IsADirectory,
+            K::DirectoryNotEmpty => Self::DirectoryNotEmpty,
+            K::ReadOnlyFilesystem => Self::ReadOnlyFilesystem,
+            K::StorageFull => Self::StorageFull,
+            K::QuotaExceeded => Self::QuotaExceeded,
+            K::FileTooLarge => Self::FileTooLarge,
+            K::InvalidInput => Self::InvalidInput,
+            K::InvalidData => Self::InvalidData,
+            K::InvalidFilename => Self::InvalidFilename,
+            K::TimedOut => Self::TimedOut,
+            K::Interrupted => Self::Interrupted,
+            K::UnexpectedEof => Self::UnexpectedEof,
+            K::WriteZero => Self::WriteZero,
+            K::Unsupported => Self::Unsupported,
+            K::CrossesDevices => Self::CrossesDevices,
+            K::TooManyLinks => Self::TooManyLinks,
+            K::ResourceBusy => Self::ResourceBusy,
+            K::BrokenPipe => Self::BrokenPipe,
+            K::OutOfMemory => Self::OutOfMemory,
+            K::WouldBlock => Self::WouldBlock,
+            _ => Self::Other,
+        }
+    }
 }
 
 /// Value of the `subCode` property of a `SECURITY_VIOLATION` error.
@@ -403,6 +700,12 @@ pub enum ProgressCallbackError {
         /// The archive that was written.
         report: CoreCreationReport,
     },
+    /// The JS progress callback threw during a creation, which was cancelled:
+    /// nothing was written and a previous output is untouched.
+    CreationCancelled {
+        /// The JS throw, attached as `cause`.
+        source: Error,
+    },
     /// The JS progress callback threw while a listing itself succeeded; the
     /// manifest is discarded.
     ListCallback {
@@ -486,6 +789,8 @@ struct ErrorProps {
     relaxable_by: Option<CorePolicySetting>,
     sub_code: Option<SubCode>,
     setting: Option<exarch_core::ConfigSetting>,
+    io_kind: Option<IoKind>,
+    non_utf8_entry_path: Option<String>,
     details: Details,
     cause: Option<Error>,
 }
@@ -497,7 +802,20 @@ struct Described {
     props: ErrorProps,
 }
 
+/// The injective rendering of the entry path a listing or in-memory extraction
+/// refused for not being valid UTF-8.
+fn non_utf8_entry_path(err: &CoreError) -> Option<String> {
+    match err {
+        CoreError::InvalidArchive(exarch_core::Malformation::EntryPathNotUtf8 { path }) => {
+            Some(crate::utils::path_text(path))
+        }
+        CoreError::PartialExtraction(partial) => non_utf8_entry_path(partial.cause()),
+        _ => None,
+    }
+}
+
 fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
+    let non_utf8_entry_path = non_utf8_entry_path(&err);
     let FfiErrorMessage {
         kind,
         description,
@@ -511,6 +829,11 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
             relaxable_by: kind.relaxable_by(),
             sub_code: kind.sub_code(),
             setting: kind.setting(),
+            io_kind: match kind {
+                FfiKind::Io(io_kind) => Some(IoKind::from(io_kind)),
+                _ => None,
+            },
+            non_utf8_entry_path,
             details: partial.map_or(Details::None, Details::Extraction),
             cause,
         },
@@ -525,6 +848,8 @@ fn describe_callback_over_success(operation: &str, details: Details, source: Err
             relaxable_by: None,
             sub_code: None,
             setting: None,
+            io_kind: None,
+            non_utf8_entry_path: None,
             details,
             cause: Some(source),
         },
@@ -539,6 +864,8 @@ fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Descri
             relaxable_by: None,
             sub_code: None,
             setting: None,
+            io_kind: None,
+            non_utf8_entry_path: None,
             details: Details::None,
             cause: Some(source),
         },
@@ -574,6 +901,21 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     source,
                 )
             }
+            ProgressCallbackError::CreationCancelled { source } => Described {
+                description:
+                    "progress callback threw, creation was cancelled and nothing was written"
+                        .to_owned(),
+                props: ErrorProps {
+                    code: JsCode::ProgressCallback,
+                    relaxable_by: None,
+                    sub_code: None,
+                    setting: None,
+                    io_kind: None,
+                    non_utf8_entry_path: None,
+                    details: Details::None,
+                    cause: Some(source),
+                },
+            },
             ProgressCallbackError::ListCallback { source } => {
                 describe_callback_over_success("listing", Details::None, source)
             }
@@ -593,6 +935,8 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     relaxable_by: None,
                     sub_code: None,
                     setting: None,
+                    io_kind: None,
+                    non_utf8_entry_path: None,
                     details: Details::None,
                     cause: reason,
                 },
@@ -618,6 +962,12 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     if let Some(setting) = props.setting {
         obj.set("setting", setting.as_str())?;
     }
+    if let Some(io_kind) = props.io_kind {
+        obj.set("ioKind", io_kind.as_str())?;
+    }
+    if let Some(path) = props.non_utf8_entry_path {
+        obj.set("nonUtf8EntryPath", path)?;
+    }
     match props.details {
         Details::None => {}
         Details::Extraction(outcome) => {
@@ -625,8 +975,16 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
             if let PartialOutcome::Kept(report) = outcome {
                 obj.set("filesExtracted", saturating_u32(report.files_extracted))?;
                 obj.set("bytesWritten", saturating_i64(report.bytes_written))?;
-                obj.set("filesSkipped", saturating_u32(report.files_skipped))?;
-                obj.set("warnings", report.warnings)?;
+                obj.set("filesSkipped", saturating_u32(report.files_skipped()))?;
+                obj.set("skipped", SkippedSummary::from(&report.skipped))?;
+                obj.set(
+                    "warnings",
+                    report
+                        .warnings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<String>>(),
+                )?;
             }
         }
         Details::Creation {
@@ -789,6 +1147,9 @@ impl fmt::Display for Failure {
                 ProgressCallbackError::CreationCallback { .. } => {
                     f.write_str("progress callback threw after successful creation")
                 }
+                ProgressCallbackError::CreationCancelled { .. } => {
+                    f.write_str("progress callback threw, creation was cancelled")
+                }
                 ProgressCallbackError::ListCallback { .. } => {
                     f.write_str("progress callback threw after successful listing")
                 }
@@ -805,7 +1166,11 @@ impl fmt::Display for Failure {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests assert by panicking"
+)]
 mod tests {
     use exarch_core::Compressed;
     use exarch_core::InvalidArchiveSubCode as CoreInvalidArchiveSubCode;
@@ -945,6 +1310,238 @@ mod tests {
         assert_eq!(dts_union("SecurityViolationSubCode"), expected);
     }
 
+    /// Every Rust mirror variant names a core variant of the same name. The
+    /// exhaustive `match` fails to compile when the mirror gains a variant
+    /// that is not listed, and the core path fails when core lacks one; the
+    /// spellings must also equal the generated TypeScript union.
+    macro_rules! mirror_maps_to_core {
+        ($test:ident, $mirror:ty, $core:ty, $union:literal, $spell:expr, [$($variant:ident),+ $(,)?]) => {
+            #[test]
+            fn $test() {
+                fn core_of(mirror: $mirror) -> $core {
+                    match mirror {
+                        $(<$mirror>::$variant => <$core>::$variant),+
+                    }
+                }
+                let spell: fn($core) -> &'static str = $spell;
+                let mirrors = [$(<$mirror>::$variant),+];
+                let spellings: BTreeSet<String> = mirrors
+                    .iter()
+                    .map(|mirror| spell(core_of(*mirror)).to_string())
+                    .collect();
+                assert_eq!(spellings.len(), mirrors.len(), "two mirror values share a core variant");
+                assert_eq!(spellings, dts_union($union));
+            }
+        };
+        ($test:ident, $mirror:ty, $core:ty, $union:literal, [$($variant:ident),+ $(,)?]) => {
+            mirror_maps_to_core!(
+                $test,
+                $mirror,
+                $core,
+                $union,
+                |core| core.as_str(),
+                [$($variant),+]
+            );
+        };
+    }
+
+    mirror_maps_to_core!(
+        test_every_quota_sub_code_mirror_value_is_a_core_variant,
+        QuotaSubCode,
+        exarch_core::QuotaKind,
+        "QuotaSubCode",
+        |kind| SubCode::Quota(kind).as_str(),
+        [
+            FileCount,
+            TotalSize,
+            FileSize,
+            IntegerOverflow,
+            DecoderMemory,
+            CompressedMembers,
+            TreeNodes,
+            SinkCapacity,
+            SolidBlockMemory
+        ]
+    );
+
+    mirror_maps_to_core!(
+        test_every_skip_kind_mirror_value_is_a_core_variant,
+        crate::report::SkipKind,
+        exarch_core::SkipKind,
+        "SkipKind",
+        [
+            Duplicate,
+            ExtensionNotAllowed,
+            Excluded,
+            Hidden,
+            OverMaxFileSize,
+            SymlinkUnsupported,
+            Unreadable
+        ]
+    );
+
+    mirror_maps_to_core!(
+        test_every_zip_bomb_sub_code_mirror_value_is_a_core_variant,
+        ZipBombSubCode,
+        exarch_core::ZipBombScope,
+        "ZipBombSubCode",
+        |scope| SubCode::ZipBomb(scope).as_str(),
+        [Entry, SolidBlock, SkippedEntries]
+    );
+
+    fn spellings<T: Copy>(all: &[T], spell: impl Fn(T) -> &'static str) -> BTreeSet<String> {
+        all.iter().map(|value| spell(*value).to_string()).collect()
+    }
+
+    #[test]
+    fn test_quota_sub_code_union_matches_core_all() {
+        assert_eq!(
+            dts_union("QuotaSubCode"),
+            spellings(SubCode::QUOTA_ALL, SubCode::as_str)
+        );
+    }
+
+    #[test]
+    fn test_zip_bomb_sub_code_union_matches_core_all() {
+        assert_eq!(
+            dts_union("ZipBombSubCode"),
+            spellings(SubCode::ZIP_BOMB_ALL, SubCode::as_str)
+        );
+    }
+
+    #[test]
+    fn test_skip_kind_union_matches_core_all() {
+        assert_eq!(
+            dts_union("SkipKind"),
+            spellings(exarch_core::SkipKind::ALL, exarch_core::SkipKind::as_str)
+        );
+    }
+
+    #[test]
+    fn test_quota_and_zip_bomb_errors_carry_their_sub_code() {
+        let d = described(CoreError::QuotaExceeded {
+            resource: QuotaResource::FileCount { current: 2, max: 1 },
+        });
+        assert_eq!(
+            d.props.sub_code,
+            Some(SubCode::Quota(exarch_core::QuotaKind::FileCount))
+        );
+        let d = described(CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
+            exarch_core::ZipBombScope::Entry,
+            Compressed(1),
+            Uncompressed(1_000_000),
+        )));
+        assert_eq!(
+            d.props.sub_code,
+            Some(SubCode::ZipBomb(exarch_core::ZipBombScope::Entry))
+        );
+    }
+
+    mirror_maps_to_core!(
+        test_every_policy_setting_mirror_value_is_a_core_variant,
+        PolicySetting,
+        CorePolicySetting,
+        "PolicySetting",
+        [
+            Symlinks,
+            Hardlinks,
+            SolidArchives,
+            BannedComponents,
+            MaxPathDepth,
+            WindowsReservedNames,
+            MaxTarMetadataBytes
+        ]
+    );
+
+    mirror_maps_to_core!(
+        test_every_partial_writes_mirror_value_is_a_core_variant,
+        PartialWrites,
+        CorePartialWrites,
+        "PartialWrites",
+        [Kept, RolledBack, Discarded]
+    );
+
+    mirror_maps_to_core!(
+        test_every_invalid_archive_sub_code_mirror_value_is_a_core_variant,
+        InvalidArchiveSubCode,
+        CoreInvalidArchiveSubCode,
+        "InvalidArchiveSubCode",
+        [
+            TarAmbiguity,
+            TarTrailer,
+            LinkTarget,
+            DuplicateEntry,
+            EntryName,
+            DeclaredSize,
+            Integrity,
+            ZipReader,
+            TarReader,
+            SevenZReader
+        ]
+    );
+
+    mirror_maps_to_core!(
+        test_every_security_violation_sub_code_mirror_value_is_a_core_variant,
+        SecurityViolationSubCode,
+        CoreSecurityViolationSubCode,
+        "SecurityViolationSubCode",
+        [
+            PathName,
+            PathDepth,
+            LinkTarget,
+            LinkPolicy,
+            ExistingSymlink,
+            EntryType,
+            RootEntry,
+            Encrypted,
+            CompressionMethod,
+            SolidArchive,
+            DeclaredSize,
+            ConcurrentChange,
+            TarMetadata,
+            TarTrailer,
+            Platform,
+            OutputConflict,
+            SourcePath
+        ]
+    );
+
+    mirror_maps_to_core!(
+        test_every_config_setting_mirror_value_is_a_core_variant,
+        ConfigSetting,
+        exarch_core::ConfigSetting,
+        "ConfigSetting",
+        [
+            MaxFileSize,
+            MaxTotalSize,
+            MaxFileCount,
+            MaxPathDepth,
+            MaxCompressionRatio,
+            MaxSolidCompressionRatio,
+            MaxSolidBlockMemory,
+            MaxTarMetadataBytes,
+            MaxDecoderMemory,
+            DecompressionBudget,
+            AllowedExtension,
+            BannedPathComponent,
+            OutputPath,
+            SourcePaths,
+            StripPrefix,
+            CreationFormat,
+            AtomicExtraction,
+            ZipOutputWriter,
+            MaxBytes,
+            ParallelDecodeMemory,
+            ExcludePattern,
+            ZipConsistency,
+            PathModel,
+            ArchiveFormat,
+            DecodeReuse,
+            DecodeReuseLimit,
+            SkipKind
+        ]
+    );
+
     fn described(err: CoreError) -> Described {
         describe(Failure::Core(err)).expect("core errors are always described")
     }
@@ -1036,6 +1633,61 @@ mod tests {
         assert_eq!(d.props.code.as_str(), "INVALID_CONFIGURATION");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_non_utf8_entry_name_refusal_carries_the_escaped_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"a\xFFb\\c"));
+        let d = described(CoreError::from(
+            exarch_core::Malformation::EntryPathNotUtf8 { path },
+        ));
+        assert_eq!(
+            d.props.non_utf8_entry_path.as_deref(),
+            Some("a\\xFFb\\x5Cc")
+        );
+        let d = described(CoreError::PathTraversal {
+            path: PathBuf::from("../x"),
+        });
+        assert_eq!(d.props.non_utf8_entry_path, None);
+    }
+
+    #[test]
+    fn test_io_kind_union_matches_mirror() {
+        let expected: BTreeSet<String> = IoKind::ALL
+            .iter()
+            .map(|kind| kind.as_str().to_string())
+            .collect();
+        assert_eq!(dts_union("IoKind"), expected);
+    }
+
+    #[test]
+    fn test_every_io_kind_maps_to_a_core_kind_and_back() {
+        for kind in IoKind::ALL {
+            assert_eq!(IoKind::from(kind.to_core()), kind, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn test_unlisted_core_kind_is_other() {
+        assert_eq!(
+            IoKind::from(std::io::ErrorKind::ConnectionReset),
+            IoKind::Other
+        );
+    }
+
+    #[test]
+    fn test_io_error_sets_io_kind_and_other_errors_do_not() {
+        let d = described(CoreError::Io(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )));
+        assert_eq!(d.props.io_kind, Some(IoKind::NotFound));
+        let d = described(CoreError::PathTraversal {
+            path: PathBuf::from("../x"),
+        });
+        assert_eq!(d.props.io_kind, None);
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     fn test_io_error_keeps_message_in_debug() {
@@ -1081,7 +1733,7 @@ mod tests {
             CoreError::HardlinkEscape { path: path.clone() },
             CoreError::InvalidPermissions {
                 path: path.clone(),
-                mode: 0o644,
+                mode: exarch_core::RawMode::new(0o644),
             },
             CoreError::SourceNotFound { path: path.clone() },
             CoreError::SourceNotAccessible { path: path.clone() },
@@ -1100,21 +1752,19 @@ mod tests {
     }
 
     fn partial(writes: CorePartialWrites) -> CoreError {
-        let source = Box::new(CoreError::SymlinkEscape {
+        let source = CoreError::SymlinkEscape {
             path: PathBuf::from("ln"),
-        });
-        let report = CoreExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            files_skipped: 1,
-            warnings: vec!["skipped 1 entries with disallowed extensions".to_string()],
-            ..CoreExtractionReport::default()
         };
-        CoreError::PartialExtraction {
-            source,
-            report,
-            writes,
-        }
+        let report = {
+            let mut r = CoreExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 512;
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, "f");
+            assert!(r.skipped.record(skip).is_ok());
+            r.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 });
+            r
+        };
+        CoreError::PartialExtraction(exarch_core::Partial::new(source, report, writes))
     }
 
     /// Regression test for #251 and #210: a partial extraction keeps the inner
@@ -1128,7 +1778,7 @@ mod tests {
         };
         assert_eq!(report.files_extracted, 2);
         assert_eq!(report.bytes_written, 512);
-        assert_eq!(report.files_skipped, 1);
+        assert_eq!(report.files_skipped(), 1);
         assert_eq!(report.warnings.len(), 1);
     }
 
@@ -1147,10 +1797,11 @@ mod tests {
     fn test_callback_over_extraction_success_describes_counters() {
         let d = describe(Failure::from(ProgressCallbackError::ExtractionCallback {
             source: Error::from_reason("boom"),
-            report: CoreExtractionReport {
-                files_extracted: 3,
-                bytes_written: 9,
-                ..CoreExtractionReport::default()
+            report: {
+                let mut r = CoreExtractionReport::new();
+                r.files_extracted = 3;
+                r.bytes_written = 9;
+                r
             },
         }))
         .expect("callback errors are described");

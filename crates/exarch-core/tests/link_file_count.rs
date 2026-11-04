@@ -15,12 +15,12 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationStatus;
 use exarch_core::extract_archive;
-use exarch_core::extract_archive_with_options;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use sevenz_rust2::ArchiveEntry;
@@ -153,7 +153,7 @@ fn link_config(max_file_count: usize) -> SecurityConfig {
 
 fn root_cause(error: ArchiveError) -> ArchiveError {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => other,
     }
 }
@@ -277,13 +277,18 @@ fn skipped_duplicate_hardlink_keeps_its_count_slot() {
 
     let out = TempDir::new().unwrap();
     std::fs::write(out.path().join("h0"), b"old").unwrap();
-    extract_archive_with_options(&archive, out.path(), &link_config(2), &options).unwrap();
+    ExtractRequest::new(&link_config(2))
+        .with_options(options.clone())
+        .extract(&archive, out.path())
+        .unwrap();
     assert_eq!(std::fs::read(out.path().join("h0")).unwrap(), b"old");
 
     let out = TempDir::new().unwrap();
     std::fs::write(out.path().join("h0"), b"old").unwrap();
     assert_file_count(
-        extract_archive_with_options(&archive, out.path(), &link_config(1), &options),
+        ExtractRequest::new(&link_config(1))
+            .with_options(options)
+            .extract(&archive, out.path()),
         1,
     );
 }
@@ -313,8 +318,9 @@ fn a_skipped_duplicate_symlink_keeps_its_count_slot() {
             let out = TempDir::new().unwrap();
             std::fs::write(out.path().join("link0"), b"old").unwrap();
 
-            let result =
-                extract_archive_with_options(&archive, out.path(), &link_config(max), &options);
+            let result = ExtractRequest::new(&link_config(max))
+                .with_options(options.clone())
+                .extract(&archive, out.path());
 
             if accepted {
                 result.unwrap();

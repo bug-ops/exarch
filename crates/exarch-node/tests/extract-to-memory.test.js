@@ -12,6 +12,7 @@ const {
   createArchiveSync,
   SecurityConfig,
   ExtractionOptions,
+  SinkOptions,
 } = require('../index.js');
 
 const FIXTURES = path.join(__dirname, '..', '..', '..', 'tests', 'fixtures');
@@ -148,11 +149,21 @@ describe('extractArchiveToMemory', () => {
     }
   });
 
-  it('refuses atomic options, which need a directory', async () => {
+  it('does not accept path extraction options, so atomic cannot be requested', () => {
     const options = new ExtractionOptions().withAtomic(true);
-    await assert.rejects(extractArchiveToMemory(tarGz, null, options), {
-      code: 'INVALID_CONFIGURATION',
+    assert.throws(() => extractArchiveToMemory(tarGz, null, options), {
+      code: 'InvalidArg',
     });
+  });
+
+  it('accepts SinkOptions and exposes only the duplicate policy', async () => {
+    const options = new SinkOptions();
+    assert.strictEqual(options.skipDuplicates, true);
+    assert.strictEqual(options.setSkipDuplicates(false), options);
+    assert.strictEqual(options.skipDuplicates, false);
+    assert.strictEqual('atomic' in options, false);
+    const result = await extractArchiveToMemory(tarGz, null, options);
+    assert.strictEqual(result.report.filesExtracted, 2);
   });
 
   it('reports discarded writes when it fails after delivering entries', async () => {

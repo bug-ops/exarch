@@ -21,9 +21,10 @@
 //! - the decoded stream is larger than [`REPLAY_LIMIT`], or a spool write
 //!   failed;
 //! - the codec decodes faster than a disk round trip (zstd) or is absent (plain
-//!   TAR);
-//! - the extraction's `max_decoder_memory` is below the one the list pass
-//!   decoded under, so the decode must be redone under the stricter bound.
+//!   TAR).
+//!
+//! The extraction runs under the policy the archive was listed for, so a
+//! different `max_decoder_memory` can never ask for a second decode.
 //!
 //! A fallback is chosen by the archive's size and contents, so it is never a
 //! security property: the replay holds the bytes the same decoder produced,
@@ -50,7 +51,6 @@ use crate::api::extract_staged;
 use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
 use crate::config::ExtractionOptions;
-use crate::config::Validated;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::FormatFamily;
@@ -98,6 +98,24 @@ enum Kept {
     Zip(Box<ZipArchive<File>>),
 }
 
+impl Kept {
+    /// Whether an extraction under `config` can use what was kept as it is.
+    ///
+    /// Always true for the config the archive was listed for: the list pass
+    /// runs under the same decoder limits, ZIP consistency policy and
+    /// allowances, and the four flags it resets (symlinks, hardlinks,
+    /// world-writable, preserved permissions) are not inputs of the kept state
+    /// (`tests/listed_differential.rs`). [`ListedArchive::extract`] asserts it
+    /// in debug builds.
+    fn serves(&self, config: &SecurityConfig) -> bool {
+        match self {
+            Self::Nothing => true,
+            Self::TarSpool(spool) => DecoderLimits::of(config).covers(spool.decoded_with),
+            Self::Zip(zip) => zip.serves(config),
+        }
+    }
+}
+
 /// The decoder output of a list pass and the decoder memory it was produced
 /// under.
 #[derive(Debug)]
@@ -106,23 +124,78 @@ struct Spool {
     decoded_with: DecoderLimits,
 }
 
+/// The options of [`ListedArchive::extract`]: the knobs that may still vary
+/// after the archive was listed.
+///
+/// What the list pass kept (the ZIP census output, the TAR spool) depends on
+/// the policy and on the [`DecodeReuse`] mode given to
+/// [`ListRequest::for_extraction`](crate::ListRequest::for_extraction), so
+/// neither is an option here.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ListedExtractOptions;
+///
+/// let options = ListedExtractOptions::default().with_atomic(true);
+/// assert!(options.atomic);
+/// assert!(options.skip_duplicates);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListedExtractOptions {
+    /// Extract atomically; see [`ExtractionOptions::atomic`].
+    pub atomic: bool,
+    /// Skip duplicate entries silently instead of aborting; see
+    /// [`ExtractionOptions::skip_duplicates`].
+    pub skip_duplicates: bool,
+}
+
+impl Default for ListedExtractOptions {
+    fn default() -> Self {
+        let options = ExtractionOptions::default();
+        Self {
+            atomic: options.atomic,
+            skip_duplicates: options.skip_duplicates,
+        }
+    }
+}
+
+impl ListedExtractOptions {
+    /// Enables or disables atomic extraction.
+    #[must_use]
+    pub const fn with_atomic(mut self, atomic: bool) -> Self {
+        self.atomic = atomic;
+        self
+    }
+
+    /// Enables or disables skipping duplicate entries silently.
+    #[must_use]
+    pub const fn with_skip_duplicates(mut self, skip: bool) -> Self {
+        self.skip_duplicates = skip;
+        self
+    }
+}
+
 /// An archive that was listed and is ready to extract without decoding it
 /// again where that is possible.
 ///
-/// Created by [`list_archive_for_extraction`]. Extracting from it gives the
-/// same result as
-/// [`extract_archive_with_options_and_progress`](crate::api::extract_archive_with_options_and_progress)
-/// on the archive; only the cost differs.
+/// Created by
+/// [`ListRequest::for_extraction`](crate::ListRequest::for_extraction),
+/// which fixes the policy the extraction runs under: the archive is listed
+/// under the same quotas, path rules, allowlist and decoder limits, and
+/// extracted under the config the request was built with. Extracting from it
+/// gives the same result as [`ExtractRequest`](crate::ExtractRequest) on the
+/// archive; only the cost differs.
 ///
 /// # Examples
 ///
 /// ```
 /// use exarch_core::DecodeReuse;
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::ListOptions;
+/// use exarch_core::ListRequest;
+/// use exarch_core::ListedExtractOptions;
 /// use exarch_core::NoopProgress;
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::list_archive_for_extraction;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let dir = tempfile::tempdir()?;
@@ -136,21 +209,11 @@ struct Spool {
 /// # std::io::Write::write_all(&mut gz, &tar.into_inner()?)?;
 /// # std::fs::write(&archive, gz.finish()?)?;
 /// let config = SecurityConfig::default();
-/// let listed = list_archive_for_extraction(
-///     &archive,
-///     &config,
-///     &ListOptions::default(),
-///     DecodeReuse::default(),
-/// )?;
+/// let listed = ListRequest::new(&config).for_extraction(&archive, DecodeReuse::default())?;
 /// assert_eq!(listed.manifest().total_entries(), 1);
 ///
 /// let out = dir.path().join("out");
-/// let report = listed.extract(
-///     &out,
-///     &config,
-///     &ExtractionOptions::default(),
-///     &mut NoopProgress,
-/// )?;
+/// let report = listed.extract(&out, &ListedExtractOptions::default(), &mut NoopProgress)?;
 /// assert_eq!(report.files_extracted, 1);
 /// # Ok(())
 /// # }
@@ -159,6 +222,8 @@ pub struct ListedArchive {
     manifest: ArchiveManifest,
     archive: PathBuf,
     kept: Kept,
+    config: Box<SecurityConfig>,
+    reuse: DecodeReuse,
 }
 
 impl std::fmt::Debug for ListedArchive {
@@ -192,49 +257,73 @@ impl ListedArchive {
         &self.manifest
     }
 
-    /// Extracts the archive into `output_dir`.
+    /// Extracts the archive into `output_dir` under the policy it was listed
+    /// for.
     ///
-    /// Behaves as
-    /// [`extract_archive_with_options_and_progress`](crate::api::extract_archive_with_options_and_progress)
-    /// does for the listed archive, reading the decoded stream kept by the list
-    /// pass when it is available and `config.max_decoder_memory` is at least
-    /// the limit the list pass decoded under (which also fixes the zstd window
-    /// limit). A ZIP archive is extracted from the archive the list pass
-    /// opened, with the decoded output it kept; `options.decode_reuse` does not
-    /// apply, the mode given to [`list_archive_for_extraction`] does.
+    /// Behaves as [`ExtractRequest`](crate::ExtractRequest) does for the listed
+    /// archive, reading the decoded stream kept by the list pass when it is
+    /// available. A ZIP archive is extracted from the archive the list pass
+    /// opened, with the decoded output it kept.
     ///
     /// # Errors
     ///
-    /// Same as [`extract_archive_with_options_and_progress`](crate::api::extract_archive_with_options_and_progress).
+    /// Same as [`ExtractRequest`](crate::ExtractRequest).
     pub fn extract<P: AsRef<Path>>(
         self,
         output_dir: P,
-        config: &SecurityConfig,
-        options: &ExtractionOptions,
+        options: &ListedExtractOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        let Self { archive, kept, .. } = self;
-        let validated = config.clone().validate()?;
-        let spool = match kept {
-            Kept::Zip(zip) if zip.serves(&validated) => {
-                return extract_staged(output_dir.as_ref(), options, |dir| {
-                    zip.extract(dir, &validated, options, progress)
-                });
-            }
-            Kept::TarSpool(spool) if DecoderLimits::of(&validated).covers(spool.decoded_with) => {
-                spool
-            }
-            Kept::Nothing | Kept::TarSpool(_) | Kept::Zip(_) => {
-                return extract_staged(output_dir.as_ref(), options, |dir| {
-                    extract_validated(&archive, dir, &validated, options, progress)
-                });
-            }
-        };
-        let config = validated;
-        extract_staged(output_dir.as_ref(), options, |dir| {
-            replay_spool(spool.file, dir, &config, options, progress)
-        })
+        let Self {
+            archive,
+            kept,
+            config,
+            reuse,
+            ..
+        } = self;
+        let extraction = ExtractionOptions::default()
+            .with_atomic(options.atomic)
+            .with_skip_duplicates(options.skip_duplicates)
+            .with_decode_reuse(reuse);
+        debug_assert!(
+            kept.serves(&config),
+            "a listed archive's kept state must serve the config it was listed for"
+        );
+        extract_kept(
+            &archive,
+            kept,
+            output_dir.as_ref(),
+            &config,
+            &extraction,
+            progress,
+        )
     }
+}
+
+/// Extracts a listed archive from what the list pass kept, or decodes it
+/// again when it kept nothing.
+fn extract_kept(
+    archive: &Path,
+    kept: Kept,
+    output_dir: &Path,
+    config: &SecurityConfig,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport> {
+    let spool = match kept {
+        Kept::Zip(zip) => {
+            let zip = (*zip).rebind(config);
+            return extract_staged(output_dir, options, |dir| {
+                zip.extract(dir, options, progress)
+            });
+        }
+        Kept::TarSpool(spool) => Some(spool),
+        Kept::Nothing => None,
+    };
+    extract_staged(output_dir, options, |dir| match spool {
+        Some(spool) => replay_spool(spool.file, dir, config, options, progress),
+        None => extract_validated(archive, dir, config, options, progress),
+    })
 }
 
 /// Extracts the decoded TAR stream `spool`, reporting a fault of the spool as
@@ -242,7 +331,7 @@ impl ListedArchive {
 fn replay_spool<R: Read>(
     spool: R,
     dir: &Path,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
@@ -259,60 +348,42 @@ fn replay_spool<R: Read>(
     )
 }
 
-/// Lists an archive and keeps what extraction can reuse.
-///
-/// The listing is the same as
-/// [`list_archive_with_options`](crate::list_archive_with_options) gives. For a
-/// gzip, bzip2 or xz compressed TAR whose decoded stream fits in 256 MiB, the
-/// decoder output is also written to an unnamed temporary file
-/// (in the platform's temporary directory, which on Linux is often memory
-/// backed) so that [`ListedArchive::extract`] does not decode the archive a
-/// second time. Trailing members after the TAR data are decoded before the
-/// listing returns; a tail longer than `max_tar_metadata_bytes` (at least
-/// 1 MiB) is refused.
-///
-/// A ZIP archive is listed from an archive handle that is kept for the
-/// extraction, together with the deflate output the structural check decoded,
-/// as `reuse` says. Use [`DecodeReuse::Off`] to keep none.
-///
-/// # Errors
-///
-/// Same as [`list_archive_with_options`](crate::list_archive_with_options).
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::DecodeReuse;
-/// use exarch_core::ListOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::list_archive_for_extraction;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// # let dir = tempfile::tempdir()?;
-/// # let archive = dir.path().join("a.tar");
-/// # let mut tar = tar::Builder::new(Vec::new());
-/// # let mut header = tar::Header::new_gnu();
-/// # header.set_size(2);
-/// # header.set_mode(0o644);
-/// # tar.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// # std::fs::write(&archive, tar.into_inner()?)?;
-/// let listed = list_archive_for_extraction(
-///     &archive,
-///     &SecurityConfig::default(),
-///     &ListOptions::default(),
-///     DecodeReuse::default(),
-/// )?;
-/// assert_eq!(listed.manifest().total_entries(), 1);
-/// # Ok(())
-/// # }
-/// ```
-pub fn list_archive_for_extraction<P: AsRef<Path>>(
-    archive_path: P,
-    config: &SecurityConfig,
-    options: &ListOptions,
-    reuse: DecodeReuse,
-) -> Result<ListedArchive> {
-    list_with_limit(archive_path.as_ref(), config, *options, REPLAY_LIMIT, reuse)
+impl ListedArchive {
+    /// Lists `archive` for an extraction under `extraction`.
+    ///
+    /// The list pass runs under the same policy with the write-time flags
+    /// reset, as that is all a listing needs and it must never admit more than
+    /// the extraction would. The extraction later runs under `extraction`.
+    pub(crate) fn list(
+        archive: &Path,
+        extraction: &SecurityConfig,
+        options: ListOptions,
+        reuse: DecodeReuse,
+        progress: Option<&mut dyn ProgressCallback>,
+    ) -> Result<Self> {
+        Self::list_within(archive, extraction, options, reuse, REPLAY_LIMIT, progress)
+    }
+
+    /// [`list`](Self::list) with a replay limit other than [`REPLAY_LIMIT`].
+    fn list_within(
+        archive: &Path,
+        extraction: &SecurityConfig,
+        options: ListOptions,
+        reuse: DecodeReuse,
+        limit: u64,
+        progress: Option<&mut dyn ProgressCallback>,
+    ) -> Result<Self> {
+        let mut listed = list_with_limit(
+            archive,
+            &extraction.for_listing(),
+            options,
+            limit,
+            reuse,
+            progress,
+        )?;
+        listed.config = Box::new(extraction.clone());
+        Ok(listed)
+    }
 }
 
 fn list_with_limit(
@@ -321,29 +392,32 @@ fn list_with_limit(
     options: ListOptions,
     limit: u64,
     reuse: DecodeReuse,
+    progress: Option<&mut dyn ProgressCallback>,
 ) -> Result<ListedArchive> {
-    let config = config.clone().validate()?;
     let format = detect_format(archive)?;
     let mut pass = ListPass::strict_with(options.stored_targets);
+    if let Some(progress) = progress {
+        pass = pass.with_progress(progress);
+    }
     let (manifest, kept) = match format.family() {
         FormatFamily::Tar(Some(codec)) if replays(codec) && fits(archive, codec, limit) => {
-            let decoded = open_tar_stream(archive, Some(codec), DecoderLimits::of(&config))?;
+            let decoded = open_tar_stream(archive, Some(codec), DecoderLimits::of(config))?;
             let source = decoded.source();
             let mut tee = SpoolTee::new(decoded.stream, limit);
             let manifest =
-                list_tar_stream(&mut tee, source, Some(codec), format, &config, &mut pass)?;
+                list_tar_stream(&mut tee, source, Some(codec), format, config, &mut pass)?;
             let kept = tee
-                .finish_spool(&config)
+                .finish_spool(config)
                 .map_or(Kept::Nothing, Kept::TarSpool);
             (manifest, kept)
         }
         FormatFamily::Seekable(SeekableFormat::Zip) => {
-            let mut zip = ZipArchive::for_extraction(File::open(archive)?, &config, reuse)?;
-            let manifest = zip.list_with(&config, &mut pass)?;
+            let mut zip = ZipArchive::for_extraction(File::open(archive)?, config, reuse)?;
+            let manifest = zip.list_with(config, &mut pass)?;
             (manifest, Kept::Zip(Box::new(zip)))
         }
         _ => (
-            list_detected(archive, format, &config, &mut pass)?,
+            list_detected(archive, format, config, &mut pass)?,
             Kept::Nothing,
         ),
     };
@@ -351,6 +425,8 @@ fn list_with_limit(
         manifest,
         archive: archive.to_path_buf(),
         kept,
+        config: Box::new(config.clone()),
+        reuse,
     })
 }
 
@@ -440,7 +516,7 @@ impl<R: Read> SpoolTee<R> {
 
     /// Drains the decoder and returns the spool, rewound, if it holds the
     /// complete decoder output.
-    fn finish_spool(mut self, config: &SecurityConfig<Validated>) -> Option<Spool> {
+    fn finish_spool(mut self, config: &SecurityConfig) -> Option<Spool> {
         self.drain();
         if self.decoding != Decoding::Finished {
             return None;
@@ -486,8 +562,8 @@ mod tests {
 
     use super::*;
     use crate::ErrorCode;
+    use crate::ExtractRequest;
     use crate::NoopProgress;
-    use crate::api::extract_archive_with_options_and_progress;
     use crate::test_utils::create_test_tar;
     use tempfile::TempDir;
 
@@ -511,26 +587,25 @@ mod tests {
         create_test_tar(vec![("a.txt", CONTENT)])
     }
 
-    fn list(archive: &Path, limit: u64) -> ListedArchive {
-        list_with_limit(
+    fn list_under(archive: &Path, config: &SecurityConfig, limit: u64) -> Result<ListedArchive> {
+        ListedArchive::list_within(
             archive,
-            &SecurityConfig::default(),
+            config,
             ListOptions::default(),
-            limit,
             DecodeReuse::default(),
+            limit,
+            None,
         )
-        .unwrap()
     }
 
-    fn extract_into(listed: ListedArchive, dir: &TempDir, config: &SecurityConfig) -> Result<()> {
+    fn list(archive: &Path, limit: u64) -> ListedArchive {
+        list_under(archive, &SecurityConfig::default(), limit).unwrap()
+    }
+
+    fn extract_into(listed: ListedArchive, dir: &TempDir) -> Result<()> {
         let out = dir.path().join("out");
         listed
-            .extract(
-                &out,
-                config,
-                &ExtractionOptions::default(),
-                &mut NoopProgress,
-            )
+            .extract(&out, &ListedExtractOptions::default(), &mut NoopProgress)
             .map(drop)
     }
 
@@ -547,7 +622,7 @@ mod tests {
             assert!(listed.has_spool(), "{codec:?}");
             std::fs::remove_file(&archive).unwrap();
 
-            extract_into(listed, &dir, &SecurityConfig::default()).unwrap();
+            extract_into(listed, &dir).unwrap();
 
             let extracted = std::fs::read(dir.path().join("out/a.txt")).unwrap();
             assert_eq!(extracted, CONTENT, "{codec:?}");
@@ -565,16 +640,9 @@ mod tests {
         let listed = list(&archive, REPLAY_LIMIT);
         std::fs::remove_file(&archive).unwrap();
         let out = dir.path().join("out");
-        let options = ExtractionOptions::default().with_atomic(true);
+        let options = ListedExtractOptions::default().with_atomic(true);
 
-        listed
-            .extract(
-                &out,
-                &SecurityConfig::default(),
-                &options,
-                &mut NoopProgress,
-            )
-            .unwrap();
+        listed.extract(&out, &options, &mut NoopProgress).unwrap();
 
         assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), CONTENT);
     }
@@ -606,7 +674,7 @@ mod tests {
         let listed = list(&archive, limit);
 
         assert!(!listed.has_spool());
-        extract_into(listed, &dir, &SecurityConfig::default()).unwrap();
+        extract_into(listed, &dir).unwrap();
         assert_eq!(
             std::fs::read(dir.path().join("out/a.txt")).unwrap().len(),
             100 * 1024
@@ -670,45 +738,33 @@ mod tests {
         let archive = write_archive(&dir, CompressionCodec::Gzip, &bytes);
         let config = SecurityConfig::default();
         let fresh = TempDir::new().unwrap();
-        let fresh_result = extract_archive_with_options_and_progress(
-            &archive,
-            fresh.path().join("out"),
-            &config,
-            &ExtractionOptions::default(),
-            &mut NoopProgress,
-        );
+        let fresh_result = ExtractRequest::new(&config)
+            .with_options(ExtractionOptions::default())
+            .with_progress(&mut NoopProgress)
+            .extract(&archive, fresh.path().join("out"));
 
-        let listed = list_with_limit(
-            &archive,
-            &config,
-            ListOptions::default(),
-            REPLAY_LIMIT,
-            DecodeReuse::default(),
-        );
+        let listed = list_under(&archive, &config, REPLAY_LIMIT);
 
         assert!(listed.is_err());
         assert!(fresh_result.is_err());
     }
 
     #[test]
-    fn a_stricter_decoder_memory_decodes_again() {
+    fn a_stricter_decoder_memory_refuses_at_the_list_pass() {
         let dir = TempDir::new().unwrap();
         let archive = write_archive(
             &dir,
             CompressionCodec::Xz,
             &encoded(CompressionCodec::Xz, &small_tar()),
         );
-        let listed = list(&archive, REPLAY_LIMIT);
-        assert!(listed.has_spool());
-        std::fs::remove_file(&archive).unwrap();
         let stricter =
             SecurityConfig::default().with_max_decoder_memory(crate::non_zero!(1024 * 1024));
 
-        assert!(extract_into(listed, &dir, &stricter).is_err());
+        assert!(list_under(&archive, &stricter, REPLAY_LIMIT).is_err());
     }
 
     #[test]
-    fn a_smaller_member_allowance_decodes_again() {
+    fn a_smaller_member_allowance_refuses_at_the_list_pass() {
         let dir = TempDir::new().unwrap();
         let tar = small_tar();
         let bytes: Vec<u8> = tar
@@ -716,15 +772,10 @@ mod tests {
             .flat_map(|chunk| encoded(CompressionCodec::Gzip, chunk))
             .collect();
         let archive = write_archive(&dir, CompressionCodec::Gzip, &bytes);
-        let listed = list(&archive, REPLAY_LIMIT);
-        assert!(listed.has_spool());
         let stricter = SecurityConfig::default()
             .with_compressed_member_allowance(std::num::NonZeroU64::MIN.saturating_add(1));
 
-        let error = match extract_into(listed, &dir, &stricter).unwrap_err() {
-            crate::ArchiveError::PartialExtraction { source, .. } => *source,
-            other => other,
-        };
+        let error = list_under(&archive, &stricter, REPLAY_LIMIT).unwrap_err();
 
         assert_matches!(
             error,
@@ -735,23 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn a_looser_decoder_memory_still_replays() {
-        let dir = TempDir::new().unwrap();
-        let archive = write_archive(
-            &dir,
-            CompressionCodec::Xz,
-            &encoded(CompressionCodec::Xz, &small_tar()),
-        );
-        let listed = list(&archive, REPLAY_LIMIT);
-        std::fs::remove_file(&archive).unwrap();
-        let looser =
-            SecurityConfig::default().with_max_decoder_memory(crate::non_zero!(512 * 1024 * 1024));
-
-        extract_into(listed, &dir, &looser).unwrap();
-    }
-
-    #[test]
-    fn replay_enforces_the_extract_configs_quotas() {
+    fn the_list_pass_enforces_the_extract_configs_quotas() {
         let dir = TempDir::new().unwrap();
         let tar = create_test_tar(vec![("a.txt", b"0123456789"), ("b.txt", b"0123456789")]);
         let archive = write_archive(
@@ -763,23 +798,14 @@ mod tests {
             SecurityConfig::default().with_max_file_count(crate::non_zero!(1)),
             SecurityConfig::default().with_max_file_size(crate::non_zero!(5)),
         ] {
-            let listed = list(&archive, REPLAY_LIMIT);
-            assert!(listed.has_spool());
-            let out = TempDir::new().unwrap();
+            let error = list_under(&archive, &strict, REPLAY_LIMIT).unwrap_err();
 
-            let result = listed.extract(
-                out.path().join("out"),
-                &strict,
-                &ExtractionOptions::default(),
-                &mut NoopProgress,
-            );
-
-            assert_eq!(result.unwrap_err().error_code(), ErrorCode::QuotaExceeded);
+            assert_eq!(error.error_code(), ErrorCode::QuotaExceeded);
         }
     }
 
     #[test]
-    fn replay_enforces_the_extract_configs_tar_metadata_limit() {
+    fn the_list_pass_enforces_the_extract_configs_tar_metadata_limit() {
         let dir = TempDir::new().unwrap();
         let long_name = format!("{}/f.txt", crate::test_utils::path_of_len(900));
         let tar = create_test_tar(vec![(long_name.as_str(), b"x")]);
@@ -788,11 +814,9 @@ mod tests {
             CompressionCodec::Gzip,
             &encoded(CompressionCodec::Gzip, &tar),
         );
-        let listed = list(&archive, REPLAY_LIMIT);
-        assert!(listed.has_spool());
         let strict = SecurityConfig::default().with_max_tar_metadata_bytes(crate::non_zero!(512));
 
-        let error = extract_into(listed, &dir, &strict).unwrap_err();
+        let error = list_under(&archive, &strict, REPLAY_LIMIT).unwrap_err();
 
         assert_eq!(
             error.relaxable_by(),
@@ -825,12 +849,7 @@ mod tests {
         bytes[middle] ^= 0xff;
         let archive = write_archive(&dir, CompressionCodec::Gzip, &bytes);
 
-        let result = list_archive_for_extraction(
-            &archive,
-            &SecurityConfig::default(),
-            &ListOptions::default(),
-            DecodeReuse::default(),
-        );
+        let result = list_under(&archive, &SecurityConfig::default(), REPLAY_LIMIT);
 
         assert!(result.is_err());
     }
@@ -853,7 +872,7 @@ mod tests {
         let mut tee = SpoolTee::new(Scripted(script), limit);
         let mut sink = [0; 8];
         while tee.read(&mut sink).is_ok_and(|n| n > 0) {}
-        tee.finish_spool(&SecurityConfig::default().validate().unwrap())
+        tee.finish_spool(&SecurityConfig::default())
     }
 
     const EIO: i32 = 5;
@@ -882,7 +901,7 @@ mod tests {
             inner: io::Cursor::new(bytes.to_vec()),
             remaining: budget,
         };
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         replay_spool(
             spool,
             dir.path(),
@@ -894,7 +913,7 @@ mod tests {
 
     fn io_root(error: &crate::ArchiveError) -> &crate::ArchiveError {
         match error {
-            crate::ArchiveError::PartialExtraction { source, .. } => io_root(source),
+            crate::ArchiveError::PartialExtraction(partial) => io_root(partial.cause()),
             other => other,
         }
     }

@@ -53,11 +53,11 @@ def test_over_cap_tail_is_a_security_violation_with_tar_trailer(temp_dir):
     assert error.relaxable_by == "max_tar_metadata_bytes"
 
 
-def test_plain_corrupt_archive_has_no_sub_code(temp_dir):
+def test_corrupt_tar_header_is_tar_reader(temp_dir):
     error = _extract(temp_dir, "junk.tar", b"A" * 2048)
 
     assert isinstance(error, exarch.InvalidArchiveError)
-    assert error.sub_code is None
+    assert error.sub_code == "TAR_READER"
 
 
 def test_core_violation_always_has_a_sub_code(temp_dir):

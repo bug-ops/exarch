@@ -27,14 +27,17 @@
 //! ```
 
 pub(crate) mod integrity;
+pub mod landing;
 pub mod list;
 pub mod manifest;
 pub mod report;
 pub mod verify;
 
+pub use landing::Landing;
+pub use landing::LandingKind;
+pub use landing::LandingPath;
 pub use list::list_archive;
-pub use list::list_archive_with_options;
-pub use list::list_archive_with_progress;
+pub(crate) use list::list_archive_with_progress;
 pub use manifest::ArchiveEntry;
 pub use manifest::ArchiveManifest;
 pub use manifest::EntryCompression;
@@ -44,15 +47,18 @@ pub use manifest::ManifestEntryType;
 pub use manifest::OversizedEntry;
 pub use manifest::SolidBlock;
 pub use report::CheckStatus;
+pub use report::Finding;
+pub use report::Heuristic;
 pub use report::IntegrityGaps;
 pub use report::IntegrityStatus;
 pub use report::IssueCategory;
 pub use report::IssueSeverity;
+pub use report::NameCollisionKind;
+pub use report::PathOccupant;
 pub use report::UnverifiedEntry;
 pub use report::UnverifiedReason;
 pub use report::VerificationIssue;
 pub use report::VerificationReport;
 pub use report::VerificationStatus;
 pub use verify::verify_archive;
-pub use verify::verify_archive_with_options;
-pub use verify::verify_archive_with_progress;
+pub(crate) use verify::verify_archive_with_progress;

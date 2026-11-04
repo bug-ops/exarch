@@ -19,12 +19,12 @@ use std::ffi::OsString;
 use std::path::Component;
 use std::path::Path;
 
-use exarch_core::extract_to_sink;
 use exarch_core::ArchiveReader;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PathModel;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
 use libfuzzer_sys::fuzz_target;
 use unicode_normalization::UnicodeNormalization;
@@ -36,7 +36,7 @@ mod common;
 const MAX_HOPS: usize = 40;
 
 fuzz_target!(|data: &[u8]| {
-    let config = common::unvalidated();
+    let config = common::config();
     for model in [PathModel::Host, PathModel::Portable] {
         for skip_duplicates in [true, false] {
             let Ok(reader) = ArchiveReader::from_bytes(data, None) else {
@@ -44,7 +44,9 @@ fuzz_target!(|data: &[u8]| {
             };
             let mut sink = MemorySink::new(MemoryLimit::from_config(config)).with_path_model(model);
             let options = SinkOptions::default().with_skip_duplicates(skip_duplicates);
-            let _ = extract_to_sink(reader, &mut sink, config, &options);
+            let _ = SinkExtractRequest::new(config)
+                .with_options(options)
+                .extract(reader, &mut sink);
             check_invariants(&sink, model);
         }
     }

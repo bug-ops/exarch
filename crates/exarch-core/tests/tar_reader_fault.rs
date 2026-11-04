@@ -16,15 +16,15 @@ use exarch_core::ArchiveReader;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::SecurityConfig;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
 use exarch_core::VerificationOptions;
-use exarch_core::extract_to_sink;
+use exarch_core::VerifyRequest;
 use exarch_core::formats::CompressionCodec;
-use exarch_core::list_reader;
-use exarch_core::verify_reader;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
@@ -57,7 +57,7 @@ fn faulty(bytes: &[u8], budget: usize) -> FailAfter {
 
 fn root(error: &ArchiveError) -> &ArchiveError {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => root(source),
+        ArchiveError::PartialExtraction(partial) => root(partial.cause()),
         other => other,
     }
 }
@@ -108,17 +108,26 @@ fn run_extract(
     config: &SecurityConfig,
 ) -> Result<(), ArchiveError> {
     let mut sink = MemorySink::new(MemoryLimit::DEFAULT);
-    extract_to_sink(reader, &mut sink, config, &SinkOptions::default()).map(drop)
+    SinkExtractRequest::new(config)
+        .with_options(SinkOptions::default())
+        .extract(reader, &mut sink)
+        .map(drop)
 }
 
 fn run_list(reader: ArchiveReader<'static>, config: &SecurityConfig) -> Result<(), ArchiveError> {
-    list_reader(reader, config, &ListOptions::default()).map(drop)
+    ListRequest::new(config)
+        .with_options(ListOptions::default())
+        .list_reader(reader)
+        .map(drop)
 }
 
 fn run_verify(reader: ArchiveReader<'static>, config: &SecurityConfig) -> Result<(), ArchiveError> {
     let options = VerificationOptions::default()
         .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT));
-    verify_reader(reader, config, &options).map(drop)
+    VerifyRequest::new(config)
+        .with_options(options)
+        .verify_reader(reader)
+        .map(drop)
 }
 
 const RUNS: [(&str, Run); 3] = [

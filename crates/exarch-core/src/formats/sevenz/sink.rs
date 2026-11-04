@@ -16,7 +16,6 @@ use crate::PathModel;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
-use crate::config::Validated;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::NodeBudget;
 use crate::security::fs_view::VirtualRoot;
@@ -39,7 +38,7 @@ struct SinkPrePass<'a> {
     root: &'a VirtualRoot,
     tree: &'a VirtualTree,
     model: PathModel,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
 }
 
 impl SinkPrePass<'_> {
@@ -88,7 +87,7 @@ impl PrePass for SinkPrePass<'_> {
 impl<S: EntrySink> SevenZTarget for SinkTarget<'_, S> {
     fn with_pre_pass(
         &self,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         _options: SinkOptions,
         run: &mut dyn FnMut(&mut dyn PrePass) -> Result<()>,
     ) -> Result<()> {

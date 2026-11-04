@@ -1,15 +1,140 @@
 //! Python bindings for report types.
 
+use exarch_core::ConfigSetting;
 use exarch_core::ExtractionReport as CoreExtractionReport;
+use exarch_core::LinkTarget;
+use exarch_core::ManifestEntryKind;
+use exarch_core::Skip as CoreSkip;
+use exarch_core::SkipKind;
+use exarch_core::Skips as CoreSkips;
 use exarch_core::creation::CreationReport as CoreCreationReport;
 use exarch_core::inspection::IntegrityGaps;
 use exarch_core::inspection::manifest::ArchiveEntry;
 use exarch_core::inspection::manifest::ArchiveManifest;
-use exarch_core::inspection::manifest::ManifestEntryType;
 use exarch_core::inspection::report::VerificationIssue;
 use exarch_core::inspection::report::VerificationReport;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::path::Path;
+use std::path::PathBuf;
+
+use crate::buffer::parse_one;
+
+/// One entry an operation left out.
+///
+/// # Attributes
+///
+/// * `kind` - Why it was skipped (`"duplicate"`, `"extension_not_allowed"`,
+///   `"excluded"`, `"hidden"`, `"over_max_file_size"`, `"symlink_unsupported"`
+///   or `"unreadable"`)
+/// * `path` - The entry's path as the operation names it
+/// * `io_kind` - The description of the I/O failure behind an `"unreadable"`
+///   skip, else `None`
+#[pyclass(name = "Skip", frozen)]
+pub struct PySkip {
+    kind: SkipKind,
+    path: PathBuf,
+    io_kind: Option<String>,
+}
+
+#[pymethods]
+impl PySkip {
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind.as_str()
+    }
+
+    #[getter]
+    fn path(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
+
+    #[getter]
+    fn io_kind(&self) -> Option<&str> {
+        self.io_kind.as_deref()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Skip(kind={:?}, path={:?})",
+            self.kind.as_str(),
+            self.path.display().to_string()
+        )
+    }
+}
+
+impl From<&CoreSkip> for PySkip {
+    fn from(skip: &CoreSkip) -> Self {
+        Self {
+            kind: skip.kind,
+            path: skip.path.clone(),
+            io_kind: skip.io_kind.map(|kind| kind.to_string()),
+        }
+    }
+}
+
+/// Everything an operation left out: exact counts per kind plus a bounded
+/// sample of the individual entries.
+///
+/// # Attributes
+///
+/// * `total` - How many entries were skipped, over all kinds
+/// * `counts` - The exact count of each kind that occurred
+/// * `sample` - The first skipped entries (at most 64)
+#[pyclass(name = "Skipped", frozen)]
+#[derive(Clone)]
+pub struct PySkips {
+    inner: CoreSkips,
+}
+
+#[pymethods]
+impl PySkips {
+    #[getter]
+    fn total(&self) -> usize {
+        self.inner.total()
+    }
+
+    /// The exact count of `kind`, which must be one of the kind strings.
+    fn count(&self, kind: &str) -> PyResult<usize> {
+        parse_one(
+            ConfigSetting::SkipKind,
+            SkipKind::ALL,
+            SkipKind::as_str,
+            kind,
+        )
+        .map(|kind| self.inner.count(kind))
+    }
+
+    #[getter]
+    fn counts(&self) -> BTreeMap<&'static str, usize> {
+        SkipKind::ALL
+            .iter()
+            .map(|kind| (kind.as_str(), self.inner.count(*kind)))
+            .filter(|(_, count)| *count > 0)
+            .collect()
+    }
+
+    #[getter]
+    fn sample(&self) -> Vec<PySkip> {
+        self.inner.sample().iter().map(PySkip::from).collect()
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.total()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Skipped(total={})", self.inner.total())
+    }
+}
+
+impl From<CoreSkips> for PySkips {
+    fn from(inner: CoreSkips) -> Self {
+        Self { inner }
+    }
+}
 
 /// Report of an archive extraction operation.
 ///
@@ -22,7 +147,8 @@ use std::collections::BTreeMap;
 /// * `symlinks_created` - Number of symlinks created
 /// * `bytes_written` - Total bytes written to disk
 /// * `duration_ms` - Extraction duration in milliseconds
-/// * `files_skipped` - Number of files skipped due to security checks
+/// * `files_skipped` - Number of entries skipped
+/// * `skipped` - The skipped entries by kind
 /// * `warnings` - List of warning messages
 #[pyclass(name = "ExtractionReport")]
 #[derive(Clone)]
@@ -62,10 +188,16 @@ impl PyExtractionReport {
         self.inner.duration.as_millis()
     }
 
-    /// Number of files skipped due to security checks.
+    /// Number of entries skipped, over all kinds.
     #[getter]
     fn files_skipped(&self) -> usize {
-        self.inner.files_skipped
+        self.inner.files_skipped()
+    }
+
+    /// The skipped entries by kind.
+    #[getter]
+    fn skipped(&self) -> PySkips {
+        PySkips::from(self.inner.skipped.clone())
     }
 
     /// Returns a copy of the warning messages list.
@@ -76,7 +208,11 @@ impl PyExtractionReport {
     /// the warnings multiple times, cache the result in a local variable.
     #[getter]
     fn warnings(&self) -> Vec<String> {
-        self.inner.warnings.clone()
+        self.inner
+            .warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     /// Returns total number of items processed.
@@ -103,7 +239,7 @@ impl PyExtractionReport {
             self.inner.symlinks_created,
             self.inner.bytes_written,
             self.inner.duration.as_millis(),
-            self.inner.files_skipped,
+            self.inner.files_skipped(),
             self.inner.warnings.len()
         )
     }
@@ -177,12 +313,21 @@ impl PyCreationReport {
 
     #[getter]
     fn files_skipped(&self) -> usize {
-        self.inner.files_skipped
+        self.inner.files_skipped()
+    }
+
+    #[getter]
+    fn skipped(&self) -> PySkips {
+        PySkips::from(self.inner.skipped.clone())
     }
 
     #[getter]
     fn warnings(&self) -> Vec<String> {
-        self.inner.warnings.clone()
+        self.inner
+            .warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     fn total_items(&self) -> usize {
@@ -210,7 +355,7 @@ impl PyCreationReport {
             self.inner.bytes_written,
             self.inner.bytes_compressed,
             self.inner.duration.as_millis(),
-            self.inner.files_skipped,
+            self.inner.files_skipped(),
             self.inner.warnings.len()
         )
     }
@@ -227,7 +372,19 @@ impl From<CoreCreationReport> for PyCreationReport {
 }
 
 /// Single entry in archive manifest.
-#[pyclass(name = "ArchiveEntry")]
+///
+/// The concrete class tells the kind: `ArchiveFile` (the only one with a
+/// `size`), `ArchiveDirectory`, `ArchiveSymlink` or `ArchiveHardlink` (both
+/// with a `target`).
+///
+/// # Attributes
+///
+/// * `path` - Entry path; a name that is not valid UTF-8 is decoded with
+///   `os.fsdecode` (lossless on Unix), never replaced
+/// * `entry_type` - `"File"`, `"Directory"`, `"Symlink"` or `"Hardlink"`
+/// * `compressed_size` - Compressed size when the format reports one
+/// * `mode` - Unix permission bits when the archive records them
+#[pyclass(name = "ArchiveEntry", subclass, frozen)]
 #[derive(Clone)]
 pub struct PyArchiveEntry {
     inner: ArchiveEntry,
@@ -236,28 +393,13 @@ pub struct PyArchiveEntry {
 #[pymethods]
 impl PyArchiveEntry {
     #[getter]
-    fn path(&self) -> String {
-        self.inner.path.to_string_lossy().into_owned()
+    fn path(&self) -> &OsStr {
+        self.inner.path.as_os_str()
     }
 
     #[getter]
-    fn size(&self) -> u64 {
-        self.inner.size
-    }
-
-    #[getter]
-    fn entry_type(&self) -> String {
-        self.inner.kind.entry_type().as_str().to_owned()
-    }
-
-    #[getter]
-    fn is_symlink(&self) -> bool {
-        self.inner.kind.entry_type() == ManifestEntryType::Symlink
-    }
-
-    #[getter]
-    fn is_hardlink(&self) -> bool {
-        self.inner.kind.entry_type() == ManifestEntryType::Hardlink
+    fn entry_type(&self) -> &'static str {
+        self.inner.kind.entry_type().as_str()
     }
 
     #[getter]
@@ -267,46 +409,249 @@ impl PyArchiveEntry {
 
     #[getter]
     fn mode(&self) -> Option<u32> {
-        self.inner.mode
-    }
-
-    #[getter]
-    fn symlink_target(&self) -> Option<String> {
-        self.inner
-            .kind
-            .symlink_target()
-            .map(|p| p.to_string_lossy().into_owned())
-    }
-
-    #[getter]
-    fn hardlink_target(&self) -> Option<String> {
-        self.inner
-            .kind
-            .hardlink_target()
-            .map(|p| p.to_string_lossy().into_owned())
+        self.inner.mode.map(exarch_core::RawMode::get)
     }
 
     fn compression_ratio(&self) -> Option<f64> {
         self.inner.compression_ratio()
     }
 
-    fn __str__(&self) -> String {
-        format!(
-            "ArchiveEntry(path='{}', type={}, size={})",
-            self.inner.path.display(),
-            self.inner.kind.entry_type(),
-            self.inner.size
-        )
-    }
-
     fn __repr__(&self) -> String {
-        self.__str__()
+        format!(
+            "ArchiveEntry(path={:?}, type={})",
+            self.inner.path.display().to_string(),
+            self.inner.kind.entry_type()
+        )
     }
 }
 
-impl From<ArchiveEntry> for PyArchiveEntry {
-    fn from(inner: ArchiveEntry) -> Self {
-        Self { inner }
+/// A regular file of the manifest.
+///
+/// # Attributes
+///
+/// * `size` - Uncompressed size in bytes
+#[pyclass(name = "ArchiveFile", extends = PyArchiveEntry, frozen)]
+pub struct PyArchiveFile {
+    size: u64,
+}
+
+#[pymethods]
+impl PyArchiveFile {
+    #[getter]
+    const fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// A directory of the manifest.
+#[pyclass(name = "ArchiveDirectory", extends = PyArchiveEntry, frozen)]
+pub struct PyArchiveDirectory;
+
+/// A symbolic link of the manifest.
+///
+/// # Attributes
+///
+/// * `target` - What listing learned of the link target
+#[pyclass(name = "ArchiveSymlink", extends = PyArchiveEntry, frozen)]
+pub struct PyArchiveSymlink {
+    target: Py<PyLinkTarget>,
+}
+
+#[pymethods]
+impl PyArchiveSymlink {
+    #[getter]
+    fn target(&self, py: Python<'_>) -> Py<PyLinkTarget> {
+        self.target.clone_ref(py)
+    }
+}
+
+/// A hard link of the manifest.
+///
+/// # Attributes
+///
+/// * `target` - What listing learned of the link target
+#[pyclass(name = "ArchiveHardlink", extends = PyArchiveEntry, frozen)]
+pub struct PyArchiveHardlink {
+    target: Py<PyLinkTarget>,
+}
+
+#[pymethods]
+impl PyArchiveHardlink {
+    #[getter]
+    fn target(&self, py: Python<'_>) -> Py<PyLinkTarget> {
+        self.target.clone_ref(py)
+    }
+}
+
+impl PyArchiveEntry {
+    /// The Python object of `entry`: the class of its kind.
+    pub fn into_py(py: Python<'_>, entry: ArchiveEntry) -> PyResult<Py<Self>> {
+        let kind = entry.kind.clone();
+        let base = Self { inner: entry };
+        let init = PyClassInitializer::from(base);
+        match kind {
+            ManifestEntryKind::File { size } => {
+                Bound::new(py, init.add_subclass(PyArchiveFile { size: size.0 }))
+                    .map(|e| e.into_super().unbind())
+            }
+            ManifestEntryKind::Directory => Bound::new(py, init.add_subclass(PyArchiveDirectory))
+                .map(|e| e.into_super().unbind()),
+            ManifestEntryKind::Symlink { target } => Bound::new(
+                py,
+                init.add_subclass(PyArchiveSymlink {
+                    target: PyLinkTarget::into_py(py, target)?,
+                }),
+            )
+            .map(|e| e.into_super().unbind()),
+            ManifestEntryKind::Hardlink { target } => Bound::new(
+                py,
+                init.add_subclass(PyArchiveHardlink {
+                    target: PyLinkTarget::into_py(py, target)?,
+                }),
+            )
+            .map(|e| e.into_super().unbind()),
+            _ => Err(PyRuntimeError::new_err(
+                "exarch-python is older than exarch-core: unknown manifest entry kind",
+            )),
+        }
+    }
+}
+
+/// The string form of a link target state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkState {
+    Recorded,
+    Missing,
+    Unread,
+    Unreadable,
+    Oversized,
+}
+
+impl LinkState {
+    #[cfg(test)]
+    pub const ALL: &'static [Self] = &[
+        Self::Recorded,
+        Self::Missing,
+        Self::Unread,
+        Self::Unreadable,
+        Self::Oversized,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::Missing => "missing",
+            Self::Unread => "unread",
+            Self::Unreadable => "unreadable",
+            Self::Oversized => "oversized",
+        }
+    }
+}
+
+/// What listing learned of a link's target; the class tells the `state`.
+///
+/// `RecordedLinkTarget` has the `path`, `OversizedLinkTarget` the `bytes` of
+/// the target that was too long to keep. A 7z symlink is `UnreadLinkTarget`:
+/// listing does not decode 7z entry data.
+#[pyclass(name = "LinkTarget", subclass, frozen)]
+pub struct PyLinkTarget;
+
+/// A link target the archive records.
+#[pyclass(name = "RecordedLinkTarget", extends = PyLinkTarget, frozen)]
+pub struct PyRecordedLinkTarget {
+    path: PathBuf,
+}
+
+#[pymethods]
+impl PyRecordedLinkTarget {
+    #[classattr]
+    fn state() -> &'static str {
+        LinkState::Recorded.as_str()
+    }
+
+    #[getter]
+    fn path(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
+}
+
+/// A link whose archive entry carries no target.
+#[pyclass(name = "MissingLinkTarget", extends = PyLinkTarget, frozen)]
+pub struct PyMissingLinkTarget;
+
+#[pymethods]
+impl PyMissingLinkTarget {
+    #[classattr]
+    fn state() -> &'static str {
+        LinkState::Missing.as_str()
+    }
+}
+
+/// A link target listing did not read.
+#[pyclass(name = "UnreadLinkTarget", extends = PyLinkTarget, frozen)]
+pub struct PyUnreadLinkTarget;
+
+#[pymethods]
+impl PyUnreadLinkTarget {
+    #[classattr]
+    fn state() -> &'static str {
+        LinkState::Unread.as_str()
+    }
+}
+
+/// A link target that could not be read.
+#[pyclass(name = "UnreadableLinkTarget", extends = PyLinkTarget, frozen)]
+pub struct PyUnreadableLinkTarget;
+
+#[pymethods]
+impl PyUnreadableLinkTarget {
+    #[classattr]
+    fn state() -> &'static str {
+        LinkState::Unreadable.as_str()
+    }
+}
+
+/// A link target too long to keep.
+#[pyclass(name = "OversizedLinkTarget", extends = PyLinkTarget, frozen)]
+pub struct PyOversizedLinkTarget {
+    bytes: usize,
+}
+
+#[pymethods]
+impl PyOversizedLinkTarget {
+    #[classattr]
+    fn state() -> &'static str {
+        LinkState::Oversized.as_str()
+    }
+
+    #[getter]
+    const fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl PyLinkTarget {
+    fn into_py(py: Python<'_>, target: LinkTarget) -> PyResult<Py<Self>> {
+        let init = PyClassInitializer::from(Self);
+        match target {
+            LinkTarget::Recorded(path) => {
+                Bound::new(py, init.add_subclass(PyRecordedLinkTarget { path }))
+                    .map(|t| t.into_super().unbind())
+            }
+            LinkTarget::Missing => Bound::new(py, init.add_subclass(PyMissingLinkTarget))
+                .map(|t| t.into_super().unbind()),
+            LinkTarget::Unread => Bound::new(py, init.add_subclass(PyUnreadLinkTarget))
+                .map(|t| t.into_super().unbind()),
+            LinkTarget::Unreadable => Bound::new(py, init.add_subclass(PyUnreadableLinkTarget))
+                .map(|t| t.into_super().unbind()),
+            LinkTarget::Oversized { bytes } => {
+                Bound::new(py, init.add_subclass(PyOversizedLinkTarget { bytes }))
+                    .map(|t| t.into_super().unbind())
+            }
+            _ => Err(PyRuntimeError::new_err(
+                "exarch-python is older than exarch-core: unknown link target state",
+            )),
+        }
     }
 }
 
@@ -336,12 +681,12 @@ impl PyArchiveManifest {
     }
 
     #[getter]
-    fn entries(&self) -> Vec<PyArchiveEntry> {
+    fn entries(&self, py: Python<'_>) -> PyResult<Vec<Py<PyArchiveEntry>>> {
         self.inner
             .entries()
             .iter()
             .cloned()
-            .map(PyArchiveEntry::from)
+            .map(|entry| PyArchiveEntry::into_py(py, entry))
             .collect()
     }
 
@@ -386,35 +731,62 @@ pub struct PyVerificationIssue {
 #[pymethods]
 impl PyVerificationIssue {
     #[getter]
-    fn severity(&self) -> String {
-        self.inner.severity.as_str().to_owned()
+    fn severity(&self) -> &'static str {
+        self.inner.severity().as_str()
     }
 
     #[getter]
     fn message(&self) -> String {
-        self.inner.message.clone()
+        self.inner.message()
     }
 
     #[getter]
-    fn path(&self) -> Option<String> {
+    fn path(&self) -> Option<&OsStr> {
+        self.inner.entry_path().map(Path::as_os_str)
+    }
+
+    #[getter]
+    fn category(&self) -> &'static str {
+        self.inner.category().as_str()
+    }
+
+    /// The error code of a refusal, as an exception of the same refusal would
+    /// carry it; `None` for a heuristic finding.
+    #[getter]
+    fn code(&self) -> Option<&'static str> {
+        self.inner.ffi_kind().map(|kind| kind.code().as_str())
+    }
+
+    #[getter]
+    fn sub_code(&self) -> Option<&'static str> {
+        self.inner.sub_code().map(exarch_core::SubCode::as_str)
+    }
+
+    #[getter]
+    fn relaxable_by(&self) -> Option<&'static str> {
         self.inner
-            .entry_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
+            .ffi_kind()
+            .and_then(exarch_core::FfiKind::relaxable_by)
+            .map(exarch_core::PolicySetting::as_str)
     }
 
     #[getter]
-    fn category(&self) -> String {
-        self.inner.category.as_str().to_owned()
+    fn setting(&self) -> Option<&'static str> {
+        self.inner
+            .ffi_kind()
+            .and_then(exarch_core::FfiKind::setting)
+            .map(exarch_core::ConfigSetting::as_str)
     }
 
+    /// The permission bits the finding is about (an invalid-permissions
+    /// refusal or an executable file), else `None`.
     #[getter]
-    fn context(&self) -> Option<String> {
-        self.inner.context.clone()
+    fn mode(&self) -> Option<u32> {
+        self.inner.mode().map(exarch_core::RawMode::get)
     }
 
     fn __str__(&self) -> String {
-        format!("[{}] {}", self.inner.severity, self.inner.message)
+        format!("[{}] {}", self.inner.severity(), self.inner.message())
     }
 
     fn __repr__(&self) -> String {
@@ -437,10 +809,17 @@ impl From<VerificationIssue> for PyVerificationIssue {
 #[pyclass(name = "UnverifiedEntry")]
 #[derive(Clone)]
 pub struct PyUnverifiedEntry {
-    #[pyo3(get)]
-    path: String,
+    path: PathBuf,
     #[pyo3(get)]
     reason: String,
+}
+
+#[pymethods]
+impl PyUnverifiedEntry {
+    #[getter]
+    fn path(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
 }
 
 /// What a requested integrity check left unverified.
@@ -473,7 +852,7 @@ impl PyIntegrityGaps {
             .entries()
             .iter()
             .map(|e| PyUnverifiedEntry {
-                path: e.path().to_string_lossy().into_owned(),
+                path: e.path().to_path_buf(),
                 reason: e.reason().as_str().to_owned(),
             })
             .collect()
@@ -594,6 +973,15 @@ impl From<VerificationReport> for PyVerificationReport {
 )]
 mod tests {
     use super::*;
+
+    fn skipped(count: usize) -> exarch_core::Skips {
+        let mut skips = exarch_core::Skips::default();
+        for i in 0..count {
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, format!("f{i}"));
+            assert!(skips.record(skip).is_ok());
+        }
+        skips
+    }
     use exarch_core::Compressed;
     use exarch_core::inspection::manifest::ManifestEntryKind;
     use std::time::Duration;
@@ -606,8 +994,8 @@ mod tests {
         core_report.symlinks_created = 2;
         core_report.bytes_written = 1024;
         core_report.duration = Duration::from_millis(500);
-        core_report.files_skipped = 1;
-        core_report.add_warning("Test warning".to_string());
+        core_report.skipped = skipped(1);
+        core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 });
 
         let py_report = PyExtractionReport::from(core_report);
 
@@ -744,8 +1132,8 @@ mod tests {
     #[test]
     fn test_warnings_clone_behavior() {
         let mut core_report = CoreExtractionReport::new();
-        core_report.add_warning("Warning 1".to_string());
-        core_report.add_warning("Warning 2".to_string());
+        core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 });
+        core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 2 });
 
         let py_report = PyExtractionReport::from(core_report);
 
@@ -773,8 +1161,12 @@ mod tests {
         core_report.bytes_written = 2048;
         core_report.bytes_compressed = 1024;
         core_report.duration = Duration::from_millis(750);
-        core_report.files_skipped = 2;
-        core_report.add_warning("Skipped file".to_string());
+        core_report.skipped = skipped(2);
+        core_report.add_warning(
+            exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
+                reason: "Skipped file".to_string(),
+            },
+        );
 
         let py_report = PyCreationReport::from(core_report);
 
@@ -829,87 +1221,120 @@ mod tests {
 
     #[test]
     fn test_archive_entry_properties() {
-        use std::path::PathBuf;
-
-        let mut entry =
-            ArchiveEntry::new(PathBuf::from("test/file.txt"), ManifestEntryKind::File, 512);
+        let mut entry = ArchiveEntry::new(
+            PathBuf::from("test/file.txt"),
+            ManifestEntryKind::File {
+                size: exarch_core::Uncompressed(512),
+            },
+        );
         entry.compression = exarch_core::EntryCompression::Entry(Compressed(256));
-        entry.mode = Some(0o644);
+        entry.mode = Some(exarch_core::RawMode::new(0o644));
 
-        let py_entry = PyArchiveEntry::from(entry);
+        let py_entry = PyArchiveEntry { inner: entry };
 
-        assert_eq!(py_entry.path(), "test/file.txt", "path should match");
-        assert_eq!(py_entry.size(), 512, "size should be 512");
-        assert_eq!(py_entry.entry_type(), "File", "entry_type should be File");
-        assert!(!py_entry.is_symlink(), "should not be symlink");
-        assert!(!py_entry.is_hardlink(), "should not be hardlink");
-        assert_eq!(
-            py_entry.compressed_size(),
-            Some(256),
-            "compressed_size should be Some(256)"
-        );
-        assert_eq!(py_entry.mode(), Some(0o644), "mode should be Some(0o644)");
-        assert_eq!(
-            py_entry.compression_ratio(),
-            Some(2.0),
-            "compression ratio should be 2.0"
-        );
+        assert_eq!(py_entry.path(), OsStr::new("test/file.txt"));
+        assert_eq!(py_entry.entry_type(), "File");
+        assert_eq!(py_entry.compressed_size(), Some(256));
+        assert_eq!(py_entry.mode(), Some(0o644));
+        assert_eq!(py_entry.compression_ratio(), Some(2.0));
     }
 
     #[test]
-    fn test_archive_entry_symlink() {
-        use std::path::PathBuf;
+    fn test_every_manifest_kind_gets_its_own_class() {
+        use exarch_core::LinkTarget;
 
-        let entry = ArchiveEntry::new(
-            PathBuf::from("link"),
+        pyo3::Python::initialize();
+        let kinds = [
+            ManifestEntryKind::File {
+                size: exarch_core::Uncompressed(1),
+            },
+            ManifestEntryKind::Directory,
             ManifestEntryKind::Symlink {
-                target: exarch_core::LinkTarget::Recorded(PathBuf::from("target/file.txt")),
+                target: LinkTarget::Recorded(PathBuf::from("t")),
             },
-            0,
-        );
-
-        let py_entry = PyArchiveEntry::from(entry);
-
-        assert!(py_entry.is_symlink(), "should be symlink");
-        assert!(!py_entry.is_hardlink(), "should not be hardlink");
-        assert_eq!(
-            py_entry.symlink_target(),
-            Some("target/file.txt".to_string()),
-            "symlink_target should match"
-        );
+            ManifestEntryKind::Hardlink {
+                target: LinkTarget::Missing,
+            },
+        ];
+        Python::attach(|py| {
+            for kind in kinds {
+                let expected = kind.entry_type();
+                let entry = ArchiveEntry::new(PathBuf::from("e"), kind);
+                let obj = PyArchiveEntry::into_py(py, entry).unwrap();
+                let name: String = obj
+                    .bind(py)
+                    .get_type()
+                    .getattr("__name__")
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                assert_eq!(name, format!("Archive{}", expected.as_str()));
+                let entry_type: String = obj
+                    .bind(py)
+                    .getattr("entry_type")
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                assert_eq!(entry_type, expected.as_str());
+            }
+        });
     }
 
     #[test]
-    fn test_archive_entry_hardlink() {
-        use std::path::PathBuf;
+    fn test_every_link_state_gets_its_own_class() {
+        use exarch_core::LinkTarget;
 
-        let entry = ArchiveEntry::new(
-            PathBuf::from("hardlink"),
-            ManifestEntryKind::Hardlink {
-                target: exarch_core::LinkTarget::Recorded(PathBuf::from("original/file.txt")),
-            },
-            0,
-        );
+        pyo3::Python::initialize();
+        let targets = [
+            LinkTarget::Recorded(PathBuf::from("t")),
+            LinkTarget::Missing,
+            LinkTarget::Unread,
+            LinkTarget::Unreadable,
+            LinkTarget::Oversized { bytes: 9 },
+        ];
+        assert_eq!(targets.len(), LinkState::ALL.len());
+        Python::attach(|py| {
+            for (target, state) in targets.into_iter().zip(LinkState::ALL) {
+                let obj = PyLinkTarget::into_py(py, target).unwrap();
+                let raised: String = obj.bind(py).getattr("state").unwrap().extract().unwrap();
+                assert_eq!(raised, state.as_str());
+            }
+        });
+    }
 
-        let py_entry = PyArchiveEntry::from(entry);
+    #[test]
+    fn test_non_utf8_entry_path_is_not_merged_with_its_lossy_twin() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
 
-        assert!(!py_entry.is_symlink(), "should not be symlink");
-        assert!(py_entry.is_hardlink(), "should be hardlink");
-        assert_eq!(
-            py_entry.hardlink_target(),
-            Some("original/file.txt".to_string()),
-            "hardlink_target should match"
-        );
+        pyo3::Python::initialize();
+        let raw = PathBuf::from(OsString::from_vec(vec![b'a', 0xff]));
+        let lossy = PathBuf::from("a\u{fffd}");
+        let kind = ManifestEntryKind::Directory;
+        Python::attach(|py| {
+            let name = |path: &PathBuf| {
+                PyArchiveEntry::into_py(py, ArchiveEntry::new(path.clone(), kind.clone()))
+                    .unwrap()
+                    .into_bound(py)
+                    .getattr("path")
+                    .unwrap()
+            };
+            assert!(!name(&raw).eq(name(&lossy)).unwrap());
+        });
     }
 
     #[test]
     fn test_archive_manifest_properties() {
         use exarch_core::formats::detect::ArchiveType;
-        use std::path::PathBuf;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
         for (name, size) in [("file1.txt", 100), ("file2.txt", 200)] {
-            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryKind::File, size);
+            let entry = ArchiveEntry::new(
+                PathBuf::from(name),
+                ManifestEntryKind::File {
+                    size: exarch_core::Uncompressed(size),
+                },
+            );
             manifest.add_entry(entry).unwrap();
         }
 
@@ -917,11 +1342,14 @@ mod tests {
 
         assert_eq!(py_manifest.total_entries(), 2, "total_entries should be 2");
         assert_eq!(py_manifest.total_size(), 300, "total_size should be 300");
-        assert_eq!(
-            py_manifest.entries().len(),
-            2,
-            "entries should have 2 items"
-        );
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            assert_eq!(
+                py_manifest.entries(py).unwrap().len(),
+                2,
+                "entries should have 2 items"
+            );
+        });
         // Format display varies, just check it's not empty
         assert!(
             !py_manifest.format().is_empty(),
@@ -931,14 +1359,8 @@ mod tests {
 
     #[test]
     fn test_verification_issue_security_policy_category() {
-        use exarch_core::inspection::report::IssueCategory;
-        use exarch_core::inspection::report::IssueSeverity;
-
-        let issue = VerificationIssue::new(
-            IssueSeverity::High,
-            IssueCategory::SecurityPolicy,
-            "Security violation: symlinks not allowed".to_string(),
-        );
+        let error = exarch_core::ArchiveError::from(exarch_core::Violation::EncryptedArchive);
+        let issue = VerificationIssue::from_error(&error, None);
 
         assert_eq!(
             PyVerificationIssue::from(issue).category(),
@@ -948,17 +1370,13 @@ mod tests {
 
     #[test]
     fn test_verification_issue_properties() {
-        use exarch_core::inspection::report::IssueCategory;
-        use exarch_core::inspection::report::IssueSeverity;
+        use exarch_core::ArchiveError;
         use std::path::PathBuf;
 
-        let mut issue = VerificationIssue::new(
-            IssueSeverity::Critical,
-            IssueCategory::PathTraversal,
-            "Path traversal detected".to_string(),
-        );
-        issue.entry_path = Some(PathBuf::from("../etc/passwd"));
-        issue.context = Some("Entry attempts to escape extraction directory".to_string());
+        let error = ArchiveError::PathTraversal {
+            path: PathBuf::from("../etc/passwd"),
+        };
+        let issue = VerificationIssue::from_error(&error, Some(PathBuf::from("../etc/passwd")));
 
         let py_issue = PyVerificationIssue::from(issue);
 
@@ -970,12 +1388,12 @@ mod tests {
         );
         assert_eq!(
             py_issue.message(),
-            "Path traversal detected",
+            "Path traversal detected: ../etc/passwd",
             "message should match"
         );
         assert_eq!(
             py_issue.path(),
-            Some("../etc/passwd".to_string()),
+            Some(OsStr::new("../etc/passwd")),
             "path should match"
         );
         assert_eq!(
@@ -984,7 +1402,9 @@ mod tests {
             "category() forwards IssueCategory's Display impl (matches exarch-cli's JSON output \
              and exarch-node's own convention)"
         );
-        assert!(py_issue.context().is_some(), "context should be Some");
+        assert_eq!(py_issue.code(), Some("PATH_TRAVERSAL"));
+        assert_eq!(py_issue.sub_code(), None);
+        assert_eq!(py_issue.mode(), None);
     }
 
     /// One alias per line: drops trailing comments, joins the lines of a
@@ -1015,19 +1435,26 @@ mod tests {
 
     #[test]
     fn test_pyi_literal_aliases_match_core_enums() {
+        use exarch_core::ConfigSetting;
+        use exarch_core::ErrorCode;
         use exarch_core::IntegrityStatus;
         use exarch_core::InvalidArchiveSubCode;
+        use exarch_core::MemoryEntryKind;
         use exarch_core::PartialWrites;
         use exarch_core::PathModel;
         use exarch_core::PolicySetting;
         use exarch_core::SecurityViolationSubCode;
+        use exarch_core::SkipKind;
+        use exarch_core::SubCode;
         use exarch_core::UnverifiedReason;
         use exarch_core::ZipConsistencyPolicy;
         use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::formats::detect::CreatableFormat;
         use exarch_core::inspection::CheckStatus;
         use exarch_core::inspection::IssueCategory;
         use exarch_core::inspection::IssueSeverity;
         use exarch_core::inspection::VerificationStatus;
+        use exarch_core::inspection::manifest::ManifestEntryType;
 
         let pyi = include_str!("../exarch.pyi");
         let expected = [
@@ -1073,12 +1500,63 @@ mod tests {
                 InvalidArchiveSubCode::as_str,
             ),
             literal_line("_PathModel", PathModel::ALL, PathModel::as_str),
+            literal_line(
+                "_CreatableFormat",
+                CreatableFormat::ALL,
+                CreatableFormat::as_str,
+            ),
+            literal_line("_SkipKind", SkipKind::ALL, SkipKind::as_str),
+            literal_line("_LinkState", LinkState::ALL, LinkState::as_str),
+            literal_line("_ErrorCode", ErrorCode::ALL, ErrorCode::as_str),
+            literal_line("_QuotaSubCode", SubCode::QUOTA_ALL, SubCode::as_str),
+            literal_line("_ZipBombSubCode", SubCode::ZIP_BOMB_ALL, SubCode::as_str),
+            literal_line("_ConfigSetting", ConfigSetting::ALL, ConfigSetting::as_str),
+            literal_line(
+                "_MemoryEntryKind",
+                MemoryEntryKind::ALL,
+                MemoryEntryKind::as_str,
+            ),
+            literal_line(
+                "_DecodeReuse",
+                crate::buffer::ReuseKind::ALL,
+                crate::buffer::ReuseKind::as_str,
+            ),
         ];
         let flat = flatten_literals(pyi);
         for line in expected {
             assert!(
                 flat.lines().any(|l| l == flatten_literals(&line).trim()),
                 "exarch.pyi is out of sync with exarch-core, expected alias:\n{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pyi_has_one_class_per_manifest_entry_type_and_link_state() {
+        use exarch_core::inspection::manifest::ManifestEntryType;
+
+        let pyi = include_str!("../exarch.pyi");
+        for kind in ManifestEntryType::ALL {
+            let narrowed = format!("def entry_type(self) -> Literal[\"{}\"]", kind.as_str());
+            assert_eq!(pyi.matches(&narrowed).count(), 1, "{kind:?}");
+        }
+        for state in LinkState::ALL {
+            let narrowed = format!("def state(self) -> Literal[\"{}\"]", state.as_str());
+            assert_eq!(pyi.matches(&narrowed).count(), 1, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn test_pyi_has_one_memory_entry_class_per_kind() {
+        use exarch_core::MemoryEntryKind;
+
+        let pyi = include_str!("../exarch.pyi");
+        for kind in MemoryEntryKind::ALL {
+            let narrowed = format!("def kind(self) -> Literal[\"{}\"]", kind.as_str());
+            assert_eq!(
+                pyi.matches(&narrowed).count(),
+                1,
+                "exarch.pyi needs exactly one MemoryEntry subclass narrowing kind to {kind:?}"
             );
         }
     }

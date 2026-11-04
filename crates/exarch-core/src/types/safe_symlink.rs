@@ -4,7 +4,6 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
-use crate::config::Validated;
 use crate::security::fs_view::LinkKind;
 use std::path::Path;
 use std::path::PathBuf;
@@ -46,8 +45,8 @@ use crate::security::fs_view::ModelRoot as _;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
 /// let mut config = SecurityConfig::default();
-/// config.allowed.symlinks = true;
-/// let config = config.validate()?;
+/// config.allowed.symlinks = exarch_core::Admit::Allow;
+/// let config = config;
 ///
 /// let link = SafePath::validate(&PathBuf::from("mylink"), &dest, &config)?;
 /// let target = PathBuf::from("../target.txt");
@@ -107,8 +106,8 @@ impl SafeSymlink {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
     /// let mut config = SecurityConfig::default();
-    /// config.allowed.symlinks = true;
-    /// let config = config.validate()?;
+    /// config.allowed.symlinks = exarch_core::Admit::Allow;
+    /// let config = config;
     ///
     /// let link = SafePath::validate(&PathBuf::from("dir/link"), &dest, &config)?;
     /// let target = PathBuf::from("../file.txt");
@@ -121,7 +120,7 @@ impl SafeSymlink {
         link: &SafePath,
         target: &Path,
         dest: &DestDir,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<Self> {
         Self::validate_in(link, target, dest, config, &HostFs)
     }
@@ -133,7 +132,7 @@ impl<P: ParentCheck> SafeSymlink<P> {
         link: &SafePath<P>,
         target: &Path,
         root: &V::Root,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
         view: &V,
     ) -> Result<Self> {
         let dest = root.as_path();
@@ -244,6 +243,42 @@ impl<P: ParentCheck> SafeSymlink<P> {
     pub fn target_path(&self) -> &Path {
         &self.target_path
     }
+
+    /// The target as a proof a sink can read: it came from a validated
+    /// symlink.
+    pub(crate) fn checked_target(&self) -> CheckedLinkTarget<'_> {
+        CheckedLinkTarget(&self.target_path)
+    }
+}
+
+/// The target of a symlink that passed validation, borrowed from its
+/// [`SafeSymlink`].
+///
+/// Handed to an [`EntrySink`](crate::EntrySink) so it can tell a target the
+/// pipeline checked (relative, free of banned components, resolving inside
+/// the root) from any other path. Only a validated symlink can produce one:
+/// the field is private and the sole constructor is crate-private. The path
+/// is the target as the archive spells it, not resolved.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::CheckedLinkTarget;
+///
+/// fn stored_as_text(target: CheckedLinkTarget<'_>) -> String {
+///     target.as_path().to_string_lossy().into_owned()
+/// }
+/// # let _ = stored_as_text;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckedLinkTarget<'a>(&'a Path);
+
+impl<'a> CheckedLinkTarget<'a> {
+    /// The validated target, as the archive spells it.
+    #[must_use]
+    pub const fn as_path(&self) -> &'a Path {
+        self.0
+    }
 }
 
 /// Fails with the symlink-policy refusal unless `config` allows symlinks.
@@ -252,10 +287,11 @@ impl<P: ParentCheck> SafeSymlink<P> {
 ///
 /// Returns `SecurityViolation` ("symlinks not allowed") when symlinks are
 /// disabled.
-pub(crate) fn require_symlinks_allowed(config: &SecurityConfig<Validated>) -> Result<()> {
+pub(crate) fn require_symlinks_allowed(config: &SecurityConfig) -> Result<()> {
     config
         .allowed
         .symlinks
+        .is_allowed()
         .ok_or_else(|| Violation::LinksNotAllowed(LinkKind::Symlink).into())
 }
 
@@ -399,18 +435,22 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
     Ok(current)
 }
 
-/// Canonicalizes `current` in `view`; a failure or a result outside `root` is
-/// a symlink escape.
+/// Canonicalizes `current` in `view`; a result outside `root`, or a failure to
+/// resolve it, is a symlink escape.
+///
+/// A path the host cannot name at all (past its length limit) is not an escape:
+/// it is the same name-too-long refusal every other length check reports.
 fn canonical_within<V: FsView>(
     view: &V,
     current: &Path,
     root: &V::Root,
     link_path: &Path,
 ) -> Result<PathBuf> {
-    // TODO(#895): resolve handle-relatively; realpath makes acceptance depend
-    // on absolute length
     match view.canonicalize(current, root) {
         Ok(Containment::Within(canonical)) => Ok(canonical),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidFilename => {
+            Err(ArchiveError::Io(error))
+        }
         Ok(Containment::Escapes) | Err(_) => Err(ArchiveError::SymlinkEscape {
             path: link_path.to_path_buf(),
         }),
@@ -435,10 +475,10 @@ mod tests {
     }
 
     /// Creates a `SecurityConfig` with symlinks enabled for testing.
-    fn create_config_with_symlinks() -> SecurityConfig<Validated> {
+    fn create_config_with_symlinks() -> SecurityConfig {
         let mut config = SecurityConfig::default();
-        config.allowed.symlinks = true;
-        config.validate().expect("valid config")
+        config.allowed.symlinks = crate::Admit::Allow;
+        config
     }
 
     #[test]
@@ -459,11 +499,37 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_target_through_a_link_past_the_host_path_limit_is_a_length_refusal_not_an_escape() {
+        use crate::formats::dir_walker::DirWalker;
+        use crate::formats::pinned_dir::PinnedRoot;
+        use crate::security::fs_view::MAX_SYMLINK_TARGET_LEN;
+
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+        let chain = crate::test_utils::path_of_len(MAX_SYMLINK_TARGET_LEN);
+        let root = PinnedRoot::open_for_test(dest.as_path()).expect("pin the destination");
+        DirWalker::new(&config)
+            .ensure_dir(&root, &SafePath::for_test(&chain))
+            .expect("create the chain handle-relatively");
+        std::os::unix::fs::symlink(&chain, dest.as_path().join("s")).expect("create the link");
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
+            .expect("link path should be valid");
+
+        let result = SafeSymlink::validate(&link, Path::new("s/x"), &dest, &config);
+
+        assert_matches!(
+            result,
+            Err(ArchiveError::Io(ref error)) if error.kind() == std::io::ErrorKind::InvalidFilename,
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn test_safe_symlink_reject_when_disabled() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allowed.symlinks = false;
-        let config = config.validate().expect("valid config");
+        config.allowed.symlinks = crate::Admit::Refuse;
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
             .expect("link path should be valid");

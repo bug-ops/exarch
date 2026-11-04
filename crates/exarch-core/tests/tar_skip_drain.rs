@@ -18,23 +18,23 @@ use std::sync::atomic::Ordering;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
 use exarch_core::DecompressionBudget;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::SecurityConfig;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
+use exarch_core::VerifyRequest;
 use exarch_core::ZipBombScope;
-use exarch_core::extract_archive_with_options;
-use exarch_core::extract_to_sink;
 use exarch_core::formats::CompressionCodec;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::traits::ArchiveFormat;
-use exarch_core::list_reader;
-use exarch_core::verify_reader;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use tempfile::TempDir;
@@ -107,7 +107,7 @@ fn zeros_tar(name: &str, len: usize) -> Vec<u8> {
 
 fn root(error: &ArchiveError) -> &ArchiveError {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => root(source),
+        ArchiveError::PartialExtraction(partial) => root(partial.cause()),
         other => other,
     }
 }
@@ -123,13 +123,13 @@ fn tight_config() -> SecurityConfig {
 /// Extracts a gzip-compressed `tar` into memory under `config`.
 fn extract_gz(tar: &[u8], config: &SecurityConfig) -> Result<(), ArchiveError> {
     let mut sink = MemorySink::new(MemoryLimit::DEFAULT);
-    extract_to_sink(
-        ArchiveReader::tar(Cursor::new(gzip(tar)), Some(CompressionCodec::Gzip)),
-        &mut sink,
-        config,
-        &SinkOptions::default(),
-    )
-    .map(drop)
+    SinkExtractRequest::new(config)
+        .with_options(SinkOptions::default())
+        .extract(
+            ArchiveReader::tar(Cursor::new(gzip(tar)), Some(CompressionCodec::Gzip)),
+            &mut sink,
+        )
+        .map(drop)
 }
 
 fn assert_stopped_early(consumed: &AtomicU64, compressed_len: usize) {
@@ -152,11 +152,11 @@ fn list_refuses_an_over_quota_entry_without_decoding_it() {
     let gz = gzip(&zeros_tar("big.bin", 8 * MIB));
     let (reader, consumed) = counted(gz.clone());
 
-    let error = list_reader(
-        ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
+    let error = ListRequest::new(
         &SecurityConfig::default().with_max_file_size(exarch_core::non_zero!(MIB as u64)),
-        &ListOptions::default(),
     )
+    .with_options(ListOptions::default())
+    .list_reader(ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)))
     .unwrap_err();
 
     assert_matches!(root(&error), ArchiveError::QuotaExceeded { .. });
@@ -168,11 +168,11 @@ fn verify_refuses_an_over_quota_entry_without_decoding_it() {
     let gz = gzip(&zeros_tar("big.bin", 8 * MIB));
     let (reader, consumed) = counted(gz.clone());
 
-    let error = verify_reader(
-        ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
+    let error = VerifyRequest::new(
         &SecurityConfig::default().with_max_total_size(exarch_core::non_zero!(MIB as u64)),
-        &VerificationOptions::default(),
     )
+    .with_options(VerificationOptions::default())
+    .verify_reader(ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)))
     .unwrap_err();
 
     assert_matches!(root(&error), ArchiveError::QuotaExceeded { .. });
@@ -185,13 +185,13 @@ fn a_skipped_entry_that_out_decodes_its_input_is_refused_early() {
     let (reader, consumed) = counted(gz.clone());
     let mut sink = MemorySink::new(MemoryLimit::DEFAULT);
 
-    let error = extract_to_sink(
-        ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
-        &mut sink,
-        &tight_config(),
-        &SinkOptions::default(),
-    )
-    .unwrap_err();
+    let error = SinkExtractRequest::new(&tight_config())
+        .with_options(SinkOptions::default())
+        .extract(
+            ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
+            &mut sink,
+        )
+        .unwrap_err();
 
     assert!(is_skip_bomb(&error), "{error:?}");
     assert_stopped_early(&consumed, gz.len());
@@ -207,13 +207,10 @@ fn the_same_bomb_is_refused_on_a_path_and_an_existing_destination() {
     let fresh = work.path().join("fresh");
 
     for dest in [existing.path(), fresh.as_path()] {
-        let error = extract_archive_with_options(
-            &archive,
-            dest,
-            &tight_config(),
-            &ExtractionOptions::default(),
-        )
-        .unwrap_err();
+        let error = ExtractRequest::new(&tight_config())
+            .with_options(ExtractionOptions::default())
+            .extract(&archive, dest)
+            .unwrap_err();
         assert!(is_skip_bomb(&error), "{error:?}");
     }
 }
@@ -289,23 +286,21 @@ fn filtering_never_refuses_what_extracting_whole_would_accept() {
     for (name, config) in [("whole", whole), ("filtered", tight_config())] {
         let existing = TempDir::new().unwrap();
         std::fs::write(existing.path().join("keep"), b"x").unwrap();
-        extract_archive_with_options(
-            &archive,
-            existing.path(),
-            &config,
-            &ExtractionOptions::default(),
-        )
-        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        ExtractRequest::new(&config)
+            .with_options(ExtractionOptions::default())
+            .extract(&archive, existing.path())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
     }
 }
 
 fn verify_gz_decoding(tar: &[u8], config: &SecurityConfig) {
-    let report = verify_reader(
-        ArchiveReader::tar(Cursor::new(gzip(tar)), Some(CompressionCodec::Gzip)),
-        config,
-        &decode_to_eof(),
-    )
-    .unwrap();
+    let report = VerifyRequest::new(config)
+        .with_options(decode_to_eof())
+        .verify_reader(ArchiveReader::tar(
+            Cursor::new(gzip(tar)),
+            Some(CompressionCodec::Gzip),
+        ))
+        .unwrap();
     assert_eq!(report.status(), VerificationStatus::Pass, "{report:?}");
 }
 
@@ -319,12 +314,10 @@ fn an_integrity_decode_of_a_skipped_bomb_is_refused_early() {
     let gz = gzip(&zeros_tar("big.bin", 8 * MIB));
     let (reader, consumed) = counted(gz.clone());
 
-    let error = verify_reader(
-        ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
-        &tight_config(),
-        &decode_to_eof(),
-    )
-    .unwrap_err();
+    let error = VerifyRequest::new(&tight_config())
+        .with_options(decode_to_eof())
+        .verify_reader(ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)))
+        .unwrap_err();
 
     assert!(is_skip_bomb(&error), "{error:?}");
     assert_stopped_early(&consumed, gz.len());
@@ -357,12 +350,13 @@ fn a_metered_skipped_entry_does_not_meter_the_allowed_entries_after_it() {
     let config = tight_config();
 
     extract_gz(&tar, &config).unwrap();
-    list_reader(
-        ArchiveReader::tar(Cursor::new(gzip(&tar)), Some(CompressionCodec::Gzip)),
-        &config,
-        &ListOptions::default(),
-    )
-    .unwrap();
+    ListRequest::new(&config)
+        .with_options(ListOptions::default())
+        .list_reader(ArchiveReader::tar(
+            Cursor::new(gzip(&tar)),
+            Some(CompressionCodec::Gzip),
+        ))
+        .unwrap();
 }
 
 #[test]
@@ -372,16 +366,13 @@ fn plain_tar_with_skipped_data_passes_at_any_size() {
     std::fs::write(&archive, zeros_tar("big.bin", 8 * MIB)).unwrap();
     let dest = work.path().join("out");
 
-    let report = extract_archive_with_options(
-        &archive,
-        &dest,
-        &tight_config(),
-        &ExtractionOptions::default(),
-    )
-    .unwrap();
+    let report = ExtractRequest::new(&tight_config())
+        .with_options(ExtractionOptions::default())
+        .extract(&archive, &dest)
+        .unwrap();
 
     assert_eq!(report.files_extracted, 1);
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
 }
 
 #[test]
@@ -390,15 +381,14 @@ fn a_caller_decoded_stream_is_not_bounded_by_ratio() {
     let decoder = flate2::read::GzDecoder::new(Cursor::new(gz));
     let work = TempDir::new().unwrap();
 
-    let config = tight_config().validate().unwrap();
-    let report = TarArchive::new(decoder)
+    let config = tight_config();
+    let report = TarArchive::new(decoder, &config)
         .extract(
             &work.path().join("out"),
-            &config,
             &ExtractionOptions::default(),
             &mut exarch_core::NoopProgress,
         )
         .unwrap();
 
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
 }

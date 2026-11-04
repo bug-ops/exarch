@@ -24,9 +24,9 @@ use exarch_core::MemoryExtractRequest;
 use exarch_core::NoopProgress;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
 use exarch_core::extract_reader_to_callback;
-use exarch_core::extract_to_sink;
 use sink_support::tar_archive;
 use sink_support::tar_dir;
 use sink_support::tar_file;
@@ -52,7 +52,10 @@ fn collect(
         Ok(())
     });
     let reader = ArchiveReader::tar(Cursor::new(tar_archive(entries)), None);
-    let result = extract_to_sink(reader, &mut sink, config, &options).map(drop);
+    let result = SinkExtractRequest::new(config)
+        .with_options(options)
+        .extract(reader, &mut sink)
+        .map(drop);
     (result, delivered)
 }
 
@@ -201,12 +204,9 @@ fn a_callback_error_ends_the_extraction() {
     });
     let reader = ArchiveReader::tar(Cursor::new(tar_archive(&entries)), None);
 
-    let result = extract_to_sink(
-        reader,
-        &mut sink,
-        &SecurityConfig::default(),
-        &SinkOptions::default(),
-    );
+    let result = SinkExtractRequest::new(&SecurityConfig::default())
+        .with_options(SinkOptions::default())
+        .extract(reader, &mut sink);
 
     assert!(result.is_err());
     assert_eq!(calls, 1);

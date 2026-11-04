@@ -1,0 +1,12 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/admitted_size_forge_via_tuple_struct.rs:9:17
+  |
+9 |     let _size = AdmittedSize(u64::MAX);
+  |                 ^^^^^^^^^^^^
+  |
+  = note: a struct named `AdmittedSize` exists in another namespace
+note: constructor is not visible here due to private fields
+ --> src/security/quota.rs
+  |
+  | pub struct AdmittedSize(u64);
+  |                         ^^^ private field

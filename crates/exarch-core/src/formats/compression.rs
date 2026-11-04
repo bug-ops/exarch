@@ -18,7 +18,6 @@ use std::io::Write;
 use std::num::NonZeroU64;
 
 use crate::Result;
-use crate::Validated;
 use crate::config::SecurityConfig;
 use crate::creation::CompressionLevel;
 use crate::formats::tar_metadata_limit::CompressedMembersExceeded;
@@ -96,9 +95,10 @@ const MEMBER_OUTPUT_BYTES: u64 = 16 * 1024;
 pub(crate) struct MemberAllowance(NonZeroU64);
 
 impl MemberAllowance {
+    #[cfg(test)]
     pub(crate) const UNBOUNDED: Self = Self(NonZeroU64::MAX);
 
-    pub(crate) fn of(config: &SecurityConfig<Validated>) -> Self {
+    pub(crate) fn of(config: &SecurityConfig) -> Self {
         Self::of_base(config.compressed_member_allowance)
     }
 
@@ -126,14 +126,7 @@ pub(crate) struct DecoderLimits {
 }
 
 impl DecoderLimits {
-    /// No limit beyond what the formats themselves impose.
-    pub(crate) const UNBOUNDED: Self = Self {
-        memory: u64::MAX,
-        zstd_window: ZstdWindowLog::LIBZSTD_DEFAULT,
-        members: MemberAllowance::UNBOUNDED,
-    };
-
-    pub(crate) fn of(config: &SecurityConfig<Validated>) -> Self {
+    pub(crate) fn of(config: &SecurityConfig) -> Self {
         Self {
             memory: config.max_decoder_memory.get(),
             zstd_window: ZstdWindowLog::of(config),
@@ -993,17 +986,12 @@ mod tests {
     #[test]
     fn test_the_allowance_follows_the_configured_base() {
         let base = NonZeroU64::new(7).unwrap();
-        let config = SecurityConfig::default()
-            .with_compressed_member_allowance(base)
-            .validate()
-            .unwrap();
+        let config = SecurityConfig::default().with_compressed_member_allowance(base);
         assert_eq!(config.compressed_member_allowance, base);
         assert_eq!(MemberAllowance::of(&config), MemberAllowance::of_base(base));
         assert_eq!(DecoderLimits::of(&config).members.at(0), 7);
         assert_eq!(
-            DecoderLimits::of(&SecurityConfig::default().validate().unwrap())
-                .members
-                .at(0),
+            DecoderLimits::of(&SecurityConfig::default()).members.at(0),
             10_000
         );
     }

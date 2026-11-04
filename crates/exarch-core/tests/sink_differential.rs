@@ -13,13 +13,13 @@ use std::io::Cursor;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
 use exarch_core::Extension;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
-use exarch_core::extract_archive_with_options;
-use exarch_core::extract_to_sink;
 use sink_support::RecordingSink;
 use sink_support::Tree;
 use sink_support::signature;
@@ -61,7 +61,9 @@ fn via_host(
     let archive = dir.path().join(name);
     std::fs::write(&archive, bytes).unwrap();
     let out = dir.path().join("out");
-    let outcome = extract_archive_with_options(&archive, &out, config, options);
+    let outcome = ExtractRequest::new(config)
+        .with_options(options.clone())
+        .extract(&archive, &out);
     let tree = if out.exists() {
         walk(&out)
     } else {
@@ -85,7 +87,9 @@ fn via_sink(
     };
     let mut sink = RecordingSink::default();
     let options = SinkOptions::try_from(options).unwrap();
-    let outcome = extract_to_sink(reader, &mut sink, config, &options);
+    let outcome = SinkExtractRequest::new(config)
+        .with_options(options)
+        .extract(reader, &mut sink);
     (outcome, sink)
 }
 
@@ -125,7 +129,8 @@ fn assert_parity(
                 "bytes_written"
             );
             assert_eq!(
-                sink_report.files_skipped, host_report.files_skipped,
+                sink_report.files_skipped(),
+                host_report.files_skipped(),
                 "files_skipped"
             );
             assert_eq!(sink_report.warnings, host_report.warnings, "warnings");
@@ -624,13 +629,10 @@ fn zip_rejected_by_structure_leaves_no_destination() {
     std::fs::write(&archive, &bytes).unwrap();
     let out = dir.path().join("out");
     assert!(
-        extract_archive_with_options(
-            &archive,
-            &out,
-            &default_config(),
-            &ExtractionOptions::default()
-        )
-        .is_err()
+        ExtractRequest::new(&default_config())
+            .with_options(ExtractionOptions::default())
+            .extract(&archive, &out)
+            .is_err()
     );
     assert!(!out.exists());
 }
@@ -766,7 +768,7 @@ fn sevenz_interleaved_empty_entries_are_delivered_in_archive_order() {
         .unwrap()
         .entries()
         .iter()
-        .filter(|entry| matches!(entry.kind, exarch_core::ManifestEntryKind::File))
+        .filter(|entry| matches!(entry.kind, exarch_core::ManifestEntryKind::File { .. }))
         .map(|entry| entry.path.clone())
         .collect();
     assert!(in_archive_order.len() >= 3, "{in_archive_order:?}");

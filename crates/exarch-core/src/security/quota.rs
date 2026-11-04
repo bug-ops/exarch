@@ -7,67 +7,23 @@ use crate::ArchiveError;
 use crate::Limit;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::config::Validated;
 use crate::security::zipbomb::Uncompressed;
 
 /// Proof that a file's size was successfully reserved against a
-/// [`QuotaTracker`].
+/// `QuotaTracker`.
 ///
 /// This is a capability token that records the byte count it reserved, so the
 /// write cap is read from the permit and cannot be re-supplied by a caller
 /// that reserved one quantity and enforces another (GHSA-5j8q). Its only
-/// producers are [`QuotaTracker::reserve`] and the crate-private
+/// producers are `QuotaTracker::reserve` and the crate-private
 /// `QuotaTracker::charge` — the private field means no other code, in or out of
-/// this crate, can assemble one directly. `EntryValidator` exposes three ways
-/// to obtain one: [`EntryValidator::validate_entry`] embeds it in
-/// [`ValidatedEntryType::File`] for the common case where path validation and
-/// quota reservation happen together; its crate-private `charge_hardlink`
-/// and `reserve_file` methods return it standalone for callers that must
-/// decouple the two — hardlinks (target size only known in a second pass,
-/// after [`EntryCount`] counted them in the first) and 7z's duplicate-skip
-/// check (quota must not be reserved for an entry that turns out to be a
-/// skipped duplicate), respectively.
+/// this crate, can assemble one directly. The extraction pipeline reserves one
+/// when it admits a file, and spends it into an [`AdmittedSize`] for the
+/// sink; hardlinks charge theirs in a second pass, after [`EntryCount`]
+/// counted them in the first.
 ///
 /// Deliberately not `Clone`/`Copy`/`Default`: a permit represents a single
 /// reservation and must not be duplicated or spent more than once.
-///
-/// [`ValidatedEntryType::File`]: crate::security::validator::ValidatedEntryType::File
-/// [`EntryValidator::validate_entry`]: crate::security::validator::EntryValidator::validate_entry
-///
-/// # Examples
-///
-/// The common case: a `QuotaPermit` arrives already embedded in a validated
-/// file entry, via [`EntryValidator::validate_entry`]:
-///
-/// ```no_run
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::security::EntrySize;
-/// use exarch_core::security::EntryValidator;
-/// use exarch_core::security::Uncompressed;
-/// use exarch_core::security::ValidatedEntryType;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::EntryType;
-/// use std::path::Path;
-/// use std::path::PathBuf;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-/// let config = SecurityConfig::default().validate()?;
-/// let mut validator = EntryValidator::new(&config, &dest);
-///
-/// let entry = validator.validate_entry(
-///     Path::new("file.txt"),
-///     &EntryType::File,
-///     EntrySize::new(Uncompressed(1024), None),
-///     None,
-/// )?;
-///
-/// if let ValidatedEntryType::File(permit) = entry.entry_type() {
-///     println!("{permit:?}");
-/// }
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug)]
 #[must_use]
 pub struct QuotaPermit {
@@ -86,6 +42,41 @@ impl QuotaPermit {
     pub(crate) const fn into_bytes(self) -> u64 {
         self.bytes.0
     }
+
+    /// Spends the permit, yielding a copyable view of the bytes it reserved
+    /// for a sink to read.
+    pub(crate) const fn into_admitted(self) -> AdmittedSize {
+        AdmittedSize(self.bytes.0)
+    }
+}
+
+/// The size of a file the pipeline admitted: the bytes a [`QuotaPermit`]
+/// reserved for it.
+///
+/// A read-only, copyable view handed to an [`EntrySink`](crate::EntrySink) so
+/// it can tell a size the quota tracker already charged from any other number.
+/// Only the pipeline can build one: the field is private and the sole
+/// constructor spends a permit.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::AdmittedSize;
+///
+/// fn capacity_hint(size: AdmittedSize) -> usize {
+///     usize::try_from(size.get().min(1 << 16)).unwrap_or(0)
+/// }
+/// # let _ = capacity_hint;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AdmittedSize(u64);
+
+impl AdmittedSize {
+    /// The admitted size in bytes.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 /// Proof that one entry was counted against `max_file_count` while its bytes
@@ -100,44 +91,6 @@ impl QuotaPermit {
 ///
 /// Deliberately not `Clone`/`Copy`/`Default`, and only producible by
 /// `QuotaTracker::reserve_count`. Zero-sized.
-///
-/// # Examples
-///
-/// A validated hardlink carries its `EntryCount`:
-///
-/// ```no_run
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::security::EntrySize;
-/// use exarch_core::security::EntryValidator;
-/// use exarch_core::security::Uncompressed;
-/// use exarch_core::security::ValidatedEntryType;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::EntryType;
-/// use std::path::Path;
-/// use std::path::PathBuf;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-/// let config = SecurityConfig::default()
-///     .with_allow_hardlinks(true)
-///     .validate()?;
-/// let mut validator = EntryValidator::new(&config, &dest);
-///
-/// let entry = validator.validate_entry(
-///     Path::new("link"),
-///     &EntryType::Hardlink {
-///         target: PathBuf::from("target.txt"),
-///     },
-///     EntrySize::new(Uncompressed(0), None),
-///     None,
-/// )?;
-///
-/// if let ValidatedEntryType::Hardlink { counted, .. } = entry.entry_type() {
-///     println!("{counted:?}");
-/// }
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug)]
 #[must_use]
 pub struct EntryCount(PhantomData<()>);
@@ -182,11 +135,7 @@ impl QuotaTracker {
     /// When all quotas are set to maximum values (unlimited), the function
     /// skips quota checks and only tracks counters with overflow detection.
     #[inline]
-    pub fn reserve(
-        &mut self,
-        size: u64,
-        config: &SecurityConfig<Validated>,
-    ) -> Result<QuotaPermit> {
+    pub fn reserve(&mut self, size: u64, config: &SecurityConfig) -> Result<QuotaPermit> {
         self.reserve_within(size, config.max_file_size, config)
     }
 
@@ -197,10 +146,7 @@ impl QuotaTracker {
     ///
     /// Returns [`ArchiveError::QuotaExceeded`] if the file count limit is
     /// exceeded or the counter overflows.
-    pub(crate) fn reserve_count(
-        &mut self,
-        config: &SecurityConfig<Validated>,
-    ) -> Result<EntryCount> {
+    pub(crate) fn reserve_count(&mut self, config: &SecurityConfig) -> Result<EntryCount> {
         self.bump_files()?;
         self.check_file_count(config)?;
 
@@ -219,7 +165,7 @@ impl QuotaTracker {
         &mut self,
         count: EntryCount,
         size: u64,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<QuotaPermit> {
         drop(count);
 
@@ -243,7 +189,7 @@ impl QuotaTracker {
     pub(crate) fn reserve_without_file_limit(
         &mut self,
         size: u64,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<QuotaPermit> {
         self.reserve_within(size, Limit::Unbounded, config)
     }
@@ -253,7 +199,7 @@ impl QuotaTracker {
         &mut self,
         size: u64,
         max_file_size: Limit<NonZeroU64>,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<QuotaPermit> {
         // OPT-C003: Fast path when all quotas unlimited - skip checks, only
         // detect overflow
@@ -291,7 +237,7 @@ impl QuotaTracker {
         &mut self,
         size: u64,
         max_file_size: Limit<NonZeroU64>,
-        config: &SecurityConfig<Validated>,
+        config: &SecurityConfig,
     ) -> Result<()> {
         check_file_size(size, max_file_size)?;
         self.bump_files()?;
@@ -320,7 +266,7 @@ impl QuotaTracker {
         Ok(())
     }
 
-    fn check_file_count(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+    fn check_file_count(&self, config: &SecurityConfig) -> Result<()> {
         if !config.max_file_count.admits(self.files_extracted) {
             core::hint::cold_path();
             return Err(ArchiveError::QuotaExceeded {
@@ -333,7 +279,7 @@ impl QuotaTracker {
         Ok(())
     }
 
-    fn check_total_size(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+    fn check_total_size(&self, config: &SecurityConfig) -> Result<()> {
         if !config.max_total_size.admits(self.bytes_written) {
             core::hint::cold_path();
             return Err(ArchiveError::QuotaExceeded {
@@ -347,12 +293,14 @@ impl QuotaTracker {
     }
 
     /// Returns the number of files extracted.
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn files_extracted(&self) -> usize {
         self.files_extracted
     }
 
     /// Returns the total bytes written.
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn bytes_written(&self) -> u64 {
         self.bytes_written
@@ -375,7 +323,7 @@ mod tests {
     #[test]
     fn permit_carries_the_reserved_size() {
         let mut tracker = QuotaTracker::new();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let permit = tracker.reserve(1234, &config).expect("within quota");
 
@@ -385,7 +333,7 @@ mod tests {
     #[test]
     fn test_quota_tracker_reserve() {
         let mut tracker = QuotaTracker::new();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         assert!(tracker.reserve(1000, &config).is_ok());
         assert_eq!(tracker.files_extracted(), 1);
@@ -397,7 +345,6 @@ mod tests {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2));
-        let config = config.validate().expect("valid config");
 
         assert!(tracker.reserve(100, &config).is_ok());
         assert!(tracker.reserve(100, &config).is_ok());
@@ -410,7 +357,6 @@ mod tests {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
         config.max_total_size = crate::Limit::Bounded(crate::non_zero!(1000));
-        let config = config.validate().expect("valid config");
 
         assert!(tracker.reserve(600, &config).is_ok());
         let result = tracker.reserve(500, &config);
@@ -422,7 +368,6 @@ mod tests {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(1000));
-        let config = config.validate().expect("valid config");
 
         let result = tracker.reserve(2000, &config);
         assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
@@ -436,7 +381,6 @@ mod tests {
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(3));
         config.max_total_size = crate::Limit::Unbounded;
         config.max_file_size = crate::Limit::Unbounded;
-        let config = config.validate().expect("valid config");
 
         // Exactly at file count limit should succeed
         assert!(
@@ -471,7 +415,6 @@ mod tests {
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(100));
         config.max_total_size = crate::Limit::Bounded(crate::non_zero!(1000));
         config.max_file_size = crate::Limit::Unbounded;
-        let config = config.validate().expect("valid config");
 
         // Add files up to exactly the limit
         assert!(tracker.reserve(600, &config).is_ok());
@@ -501,7 +444,6 @@ mod tests {
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(100));
         config.max_total_size = crate::Limit::Unbounded;
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(5000));
-        let config = config.validate().expect("valid config");
 
         // File exactly at limit should succeed
         assert!(
@@ -530,7 +472,6 @@ mod tests {
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(1));
         config.max_total_size = crate::Limit::Unbounded;
         config.max_file_size = crate::Limit::Unbounded;
-        let config = config.validate().expect("valid config");
 
         // First file should succeed
         assert!(tracker.reserve(100, &config).is_ok());
@@ -549,7 +490,6 @@ mod tests {
         config.max_file_size = crate::Limit::Unbounded;
         config.max_file_count = crate::Limit::Unbounded;
         config.max_total_size = crate::Limit::Unbounded;
-        let config = config.validate().expect("valid config");
 
         for i in 1..=1000 {
             assert!(
@@ -570,7 +510,6 @@ mod tests {
         config.max_file_size = crate::Limit::Unbounded;
         config.max_file_count = crate::Limit::Unbounded;
         config.max_total_size = crate::Limit::Unbounded;
-        let config = config.validate().expect("valid config");
 
         // Manually set bytes_written to near overflow
         tracker.bytes_written = u64::MAX - 100;
@@ -593,7 +532,6 @@ mod tests {
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(10));
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2));
         config.max_total_size = crate::Limit::Bounded(crate::non_zero!(1000));
-        let config = config.validate().expect("valid config");
 
         assert_matches!(
             tracker.reserve(500, &config),
@@ -619,7 +557,6 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(10));
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(1));
-        let config = config.validate().expect("valid config");
 
         assert!(tracker.reserve_without_file_limit(500, &config).is_ok());
         assert_matches!(
@@ -637,7 +574,6 @@ mod tests {
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(10));
         config.max_file_count = crate::Limit::Unbounded;
         config.max_total_size = crate::Limit::Unbounded;
-        let config = config.validate().expect("valid config");
 
         assert!(tracker.reserve(500, &config).is_err());
         assert!(tracker.reserve_without_file_limit(500, &config).is_ok());
@@ -652,7 +588,6 @@ mod tests {
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(10));
         config.max_file_count = crate::Limit::Unbounded;
         config.max_total_size = crate::Limit::Unbounded;
-        let config = config.validate().expect("valid config");
 
         tracker.bytes_written = u64::MAX - 100;
         assert_matches!(
@@ -666,7 +601,7 @@ mod tests {
     #[test]
     fn test_charge_adds_bytes_without_counting_again() {
         let mut tracker = QuotaTracker::new();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default();
 
         let count = tracker.reserve_count(&config).expect("count");
         assert_eq!(tracker.files_extracted(), 1);
@@ -682,7 +617,6 @@ mod tests {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
         config.max_file_count = crate::Limit::Bounded(crate::non_zero!(1));
-        let config = config.validate().expect("valid config");
 
         let _first = tracker.reserve_count(&config).expect("first");
         assert_matches!(
@@ -699,7 +633,6 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.max_file_size = crate::Limit::Bounded(crate::non_zero!(100));
         config.max_total_size = crate::Limit::Bounded(crate::non_zero!(150));
-        let config = config.validate().expect("valid config");
 
         let a = tracker.reserve_count(&config).expect("a");
         let b = tracker.reserve_count(&config).expect("b");

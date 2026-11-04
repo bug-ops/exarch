@@ -14,7 +14,6 @@ use crate::EntryCompression;
 use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::config::Validated;
 use crate::copy::CopyError;
 use crate::formats::common;
 use crate::inspection::integrity::Charge;
@@ -198,8 +197,8 @@ impl<T> LinkTable<T> {
             .last()
             .is_some_and(|&(last, _)| last >= file_index)
         {
-            return Err(ArchiveError::unclassified(
-                "7z link entries are out of order",
+            return Err(ArchiveError::from(
+                Malformation::SevenZLinkEntriesOutOfOrder,
             ));
         }
         self.entries.push((file_index, value));
@@ -245,7 +244,7 @@ pub fn deliver_undecoded_links(
 pub(super) fn blocks_closed_to_links(
     header: &SevenZHeader,
     compression: &[EntryCompression],
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
 ) -> Vec<bool> {
     let mut closed = vec![false; header.block_count()];
     for refusal in sevenz_refusals(header, config) {
@@ -309,7 +308,7 @@ pub fn walk_sevenz_links<R: Read + Seek, T>(
     header: &SevenZHeader,
     source: &mut R,
     compression: &[EntryCompression],
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     links: &LinkTable<T>,
     each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
 ) -> Result<()> {
@@ -340,7 +339,7 @@ pub fn walk_sevenz_links<R: Read + Seek, T>(
 pub(super) fn walk_block_links<R: Read + Seek>(
     header: &SevenZHeader,
     source: &mut R,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     block: BlockIndex,
     wanted: &[usize],
     each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,

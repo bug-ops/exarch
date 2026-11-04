@@ -15,6 +15,20 @@ export interface AbortSignalLike {
 }
 
 /**
+ * The value a progress callback receives for each entry: its path, the number
+ * of entries (`null` while it is not known, as for a TAR stream), its 1-based
+ * position and the bytes written for it so far (always `0` at entry start).
+ * The path renders injectively: a backslash is `\x5C` and each byte that is not
+ * valid UTF-8 is `\xNN`, so two distinct entries never share a rendered name.
+ */
+export type ProgressArgs = [
+  path: string,
+  total: number | null,
+  current: number,
+  bytesWritten: number,
+]
+
+/**
  * Properties of an error raised by exarch-core.
  *
  * `message` is the human-readable description only; everything
@@ -24,19 +38,6 @@ export interface AbortSignalLike {
  */
 export interface ExarchErrorBase extends Error {
   code: ErrorCode
-  /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
-  relaxableBy?: PolicySetting
-  /**
-   * Finer classification of an `INVALID_ARCHIVE` (`InvalidArchiveSubCode`)
-   * failure, when it has one, and of every core `SECURITY_VIOLATION`
-   * (`SecurityViolationSubCode`). The interfaces are discriminated by `writes`,
-   * not `code`, so the pairing is not narrowed per code: `INVALID_ARCHIVE`
-   * carries one of the `InvalidArchiveSubCode` values, `SECURITY_VIOLATION` carries
-   * one of the `SecurityViolationSubCode` values.
-   */
-  subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
-  /** The configuration setting or input an `INVALID_CONFIGURATION` error refused. */
-  setting?: ConfigSetting
   /**
    * The exception thrown by a progress callback, an `onEntry` callback or an
    * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
@@ -58,6 +59,7 @@ export interface ExarchErrorPlain extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -68,6 +70,7 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   filesExtracted: number
   bytesWritten: number
   filesSkipped: number
+  skipped: SkippedSummary
   warnings: Array<string>
   filesAdded?: undefined
 }
@@ -79,6 +82,7 @@ export interface ExarchErrorRolledBack extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -93,6 +97,23 @@ export interface ExarchErrorDiscarded extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
+  warnings?: undefined
+  filesAdded?: undefined
+}
+
+/**
+ * A progress callback threw while a listing or a verification succeeded (the
+ * result was discarded), or during a creation (cancelled: nothing was written
+ * and a previous output is untouched).
+ */
+export interface ExarchErrorReadCallback extends ExarchErrorBase {
+  code: 'PROGRESS_CALLBACK_ERROR'
+  writes?: undefined
+  filesExtracted?: undefined
+  bytesWritten?: undefined
+  filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -103,6 +124,7 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
   writes?: undefined
   filesExtracted?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded: number
   bytesWritten: number
@@ -119,30 +141,200 @@ export interface ExarchNativeError extends Error {
   relaxableBy?: undefined
   subCode?: undefined
   setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
 
-/**
- * Every error exarch rejects or throws with.
- *
- * Promises reject with, and sync functions throw, an object of this shape;
- * narrow an `unknown` catch value with `err as ExarchError`. Discriminate on
- * `writes`; `code` is an `ErrorCode` for every member except
- * `ExarchNativeError`, so a `switch (err.code)` is exhaustive only after
- * excluding it.
- */
-export type ExarchError =
+/** A malformed archive; `subCode` classifies it when core can. */
+export interface ExarchInvalidArchiveDetail {
+  code: 'INVALID_ARCHIVE'
+  subCode?: InvalidArchiveSubCode
+  /**
+   * The path of an `'ENTRY_NAME'` refusal for an entry name that is not valid
+   * UTF-8, written injectively: a backslash is `\x5C` and each invalid byte
+   * `\xNN`, so two distinct names never render alike.
+   */
+  nonUtf8EntryPath?: string
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+}
+
+/** A refusal by policy; core always classifies it and may name the setting that relaxes it. */
+export interface ExarchSecurityViolationDetail {
+  code: 'SECURITY_VIOLATION'
+  subCode: SecurityViolationSubCode
+  relaxableBy?: PolicySetting
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** A rejected setting or input. */
+export interface ExarchInvalidConfigurationDetail {
+  code: 'INVALID_CONFIGURATION'
+  setting?: ConfigSetting
+  subCode?: undefined
+  relaxableBy?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** An I/O failure, with the kind core reported. */
+export interface ExarchIoDetail {
+  code: 'IO_ERROR'
+  ioKind: IoKind
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+}
+
+/** A quota refusal; `subCode` names the quota that was exceeded. */
+export interface ExarchQuotaDetail {
+  code: 'QUOTA_EXCEEDED'
+  subCode: QuotaSubCode
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** A compression ratio refusal; `subCode` names what the ratio was measured over. */
+export interface ExarchZipBombDetail {
+  code: 'ZIP_BOMB'
+  subCode: ZipBombSubCode
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** Every other code carries no detail property. */
+export interface ExarchPlainCodeDetail {
+  code: Exclude<
+    ErrorCode,
+    | 'INVALID_ARCHIVE'
+    | 'SECURITY_VIOLATION'
+    | 'INVALID_CONFIGURATION'
+    | 'IO_ERROR'
+    | 'QUOTA_EXCEEDED'
+    | 'ZIP_BOMB'
+  >
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** The pairing of a `code` with the properties it can carry. */
+export type ExarchErrorCodeDetail =
+  | ExarchInvalidArchiveDetail
+  | ExarchSecurityViolationDetail
+  | ExarchInvalidConfigurationDetail
+  | ExarchIoDetail
+  | ExarchQuotaDetail
+  | ExarchZipBombDetail
+  | ExarchPlainCodeDetail
+
+/** The partial-extraction shapes, discriminated by `writes`. */
+export type ExarchErrorOutcome =
   | ExarchErrorPlain
   | ExarchErrorWritesKept
   | ExarchErrorRolledBack
   | ExarchErrorDiscarded
   | ExarchErrorCreationCallback
-  | ExarchNativeError
+  | ExarchErrorReadCallback
+
+/**
+ * An error raised by exarch-core or by one of the binding's callbacks.
+ *
+ * Discriminate on `writes` for the partial-extraction outcome and on `code`
+ * for the detail properties: `code === 'INVALID_ARCHIVE'` narrows `subCode` to
+ * `InvalidArchiveSubCode`, `'SECURITY_VIOLATION'` to a required
+ * `SecurityViolationSubCode`, `'INVALID_CONFIGURATION'` exposes `setting` and
+ * `'IO_ERROR'` a required `ioKind`, `'QUOTA_EXCEEDED'` and `'ZIP_BOMB'` a required
+ * `QuotaSubCode` or `ZipBombSubCode`. `code` is an `ErrorCode`, so a
+ * `switch (err.code)` is exhaustive.
+ */
+export type ExarchCoreError = ExarchErrorOutcome & ExarchErrorCodeDetail
+
+/**
+ * Every error exarch rejects or throws with.
+ *
+ * Promises reject with, and sync functions throw, an object of this shape;
+ * narrow an `unknown` catch value with `err as ExarchError`. Its `code` is an
+ * `ErrorCode` for every member except `ExarchNativeError`, whose `code` is a
+ * plain string and which therefore also matches every `code` comparison: to
+ * use the pairings of `ExarchCoreError`, exclude the native member first
+ * (`err as ExarchCoreError` once `err.code` is known to be an `ErrorCode`).
+ */
+export type ExarchError = ExarchCoreError | ExarchNativeError
+
+/**
+ * An entry delivered to an `onEntry` callback. Discriminate on `kind`: a file
+ * always has `data`, a symlink or hardlink always has `target`.
+ */
+export type MemoryEntry =
+  | MemoryFileEntry
+  | MemoryDirectoryEntry
+  | MemorySymlinkEntry
+  | MemoryHardlinkEntry
+
+/**
+ * An entry held in the result of `extractArchiveToMemory`: a `MemoryEntry`
+ * without the hardlink, which only a callback receives.
+ */
+export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
+
+/** What a `MemoryEntry` holds. */
+export type MemoryEntryKind = MemoryEntry['kind']
+
+/**
+ * A link target of a listing, discriminated by `state`: only a `'recorded'`
+ * target has a `path`, and only an `'oversized'` one has `bytes`.
+ */
+export type LinkTarget =
+  | RecordedLinkTarget
+  | MissingLinkTarget
+  | UnreadLinkTarget
+  | UnreadableLinkTarget
+  | OversizedLinkTarget
+
+/**
+ * One entry of a listing, discriminated by `entryType`: only a file has a
+ * `size`, only a link has a `target`.
+ */
+export type ArchiveEntry =
+  | ManifestFileEntry
+  | ManifestDirectoryEntry
+  | ManifestSymlinkEntry
+  | ManifestHardlinkEntry
+
+/** The detail of a verification finding that is a heuristic, not a refusal. */
+export interface HeuristicIssueDetail {
+  code?: undefined
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/**
+ * A verification finding. A refusal carries the `code` and the properties the
+ * error extraction would raise has for it, paired as on `ExarchCoreError`; a
+ * heuristic carries none of them.
+ */
+export type VerificationIssue = VerificationIssueFields &
+  (ExarchErrorCodeDetail | HeuristicIssueDetail)
 
 /**
  * Which binding artifact the generated loader actually loaded: `'native'` for
@@ -186,7 +378,9 @@ export declare class CreationConfig {
    *
    * # Errors
    *
-   * Returns error if level is not in range 1-9.
+   * Throws `INVALID_COMPRESSION_LEVEL` if level is not a whole number from 1
+   * to 9 (a fraction, `NaN`, a negative or an out-of-range number is
+   * refused, never wrapped).
    */
   setCompressionLevel(level: number): this
   /**
@@ -224,11 +418,21 @@ export declare class CreationConfig {
   /**
    * Adds an exclude pattern.
    *
-   * Files matching this pattern will be skipped.
+   * Files matching this pattern will be skipped. Four shapes exist: `name`
+   * (a path component equal to it), `name*` (a component starting with it),
+   * `*name` (a component ending with it) and `dir/sub` (that path and its
+   * subtree). A pattern matches the entry's archive path, never the
+   * ancestors of a source directory, so write `build`, not `src/build`, for
+   * a source `src`.
    *
    * # Errors
    *
-   * Returns error if pattern contains null bytes.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
+   * other shape instead of silently excluding nothing: an empty pattern,
+   * one with a null byte, leading or trailing whitespace, a comma, any of
+   * `?`, `[`, `]`, `{`, `}` and `!`, a `*` elsewhere than first or last,
+   * `.` or `..` as a component, an absolute path or one over 255 bytes. A
+   * name holding such a character cannot be excluded by pattern.
    */
   addExcludePattern(pattern: string): this
   /** Finalizes the configuration (for API consistency). */
@@ -342,7 +546,8 @@ export declare class SecurityConfig {
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
-   * negative or zero.
+   * not a positive whole number up to 2^53 - 1 (zero, negative, fractional,
+   * `NaN` and infinite values are refused, never wrapped).
    */
   setMaxFileSize(size: number): this
   /**
@@ -375,7 +580,7 @@ export declare class SecurityConfig {
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_file_count`) if count
-   * is zero.
+   * is not a positive whole number up to 2^53 - 1.
    */
   setMaxFileCount(count: number): this
   /**
@@ -384,7 +589,7 @@ export declare class SecurityConfig {
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_path_depth`) if depth
-   * is zero.
+   * is not a positive whole number up to 2^53 - 1.
    */
   setMaxPathDepth(depth: number): this
   /** Allows or denies symlinks. */
@@ -417,20 +622,21 @@ export declare class SecurityConfig {
    *
    * # Errors
    *
-   * Returns error if `size` is not a positive whole number of bytes.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `parallel_decode_memory`)
+   * if `size` is not a positive whole number of bytes.
    */
   setParallelDecodeMemory(size?: number | undefined | null): this
   /**
-   * Sets the maximum memory that may be used to decompress a solid 7z block.
+   * Sets the maximum decoded size of a solid 7z block, in bytes.
    *
-   * Solid archives decompress entire blocks into memory before individual
-   * entries can be read. This limit caps that allocation to prevent
-   * memory exhaustion from crafted archives. Default: 512 MB.
+   * The limit bounds the decoded volume of each solid block, not resident
+   * memory. It exists only while solid archives are allowed, so call
+   * `setAllowSolidArchives(true)` first. Default: 512 MB.
    *
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_solid_block_memory`)
-   * if size is negative or zero.
+   * if size is negative or zero, or while solid archives are not allowed.
    */
   setMaxSolidBlockMemory(size: number): this
   /** Sets whether to preserve permissions from archive. */
@@ -466,14 +672,14 @@ export declare class SecurityConfig {
   isPathComponentAllowed(component: string): boolean
   /** Checks if a file extension is allowed. */
   isExtensionAllowed(extension: string): boolean
-  /** Maximum file size in bytes. */
-  get maxFileSize(): number
-  /** Maximum total size in bytes. */
-  get maxTotalSize(): number
+  /** Maximum file size in bytes, or `null` when unbounded. */
+  get maxFileSize(): number | null
+  /** Maximum total size in bytes, or `null` when unbounded. */
+  get maxTotalSize(): number | null
   /** Maximum compression ratio. */
   get maxCompressionRatio(): number
-  /** Maximum file count. */
-  get maxFileCount(): number
+  /** Maximum file count, or `null` when unbounded. */
+  get maxFileCount(): number | null
   /** Maximum path depth. */
   get maxPathDepth(): number
   /** Whether to preserve permissions from archive. */
@@ -502,8 +708,11 @@ export declare class SecurityConfig {
    * `null` when decoding runs on one thread.
    */
   get parallelDecodeMemory(): number | null
-  /** Maximum memory in bytes for decompressing a solid 7z block. */
-  get maxSolidBlockMemory(): number
+  /**
+   * Maximum decoded size in bytes of a solid 7z block, or `null` while
+   * solid archives are not allowed.
+   */
+  get maxSolidBlockMemory(): number | null
   /**
    * List of allowed file extensions.
    *
@@ -528,6 +737,32 @@ export declare class SecurityConfig {
   getBannedPathComponentsCount(): number
   /** Checks if a specific component is in the banned list. */
   hasBannedPathComponent(component: string): boolean
+}
+
+/**
+ * Options for extraction into memory or into a callback.
+ *
+ * A sink has no directory to rename, so unlike `ExtractionOptions` there is
+ * no `atomic` setting: only the duplicate policy carries over.
+ *
+ * # Defaults
+ *
+ * | Setting | Default Value |
+ * |---------|--------------|
+ * | `skipDuplicates` | `true` |
+ */
+export declare class SinkOptions {
+  /** Creates a new `SinkOptions` with defaults. */
+  constructor()
+  /**
+   * Sets whether duplicate archive entries are skipped silently.
+   *
+   * When `true` (default), a duplicate entry is skipped and counted. When
+   * `false`, a duplicate entry causes an error.
+   */
+  setSkipDuplicates(skip: boolean): this
+  /** Whether duplicate entries are skipped silently. */
+  get skipDuplicates(): boolean
 }
 
 /**
@@ -571,34 +806,6 @@ export declare class VerificationOptions {
 }
 
 /**
- * Single entry in archive manifest.
- *
- * Contains metadata about a file, directory, symlink, or hardlink
- * without extracting it to disk.
- */
-export interface ArchiveEntry {
-  /** Entry path (relative, as stored in archive). */
-  path: string
-  /** Entry type. */
-  entryType: ManifestEntryType
-  /** Uncompressed size in bytes (0 for directories). */
-  size: number
-  /** Compressed size in bytes (if the format reports one). */
-  compressedSize?: number
-  /** File permissions (Unix mode). */
-  mode?: number
-  /** Modification time (milliseconds since Unix epoch). */
-  modified?: number
-  /**
-   * Symlink target (if `entry_type` is "Symlink"). Not set for a 7z
-   * symlink: listing does not decode 7z entry data to read it.
-   */
-  symlinkTarget?: string
-  /** Hardlink target (if `entry_type` is "Hardlink"). */
-  hardlinkTarget?: string
-}
-
-/**
  * Complete manifest of archive contents.
  *
  * Generated by `listArchive()`, contains metadata about all entries
@@ -622,7 +829,7 @@ export type ArchiveType = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'archive_path' | 'output_directory' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_archive' | 'zip_output_writer' | 'max_bytes'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind'
 
 /**
  * Create an archive from source files and directories (async).
@@ -654,7 +861,7 @@ export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count
  * const report = await createArchive('output.tar.gz', ['src/'], config);
  * ```
  */
-export declare function createArchive(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null): Promise<CreationReport>
+export declare function createArchive(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, options?: CreateOptions | undefined | null): Promise<CreationReport>
 
 /**
  * Create an archive from source files and directories (sync).
@@ -685,7 +892,7 @@ export declare function createArchive(outputPath: string, sources: Array<string>
  * console.log(`Created archive with ${report.filesAdded} files`);
  * ```
  */
-export declare function createArchiveSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null): CreationReport
+export declare function createArchiveSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, options?: CreateOptions | undefined | null): CreationReport
 
 /**
  * Create an archive from source files and directories into memory (async).
@@ -752,7 +959,8 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * function calling convention: `err` is always `null`, the entry data
  * arrives as a single array argument) where:
  * - `path` — entry path being added to the archive
- * - `total` — total number of entries as `number`
+ * - `total` — total number of entries as `number`, or `null` while the count
+ *   is not known
  * - `current` — 1-based index of the current entry as `number`
  * - `bytesWritten` — always `0`. The callback only fires from the entry-start
  *   event, which resets the running per-entry byte counter immediately before
@@ -762,13 +970,21 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * Creation runs on the tokio blocking thread pool. The progress callback is
  * dispatched back to the JavaScript thread via a threadsafe function.
  *
+ * A callback that throws cancels the creation: nothing is published and a
+ * previous output stays untouched, and the promise rejects with
+ * `PROGRESS_CALLBACK_ERROR` and the throw as `cause`. Cancellation is noticed
+ * at the start of the next entry, so a failure of the entry whose callback
+ * threw is an independent core error and wins (the throw is then its
+ * `cause`).
+ *
  * # Arguments
  *
  * * `output_path` - Path to output archive file
  * * `sources` - Array of source files/directories to include
  * * `config` - Optional `CreationConfig` (uses defaults if omitted)
  * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
- *   string, total: number, current: number, bytesWritten: number]) => void`
+ *   string, total: number | null, current: number, bytesWritten: number]) =>
+ *   void`
  *
  * # Returns
  *
@@ -823,7 +1039,7 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * console.log(`Created archive with ${report.filesAdded} files`);
  * ```
  */
-export declare function createArchiveWithProgress(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<CreationReport>
+export declare function createArchiveWithProgress(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, options?: CreateOptions | undefined | null): Promise<CreationReport>
 
 /**
  * Create an archive from source files and directories with a progress
@@ -852,7 +1068,9 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * `uncaughtException` on the turn that delivered the call, observable via
  * `process.on('uncaughtException', ...)`. It is never merged into a
  * `PROGRESS_CALLBACK_ERROR` result the way `createArchiveWithProgress` merges
- * it, and it cannot be caught by wrapping this call in `try`/`catch`.
+ * it, and it cannot be caught by wrapping this call in `try`/`catch`. For the
+ * same reason a throw cannot cancel the creation (`createArchiveWithProgress`
+ * does): the archive is already written and committed when the callback runs.
  *
  * The primitive-throw crash documented on `createArchiveWithProgress` does
  * **not** apply here: that defect lives in the await-the-result dispatch path,
@@ -867,9 +1085,10 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * * `sources` - Array of source files/directories to include
  * * `config` - Optional `CreationConfig` (uses defaults if omitted)
  * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
- *   string, total: number, current: number, bytesWritten: number]) => void`.
- *   See the sections above: calls arrive only after this function returns, and
- *   a throw becomes an `uncaughtException` rather than an error from here.
+ *   string, total: number | null, current: number, bytesWritten: number]) =>
+ *   void`. See the sections above: calls arrive only after this function
+ *   returns, and a throw becomes an `uncaughtException` rather than an error
+ *   from here.
  *
  * # Returns
  *
@@ -895,7 +1114,7 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * console.log(`Created archive with ${report.filesAdded} files`);
  * ```
  */
-export declare function createArchiveWithProgressSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): CreationReport
+export declare function createArchiveWithProgressSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, options?: CreateOptions | undefined | null): CreationReport
 
 /** An archive created in memory. */
 export interface CreatedArchive {
@@ -903,6 +1122,25 @@ export interface CreatedArchive {
   data: Uint8Array
   /** Creation statistics. */
   report: CreationReport
+}
+
+/**
+ * Options of `createArchive` and its variants.
+ *
+ * `overwrite` follows the same default as the Python binding: `true`
+ * replaces an existing output when creation succeeds (a failed creation
+ * leaves the previous output untouched); `false` refuses an existing output
+ * with `OUTPUT_EXISTS`.
+ */
+export interface CreateOptions {
+  /**
+   * The archive format, instead of the one the output extension names (how
+   * a `.apk` or `.whl` is written as a plain ZIP). `'SevenZ'` cannot be
+   * created.
+   */
+  format?: ArchiveType
+  /** Whether an existing output may be replaced. Defaults to `true`. */
+  overwrite?: boolean
 }
 
 /**
@@ -923,11 +1161,19 @@ export interface CreationReport {
   bytesCompressed: number
   /** Duration of the creation operation in milliseconds. */
   durationMs: number
-  /** Number of files skipped (due to filters or errors). */
+  /**
+   * Number of entries skipped, over all reasons (filters, size limit,
+   * unreadable entries, unsupported symlinks).
+   */
   filesSkipped: number
+  /** The skipped entries by reason. */
+  skipped: SkippedSummary
   /** Warnings generated during creation. */
   warnings: Array<string>
 }
+
+/** The `kind` of a [`MemoryDirectoryEntry`]. */
+export type DirectoryKind = 'directory'
 
 /**
  * Value of the `code` property on errors surfaced to JavaScript.
@@ -995,8 +1241,10 @@ export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' 
  *   Changing the setting removes that refusal only; the entry can still fail a
  *   later check. `windows_reserved_names` and `max_tar_metadata_bytes` have no
  *   setter in this binding (Rust API only).
- * - `subCode`: the family of an `INVALID_ARCHIVE` or `SECURITY_VIOLATION`
- *   refusal, when it has one.
+ * - `subCode`: the finer classification of an `INVALID_ARCHIVE` (when it has
+ *   one), the family of every `SECURITY_VIOLATION`, the quota of every
+ *   `QUOTA_EXCEEDED` and the scope of every `ZIP_BOMB`.
+ * - `ioKind`: the kind of an `IO_ERROR`, such as `NotFound`.
  * - `setting`: set on an `INVALID_CONFIGURATION` that names the refused
  *   setting or input, as a `snake_case` id such as `max_file_count`.
  * - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
@@ -1090,7 +1338,7 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  *   and closed (`return()`) however the call ends
  * * `onEntry` - Called with each entry; may return a promise
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
- * * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+ * * `options` - Optional `SinkOptions`
  * * `pathModel` - `'host'` (default) or `'portable'`
  * * `format` - The archive format; detected from the leading bytes if omitted
  * * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
@@ -1124,7 +1372,7 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * });
  * ```
  */
-export declare function extractArchiveToCallback(data: Uint8Array | AsyncIterable<Uint8Array>, onEntry: (entry: MemoryEntry) => void | Promise<void>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ExtractionReport>
+export declare function extractArchiveToCallback(data: Uint8Array | AsyncIterable<Uint8Array>, onEntry: (entry: MemoryEntry) => void | Promise<void>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ExtractionReport>
 
 /**
  * Extract an archive held in memory, handing every verified entry to a
@@ -1156,7 +1404,7 @@ export declare function extractArchiveToCallback(data: Uint8Array | AsyncIterabl
  * extractArchiveToCallbackSync(fs.readFileSync('a.zip'), (entry) => names.push(entry.path));
  * ```
  */
-export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: (entry: MemoryEntry) => void, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): ExtractionReport
+export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: (entry: MemoryEntry) => void, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): ExtractionReport
 
 /**
  * Extract an archive held in memory into memory (async).
@@ -1170,7 +1418,7 @@ export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: 
  *   `AsyncIterable<Uint8Array>` (TAR family only), read from a worker thread
  *   and closed (`return()`) however the call ends
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
- * * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+ * * `options` - Optional `SinkOptions`
  * * `maxBytes` - The most bytes to keep: payload (file data, hardlink copies
  *   and symlink targets) plus path bytes plus 256 per entry; defaults to the
  *   config's `maxTotalSize`
@@ -1200,7 +1448,7 @@ export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: 
  * const { entries } = await extractArchiveToMemory(fs.readFileSync('a.tar.gz'));
  * ```
  */
-export declare function extractArchiveToMemory(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
+export declare function extractArchiveToMemory(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
 
 /**
  * Extract an archive held in memory into memory (sync).
@@ -1226,7 +1474,7 @@ export declare function extractArchiveToMemory(data: Uint8Array | AsyncIterable<
  * const { entries } = extractArchiveToMemorySync(fs.readFileSync('a.zip'));
  * ```
  */
-export declare function extractArchiveToMemorySync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): MemoryExtraction
+export declare function extractArchiveToMemorySync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): MemoryExtraction
 
 /**
  * Extract an archive held in memory into memory with a progress callback
@@ -1253,7 +1501,7 @@ export declare function extractArchiveToMemorySync(data: Uint8Array, config?: Se
  * still completes:
  *
  * - When extraction succeeded, the promise rejects with
- *   `PROGRESS_CALLBACK_ERROR`, the throw as `cause`, and the report counters;
+ *   `PROGRESS_CALLBACK_ERROR`, the throw as `cause` and `writes: 'discarded'`;
  *   the extracted entries are discarded, as nothing was written to disk.
  * - When extraction failed, the core error keeps its `code` and the throw is
  *   attached as `cause`.
@@ -1268,7 +1516,7 @@ export declare function extractArchiveToMemorySync(data: Uint8Array, config?: Se
  * );
  * ```
  */
-export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
+export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
 
 /**
  * Extract an archive held in memory into memory with a progress callback
@@ -1304,7 +1552,7 @@ export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | As
  * );
  * ```
  */
-export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): MemoryExtraction
+export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): MemoryExtraction
 
 /**
  * Extract an archive to the specified directory with a progress callback
@@ -1333,7 +1581,8 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `options` - Optional `ExtractionOptions` (uses defaults if omitted)
  * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
- *   string, total: number, current: number, bytesWritten: number]) => void`
+ *   string, total: number | null, current: number, bytesWritten: number]) =>
+ *   void`
  *
  * # Returns
  *
@@ -1401,7 +1650,7 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * console.log(`Extracted ${report.filesExtracted} files`);
  * ```
  */
-export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<ExtractionReport>
+export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): Promise<ExtractionReport>
 
 /**
  * Report of an archive extraction operation.
@@ -1419,11 +1668,22 @@ export interface ExtractionReport {
   bytesWritten: number
   /** Extraction duration in milliseconds. */
   durationMs: number
-  /** Number of files skipped due to security checks. */
+  /** Number of entries skipped, over all reasons. */
   filesSkipped: number
-  /** List of warning messages. */
+  /** The skipped entries by reason. */
+  skipped: SkippedSummary
+  /**
+   * Descriptions of conditions worth surfacing that are not skipped
+   * entries.
+   */
   warnings: Array<string>
 }
+
+/** The `kind` of a [`MemoryFileEntry`]. */
+export type FileKind = 'file'
+
+/** The `kind` of a [`MemoryHardlinkEntry`]. */
+export type HardlinkKind = 'hardlink'
 
 /** What a requested integrity check left unverified. */
 export interface IntegrityGaps {
@@ -1439,13 +1699,29 @@ export interface IntegrityGaps {
 export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
 
 /** Value of the `subCode` property of an `INVALID_ARCHIVE` error. */
-export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER' | 'LINK_TARGET' | 'DUPLICATE_ENTRY' | 'ENTRY_NAME' | 'DECLARED_SIZE' | 'INTEGRITY' | 'ZIP_READER'
+export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER' | 'LINK_TARGET' | 'DUPLICATE_ENTRY' | 'ENTRY_NAME' | 'DECLARED_SIZE' | 'INTEGRITY' | 'ZIP_READER' | 'TAR_READER' | 'SEVENZ_READER'
+
+/**
+ * Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
+ * core reported, so a caller can tell "not found" from "permission denied"
+ * without parsing the message.
+ *
+ * A kind with no entry here, and `ErrorKind::Other`, is `Other`.
+ */
+export type IoKind = 'NotFound' | 'PermissionDenied' | 'AlreadyExists' | 'NotADirectory' | 'IsADirectory' | 'DirectoryNotEmpty' | 'ReadOnlyFilesystem' | 'StorageFull' | 'QuotaExceeded' | 'FileTooLarge' | 'InvalidInput' | 'InvalidData' | 'InvalidFilename' | 'TimedOut' | 'Interrupted' | 'UnexpectedEof' | 'WriteZero' | 'Unsupported' | 'CrossesDevices' | 'TooManyLinks' | 'ResourceBusy' | 'BrokenPipe' | 'OutOfMemory' | 'WouldBlock' | 'Other'
 
 /** Issue category. */
 export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete' | 'Header Mismatch' | 'Duplicate Entry' | 'Overlapping Entries' | 'Hidden Entry' | 'Name Collision' | 'Archive Note'
 
 /** Issue severity. */
 export type IssueSeverity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+
+/**
+ * How a link target is recorded.
+ *
+ * Values must equal the `state` of the matching target interface.
+ */
+export type LinkTargetState = 'recorded' | 'missing' | 'unread' | 'unreadable' | 'oversized'
 
 /**
  * List archive contents without extracting (async).
@@ -1575,7 +1851,7 @@ export declare function listArchiveBytesSync(data: Uint8Array, config?: Security
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory with a progress callback
@@ -1612,7 +1888,7 @@ export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIte
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): ArchiveManifest
+export declare function listArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): ArchiveManifest
 
 /**
  * List archive contents without extracting (sync).
@@ -1645,42 +1921,146 @@ export declare function listArchiveBytesWithProgressSync(data: Uint8Array, confi
  */
 export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null): ArchiveManifest
 
+/** A directory in a listing. */
+export interface ManifestDirectoryEntry {
+  /** Entry path (relative, as stored in archive). */
+  path: string
+  /** Always `'Directory'`. */
+  entryType: 'Directory'
+  /** Compressed size in bytes (if the format reports one). */
+  compressedSize?: number
+  /** File permissions (raw Unix mode). */
+  mode?: number
+  /** Modification time (milliseconds since Unix epoch). */
+  modified?: number
+}
+
 /** Manifest entry type. */
 export type ManifestEntryType = 'File' | 'Directory' | 'Symlink' | 'Hardlink'
 
-/** An entry extracted into memory. */
-export interface MemoryEntry {
-  /** Entry path, relative, as delivered by extraction. */
+/** A regular file in a listing. */
+export interface ManifestFileEntry {
+  /** Entry path (relative, as stored in archive). */
   path: string
-  /** What the entry is. */
-  kind: MemoryEntryKind
-  /**
-   * The file's bytes as a `Uint8Array` (a plain `Uint8Array`, not a
-   * `Buffer`; input parameters accept both); only for a file.
-   */
-  data?: Uint8Array
-  /**
-   * Permission bits after setuid and setgid were stripped; only for a file
-   * whose archive carries a mode.
-   */
+  /** Always `'File'`. */
+  entryType: 'File'
+  /** Uncompressed size in bytes. */
+  size: number
+  /** Compressed size in bytes (if the format reports one). */
+  compressedSize?: number
+  /** File permissions (raw Unix mode). */
   mode?: number
-  /**
-   * For a symlink, the target as the archive spells it, relative to the
-   * link; for a hardlink, the root-relative resolved path of an already
-   * delivered entry, a file or an earlier hardlink. Absent for other kinds.
-   */
-  target?: string
+  /** Modification time (milliseconds since Unix epoch). */
+  modified?: number
 }
 
-/** What a `MemoryEntry` holds. */
-export type MemoryEntryKind = 'file' | 'directory' | 'symlink' | 'hardlink'
+/** A hard link in a listing. */
+export interface ManifestHardlinkEntry {
+  /** Entry path (relative, as stored in archive). */
+  path: string
+  /** Always `'Hardlink'`. */
+  entryType: 'Hardlink'
+  /** Compressed size in bytes (if the format reports one). */
+  compressedSize?: number
+  /** File permissions (raw Unix mode). */
+  mode?: number
+  /** Modification time (milliseconds since Unix epoch). */
+  modified?: number
+  /** The link target. */
+  target: LinkTarget
+}
+
+/** A symbolic link in a listing. */
+export interface ManifestSymlinkEntry {
+  /** Entry path (relative, as stored in archive). */
+  path: string
+  /** Always `'Symlink'`. */
+  entryType: 'Symlink'
+  /** Compressed size in bytes (if the format reports one). */
+  compressedSize?: number
+  /** File permissions (raw Unix mode). */
+  mode?: number
+  /** Modification time (milliseconds since Unix epoch). */
+  modified?: number
+  /**
+   * The link target. A 7z target is `'unread'`: listing does not decode 7z
+   * entry data to read it.
+   */
+  target: LinkTarget
+}
+
+/** A directory the archive names explicitly. */
+export interface MemoryDirectoryEntry {
+  /** Entry path, relative, as delivered by extraction. */
+  path: string
+  /** Always `'directory'`. */
+  kind: DirectoryKind
+}
 
 /** The result of `extractArchiveToMemory`. */
 export interface MemoryExtraction {
   /** Extraction statistics. */
   report: ExtractionReport
   /** The extracted entries in path order. */
-  entries: Array<MemoryEntry>
+  entries: Array<StoredMemoryEntry>
+}
+
+/** A regular file extracted into memory. */
+export interface MemoryFileEntry {
+  /** Entry path, relative, as delivered by extraction. */
+  path: string
+  /** Always `'file'`. */
+  kind: FileKind
+  /**
+   * The file's bytes as a `Uint8Array` (a plain `Uint8Array`, not a
+   * `Buffer`; input parameters accept both).
+   */
+  data: Uint8Array
+  /**
+   * Permission bits after setuid and setgid were stripped; absent when the
+   * archive carries no mode.
+   */
+  mode?: number
+}
+
+/**
+ * A hard link delivered by reference; only `extractArchiveToCallback`
+ * delivers it.
+ */
+export interface MemoryHardlinkEntry {
+  /** Entry path, relative, as delivered by extraction. */
+  path: string
+  /** Always `'hardlink'`. */
+  kind: HardlinkKind
+  /**
+   * The root-relative resolved path of an already delivered entry, a file
+   * or an earlier hardlink.
+   */
+  target: string
+}
+
+/** A symbolic link extracted into memory as data. */
+export interface MemorySymlinkEntry {
+  /** Entry path, relative, as delivered by extraction. */
+  path: string
+  /** Always `'symlink'`. */
+  kind: SymlinkKind
+  /** The target as the archive spells it, relative to the link. */
+  target: string
+}
+
+/** A link whose archive stores no target. */
+export interface MissingLinkTarget {
+  /** Always `'missing'`. */
+  state: 'missing'
+}
+
+/** A link target above the host's name limits. */
+export interface OversizedLinkTarget {
+  /** Always `'oversized'`. */
+  state: 'oversized'
+  /** Length of the stored target in bytes. */
+  bytes: number
 }
 
 /**
@@ -1698,8 +2078,72 @@ export type PathModel = 'host' | 'portable'
  */
 export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes'
 
+/**
+ * Value of the `subCode` property of a `QUOTA_EXCEEDED` error: the quota
+ * that was exceeded.
+ */
+export type QuotaSubCode = 'FILE_COUNT' | 'TOTAL_SIZE' | 'FILE_SIZE' | 'INTEGER_OVERFLOW' | 'DECODER_MEMORY' | 'COMPRESSED_MEMBERS' | 'TREE_NODES' | 'SINK_CAPACITY' | 'SOLID_BLOCK_MEMORY'
+
+/** A link target the archive stores. */
+export interface RecordedLinkTarget {
+  /** Always `'recorded'`. */
+  state: 'recorded'
+  /** The target as the archive spells it. */
+  path: string
+}
+
 /** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
 export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH'
+
+/** How many entries were skipped for one reason. */
+export interface SkipCount {
+  /** Why the entries were skipped. */
+  kind: SkipKind
+  /** How many entries, saturated at `2^32 - 1`. */
+  count: number
+}
+
+/** Why an entry was left out of an extraction or a creation. */
+export type SkipKind = 'duplicate' | 'extension_not_allowed' | 'excluded' | 'hidden' | 'over_max_file_size' | 'symlink_unsupported' | 'unreadable'
+
+/** One skipped entry. */
+export interface SkippedEntry {
+  /**
+   * The entry path as the operation names it, rendered injectively: a
+   * backslash is `\x5C` and each invalid byte is `\xNN`.
+   */
+  path: string
+  /** Why the entry was skipped. */
+  kind: SkipKind
+  /** The I/O failure behind an `'unreadable'` skip. */
+  ioKind?: IoKind
+}
+
+/**
+ * Everything an operation left out: exact counts per reason plus a bounded
+ * sample of the individual entries.
+ */
+export interface SkippedSummary {
+  /** Exact count per reason; reasons with no skip are absent. */
+  counts: Array<SkipCount>
+  /** The first skipped entries in the order they were skipped, at most 64. */
+  sample: Array<SkippedEntry>
+}
+
+/** The `kind` of a [`MemorySymlinkEntry`]. */
+export type SymlinkKind = 'symlink'
+
+/** A link target that could not be read. */
+export interface UnreadableLinkTarget {
+  /** Always `'unreadable'`. */
+  state: 'unreadable'
+}
+
+/** A link target that was not read. */
+export interface UnreadLinkTarget {
+  /** Always `'unread'`. */
+  state: 'unread'
+}
 
 /** Number of items left unverified for one reason. */
 export interface UnverifiedCount {
@@ -1720,18 +2164,42 @@ export interface UnverifiedEntry {
 /** Why part of the payload was not verified by the integrity check. */
 export type UnverifiedReason = 'over_budget' | 'resource_limit' | 'solid_policy' | 'size_ceiling' | 'uncovered_block_crc' | 'not_decodable' | 'no_end_marker' | 'path_too_long' | 'descriptor_tail'
 
-/** Single verification issue. */
-export interface VerificationIssue {
+/**
+ * Single verification issue.
+ *
+ * `code`, `subCode`, `relaxableBy`, `setting` and `ioKind` are those of the
+ * error a failed extraction would raise for the same finding, and pair as
+ * they do on an error (`VerificationIssue` in `index.d.ts` is this object
+ * intersected with the per-code pairing); a heuristic finding carries none.
+ */
+export interface VerificationIssueFields {
   /** Issue severity level. */
   severity: IssueSeverity
   /** Issue category. */
   category: IssueCategory
-  /** Entry path that triggered issue (if applicable). */
+  /**
+   * Entry path that triggered issue (if applicable); a path that is not
+   * valid UTF-8 or contains a backslash is rendered injectively: a backslash
+   * is `\x5C` and each invalid byte is `\xNN`.
+   */
   entryPath?: string
   /** Human-readable description. */
   message: string
-  /** Optional context (compression ratio, target path, etc.). */
-  context?: string
+  /** The `ErrorCode` extraction would fail with, for a refusal. */
+  code?: ErrorCode
+  /** Finer classification of the refusal. */
+  subCode?: InvalidArchiveSubCode | SecurityViolationSubCode | QuotaSubCode | ZipBombSubCode
+  /** The `SecurityConfig` setting that relaxes the refusal. */
+  relaxableBy?: PolicySetting
+  /** The configuration setting an `INVALID_CONFIGURATION` refusal names. */
+  setting?: ConfigSetting
+  /** The kind of an `IO_ERROR` refusal. */
+  ioKind?: IoKind
+  /**
+   * The permission bits (raw archive mode) of an `'Invalid Permissions'`
+   * refusal or of an `'Executable File'` finding.
+   */
+  mode?: number
 }
 
 /**
@@ -1899,7 +2367,7 @@ export declare function verifyArchiveBytesSync(data: Uint8Array, config?: Securi
  * );
  * ```
  */
-export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<VerificationReport>
+export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory with a progress callback
@@ -1937,7 +2405,7 @@ export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncI
  * );
  * ```
  */
-export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): VerificationReport
+export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): VerificationReport
 
 /**
  * Verify archive security (sync).
@@ -1970,6 +2438,12 @@ export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, con
  * ```
  */
 export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): VerificationReport
+
+/**
+ * Value of the `subCode` property of a `ZIP_BOMB` error: what the refused
+ * ratio was measured over.
+ */
+export type ZipBombSubCode = 'ENTRY' | 'SOLID_BLOCK' | 'SKIPPED_ENTRIES'
 
 /**
  * How ZIP archives with ambiguous structure are handled.

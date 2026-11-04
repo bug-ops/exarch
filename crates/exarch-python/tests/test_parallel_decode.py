@@ -23,8 +23,10 @@ def test_builder_setter_and_none():
 
 
 @pytest.mark.parametrize("value", [0, -1, 2**70])
-def test_non_positive_and_oversized_are_value_errors(value):
-    with pytest.raises(ValueError, match="parallel_decode_memory must be positive"):
+def test_non_positive_and_oversized_are_configuration_errors(value):
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
         exarch.SecurityConfig().with_parallel_decode_memory(value)
-    with pytest.raises(ValueError, match="parallel_decode_memory must be positive"):
+    assert info.value.setting == "parallel_decode_memory"
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
         exarch.SecurityConfig().parallel_decode_memory = value
+    assert info.value.setting == "parallel_decode_memory"

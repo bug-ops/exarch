@@ -84,10 +84,10 @@ fn assert_refused_everywhere(archive: &Path) {
 
     let out = TempDir::new().unwrap();
     let error = extract_archive(archive, out.path(), &config).unwrap_err();
-    let ArchiveError::PartialExtraction { source, .. } = &error else {
+    let ArchiveError::PartialExtraction(partial) = &error else {
         panic!("expected PartialExtraction, got {error:?}");
     };
-    assert_invalid_archive(source);
+    assert_invalid_archive(partial.cause());
     assert!(out.path().join("ok.txt").is_file());
     assert!(!out.path().join("a").join("b").exists());
     assert!(!out.path().join("z.txt").exists());

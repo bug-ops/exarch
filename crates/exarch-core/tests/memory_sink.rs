@@ -26,9 +26,9 @@ use exarch_core::PathModel;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
 use exarch_core::extract_reader_to_memory;
-use exarch_core::extract_to_sink;
 use sink_support::tar_archive;
 use sink_support::tar_dir;
 use sink_support::tar_entry_mode;
@@ -63,17 +63,17 @@ fn run_tar(
     config: &SecurityConfig,
     options: SinkOptions,
 ) -> Result<ExtractionReport, ArchiveError> {
-    extract_to_sink(
-        ArchiveReader::tar(Cursor::new(tar_archive(entries)), None),
-        sink,
-        config,
-        &options,
-    )
+    SinkExtractRequest::new(config)
+        .with_options(options)
+        .extract(
+            ArchiveReader::tar(Cursor::new(tar_archive(entries)), None),
+            sink,
+        )
 }
 
 fn sink_capacity(error: &ArchiveError) -> Option<u64> {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => sink_capacity(source),
+        ArchiveError::PartialExtraction(partial) => sink_capacity(partial.cause()),
         ArchiveError::QuotaExceeded {
             resource: QuotaResource::SinkCapacity { max },
         } => Some(*max),
@@ -131,13 +131,13 @@ fn a_tar_round_trips_files_directories_and_links() {
 fn a_zip_round_trips() {
     let mut sink = MemorySink::default();
     let bytes = zip_archive(vec![zip_dir("d/"), zip_file("d/a.txt", b"alpha")]);
-    extract_to_sink(
-        ArchiveReader::seekable(Cursor::new(bytes), SeekableFormat::Zip),
-        &mut sink,
-        &SecurityConfig::default(),
-        &SinkOptions::default(),
-    )
-    .unwrap();
+    SinkExtractRequest::new(&SecurityConfig::default())
+        .with_options(SinkOptions::default())
+        .extract(
+            ArchiveReader::seekable(Cursor::new(bytes), SeekableFormat::Zip),
+            &mut sink,
+        )
+        .unwrap();
     assert_eq!(file_bytes(&sink, "d/a.txt"), b"alpha");
     assert_eq!(sink.iter().count(), 2);
 }
@@ -172,7 +172,7 @@ fn exceeding_the_limit_is_a_typed_quota_error_and_wraps_after_delivery() {
     )
     .unwrap_err();
 
-    assert_matches!(error, ArchiveError::PartialExtraction { .. });
+    assert_matches!(error, ArchiveError::PartialExtraction(_));
     assert_eq!(sink_capacity(&error), Some(one + 10), "{error:?}");
     assert_eq!(file_bytes(&sink, "a"), b"12345");
     assert!(sink.get(Path::new("b")).is_none());
@@ -397,12 +397,9 @@ fn a_failed_file_publishes_nothing() {
     header.set_cksum();
     let mut truncated = header.as_bytes().to_vec();
     truncated.extend_from_slice(&[9; 10]);
-    let result = extract_to_sink(
-        ArchiveReader::tar(Cursor::new(truncated), None),
-        &mut sink,
-        &SecurityConfig::default(),
-        &SinkOptions::default(),
-    );
+    let result = SinkExtractRequest::new(&SecurityConfig::default())
+        .with_options(SinkOptions::default())
+        .extract(ArchiveReader::tar(Cursor::new(truncated), None), &mut sink);
     assert!(result.is_err());
     assert!(sink.get(Path::new("t")).is_none());
     assert_eq!(sink.stored_bytes(), 0);
@@ -446,11 +443,8 @@ fn extract_reader_to_memory_reports_discarded_writes_after_delivered_entries() {
     .unwrap_err();
 
     assert_matches!(
-        error,
-        ArchiveError::PartialExtraction {
-            writes: PartialWrites::Discarded,
-            ..
-        },
+        &error,
+        ArchiveError::PartialExtraction(partial) if partial.writes() == PartialWrites::Discarded,
         "{error:?}"
     );
 }

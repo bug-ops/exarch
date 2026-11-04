@@ -85,9 +85,13 @@ describe('verifyArchive integrity check', () => {
     assert.strictEqual(options.decompressionBudget, 500 * 1024 * 1024);
   });
 
-  it('withIntegrityCheck rejects a zero or negative budget', () => {
-    assert.throws(() => new VerificationOptions().withIntegrityCheck(0));
-    assert.throws(() => new VerificationOptions().withIntegrityCheck(-1));
+  it('withIntegrityCheck rejects a zero, negative or fractional budget by setting', () => {
+    for (const bad of [0, -1, -5, 1.5, NaN]) {
+      assert.throws(() => new VerificationOptions().withIntegrityCheck(bad), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'decompression_budget',
+      });
+    }
   });
 
   it('default verify leaves integrity SKIPPED', async () => {

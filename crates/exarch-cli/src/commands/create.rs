@@ -1,42 +1,31 @@
 //! Create command implementation.
 
 use crate::cli::CreateArgs;
-use crate::error::convert_extraction_error;
+use crate::commands::CommandResult;
+use crate::commands::Outcome;
+use crate::error::convert_error;
+use crate::operation::Operation;
 use crate::output::OutputFormatter;
-use crate::output::Verbosity;
-use crate::progress::CliProgress;
-use anyhow::Context;
-use anyhow::Result;
+use crate::output::OutputMode;
+use crate::progress::BarLength;
+use crate::progress::progress_for;
 use exarch_core::ConfigSetting;
+use exarch_core::CreateRequest;
 use exarch_core::CreationConfig;
+use exarch_core::ExcludePattern;
 use exarch_core::Limit;
-use exarch_core::NoopProgress;
-use exarch_core::create_archive_with_progress;
+use exarch_core::OutputFile;
+use exarch_core::creation::CompressionLevel;
 use std::num::NonZeroU64;
 
 pub fn execute(
     args: &CreateArgs,
     formatter: &mut dyn OutputFormatter,
-    verbosity: Verbosity,
-) -> Result<()> {
-    // Check if output exists
-    if args.output.exists() && !args.force {
-        anyhow::bail!(
-            "Output file already exists: {}. Use --force to overwrite",
-            args.output.display()
-        );
-    }
-
-    // Remove existing file if --force
-    if args.output.exists() && args.force {
-        std::fs::remove_file(&args.output).with_context(|| {
-            format!("Failed to remove existing file: {}", args.output.display())
-        })?;
-    }
-
+    mode: OutputMode,
+) -> CommandResult {
     let max_file_size = match args.max_file_size {
         Some(size) => Limit::<NonZeroU64>::parse(ConfigSetting::MaxFileSize, size)
-            .map_err(|err| convert_extraction_error(err, &args.output))?,
+            .map_err(|err| convert_error(Operation::Create, err, &args.output))?,
         None => Limit::Unbounded,
     };
 
@@ -48,33 +37,40 @@ pub fn execute(
         .with_max_file_size(max_file_size)
         .with_preserve_permissions(args.preserve_permissions);
     if let Some(level) = args.compression_level {
+        let level = CompressionLevel::try_from(level)
+            .map_err(|err| convert_error(Operation::Create, err, &args.output))?;
         config = config.with_compression_level(level);
     }
 
     // Add user exclude patterns to defaults
-    config.exclude_patterns.extend(args.exclude.iter().cloned());
+    for pattern in &args.exclude {
+        let pattern = ExcludePattern::try_from(pattern.as_str())
+            .map_err(|err| convert_error(Operation::Create, err, &args.output))?;
+        config.exclude_patterns.push(pattern);
+    }
 
-    // Create archive with progress if TTY is detected
-    let report = if verbosity != Verbosity::Quiet && CliProgress::should_show() {
-        let mut progress = CliProgress::new(100, "Creating");
-        create_archive_with_progress(&args.output, &args.sources, &config, &mut progress)
-            .with_context(|| format!("Failed to create archive: {}", args.output.display()))?
+    let mut progress = progress_for(mode, BarLength::Discover, Operation::Create);
+    let output = if args.force {
+        OutputFile::replace(&args.output)
     } else {
-        let mut noop = NoopProgress;
-        create_archive_with_progress(&args.output, &args.sources, &config, &mut noop)
-            .with_context(|| format!("Failed to create archive: {}", args.output.display()))?
+        OutputFile::create_new(&args.output)
     };
+    let report = CreateRequest::new(&config)
+        .with_progress(progress.as_mut())
+        .create(&output, &args.sources)?;
 
     formatter.format_creation_result(&args.output, &report)?;
 
-    Ok(())
+    Ok(Outcome::Ok)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::output::ManifestView;
     use crate::output::OutputFormatter;
+    use crate::output::Verbosity;
     use anyhow::Result;
     use exarch_core::ArchiveManifest;
     use exarch_core::CreationReport;
@@ -114,11 +110,7 @@ mod tests {
             Ok(())
         }
 
-        fn format_manifest_short(&mut self, _: &ArchiveManifest) -> Result<()> {
-            Ok(())
-        }
-
-        fn format_manifest_long(&mut self, _: &ArchiveManifest, _: bool) -> Result<()> {
+        fn format_manifest(&mut self, _: &ArchiveManifest, _: ManifestView) -> Result<()> {
             Ok(())
         }
 
@@ -126,7 +118,9 @@ mod tests {
             Ok(())
         }
 
-        fn format_error(&mut self, _: &str, _: &anyhow::Error) {}
+        fn format_error(&mut self, _: Operation, _: &anyhow::Error) {}
+
+        fn format_verification_failed(&mut self) {}
     }
 
     /// `JsonFormatter` always calls `format_creation_result` regardless of
@@ -157,11 +151,7 @@ mod tests {
             Ok(())
         }
 
-        fn format_manifest_short(&mut self, _: &ArchiveManifest) -> Result<()> {
-            Ok(())
-        }
-
-        fn format_manifest_long(&mut self, _: &ArchiveManifest, _: bool) -> Result<()> {
+        fn format_manifest(&mut self, _: &ArchiveManifest, _: ManifestView) -> Result<()> {
             Ok(())
         }
 
@@ -169,7 +159,9 @@ mod tests {
             Ok(())
         }
 
-        fn format_error(&mut self, _: &str, _: &anyhow::Error) {}
+        fn format_error(&mut self, _: Operation, _: &anyhow::Error) {}
+
+        fn format_verification_failed(&mut self) {}
     }
 
     fn make_args(output: PathBuf, source: PathBuf) -> CreateArgs {
@@ -198,7 +190,9 @@ mod tests {
         args.max_file_size = Some(0);
         let mut formatter = SpyFormatter::new(false);
 
-        let err = execute(&args, &mut formatter, Verbosity::Quiet).unwrap_err();
+        let err = execute(&args, &mut formatter, OutputMode::Human(Verbosity::Quiet))
+            .unwrap_err()
+            .contextualize(Operation::Create, &out);
 
         assert!(
             format!("{err:#}").contains("max_file_size must not be zero"),
@@ -220,7 +214,7 @@ mod tests {
         let args = make_args(out, src);
         let mut formatter = AlwaysCallSpyFormatter::new();
 
-        execute(&args, &mut formatter, Verbosity::Quiet).unwrap();
+        execute(&args, &mut formatter, OutputMode::Human(Verbosity::Quiet)).unwrap();
 
         assert!(
             formatter.was_called(),
@@ -238,7 +232,7 @@ mod tests {
         let args = make_args(out, src);
         let mut formatter = AlwaysCallSpyFormatter::new();
 
-        execute(&args, &mut formatter, Verbosity::Normal).unwrap();
+        execute(&args, &mut formatter, OutputMode::Human(Verbosity::Normal)).unwrap();
 
         assert!(formatter.was_called());
     }
@@ -255,7 +249,7 @@ mod tests {
         let args = make_args(out, src);
         let mut formatter = SpyFormatter::new(true);
 
-        execute(&args, &mut formatter, Verbosity::Quiet).unwrap();
+        execute(&args, &mut formatter, OutputMode::Human(Verbosity::Quiet)).unwrap();
 
         assert!(
             !formatter.was_called(),

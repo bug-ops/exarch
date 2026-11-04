@@ -15,6 +15,20 @@ export interface AbortSignalLike {
 }
 
 /**
+ * The value a progress callback receives for each entry: its path, the number
+ * of entries (`null` while it is not known, as for a TAR stream), its 1-based
+ * position and the bytes written for it so far (always `0` at entry start).
+ * The path renders injectively: a backslash is `\x5C` and each byte that is not
+ * valid UTF-8 is `\xNN`, so two distinct entries never share a rendered name.
+ */
+export type ProgressArgs = [
+  path: string,
+  total: number | null,
+  current: number,
+  bytesWritten: number,
+]
+
+/**
  * Properties of an error raised by exarch-core.
  *
  * `message` is the human-readable description only; everything
@@ -24,19 +38,6 @@ export interface AbortSignalLike {
  */
 export interface ExarchErrorBase extends Error {
   code: ErrorCode
-  /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
-  relaxableBy?: PolicySetting
-  /**
-   * Finer classification of an `INVALID_ARCHIVE` (`InvalidArchiveSubCode`)
-   * failure, when it has one, and of every core `SECURITY_VIOLATION`
-   * (`SecurityViolationSubCode`). The interfaces are discriminated by `writes`,
-   * not `code`, so the pairing is not narrowed per code: `INVALID_ARCHIVE`
-   * carries one of the `InvalidArchiveSubCode` values, `SECURITY_VIOLATION` carries
-   * one of the `SecurityViolationSubCode` values.
-   */
-  subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
-  /** The configuration setting or input an `INVALID_CONFIGURATION` error refused. */
-  setting?: ConfigSetting
   /**
    * The exception thrown by a progress callback, an `onEntry` callback or an
    * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
@@ -58,6 +59,7 @@ export interface ExarchErrorPlain extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -68,6 +70,7 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   filesExtracted: number
   bytesWritten: number
   filesSkipped: number
+  skipped: SkippedSummary
   warnings: Array<string>
   filesAdded?: undefined
 }
@@ -79,6 +82,7 @@ export interface ExarchErrorRolledBack extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -93,6 +97,23 @@ export interface ExarchErrorDiscarded extends ExarchErrorBase {
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
+  warnings?: undefined
+  filesAdded?: undefined
+}
+
+/**
+ * A progress callback threw while a listing or a verification succeeded (the
+ * result was discarded), or during a creation (cancelled: nothing was written
+ * and a previous output is untouched).
+ */
+export interface ExarchErrorReadCallback extends ExarchErrorBase {
+  code: 'PROGRESS_CALLBACK_ERROR'
+  writes?: undefined
+  filesExtracted?: undefined
+  bytesWritten?: undefined
+  filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
@@ -103,6 +124,7 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
   writes?: undefined
   filesExtracted?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded: number
   bytesWritten: number
@@ -119,27 +141,197 @@ export interface ExarchNativeError extends Error {
   relaxableBy?: undefined
   subCode?: undefined
   setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
   filesSkipped?: undefined
+  skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
 }
 
-/**
- * Every error exarch rejects or throws with.
- *
- * Promises reject with, and sync functions throw, an object of this shape;
- * narrow an `unknown` catch value with `err as ExarchError`. Discriminate on
- * `writes`; `code` is an `ErrorCode` for every member except
- * `ExarchNativeError`, so a `switch (err.code)` is exhaustive only after
- * excluding it.
- */
-export type ExarchError =
+/** A malformed archive; `subCode` classifies it when core can. */
+export interface ExarchInvalidArchiveDetail {
+  code: 'INVALID_ARCHIVE'
+  subCode?: InvalidArchiveSubCode
+  /**
+   * The path of an `'ENTRY_NAME'` refusal for an entry name that is not valid
+   * UTF-8, written injectively: a backslash is `\x5C` and each invalid byte
+   * `\xNN`, so two distinct names never render alike.
+   */
+  nonUtf8EntryPath?: string
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+}
+
+/** A refusal by policy; core always classifies it and may name the setting that relaxes it. */
+export interface ExarchSecurityViolationDetail {
+  code: 'SECURITY_VIOLATION'
+  subCode: SecurityViolationSubCode
+  relaxableBy?: PolicySetting
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** A rejected setting or input. */
+export interface ExarchInvalidConfigurationDetail {
+  code: 'INVALID_CONFIGURATION'
+  setting?: ConfigSetting
+  subCode?: undefined
+  relaxableBy?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** An I/O failure, with the kind core reported. */
+export interface ExarchIoDetail {
+  code: 'IO_ERROR'
+  ioKind: IoKind
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+}
+
+/** A quota refusal; `subCode` names the quota that was exceeded. */
+export interface ExarchQuotaDetail {
+  code: 'QUOTA_EXCEEDED'
+  subCode: QuotaSubCode
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** A compression ratio refusal; `subCode` names what the ratio was measured over. */
+export interface ExarchZipBombDetail {
+  code: 'ZIP_BOMB'
+  subCode: ZipBombSubCode
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** Every other code carries no detail property. */
+export interface ExarchPlainCodeDetail {
+  code: Exclude<
+    ErrorCode,
+    | 'INVALID_ARCHIVE'
+    | 'SECURITY_VIOLATION'
+    | 'INVALID_CONFIGURATION'
+    | 'IO_ERROR'
+    | 'QUOTA_EXCEEDED'
+    | 'ZIP_BOMB'
+  >
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/** The pairing of a `code` with the properties it can carry. */
+export type ExarchErrorCodeDetail =
+  | ExarchInvalidArchiveDetail
+  | ExarchSecurityViolationDetail
+  | ExarchInvalidConfigurationDetail
+  | ExarchIoDetail
+  | ExarchQuotaDetail
+  | ExarchZipBombDetail
+  | ExarchPlainCodeDetail
+
+/** The partial-extraction shapes, discriminated by `writes`. */
+export type ExarchErrorOutcome =
   | ExarchErrorPlain
   | ExarchErrorWritesKept
   | ExarchErrorRolledBack
   | ExarchErrorDiscarded
   | ExarchErrorCreationCallback
-  | ExarchNativeError
+  | ExarchErrorReadCallback
+
+/**
+ * An error raised by exarch-core or by one of the binding's callbacks.
+ *
+ * Discriminate on `writes` for the partial-extraction outcome and on `code`
+ * for the detail properties: `code === 'INVALID_ARCHIVE'` narrows `subCode` to
+ * `InvalidArchiveSubCode`, `'SECURITY_VIOLATION'` to a required
+ * `SecurityViolationSubCode`, `'INVALID_CONFIGURATION'` exposes `setting` and
+ * `'IO_ERROR'` a required `ioKind`, `'QUOTA_EXCEEDED'` and `'ZIP_BOMB'` a required
+ * `QuotaSubCode` or `ZipBombSubCode`. `code` is an `ErrorCode`, so a
+ * `switch (err.code)` is exhaustive.
+ */
+export type ExarchCoreError = ExarchErrorOutcome & ExarchErrorCodeDetail
+
+/**
+ * Every error exarch rejects or throws with.
+ *
+ * Promises reject with, and sync functions throw, an object of this shape;
+ * narrow an `unknown` catch value with `err as ExarchError`. Its `code` is an
+ * `ErrorCode` for every member except `ExarchNativeError`, whose `code` is a
+ * plain string and which therefore also matches every `code` comparison: to
+ * use the pairings of `ExarchCoreError`, exclude the native member first
+ * (`err as ExarchCoreError` once `err.code` is known to be an `ErrorCode`).
+ */
+export type ExarchError = ExarchCoreError | ExarchNativeError
+
+/**
+ * An entry delivered to an `onEntry` callback. Discriminate on `kind`: a file
+ * always has `data`, a symlink or hardlink always has `target`.
+ */
+export type MemoryEntry =
+  | MemoryFileEntry
+  | MemoryDirectoryEntry
+  | MemorySymlinkEntry
+  | MemoryHardlinkEntry
+
+/**
+ * An entry held in the result of `extractArchiveToMemory`: a `MemoryEntry`
+ * without the hardlink, which only a callback receives.
+ */
+export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
+
+/** What a `MemoryEntry` holds. */
+export type MemoryEntryKind = MemoryEntry['kind']
+
+/**
+ * A link target of a listing, discriminated by `state`: only a `'recorded'`
+ * target has a `path`, and only an `'oversized'` one has `bytes`.
+ */
+export type LinkTarget =
+  | RecordedLinkTarget
+  | MissingLinkTarget
+  | UnreadLinkTarget
+  | UnreadableLinkTarget
+  | OversizedLinkTarget
+
+/**
+ * One entry of a listing, discriminated by `entryType`: only a file has a
+ * `size`, only a link has a `target`.
+ */
+export type ArchiveEntry =
+  | ManifestFileEntry
+  | ManifestDirectoryEntry
+  | ManifestSymlinkEntry
+  | ManifestHardlinkEntry
+
+/** The detail of a verification finding that is a heuristic, not a refusal. */
+export interface HeuristicIssueDetail {
+  code?: undefined
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
+/**
+ * A verification finding. A refusal carries the `code` and the properties the
+ * error extraction would raise has for it, paired as on `ExarchCoreError`; a
+ * heuristic carries none of them.
+ */
+export type VerificationIssue = VerificationIssueFields &
+  (ExarchErrorCodeDetail | HeuristicIssueDetail)

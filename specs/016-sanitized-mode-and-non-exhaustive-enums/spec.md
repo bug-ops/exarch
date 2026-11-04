@@ -9,7 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-09-02
-updated: 2026-10-26
+updated: 2026-11-04
 status: implemented
 related:
   - "[[constitution]]"
@@ -21,6 +21,9 @@ related:
 ---
 
 # Feature: SanitizedMode Newtype and Non-Exhaustive Enum Hardening
+
+> [!note] Revision 2026-11-04 (50-issue batch)
+> `ValidatedEntry` and `ValidatedEntryType` were removed (#900) and `types::EntryType` became crate-private; the sanitized mode now travels in `ValidatedFile`. New enums follow the same rule: `SkipKind`, `Admit`, `ManifestEntryType`, `CheckStatus`, `IssueSeverity` and `VerificationStatus` are closed (`closed_enum`, with `ALL` and a drift test per consumer), while `ExtractionReport`, `CreationReport`, `IoContext`, `ExcludePattern`, `Heuristic`, `OutputPolicy` and `OutputFormat` are `#[non_exhaustive]`; `CallbackError` is deliberately closed (#905, #922, #899, #906, #911).
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / security (`security::permissions`), plus six growth-prone public
@@ -59,7 +62,7 @@ project expects to make routinely pre-1.0.0.
 Make an unsanitized mode reaching permission-setting code a compile error, via a sealed
 `SanitizedMode` newtype constructible only by `sanitize_permissions`. Mark the six growth-prone
 enums `#[non_exhaustive]` so that adding a variant to any of them stops being a breaking change for
-downstream exhaustive matches, consistent with `ValidatedEntryType`'s existing
+downstream exhaustive matches, consistent with the (since removed, #900) `ValidatedEntryType`'s
 `#[non_exhaustive]` attribute.
 
 ### Out of Scope
@@ -120,8 +123,8 @@ THEN the downstream crate's build breaks with "non-exhaustive patterns" only if 
 |----|------------|----------|
 | FR-001 | `security::sanitize_permissions` SHALL return `SanitizedMode` instead of `u32`; `SanitizedMode` SHALL have no public constructor, no `Default` impl, and its single field SHALL be private, so it is assemblable only via `sanitize_permissions` | must |
 | FR-002 | `SanitizedMode` SHALL expose `as_u32(self) -> u32` as the sole accessor for recovering the raw mode value | must |
-| FR-003 | `ValidatedEntry::mode()`, `EntryValidator::validate_entry()`'s sanitized output, and `formats::common::create_file_with_mode`/`extract_file_with_permit` SHALL take `Option<SanitizedMode>` instead of `Option<u32>` | must |
-| FR-004 | `ArchiveError`, `QuotaResource`, `formats::detect::ArchiveType`, `formats::compression::CompressionCodec`, `inspection::report::IssueCategory`, and `types::entry_type::EntryType` SHALL be marked `#[non_exhaustive]` | must |
+| FR-003 | The mode carried by `ValidatedFile` (formerly `ValidatedEntry::mode()` and `EntryValidator::validate_entry()`'s sanitized output, removed in #900), and `formats::common::create_file_with_mode`/`extract_file_with_permit` SHALL take `Option<SanitizedMode>` instead of `Option<u32>` | must |
+| FR-004 | `ArchiveError`, `QuotaResource`, `formats::detect::ArchiveType`, `formats::compression::CompressionCodec`, `inspection::report::IssueCategory`, and `types::entry_type::EntryType` (crate-private since #900) SHALL be marked `#[non_exhaustive]` | must |
 | FR-005 | `creation::walker::EntryType` (`pub(crate)`-only) SHALL NOT be marked `#[non_exhaustive]`, since the attribute has no effect on a type never nameable outside the crate | must |
 | FR-006 | Every internal exhaustive `match` inside `exarch-core` on one of the six newly-`#[non_exhaustive]` enums SHALL continue to compile unchanged — `#[non_exhaustive]` only restricts matching *from outside the defining crate* | must |
 | FR-007 | `exarch-cli`'s `error::convert_extraction_error` and `output::json::extraction_error_kind`, and `exarch-node`'s and `exarch-python`'s `convert_error` functions, SHALL add a wildcard arm (`_ =>`) to every `match` on `ArchiveError`/`QuotaResource` that previously matched exhaustively, mapping an unrecognized future variant to a generic fallback message rather than failing to compile | must |
@@ -150,7 +153,7 @@ THEN the downstream crate's build breaks with "non-exhaustive patterns" only if 
 > [!note] v0.7.0: the pattern extends to new public enums
 > Enums added in v0.7.0 are `#[non_exhaustive]` from the start: `PolicySetting`, `ZipBombScope`,
 > `PartialWrites` (a `Discarded` variant was added in v0.8.0, #800, #808), `ZipConsistencyPolicy`, `ParallelDecode`, `StoredTargets` and `IntegrityCheck`;
-> `ValidatedEntryType::Hardlink` and `SecurityViolation` are `#[non_exhaustive]` variants (#652, #671, #688, #757).
+> `SecurityViolation` (and, until #900, `ValidatedEntryType::Hardlink`) are `#[non_exhaustive]` variants (#652, #671, #688, #757).
 > v0.8.0 adds `FfiKind`, `ErrorCode`, `PartialOutcome`, `ReaderFormatError`, `PathModel`, `CreatableFormat`, `SeekableFormat`, `MemoryEntryKind` and `SinkOptions` as `#[non_exhaustive]` from the start, and `ArchiveError::ReaderFormat` and `QuotaResource::{TreeNodes, SinkCapacity}` as new variants of existing `#[non_exhaustive]` types (#768, #787, #808).
 
 ## 6. Edge Cases and Error Handling

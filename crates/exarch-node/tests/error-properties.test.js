@@ -128,10 +128,12 @@ describe('extraction error properties', () => {
     const config = new SecurityConfig().setMaxFileCount(1);
     await assert.rejects(extractArchive(archivePath, path.join(tempDir, 'out'), config), (err) => {
       assert.strictEqual(err.code, 'QUOTA_EXCEEDED');
+      assert.strictEqual(err.subCode, 'FILE_COUNT');
       assert.strictEqual(err.writes, 'kept');
       assert.strictEqual(typeof err.filesExtracted, 'number');
       assert.strictEqual(typeof err.bytesWritten, 'number');
       assert.strictEqual(typeof err.filesSkipped, 'number');
+      assert.deepStrictEqual(Object.keys(err.skipped).sort(), ['counts', 'sample']);
       assert.ok(Array.isArray(err.warnings));
       assertDescriptionOnly(err);
       return true;
@@ -237,14 +239,28 @@ describe('subCode', () => {
     assert.strictEqual(err.relaxableBy, 'max_tar_metadata_bytes');
   });
 
-  it('a plain corrupt archive carries no subCode', async () => {
+  it('a corrupt TAR header is TAR_READER', async () => {
     const err = await failureOf(write('junk.tar', Buffer.alloc(2048, 0x41)));
-    assert.strictEqual(err.subCode, undefined);
+    assert.strictEqual(err.subCode, 'TAR_READER');
   });
 
   it('every core SECURITY_VIOLATION carries a subCode', async () => {
     const violation = await extractArchive('/tmp/a\0.tar', '/tmp/out').catch((e) => e);
     assert.strictEqual(violation.code, 'SECURITY_VIOLATION');
     assert.strictEqual(violation.subCode, 'PATH_NAME');
+  });
+});
+
+describe('ioKind', () => {
+  it('an IO_ERROR keeps the kind core reported', async () => {
+    const missing = path.join(os.tmpdir(), 'exarch-node-missing', 'a.tar');
+    const err = await listArchive(missing).catch((e) => e);
+    assert.strictEqual(err.code, 'IO_ERROR');
+    assert.strictEqual(err.ioKind, 'NotFound');
+  });
+
+  it('an error that is not an IO_ERROR carries no ioKind', async () => {
+    const err = await extractArchive('/tmp/a\0.tar', '/tmp/out').catch((e) => e);
+    assert.strictEqual(err.ioKind, undefined);
   });
 });

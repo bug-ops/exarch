@@ -10,12 +10,12 @@ use libfuzzer_sys::fuzz_target;
 mod common;
 
 fuzz_target!(|data: &[u8]| {
-    let config = common::validated();
+    let config = common::config();
 
-    if let Ok(mut archive) = SevenZArchive::new(Cursor::new(data)) {
-        let _ = archive.list(config);
+    if let Ok(archive) = SevenZArchive::new(Cursor::new(data), config) {
+        let _ = archive.list();
     }
-    if let Ok(mut archive) = SevenZArchive::new(Cursor::new(data)) {
-        let _ = archive.verify(config, &common::verification_options());
+    if let Ok(archive) = SevenZArchive::new(Cursor::new(data), config) {
+        let _ = archive.verify(&common::verification_options());
     }
 });

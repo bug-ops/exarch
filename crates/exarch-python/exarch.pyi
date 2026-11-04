@@ -4,11 +4,21 @@ Memory-safe archive extraction library with security validation.
 This module provides secure archive extraction, creation, listing, and verification
 with built-in protection against path traversal, zip bombs, symlink attacks,
 and other common vulnerabilities.
+
+Entry names that are not valid UTF-8 are never replaced: paths in manifests,
+reports, skips, verification issues and progress callbacks are decoded with
+``os.fsdecode`` (surrogateescape on Unix), which is injective, so two distinct
+entries never share a listed name. This differs from the CLI and the Node
+binding, which show an escaped text form; use ``os.fsencode`` to get the raw
+bytes back. The in-memory functions refuse such names instead.
+
+The aliases ``AnyMemoryEntry``, ``AnyArchiveEntry``, ``AnyLinkTarget`` and
+``ProgressCallbackFn`` are importable at runtime as typing objects.
 """
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, final
 
 __version__: str
 
@@ -21,6 +31,7 @@ _ArchiveData = bytes | bytearray | _ArchiveFile
 
 # Stub-only aliases: the native module does not export them at runtime.
 _ArchiveType = Literal["Tar", "TarGz", "TarBz2", "TarXz", "TarZst", "Zip", "SevenZ"]
+_CreatableFormat = Literal["Tar", "TarGz", "TarBz2", "TarXz", "TarZst", "Zip"]
 _ManifestEntryType = Literal["File", "Directory", "Symlink", "Hardlink"]
 _VerificationStatus = Literal["PASS", "FAIL", "WARNING"]
 _CheckStatus = Literal["OK", "FAILED", "WARNING", "SKIPPED"]
@@ -38,13 +49,86 @@ _InvalidArchiveSubCode = Literal[
     "DECLARED_SIZE",
     "INTEGRITY",
     "ZIP_READER",
+    "TAR_READER",
+    "SEVENZ_READER",
 ]
+_QuotaSubCode = Literal[
+    "FILE_COUNT",
+    "TOTAL_SIZE",
+    "FILE_SIZE",
+    "INTEGER_OVERFLOW",
+    "DECODER_MEMORY",
+    "COMPRESSED_MEMBERS",
+    "TREE_NODES",
+    "SINK_CAPACITY",
+    "SOLID_BLOCK_MEMORY",
+]
+_ZipBombSubCode = Literal["ENTRY", "SOLID_BLOCK", "SKIPPED_ENTRIES"]
 _SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH"]  # noqa: E501  # fmt: skip
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
+_DecodeReuse = Literal["off", "memory", "temp_file"]
+_LinkState = Literal["recorded", "missing", "unread", "unreadable", "oversized"]
+_SkipKind = Literal[
+    "duplicate",
+    "extension_not_allowed",
+    "excluded",
+    "hidden",
+    "over_max_file_size",
+    "symlink_unsupported",
+    "unreadable",
+]
+_ErrorCode = Literal[
+    "PATH_TRAVERSAL",
+    "SYMLINK_ESCAPE",
+    "HARDLINK_ESCAPE",
+    "ZIP_BOMB",
+    "ZIP_INCONSISTENCY",
+    "QUOTA_EXCEEDED",
+    "SECURITY_VIOLATION",
+    "INVALID_ARCHIVE",
+    "IO_ERROR",
+    "INVALID_PERMISSIONS",
+    "SOURCE_NOT_FOUND",
+    "SOURCE_NOT_ACCESSIBLE",
+    "OUTPUT_EXISTS",
+    "INVALID_COMPRESSION_LEVEL",
+    "UNKNOWN_FORMAT",
+    "INVALID_CONFIGURATION",
+]
+_ConfigSetting = Literal[
+    "max_file_size",
+    "max_total_size",
+    "max_file_count",
+    "max_path_depth",
+    "max_compression_ratio",
+    "max_solid_compression_ratio",
+    "max_solid_block_memory",
+    "max_tar_metadata_bytes",
+    "max_decoder_memory",
+    "decompression_budget",
+    "allowed_extension",
+    "banned_path_component",
+    "output_path",
+    "source_paths",
+    "strip_prefix",
+    "creation_format",
+    "atomic_extraction",
+    "zip_output_writer",
+    "max_bytes",
+    "parallel_decode_memory",
+    "exclude_pattern",
+    "zip_consistency",
+    "path_model",
+    "archive_format",
+    "decode_reuse",
+    "decode_reuse_limit",
+    "skip_kind",
+]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 
+@final
 class SecurityConfig:
     """
     Security configuration for archive extraction.
@@ -53,9 +137,12 @@ class SecurityConfig:
 
     Every limit (file size, total size, file count, path depth, compression
     ratio, solid block memory) is refused at assignment: a builder method or a
-    property setter raises ``ValueError`` for zero, and for a ratio that is not
-    a positive finite number. The exception's ``setting`` attribute names the
-    refused setting (``"max_file_size"``, ``"max_compression_ratio"``, ...).
+    property setter raises ``InvalidConfigurationError`` (a ``ValueError``) for
+    zero, a negative or oversized integer, and for a ratio that is not a
+    positive finite number; ``bool`` raises ``TypeError``. The exception's
+    ``setting`` attribute names the refused setting (``"max_file_size"``,
+    ``"max_compression_ratio"``, ...). A limit reads ``None`` when it is
+    unbounded, as in ``permissive()`` presets.
     """
 
     def __init__(self) -> None:
@@ -80,7 +167,8 @@ class SecurityConfig:
     def with_max_file_size(self, size: int) -> SecurityConfig:
         """Sets the maximum file size in bytes.
 
-        Raises ``ValueError`` for zero; its ``setting`` attribute names the
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
+        its ``setting`` attribute names the
         refused setting (``"max_file_size"``).
         """
         ...
@@ -88,7 +176,8 @@ class SecurityConfig:
     def with_max_total_size(self, size: int) -> SecurityConfig:
         """Sets the maximum total size in bytes.
 
-        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
+        its ``setting`` attribute is
         ``"max_total_size"``.
         """
         ...
@@ -111,7 +200,8 @@ class SecurityConfig:
         `extract_archive` counts files, symlinks and hardlinks, not
         directories; `list_archive` and `verify_archive` count every entry.
 
-        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
+        its ``setting`` attribute is
         ``"max_file_count"``.
         """
         ...
@@ -119,7 +209,8 @@ class SecurityConfig:
     def with_max_path_depth(self, depth: int) -> SecurityConfig:
         """Sets the maximum path depth.
 
-        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
+        its ``setting`` attribute is
         ``"max_path_depth"``.
         """
         ...
@@ -141,7 +232,13 @@ class SecurityConfig:
         ...
 
     def with_allow_solid_archives(self, allow: bool = True) -> SecurityConfig:
-        """Allows or denies solid 7z archives."""
+        """
+        Allows or denies solid 7z archives.
+
+        Allowing keeps solid limits that are already set. ``allow=False`` drops
+        them, so allowing again afterwards starts from the defaults (512 MiB per
+        block, ratio 1000), not from a limit set earlier.
+        """
         ...
 
     def with_parallel_decode_memory(self, size: int | None) -> SecurityConfig:
@@ -156,7 +253,8 @@ class SecurityConfig:
         both.
 
         Raises:
-            ValueError: If ``size`` is zero, negative or above 2**64 - 1.
+            InvalidConfigurationError: If ``size`` is zero, negative or above 2**64 - 1
+                (``setting == "parallel_decode_memory"``).
         """
         ...
 
@@ -173,11 +271,12 @@ class SecurityConfig:
 
     def with_max_solid_block_memory(self, size: int) -> SecurityConfig:
         """
-        Sets the maximum memory budget in bytes for decompressing a solid 7z block.
+        Sets the maximum decoded size in bytes of a solid 7z block.
 
-        Only enforced when ``with_allow_solid_archives`` is called with ``True``. Raises
-        ``ValueError`` if *size* is zero. Its ``setting`` attribute
-        is ``"max_solid_block_memory"``.
+        The limit bounds decoded volume per block, not resident memory, and exists only
+        while solid archives are allowed: call ``with_allow_solid_archives`` first. Raises
+        ``ValueError`` if *size* is zero or solid archives are not allowed. Its ``setting``
+        attribute is ``"max_solid_block_memory"``.
         """
         ...
 
@@ -215,15 +314,15 @@ class SecurityConfig:
         ...
 
     @property
-    def max_file_size(self) -> int:
-        """Maximum size for a single file in bytes (default: 50 MB)."""
+    def max_file_size(self) -> int | None:
+        """Maximum size for a single file in bytes (default: 50 MB); None if unbounded."""
         ...
 
     @max_file_size.setter
     def max_file_size(self, value: int) -> None: ...
     @property
-    def max_total_size(self) -> int:
-        """Maximum total size for all files in bytes (default: 500 MB)."""
+    def max_total_size(self) -> int | None:
+        """Maximum total size for all files in bytes (default: 500 MB); None if unbounded."""
         ...
 
     @max_total_size.setter
@@ -239,9 +338,9 @@ class SecurityConfig:
     @max_compression_ratio.setter
     def max_compression_ratio(self, value: float) -> None: ...
     @property
-    def max_file_count(self) -> int:
+    def max_file_count(self) -> int | None:
         """
-        Maximum number of entries (default: 10,000).
+        Maximum number of entries (default: 10,000); None if unbounded.
 
         `extract_archive` counts files, symlinks and hardlinks, not
         directories; `list_archive` and `verify_archive` count every entry.
@@ -265,8 +364,11 @@ class SecurityConfig:
     @preserve_permissions.setter
     def preserve_permissions(self, value: bool) -> None: ...
     @property
-    def max_solid_block_memory(self) -> int:
-        """Maximum memory budget in bytes for decompressing a solid 7z block (default: 512 MB)."""
+    def max_solid_block_memory(self) -> int | None:
+        """
+        Maximum decoded size in bytes of a solid 7z block (default: 512 MB once solid
+        archives are allowed, ``None`` while they are not).
+        """
         ...
 
     @max_solid_block_memory.setter
@@ -333,6 +435,7 @@ class SecurityConfig:
     @banned_path_components.setter
     def banned_path_components(self, value: list[str]) -> None: ...
 
+@final
 class VerificationOptions:
     """
     Options controlling verification behavior (non-security).
@@ -362,7 +465,8 @@ class VerificationOptions:
                 ``max_total_size``.
 
         Raises:
-            ValueError: ``budget`` is zero or negative.
+            InvalidConfigurationError: ``budget`` is zero, negative or above 2**64 - 1
+                (``setting == "decompression_budget"``).
         """
         ...
 
@@ -376,6 +480,7 @@ class VerificationOptions:
         """Budget in bytes when the integrity check is enabled, else None."""
         ...
 
+@final
 class ExtractionOptions:
     """
     Options controlling extraction behavior (non-security).
@@ -411,8 +516,12 @@ class ExtractionOptions:
         the temp dir is removed, leaving the output directory untouched.
         Default: ``False``.
 
-        **Important:** atomic mode requires that the output directory does not
-        already exist. If it does, extraction raises ``OutputExistsError``.
+        **Important:** atomic mode requires that the output directory is absent
+        or empty: an empty directory is replaced. Into a non-empty directory the
+        final rename fails and extraction raises ``OSError`` with
+        ``code == "IO_ERROR"`` (not ``OutputExistsError``, which
+        ``create_archive`` raises with ``overwrite=False``); the staged tree is
+        removed and the directory is left as it was.
         Non-atomic mode extracts into an existing directory without error.
         """
         ...
@@ -436,6 +545,7 @@ class ExtractionOptions:
     @atomic.setter
     def atomic(self, value: bool) -> None: ...
 
+@final
 class CreationConfig:
     """
     Configuration for archive creation.
@@ -455,7 +565,7 @@ class CreationConfig:
     def with_compression_level(self, level: int) -> CreationConfig:
         """Sets the compression level (1-9).
 
-        Raises ``ValueError`` for a level outside 1-9.
+        Raises ``InvalidCompressionLevelError`` for a level outside 1-9.
         """
         ...
 
@@ -466,7 +576,11 @@ class CreationConfig:
 
     @compression_level.setter
     def compression_level(self, value: int | None) -> None:
-        """Sets the level; ``None`` resets it to 6. Raises ``ValueError`` outside 1-9."""
+        """
+        Sets the level; ``None`` resets it to 6.
+
+        Raises ``InvalidCompressionLevelError`` outside 1-9.
+        """
         ...
 
     def with_preserve_permissions(self, preserve: bool = True) -> CreationConfig:
@@ -482,9 +596,41 @@ class CreationConfig:
         ...
 
     def with_exclude_patterns(self, patterns: list[str]) -> CreationConfig:
-        """Sets exclude patterns."""
+        """
+        Sets exclude patterns, matched against the archive entry path.
+
+        A name (``build``), ``name*`` or ``*name`` matches one path component at
+        any depth; a pattern with a separator (``docs/build``) matches that
+        path from the archive root and its subtree.
+
+        Raises ``InvalidConfigurationError`` (``setting == "exclude_pattern"``)
+        for an empty pattern, ``.``, ``..``, an absolute path, a bare ``*``,
+        an inner or repeated ``*``, ``*`` combined with a separator, a glob
+        look-alike (``?``, ``[``, ``]``, ``{``, ``}``, ``!``), a comma, or leading
+        or trailing whitespace. Only the shapes above are matched, so a refused
+        pattern would otherwise be read literally.
+        """
         ...
 
+    @property
+    def preserve_permissions(self) -> bool: ...
+    @preserve_permissions.setter
+    def preserve_permissions(self, value: bool) -> None: ...
+    @property
+    def follow_symlinks(self) -> bool: ...
+    @follow_symlinks.setter
+    def follow_symlinks(self, value: bool) -> None: ...
+    @property
+    def include_hidden(self) -> bool: ...
+    @include_hidden.setter
+    def include_hidden(self, value: bool) -> None: ...
+    @property
+    def exclude_patterns(self) -> list[str]:
+        """The exclude patterns as text; assigning parses them like ``with_exclude_patterns``."""
+        ...
+
+    @exclude_patterns.setter
+    def exclude_patterns(self, value: list[str]) -> None: ...
     def with_max_file_size(self, size: int | None) -> CreationConfig:
         """Sets maximum file size in bytes, or None for no limit (default).
 
@@ -509,6 +655,54 @@ class CreationConfig:
         """Finalizes the configuration."""
         ...
 
+@final
+class Skip:
+    """One entry an operation left out."""
+
+    @property
+    def kind(self) -> _SkipKind:
+        """Why the entry was skipped."""
+        ...
+
+    @property
+    def path(self) -> str:
+        """The entry's path as the operation names it."""
+        ...
+
+    @property
+    def io_kind(self) -> str | None:
+        """The description of the I/O failure behind an "unreadable" skip."""
+        ...
+
+@final
+class Skipped:
+    """
+    Everything an operation left out: exact counts per kind plus a bounded
+    sample of the individual entries.
+    """
+
+    @property
+    def total(self) -> int:
+        """How many entries were skipped, over all kinds."""
+        ...
+
+    @property
+    def counts(self) -> dict[_SkipKind, int]:
+        """The exact count of each kind that occurred."""
+        ...
+
+    @property
+    def sample(self) -> list[Skip]:
+        """The first skipped entries (at most 64)."""
+        ...
+
+    def count(self, kind: _SkipKind) -> int:
+        """The exact count of one kind; ValueError for an unknown kind."""
+        ...
+
+    def __len__(self) -> int: ...
+
+@final
 class ExtractionReport:
     """
     Report of an archive extraction operation.
@@ -543,7 +737,12 @@ class ExtractionReport:
 
     @property
     def files_skipped(self) -> int:
-        """Number of files skipped due to security checks."""
+        """Number of entries skipped, over all kinds."""
+        ...
+
+    @property
+    def skipped(self) -> Skipped:
+        """The skipped entries by kind."""
         ...
 
     @property
@@ -559,6 +758,7 @@ class ExtractionReport:
         """Returns whether any warnings were generated."""
         ...
 
+@final
 class CreationReport:
     """
     Report of an archive creation operation.
@@ -598,7 +798,12 @@ class CreationReport:
 
     @property
     def files_skipped(self) -> int:
-        """Number of files skipped."""
+        """Number of entries skipped, over all kinds (excluded, hidden, oversized, ...)."""
+        ...
+
+    @property
+    def skipped(self) -> Skipped:
+        """The skipped entries by kind."""
         ...
 
     @property
@@ -622,32 +827,84 @@ class CreationReport:
         """Returns the compression percentage (space saved)."""
         ...
 
+class LinkTarget:
+    """
+    What listing learned of a link's target; narrow with ``isinstance`` or on
+    ``state``. A 7z symlink is an ``UnreadLinkTarget``: listing does not decode
+    7z entry data.
+    """
+
+@final
+class RecordedLinkTarget(LinkTarget):
+    """A target the archive records."""
+
+    @property
+    def state(self) -> Literal["recorded"]: ...
+    @property
+    def path(self) -> str:
+        """The target as the archive spells it."""
+        ...
+
+@final
+class MissingLinkTarget(LinkTarget):
+    """A link whose archive entry carries no target."""
+
+    @property
+    def state(self) -> Literal["missing"]: ...
+
+@final
+class UnreadLinkTarget(LinkTarget):
+    """A target listing did not read."""
+
+    @property
+    def state(self) -> Literal["unread"]: ...
+
+@final
+class UnreadableLinkTarget(LinkTarget):
+    """A target that could not be read."""
+
+    @property
+    def state(self) -> Literal["unreadable"]: ...
+
+@final
+class OversizedLinkTarget(LinkTarget):
+    """A target too long to keep."""
+
+    @property
+    def state(self) -> Literal["oversized"]: ...
+    @property
+    def bytes(self) -> int:
+        """The length of the target in bytes."""
+        ...
+
+AnyLinkTarget = (
+    RecordedLinkTarget
+    | MissingLinkTarget
+    | UnreadLinkTarget
+    | UnreadableLinkTarget
+    | OversizedLinkTarget
+)
+
 class ArchiveEntry:
-    """Single entry in archive manifest."""
+    """
+    Single entry in archive manifest.
+
+    The concrete class tells the kind; only ``ArchiveFile`` has a ``size``, and
+    the link kinds have a ``target``.
+    """
 
     @property
     def path(self) -> str:
-        """Entry path."""
-        ...
-
-    @property
-    def size(self) -> int:
-        """Uncompressed size in bytes."""
+        """
+        Entry path. A name that is not valid UTF-8 is decoded with
+        ``os.fsdecode`` (lossless on Unix), never replaced, so two entries never
+        share a listed name.
+        """
         ...
 
     @property
     def entry_type(self) -> _ManifestEntryType:
         """Entry type."""
-        ...
-
-    @property
-    def is_symlink(self) -> bool:
-        """Whether this is a symlink."""
-        ...
-
-    @property
-    def is_hardlink(self) -> bool:
-        """Whether this is a hardlink."""
         ...
 
     @property
@@ -665,29 +922,53 @@ class ArchiveEntry:
         """File permissions (Unix mode)."""
         ...
 
-    @property
-    def symlink_target(self) -> str | None:
-        """
-        Symlink target (if applicable).
-
-        None for a 7z symlink: listing does not decode 7z entry data to read it.
-        """
-        ...
-
-    @property
-    def hardlink_target(self) -> str | None:
-        """Hardlink target (if applicable)."""
-        ...
-
     def compression_ratio(self) -> float | None:
         """
         Returns the compression ratio if the entry owns its compressed data.
 
-        None for TAR, empty entries and solid 7z members (including the
-        block start, whose ratio is checked per block).
+        None for entries of a solid block, whose ratio is checked per block.
         """
         ...
 
+@final
+class ArchiveFile(ArchiveEntry):
+    """A regular file."""
+
+    @property
+    def entry_type(self) -> Literal["File"]: ...
+    @property
+    def size(self) -> int:
+        """Uncompressed size in bytes."""
+        ...
+
+@final
+class ArchiveDirectory(ArchiveEntry):
+    """A directory."""
+
+    @property
+    def entry_type(self) -> Literal["Directory"]: ...
+
+@final
+class ArchiveSymlink(ArchiveEntry):
+    """A symbolic link."""
+
+    @property
+    def entry_type(self) -> Literal["Symlink"]: ...
+    @property
+    def target(self) -> AnyLinkTarget: ...
+
+@final
+class ArchiveHardlink(ArchiveEntry):
+    """A hard link."""
+
+    @property
+    def entry_type(self) -> Literal["Hardlink"]: ...
+    @property
+    def target(self) -> AnyLinkTarget: ...
+
+AnyArchiveEntry = ArchiveFile | ArchiveDirectory | ArchiveSymlink | ArchiveHardlink
+
+@final
 class ArchiveManifest:
     """
     Archive manifest with entry metadata.
@@ -707,7 +988,7 @@ class ArchiveManifest:
         ...
 
     @property
-    def entries(self) -> list[ArchiveEntry]:
+    def entries(self) -> list[AnyArchiveEntry]:
         """List of archive entries."""
         ...
 
@@ -716,6 +997,7 @@ class ArchiveManifest:
         """Archive format."""
         ...
 
+@final
 class VerificationIssue:
     """Verification issue."""
 
@@ -740,10 +1022,36 @@ class VerificationIssue:
         ...
 
     @property
-    def context(self) -> str | None:
-        """Optional context."""
+    def code(self) -> _ErrorCode | None:
+        """
+        The error code of a refusal, the same an exception of that refusal
+        carries; None for a heuristic finding.
+        """
         ...
 
+    @property
+    def sub_code(self) -> str | None:
+        """The sub-code of the refusal (a security, invalid-archive, quota or zip bomb code)."""
+        ...
+
+    @property
+    def relaxable_by(self) -> _PolicySetting | None:
+        """The policy setting that would admit the refused entry, if one does."""
+        ...
+
+    @property
+    def setting(self) -> _ConfigSetting | None:
+        """The configuration setting the refusal concerns, if any."""
+        ...
+
+    @property
+    def mode(self) -> int | None:
+        """The permission bits of an invalid-permissions refusal or an
+        executable-file finding; None otherwise.
+        """
+        ...
+
+@final
 class UnverifiedEntry:
     """One entry the integrity check could not verify."""
 
@@ -757,6 +1065,7 @@ class UnverifiedEntry:
         """Why the entry was not verified."""
         ...
 
+@final
 class IntegrityGaps:
     """What a requested integrity check left unverified."""
 
@@ -780,6 +1089,7 @@ class IntegrityGaps:
         """Total number of unverified items, including those without a path."""
         ...
 
+@final
 class VerificationReport:
     """
     Verification report.
@@ -855,8 +1165,13 @@ class VerificationReport:
         """Returns true if there are any critical severity issues."""
         ...
 
-ProgressCallbackFn = Callable[[str, int, int, int], None]
-"""Progress callback: (path, total, current, bytes_written) -> None."""
+ProgressCallbackFn = Callable[[str, int | None, int, int], None]
+"""
+Progress callback: (path, total, current, bytes_written) -> None.
+
+``current`` counts from 1. ``total`` is None when the number of entries is not
+known up front, as when a TAR stream is read.
+"""
 
 def extract_archive(
     archive_path: str | Path,
@@ -960,8 +1275,8 @@ def extract_archive_with_progress(
           only entry-level events, so ``bytes_written`` will always be 0 during
           extraction.
         - For TAR-family formats (tar, tar.gz, tar.bz2, tar.xz, tar.zst) the
-          ``total`` argument is 0 because the entry count is unknown until the
-          stream is fully read.
+          ``total`` argument is ``None`` because the entry count is unknown
+          until the stream is fully read.
 
         When extraction fails after some files have already been written to disk,
         the specific exception (e.g. ``SymlinkEscapeError``) is raised with
@@ -996,19 +1311,32 @@ def create_archive(
     output_path: str | Path,
     sources: list[str | Path],
     config: CreationConfig | None = None,
+    format: _CreatableFormat | None = None,
+    overwrite: bool = True,
 ) -> CreationReport:
     """
     Create an archive from source files and directories.
+
+    The archive is written to a temporary file next to ``output_path`` (whose
+    directory must be writable) and renamed into place when complete, so a
+    failed creation leaves ``output_path`` as it was. The output and its
+    temporary file are never archived, even inside a source directory.
 
     Args:
         output_path: Path to output archive file (str or pathlib.Path)
         sources: List of source files/directories to include (str or pathlib.Path)
         config: Optional CreationConfig (uses defaults if None)
+        format: The format to write whatever the extension is (for example
+            "Zip" for a ``.whl``); None detects it from the extension
+        overwrite: Replace an existing regular file or symlink, keeping its
+            permission bits (default); False refuses any existing output
 
     Returns:
         CreationReport with creation statistics
 
     Raises:
+        OutputExistsError: ``overwrite`` is False and ``output_path`` exists
+        InvalidConfigurationError: ``output_path`` is a directory, FIFO or device
         ValueError: Invalid arguments
         IOError: I/O operation failed
         UnsupportedFormatError: Archive format not supported
@@ -1020,9 +1348,13 @@ def create_archive_with_progress(
     sources: list[str | Path],
     config: CreationConfig | None = None,
     progress: ProgressCallbackFn | None = None,
+    format: _CreatableFormat | None = None,
+    overwrite: bool = True,
 ) -> CreationReport:
     """
     Create an archive with progress reporting.
+
+    ``format`` and ``overwrite`` are as in create_archive.
 
     Args:
         output_path: Path to output archive file (str or pathlib.Path)
@@ -1039,20 +1371,15 @@ def create_archive_with_progress(
         UnsupportedFormatError: Archive format not supported
 
     Note:
-        If ``progress`` itself raises, creation is **not** aborted early — the
-        underlying progress-callback contract has no cancellation signal, so
-        creation always runs to completion first, and ``progress`` is not
-        called again for the remaining entries once it has raised:
-
-        - If creation otherwise succeeds, ``progress``'s own exception is what
-          propagates (unchanged — the same type, message, and traceback), with
-          ``files_added`` and ``bytes_written`` attributes attached describing
-          what was written, plus a ``progress_callback_error = True`` marker
-          attribute.
-        - If creation also fails, the creation error takes priority (a raising
-          ``progress`` can never mask a security error such as
-          ``SymlinkEscapeError``) and ``progress``'s exception is attached as
-          ``__cause__`` rather than being dropped.
+        If ``progress`` raises (``KeyboardInterrupt`` included), creation is
+        cancelled at the next entry: the staged archive is discarded, a previous
+        archive at ``output_path`` stays untouched and no temporary file is
+        left. ``progress`` is not called again, and its own exception propagates
+        unchanged with a ``progress_callback_error = True`` marker attribute.
+        If creation fails for its own reason first, that error takes priority (a
+        raising ``progress`` can never mask a security error such as
+        ``SymlinkEscapeError``) and ``progress``'s exception is attached as
+        ``__cause__``.
 
     Example:
         >>> def progress(path: str, total: int, current: int, bytes: int):
@@ -1163,37 +1490,106 @@ def verify_archive_bytes(
     ...
 
 class MemoryEntry:
-    """An entry extracted into memory."""
+    """
+    An entry extracted into memory.
+
+    The concrete class tells what the entry holds; narrow with ``isinstance``
+    or on ``kind``. Each class carries only the attributes of its kind.
+    """
 
     @property
     def path(self) -> str:
         """Entry path, relative, as delivered by extraction."""
         ...
 
-    @property
-    def kind(self) -> _MemoryEntryKind:
-        """What the entry is."""
-        ...
+@final
+class MemoryFile(MemoryEntry):
+    """A regular file."""
 
     @property
-    def data(self) -> bytes | None:
-        """The file's bytes; None unless kind is "file"."""
+    def kind(self) -> Literal["file"]: ...
+    @property
+    def data(self) -> bytes:
+        """The file's bytes."""
         ...
 
     @property
     def mode(self) -> int | None:
-        """Permission bits after setuid and setgid were stripped."""
+        """Permission bits after setuid and setgid were stripped, if the archive carries a mode."""
         ...
+
+@final
+class MemoryDirectory(MemoryEntry):
+    """A directory the archive names explicitly."""
 
     @property
-    def target(self) -> str | None:
-        """
-        For "symlink", the target as the archive spells it, relative to the
-        link; for "hardlink", the root-relative resolved path of an already
-        delivered entry, a file or an earlier hardlink. None for other kinds.
-        """
+    def kind(self) -> Literal["directory"]: ...
+
+@final
+class MemorySymlink(MemoryEntry):
+    """A symbolic link, stored as data."""
+
+    @property
+    def kind(self) -> Literal["symlink"]: ...
+    @property
+    def target(self) -> str:
+        """The target as the archive spells it, relative to the link."""
         ...
 
+@final
+class MemoryHardlink(MemoryEntry):
+    """A hard link to an already delivered entry; only from extract_archive_to_callback."""
+
+    @property
+    def kind(self) -> Literal["hardlink"]: ...
+    @property
+    def target(self) -> str:
+        """The root-relative resolved path of an already delivered file or earlier hardlink."""
+        ...
+
+AnyMemoryEntry = MemoryFile | MemoryDirectory | MemorySymlink | MemoryHardlink
+
+@final
+class SinkOptions:
+    """
+    What the in-memory and callback extraction functions honour of the options
+    of path-based extraction.
+
+    Atomic extraction renames a directory, which an in-memory extraction does
+    not have, so only the duplicate policy and the ZIP decode reuse remain.
+
+    Args:
+        skip_duplicates: Skip an entry whose path an earlier entry already holds
+            instead of replacing it (default: True).
+        decode_reuse: Where a ZIP extraction keeps the output of its structural
+            check so deflate entries are decoded once instead of twice:
+            ``"off"`` (default), ``"memory"`` or ``"temp_file"``.
+            ``"temp_file"`` writes the plaintext of the archive to the
+            temporary directory until the extraction ends.
+        decode_reuse_limit: The most bytes kept, at most 256 MiB (default
+            32 MiB). Only with ``"memory"`` or ``"temp_file"``.
+
+    Raises:
+        ValueError: Unknown ``decode_reuse``, a non-positive limit, or a limit
+            with ``"off"``.
+    """
+
+    def __new__(
+        cls,
+        skip_duplicates: bool = True,
+        decode_reuse: _DecodeReuse = "off",
+        decode_reuse_limit: int | None = None,
+    ) -> SinkOptions: ...
+    @property
+    def skip_duplicates(self) -> bool: ...
+    @property
+    def decode_reuse(self) -> _DecodeReuse: ...
+    @property
+    def decode_reuse_limit(self) -> int | None:
+        """The limit in bytes; None for ``"off"``."""
+        ...
+
+@final
 class MemoryExtraction:
     """The result of extract_archive_to_memory."""
 
@@ -1203,14 +1599,14 @@ class MemoryExtraction:
         ...
 
     @property
-    def entries(self) -> list[MemoryEntry]:
+    def entries(self) -> list[AnyMemoryEntry]:
         """The extracted entries in path order."""
         ...
 
 def extract_archive_to_memory(
     data: _ArchiveData,
     config: SecurityConfig | None = None,
-    options: ExtractionOptions | None = None,
+    options: SinkOptions | None = None,
     max_bytes: int | None = None,
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
@@ -1226,7 +1622,7 @@ def extract_archive_to_memory(
             its current position; if it is seekable any format works, otherwise only
             the TAR family. An exception it raises propagates unchanged.
         config: Optional SecurityConfig (uses secure defaults if None)
-        options: Optional ExtractionOptions (atomic is not supported)
+        options: Optional SinkOptions
         max_bytes: The most bytes to keep: payload (file data, hardlink copies
             and symlink targets) plus path bytes plus 256 per entry; defaults
             to the config's max_total_size
@@ -1246,9 +1642,9 @@ def extract_archive_to_memory(
 
 def extract_archive_to_callback(
     data: _ArchiveData,
-    on_entry: Callable[[MemoryEntry], object],
+    on_entry: Callable[[AnyMemoryEntry], object],
     config: SecurityConfig | None = None,
-    options: ExtractionOptions | None = None,
+    options: SinkOptions | None = None,
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
 ) -> ExtractionReport:
@@ -1281,7 +1677,7 @@ def extract_archive_to_callback(
             extract_archive_to_memory)
         on_entry: Called with each MemoryEntry
         config: Optional SecurityConfig (uses secure defaults if None)
-        options: Optional ExtractionOptions (atomic is not supported)
+        options: Optional SinkOptions
         path_model: "host" (default) or "portable"
         format: The archive format; detected from the leading bytes if None
 
@@ -1297,7 +1693,7 @@ def extract_archive_to_memory_with_progress(
     data: _ArchiveData,
     config: SecurityConfig | None = None,
     progress: ProgressCallbackFn | None = None,
-    options: ExtractionOptions | None = None,
+    options: SinkOptions | None = None,
     max_bytes: int | None = None,
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
@@ -1328,7 +1724,7 @@ def list_archive_bytes_with_progress(
     List the contents of an archive held in memory, reporting progress.
 
     Same as list_archive_bytes, plus a callback invoked once per entry with
-    (path, total, current, bytes_written); total is 0 for TAR and
+    (path, total, current, bytes_written); total is None for TAR and
     bytes_written is always 0.
 
     Raises:
@@ -1350,7 +1746,7 @@ def verify_archive_bytes_with_progress(
     Verify the security of an archive held in memory, reporting progress.
 
     Same as verify_archive_bytes, plus a callback invoked once per entry with
-    (path, total, current, bytes_written); total is 0 for TAR and
+    (path, total, current, bytes_written); total is None for TAR and
     bytes_written is always 0.
 
     Raises:
@@ -1361,6 +1757,7 @@ def verify_archive_bytes_with_progress(
     """
     ...
 
+@final
 class CreatedArchive:
     """The result of create_archive_to_bytes."""
 
@@ -1376,7 +1773,7 @@ class CreatedArchive:
 
 def create_archive_to_bytes(
     sources: list[str | Path],
-    format: _ArchiveType,
+    format: _CreatableFormat,
     config: CreationConfig | None = None,
 ) -> CreatedArchive:
     """
@@ -1405,13 +1802,49 @@ class ArchiveError(Exception):
     Base exception for all extraction errors.
 
     Attributes:
+        code: The stable error code, the same on every exarch exception,
+            including the builtin ``OSError`` subclasses raised for I/O
+            failures.
         writes: Set only when extraction failed after recording progress:
             ``"kept"`` if the written files remain on disk, ``"rolled_back"``
             if atomic extraction discarded them, ``"discarded"`` if an
             in-memory extraction dropped the entries it had collected.
     """
 
+    # Set on each instance when the error is raised; the class has no default,
+    # so `ArchiveError.code` itself raises AttributeError.
+    code: _ErrorCode
     writes: _PartialWrites
+
+class OutputExistsError(ArchiveError, FileExistsError):
+    """The output path already exists (``code == "OUTPUT_EXISTS"``)."""
+
+    ...
+
+class SourceNotFoundError(ArchiveError, FileNotFoundError):
+    """A source path does not exist (``code == "SOURCE_NOT_FOUND"``)."""
+
+    ...
+
+class SourceNotAccessibleError(ArchiveError, PermissionError):
+    """A source path cannot be read (``code == "SOURCE_NOT_ACCESSIBLE"``)."""
+
+    ...
+
+class InvalidConfigurationError(ArchiveError, ValueError):
+    """
+    A setting or argument was refused (``code == "INVALID_CONFIGURATION"``).
+
+    Attributes:
+        setting: The refused setting, or ``None`` when the refusal names none.
+    """
+
+    setting: _ConfigSetting | None
+
+class InvalidCompressionLevelError(ArchiveError, ValueError):
+    """A compression level is out of range (``code == "INVALID_COMPRESSION_LEVEL"``)."""
+
+    ...
 
 class PathTraversalError(ArchiveError):
     """
@@ -1430,6 +1863,7 @@ class PathTraversalError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class SymlinkEscapeError(ArchiveError):
@@ -1449,6 +1883,7 @@ class SymlinkEscapeError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class HardlinkEscapeError(ArchiveError):
@@ -1468,6 +1903,7 @@ class HardlinkEscapeError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class ZipBombError(ArchiveError):
@@ -1482,11 +1918,14 @@ class ZipBombError(ArchiveError):
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
         warnings: Warning messages generated before the error.
+        sub_code: What the ratio was measured over: one entry, a solid block or the skipped entries.
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
+    sub_code: _ZipBombSubCode
     warnings: list[str]
 
 class InvalidPermissionsError(ArchiveError):
@@ -1506,6 +1945,7 @@ class InvalidPermissionsError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class QuotaExceededError(ArchiveError):
@@ -1520,11 +1960,14 @@ class QuotaExceededError(ArchiveError):
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
         warnings: Warning messages generated before the error.
+        sub_code: Which quota was exceeded.
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
+    sub_code: _QuotaSubCode
     warnings: list[str]
 
 class ZipInconsistencyError(SecurityViolationError):
@@ -1545,6 +1988,7 @@ class ZipInconsistencyError(SecurityViolationError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class SecurityViolationError(ArchiveError):
@@ -1573,6 +2017,7 @@ class SecurityViolationError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
     relaxable_by: _PolicySetting | None
     sub_code: _SecurityViolationSubCode | None
@@ -1603,9 +2048,10 @@ class InvalidArchiveError(ArchiveError):
             different tools, ``"TAR_TRAILER"`` when the stream after the TAR
             end-of-archive marker is corrupt or truncated, ``"LINK_TARGET"``,
             ``"DUPLICATE_ENTRY"``, ``"ENTRY_NAME"``, ``"DECLARED_SIZE"``,
-            ``"INTEGRITY"`` or ``"ZIP_READER"`` (a failure of the ZIP reader
-            or of the structural check built on it) for the refusal of that
-            family; ``None`` otherwise.
+            ``"INTEGRITY"``, ``"ZIP_READER"`` (a failure of the ZIP reader or
+            of the structural check built on it), ``"TAR_READER"`` or
+            ``"SEVENZ_READER"`` (a failure of the TAR or 7z reader) for the
+            refusal of that family; ``None`` otherwise.
     """
 
     sub_code: _InvalidArchiveSubCode | None

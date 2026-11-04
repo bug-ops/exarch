@@ -97,11 +97,11 @@ fn an_overlong_name_of_a_skipped_extension_is_not_refused_in_any_destination_sta
 
     let fresh = TempDir::new().unwrap();
     let report = extract_archive(&archive, fresh.path().join("new"), &config).unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
 
     let existing = TempDir::new().unwrap();
     let report = extract_archive(&archive, existing.path(), &config).unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     assert!(existing.path().join("ok.txt").is_file());
 }
 
@@ -358,6 +358,35 @@ mod landing {
         }
     }
 
+    // #945: verify must judge the projected landing like extract does.
+    #[cfg(unix)]
+    #[test]
+    fn verify_and_extract_agree_on_the_projected_landing_limit() {
+        let config = deep_config();
+        for shape in Shape::ALL {
+            for (entry_len, accepted) in [(HOST_PATH_LIMIT - 1, true), (HOST_PATH_LIMIT, false)] {
+                let (_dir, archive) = archive_below_short_chain(shape, entry_len);
+                let out = TempDir::new().unwrap();
+                let extracted = extract_archive(&archive, out.path(), &config).is_ok();
+                let verified = verify_archive(&archive, &config)
+                    .is_ok_and(|report| report.status() == VerificationStatus::Pass);
+                let reader = exarch_core::ArchiveReader::tar(
+                    std::io::Cursor::new(std::fs::read(&archive).unwrap()),
+                    None,
+                );
+                let sunk = exarch_core::SinkExtractRequest::new(&config)
+                    .with_options(exarch_core::SinkOptions::default())
+                    .extract(reader, &mut exarch_core::MemorySink::default())
+                    .is_ok();
+                assert_eq!(
+                    (extracted, verified, sunk),
+                    (accepted, accepted, accepted),
+                    "{shape:?} entry of {entry_len} bytes"
+                );
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_preexisting_symlink_out_of_the_root_still_refuses_a_long_tail() {
@@ -383,12 +412,12 @@ mod landing {
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 
-    // Pins the refusal of #895: the link `d -> chain` resolves by absolute
-    // path, so a chain within the relative limit but past the absolute one
-    // is refused as a symlink parent. Flip this when #895 lands.
+    // #895: the link `d -> chain` is resolved handle-relatively, so a chain
+    // within the relative limit is accepted whatever the destination's own
+    // absolute length is.
     #[cfg(unix)]
     #[test]
-    fn a_link_to_a_chain_past_the_absolute_limit_is_refused_as_a_symlink_parent() {
+    fn a_link_to_a_chain_past_the_absolute_limit_is_followed_handle_relatively() {
         let chain = name_of_len(HOST_PATH_LIMIT - 8);
         let mut builder = tar::Builder::new(Vec::new());
         builder
@@ -410,15 +439,12 @@ mod landing {
 
         let config = SecurityConfig::default().with_allow_symlinks(true);
         let out = TempDir::new().unwrap();
-        let err = extract_archive(&archive, out.path(), &config).unwrap_err();
+        let report = extract_archive(&archive, out.path(), &config).unwrap();
 
-        std::assert_matches!(
-            err.ffi_kind(),
-            exarch_core::FfiKind::SecurityViolation {
-                sub_code: exarch_core::SecurityViolationSubCode::ExistingSymlink,
-                ..
-            },
-            "{err}"
+        assert_eq!(
+            (report.files_extracted, report.symlinks_created),
+            (2, 1),
+            "{report:?}"
         );
     }
 }

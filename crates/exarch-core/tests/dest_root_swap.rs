@@ -13,10 +13,10 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options_and_progress;
 use tempfile::TempDir;
 use zip::CompressionMethod;
 use zip::ZipWriter;
@@ -80,7 +80,7 @@ struct SwapRoot {
 }
 
 impl ProgressCallback for SwapRoot {
-    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+    fn on_entry_start(&mut self, _path: &Path, _position: exarch_core::EntryPosition) {}
 
     fn on_bytes_written(&mut self, _bytes: u64) {}
 
@@ -127,14 +127,11 @@ fn run(format: Format, names: &[&str], precreate: Option<&str>, swap: Swap) -> O
         swap,
     };
 
-    let result = extract_archive_with_options_and_progress(
-        &archive,
-        &dest,
-        &SecurityConfig::default(),
-        &ExtractionOptions::default(),
-        &mut swapper,
-    )
-    .map(|_| ());
+    let result = ExtractRequest::new(&SecurityConfig::default())
+        .with_options(ExtractionOptions::default())
+        .with_progress(&mut swapper)
+        .extract(&archive, &dest)
+        .map(|_| ());
     Outcome {
         _root: root,
         result,

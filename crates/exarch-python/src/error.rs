@@ -7,11 +7,17 @@ use exarch_core::FfiKind;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting;
 use exarch_core::SubCode;
+use pyo3::PyTypeInfo;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
-use pyo3::exceptions::PyIOError;
+use pyo3::exceptions::PyFileExistsError;
+use pyo3::exceptions::PyFileNotFoundError;
+use pyo3::exceptions::PyPermissionError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::PyDict;
+use pyo3::types::PyType;
 
 // Base exception for all extraction errors
 create_exception!(exarch, ArchiveError, PyException);
@@ -33,6 +39,90 @@ create_exception!(exarch, UnsupportedFormatError, ArchiveError);
 // catching the parent still work.
 create_exception!(exarch, UnknownFormatError, UnsupportedFormatError);
 create_exception!(exarch, InvalidArchiveError, ArchiveError);
+
+/// An exception class that derives from [`ArchiveError`] and from a builtin
+/// exception, so `except OSError` and `except ValueError` handlers keep
+/// working next to `except ArchiveError`.
+///
+/// `create_exception!` takes one base, so the class is built with
+/// `type(name, bases, namespace)` on first use.
+struct DualClass {
+    name: &'static str,
+    builtin: fn(Python<'_>) -> Bound<'_, PyType>,
+    /// Attributes an instance may lack, so the class holds `None` for them.
+    optional_attrs: &'static [&'static str],
+    class: PyOnceLock<Py<PyType>>,
+}
+
+impl DualClass {
+    const fn new(
+        name: &'static str,
+        builtin: fn(Python<'_>) -> Bound<'_, PyType>,
+        optional_attrs: &'static [&'static str],
+    ) -> Self {
+        Self {
+            name,
+            builtin,
+            optional_attrs,
+            class: PyOnceLock::new(),
+        }
+    }
+
+    fn class<'py>(&self, py: Python<'py>) -> PyResult<&Bound<'py, PyType>> {
+        self.class
+            .get_or_try_init(py, || {
+                let namespace = PyDict::new(py);
+                namespace.set_item("__module__", "exarch")?;
+                for attr in self.optional_attrs {
+                    namespace.set_item(attr, py.None())?;
+                }
+                let bases = (py.get_type::<ArchiveError>(), (self.builtin)(py));
+                PyType::type_object(py)
+                    .call1((self.name, bases, namespace))?
+                    .cast_into::<PyType>()
+                    .map(Bound::unbind)
+                    .map_err(PyErr::from)
+            })
+            .map(|class| class.bind(py))
+    }
+
+    fn error(&self, description: String) -> PyErr {
+        Python::attach(|py| {
+            self.class(py)
+                .and_then(|class| class.call1((description,)))
+                .map_or_else(|err| err, PyErr::from_value)
+        })
+    }
+}
+
+static OUTPUT_EXISTS: DualClass =
+    DualClass::new("OutputExistsError", PyFileExistsError::type_object, &[]);
+static SOURCE_NOT_FOUND: DualClass =
+    DualClass::new("SourceNotFoundError", PyFileNotFoundError::type_object, &[]);
+static SOURCE_NOT_ACCESSIBLE: DualClass = DualClass::new(
+    "SourceNotAccessibleError",
+    PyPermissionError::type_object,
+    &[],
+);
+static INVALID_CONFIGURATION: DualClass = DualClass::new(
+    "InvalidConfigurationError",
+    PyValueError::type_object,
+    &["setting"],
+);
+static INVALID_COMPRESSION_LEVEL: DualClass = DualClass::new(
+    "InvalidCompressionLevelError",
+    PyValueError::type_object,
+    &[],
+);
+
+/// Every dual-base class, in registration order.
+static DUAL_CLASSES: [&DualClass; 5] = [
+    &OUTPUT_EXISTS,
+    &SOURCE_NOT_FOUND,
+    &SOURCE_NOT_ACCESSIBLE,
+    &INVALID_CONFIGURATION,
+    &INVALID_COMPRESSION_LEVEL,
+];
 
 /// Builds the Python exception for one error class from its message.
 type NewErr = fn(String) -> PyErr;
@@ -58,12 +148,11 @@ fn class_for(code: ErrorCode) -> Option<NewErr> {
         ErrorCode::QuotaExceeded => |d| QuotaExceededError::new_err(d),
         ErrorCode::SecurityViolation => |d| SecurityViolationError::new_err(d),
         ErrorCode::InvalidArchive => |d| InvalidArchiveError::new_err(d),
-        ErrorCode::SourceNotFound | ErrorCode::SourceNotAccessible | ErrorCode::OutputExists => {
-            |d| PyIOError::new_err(d)
-        }
-        ErrorCode::InvalidCompressionLevel | ErrorCode::InvalidConfiguration => {
-            |d| PyValueError::new_err(d)
-        }
+        ErrorCode::SourceNotFound => |d| SOURCE_NOT_FOUND.error(d),
+        ErrorCode::SourceNotAccessible => |d| SOURCE_NOT_ACCESSIBLE.error(d),
+        ErrorCode::OutputExists => |d| OUTPUT_EXISTS.error(d),
+        ErrorCode::InvalidCompressionLevel => |d| INVALID_COMPRESSION_LEVEL.error(d),
+        ErrorCode::InvalidConfiguration => |d| INVALID_CONFIGURATION.error(d),
         ErrorCode::UnknownFormat => |d| UnknownFormatError::new_err(d),
         _ => return None,
     };
@@ -86,6 +175,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
         partial,
         ..
     } = err.into_ffi_message();
+    let code = kind.code();
     let py_err = if let FfiKind::Io(io_kind) = kind {
         PyErr::from(std::io::Error::new(io_kind, description))
     } else {
@@ -103,10 +193,23 @@ pub fn convert_error(err: CoreError) -> PyErr {
         );
         err
     };
+    set_optional_str(&py_err, "code", Some(code.as_str()));
     if let Some(outcome) = partial {
         attach_partial(&py_err, outcome);
     }
     py_err
+}
+
+/// The `InvalidCompressionLevelError` for a level a binding refused before
+/// the core saw it, with the same `code` the core error would carry.
+pub fn compression_level_error(description: String) -> PyErr {
+    let err = INVALID_COMPRESSION_LEVEL.error(description);
+    set_optional_str(
+        &err,
+        "code",
+        Some(ErrorCode::InvalidCompressionLevel.as_str()),
+    );
+    err
 }
 
 /// Sets `name` on the exception when `value` is present; otherwise the class
@@ -131,8 +234,19 @@ fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
         if let PartialOutcome::Kept(report) = outcome {
             let _ = exc_value.setattr("files_extracted", report.files_extracted);
             let _ = exc_value.setattr("bytes_written", report.bytes_written);
-            let _ = exc_value.setattr("files_skipped", report.files_skipped);
-            let _ = exc_value.setattr("warnings", report.warnings);
+            let _ = exc_value.setattr("files_skipped", report.files_skipped());
+            let _ = exc_value.setattr(
+                "skipped",
+                crate::report::PySkips::from(report.skipped.clone()),
+            );
+            let _ = exc_value.setattr(
+                "warnings",
+                report
+                    .warnings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<String>>(),
+            );
         }
     });
 }
@@ -180,6 +294,9 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let invalid_archive = m.py().get_type::<InvalidArchiveError>();
     invalid_archive.setattr("sub_code", m.py().None())?;
     m.add("InvalidArchiveError", invalid_archive)?;
+    for dual in DUAL_CLASSES {
+        m.add(dual.name, dual.class(m.py())?)?;
+    }
     Ok(())
 }
 
@@ -192,6 +309,15 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::*;
 
+    fn skipped(count: usize) -> exarch_core::Skips {
+        let mut skips = exarch_core::Skips::default();
+        for i in 0..count {
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, format!("f{i}"));
+            assert!(skips.record(skip).is_ok());
+        }
+        skips
+    }
+
     #[test]
     fn test_every_error_code_has_an_exception_class() {
         for &code in ErrorCode::ALL {
@@ -201,6 +327,94 @@ mod tests {
                 "{code:?}"
             );
         }
+    }
+
+    /// One core error per dual-base class, with the builtin it must also be.
+    fn dual_cases() -> Vec<(CoreError, &'static DualClass, &'static str)> {
+        vec![
+            (
+                CoreError::OutputExists {
+                    path: std::path::PathBuf::from("out.tar"),
+                },
+                &OUTPUT_EXISTS,
+                "OUTPUT_EXISTS",
+            ),
+            (
+                CoreError::SourceNotFound {
+                    path: std::path::PathBuf::from("src"),
+                },
+                &SOURCE_NOT_FOUND,
+                "SOURCE_NOT_FOUND",
+            ),
+            (
+                CoreError::SourceNotAccessible {
+                    path: std::path::PathBuf::from("src"),
+                },
+                &SOURCE_NOT_ACCESSIBLE,
+                "SOURCE_NOT_ACCESSIBLE",
+            ),
+            (
+                CoreError::InvalidConfiguration {
+                    setting: exarch_core::ConfigSetting::MaxBytes,
+                    problem: exarch_core::ConfigProblem::Zero,
+                },
+                &INVALID_CONFIGURATION,
+                "INVALID_CONFIGURATION",
+            ),
+            (
+                CoreError::InvalidCompressionLevel { level: 99 },
+                &INVALID_COMPRESSION_LEVEL,
+                "INVALID_COMPRESSION_LEVEL",
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_dual_classes_are_raised_with_code_and_both_bases() {
+        pyo3::Python::initialize();
+        for (err, dual, code) in dual_cases() {
+            let py_err = convert_error(err);
+            Python::attach(|py| {
+                let class = dual.class(py).expect("class builds");
+                assert!(py_err.matches(py, class).unwrap(), "{}", dual.name);
+                assert!(
+                    py_err.is_instance_of::<ArchiveError>(py),
+                    "{} must derive from ArchiveError",
+                    dual.name
+                );
+                let builtin = (dual.builtin)(py);
+                assert!(py_err.matches(py, &builtin).unwrap(), "{}", dual.name);
+                let raised: String = py_err
+                    .value(py)
+                    .getattr("code")
+                    .expect("code missing")
+                    .extract()
+                    .expect("code not str");
+                assert_eq!(raised, code);
+            });
+        }
+    }
+
+    #[test]
+    fn test_every_dual_class_has_a_case() {
+        assert_eq!(dual_cases().len(), DUAL_CLASSES.len());
+    }
+
+    #[test]
+    fn test_io_error_carries_code() {
+        pyo3::Python::initialize();
+        let py_err = convert_error(CoreError::Io(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )));
+        Python::attach(|py| {
+            let raised: String = py_err
+                .value(py)
+                .getattr("code")
+                .expect("code missing")
+                .extract()
+                .expect("code not str");
+            assert_eq!(raised, "IO_ERROR");
+        });
     }
 
     use exarch_core::Compressed;
@@ -321,7 +535,7 @@ mod tests {
     fn test_invalid_permissions_conversion() {
         let err = CoreError::InvalidPermissions {
             path: PathBuf::from("malicious.sh"),
-            mode: 0o777,
+            mode: exarch_core::RawMode::new(0o777),
         };
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
@@ -680,19 +894,20 @@ mod tests {
         use exarch_core::ExtractionReport;
         use exarch_core::QuotaResource;
 
-        let report = ExtractionReport {
-            files_extracted: 3,
-            bytes_written: 1024,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 3;
+            r.bytes_written = 1024;
+            r
         };
         let source = CoreError::QuotaExceeded {
             resource: QuotaResource::FileCount { current: 4, max: 3 },
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         Python::attach(|py| {
@@ -724,30 +939,29 @@ mod tests {
     /// alongside the pre-existing `files_extracted`/`bytes_written`. Uses a
     /// skip-only report (`files_extracted: 0, bytes_written: 0`) matching
     /// #505's original trigger — a failure that skipped entries without
-    /// extracting anything — and a realistic aggregated warning string (see
-    /// `formats::common`'s `"skipped N entries with disallowed extensions"`
-    /// convention) rather than an invented one, so the test documents why
+    /// extracting anything — and a typed warning, so the test documents why
     /// the fix exists, not just that the fields are forwarded.
     #[test]
     fn test_partial_extraction_includes_files_skipped_and_warnings() {
         use exarch_core::ExtractionReport;
         use exarch_core::QuotaResource;
 
-        let report = ExtractionReport {
-            files_extracted: 0,
-            bytes_written: 0,
-            files_skipped: 2,
-            warnings: vec!["skipped 2 entries with disallowed extensions".to_string()],
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 0;
+            r.bytes_written = 0;
+            r.skipped = skipped(2);
+            r.warnings = vec![exarch_core::ExtractionWarning::AntiItemsSkipped { count: 2 }];
+            r
         };
         let source = CoreError::QuotaExceeded {
             resource: QuotaResource::FileCount { current: 4, max: 3 },
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         Python::attach(|py| {
@@ -765,7 +979,7 @@ mod tests {
             assert_eq!(files_skipped, 2);
             assert_eq!(
                 warnings,
-                vec!["skipped 2 entries with disallowed extensions"]
+                vec!["skipped 2 7z anti-items (deletion markers are not applied)"]
             );
         });
     }
@@ -776,18 +990,19 @@ mod tests {
     fn test_partial_extraction_rolled_back_omits_counters() {
         use exarch_core::ExtractionReport;
 
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 2,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 2;
+            r
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(CoreError::SymlinkEscape {
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            CoreError::SymlinkEscape {
                 path: PathBuf::from("ln"),
-            }),
+            },
             report,
-            writes: PartialWrites::RolledBack,
-        };
+            PartialWrites::RolledBack,
+        ));
 
         let py_err = convert_error(err);
         Python::attach(|py| {
@@ -815,13 +1030,13 @@ mod tests {
 
     #[test]
     fn test_partial_extraction_kept_attaches_writes() {
-        let err = CoreError::PartialExtraction {
-            source: Box::new(CoreError::SymlinkEscape {
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            CoreError::SymlinkEscape {
                 path: PathBuf::from("ln"),
-            }),
-            report: exarch_core::ExtractionReport::default(),
-            writes: PartialWrites::Kept,
-        };
+            },
+            exarch_core::ExtractionReport::default(),
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         Python::attach(|py| {
@@ -871,19 +1086,20 @@ mod tests {
     fn test_partial_extraction_symlink_escape_preserves_type_and_report() {
         use exarch_core::ExtractionReport;
 
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 512;
+            r
         };
         let source = CoreError::SymlinkEscape {
             path: PathBuf::from("/etc/passwd"),
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         assert_partial_extraction_report::<SymlinkEscapeError>(&py_err, 2, 512);
@@ -893,19 +1109,20 @@ mod tests {
     fn test_partial_extraction_hardlink_escape_preserves_type_and_report() {
         use exarch_core::ExtractionReport;
 
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 512;
+            r
         };
         let source = CoreError::HardlinkEscape {
             path: PathBuf::from("/etc/shadow"),
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         assert_partial_extraction_report::<HardlinkEscapeError>(&py_err, 2, 512);
@@ -915,17 +1132,18 @@ mod tests {
     fn test_partial_extraction_security_violation_preserves_type_and_report() {
         use exarch_core::ExtractionReport;
 
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 512;
+            r
         };
         let source = CoreError::from(exarch_core::Violation::EncryptedArchive);
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         assert_partial_extraction_report::<SecurityViolationError>(&py_err, 2, 512);

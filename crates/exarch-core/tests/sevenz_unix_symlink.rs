@@ -23,6 +23,7 @@ use exarch_core::ArchiveManifest;
 use exarch_core::CheckStatus;
 use exarch_core::DecompressionBudget;
 use exarch_core::ErrorCode;
+use exarch_core::ExtractRequest;
 #[cfg(unix)]
 use exarch_core::ExtractionOptions;
 use exarch_core::IntegrityCheck;
@@ -30,19 +31,17 @@ use exarch_core::IntegrityStatus;
 use exarch_core::IssueCategory;
 use exarch_core::LinkTarget;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
 use exarch_core::StoredTargets;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
+use exarch_core::VerifyRequest;
 use exarch_core::extract_archive;
-#[cfg(unix)]
-use exarch_core::extract_archive_with_options;
 use exarch_core::list_archive;
-use exarch_core::list_archive_with_options;
 use exarch_core::verify_archive;
-use exarch_core::verify_archive_with_options;
 use sevenz_rust2::Archive;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
@@ -212,7 +211,12 @@ fn dir_is_empty(dir: &TempDir) -> bool {
 
 fn link_target(path: &Path, config: &SecurityConfig) -> LinkTarget {
     let options = ListOptions::default().with_stored_targets(StoredTargets::Read);
-    first_link_target(&list_archive_with_options(path, config, &options).unwrap())
+    first_link_target(
+        &ListRequest::new(config)
+            .with_options(options)
+            .list(path)
+            .unwrap(),
+    )
 }
 
 fn default_link_target(path: &Path, config: &SecurityConfig) -> LinkTarget {
@@ -250,13 +254,17 @@ fn assert_nothing_outside(container: &TempDir, label: &str) {
 
 fn partial_source(err: ArchiveError) -> ArchiveError {
     match err {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => panic!("expected PartialExtraction, got {other:?}"),
     }
 }
 
 fn issue_categories(report: &VerificationReport) -> Vec<IssueCategory> {
-    report.issues().iter().map(|i| i.category).collect()
+    report
+        .issues()
+        .iter()
+        .map(exarch_core::VerificationIssue::category)
+        .collect()
 }
 
 fn integrity(budget: u64) -> VerificationOptions {
@@ -288,7 +296,10 @@ fn list_skips_targets_on_request() {
     let path = archive_of(&dir, &[Item::Link("l", b"a.txt")]);
     let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
 
-    let manifest = list_archive_with_options(&path, &SecurityConfig::default(), &options).unwrap();
+    let manifest = ListRequest::new(&SecurityConfig::default())
+        .with_options(options)
+        .list(&path)
+        .unwrap();
 
     assert_matches!(
         &manifest.entries()[0].kind,
@@ -347,9 +358,9 @@ fn verify_fails_a_link_when_symlinks_are_not_allowed() {
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(
         report.issues().iter().any(|i| {
-            i.category == IssueCategory::SecurityPolicy
-                && i.entry_path.as_deref() == Some(Path::new("link"))
-                && i.message.contains("symlinks not allowed")
+            i.category() == IssueCategory::SecurityPolicy
+                && i.entry_path() == Some(Path::new("link"))
+                && i.message().contains("symlinks not allowed")
         }),
         "{:?}",
         report.issues()
@@ -363,8 +374,10 @@ fn verify_validates_the_target_when_symlinks_are_allowed() {
         &dir,
         &[Item::File("a.txt", b"hi"), Item::Link("link", b"a.txt")],
     );
-    let report =
-        verify_archive_with_options(&inside, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    let report = VerifyRequest::new(&allow_symlinks())
+        .with_options(integrity(1 << 20))
+        .verify(&inside)
+        .unwrap();
     assert_eq!(
         report.status(),
         VerificationStatus::Pass,
@@ -374,8 +387,10 @@ fn verify_validates_the_target_when_symlinks_are_allowed() {
 
     for target in [&b"/etc/passwd"[..], b"../x", b"a/../../x"] {
         let path = archive_of(&dir, &[Item::Link("link", target)]);
-        let report =
-            verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+        let report = VerifyRequest::new(&allow_symlinks())
+            .with_options(integrity(1 << 20))
+            .verify(&path)
+            .unwrap();
         assert_eq!(report.status(), VerificationStatus::Fail, "{target:?}");
         assert!(
             issue_categories(&report).contains(&IssueCategory::SymlinkEscape),
@@ -404,11 +419,11 @@ fn verify_without_integrity_warns_that_targets_were_not_validated() {
             report.issues()
         );
         let issue = &report.issues()[0];
-        assert_eq!(issue.entry_path, None);
+        assert_eq!(issue.entry_path(), None);
         assert!(
-            issue.message.contains("1 symlink target was not read"),
+            issue.message().contains("1 symlink target was not read"),
             "{}",
-            issue.message
+            issue.message()
         );
     }
 }
@@ -463,7 +478,10 @@ fn verify_fails_a_target_that_runs_through_a_link_the_budget_left_unread() {
     let path = dir.path().join("two-blocks.7z");
     std::fs::write(&path, writer.finish().unwrap().into_inner()).unwrap();
 
-    let report = verify_archive_with_options(&path, &solid_config(), &integrity(10_000)).unwrap();
+    let report = VerifyRequest::new(&solid_config())
+        .with_options(integrity(10_000))
+        .verify(&path)
+        .unwrap();
 
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(
@@ -480,8 +498,10 @@ fn verify_integrity_checks_the_link_in_the_same_decode() {
         &dir,
         &[Item::File("a.txt", b"hi"), Item::Link("link", b"a.txt")],
     );
-    let report =
-        verify_archive_with_options(&clean, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    let report = VerifyRequest::new(&allow_symlinks())
+        .with_options(integrity(1 << 20))
+        .verify(&clean)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
     assert_eq!(
         report.status(),
@@ -498,12 +518,17 @@ fn verify_integrity_checks_the_link_in_the_same_decode() {
     flip_first(&mut bytes, b"TARGETTARGET");
     let corrupt = dir.path().join("corrupt.7z");
     std::fs::write(&corrupt, bytes).unwrap();
-    let report =
-        verify_archive_with_options(&corrupt, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    let report = VerifyRequest::new(&allow_symlinks())
+        .with_options(integrity(1 << 20))
+        .verify(&corrupt)
+        .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
     assert!(issue_categories(&report).contains(&IssueCategory::CorruptData));
     assert!(
-        report.issues().iter().all(|i| !i.message.contains("empty")),
+        report
+            .issues()
+            .iter()
+            .all(|i| !i.message().contains("empty")),
         "{:?}",
         report.issues()
     );
@@ -511,7 +536,7 @@ fn verify_integrity_checks_the_link_in_the_same_decode() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("could not be read")),
+            .any(|i| i.message().contains("could not be read")),
         "{:?}",
         report.issues()
     );
@@ -522,7 +547,10 @@ fn verify_integrity_leaves_a_link_unread_when_the_budget_cannot_decode_it() {
     let dir = TempDir::new().unwrap();
     let path = archive_of(&dir, &[Item::Link("link", b"a.txt")]);
 
-    let report = verify_archive_with_options(&path, &allow_symlinks(), &integrity(1)).unwrap();
+    let report = VerifyRequest::new(&allow_symlinks())
+        .with_options(integrity(1))
+        .verify(&path)
+        .unwrap();
 
     assert_eq!(report.status(), VerificationStatus::Warning);
     assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
@@ -530,7 +558,7 @@ fn verify_integrity_leaves_a_link_unread_when_the_budget_cannot_decode_it() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("1 symlink target was not read")),
+            .any(|i| i.message().contains("1 symlink target was not read")),
         "{:?}",
         report.issues()
     );
@@ -550,15 +578,17 @@ fn verify_integrity_marks_the_links_of_a_refused_solid_block_unreadable() {
     )
     .unwrap();
 
-    let report =
-        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    let report = VerifyRequest::new(&allow_symlinks())
+        .with_options(integrity(1 << 20))
+        .verify(&path)
+        .unwrap();
 
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("could not be read")),
+            .any(|i| i.message().contains("could not be read")),
         "{:?}",
         report.issues()
     );
@@ -566,7 +596,7 @@ fn verify_integrity_marks_the_links_of_a_refused_solid_block_unreadable() {
         report
             .issues()
             .iter()
-            .all(|i| !i.message.contains("symlink target was not read")),
+            .all(|i| !i.message().contains("symlink target was not read")),
         "{:?}",
         report.issues()
     );
@@ -695,7 +725,9 @@ fn existing_destination_symlink_is_not_replaced() {
         std::fs::create_dir_all(out.path().join("p/q")).unwrap();
         symlink("p/q", out.path().join("x")).unwrap();
         let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
-        let result = extract_archive_with_options(&path, out.path(), &allow_symlinks(), &options);
+        let result = ExtractRequest::new(&allow_symlinks())
+            .with_options(options.clone())
+            .extract(&path, out.path());
 
         if skip_duplicates {
             result.unwrap();
@@ -718,7 +750,7 @@ fn existing_destination_symlink_is_not_replaced() {
 #[cfg(unix)]
 fn assert_symlink_refused(error: ArchiveError) {
     let error = match error {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => other,
     };
     let ArchiveError::Io(io) = &error else {
@@ -748,7 +780,9 @@ fn dangling_link_at_the_link_path_is_skipped_or_refused_by_policy() {
         symlink("gone", out.path().join("l")).unwrap();
         let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
 
-        let result = extract_archive_with_options(&path, out.path(), &allow_symlinks(), &options);
+        let result = ExtractRequest::new(&allow_symlinks())
+            .with_options(options.clone())
+            .extract(&path, out.path());
 
         if skip_duplicates {
             result.unwrap();
@@ -778,7 +812,7 @@ fn extract_rejects_an_oversized_non_utf8_or_empty_target() {
 
         let err = extract_archive(&path, out.path(), &allow_symlinks()).unwrap_err();
 
-        let header_refusal = !matches!(err, ArchiveError::PartialExtraction { .. });
+        let header_refusal = !matches!(err, ArchiveError::PartialExtraction(_));
         let err = if header_refusal {
             err
         } else {
@@ -810,9 +844,10 @@ fn solid_block_with_a_link_follows_the_solid_policy() {
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(extract_archive(&path, TempDir::new().unwrap().path(), &refused).is_err());
 
-    let allowed = allow_symlinks()
-        .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024));
+    let allowed = allow_symlinks().with_solid_archives(exarch_core::SolidArchives::Allow(
+        exarch_core::SolidLimits::DEFAULT
+            .with_max_block_memory(exarch_core::non_zero!(100 * 1024 * 1024)),
+    ));
     assert_eq!(
         link_target(&path, &allowed),
         LinkTarget::Recorded(PathBuf::from("a.txt"))
@@ -843,8 +878,10 @@ fn unresolvable_parent_components_are_refused_in_both_orders() {
             assert_matches!(partial_source(err), ArchiveError::SymlinkEscape { .. });
             assert!(std::fs::symlink_metadata(out.path().join("d")).is_ok());
         }
-        let report =
-            verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+        let report = VerifyRequest::new(&allow_symlinks())
+            .with_options(integrity(1 << 20))
+            .verify(&path)
+            .unwrap();
         assert_eq!(report.security_status(), CheckStatus::Fail);
     }
 }
@@ -861,8 +898,10 @@ fn a_target_through_a_directory_of_the_same_archive_resolves_like_tar() {
     let link = std::fs::read_link(out.path().join("t2")).unwrap();
     assert_eq!(link, Path::new("t/../x"));
     assert!(!out.path().join("x").exists());
-    let report =
-        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    let report = VerifyRequest::new(&allow_symlinks())
+        .with_options(integrity(1 << 20))
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.security_status(), CheckStatus::Pass);
 }
 
@@ -950,9 +989,10 @@ fn links_count_against_the_entry_limit_in_list_and_verify() {
 }
 
 fn solid_config() -> SecurityConfig {
-    allow_symlinks()
-        .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024))
+    allow_symlinks().with_solid_archives(exarch_core::SolidArchives::Allow(
+        exarch_core::SolidLimits::DEFAULT
+            .with_max_block_memory(exarch_core::non_zero!(100 * 1024 * 1024)),
+    ))
 }
 
 #[cfg(unix)]
@@ -1048,8 +1088,10 @@ fn a_link_written_by_7zip_with_snl_is_a_unix_symlink_not_a_reparse_point() {
         link_target(&path, &allow_symlinks()),
         LinkTarget::Recorded(PathBuf::from("target.txt"))
     );
-    let report =
-        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    let report = VerifyRequest::new(&allow_symlinks())
+        .with_options(integrity(1 << 20))
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.security_status(), CheckStatus::Pass);
 
     let refused = TempDir::new().unwrap();
@@ -1158,8 +1200,10 @@ fn assert_orphan_block_refused(path: &Path, mapping: [Option<usize>; 2]) {
     }
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 2);
 
-    let report =
-        verify_archive_with_options(path, &SecurityConfig::default(), &integrity(1 << 20)).unwrap();
+    let report = VerifyRequest::new(&SecurityConfig::default())
+        .with_options(integrity(1 << 20))
+        .verify(path)
+        .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_eq!(
         issue_categories(&report)
@@ -1224,7 +1268,10 @@ fn tree_of(root: &Path) -> Vec<String> {
 fn extract_class(path: &Path, config: &SecurityConfig, skip_duplicates: bool) -> &'static str {
     let out = TempDir::new().unwrap();
     let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
-    match extract_archive_with_options(path, out.path(), config, &options) {
+    match ExtractRequest::new(config)
+        .with_options(options)
+        .extract(path, out.path())
+    {
         Ok(_) => "extracted",
         Err(ArchiveError::InvalidArchive(_)) => {
             assert!(dir_is_empty(&out), "a refusal writes nothing");
@@ -1238,7 +1285,10 @@ fn extract_class(path: &Path, config: &SecurityConfig, skip_duplicates: bool) ->
 /// or `refused`.
 #[cfg(unix)]
 fn verify_class(path: &Path, config: &SecurityConfig) -> &'static str {
-    match verify_archive_with_options(path, config, &integrity(1 << 20)) {
+    match VerifyRequest::new(config)
+        .with_options(integrity(1 << 20))
+        .verify(path)
+    {
         Ok(report) if report.status() == VerificationStatus::Pass => "pass",
         Ok(report) => {
             assert_ne!(report.security_status(), CheckStatus::Pass, "{report:?}");
@@ -1378,8 +1428,10 @@ fn a_link_found_by_p7zip_16_02_in_a_directory_is_a_unix_symlink() {
         link_target(&path, &SecurityConfig::default()),
         LinkTarget::Recorded(PathBuf::from("target.txt"))
     );
-    let report =
-        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    let report = VerifyRequest::new(&allow_symlinks())
+        .with_options(integrity(1 << 20))
+        .verify(&path)
+        .unwrap();
     assert_eq!(report.security_status(), CheckStatus::Pass);
 
     let refused = TempDir::new().unwrap();
@@ -1429,7 +1481,10 @@ fn a_link_written_by_p7zip_16_02_is_a_regular_file() {
                 .all(|entry| !matches!(entry.kind, ManifestEntryKind::Symlink { .. })),
             "no entry is a link"
         );
-        let report = verify_archive_with_options(&path, &config, &integrity(1 << 20)).unwrap();
+        let report = VerifyRequest::new(&config)
+            .with_options(integrity(1 << 20))
+            .verify(&path)
+            .unwrap();
         assert_eq!(report.security_status(), CheckStatus::Pass);
 
         let out = TempDir::new().unwrap();

@@ -66,7 +66,7 @@ fn root_dir_entry_is_skipped_on_extract() {
 
         let report = extract_archive(&archive, out.path(), &SecurityConfig::default()).unwrap();
 
-        assert_eq!(report.files_skipped, 0, "{root:?}");
+        assert_eq!(report.files_skipped(), 0, "{root:?}");
         assert_eq!(std::fs::read(out.path().join("a.txt")).unwrap(), b"hi");
         assert_eq!(std::fs::read(out.path().join("sub/b")).unwrap(), b"y");
     }
@@ -168,7 +168,7 @@ fn empty_root_file_entry_is_a_no_op_not_a_skipped_duplicate() {
 
     let report = extract_archive(&archive, out.path(), &SecurityConfig::default()).unwrap();
 
-    assert_eq!(report.files_skipped, 0);
+    assert_eq!(report.files_skipped(), 0);
     assert_eq!(report.files_extracted, 1);
     assert!(
         verify_archive(&archive, &SecurityConfig::default())

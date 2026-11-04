@@ -3,7 +3,6 @@
 use std::error::Error;
 use std::fmt;
 use std::io;
-use std::path::Path;
 
 use crate::ArchiveError;
 use crate::ArchiveReader;
@@ -11,11 +10,13 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
+use crate::security::quota::AdmittedSize;
 use crate::sink::EntrySink;
 use crate::sink::MemoryEntry;
 use crate::sink::MemoryEntryKind;
 use crate::sink::MemoryExtractRequest;
 use crate::sink::MemoryFile;
+use crate::types::CheckedLinkTarget;
 use crate::types::SafePath;
 
 /// An entry delivered by a [`CallbackSink`].
@@ -116,8 +117,8 @@ impl From<MemoryEntry> for CallbackEntry {
 /// use exarch_core::CallbackSink;
 /// use exarch_core::MemoryEntry;
 /// use exarch_core::SecurityConfig;
+/// use exarch_core::SinkExtractRequest;
 /// use exarch_core::SinkOptions;
-/// use exarch_core::extract_to_sink;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = tar::Builder::new(Vec::new());
@@ -135,12 +136,10 @@ impl From<MemoryEntry> for CallbackEntry {
 ///     Ok(())
 /// });
 /// let reader = ArchiveReader::tar(io::Cursor::new(archive), None);
-/// extract_to_sink(
-///     reader,
-///     &mut sink,
-///     &SecurityConfig::default(),
-///     &SinkOptions::default(),
-/// )?;
+/// let config = SecurityConfig::default();
+/// SinkExtractRequest::new(&config)
+///     .with_options(SinkOptions::default())
+///     .extract(reader, &mut sink)?;
 /// assert_eq!(seen.len(), 1);
 /// assert_eq!(seen[0].1, b"hello");
 /// # Ok(())
@@ -205,20 +204,20 @@ where
         &mut self,
         _path: &SafePath,
         mode: Option<SanitizedMode>,
-        size: u64,
+        size: AdmittedSize,
     ) -> io::Result<MemoryFile> {
-        Ok(MemoryFile::with_size(size, mode))
+        Ok(MemoryFile::with_size(size.get(), mode))
     }
 
     fn finish_file(&mut self, path: &SafePath, file: MemoryFile) -> io::Result<()> {
         (self.callback)(path, file.into_entry().into())
     }
 
-    fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()> {
+    fn create_symlink(&mut self, link: &SafePath, target: CheckedLinkTarget<'_>) -> io::Result<()> {
         (self.callback)(
             link,
             MemoryEntry::Symlink {
-                target: target.to_path_buf(),
+                target: target.as_path().to_path_buf(),
             }
             .into(),
         )
@@ -239,6 +238,10 @@ where
 /// The first error the callback returned is kept as `E`, so the caller keeps
 /// its own error type instead of recovering it from a side slot.
 ///
+/// Closed by design: a failure is either the caller's own or the archive's, so
+/// a `match` over both variants needs no wildcard arm and the compiler flags
+/// any variant a future change adds.
+///
 /// # Examples
 ///
 /// ```
@@ -254,7 +257,6 @@ where
 /// );
 /// ```
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum CallbackError<E> {
     /// The callback returned this error for an entry, which ended the
     /// extraction. It takes precedence over the archive error the aborted
@@ -304,7 +306,7 @@ impl<E> From<ArchiveError> for CallbackError<E> {
 ///
 /// [`CallbackError::Callback`] with the first error of `on_entry`, else
 /// [`CallbackError::Archive`] with the errors of
-/// [`extract_to_sink_with_progress`](crate::extract_to_sink_with_progress).
+/// [`SinkExtractRequest::extract`](crate::SinkExtractRequest::extract).
 ///
 /// # Examples
 ///
@@ -366,16 +368,51 @@ where
         })
     })
     .with_path_model(request.model);
-    let result = crate::extract_to_sink_with_progress(
-        reader,
-        &mut sink,
-        &request.config,
-        &request.options,
-        progress,
-    );
+    let result = crate::SinkExtractRequest::new(&request.config)
+        .with_options(request.options)
+        .with_progress(progress)
+        .extract(reader, &mut sink);
     match (failure, result) {
         (Some(err), _) => Err(CallbackError::Callback(err)),
         (None, Ok(report)) => Ok(report),
         (None, Err(err)) => Err(CallbackError::Archive(err)),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::SecurityConfig;
+
+    fn hardlink_target() -> SafePath {
+        SafePath::validate(
+            std::path::Path::new("target.txt"),
+            &crate::DestDir::new(std::env::temp_dir()).unwrap(),
+            &SecurityConfig::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_callback_entry_maps_to_a_memory_entry_kind() {
+        let entries = [
+            CallbackEntry::Stored(MemoryEntry::Directory),
+            CallbackEntry::Hardlink {
+                target: hardlink_target(),
+            },
+        ];
+        let mut seen = Vec::new();
+        for entry in &entries {
+            // A wildcard-free match: a new variant fails to compile here.
+            let expected = match entry {
+                CallbackEntry::Stored(stored) => stored.kind(),
+                CallbackEntry::Hardlink { .. } => MemoryEntryKind::Hardlink,
+            };
+            assert_eq!(entry.kind(), expected);
+            seen.push(entry.kind());
+        }
+        assert!(seen.contains(&MemoryEntryKind::Directory));
+        assert!(seen.contains(&MemoryEntryKind::Hardlink));
     }
 }

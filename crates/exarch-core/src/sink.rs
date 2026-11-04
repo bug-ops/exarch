@@ -1,6 +1,6 @@
 //! Extraction into caller-owned storage instead of a directory.
 //!
-//! [`extract_to_sink`](crate::extract_to_sink) runs the same validation
+//! [`SinkExtractRequest`](crate::SinkExtractRequest) runs the same validation
 //! pipeline as [`extract_archive`](crate::extract_archive) (quotas, ratio
 //! limits, path and link checks, the per-format gates) but hands each entry to
 //! an [`EntrySink`], so an archive can be unpacked into memory, an object
@@ -78,13 +78,15 @@
 //! use std::path::Path;
 //! use std::path::PathBuf;
 //!
+//! use exarch_core::AdmittedSize;
 //! use exarch_core::ArchiveReader;
+//! use exarch_core::CheckedLinkTarget;
 //! use exarch_core::EntrySink;
 //! use exarch_core::SafePath;
 //! use exarch_core::SanitizedMode;
 //! use exarch_core::SecurityConfig;
+//! use exarch_core::SinkExtractRequest;
 //! use exarch_core::SinkOptions;
-//! use exarch_core::extract_to_sink;
 //!
 //! #[derive(Default)]
 //! struct MapSink(BTreeMap<PathBuf, Vec<u8>>);
@@ -100,10 +102,10 @@
 //!         &mut self,
 //!         _: &SafePath,
 //!         _: Option<SanitizedMode>,
-//!         size: u64,
+//!         size: AdmittedSize,
 //!     ) -> io::Result<Vec<u8>> {
 //!         Ok(Vec::with_capacity(
-//!             usize::try_from(size.min(1 << 16)).unwrap_or(0),
+//!             usize::try_from(size.get().min(1 << 16)).unwrap_or(0),
 //!         ))
 //!     }
 //!
@@ -112,7 +114,7 @@
 //!         Ok(())
 //!     }
 //!
-//!     fn create_symlink(&mut self, _: &SafePath, _: &Path) -> io::Result<()> {
+//!     fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
 //!         Ok(())
 //!     }
 //!
@@ -133,12 +135,10 @@
 //!
 //! let mut sink = MapSink::default();
 //! let reader = ArchiveReader::tar(io::Cursor::new(archive), None);
-//! let report = extract_to_sink(
-//!     reader,
-//!     &mut sink,
-//!     &SecurityConfig::default(),
-//!     &SinkOptions::default(),
-//! )?;
+//! let config = SecurityConfig::default();
+//! let report = SinkExtractRequest::new(&config)
+//!     .with_options(SinkOptions::default())
+//!     .extract(reader, &mut sink)?;
 //! assert_eq!(report.files_extracted, 1);
 //! assert_eq!(sink.0[Path::new("docs/hello.txt")], b"hello");
 //! # Ok(())
@@ -176,7 +176,6 @@ use crate::Malformation;
 use crate::QuotaResource;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::formats::common;
@@ -191,6 +190,7 @@ use crate::security::admitted::ValidatedHardlink;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView as _;
+use crate::security::fs_view::LandingLimits;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::ModelRoot as _;
 use crate::security::fs_view::Node;
@@ -200,13 +200,16 @@ use crate::security::fs_view::PathModel;
 use crate::security::fs_view::PlaceError;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
+use crate::security::fs_view::name_too_long;
 use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
+use crate::security::quota::AdmittedSize;
 use crate::security::quota::EntryCount;
 use crate::security::validator::FileScreen;
 use crate::security::validator::ValidatorCore;
+use crate::types::CheckedLinkTarget;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::Resolved;
@@ -456,7 +459,8 @@ pub trait EntrySink {
     /// Returns an error if the directory cannot be created.
     fn create_directory(&mut self, path: &SafePath) -> io::Result<()>;
 
-    /// Starts a file of exactly `size` bytes, as the archive declares it.
+    /// Starts a file of exactly `size` bytes, the size the quota tracker
+    /// admitted for it.
     ///
     /// `mode` is the permission bits after setuid and setgid are stripped, if
     /// the archive carries any.
@@ -468,14 +472,14 @@ pub trait EntrySink {
         &mut self,
         path: &SafePath,
         mode: Option<SanitizedMode>,
-        size: u64,
+        size: AdmittedSize,
     ) -> io::Result<Self::File>;
 
     /// Starts a file whose `bytes` are already complete and verified.
     ///
     /// The result is then passed to [`finish_file`](Self::finish_file) like one
-    /// from [`create_file`](Self::create_file), and `bytes.len()` is the size
-    /// the archive declares. The default writes `bytes` through
+    /// from [`create_file`](Self::create_file), and `bytes.len()` equals
+    /// `size`. The default writes `bytes` through
     /// [`create_file`](Self::create_file); a sink that keeps its files in
     /// memory can override it to take the buffer without copying it.
     ///
@@ -487,8 +491,9 @@ pub trait EntrySink {
     ///
     /// ```
     /// use std::io;
-    /// use std::path::Path;
     ///
+    /// use exarch_core::AdmittedSize;
+    /// use exarch_core::CheckedLinkTarget;
     /// use exarch_core::EntrySink;
     /// use exarch_core::SafePath;
     /// use exarch_core::SanitizedMode;
@@ -506,10 +511,10 @@ pub trait EntrySink {
     ///         &mut self,
     ///         _: &SafePath,
     ///         _: Option<SanitizedMode>,
-    ///         size: u64,
+    ///         size: AdmittedSize,
     ///     ) -> io::Result<Vec<u8>> {
     ///         Ok(Vec::with_capacity(
-    ///             usize::try_from(size.min(1 << 16)).unwrap_or(0),
+    ///             usize::try_from(size.get().min(1 << 16)).unwrap_or(0),
     ///         ))
     ///     }
     ///
@@ -517,6 +522,7 @@ pub trait EntrySink {
     ///         &mut self,
     ///         _: &SafePath,
     ///         _: Option<SanitizedMode>,
+    ///         _: AdmittedSize,
     ///         bytes: Vec<u8>,
     ///     ) -> io::Result<Vec<u8>> {
     ///         Ok(bytes)
@@ -526,7 +532,7 @@ pub trait EntrySink {
     ///         Ok(())
     ///     }
     ///
-    ///     fn create_symlink(&mut self, _: &SafePath, _: &Path) -> io::Result<()> {
+    ///     fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
     ///         Ok(())
     ///     }
     ///
@@ -539,9 +545,10 @@ pub trait EntrySink {
         &mut self,
         path: &SafePath,
         mode: Option<SanitizedMode>,
+        size: AdmittedSize,
         bytes: Vec<u8>,
     ) -> io::Result<Self::File> {
-        let mut file = self.create_file(path, mode, bytes.len() as u64)?;
+        let mut file = self.create_file(path, mode, size)?;
         file.write_all(&bytes)?;
         Ok(file)
     }
@@ -558,12 +565,13 @@ pub trait EntrySink {
     /// the archive spells it and is validated not to escape the root.
     ///
     /// Entries delivered later are already resolved through this link, so a
-    /// sink may store it as opaque data.
+    /// sink may store it as opaque data; [`CheckedLinkTarget::as_path`] gives
+    /// the text to store.
     ///
     /// # Errors
     ///
     /// Returns an error if the link cannot be created.
-    fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()>;
+    fn create_symlink(&mut self, link: &SafePath, target: CheckedLinkTarget<'_>) -> io::Result<()>;
 
     /// Creates `link` with the content of the file at `target`.
     ///
@@ -577,14 +585,14 @@ pub trait EntrySink {
 struct StagedFile {
     path: SafePath,
     mode: Option<SanitizedMode>,
-    size: u64,
+    size: AdmittedSize,
 }
 
 /// An [`ExtractTarget`] that validates against an in-memory model of the
 /// destination and delivers to an [`EntrySink`].
 pub(crate) struct SinkTarget<'a, S: EntrySink> {
     sink: &'a mut S,
-    config: &'a SecurityConfig<Validated>,
+    config: &'a SecurityConfig,
     root: VirtualRoot,
     model: PathModel,
     tree: VirtualTree,
@@ -595,7 +603,7 @@ pub(crate) struct SinkTarget<'a, S: EntrySink> {
 }
 
 impl<'a, S: EntrySink> SinkTarget<'a, S> {
-    pub(crate) fn new(sink: &'a mut S, config: &'a SecurityConfig<Validated>) -> Self {
+    pub(crate) fn new(sink: &'a mut S, config: &'a SecurityConfig) -> Self {
         let root = VirtualRoot::new();
         let model = sink.path_model();
         let tree = VirtualTree::new(
@@ -624,14 +632,14 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
         tally: &mut Tally<'_>,
     ) -> Result<Option<StagedFile>> {
         let (path, permit, mode) = admitted.into_parts();
-        let size = permit.into_bytes();
+        let size = permit.into_admitted();
         // Overflow guard only, as on the host: the sum is not stored.
-        common::checked_add_bytes(tally.report.bytes_written, size)?;
+        common::checked_add_bytes(tally.report.bytes_written, size.get())?;
 
         let rel = path.as_path();
         match (self.tree.occupant(rel), tally.options.duplicate_policy()) {
             (Some(_), DuplicatePolicy::Skip) => {
-                tally.record_duplicate_skip()?;
+                tally.record_duplicate_skip(rel)?;
                 return Ok(None);
             }
             (
@@ -643,7 +651,7 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
             (Some(Occupant::File) | None, _) => {}
         }
 
-        let path = self.place(rel, Node::File)?;
+        let path = self.place(&path, Node::File)?;
         Ok(Some(StagedFile { path, mode, size }))
     }
 
@@ -658,8 +666,12 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
             .sink
             .create_file(&staged.path, staged.mode, staged.size)
             .map_err(sink_error)?;
-        let written =
-            copy_with_buffer(reader, &mut file, &mut self.copy_buffer, Some(staged.size))?;
+        let written = copy_with_buffer(
+            reader,
+            &mut file,
+            &mut self.copy_buffer,
+            Some(staged.size.get()),
+        )?;
         self.finish_staged(staged.path, file, written, tally)
     }
 
@@ -676,19 +688,10 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
     }
 
     /// Places `node` at `rel`, returning where it landed.
-    fn place(&mut self, rel: &Path, node: Node) -> Result<SafePath> {
-        let resolved = self.tree.place(rel, node).map_err(place_error)?;
-        self.landed_within_limits(resolved)
-    }
-
-    /// The path an entry landed at, checked against the model's name limits:
-    /// the entry's own name was checked before it was resolved through earlier
-    /// symlinks, and the path it lands at can be longer.
-    fn landed_within_limits(&self, resolved: PathBuf) -> Result<SafePath> {
-        self.model
-            .check_name_lengths(&resolved)
-            .map_err(ArchiveError::Io)?;
-        Ok(landed(resolved))
+    fn place(&mut self, rel: &SafePath, node: Node) -> Result<SafePath> {
+        self.tree
+            .project_landing(rel, node, LandingLimits::Enforced)
+            .map_err(place_error)
     }
 
     /// The path model entries are validated against.
@@ -718,6 +721,7 @@ fn place_error(error: PlaceError) -> ArchiveError {
     match error {
         PlaceError::Conflict(conflict) => conflict.into_archive_error(),
         PlaceError::Budget(exceeded) => exceeded.into(),
+        PlaceError::LandingTooLong => ArchiveError::Io(name_too_long()),
     }
 }
 
@@ -733,13 +737,6 @@ fn sink_error(error: io::Error) -> ArchiveError {
             resource: QuotaResource::SinkCapacity { max },
         },
     )
-}
-
-fn landed(resolved: PathBuf) -> SafePath {
-    // SAFETY: the tree builds the path from components of entries that passed
-    // `SafePath` validation and from nothing else, so it is relative and
-    // normalized.
-    SafePath::new_unchecked(resolved)
 }
 
 impl<S: EntrySink> SinkTarget<'_, S> {
@@ -776,9 +773,9 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             &ctx,
         )?;
         match screen {
-            FileScreen::DisallowedExtension => {
-                tally.record_extension_skip().map(FileAdmission::Skipped)
-            }
+            FileScreen::DisallowedExtension => tally
+                .record_extension_skip(request.path)
+                .map(FileAdmission::Skipped),
             FileScreen::Pending(pending) => {
                 let file = self.core.admit_file(pending)?;
                 self.check_limits(request.path, None)?;
@@ -827,7 +824,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {
         let rel = path.as_path();
         let occupied = self.tree.occupant(rel).is_some();
-        let resolved = self.place(rel, Node::Dir)?;
+        let resolved = self.place(path, Node::Dir)?;
         if !occupied && !rel.is_empty() {
             self.sink.create_directory(&resolved).map_err(sink_error)?;
         }
@@ -857,11 +854,11 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             return Ok(());
         };
         match retained {
-            Retained::Bytes(bytes) if bytes.len() as u64 == staged.size => {
+            Retained::Bytes(bytes) if bytes.len() as u64 == staged.size.get() => {
                 let written = bytes.len() as u64;
                 let file = self
                     .sink
-                    .create_file_from(&staged.path, staged.mode, bytes)
+                    .create_file_from(&staged.path, staged.mode, staged.size, bytes)
                     .map_err(sink_error)?;
                 self.finish_staged(staged.path, file, written, tally)
             }
@@ -871,42 +868,50 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     }
 
     fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()> {
-        let rel = symlink.link().as_path();
+        let link = symlink.link();
+        let rel = link.as_path();
         let target = symlink.target_path();
         let occupant = self.tree.occupant(rel);
         match (occupant, tally.options.duplicate_policy()) {
-            (Some(_), DuplicatePolicy::Skip) => return tally.record_duplicate_skip().map(drop),
+            (Some(_), DuplicatePolicy::Skip) => return tally.record_duplicate_skip(rel).map(drop),
             (Some(Occupant::Directory), DuplicatePolicy::Overwrite) => {
                 return Err(common::occupant_at_dest_error(rel, Occupant::Directory).into());
             }
             (Some(Occupant::Symlink), DuplicatePolicy::Overwrite) => {
                 // An unchanged link re-points nothing; any other target is
                 // refused by the tree.
-                let unchanged = self.tree.place(rel, Node::Symlink(target.to_path_buf()));
+                let unchanged = self.tree.project_landing(
+                    link,
+                    Node::Symlink(target.to_path_buf()),
+                    LandingLimits::Enforced,
+                );
                 return match unchanged {
-                    Ok(_) => common::checked_increment_files_skipped(tally.report),
-                    Err(PlaceError::Budget(exceeded)) => Err(exceeded.into()),
+                    Ok(_) => common::record_duplicate_skip(tally.report, rel),
                     Err(PlaceError::Conflict(_)) => {
                         Err(common::occupant_at_dest_error(rel, Occupant::Symlink).into())
                     }
+                    Err(error) => Err(place_error(error)),
                 };
             }
             (Some(Occupant::File) | None, _) => {}
         }
 
         let node = Node::Symlink(target.to_path_buf());
-        let resolved = match self.tree.place(rel, node.clone()) {
-            Ok(resolved) => self.landed_within_limits(resolved)?,
+        let resolved = match self
+            .tree
+            .project_landing(link, node.clone(), LandingLimits::Enforced)
+        {
+            Ok(resolved) => resolved,
             // The tree reports a symlink replacing a file as a conflict but
             // does replace it, as the host does; placing it again finds its
             // own unchanged duplicate and returns the path.
             Err(PlaceError::Conflict(conflict)) if conflict.occupant == Some(Occupant::File) => {
-                self.place(rel, node)?
+                self.place(link, node)?
             }
             Err(error) => return Err(place_error(error)),
         };
         self.sink
-            .create_symlink(&resolved, target)
+            .create_symlink(&resolved, symlink.checked_target())
             .map_err(sink_error)?;
         tally.report.symlinks_created += 1;
         Ok(())
@@ -918,7 +923,6 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         target: &HardlinkTarget,
         counted: EntryCount,
         tally: &mut Tally<'_>,
-        hardlink_duplicate_skips: &mut u64,
     ) -> Result<()> {
         let config = self.config;
         let link = SafePath::validate_in(link.as_path(), &self.root, config, &self.tree)?;
@@ -941,9 +945,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         }
         if self.tree.occupant(link.as_path()).is_some() {
             if tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-                common::checked_increment_files_skipped(tally.report)?;
-                *hardlink_duplicate_skips = hardlink_duplicate_skips.saturating_add(1);
-                return Ok(());
+                return common::record_duplicate_skip(tally.report, link.as_path());
             }
             return Err(ArchiveError::from(Malformation::DuplicateEntry {
                 path: link.as_path().to_path_buf(),
@@ -958,9 +960,11 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             .ok_or_else(|| hardlink_target_missing(target.as_path()))?;
         self.core.charge_hardlink(counted, size).map(drop)?;
 
-        let resolved = self.place(link.as_path(), Node::File)?;
+        let target_landing =
+            SafePath::from_normalized(resolved_target).map_err(ArchiveError::Io)?;
+        let resolved = self.place(&link, Node::File)?;
         self.sink
-            .create_hardlink(&resolved, &landed(resolved_target))
+            .create_hardlink(&resolved, &target_landing)
             .map_err(sink_error)?;
         self.sizes.insert(resolved.into_path_buf(), size);
 

@@ -1,22 +1,29 @@
 //! List command implementation
 
 use crate::cli::ListArgs;
-use crate::commands::apply_size_limits;
+use crate::commands::CommandResult;
+use crate::commands::Outcome;
+use crate::output::ManifestView;
 use crate::output::OutputFormatter;
-use anyhow::Result;
+use crate::output::SizeUnits;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
+use exarch_core::SecurityConfig;
 use exarch_core::StoredTargets;
-use exarch_core::list_archive_with_options;
 
-pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> Result<()> {
+/// The listing the flags ask for; `-H` is only accepted together with `-l`.
+const fn manifest_view(args: &ListArgs) -> ManifestView {
+    match (args.long, args.human_readable) {
+        (false, _) => ManifestView::Short,
+        (true, false) => ManifestView::Long(SizeUnits::Bytes),
+        (true, true) => ManifestView::Long(SizeUnits::Human),
+    }
+}
+
+pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = args
         .zip
-        .apply(apply_size_limits(
-            args.max_files,
-            args.max_total_size,
-            args.max_file_size,
-        )?)
-        .with_allow_solid_archives(args.allow_solid_archives);
+        .apply(args.limits.apply(SecurityConfig::default())?);
 
     let stored_targets = if args.read_link_targets {
         StoredTargets::Read
@@ -26,14 +33,12 @@ pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> Result<(
     let options = ListOptions::default().with_stored_targets(stored_targets);
 
     // List archive
-    let manifest = list_archive_with_options(&args.archive, &config, &options)?;
+    let manifest = ListRequest::new(&config)
+        .with_options(options)
+        .list(&args.archive)?;
 
     // Format output
-    if args.long {
-        formatter.format_manifest_long(&manifest, args.human_readable)?;
-    } else {
-        formatter.format_manifest_short(&manifest)?;
-    }
+    formatter.format_manifest(&manifest, manifest_view(args))?;
 
-    Ok(())
+    Ok(Outcome::Ok)
 }

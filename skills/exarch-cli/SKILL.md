@@ -100,7 +100,7 @@ Key flags (all optional):
 | `--max-files` | 10000 | Max number of entries (files, symlinks, hardlinks and directories); extraction fails with `QuotaExceeded` past it. A value of `0` is refused (see below). |
 | `--max-total-size` | 500 MB | Max cumulative extracted size. Accepts `K`/`M`/`G`/`T` suffixes, e.g. `2G`. `0` is refused. |
 | `--max-file-size` | 50 MB | Max size of any single extracted file. Same suffix syntax. `0` is refused. |
-| `--max-compression-ratio` | 100 | Max uncompressed/compressed ratio before an entry is treated as a zip bomb. Applies to ZIP and non-solid 7z; it does **not** apply to solid 7z blocks. With `--allow-solid-archives`, each solid block is checked as a whole against a fixed 1000x limit (`max_solid_compression_ratio`, Rust API only, not configurable from the CLI). An entry that declares data but zero compressed bytes is always a zip bomb with ratio `unbounded` and no ratio limit admits it; its `HINT` says the size metadata is inconsistent rather than suggesting this flag. The ratio of a 7z block counts only the pack streams its coders consume (derived from the coder method IDs, as the stream counts are not public in `sevenz-rust2`); a crafted header that declares a coder with a BCJ2 ID but never decodes it can still add up to three unreferenced pack streams to the last block's total, so that ratio stays an upper bound for such archives (the padding must be real bytes of the file and the other quotas still apply). For a compressed TAR it also bounds entries that `--allowed-extensions` or duplicate skipping leave undecoded to their end: past `--max-file-size` and `--max-total-size`, skipped data may decode to at most this ratio times the compressed input read so far (all entries, extracted ones included), else `extract` stops with `ZipBomb`, scope `skipped entries`, exit `1`, `error.kind` `ZipBomb`; an archive that extracts without the filter is never refused because of it. Verified live: a `.tar.gz` of 200 MiB of zeros with `--allowed-extensions txt` fails with `HINT: Skipped entries of a compressed TAR decoded more than --max-compression-ratio x the compressed input read so far`, and passes with `--max-compression-ratio 100000`. |
+| `--max-compression-ratio` | 100 | Max uncompressed/compressed ratio before an entry is treated as a zip bomb. Applies to ZIP and non-solid 7z; it does **not** apply to solid 7z blocks. With `--allow-solid-archives`, each solid block is checked as a whole against a fixed 1000x limit (`max_solid_compression_ratio`, Rust API only, not configurable from the CLI). An entry that declares data but zero compressed bytes is always a zip bomb with ratio `unbounded` and no ratio limit admits it; its `HINT` says the size metadata is inconsistent rather than suggesting this flag. The ratio of a 7z block counts only the pack streams its coders consume (derived from the coder method IDs, as the stream counts are not public in `sevenz-rust2`); a crafted header that declares a coder with a BCJ2 ID but never decodes it can still add up to three unreferenced pack streams to the last block's total, so that ratio stays an upper bound for such archives (the padding must be real bytes of the file and the other quotas still apply). For a compressed TAR it also bounds entries that `--allowed-extensions` or duplicate skipping leave undecoded to their end: past `--max-file-size` and `--max-total-size`, skipped data may decode to at most this ratio times the compressed input read so far (all entries, extracted ones included), else `extract` stops with `ZipBomb`, scope `skipped entries`, exit `1`, `error.kind` `ZipBomb`; an archive that extracts without the filter is never refused because of it. Verified live: a `.tar.gz` of 200 MiB of zeros with `--allowed-extensions txt` fails with `HINT: Skipped entries of a compressed TAR decoded more than --max-compression-ratio x the compressed input read so far`, and passes with `--max-compression-ratio 100000`. Fractions are accepted (`2.5`); `0`, a negative and a non-finite value are refused as `InvalidConfiguration` (setting `max_compression_ratio`) with exit `1`, and with the JSON envelope under `--json`, like every other limit value. `list` and `verify` accept the flag too. |
 | `--max-path-depth` | 32 | Max path component depth allowed per entry. `0` is refused. `extract` also refuses an entry name or path above the host's length limit with `I/O error: file name too long`, as `list` and `verify` do (verified live on ZIP). |
 | `--allowed-extensions <EXT>` | all allowed | Restrict extraction to matching extensions. Repeatable or comma-separated (`txt,pdf`); leading dot optional, case-insensitive, padding spaces and empty tokens ignored. An entry that can never match (`tar.gz`, `a/b`) is an error, and so is a value with no extension at all (`,`, `""`), which would otherwise allow everything. Applies to regular files only. TAR, ZIP and 7z check an entry's path first, then the allowlist, then the quotas: a skipped file is not charged to `--max-total-size` or `--max-file-size`, creates no directories, and is counted in `files_skipped`, whatever the destination state; but a skipped entry with an unsafe path (`../x.bin`, or one below an existing file or dangling symlink) is refused, not skipped (verified live on TAR and ZIP). |
 | `--allow-symlinks` | off | Allow symlinks that resolve within the extraction directory. `extract` and `verify` reject symlink and hardlink targets whose `..` components cannot be resolved against the extracted tree (TAR, ZIP and 7z). `extract` never writes through a symlink that already sits below the destination: by default it fails with `path component is a symlink: <path>` (`SecurityViolation`, `relaxable_by` `symlinks`); with this flag a pre-existing link is accepted only if it resolves to a directory inside the destination; one that leaves the destination fails with `SymlinkEscape`, and a dangling, looping or file-pointing one fails with `Security violation: refusing to create <entry> under the existing symlink at <parent>` (not relaxable, also by default for a looping link). A symlinked destination root is still accepted (#533). Verified live on TAR, ZIP and 7z. |
@@ -108,7 +108,7 @@ Key flags (all optional):
 | `--allow-absolute-paths` | off | Allow archive entries with absolute paths. For ZIP the leading root and any drive, UNC, verbatim (`\\?\`) or device (`\\.\`) prefix is stripped, so the entry lands under the destination (`/tmp/x` extracts to `<dest>/tmp/x`). |
 | `--allow-world-writable` | off | Allow files with world-writable (mode `0o002`) permission bits. |
 | `--allow-solid-archives` | off | Allow solid 7z archives (see Security model below). |
-| `--parallel-decode-memory <SIZE\|off>` | 128M | 7z only. Memory for decoding independent LZMA2 runs ahead on worker threads (K, M, G, T suffixes); `off` decodes on one thread; `0` exits 2 ("greater than zero"). |
+| `--parallel-decode-memory <SIZE\|off>` | 128M | 7z only. Memory for decoding independent LZMA2 runs ahead on worker threads (K, M, G, T suffixes); `off` decodes on one thread; `0` is refused as `InvalidConfiguration` (setting `parallel_decode_memory`) with exit `1`, like every other limit value (verified live). |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. `enforce` rejects an archive whose structure different ZIP readers interpret differently (see "ZIP structure" under `verify`); `ignore` keeps the central-directory interpretation and raises no structural finding. Relax it only for archives from a producer you trust. |
 | `--decode-reuse <off\|memory\|temp-file>` | memory | ZIP only. Where the structural check keeps the deflate, bzip2 and zstd output it decodes, so extraction writes it instead of decoding the entry a second time. `memory` keeps up to 256 MiB in RAM (peak RSS about 265 MiB on a 300 MiB deflate ZIP against 5 MiB with `off`); `temp-file` keeps up to 256 MiB in an unnamed temporary file (plaintext in the temp directory until extraction ends; RAM on a tmpfs, often no faster than `off` on a disk); `off` keeps nothing. The kept size never exceeds `--max-total-size` or the decoder memory limit, and entries over `--max-file-size` or `--max-compression-ratio` are never kept. No effect under `--zip-consistency ignore`; entries that do not fit are decoded twice. A kept entry is checked against its CRC-32 again when written. Invalid value: exit `2`. Verified live on the debug binary: a deflate, a bzip2 and a zstd ZIP each extract to identical files under all three values, and `--decode-reuse disk` lists the possible values `off, memory, temp-file`; that the kept output is replayed instead of decoded again is covered by unit tests, not by the binary. |
 | `--banned-component <COMPONENT>` | see below | Block entries whose path contains this component. **Replaces** the default list — see warning below. Repeatable, and a value may be comma-separated (`.git,.ssh`); tokens are trimmed. A token containing `/` or `\`, or equal to `.` or `..` is an error, and so is a non-empty value with no token (`,`, a blank). |
@@ -131,19 +131,21 @@ exarch create out.tar.gz src/ --json
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `-f, --force` | off | Overwrite `OUTPUT` if it already exists. |
-| `-l, --compression-level <1-9>` | 6 | Compression level on a shared 1-9 scale (each codec maps it to its own range). A value outside 1-9 or not a whole number is a usage error. |
-| `-x, --exclude <PATTERN>` | none | Glob exclude pattern; repeatable. |
+| `-f, --force` | off | Replace `OUTPUT` if it already exists. The archive is written to a temporary file in `OUTPUT`'s directory (which must be writable) and renamed into place only when complete, so a failed run leaves the previous archive untouched and no temp file behind; a replaced file keeps its permission bits (verified live: a `0600` archive stays `0600`). Without `--force` an existing `OUTPUT` is refused with `OutputExists` (exit `1`, `HINT: Use --force to overwrite.`) and left as it was. A directory, FIFO or device as `OUTPUT` is refused even with `--force` (`InvalidConfiguration`, setting `output_path`). The output file is never archived into itself. |
+| `-l, --compression-level <1-9>` | 6 | Compression level on a shared 1-9 scale (each codec maps it to its own range). A value outside 1-9 is refused as `InvalidCompressionLevel` with exit `1`; a value that is not a whole number is a clap usage error (exit `2`). |
+| `-x, --exclude <PATTERN>` | none | Exclude pattern; repeatable. One path component matched exactly (`node_modules`), as a prefix (`tmp*`) or as a suffix (`*.log`), or a relative path with separators (`build/out`) that excludes that path and everything below it. Matching is on the raw name bytes, so `*.key` also excludes a file whose name is not valid UTF-8. Any other shape is refused rather than silently matching nothing or matching literally: an inner or second `*`, a bare `*`, a `*` next to a separator (`build/*`; use `build`), any of `? [ ] { } !` (no glob syntax beyond one `*`), a comma (one pattern per `-x`), leading or trailing whitespace or control characters, `.`/`..`, an absolute path, an empty, over-long or NUL-containing value. A refusal is the library's typed `InvalidConfiguration` (setting `exclude_pattern`), whose message names the pattern and the reason; exit `1`, with the JSON envelope under `--json`, and no archive is written (verified live: `-x '?.txt'`, `'[a'`, `'{a,b}'`, `'!a.txt'`, `' .env'`, `'a,b'`, `'build/*'`; the non-UTF-8 match is covered by a test on filesystems that allow such names, not run on macOS). Excluded entries are counted in `skipped_by_kind.excluded`. |
 | `--strip-prefix <PREFIX>` | none | Strip a path prefix from entry names. |
-| `--include-hidden` | off | Include dotfiles/hidden entries. |
+| `--include-hidden` | off | Include dotfiles/hidden entries. Without it a hidden file is skipped and a hidden directory below a source directory is skipped whole (never entered, so `.ssh/id_rsa` or `.aws/credentials` are not archived under their visible names); each skipped directory counts once in `skipped_by_kind.hidden`. A hidden directory given as a source, and a source file given directly, are archived regardless. The name on disk decides: with `--follow-symlinks` a link is judged by its own visible name, so a link `keys -> .ssh` is archived (contents under `keys/`) while a hidden-named link is skipped. |
 | `--follow-symlinks` | off | Follow symlinks when walking source trees (stores target contents, not the link). |
 | `--max-file-size <BYTES>` | none | Skip source files larger than this (`K`/`M`/`G`/`T` suffixes). `0` is refused with `InvalidConfiguration` (setting `max_file_size`), exit `1`, and no archive is written (verified live with the debug binary). |
 | `--preserve-permissions[=true\|false]` | `true` | Preserve platform permission bits. Pass `--preserve-permissions=false` for a portable, permission-agnostic archive. |
 
+**Overwrite defaults differ between front ends.** The CLI refuses an existing `OUTPUT` unless `--force` is passed (`OutputExists`, exit `1`). The Node and Python bindings take an `overwrite` option that defaults to `true`, so `createArchive` / `create_archive` replace an existing file unless the caller passes `overwrite: false` (`overwrite=False`). Every front end writes through the same staged temporary file and renames it into place, so a failed run keeps the previous archive.
+
 > [!NOTE]
 > With `--follow-symlinks` off (default), a symlink passed directly as a source (file or
 > directory) is archived as a link in TAR; ZIP has no symlink entry type, so it is skipped
-> instead (warning + `files_skipped`). With `--follow-symlinks` on, both TAR and ZIP dereference
+> instead (counted as a `symlink_unsupported` skip). With `--follow-symlinks` on, both TAR and ZIP dereference
 > the symlink and store the target's content — for a directory symlink, this means walking and
 > archiving the entire target tree.
 
@@ -170,13 +172,16 @@ exarch list archive.zip -l -H --json
 | Flag | Default | Purpose |
 |---|---|---|
 | `-l, --long` | off | Detailed per-entry info (type, size, mode, timestamps, link targets). A link whose target was not read shows `(target not read)`, one whose read failed `(target unreadable)`. |
-| `-H, --human-readable` | off | Human-readable sizes in text mode (ignored in `--json` mode, which always emits raw byte counts). |
+| `-H, --human-readable` | off | Human-readable sizes in text mode (ignored in `--json` mode, which always emits raw byte counts). Requires `--long`: `-H` alone is a usage error (exit `2`, verified live). |
 | `--max-files` | 10000 | Hard limit on entries scanned; listing fails with `QuotaExceeded` past this count, it does not truncate. Files that `extract --allowed-extensions` skips still count here, but not toward the total-size or per-file limits. |
 | `--max-total-size` | 500 MB | Hard limit on cumulative listed size; listing fails with `QuotaExceeded` past this size. Raise it explicitly for larger archives. |
 | `--max-file-size` | 50 MB | Hard limit on any single entry's size; listing fails with `QuotaExceeded` (`FileSize`) past this size. Raise it explicitly for archives with large individual files. |
 | `--allow-solid-archives` | off | Allow listing solid 7z archives (higher memory use). |
-| `--read-link-targets` | off | Read 7z symlink targets, which decodes the blocks that hold them (in a large solid block, most of the archive). By default `list` decodes nothing for links and `symlink_target` is `null`. TAR and ZIP always show their targets. |
+| `--read-link-targets` | off | Read 7z symlink targets, which decodes the blocks that hold them (in a large solid block, most of the archive). By default `list` decodes nothing for links and their `link_target` state is `unread`. TAR and ZIP always show their targets. |
+| `--max-compression-ratio` | 100 | Same as `extract`. |
 | `--zip-consistency <enforce\|ignore>` | enforce | Same as `extract`: under `enforce` a ZIP with ambiguous structure fails with `ZipInconsistency` instead of being listed. |
+
+With `--json -l`, every symlink or hardlink entry has a `link_target` object tagged by `state`: `{"state": "recorded", "path": "..."}` for a stored target, and `missing`, `unread` (a 7z target left undecoded), `unreadable` or `{"state": "oversized", "bytes": N}` (over the host's name limits) with no path. A file or directory has no `link_target` key. The old `symlink_target` and `hardlink_target` strings are gone: `null` used to stand for all four non-recorded states. `list -l` prints a note for each (`(target missing)`, `(target not read)`, `(target unreadable)`, `(target too long: N bytes)`). Verified live on a TAR symlink (`recorded`) and a 7z symlink (`unread` by default, `recorded` with `--read-link-targets`).
 
 Verified live: a 51 MB tar entry fails `exarch list` with
 `"quota exceeded: single file size (53477376 > 52428800)"` at the 50 MB default, and succeeds
@@ -200,17 +205,17 @@ exarch verify archive.tar.gz --json
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--strict` | off | Treat any warning-level finding as an error and exit with status `2` instead of `0`. |
+| `--strict` | off | Treat any warning-level finding as an error and exit with status `3` instead of `0` (`2` is clap's usage-error status, so a script can tell the two apart). |
 | `--check-integrity` | off | Decode the payload to the decoder's EOF so checksums and codec framing are verified. See "Payload integrity" below. |
-| `--decompression-budget <SIZE>` | 500M | Extra bytes `--check-integrity` may decode beyond what listing already decodes (`K`/`M`/`G`/`T` suffixes). Requires `--check-integrity`; `0` is rejected. Fixed default: it does not follow `--max-total-size`, so raise both for archives over 500 MB. |
-| `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--zip-consistency`, `--max-files`, `--max-total-size`, `--max-file-size`, `--allow-solid-archives`, `--check-integrity`, `--decompression-budget`, `--parallel-decode-memory` and `--strict`); it has no `--max-compression-ratio`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
+| `--decompression-budget <SIZE>` | 500M | Extra bytes `--check-integrity` may decode beyond what listing already decodes (`K`/`M`/`G`/`T` suffixes). Requires `--check-integrity`; `0` is refused as `InvalidConfiguration` (setting `decompression_budget`) with exit `1`. Fixed default: it does not follow `--max-total-size`, so raise both for archives over 500 MB. |
+| `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--zip-consistency`, `--max-files`, `--max-total-size`, `--max-file-size`, `--max-compression-ratio`, `--allow-solid-archives`, `--check-integrity`, `--decompression-budget`, `--parallel-decode-memory` and `--strict`); it has no `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. Under `enforce`, structural findings are reported as issues (see "ZIP structure" below); under `ignore` none are raised. |
 | `--parallel-decode-memory <SIZE\|off>` | 128M | Same as `extract`; effective with `--check-integrity`. |
-| `--max-files` / `--max-total-size` / `--max-file-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / off) | Same hard-limit semantics as `list` for file count (every entry is counted) and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
+| `--max-files` / `--max-total-size` / `--max-file-size` / `--max-compression-ratio` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / 100 / off) | Same hard-limit semantics as `list` for file count (every entry is counted) and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
 
 `verify` always runs the full security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting. By default it does not validate payload checksums: `integrity_status` is `SKIPPED` (`Integrity: SKIPPED` in text mode), so a passing `verify` says nothing about data corruption. Pass `--check-integrity` for that.
 
-**7z link targets are validated only with `--check-integrity`.** They live in compressed data, so a plain `verify --allow-symlinks` of a 7z archive with symlinks reports one `MEDIUM` issue (`N symlink target(s) were not read, so ...`) and status `WARNING`: exit `0`, or `2` with `--strict`. This includes an archive whose link escapes the destination, so a `verify && extract` gate no longer stops it; gate with `verify --strict` or `verify --check-integrity` (exit `1` on the escape), and use `extract --atomic` for all-or-nothing extraction. Entries beneath or through an unread link are still reported as failures.
+**7z link targets are validated only with `--check-integrity`.** They live in compressed data, so a plain `verify --allow-symlinks` of a 7z archive with symlinks reports one `MEDIUM` issue (`N symlink target(s) were not read, so ...`) and status `WARNING`: exit `0`, or `3` with `--strict`. This includes an archive whose link escapes the destination, so a `verify && extract` gate no longer stops it; gate with `verify --strict` or `verify --check-integrity` (exit `1` on the escape), and use `extract --atomic` for all-or-nothing extraction. Entries beneath or through an unread link are still reported as failures.
 
 #### Payload integrity (`--check-integrity`)
 
@@ -220,7 +225,7 @@ exarch verify archive.tar.gz --json
 |---|---|---|
 | `OK` | Every payload byte was decoded and every checksum the format has matched. | `0` |
 | `FAILED` | A checksum or decoder error proved the payload corrupt: a `HIGH` `"Corrupt Data"` issue, attributed to the entry where one owns it (`entry_path` is `null` for a stream trailer such as a gzip CRC). | `1` |
-| `INCOMPLETE` | Part of the payload was not verified; one `MEDIUM` `"Integrity Incomplete"` issue lists the counts per reason, so `status` is at least `WARNING`. | `0`, or `2` with `--strict` |
+| `INCOMPLETE` | Part of the payload was not verified; one `MEDIUM` `"Integrity Incomplete"` issue lists the counts per reason, so `status` is at least `WARNING`. | `0`, or `3` with `--strict` |
 | `SKIPPED` | `--check-integrity` was not passed. | n/a |
 
 **Exit code `0` does not mean integrity `OK`**: `INCOMPLETE` exits `0` unless `--strict` is passed, so use `--strict` (or read `data.integrity_status`) in automation. Reasons an item is unverified: decompression budget exhausted, quota/ratio/decoder-memory limit, a solid 7z archive while `--allow-solid-archives` is off, a 7z block checksum that the entries do not cover, an unsupported 7z coder, a TAR stream with no end-of-archive marker, an entry dropped from the manifest because its path exceeds the host limits, and the data-descriptor tail of a ZIP entry that was not searched. `verify` reports everything `extract` refuses in a 7z archive as an archive-level issue and exits `1`: a solid archive while `--allow-solid-archives` is off (`Security Policy`), a block whose coder memory exceeds the decoder limit (`Quota Exceeded`), AES-encrypted content under a plain header (`Security Policy`), an unknown coder, and a block whose files do not add up to its decoded size (`Invalid Archive`: `7z block's files do not account for its decoded size`; an orphan block, or sub-streams shifted by an entry without data, as a writer that gives directories a sub-stream produces; `extract` refuses it too). A stream-less entry (directory or empty file) between a block's files is fine. The payload of a refused block is counted as unverified. Verified live: `tests/fixtures/solid.7z` gives `Archive verification: FAIL` with one `Security Policy` issue and `Integrity: INCOMPLETE` with `--check-integrity` (exit `1`), and `PASS` with `--allow-solid-archives`; `tests/fixtures/interleaved-empty.7z` passes `verify --allow-solid-archives --check-integrity` and extracts all four entries, and `interleaved-empty-badcrc.7z` fails the integrity check with a `checksum mismatch` on `c.txt`.
@@ -259,6 +264,8 @@ document to stdout — a `status: "success"` envelope carrying the full report (
 "FAIL"`, findings in `data.issues`). Verified live on an archive containing a bare symlink
 entry: a single valid JSON document, parseable with a plain `json.loads(stdout)`. The process
 still exits `1` for a FAIL status.
+
+Entry names that are not valid UTF-8 are shown the same way in text and `--json`, wherever a path appears (`list`, `verify`, errors, skip samples): each invalid byte is written `\xNN` and a backslash `\x5C`, Paths of the host (the archive, the destination, the output) keep their native spelling; only entry names are rendered this way. Two names that differ only in invalid bytes (`caf\xE9`, `caf\xE8`) never print alike and no U+FFFD appears. A refusal issue (everything `extract` would also refuse) carries the typed fields of the error extraction raises: `code` (the `error.kind` names, such as `SecurityViolation`), `sub_code` and, where a policy flag relaxes it, `relaxable_by` and `setting`, so no script needs to parse `message`; an observation `verify` makes on its own has none of them. An executable file and an invalid-permissions refusal report their raw mode as a numeric `mode` (the old `context` string is gone; verified live on a setuid TAR: `mode` 2541, which is `0o4755`). Verified live: a TAR symlink without `--allow-symlinks` gives `code` `SecurityViolation`, `sub_code` `LINK_POLICY`, `relaxable_by` `symlinks`.
 
 `data.issues[].category` is one of `"Path Traversal"`, `"Symlink Escape"`, `"Hardlink Escape"`,
 `"Zip Bomb"`, `"Invalid Permissions"`, `"Quota Exceeded"`, `"Security Policy"`,
@@ -364,7 +371,7 @@ A 7z entry carrying a Unix symlink mode (`0x8000` flag plus `S_IFLNK` in the hig
 attributes, as p7zip and `bsdtar --format 7zip` write them) is a symlink whose target is the
 entry's data:
 
-- `list` leaves the target unread by default (`symlink_target` is `null` with `--json -l`, and
+- `list` leaves the target unread by default (`link_target` is `{"state": "unread"}` with `--json -l`, and
   `list -l` prints `(target not read)`); `--read-link-targets` reads it whatever the policy.
 - `verify` without `--allow-symlinks` fails with `symlinks not allowed`. With it, the target is
   validated only under `--check-integrity` (an absolute or escaping target then fails as a symlink
@@ -484,12 +491,16 @@ with the debug binary on four TARs: a size field `+0000000005` gives `kind` `Inv
 and no `sub_code`. A hardlink to a missing target gives `InvalidArchive` and
 `LINK_TARGET`, and a symlink entry with an empty link name gives `InvalidArchive` and `LINK_TARGET` (both verified live with the debug binary).
 
+A `QuotaExceeded` error also carries a `sub_code` naming the exhausted limit (`FILE_COUNT`, `TOTAL_SIZE`, `FILE_SIZE`, ..., `SOLID_BLOCK_MEMORY`), and a `ZipBomb` one the scope (`ENTRY`, `SOLID_BLOCK`, `SKIPPED_ENTRIES`). Verified live: `list --json --max-total-size 1` gives `kind` `QuotaExceeded`, `sub_code` `TOTAL_SIZE`.
+
 `error.setting` is present only on an `InvalidConfiguration` error and names the refused setting by its
 stable snake_case id (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`,
 `max_compression_ratio`, `decompression_budget`, `allowed_extension`, `banned_path_component`, `output_path`,
 `source_paths`, ...). A zero limit is refused when the flag is applied, so `list --max-files 0 --json` gives
 `kind` `InvalidConfiguration`, `setting` `max_file_count` and message
-`invalid configuration: max_file_count must not be zero` (verified live with the debug binary). A zero `--max-files`, `--max-total-size`, `--max-file-size` or `--max-path-depth` is refused when the flag is applied and exits `1`; `extract` prints `Error: Invalid configuration: <setting> must not be zero` followed by `HINT: Check the flags you passed and their allowed value ranges.`, while `list` and `verify` print the plain `Error: invalid configuration: ...` line without a `HINT`. `--max-compression-ratio 0` never reaches the library: clap refuses it as out of the range `1..=4294967295` with exit `2`. Verified live with the debug binary built from the branch HEAD.
+`invalid configuration: max_file_count must not be zero` (verified live with the debug binary). clap checks only the syntax of a limit flag (a number, with `K`/`M`/`G`/`T` suffixes for sizes); every value the library refuses is refused when the flag is applied, for `extract`, `list` and `verify` alike: a zero `--max-files`, `--max-total-size`, `--max-file-size` or `--max-path-depth`, a zero, negative or non-finite `--max-compression-ratio` and a zero `--decompression-budget` exit `1` with the JSON envelope under `--json` (`kind` `InvalidConfiguration`, `setting` naming the flag), and in text mode print `Error: Invalid configuration: <setting> ...` followed by `HINT: Check the flags you passed and their allowed value ranges.` for all three commands. Only a value clap cannot parse (`--max-files abc`, `--max-files 2.5`, `--max-compression-ratio x`) is a usage error with exit `2` and plain text. Verified live with the debug binary: `--json list --max-compression-ratio 0` and `--json list --max-files 0` print one `InvalidConfiguration` envelope and exit `1`.
+
+The same hints now apply to every command: `list` and `verify` name the archive and give the `HINT` of their own failure (for a quota, `Use --max-files, --max-total-size, or --max-file-size to increase limits.`), and a hint names only flags the command has (`list` is never told to pass `--allow-symlinks`).
 
 `error.relaxable_by` is present only on a `SecurityViolation` that a core `SecurityConfig` setting
 relaxes, and names the setting whose current value refused the entry: `symlinks`, `hardlinks`,
@@ -526,7 +537,7 @@ three-entry archive where the first entry extracts, the second is skipped for a 
 extension (via `--allowed-extensions`), and the third is a symlink rejected by the (default-off)
 `--allow-symlinks` check. The same progress counts, skip count, and warnings also appear as free
 text inside `error.message` (prefixed `"WARNING: Extraction was stopped. ..."`, with optional
-`"Files skipped: N"` / `"Warnings:"` lines when non-empty) — prefer the structured
+`"Files skipped: N"` / `"Warnings:"` lines when non-empty; the partial report carries the same skip fields as a finished run) — prefer the structured
 `error.partial_report` field over parsing that text.
 
 Human-readable output (`list`, `list -l`, `verify` issue lines, `extract -v`, warnings and error
@@ -554,8 +565,10 @@ Only the Rust, Node and Python extract entry points, which do not run that pass,
 extraction with the entries before it kept. A failed `extract --atomic` reports
 `writes: "rolled_back"` and leaves the destination unchanged.
 
-Note: `extract` lists the archive first (`list_archive()`, sharing `--max-file-count`,
-`--max-total-size`, and `--max-file-size` with the extraction config) to detect output
+The conflict check asks the library every path extraction creates, the implied parent directories of an entry included (`first.txt` and `a/b.txt` with a file at `out/a`), probes each with `lstat` and names the conflict at the path that holds it, before anything is written (verified live: `out/a` is named, `first.txt` is not written). A destination symlink at a landing is not turned into a generic conflict: one that points outside the destination is refused before any write as a `SymlinkEscape`, one that leads to no directory (a file, a dangling or looping link) as the library's `SecurityViolation` (`refusing to create ... under the existing symlink`, no `relaxable_by`), and a file entry over a link as `refusing to replace the existing symlink`; one that points at a directory inside the destination is left to extraction, which accepts it under `--allow-symlinks` or refuses with that hint. Under `--force` files are still replaced by files, but a file or link where the archive needs a directory is refused before anything is written, because a directory can never replace it (`first.txt` and `a/b.txt` with a file at `out/a`: `out/a` is named and `first.txt` is not written; tested). `--atomic` writes nothing into the destination until the end and is not pre-checked. A landing whose absolute path (destination plus entry path) is over the host path limit is left to extraction, which places entries through directory handles and does not depend on the destination's length; the pre-check never aborts on it (tested with a TAR and a ZIP, with and without `--force`). One known difference: under `--force` a file entry over an existing symlink is not pre-checked (a symlink entry that repeats an existing link must stay a no-op so re-extraction works), so the library refuses it at write time as a plain `IoError` (`refusing to replace the existing symlink at ...`), while without `--force` the same case is the typed `SecurityViolation`. A failure to inspect a path other than its absence is an error, not a pass. The check asks the library where each entry would land (absolute and Windows-prefixed names, `./` components and paths through earlier links resolved as extraction resolves them, entries extraction would not create left out). Anything already at the landing of a file, link or hardlink is a conflict, and so is a non-directory at the landing of a directory; an existing directory under a directory entry is not. Verified live on a `./a.txt` entry, a symlink entry over a file, a file entry over a dangling symlink and a directory over a directory. `list -l` sizes now count regular files only (a link or directory shows size `0`).
+
+Note: `extract` lists the archive first (a listing under the extraction config, sharing
+`--max-files`, `--max-total-size`, and `--max-file-size`) to detect output
 conflicts and size the progress bar, except for a TAR (any codec) extracted with `--atomic`
 (including `--atomic --force` over an existing destination), or whose destination does not
 exist yet and whose parent directory does. `--atomic` decodes a TAR once: the list pass would
@@ -592,15 +605,24 @@ Success (`extract`):
     "symlinks_created": 0,
     "bytes_written": 6,
     "files_skipped": 0,
+    "skipped_by_kind": {},
+    "skipped_sample": [],
     "duration_ms": 0,
     "warnings": []
   }
 }
 ```
 
-`files_skipped` and `warnings` are populated whenever entries are skipped without failing the
-extraction — e.g. `--allowed-extensions` rejecting entries by extension, or duplicate destination
-files skipped under `--skip-duplicates` semantics (the default when `--force` is absent).
+`files_skipped` (the total), `skipped_by_kind` (exact counts per reason: `duplicate`,
+`extension_not_allowed`, `excluded`, `hidden`, `over_max_file_size`, `symlink_unsupported`,
+`unreadable`; only reasons that occurred) and `skipped_sample` (the first 64 skipped entries, each
+`{"kind", "path"}` plus `io_kind` for an unreadable one) are populated whenever entries are skipped
+without failing the extraction; `warnings` holds other conditions (7z anti-items, an undeletable
+backup). `create` reports the same three skip fields. In text mode the total is followed by one
+`kind: N` line per reason. Verified live: `extract --allowed-extensions md` of a one-file archive prints
+`Files skipped: 1` / `extension_not_allowed: 1`, and `create -x a.txt` prints `excluded: 1`. A skip no
+longer appears as a free-text warning — e.g. `--allowed-extensions` rejecting entries by extension, or duplicate destination
+files skipped as duplicates (the default; `--force` overwrites them instead).
 Verified live with a mixed-extension archive extracted via `--allowed-extensions txt`:
 
 ```json
@@ -613,10 +635,15 @@ Verified live with a mixed-extension archive extracted via `--allowed-extensions
     "symlinks_created": 0,
     "bytes_written": 18,
     "files_skipped": 2,
+    "skipped_by_kind": {
+      "extension_not_allowed": 2
+    },
+    "skipped_sample": [
+      {"kind": "extension_not_allowed", "path": "a.bin"},
+      {"kind": "extension_not_allowed", "path": "b.bin"}
+    ],
     "duration_ms": 0,
-    "warnings": [
-      "skipped 2 entries with disallowed extensions"
-    ]
+    "warnings": []
   }
 }
 ```
@@ -646,16 +673,16 @@ partial extraction is kept):
   "status": "error",
   "error": {
     "kind": "SecurityViolation",
-    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nFiles skipped: 1\nWarnings:\n  - skipped 1 entry with disallowed extension\nHINT: Inspect or remove the output directory before re-running.: operation denied by security policy: symlinks not allowed",
+    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nFiles skipped: 1\nHINT: Inspect or remove the output directory before re-running.: operation denied by security policy: symlinks not allowed",
     "partial_report": {
       "files_extracted": 1,
       "directories_created": 0,
       "symlinks_created": 0,
       "bytes_written": 5,
       "files_skipped": 1,
-      "warnings": [
-        "skipped 1 entry with disallowed extension"
-      ],
+      "skipped_by_kind": {"extension_not_allowed": 1},
+      "skipped_sample": [{"kind": "extension_not_allowed", "path": "x.bin"}],
+      "warnings": [],
       "writes": "kept"
     }
   }
@@ -678,7 +705,8 @@ across versions.
 |---|---|
 | `0` | Success. |
 | `1` | Operation failed (see `error.kind` in JSON mode, or stderr in text mode). **Exception:** `verify --json` on a FAIL-status archive also exits `1`, but prints a `status: "success"` envelope with `data.status: "FAIL"` — there is no `error` object in this case. Check `data.status`, not top-level `status`, for `verify`. |
-| `2` | `verify --strict` only: the archive is otherwise valid but has warning-level findings, treated as failure because `--strict` was passed. |
+| `2` | Usage error from the argument parser (unknown flag, unparsable value, `-H` without `-l`, `--decompression-budget` without `--check-integrity`). Plain text on stderr, no JSON envelope. The CLI itself never exits `2` otherwise. |
+| `3` | `verify --strict` only: the archive is otherwise valid but has warning-level findings, treated as failure because `--strict` was passed. Breaking: this was `2`, which clashed with the usage-error status. |
 
 ## Security model (context, not a full manual)
 

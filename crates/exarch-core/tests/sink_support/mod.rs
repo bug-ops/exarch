@@ -8,7 +8,9 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::AdmittedSize;
 use exarch_core::ArchiveError;
+use exarch_core::CheckedLinkTarget;
 use exarch_core::EntrySink;
 use exarch_core::SafePath;
 use exarch_core::SanitizedMode;
@@ -43,7 +45,7 @@ impl EntrySink for RecordingSink {
         &mut self,
         path: &SafePath,
         mode: Option<SanitizedMode>,
-        _size: u64,
+        _size: AdmittedSize,
     ) -> io::Result<Vec<u8>> {
         self.modes.insert(
             path.as_path().to_path_buf(),
@@ -58,11 +60,11 @@ impl EntrySink for RecordingSink {
         Ok(())
     }
 
-    fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()> {
+    fn create_symlink(&mut self, link: &SafePath, target: CheckedLinkTarget<'_>) -> io::Result<()> {
         self.tree.files.remove(link.as_path());
         self.tree
             .symlinks
-            .insert(link.as_path().to_path_buf(), target.to_path_buf());
+            .insert(link.as_path().to_path_buf(), target.as_path().to_path_buf());
         Ok(())
     }
 
@@ -177,7 +179,7 @@ pub fn zip_archive(entries: Vec<RawEntry>) -> Vec<u8> {
 /// reports the errno its syscalls return, the sink the closest kind.
 pub fn signature(error: &ArchiveError) -> String {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => signature(source),
+        ArchiveError::PartialExtraction(partial) => signature(partial.cause()),
         ArchiveError::SecurityViolation { kind, .. } => format!("SecurityViolation({kind:?})"),
         ArchiveError::Io(_) => "Io".to_owned(),
         ArchiveError::QuotaExceeded { resource } => format!("QuotaExceeded({resource:?})"),

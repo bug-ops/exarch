@@ -3,13 +3,8 @@
 use crate::ArchiveError;
 use crate::Limit;
 use crate::Result;
-use crate::config::Unvalidated;
-use crate::config::Validated;
-use crate::formats::detect::CreatableFormat;
-use std::marker::PhantomData;
+use crate::creation::filters::ExcludePattern;
 use std::num::NonZeroU64;
-use std::ops::Deref;
-use std::ops::DerefMut;
 use std::path::PathBuf;
 
 /// A compression level on exarch's 1-9 scale; the default is 6.
@@ -79,94 +74,6 @@ impl TryFrom<u32> for CompressionLevel {
     }
 }
 
-/// The field data of a [`CreationConfig`], reachable via [`Deref`]/[`DerefMut`]
-/// regardless of (or gated by) validation state.
-///
-/// Mirrors [`SecurityConfigFields`](crate::config::SecurityConfigFields): a
-/// plain `#[non_exhaustive]` data bag that blocks external struct-literal
-/// forging, while [`CreationConfig`]'s own private `fields` member blocks
-/// re-wrapping a mutated bag into a `Validated` config. See that type's docs
-/// for the full rationale — the same sealing boundary applies here.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct CreationConfigFields {
-    /// Follow symlinks when adding files to archive.
-    ///
-    /// Default: `false` (store symlinks as symlinks).
-    ///
-    /// Security note: Following symlinks may include unintended files
-    /// from outside the source directory.
-    pub follow_symlinks: bool,
-
-    /// Include hidden files (files starting with '.').
-    ///
-    /// Default: `false` (skip hidden files).
-    pub include_hidden: bool,
-
-    /// Maximum size for a single file in bytes.
-    ///
-    /// Files larger than this limit will be skipped.
-    /// [`Limit::Unbounded`] means no limit; a zero limit is unrepresentable.
-    ///
-    /// Default: [`Limit::Unbounded`].
-    pub max_file_size: Limit<NonZeroU64>,
-
-    /// Patterns to exclude from the archive.
-    ///
-    /// Files matching these patterns will be skipped.
-    ///
-    /// Default: `[".git", ".DS_Store", "*.tmp"]`.
-    pub exclude_patterns: Vec<String>,
-
-    /// Prefix to strip from entry paths in the archive.
-    ///
-    /// If set, this prefix will be removed from all entry paths.
-    /// Useful for creating archives without deep directory nesting.
-    ///
-    /// Default: `None`.
-    pub strip_prefix: Option<PathBuf>,
-
-    /// Compression level (1-9).
-    ///
-    /// Higher values provide better compression but slower speed.
-    ///
-    /// Default: 6 (balanced).
-    pub compression_level: CompressionLevel,
-
-    /// Preserve file permissions in the archive.
-    ///
-    /// Default: `true`.
-    pub preserve_permissions: bool,
-
-    /// Archive format to create.
-    ///
-    /// `None` means auto-detect from output file extension. Ignored by
-    /// [`create_to_writer`](crate::create_to_writer), whose writer already
-    /// fixes the format.
-    ///
-    /// Default: `None`.
-    pub format: Option<CreatableFormat>,
-}
-
-impl Default for CreationConfigFields {
-    fn default() -> Self {
-        Self {
-            follow_symlinks: false,
-            include_hidden: false,
-            max_file_size: Limit::Unbounded,
-            exclude_patterns: vec![
-                ".git".to_string(),
-                ".DS_Store".to_string(),
-                "*.tmp".to_string(),
-            ],
-            strip_prefix: None,
-            compression_level: CompressionLevel::default(),
-            preserve_permissions: true,
-            format: None,
-        }
-    }
-}
-
 /// Configuration for archive creation operations.
 ///
 /// Controls how archives are created from filesystem sources, including
@@ -189,56 +96,72 @@ impl Default for CreationConfigFields {
 /// # Ok(())
 /// # }
 /// ```
-///
-/// # Typestate
-///
-/// `CreationConfig` carries a phantom `State` type parameter —
-/// [`Unvalidated`] (the default) or [`Validated`] — that tracks whether
-/// [`validate`](CreationConfig::validate) has been called. Builder methods
-/// are only available in the `Unvalidated` state; the low-level
-/// `creation::tar::*` / `creation::zip::*` functions and
-/// [`FormatCreator::create`](crate::formats::traits::FormatCreator::create)
-/// require `CreationConfig<Validated>`. This makes skipping validation a
-/// compile error instead of a runtime gap — a forged or hand-mutated
-/// `compression_level` can no longer reach the `flate2`/`liblzma` backends,
-/// which panic on out-of-range values instead of returning an error.
-///
-/// # Sealing
-///
-/// Fields are private and reachable only through
-/// <code>[Deref]<Target = [CreationConfigFields]></code>, so
-/// `config.compression_level` continues to work as plain field access for
-/// both states. [`DerefMut`] is implemented only for
-/// `CreationConfig<Unvalidated>`, so a `CreationConfig<Validated>`'s fields
-/// cannot be reassigned after the fact — the only way to produce one is
-/// [`validate`](CreationConfig::validate) itself, and it stays that way for
-/// its entire lifetime.
 #[derive(Debug, Clone)]
-pub struct CreationConfig<State = Unvalidated> {
-    fields: CreationConfigFields,
+#[non_exhaustive]
+pub struct CreationConfig {
+    /// Follow symlinks when adding files to archive.
+    ///
+    /// Default: `false` (store symlinks as symlinks).
+    ///
+    /// Security note: Following symlinks may include unintended files
+    /// from outside the source directory.
+    pub follow_symlinks: bool,
 
-    /// Typestate marker — see the "Typestate" section on the type-level docs.
-    _marker: PhantomData<State>,
+    /// Include hidden entries (names starting with '.').
+    ///
+    /// When `false`, a hidden file is skipped and a hidden directory below a
+    /// source directory is skipped whole: it is never entered, so nothing
+    /// inside it (`.ssh/id_rsa`, `.aws/credentials`) is archived, even under a
+    /// visible name. The skipped directory is counted once as a hidden skip.
+    /// A hidden source directory named by the caller, and a source file named
+    /// directly, are archived regardless.
+    ///
+    /// The name on disk decides, before `strip_prefix` applies. With
+    /// [`follow_symlinks`](Self::follow_symlinks) a link is judged by its own
+    /// visible name, not its target's: a link `keys -> .ssh` is archived (its
+    /// contents under `keys/`), while a hidden-named link to a directory is
+    /// skipped.
+    ///
+    /// Default: `false` (skip hidden entries).
+    pub include_hidden: bool,
+
+    /// Maximum size for a single file in bytes.
+    ///
+    /// Files larger than this limit will be skipped.
+    /// [`Limit::Unbounded`] means no limit; a zero limit is unrepresentable.
+    ///
+    /// Default: [`Limit::Unbounded`].
+    pub max_file_size: Limit<NonZeroU64>,
+
+    /// Patterns to exclude from the archive.
+    ///
+    /// Files matching these patterns will be skipped.
+    ///
+    /// Default: `[".git", ".DS_Store", "*.tmp"]`.
+    pub exclude_patterns: Vec<ExcludePattern>,
+
+    /// Prefix to strip from entry paths in the archive.
+    ///
+    /// If set, this prefix will be removed from all entry paths.
+    /// Useful for creating archives without deep directory nesting.
+    ///
+    /// Default: `None`.
+    pub strip_prefix: Option<PathBuf>,
+
+    /// Compression level (1-9).
+    ///
+    /// Higher values provide better compression but slower speed.
+    ///
+    /// Default: 6 (balanced).
+    pub compression_level: CompressionLevel,
+
+    /// Preserve file permissions in the archive.
+    ///
+    /// Default: `true`.
+    pub preserve_permissions: bool,
 }
 
-impl<State> Deref for CreationConfig<State> {
-    type Target = CreationConfigFields;
-
-    fn deref(&self) -> &CreationConfigFields {
-        &self.fields
-    }
-}
-
-/// Only `Unvalidated` configs are mutable — see the "Sealing" section on
-/// [`CreationConfig`]'s type-level docs for why this is the crux of the
-/// typestate guarantee.
-impl DerefMut for CreationConfig<Unvalidated> {
-    fn deref_mut(&mut self) -> &mut CreationConfigFields {
-        &mut self.fields
-    }
-}
-
-impl Default for CreationConfig<Unvalidated> {
+impl Default for CreationConfig {
     /// Creates a `CreationConfig` with secure default settings.
     ///
     /// Default values:
@@ -249,16 +172,24 @@ impl Default for CreationConfig<Unvalidated> {
     /// - `strip_prefix`: `None`
     /// - `compression_level`: 6
     /// - `preserve_permissions`: `true`
-    /// - `format`: `None`
     fn default() -> Self {
         Self {
-            fields: CreationConfigFields::default(),
-            _marker: PhantomData,
+            follow_symlinks: false,
+            include_hidden: false,
+            max_file_size: Limit::Unbounded,
+            exclude_patterns: vec![
+                ExcludePattern::exact(".git"),
+                ExcludePattern::exact(".DS_Store"),
+                ExcludePattern::suffix(".tmp"),
+            ],
+            strip_prefix: None,
+            compression_level: CompressionLevel::default(),
+            preserve_permissions: true,
         }
     }
 }
 
-impl CreationConfig<Unvalidated> {
+impl CreationConfig {
     /// Creates a new `CreationConfig` with default settings.
     #[must_use]
     pub fn new() -> Self {
@@ -277,7 +208,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_follow_symlinks(mut self, follow: bool) -> Self {
-        self.fields.follow_symlinks = follow;
+        self.follow_symlinks = follow;
         self
     }
 
@@ -293,7 +224,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_include_hidden(mut self, include: bool) -> Self {
-        self.fields.include_hidden = include;
+        self.include_hidden = include;
         self
     }
 
@@ -316,7 +247,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_max_file_size(mut self, max_size: impl Into<Limit<NonZeroU64>>) -> Self {
-        self.fields.max_file_size = max_size.into();
+        self.max_file_size = max_size.into();
         self
     }
 
@@ -326,13 +257,16 @@ impl CreationConfig<Unvalidated> {
     ///
     /// ```
     /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::creation::ExcludePattern;
     ///
-    /// let config = CreationConfig::default().with_exclude_patterns(vec!["*.log".to_string()]);
-    /// assert_eq!(config.exclude_patterns, vec!["*.log".to_string()]);
+    /// let log = ExcludePattern::try_from("*.log")?;
+    /// let config = CreationConfig::default().with_exclude_patterns(vec![log.clone()]);
+    /// assert_eq!(config.exclude_patterns, vec![log]);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
-    pub fn with_exclude_patterns(mut self, patterns: Vec<String>) -> Self {
-        self.fields.exclude_patterns = patterns;
+    pub fn with_exclude_patterns(mut self, patterns: Vec<ExcludePattern>) -> Self {
+        self.exclude_patterns = patterns;
         self
     }
 
@@ -349,7 +283,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_strip_prefix(mut self, prefix: Option<PathBuf>) -> Self {
-        self.fields.strip_prefix = prefix;
+        self.strip_prefix = prefix;
         self
     }
 
@@ -368,7 +302,7 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_compression_level(mut self, level: CompressionLevel) -> Self {
-        self.fields.compression_level = level;
+        self.compression_level = level;
         self
     }
 
@@ -384,57 +318,8 @@ impl CreationConfig<Unvalidated> {
     /// ```
     #[must_use]
     pub fn with_preserve_permissions(mut self, preserve: bool) -> Self {
-        self.fields.preserve_permissions = preserve;
+        self.preserve_permissions = preserve;
         self
-    }
-
-    /// Sets the archive format.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::creation::CreationConfig;
-    /// use exarch_core::formats::detect::CreatableFormat;
-    ///
-    /// let config = CreationConfig::default().with_format(Some(CreatableFormat::TarGz));
-    /// assert_eq!(config.format, Some(CreatableFormat::TarGz));
-    /// ```
-    #[must_use]
-    pub fn with_format(mut self, format: Option<CreatableFormat>) -> Self {
-        self.fields.format = format;
-        self
-    }
-
-    /// Validates the configuration, transitioning to the [`Validated`]
-    /// typestate on success.
-    ///
-    /// Consumes `self`: the only way to obtain a `CreationConfig<Validated>`,
-    /// which is what the low-level `creation::tar::*` / `creation::zip::*`
-    /// functions and
-    /// [`FormatCreator::create`](crate::formats::traits::FormatCreator::create)
-    /// require. Once returned, the `Validated` config's fields can no longer
-    /// be reassigned (see the "Sealing" section on the type-level docs), so
-    /// this check can never be silently invalidated afterward.
-    ///
-    /// # Errors
-    ///
-    /// Currently never fails: every field is already typed to a valid range.
-    /// The `Result` keeps the signature stable for checks that need the whole
-    /// configuration.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::creation::CreationConfig;
-    ///
-    /// let config = CreationConfig::default();
-    /// assert!(config.validate().is_ok());
-    /// ```
-    pub fn validate(self) -> Result<CreationConfig<Validated>> {
-        Ok(CreationConfig {
-            fields: self.fields,
-            _marker: PhantomData,
-        })
     }
 }
 
@@ -451,13 +336,15 @@ mod tests {
         assert!(!config.include_hidden);
         assert_eq!(config.max_file_size, Limit::Unbounded);
         assert_eq!(config.exclude_patterns.len(), 3);
-        assert!(config.exclude_patterns.contains(&".git".to_string()));
-        assert!(config.exclude_patterns.contains(&".DS_Store".to_string()));
-        assert!(config.exclude_patterns.contains(&"*.tmp".to_string()));
+        let shown: Vec<String> = config
+            .exclude_patterns
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(shown, [".git", ".DS_Store", "*.tmp"]);
         assert_eq!(config.strip_prefix, None);
         assert_eq!(config.compression_level, CompressionLevel::default());
         assert!(config.preserve_permissions);
-        assert_eq!(config.format, None);
     }
 
     #[test]
@@ -467,11 +354,10 @@ mod tests {
             .with_follow_symlinks(true)
             .with_include_hidden(true)
             .with_max_file_size(crate::non_zero!(1024 * 1024))
-            .with_exclude_patterns(vec!["*.log".to_string()])
+            .with_exclude_patterns(vec![ExcludePattern::try_from("*.log").unwrap()])
             .with_strip_prefix(Some(PathBuf::from("/base")))
             .with_compression_level(level)
-            .with_preserve_permissions(false)
-            .with_format(Some(CreatableFormat::TarGz));
+            .with_preserve_permissions(false);
 
         assert!(config.follow_symlinks);
         assert!(config.include_hidden);
@@ -479,21 +365,13 @@ mod tests {
             config.max_file_size,
             Limit::Bounded(crate::non_zero!(1024 * 1024))
         );
-        assert_eq!(config.exclude_patterns, vec!["*.log".to_string()]);
+        assert_eq!(
+            config.exclude_patterns,
+            vec![ExcludePattern::try_from("*.log").unwrap()]
+        );
         assert_eq!(config.strip_prefix, Some(PathBuf::from("/base")));
         assert_eq!(config.compression_level, level);
         assert!(!config.preserve_permissions);
-        assert_eq!(config.format, Some(CreatableFormat::TarGz));
-    }
-
-    #[test]
-    fn test_creation_config_validate_valid() {
-        assert!(CreationConfig::default().validate().is_ok());
-        for level in [1u8, 9] {
-            let config = CreationConfig::default()
-                .with_compression_level(CompressionLevel::try_from(level).unwrap());
-            assert!(config.validate().is_ok());
-        }
     }
 
     #[test]
@@ -549,7 +427,9 @@ mod tests {
 
         // Security: Exclude sensitive patterns
         assert!(
-            config.exclude_patterns.contains(&".git".to_string()),
+            config
+                .exclude_patterns
+                .contains(&ExcludePattern::exact(".git")),
             "should exclude .git by default"
         );
     }

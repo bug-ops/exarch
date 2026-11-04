@@ -171,15 +171,12 @@ impl Refusal {
 fn extract_rejects_oversized_gnu_longname_metadata_entry() {
     let bomb = metadata_bomb(b'L', 8192);
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
-        .validate()
-        .unwrap();
+    let config =
+        SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
-    let archive = TarArchive::new(Cursor::new(bomb));
+    let archive = TarArchive::new(Cursor::new(bomb), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -190,15 +187,12 @@ fn extract_rejects_oversized_gnu_longname_metadata_entry() {
 fn extract_rejects_oversized_gnu_longlink_metadata_entry() {
     let bomb = metadata_bomb(b'K', 8192);
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
-        .validate()
-        .unwrap();
+    let config =
+        SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
-    let archive = TarArchive::new(Cursor::new(bomb));
+    let archive = TarArchive::new(Cursor::new(bomb), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -209,15 +203,12 @@ fn extract_rejects_oversized_gnu_longlink_metadata_entry() {
 fn extract_rejects_oversized_pax_metadata_entry() {
     let bomb = metadata_bomb(b'x', 8192);
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
-        .validate()
-        .unwrap();
+    let config =
+        SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
-    let archive = TarArchive::new(Cursor::new(bomb));
+    let archive = TarArchive::new(Cursor::new(bomb), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -242,14 +233,11 @@ fn extract_accepts_metadata_entry_within_the_configured_budget() {
     t.extend(std::iter::repeat_n(0u8, BLOCK * 2));
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
-        .validate()
-        .unwrap();
-    let archive = TarArchive::new(Cursor::new(t));
+    let config =
+        SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
+    let archive = TarArchive::new(Cursor::new(t), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -311,10 +299,9 @@ fn default_config_budget_rejects_a_moderately_oversized_metadata_entry() {
     let bomb = metadata_bomb(b'L', 4 * 1024 * 1024 + 4096);
     let temp = TempDir::new().unwrap();
 
-    let archive = TarArchive::new(Cursor::new(bomb));
+    let archive = TarArchive::new(Cursor::new(bomb), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default().validate().unwrap(),
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -445,13 +432,11 @@ fn s3_shape_global_only_bomb(bomb_real_bytes: usize) -> Vec<u8> {
 fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str, refusal: Refusal) {
     let config =
         SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
-    let validated_config = config.clone().validate().unwrap();
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(bomb.to_owned()));
+    let archive = TarArchive::new(Cursor::new(bomb.to_owned()), &config);
     let result = archive.extract(
         temp.path(),
-        &validated_config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -511,14 +496,11 @@ fn legitimate_pax_global_header_does_not_false_positive() {
     t.extend(std::iter::repeat_n(0u8, BLOCK * 2));
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
-        .validate()
-        .unwrap();
-    let archive = TarArchive::new(Cursor::new(t));
+    let config =
+        SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
+    let archive = TarArchive::new(Cursor::new(t), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -791,12 +773,10 @@ fn extract_fully_skips_a_legitimate_large_disallowed_extension_entry_and_continu
     let config = SecurityConfig::default()
         .try_add_allowed_extension("txt")
         .unwrap();
-    let validated_config = config.clone().validate().unwrap();
 
-    let archive = TarArchive::new(Cursor::new(data.clone()));
+    let archive = TarArchive::new(Cursor::new(data.clone()), &config);
     let result = archive.extract(
         temp.path(),
-        &validated_config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -806,7 +786,11 @@ fn extract_fully_skips_a_legitimate_large_disallowed_extension_entry_and_continu
          search",
     );
     assert_eq!(report.files_extracted, 2, "before.txt and after.txt");
-    assert_eq!(report.files_skipped, 1, "big.bin skipped for its extension");
+    assert_eq!(
+        report.files_skipped(),
+        1,
+        "big.bin skipped for its extension"
+    );
     assert!(temp.path().join("before.txt").exists());
     assert!(temp.path().join("after.txt").exists());
     assert!(!temp.path().join("big.bin").exists());
@@ -820,7 +804,7 @@ fn extract_fully_skips_a_legitimate_large_disallowed_extension_entry_and_continu
     let report = exarch_core::extract_archive(&path, &out, &config)
         .expect("extract_archive must not reject this archive");
     assert_eq!(report.files_extracted, 2);
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
 }
 
 #[test]
@@ -938,10 +922,9 @@ fn budget_violation_is_not_confused_with_other_archive_errors() {
     // archive (not a budget trip) must not be misclassified.
     let garbage = vec![1u8, 2, 3, 4, 5];
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(garbage));
+    let archive = TarArchive::new(Cursor::new(garbage), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default().validate().unwrap(),
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );

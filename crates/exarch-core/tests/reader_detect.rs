@@ -16,13 +16,13 @@ use std::io::Write;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
 use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use exarch_core::ReaderFormatError;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
 use exarch_core::formats::compression::CompressionCodec;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::detect_format;
-use exarch_core::list_reader;
 use sink_support::tar_archive;
 use sink_support::tar_file;
 use sink_support::zip_archive;
@@ -128,7 +128,9 @@ fn path_format(bytes: &[u8]) -> ArchiveType {
 }
 
 fn listing(reader: ArchiveReader<'_>) -> String {
-    let manifest = list_reader(reader, &SecurityConfig::default(), &ListOptions::default());
+    let manifest = ListRequest::new(&SecurityConfig::default())
+        .with_options(ListOptions::default())
+        .list_reader(reader);
     format!("{:?}", manifest.unwrap())
 }
 

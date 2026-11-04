@@ -2,7 +2,15 @@
 //!
 //! Converts exarch-core's typed errors (thiserror) into user-friendly
 //! contextual errors (anyhow) with actionable guidance.
+//!
+//! CLI-authored messages are structured ([`Part`]) rather than preformatted
+//! strings: escaping is a property of the output medium, so the human
+//! formatter escapes archive-derived parts for the terminal while `--json`
+//! keeps them exact.
 
+use crate::operation::Flag;
+use crate::operation::Operation;
+use crate::output::terminal::TerminalEntry;
 use crate::output::terminal::TerminalPath;
 use crate::output::terminal::TerminalText;
 use anyhow::Result;
@@ -14,99 +22,253 @@ use exarch_core::PathComponentName;
 use exarch_core::PolicySetting;
 use exarch_core::QuotaKind;
 use exarch_core::SecurityConfig;
+use exarch_core::SkipKind;
 use exarch_core::TarTrailerRefusal;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
 use exarch_core::formats::detect::ArchiveType;
+use exarch_core::path_text;
+use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
+use std::path::PathBuf;
 
-fn zip_bomb_hint(details: &ZipBombDetails) -> &'static str {
-    match (details.ratio(), details.scope()) {
-        (CompressionRatio::Unbounded, _) => {
+/// One piece of a CLI-authored message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Part {
+    /// Text written in the source: trusted, may span lines.
+    Lit(&'static str),
+    /// A path of the host (an archive, a destination, an output), in its
+    /// native spelling: escaped for the terminal, exact in `--json`.
+    Path(PathBuf),
+    /// The name of an archive entry: rendered injectively with `path_text`
+    /// and escaped for the terminal.
+    Entry(PathBuf),
+    /// Single-line text, possibly derived from an archive: escaped for the
+    /// terminal, exact in `--json`.
+    Text(String),
+}
+
+impl Part {
+    fn write_raw(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lit(text) => f.write_str(text),
+            Self::Path(path) => write!(f, "{}", path.display()),
+            Self::Entry(path) => f.write_str(&path_text(path)),
+            Self::Text(text) => f.write_str(text),
+        }
+    }
+
+    fn write_terminal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lit(text) => f.write_str(text),
+            Self::Path(path) => write!(f, "{}", TerminalPath::new(path)),
+            Self::Entry(path) => write!(f, "{}", TerminalEntry::new(path)),
+            Self::Text(text) => write!(f, "{}", TerminalText::new(text)),
+        }
+    }
+}
+
+/// The parts of a message, rendered raw for logs and `--json` or escaped for
+/// a terminal.
+pub struct Rendered<'a> {
+    parts: &'a [Part],
+    medium: Medium,
+}
+
+#[derive(Clone, Copy)]
+enum Medium {
+    Raw,
+    Terminal,
+}
+
+impl fmt::Display for Rendered<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.parts.iter().try_for_each(|part| match self.medium {
+            Medium::Raw => part.write_raw(f),
+            Medium::Terminal => part.write_terminal(f),
+        })
+    }
+}
+
+/// An error object whose text is a list of [`Part`]s.
+pub trait CliMessage {
+    fn parts(&self) -> Cow<'_, [Part]>;
+}
+
+/// The structured message of `link` when it is one of the CLI's own error
+/// objects.
+pub fn cli_message<'a>(link: &'a (dyn std::error::Error + 'static)) -> Option<Cow<'a, [Part]>> {
+    link.downcast_ref::<CliContext>()
+        .map(CliMessage::parts)
+        .or_else(|| {
+            link.downcast_ref::<PartialExtractionContext>()
+                .map(CliMessage::parts)
+        })
+}
+
+/// Renders `parts` with archive-derived parts escaped for a terminal.
+pub fn terminal(parts: &[Part]) -> String {
+    Rendered {
+        parts,
+        medium: Medium::Terminal,
+    }
+    .to_string()
+}
+
+/// Renders `parts` exactly, as `--json` and `Display` do.
+pub fn raw(parts: &[Part]) -> String {
+    Rendered {
+        parts,
+        medium: Medium::Raw,
+    }
+    .to_string()
+}
+
+/// Builder for the parts of one message.
+#[derive(Debug, Default)]
+pub struct Message(Vec<Part>);
+
+impl Message {
+    /// Appends text written in the source, which may span lines.
+    pub fn lit(mut self, text: &'static str) -> Self {
+        self.0.push(Part::Lit(text));
+        self
+    }
+
+    /// Appends a host path (an archive, a destination), escaped for a terminal
+    /// and exact in `--json`.
+    pub fn path(mut self, path: &Path) -> Self {
+        self.0.push(Part::Path(path.to_path_buf()));
+        self
+    }
+
+    /// Appends the name of an archive entry, rendered injectively.
+    pub fn entry(mut self, path: &Path) -> Self {
+        self.0.push(Part::Entry(path.to_path_buf()));
+        self
+    }
+
+    /// Appends single-line text that may derive from an archive, escaped for a
+    /// terminal and exact in `--json`.
+    pub fn text(mut self, text: impl Into<String>) -> Self {
+        self.0.push(Part::Text(text.into()));
+        self
+    }
+
+    /// Appends a `HINT:` line when there is advice to give.
+    pub fn hint(self, hint: Option<String>) -> Self {
+        match hint {
+            Some(body) => self.lit("\nHINT: ").text(body),
+            None => self,
+        }
+    }
+
+    /// The finished list of parts.
+    pub fn into_parts(self) -> Vec<Part> {
+        self.0
+    }
+}
+
+/// Joins flag names as "A", "A or B" or "A, B, or C".
+fn join_or(flags: &[&str]) -> String {
+    match flags {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [a, b] => format!("{a} or {b}"),
+        [init @ .., last] => format!("{}, or {last}", init.join(", ")),
+    }
+}
+
+/// The flags of `candidates` that `op` accepts, as typed.
+fn accepted(op: Operation, candidates: &[Flag]) -> Vec<&'static str> {
+    candidates
+        .iter()
+        .filter(|flag| op.accepts(**flag))
+        .map(|flag| flag.long())
+        .collect()
+}
+
+fn zip_bomb_hint(op: Operation, details: &ZipBombDetails) -> Option<String> {
+    if details.ratio() == CompressionRatio::Unbounded {
+        return Some(
             "The archive claims data from zero compressed bytes, so its size metadata is \
              inconsistent and no ratio limit admits it."
-        }
-        (CompressionRatio::Finite(_), ZipBombScope::SolidBlock) => {
-            "Solid 7z blocks use a fixed 1000x limit that the CLI cannot change."
-        }
-        (CompressionRatio::Finite(_), ZipBombScope::SkippedEntries) => {
-            "Skipped entries of a compressed TAR decoded more than --max-compression-ratio x the \
-             compressed input read so far (all entries); raise the ratio if legitimate."
-        }
-        (CompressionRatio::Finite(_), _) => {
-            "--max-compression-ratio allows higher ratios for ZIP and non-solid 7z if legitimate."
-        }
+                .to_owned(),
+        );
     }
+    dedicated_zip_bomb_hint(op, details.scope())
 }
 
-/// Sentinel error returned by `verify::execute` when `--strict` is active and
-/// the archive has a `Warning`-status verification report. `main` maps this to
-/// exit code 2 without printing an error message (the formatter already
-/// reported the warning details to stdout/stderr before this is returned).
-#[derive(Debug)]
-pub struct StrictWarning;
-
-impl fmt::Display for StrictWarning {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Archive has warnings (--strict mode)")
+/// The hint for each zip-bomb scope; `None` for a scope added to the
+/// `#[non_exhaustive]` [`ZipBombScope`] after this match was written, which
+/// `every_zip_bomb_scope_has_a_dedicated_hint` rejects.
+fn dedicated_zip_bomb_hint(op: Operation, scope: ZipBombScope) -> Option<String> {
+    let ratio = op
+        .accepts(Flag::MaxCompressionRatio)
+        .then(|| Flag::MaxCompressionRatio.long());
+    match scope {
+        ZipBombScope::SolidBlock => {
+            Some("Solid 7z blocks use a fixed 1000x limit that the CLI cannot change.".to_owned())
+        }
+        ZipBombScope::SkippedEntries => ratio.map(|flag| {
+            format!(
+                "Skipped entries of a compressed TAR decoded more than {flag} x the compressed \
+                 input read so far (all entries); raise the ratio if legitimate."
+            )
+        }),
+        ZipBombScope::Entry => ratio.map(|flag| {
+            format!("{flag} allows higher ratios for ZIP and non-solid 7z if legitimate.")
+        }),
+        _ => None,
     }
 }
-
-impl std::error::Error for StrictWarning {}
-
-/// Sentinel error returned by `verify::execute` when the verification report
-/// has `Fail` status.
-///
-/// The verification report itself (already emitted by the formatter, with
-/// `data.status == "FAIL"` in JSON mode) fully describes the failure, so
-/// `main` must not print a second error envelope for `--json` output — doing
-/// so would emit two concatenated top-level JSON documents on stdout. For
-/// human-readable output, `main` still prints this sentinel via
-/// `format_error` and exits non-zero, matching prior behavior.
-#[derive(Debug)]
-pub struct VerificationFailed;
-
-impl fmt::Display for VerificationFailed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Archive verification failed")
-    }
-}
-
-impl std::error::Error for VerificationFailed {}
 
 /// CLI-authored message layered over an optional [`ArchiveError`].
 ///
 /// A distinct error type, not an anyhow `.context()` string, so the human
-/// formatter can recognise it in the error chain and keep its line breaks
-/// while escaping everything else. `Display` is the message alone; the wrapped
-/// error is exposed as the `source`, so `{:#}` renders `message: error`.
+/// formatter can recognise it in the error chain and escape its parts for the
+/// terminal. `Display` is the message rendered exactly; the wrapped error is
+/// exposed as the `source`, so `{:#}` renders `message: error`.
 #[derive(Debug)]
 pub struct CliContext {
-    text: String,
+    parts: Vec<Part>,
     source: Option<ArchiveError>,
 }
 
 impl CliContext {
     /// A message that wraps no underlying error.
-    pub fn new(text: impl Into<String>) -> Self {
+    pub const fn new(message: Vec<Part>) -> Self {
         Self {
-            text: text.into(),
+            parts: message,
             source: None,
         }
     }
 
-    fn wrapping(text: String, source: ArchiveError) -> Self {
+    const fn wrapping(message: Vec<Part>, source: ArchiveError) -> Self {
         Self {
-            text,
+            parts: message,
             source: Some(source),
         }
     }
 }
 
+impl CliMessage for CliContext {
+    fn parts(&self) -> Cow<'_, [Part]> {
+        Cow::Borrowed(&self.parts)
+    }
+}
+
 impl fmt::Display for CliContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.text)
+        write!(
+            f,
+            "{}",
+            Rendered {
+                parts: &self.parts,
+                medium: Medium::Raw,
+            }
+        )
     }
 }
 
@@ -133,42 +295,69 @@ pub struct PartialExtractionContext {
     inner: anyhow::Error,
 }
 
-impl fmt::Display for PartialExtractionContext {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl PartialExtractionContext {
+    /// The text for each [`PartialWrites`] state; `None` for a state added to
+    /// the `#[non_exhaustive]` enum after this match was written, which
+    /// `every_partial_writes_state_has_dedicated_text` rejects.
+    fn dedicated_parts(&self) -> Option<Vec<Part>> {
         let r = &self.report;
-        match self.writes {
+        let message = match self.writes {
             PartialWrites::Kept => {
                 let items = r.files_extracted + r.directories_created + r.symlinks_created;
-                write!(
-                    f,
-                    "WARNING: Extraction was stopped. {items} items ({} files, {} directories, {} symlinks) \
-                     were written to disk before the error.",
-                    r.files_extracted, r.directories_created, r.symlinks_created,
-                )?;
-                if r.files_skipped > 0 {
-                    write!(f, "\nFiles skipped: {}", r.files_skipped)?;
-                }
-                if !r.warnings.is_empty() {
-                    write!(f, "\nWarnings:")?;
-                    for warning in &r.warnings {
-                        write!(f, "\n  - {}", TerminalText::new(warning))?;
+                let mut message = Message::default()
+                    .lit("WARNING: Extraction was stopped. ")
+                    .text(format!(
+                        "{items} items ({} files, {} directories, {} symlinks)",
+                        r.files_extracted, r.directories_created, r.symlinks_created,
+                    ))
+                    .lit(" were written to disk before the error.");
+                if r.files_skipped() > 0 {
+                    message = message
+                        .lit("\nFiles skipped: ")
+                        .text(r.files_skipped().to_string());
+                    for &kind in SkipKind::ALL {
+                        let count = r.skipped.count(kind);
+                        if count > 0 {
+                            message = message.lit("\n    ").text(format!("{kind}: {count}"));
+                        }
                     }
                 }
-                write!(
-                    f,
-                    "\nHINT: Inspect or remove the output directory before re-running."
-                )
+                if !r.warnings.is_empty() {
+                    message = message.lit("\nWarnings:");
+                    for warning in &r.warnings {
+                        message = message.lit("\n  - ").text(warning.to_string());
+                    }
+                }
+                message.lit("\nHINT: Inspect or remove the output directory before re-running.")
             }
             // The counts and warnings describe the discarded run, not the
             // destination.
-            PartialWrites::RolledBack => f.write_str(
+            PartialWrites::RolledBack => Message::default().lit(
                 "WARNING: Extraction was stopped. The partial extraction was discarded; the \
                  destination was left unchanged.",
             ),
-            // Forward-compat for a `PartialWrites` state added after this
-            // match.
-            _ => f.write_str("WARNING: Extraction was stopped."),
-        }
+            PartialWrites::Discarded => {
+                Message::default().lit("WARNING: Extraction was stopped. Nothing was written.")
+            }
+            _ => return None,
+        };
+        Some(message.into_parts())
+    }
+}
+
+impl CliMessage for PartialExtractionContext {
+    fn parts(&self) -> Cow<'_, [Part]> {
+        Cow::Owned(self.dedicated_parts().unwrap_or_else(|| {
+            Message::default()
+                .lit("WARNING: Extraction was stopped.")
+                .into_parts()
+        }))
+    }
+}
+
+impl fmt::Display for PartialExtractionContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&raw(&self.parts()))
     }
 }
 
@@ -178,48 +367,68 @@ impl std::error::Error for PartialExtractionContext {
     }
 }
 
-/// The HINT body for a `SecurityViolation` that `relaxable_by` names.
+/// The hint for a `SecurityViolation` that `relaxable_by` names.
 ///
-/// `None` means no `SecurityConfig` value relaxes the refusal. Settings the CLI
-/// has no flag for point at the Rust API instead of at a flag that does not
-/// exist.
-fn relaxation_hint(relaxable_by: Option<PolicySetting>) -> String {
-    match relaxable_by {
-        None => "This archive was rejected by a security check that cannot be relaxed via any \
-                 policy flag."
-            .to_owned(),
-        Some(PolicySetting::Symlinks) => {
-            "If this archive is from a trusted source, pass --allow-symlinks.".to_owned()
+/// With no `SecurityConfig` value to relax it, or no flag of `op` for one,
+/// the hint says so instead of naming a flag that does not exist.
+fn relaxation_hint(op: Operation, relaxable_by: Option<PolicySetting>) -> String {
+    let trusted = |flag: Flag| {
+        op.accepts(flag).then(|| {
+            format!(
+                "If this archive is from a trusted source, pass {}.",
+                flag.long()
+            )
+        })
+    };
+    let hint = match relaxable_by {
+        None => {
+            return "This archive was rejected by a security check that cannot be relaxed via any \
+                    policy flag."
+                .to_owned();
         }
-        Some(PolicySetting::Hardlinks) => {
-            "If this archive is from a trusted source, pass --allow-hardlinks.".to_owned()
+        Some(PolicySetting::Symlinks) => trusted(Flag::AllowSymlinks),
+        Some(PolicySetting::Hardlinks) => trusted(Flag::AllowHardlinks),
+        Some(PolicySetting::SolidArchives) => trusted(Flag::AllowSolidArchives),
+        Some(PolicySetting::BannedComponents) => op.accepts(Flag::BannedComponent).then(|| {
+            format!(
+                "{} replaces the whole default list. To keep the other bans, re-pass the \
+                 entries you still want banned (defaults: {}), leaving out only the component \
+                 that refused this entry.",
+                Flag::BannedComponent.long(),
+                SecurityConfig::default()
+                    .banned_path_components
+                    .iter()
+                    .map(PathComponentName::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }),
+        Some(PolicySetting::MaxPathDepth) => op.accepts(Flag::MaxPathDepth).then(|| {
+            format!(
+                "If this archive is from a trusted source, pass a larger {}.",
+                Flag::MaxPathDepth.long()
+            )
+        }),
+        Some(PolicySetting::WindowsReservedNames) => {
+            return "No CLI flag relaxes this. Rust API only: \
+                    SecurityConfig::with_allow_windows_reserved_names."
+                .to_owned();
         }
-        Some(PolicySetting::SolidArchives) => {
-            "If this archive is from a trusted source, pass --allow-solid-archives.".to_owned()
-        }
-        Some(PolicySetting::BannedComponents) => format!(
-            "--banned-component replaces the whole default list. To keep the other bans, re-pass \
-             the entries you still want banned (defaults: {}), leaving out only the component \
-             that refused this entry.",
-            SecurityConfig::default()
-                .banned_path_components
-                .iter()
-                .map(PathComponentName::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Some(PolicySetting::MaxPathDepth) => {
-            "If this archive is from a trusted source, pass a larger --max-path-depth.".to_owned()
-        }
-        Some(PolicySetting::WindowsReservedNames) => "No CLI flag relaxes this. Rust API only: \
-             SecurityConfig::with_allow_windows_reserved_names."
-            .to_owned(),
         Some(PolicySetting::MaxTarMetadataBytes) => {
-            "No CLI flag relaxes this. Rust API only: SecurityConfig::with_max_tar_metadata_bytes."
-                .to_owned()
+            return "No CLI flag relaxes this. Rust API only: \
+                    SecurityConfig::with_max_tar_metadata_bytes."
+                .to_owned();
         }
-        Some(_) => "Relax the SecurityConfig setting that refused this entry.".to_owned(),
-    }
+        Some(_) => {
+            return "Relax the SecurityConfig setting that refused this entry.".to_owned();
+        }
+    };
+    hint.unwrap_or_else(|| {
+        format!(
+            "`{}` has no flag that relaxes this check; run `extract` with the matching flag.",
+            op.name()
+        )
+    })
 }
 
 /// The archive formats the detector accepts, as canonical extensions.
@@ -231,170 +440,218 @@ fn supported_formats() -> String {
         .join(", ")
 }
 
-fn quota_exceeded_context(kind: QuotaKind, archive: TerminalPath<'_>) -> String {
-    dedicated_quota_context(kind, archive).unwrap_or_else(|| {
-        format!("Extraction limit exceeded for '{archive}'\nNo CLI flag is known to relax it.")
+fn quota_exceeded_context(op: Operation, kind: QuotaKind, archive: &Path) -> Message {
+    dedicated_quota_context(op, kind, archive).unwrap_or_else(|| {
+        Message::default()
+            .lit("Extraction limit exceeded for '")
+            .path(archive)
+            .lit("'\nNo CLI flag is known to relax it.")
     })
 }
 
 /// The context for each quota dimension; `None` only for a dimension added to
 /// the `#[non_exhaustive]` [`QuotaKind`] after this match was written, which
 /// `test_every_quota_kind_has_a_dedicated_context` rejects.
-fn dedicated_quota_context(kind: QuotaKind, archive: TerminalPath<'_>) -> Option<String> {
+fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Option<Message> {
+    let message = Message::default();
     let context = match kind {
-        QuotaKind::FileCount | QuotaKind::TotalSize | QuotaKind::FileSize => format!(
-            "Extraction limit exceeded for '{archive}'\n\
-             HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits."
-        ),
-        QuotaKind::DecoderMemory => format!(
-            "Decoder memory limit exceeded for '{archive}'\n\
-             The archive declares a decompression dictionary or window larger than the allowed \
-             limit. No CLI flag relaxes this. Rust API only: \
-             SecurityConfig::with_max_decoder_memory."
-        ),
-        QuotaKind::CompressedMembers => format!(
-            "Compressed member limit exceeded for '{archive}'\n\
-             The stream holds more gzip or bzip2 members than its output allows. No CLI flag \
-             relaxes this. Rust API only: SecurityConfig::with_compressed_member_allowance."
-        ),
-        QuotaKind::IntegerOverflow => format!(
-            "Quota accounting overflowed for '{archive}'\n\
-             The archive declares sizes or counts too large to track. No CLI flag relaxes this."
-        ),
-        QuotaKind::TreeNodes => format!(
-            "Destination name budget exceeded for '{archive}'\n\
-             The archive spells more distinct names than the in-memory destination model admits. \
-             No CLI flag relaxes this. Rust API only: SecurityConfig::with_max_file_count and \
-             SecurityConfig::with_max_path_depth."
-        ),
-        QuotaKind::SinkCapacity => format!(
-            "In-memory sink capacity exceeded for '{archive}'\n\
-             No CLI flag relaxes this. Rust API only: the sink's capacity limit."
-        ),
+        QuotaKind::FileCount | QuotaKind::TotalSize | QuotaKind::FileSize => {
+            let flags = accepted(op, &[Flag::MaxFiles, Flag::MaxTotalSize, Flag::MaxFileSize]);
+            message
+                .lit("Extraction limit exceeded for '")
+                .path(archive)
+                .lit("'")
+                .hint((!flags.is_empty()).then(|| {
+                    format!("Use {} to increase limits.", join_or(&flags))
+                }))
+        }
+        QuotaKind::DecoderMemory => message
+            .lit("Decoder memory limit exceeded for '")
+            .path(archive)
+            .lit(
+                "'\nThe archive declares a decompression dictionary or window larger than the \
+                 allowed limit. No CLI flag relaxes this. Rust API only: \
+                 SecurityConfig::with_max_decoder_memory.",
+            ),
+        QuotaKind::CompressedMembers => message
+            .lit("Compressed member limit exceeded for '")
+            .path(archive)
+            .lit(
+                "'\nThe stream holds more gzip or bzip2 members than its output allows. No CLI \
+                 flag relaxes this. Rust API only: SecurityConfig::with_compressed_member_allowance.",
+            ),
+        QuotaKind::IntegerOverflow => message
+            .lit("Quota accounting overflowed for '")
+            .path(archive)
+            .lit(
+                "'\nThe archive declares sizes or counts too large to track. No CLI flag relaxes \
+                 this.",
+            ),
+        QuotaKind::TreeNodes => message
+            .lit("Destination name budget exceeded for '")
+            .path(archive)
+            .lit(
+                "'\nThe archive spells more distinct names than the in-memory destination model \
+                 admits. No CLI flag relaxes this. Rust API only: \
+                 SecurityConfig::with_max_file_count and SecurityConfig::with_max_path_depth.",
+            ),
+        QuotaKind::SinkCapacity => message
+            .lit("In-memory sink capacity exceeded for '")
+            .path(archive)
+            .lit("'\nNo CLI flag relaxes this. Rust API only: the sink's capacity limit."),
+        QuotaKind::SolidBlockMemory => message
+            .lit("Solid block size limit exceeded for '")
+            .path(archive)
+            .lit(
+                "'\nA solid 7z block declares more decoded data than the limit admits. No CLI \
+                 flag relaxes this. Rust API only: SecurityConfig::with_solid_limits.",
+            ),
         _ => return None,
     };
     Some(context)
 }
 
-/// Converts `ArchiveError` to user-friendly anyhow error with context.
+/// Converts an `ArchiveError` met while running `op` to a user-friendly anyhow
+/// error with context.
 ///
 /// The original `ArchiveError` is preserved as the source of a [`CliContext`]
 /// so that callers can downcast via the anyhow chain (used by JSON error
-/// output).
+/// output). Hints name only flags `op` accepts.
 ///
 /// A `PartialExtraction` keeps the `writes` outcome core recorded.
-pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Error {
-    // Handle PartialExtraction before the borrow below.
-    //
+pub fn convert_error(op: Operation, err: ArchiveError, archive: &Path) -> anyhow::Error {
     // `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so
     // placing it in an anyhow chain directly would cause the inner error text
-    // to appear twice in `{:#}` output. Recursing gives the inner `source`
-    // its own fully-formed, category-specific context (HINT included) first;
-    // `PartialExtractionContext` is then layered on top as an additional
-    // context frame, which — unlike `PartialExtraction` itself — never
-    // re-displays the inner error text.
+    // to appear twice in `{:#}` output. Converting the inner `source` first
+    // gives it its own fully-formed, category-specific context (HINT
+    // included); `PartialExtractionContext` is then layered on top as an
+    // additional context frame, which never re-displays the inner error text.
     //
     // This keeps issue #204's "inner error text appears exactly once in
-    // `{:#}`" guarantee: no CLI-authored `context` string below interpolates
-    // data the wrapped error's own Display already carries.
-    if let ArchiveError::PartialExtraction {
-        source,
-        report,
-        writes,
-    } = err
-    {
-        let inner = convert_extraction_error(*source, archive);
-        return anyhow::Error::new(PartialExtractionContext {
-            report,
-            writes,
-            inner,
-        });
-    }
-
-    let archive = TerminalPath::new(archive);
-    let context = match &err {
-        ArchiveError::PartialExtraction { .. } => unreachable!(),
-        ArchiveError::PathTraversal { .. } => format!(
-            "Security violation: Archive '{archive}' attempted path traversal\n\
-             HINT: This archive may be malicious. Do not extract from untrusted sources."
-        ),
-        ArchiveError::ZipBomb(details) => format!(
-            "Security violation: Archive '{archive}' appears to be a zip bomb\n\
-             HINT: {}",
-            zip_bomb_hint(details),
-        ),
-        ArchiveError::ZipInconsistency(_) => format!(
-            "Security violation: ZIP archive '{archive}' is read differently by different tools\n\
-             HINT: The archive may be crafted to show different content to different extractors. \
-             Use --zip-consistency ignore only for archives from a trusted producer."
-        ),
-        ArchiveError::QuotaExceeded { resource } => {
-            quota_exceeded_context(resource.kind(), archive)
+    // `{:#}`" guarantee: no CLI-authored context below interpolates data the
+    // wrapped error's own Display already carries.
+    let err = match err {
+        ArchiveError::PartialExtraction(partial) => {
+            let (cause, report, writes) = partial.into_parts();
+            return anyhow::Error::new(PartialExtractionContext {
+                report,
+                writes,
+                inner: convert_error(op, cause, archive),
+            });
         }
-        ArchiveError::SymlinkEscape { .. } | ArchiveError::HardlinkEscape { .. } => format!(
-            "Security violation: Archive '{archive}' has a link that escapes the destination\n\
-             HINT: a link resolves outside the destination (an archive link or an existing \
-             destination symlink); no flag relaxes this check."
-        ),
-        ArchiveError::Io(_) => format!("Failed to process '{archive}'"),
-        ArchiveError::UnknownFormat { path } => format!(
-            "Cannot determine archive format: {}\n\
-             HINT: Supported formats: {}",
-            TerminalPath::new(path),
-            supported_formats(),
-        ),
+        other => other,
+    };
+
+    let context = context_message(op, &err, archive);
+    anyhow::Error::new(CliContext::wrapping(context.into_parts(), err))
+}
+
+fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message {
+    let message = Message::default();
+    match err {
+        ArchiveError::PathTraversal { .. } => message
+            .lit("Security violation: Archive '")
+            .path(archive)
+            .lit(
+                "' attempted path traversal\n\
+                 HINT: This archive may be malicious. Do not extract from untrusted sources.",
+            ),
+        ArchiveError::ZipBomb(details) => message
+            .lit("Security violation: Archive '")
+            .path(archive)
+            .lit("' appears to be a zip bomb")
+            .hint(zip_bomb_hint(op, details)),
+        ArchiveError::ZipInconsistency(_) => {
+            let relax = op.accepts(Flag::ZipConsistency).then(|| {
+                format!(
+                    " Use {} ignore only for archives from a trusted producer.",
+                    Flag::ZipConsistency.long()
+                )
+            });
+            message
+                .lit("Security violation: ZIP archive '")
+                .path(archive)
+                .lit("' is read differently by different tools")
+                .hint(Some(format!(
+                    "The archive may be crafted to show different content to different \
+                     extractors.{}",
+                    relax.unwrap_or_default()
+                )))
+        }
+        ArchiveError::QuotaExceeded { resource } => {
+            quota_exceeded_context(op, resource.kind(), archive)
+        }
+        ArchiveError::SymlinkEscape { .. } | ArchiveError::HardlinkEscape { .. } => message
+            .lit("Security violation: Archive '")
+            .path(archive)
+            .lit(
+                "' has a link that escapes the destination\n\
+                 HINT: a link resolves outside the destination (an archive link or an existing \
+                 destination symlink); no flag relaxes this check.",
+            ),
+        ArchiveError::Io(_) => message.lit("Failed to process '").path(archive).lit("'"),
+        ArchiveError::UnknownFormat { .. } => message
+            .lit("Cannot determine archive format")
+            .hint(Some(format!("Supported formats: {}", supported_formats()))),
         ArchiveError::SecurityViolation { .. }
-        | ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }) => format!(
-            "Security violation while processing '{archive}'\nHINT: {}",
-            relaxation_hint(err.relaxable_by())
-        ),
+        | ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }) => message
+            .lit("Security violation while processing '")
+            .path(archive)
+            .lit("'")
+            .hint(Some(relaxation_hint(op, err.relaxable_by()))),
         ArchiveError::InvalidArchive(_)
         | ArchiveError::TarAmbiguity(_)
-        | ArchiveError::TarTrailer(_) => format!(
-            "Invalid archive '{archive}'\n\
-             HINT: The archive may be corrupted or malformed."
-        ),
-        ArchiveError::InvalidConfiguration { setting, problem } => format!(
-            "Invalid configuration: {}\n\
-             HINT: Check the flags you passed and their allowed value ranges.",
-            setting.describe(problem),
-        ),
-        ArchiveError::SourceNotFound { path } => format!(
-            "Source path not found: {}\n\
-             HINT: Verify the archive path exists and is readable.",
-            TerminalPath::new(path),
-        ),
-        ArchiveError::SourceNotAccessible { path } => format!(
-            "Source path is not accessible: {}\n\
-             HINT: Check file permissions on the archive.",
-            TerminalPath::new(path),
-        ),
-        ArchiveError::OutputExists { path } => format!(
-            "Output path already exists: {}\n\
-             HINT: Use --force to overwrite.",
-            TerminalPath::new(path),
-        ),
-        ArchiveError::InvalidPermissions { mode, .. } => {
-            format!("Invalid permissions {mode:#o}: blocked by security policy.")
+        | ArchiveError::TarTrailer(_) => message
+            .lit("Invalid archive '")
+            .path(archive)
+            .lit("'\nHINT: The archive may be corrupted or malformed."),
+        ArchiveError::InvalidConfiguration { setting, problem } => message
+            .lit("Invalid configuration: ")
+            .text(setting.describe(problem))
+            .lit("\nHINT: Check the flags you passed and their allowed value ranges."),
+        ArchiveError::SourceNotFound { .. } => message.lit("Source path not found").lit(match op {
+            Operation::Create => "\nHINT: Verify the source path exists and is readable.",
+            Operation::Extract | Operation::List | Operation::Verify => {
+                "\nHINT: Verify the archive path exists and is readable."
+            }
+        }),
+        ArchiveError::SourceNotAccessible { .. } => {
+            message.lit("Source path is not accessible").lit(match op {
+                Operation::Create => "\nHINT: Check file permissions on the source.",
+                Operation::Extract | Operation::List | Operation::Verify => {
+                    "\nHINT: Check file permissions on the archive."
+                }
+            })
         }
-        ArchiveError::InvalidCompressionLevel { level } => {
-            format!("Invalid compression level {level}: must be between 1 and 9.")
-        }
+        ArchiveError::OutputExists { .. } => message.lit("Output path already exists").hint(
+            op.accepts(Flag::Force)
+                .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
+        ),
+        ArchiveError::InvalidPermissions { mode, .. } => message.text(format!(
+            "Invalid permissions {:#o}: blocked by security policy.",
+            mode.get()
+        )),
+        ArchiveError::InvalidCompressionLevel { level } => message.text(format!(
+            "Invalid compression level {level}: must be between 1 and 9."
+        )),
 
         // Forward-compat: a variant added to ArchiveError after this match was
         // written. #[non_exhaustive] requires this arm to compile against a
         // newer exarch-core; there is no more specific context to add.
-        _ => format!("Error while processing '{archive}'"),
-    };
-    anyhow::Error::new(CliContext::wrapping(context, err))
+        _ => message
+            .lit("Error while processing '")
+            .path(archive)
+            .lit("'"),
+    }
 }
 
 /// Adds context to a generic error about archive operations.
 pub fn add_archive_context<T>(
+    op: Operation,
     result: Result<T, ArchiveError>,
     archive: &Path,
 ) -> anyhow::Result<T> {
-    result.map_err(|e| convert_extraction_error(e, archive))
+    result.map_err(|e| convert_error(op, e, archive))
 }
 
 #[cfg(test)]
@@ -412,7 +669,7 @@ mod tests {
         let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../../../etc/passwd"),
         };
-        let converted = convert_extraction_error(err, Path::new("malicious.zip"));
+        let converted = convert_error(Operation::Extract, err, Path::new("malicious.zip"));
         let msg = format!("{converted:?}");
         assert!(msg.contains("path traversal"));
         assert!(msg.contains("malicious.zip"));
@@ -425,7 +682,7 @@ mod tests {
             Compressed(compressed),
             Uncompressed(uncompressed),
         ));
-        let converted = convert_extraction_error(err, Path::new("bomb.zip"));
+        let converted = convert_error(Operation::Extract, err, Path::new("bomb.zip"));
         format!("{converted:?}")
     }
 
@@ -462,7 +719,7 @@ mod tests {
     fn test_path_traversal_path_appears_once() {
         let path = PathBuf::from("../../../etc/passwd");
         let err = ArchiveError::PathTraversal { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("../../../etc/passwd").count(),
@@ -475,7 +732,7 @@ mod tests {
     fn test_symlink_escape_path_appears_once() {
         let path = PathBuf::from("link/to/escape");
         let err = ArchiveError::SymlinkEscape { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("link/to/escape").count(),
@@ -494,7 +751,7 @@ mod tests {
                 path: PathBuf::from("hard/link/escape"),
             },
         ] {
-            let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+            let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
             let msg = format!("{converted:#}");
             assert!(msg.contains("no flag relaxes this check"), "{msg}");
             assert!(!msg.contains("--allow-"), "{msg}");
@@ -505,7 +762,7 @@ mod tests {
     fn test_hardlink_escape_path_appears_once() {
         let path = PathBuf::from("hard/link/escape");
         let err = ArchiveError::HardlinkEscape { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("hard/link/escape").count(),
@@ -518,7 +775,7 @@ mod tests {
     fn test_convert_io_error() {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
         let err = ArchiveError::Io(io_err);
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:?}");
         assert!(msg.contains("I/O error"));
     }
@@ -533,7 +790,7 @@ mod tests {
             "Illegal byte sequence (os error 92)",
         );
         let err = ArchiveError::Io(io_err);
-        let converted = convert_extraction_error(err, Path::new("nonutf8.tar"));
+        let converted = convert_error(Operation::Extract, err, Path::new("nonutf8.tar"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("Illegal byte sequence (os error 92)").count(),
@@ -553,27 +810,28 @@ mod tests {
 
     #[test]
     fn test_partial_hardlink_escape_inner_text_appears_once() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+            PartialWrites::Kept,
+        ));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         let occurrences = msg.matches("hardlink_escape_path").count();
         assert_eq!(
@@ -589,7 +847,7 @@ mod tests {
     fn test_output_exists_contains_path_and_hint() {
         let path = PathBuf::from("/tmp/output");
         let err = ArchiveError::OutputExists { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains("/tmp/output"), "path missing: {msg}");
         assert!(msg.contains("--force"), "hint missing: {msg}");
@@ -598,8 +856,11 @@ mod tests {
     #[test]
     fn test_invalid_permissions_contains_mode_and_path() {
         let path = PathBuf::from("evil/file");
-        let err = ArchiveError::InvalidPermissions { path, mode: 0o4755 };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let err = ArchiveError::InvalidPermissions {
+            path,
+            mode: exarch_core::RawMode::new(0o4755),
+        };
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains("evil/file"), "path missing: {msg}");
         assert!(
@@ -611,7 +872,7 @@ mod tests {
     #[test]
     fn test_invalid_compression_level_contains_level() {
         let err = ArchiveError::InvalidCompressionLevel { level: 0 };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains('0'), "level missing: {msg}");
         assert!(msg.contains("between 1 and 9"), "range hint missing: {msg}");
@@ -622,7 +883,7 @@ mod tests {
         let err = ArchiveError::from(Violation::EncryptedEntry {
             name: "distinctive-entry".into(),
         });
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("distinctive-entry").count(),
@@ -638,7 +899,7 @@ mod tests {
     #[test]
     fn test_security_violation_forged_size_hint_omits_policy_flags() {
         let err = ArchiveError::from(Violation::DeclaredSizeExceeded { declared: 50 });
-        let converted = convert_extraction_error(err, Path::new("archive.zip"));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.zip"));
         let msg = format!("{converted:#}");
         assert!(
             msg.contains("cannot be relaxed via any policy flag"),
@@ -676,7 +937,7 @@ mod tests {
 
     fn hint_for(setting: PolicySetting) -> String {
         let err = ArchiveError::from(violation_for(setting));
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         format!("{converted:#}")
     }
 
@@ -753,8 +1014,10 @@ mod tests {
     fn test_every_quota_kind_has_a_dedicated_context() {
         let archive = Path::new("a.tar");
         for &kind in QuotaKind::ALL {
-            let msg = dedicated_quota_context(kind, TerminalPath::new(archive))
-                .unwrap_or_else(|| panic!("{kind} took the wildcard arm"));
+            let msg = dedicated_quota_context(Operation::Extract, kind, archive).map_or_else(
+                || panic!("{kind} took the wildcard arm"),
+                |m| raw(&m.into_parts()),
+            );
             let raises_a_flag = msg.contains("HINT: Use --max-files");
             let is_size_or_count = matches!(
                 kind,
@@ -780,27 +1043,28 @@ mod tests {
 
     #[test]
     fn test_partial_symlink_escape_inner_text_appears_once() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::SymlinkEscape {
             path: PathBuf::from("symlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 2,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 100,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 2;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 100;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+            PartialWrites::Kept,
+        ));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         let occurrences = msg.matches("symlink_escape_path").count();
         assert_eq!(
@@ -815,27 +1079,30 @@ mod tests {
 
     #[test]
     fn test_partial_display_shows_files_skipped_and_warnings_when_present() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 2,
-            warnings: vec!["skipped a broken symlink".to_string()],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(2);
+            r.warnings = vec![crate::test_support::extraction_warning(
+                "skipped a broken symlink",
+            )];
+            r
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+            PartialWrites::Kept,
+        ));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains("Files skipped: 2"), "got: {msg}");
         assert!(msg.contains("Warnings:"), "got: {msg}");
@@ -847,25 +1114,26 @@ mod tests {
 
     #[test]
     fn test_partial_security_violation_keeps_hint_and_partial_progress_wording() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::from(Violation::LinksNotAllowed(LinkKind::Symlink));
-        let report = ExtractionReport {
-            files_extracted: 3,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 42,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 3;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 42;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+            PartialWrites::Kept,
+        ));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(
             msg.contains("were written to disk before the error"),
@@ -884,26 +1152,27 @@ mod tests {
 
     #[test]
     fn test_partial_rolled_back_display_makes_no_written_claim() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::HardlinkEscape {
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            ArchiveError::HardlinkEscape {
                 path: PathBuf::from("hardlink_escape_path"),
-            }),
+            },
             report,
-            writes: PartialWrites::RolledBack,
-        };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+            PartialWrites::RolledBack,
+        ));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(!msg.contains("written to disk"), "got: {msg}");
         assert!(!msg.contains("Inspect or remove"), "got: {msg}");
@@ -913,26 +1182,27 @@ mod tests {
 
     #[test]
     fn test_partial_rolled_back_display_omits_the_discarded_runs_skips_and_warnings() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 3,
-            warnings: vec!["skipped 3 entries".to_string()],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(3);
+            r.warnings = vec![crate::test_support::extraction_warning("skipped 3 entries")];
+            r
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::HardlinkEscape {
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            ArchiveError::HardlinkEscape {
                 path: PathBuf::from("hardlink_escape_path"),
-            }),
+            },
             report,
-            writes: PartialWrites::RolledBack,
-        };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+            PartialWrites::RolledBack,
+        ));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(!msg.contains("Files skipped"), "got: {msg}");
         assert!(!msg.contains("Warnings:"), "got: {msg}");
@@ -942,27 +1212,28 @@ mod tests {
 
     #[test]
     fn test_partial_display_hides_files_skipped_and_warnings_when_empty() {
-        use exarch_core::ExtractionReport;
         use std::time::Duration;
 
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = exarch_core::ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = crate::test_support::skips(0);
+            r.warnings = vec![];
+            r
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+            PartialWrites::Kept,
+        ));
+        let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(!msg.contains("Files skipped"), "got: {msg}");
         assert!(!msg.contains("Warnings:"), "got: {msg}");
@@ -973,7 +1244,7 @@ mod tests {
         let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../x"),
         };
-        let converted = convert_extraction_error(err, Path::new("a.tar"));
+        let converted = convert_error(Operation::Extract, err, Path::new("a.tar"));
         assert!(converted.downcast_ref::<CliContext>().is_some());
         assert!(
             converted
@@ -984,14 +1255,14 @@ mod tests {
 
     #[test]
     fn test_partial_context_is_chain_root_with_inner_source() {
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::PathTraversal {
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            ArchiveError::PathTraversal {
                 path: PathBuf::from("../x"),
-            }),
-            report: ExtractionReport::default(),
-            writes: PartialWrites::Kept,
-        };
-        let converted = convert_extraction_error(err, Path::new("a.tar"));
+            },
+            ExtractionReport::default(),
+            PartialWrites::Kept,
+        ));
+        let converted = convert_error(Operation::Extract, err, Path::new("a.tar"));
         assert!(
             converted
                 .downcast_ref::<PartialExtractionContext>()
@@ -1015,26 +1286,146 @@ mod tests {
         let err = ArchiveError::from(exarch_core::Malformation::SymlinkTargetUnreadable {
             detail: "distinctive-reason".into(),
         });
-        let converted = convert_extraction_error(err, Path::new("a.tar"));
+        let converted = convert_error(Operation::Extract, err, Path::new("a.tar"));
         let msg = format!("{converted:#}");
         assert_eq!(msg.matches("distinctive-reason").count(), 1, "got: {msg}");
     }
 
+    fn forged_warning_context() -> PartialExtractionContext {
+        PartialExtractionContext {
+            report: {
+                let mut r = exarch_core::ExtractionReport::new();
+                r.warnings = vec![crate::test_support::extraction_warning("w\x1b[31m\nforged")];
+                r
+            },
+            writes: PartialWrites::Kept,
+            inner: anyhow::anyhow!("inner"),
+        }
+    }
+
     #[test]
-    fn test_partial_display_escapes_warnings() {
-        let report = ExtractionReport {
-            warnings: vec!["w\x1b[31m\nforged".to_string()],
-            ..ExtractionReport::default()
-        };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::PathTraversal {
-                path: PathBuf::from("../x"),
-            }),
+    fn test_partial_terminal_rendering_escapes_warnings() {
+        let rendered = terminal(&forged_warning_context().parts());
+        assert!(!rendered.contains('\x1b'), "got: {rendered:?}");
+        assert!(
+            rendered.contains("\\x1b[31m\\x0aforged"),
+            "got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_partial_display_keeps_archive_text_exact_for_json() {
+        let msg = forged_warning_context().to_string();
+        assert!(msg.contains("w\x1b[31m\nforged"), "got: {msg:?}");
+    }
+
+    #[test]
+    fn terminal_rendering_escapes_paths_and_text_but_not_literals() {
+        let message = Message::default()
+            .lit("a\nb ")
+            .path(Path::new("p\x1b"))
+            .lit(" ")
+            .text("t\x1b")
+            .into_parts();
+        assert_eq!(raw(&message), "a\nb p\x1b t\x1b");
+        assert_eq!(terminal(&message), "a\nb p\\x1b t\\x1b");
+    }
+
+    #[test]
+    fn every_partial_writes_state_has_dedicated_text() {
+        for &writes in PartialWrites::ALL {
+            let context = PartialExtractionContext {
+                report: ExtractionReport::default(),
+                writes,
+                inner: anyhow::anyhow!("inner"),
+            };
+            assert!(
+                context.dedicated_parts().is_some(),
+                "{writes} took the wildcard"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kept_partial_extraction_lists_skips_per_kind() {
+        let mut report = exarch_core::ExtractionReport::new();
+        report.skipped = crate::test_support::skips(2);
+        let context = PartialExtractionContext {
             report,
             writes: PartialWrites::Kept,
+            inner: anyhow::anyhow!("inner"),
         };
-        let msg = format!("{:#}", convert_extraction_error(err, Path::new("a.tar")));
-        assert!(!msg.contains('\x1b'), "got: {msg:?}");
-        assert!(msg.contains("\\x1b[31m\\x0aforged"), "got: {msg:?}");
+        let text = context.to_string();
+        assert!(
+            text.contains("Files skipped: 2\n    duplicate: 2"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn discarded_extraction_says_nothing_was_written() {
+        let context = PartialExtractionContext {
+            report: ExtractionReport::default(),
+            writes: PartialWrites::Discarded,
+            inner: anyhow::anyhow!("inner"),
+        };
+        assert_eq!(
+            context.to_string(),
+            "WARNING: Extraction was stopped. Nothing was written."
+        );
+    }
+
+    #[test]
+    fn every_zip_bomb_scope_has_a_dedicated_hint() {
+        for &scope in ZipBombScope::ALL {
+            assert!(
+                dedicated_zip_bomb_hint(Operation::Extract, scope).is_some(),
+                "{scope} took the wildcard arm"
+            );
+        }
+    }
+
+    #[test]
+    fn hints_name_only_flags_their_operation_accepts() {
+        for &op in Operation::ALL {
+            for err in hint_probes() {
+                let converted = convert_error(op, err, Path::new("a.tar"));
+                let msg = converted
+                    .downcast_ref::<CliContext>()
+                    .map(|c| raw(&c.parts()))
+                    .unwrap_or_default();
+                for &flag in Flag::ALL {
+                    assert!(
+                        op.accepts(flag) || !msg.contains(flag.long()),
+                        "{} hint names {} it does not accept: {msg}",
+                        op.name(),
+                        flag.long()
+                    );
+                }
+            }
+        }
+    }
+
+    fn hint_probes() -> Vec<ArchiveError> {
+        vec![
+            ArchiveError::from(Violation::LinksNotAllowed(LinkKind::Symlink)),
+            ArchiveError::from(Violation::LinksNotAllowed(LinkKind::Hardlink)),
+            ArchiveError::from(Violation::SolidArchive),
+            ArchiveError::from(Violation::BannedComponent {
+                component: ".git".into(),
+            }),
+            ArchiveError::from(Violation::PathDepth { depth: 2, max: 1 }),
+            ArchiveError::OutputExists {
+                path: PathBuf::from("o"),
+            },
+            ArchiveError::QuotaExceeded {
+                resource: exarch_core::QuotaResource::FileCount { current: 2, max: 1 },
+            },
+            ArchiveError::ZipBomb(ZipBombDetails::new(
+                ZipBombScope::Entry,
+                Compressed(1),
+                Uncompressed(1 << 30),
+            )),
+        ]
     }
 }

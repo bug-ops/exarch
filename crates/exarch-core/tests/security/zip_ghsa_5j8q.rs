@@ -50,7 +50,7 @@ fn build_forged_size_zip(
 #[test]
 fn ghsa_5j8q_forged_small_uncompressed_size_aborts_and_cleans_up() {
     let dest = TempDir::new().unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     // Highly compressible so the real DEFLATE stream is tiny while still
     // decompressing to several megabytes — the same shape a real
@@ -58,10 +58,9 @@ fn ghsa_5j8q_forged_small_uncompressed_size_aborts_and_cleans_up() {
     let real_payload = vec![0x41u8; 4 * 1024 * 1024];
     let data = build_forged_size_zip("bomb.txt", &real_payload, 50);
 
-    let archive = ZipArchive::new(Cursor::new(data)).unwrap();
+    let archive = ZipArchive::new(Cursor::new(data), &config).unwrap();
     let result = archive.extract(
         dest.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
@@ -99,16 +98,15 @@ fn ghsa_5j8q_forged_small_uncompressed_size_aborts_and_cleans_up() {
 #[test]
 fn ghsa_5j8q_forged_oversized_declared_size_rejected_after_eof() {
     let dest = TempDir::new().unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     let real_payload: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
     let declared = real_payload.len() as u32 * 2;
     let data = build_forged_size_zip("liar.txt", &real_payload, declared);
 
-    let archive = ZipArchive::new(Cursor::new(data)).unwrap();
+    let archive = ZipArchive::new(Cursor::new(data), &config).unwrap();
     let result = archive.extract(
         dest.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
@@ -137,7 +135,7 @@ fn ghsa_5j8q_forged_oversized_declared_size_rejected_after_eof() {
 #[test]
 fn forged_size_zip_builder_round_trips_when_size_is_accurate() {
     let dest = TempDir::new().unwrap();
-    let config = SecurityConfig::default().validate().unwrap();
+    let config = SecurityConfig::default();
 
     // Low-repetition bytes so DEFLATE cannot compress this below the
     // default max_compression_ratio (100:1) and trigger an unrelated
@@ -146,10 +144,9 @@ fn forged_size_zip_builder_round_trips_when_size_is_accurate() {
     let declared = real_payload.len() as u32;
     let data = build_forged_size_zip("honest.txt", &real_payload, declared);
 
-    let archive = ZipArchive::new(Cursor::new(data)).unwrap();
+    let archive = ZipArchive::new(Cursor::new(data), &config).unwrap();
     let result = archive.extract(
         dest.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );

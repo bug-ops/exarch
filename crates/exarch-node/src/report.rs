@@ -14,8 +14,21 @@ use napi::Error;
 use napi::Result;
 use napi_derive::napi;
 
+use crate::CoreResult;
+use crate::error::Failure;
+use crate::error::IoKind;
+use crate::utils::path_text;
+use exarch_core::ArchiveError as CoreError;
+use napi::bindgen_prelude::Either4;
+use napi::bindgen_prelude::Either5;
+
 pub fn saturating_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// Whole milliseconds of `duration`, clamped to `i64::MAX`.
+pub fn saturating_millis(duration: std::time::Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 pub fn saturating_i64(n: u64) -> i64 {
@@ -311,7 +324,7 @@ impl TryFrom<&CoreIntegrityGaps> for IntegrityGaps {
                 .iter()
                 .map(|e| {
                     Ok(UnverifiedEntry {
-                        path: e.path().to_string_lossy().into_owned(),
+                        path: path_text(e.path()),
                         reason: e.reason().try_into()?,
                     })
                 })
@@ -444,6 +457,97 @@ impl TryFrom<CoreIssueCategory> for IssueCategory {
     }
 }
 
+/// Why an entry was left out of an extraction or a creation.
+// Generates the TypeScript union only; runtime values come from core's
+// `SkipKind::as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipKind {
+    /// A pre-existing destination entry kept under the skip-duplicates policy.
+    #[napi(value = "duplicate")]
+    Duplicate,
+    /// A file refused by the extension allowlist.
+    #[napi(value = "extension_not_allowed")]
+    ExtensionNotAllowed,
+    /// An entry matched by a creation exclude pattern.
+    #[napi(value = "excluded")]
+    Excluded,
+    /// A hidden entry left out by a creation configuration.
+    #[napi(value = "hidden")]
+    Hidden,
+    /// A file larger than the creation file size limit.
+    #[napi(value = "over_max_file_size")]
+    OverMaxFileSize,
+    /// A symlink that cannot be stored.
+    #[napi(value = "symlink_unsupported")]
+    SymlinkUnsupported,
+    /// An entry that could not be read.
+    #[napi(value = "unreadable")]
+    Unreadable,
+}
+
+/// How many entries were skipped for one reason.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct SkipCount {
+    /// Why the entries were skipped.
+    #[napi(ts_type = "SkipKind")]
+    pub kind: String,
+    /// How many entries, saturated at `2^32 - 1`.
+    pub count: u32,
+}
+
+/// One skipped entry.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct SkippedEntry {
+    /// The entry path as the operation names it, rendered injectively: a
+    /// backslash is `\x5C` and each invalid byte is `\xNN`.
+    pub path: String,
+    /// Why the entry was skipped.
+    #[napi(ts_type = "SkipKind")]
+    pub kind: String,
+    /// The I/O failure behind an `'unreadable'` skip.
+    pub io_kind: Option<IoKind>,
+}
+
+/// Everything an operation left out: exact counts per reason plus a bounded
+/// sample of the individual entries.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct SkippedSummary {
+    /// Exact count per reason; reasons with no skip are absent.
+    pub counts: Vec<SkipCount>,
+    /// The first skipped entries in the order they were skipped, at most 64.
+    pub sample: Vec<SkippedEntry>,
+}
+
+impl From<&exarch_core::Skips> for SkippedSummary {
+    fn from(skips: &exarch_core::Skips) -> Self {
+        Self {
+            counts: exarch_core::SkipKind::ALL
+                .iter()
+                .filter_map(|kind| {
+                    let count = skips.count(*kind);
+                    (count > 0).then(|| SkipCount {
+                        kind: kind.as_str().to_owned(),
+                        count: saturating_u32(count),
+                    })
+                })
+                .collect(),
+            sample: skips
+                .sample()
+                .iter()
+                .map(|skip| SkippedEntry {
+                    path: path_text(&skip.path),
+                    kind: skip.kind.as_str().to_owned(),
+                    io_kind: skip.io_kind.map(IoKind::from),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Report of an archive extraction operation.
 ///
 /// Contains statistics and metadata about the extraction process.
@@ -460,14 +564,16 @@ pub struct ExtractionReport {
     pub bytes_written: i64,
     /// Extraction duration in milliseconds.
     pub duration_ms: i64,
-    /// Number of files skipped due to security checks.
+    /// Number of entries skipped, over all reasons.
     pub files_skipped: u32,
-    /// List of warning messages.
+    /// The skipped entries by reason.
+    pub skipped: SkippedSummary,
+    /// Descriptions of conditions worth surfacing that are not skipped
+    /// entries.
     pub warnings: Vec<String>,
 }
 
 impl From<CoreReport> for ExtractionReport {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn from(report: CoreReport) -> Self {
         // Use saturating conversions to prevent silent wraparound on overflow
         // This ensures audit trails remain accurate even for very large
@@ -477,9 +583,10 @@ impl From<CoreReport> for ExtractionReport {
             directories_created: saturating_u32(report.directories_created),
             symlinks_created: saturating_u32(report.symlinks_created),
             bytes_written: saturating_i64(report.bytes_written),
-            duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
-            files_skipped: saturating_u32(report.files_skipped),
-            warnings: report.warnings,
+            duration_ms: saturating_millis(report.duration),
+            files_skipped: saturating_u32(report.files_skipped()),
+            skipped: SkippedSummary::from(&report.skipped),
+            warnings: report.warnings.iter().map(ToString::to_string).collect(),
         }
     }
 }
@@ -502,14 +609,16 @@ pub struct CreationReport {
     pub bytes_compressed: i64,
     /// Duration of the creation operation in milliseconds.
     pub duration_ms: i64,
-    /// Number of files skipped (due to filters or errors).
+    /// Number of entries skipped, over all reasons (filters, size limit,
+    /// unreadable entries, unsupported symlinks).
     pub files_skipped: u32,
+    /// The skipped entries by reason.
+    pub skipped: SkippedSummary,
     /// Warnings generated during creation.
     pub warnings: Vec<String>,
 }
 
 impl From<exarch_core::creation::CreationReport> for CreationReport {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn from(report: exarch_core::creation::CreationReport) -> Self {
         Self {
             files_added: saturating_u32(report.files_added),
@@ -517,9 +626,10 @@ impl From<exarch_core::creation::CreationReport> for CreationReport {
             symlinks_added: saturating_u32(report.symlinks_added),
             bytes_written: saturating_i64(report.bytes_written),
             bytes_compressed: saturating_i64(report.bytes_compressed),
-            duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
-            files_skipped: saturating_u32(report.files_skipped),
-            warnings: report.warnings,
+            duration_ms: saturating_millis(report.duration),
+            files_skipped: saturating_u32(report.files_skipped()),
+            skipped: SkippedSummary::from(&report.skipped),
+            warnings: report.warnings.iter().map(ToString::to_string).collect(),
         }
     }
 }
@@ -532,6 +642,7 @@ impl From<exarch_core::creation::CreationReport> for CreationReport {
 #[derive(Debug, Clone)]
 pub struct ArchiveManifest {
     /// All entries in the archive (files, dirs, symlinks, hardlinks).
+    #[napi(ts_type = "Array<ArchiveEntry>")]
     pub entries: Vec<ArchiveEntry>,
     /// Total number of entries.
     pub total_entries: u32,
@@ -542,18 +653,18 @@ pub struct ArchiveManifest {
 }
 
 impl TryFrom<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
-    type Error = Error;
+    type Error = Failure;
 
-    fn try_from(manifest: exarch_core::inspection::ArchiveManifest) -> Result<Self> {
+    fn try_from(manifest: exarch_core::inspection::ArchiveManifest) -> CoreResult<Self> {
         let total_entries = saturating_u32(manifest.total_entries());
         let total_size = saturating_i64(manifest.total_size());
-        let format = ArchiveType::try_from(manifest.format())?;
+        let format = ArchiveType::try_from(manifest.format()).map_err(Failure::Native)?;
         Ok(Self {
             entries: manifest
                 .into_entries()
                 .into_iter()
-                .map(ArchiveEntry::from)
-                .collect(),
+                .map(|entry| archive_entry(&entry))
+                .collect::<CoreResult<_>>()?,
             total_entries,
             total_size,
             format,
@@ -561,56 +672,271 @@ impl TryFrom<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
     }
 }
 
-/// Single entry in archive manifest.
+/// How a link target is recorded.
 ///
-/// Contains metadata about a file, directory, symlink, or hardlink
-/// without extracting it to disk.
+/// Values must equal the `state` of the matching target interface.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkTargetState {
+    /// The target as the archive stores it.
+    #[napi(value = "recorded")]
+    Recorded,
+    /// The archive stores no target.
+    #[napi(value = "missing")]
+    Missing,
+    /// The target was not read: a 7z target kept in compressed entry data.
+    #[napi(value = "unread")]
+    Unread,
+    /// The target could not be read.
+    #[napi(value = "unreadable")]
+    Unreadable,
+    /// The target exceeds the host's name limits; only its length is kept.
+    #[napi(value = "oversized")]
+    Oversized,
+}
+
+/// A link target the archive stores.
 #[napi(object)]
 #[derive(Debug, Clone)]
-pub struct ArchiveEntry {
+pub struct RecordedLinkTarget {
+    /// Always `'recorded'`.
+    #[napi(ts_type = "'recorded'")]
+    pub state: LinkTargetState,
+    /// The target as the archive spells it.
+    pub path: String,
+}
+
+/// A link whose archive stores no target.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct MissingLinkTarget {
+    /// Always `'missing'`.
+    #[napi(ts_type = "'missing'")]
+    pub state: LinkTargetState,
+}
+
+/// A link target that was not read.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnreadLinkTarget {
+    /// Always `'unread'`.
+    #[napi(ts_type = "'unread'")]
+    pub state: LinkTargetState,
+}
+
+/// A link target that could not be read.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnreadableLinkTarget {
+    /// Always `'unreadable'`.
+    #[napi(ts_type = "'unreadable'")]
+    pub state: LinkTargetState,
+}
+
+/// A link target above the host's name limits.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct OversizedLinkTarget {
+    /// Always `'oversized'`.
+    #[napi(ts_type = "'oversized'")]
+    pub state: LinkTargetState,
+    /// Length of the stored target in bytes.
+    pub bytes: i64,
+}
+
+type LinkTarget = Either5<
+    RecordedLinkTarget,
+    MissingLinkTarget,
+    UnreadLinkTarget,
+    UnreadableLinkTarget,
+    OversizedLinkTarget,
+>;
+
+fn link_target(target: &exarch_core::inspection::LinkTarget) -> CoreResult<LinkTarget> {
+    use exarch_core::inspection::LinkTarget as Core;
+
+    Ok(match target {
+        Core::Recorded(path) => Either5::A(RecordedLinkTarget {
+            state: LinkTargetState::Recorded,
+            path: utf8_path(path)?,
+        }),
+        Core::Missing => Either5::B(MissingLinkTarget {
+            state: LinkTargetState::Missing,
+        }),
+        Core::Unread => Either5::C(UnreadLinkTarget {
+            state: LinkTargetState::Unread,
+        }),
+        Core::Unreadable => Either5::D(UnreadableLinkTarget {
+            state: LinkTargetState::Unreadable,
+        }),
+        Core::Oversized { bytes } => Either5::E(OversizedLinkTarget {
+            state: LinkTargetState::Oversized,
+            bytes: saturating_i64(u64::try_from(*bytes).unwrap_or(u64::MAX)),
+        }),
+        _ => return Err(Failure::Native(unknown_variant("link target", "unknown"))),
+    })
+}
+
+/// The text of `path`, or the refusal a listing must raise: a lossy rendering
+/// could merge two distinct entries into one name.
+pub fn utf8_path(path: &std::path::Path) -> CoreResult<String> {
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        Failure::from(CoreError::from(
+            exarch_core::Malformation::EntryPathNotUtf8 {
+                path: path.to_path_buf(),
+            },
+        ))
+    })
+}
+
+/// A regular file in a listing.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ManifestFileEntry {
     /// Entry path (relative, as stored in archive).
     pub path: String,
-    /// Entry type.
+    /// Always `'File'`.
+    #[napi(ts_type = "'File'")]
     pub entry_type: ManifestEntryType,
-    /// Uncompressed size in bytes (0 for directories).
+    /// Uncompressed size in bytes.
     pub size: i64,
     /// Compressed size in bytes (if the format reports one).
     pub compressed_size: Option<i64>,
-    /// File permissions (Unix mode).
+    /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
     /// Modification time (milliseconds since Unix epoch).
     pub modified: Option<i64>,
-    /// Symlink target (if `entry_type` is "Symlink"). Not set for a 7z
-    /// symlink: listing does not decode 7z entry data to read it.
-    pub symlink_target: Option<String>,
-    /// Hardlink target (if `entry_type` is "Hardlink").
-    pub hardlink_target: Option<String>,
 }
 
-impl From<exarch_core::inspection::ArchiveEntry> for ArchiveEntry {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    fn from(entry: exarch_core::inspection::ArchiveEntry) -> Self {
-        Self {
-            path: entry.path.to_string_lossy().into_owned(),
-            entry_type: entry.kind.entry_type().into(),
-            size: saturating_i64(entry.size),
-            compressed_size: entry.compressed_size().map(saturating_i64),
-            mode: entry.mode,
-            modified: entry.modified.and_then(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-            }),
-            symlink_target: entry
-                .kind
-                .symlink_target()
-                .map(|p| p.to_string_lossy().into_owned()),
-            hardlink_target: entry
-                .kind
-                .hardlink_target()
-                .map(|p| p.to_string_lossy().into_owned()),
-        }
-    }
+/// A directory in a listing.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ManifestDirectoryEntry {
+    /// Entry path (relative, as stored in archive).
+    pub path: String,
+    /// Always `'Directory'`.
+    #[napi(ts_type = "'Directory'")]
+    pub entry_type: ManifestEntryType,
+    /// Compressed size in bytes (if the format reports one).
+    pub compressed_size: Option<i64>,
+    /// File permissions (raw Unix mode).
+    pub mode: Option<u32>,
+    /// Modification time (milliseconds since Unix epoch).
+    pub modified: Option<i64>,
+}
+
+/// A symbolic link in a listing.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ManifestSymlinkEntry {
+    /// Entry path (relative, as stored in archive).
+    pub path: String,
+    /// Always `'Symlink'`.
+    #[napi(ts_type = "'Symlink'")]
+    pub entry_type: ManifestEntryType,
+    /// Compressed size in bytes (if the format reports one).
+    pub compressed_size: Option<i64>,
+    /// File permissions (raw Unix mode).
+    pub mode: Option<u32>,
+    /// Modification time (milliseconds since Unix epoch).
+    pub modified: Option<i64>,
+    /// The link target. A 7z target is `'unread'`: listing does not decode 7z
+    /// entry data to read it.
+    #[napi(ts_type = "LinkTarget")]
+    pub target: LinkTarget,
+}
+
+/// A hard link in a listing.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ManifestHardlinkEntry {
+    /// Entry path (relative, as stored in archive).
+    pub path: String,
+    /// Always `'Hardlink'`.
+    #[napi(ts_type = "'Hardlink'")]
+    pub entry_type: ManifestEntryType,
+    /// Compressed size in bytes (if the format reports one).
+    pub compressed_size: Option<i64>,
+    /// File permissions (raw Unix mode).
+    pub mode: Option<u32>,
+    /// Modification time (milliseconds since Unix epoch).
+    pub modified: Option<i64>,
+    /// The link target.
+    #[napi(ts_type = "LinkTarget")]
+    pub target: LinkTarget,
+}
+
+/// One entry of a listing, discriminated by `entryType`.
+pub type ArchiveEntry =
+    Either4<ManifestFileEntry, ManifestDirectoryEntry, ManifestSymlinkEntry, ManifestHardlinkEntry>;
+
+/// The fields every entry kind carries.
+struct EntryCommon {
+    path: String,
+    compressed_size: Option<i64>,
+    mode: Option<u32>,
+    modified: Option<i64>,
+}
+
+fn entry_common(entry: &exarch_core::inspection::ArchiveEntry) -> CoreResult<EntryCommon> {
+    Ok(EntryCommon {
+        path: entry
+            .utf8_path()
+            .map_err(|malformation| Failure::from(CoreError::from(malformation)))?
+            .to_owned(),
+        compressed_size: entry.compressed_size().map(saturating_i64),
+        mode: entry.mode.map(exarch_core::RawMode::get),
+        modified: entry.modified.and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(saturating_millis)
+        }),
+    })
+}
+
+fn archive_entry(entry: &exarch_core::inspection::ArchiveEntry) -> CoreResult<ArchiveEntry> {
+    use exarch_core::inspection::ManifestEntryKind as Kind;
+
+    let EntryCommon {
+        path,
+        compressed_size,
+        mode,
+        modified,
+    } = entry_common(entry)?;
+    Ok(match &entry.kind {
+        Kind::File { .. } => Either4::A(ManifestFileEntry {
+            path,
+            entry_type: ManifestEntryType::File,
+            size: saturating_i64(entry.size()),
+            compressed_size,
+            mode,
+            modified,
+        }),
+        Kind::Directory => Either4::B(ManifestDirectoryEntry {
+            path,
+            entry_type: ManifestEntryType::Directory,
+            compressed_size,
+            mode,
+            modified,
+        }),
+        Kind::Symlink { target } => Either4::C(ManifestSymlinkEntry {
+            path,
+            entry_type: ManifestEntryType::Symlink,
+            compressed_size,
+            mode,
+            modified,
+            target: link_target(target)?,
+        }),
+        Kind::Hardlink { target } => Either4::D(ManifestHardlinkEntry {
+            path,
+            entry_type: ManifestEntryType::Hardlink,
+            compressed_size,
+            mode,
+            modified,
+            target: link_target(target)?,
+        }),
+        _ => return Err(Failure::Native(unknown_variant("entry kind", "unknown"))),
+    })
 }
 
 /// Result of archive verification.
@@ -630,6 +956,7 @@ pub struct VerificationReport {
     /// Security check result.
     pub security_status: CheckStatus,
     /// List of all issues found (sorted by severity).
+    #[napi(ts_type = "Array<VerificationIssue>")]
     pub issues: Vec<VerificationIssue>,
     /// Total entries scanned.
     pub total_entries: u32,
@@ -642,20 +969,26 @@ pub struct VerificationReport {
 }
 
 impl TryFrom<exarch_core::inspection::VerificationReport> for VerificationReport {
-    type Error = Error;
+    type Error = Failure;
 
-    fn try_from(report: exarch_core::inspection::VerificationReport) -> Result<Self> {
+    fn try_from(
+        report: exarch_core::inspection::VerificationReport,
+    ) -> std::result::Result<Self, Failure> {
         let status = report.status().into();
-        let integrity_status = report.integrity_status().try_into()?;
+        let integrity_status = report
+            .integrity_status()
+            .try_into()
+            .map_err(Failure::Native)?;
         let integrity_gaps = report
             .integrity_gaps()
             .map(IntegrityGaps::try_from)
-            .transpose()?;
+            .transpose()
+            .map_err(Failure::Native)?;
         let security_status = report.security_status().into();
         let total_entries = saturating_u32(report.total_entries());
         let suspicious_entries = saturating_u32(report.suspicious_entries());
         let total_size = saturating_i64(report.total_size());
-        let format = ArchiveType::try_from(report.format())?;
+        let format = ArchiveType::try_from(report.format()).map_err(Failure::Native)?;
         Ok(Self {
             status,
             integrity_status,
@@ -665,7 +998,8 @@ impl TryFrom<exarch_core::inspection::VerificationReport> for VerificationReport
                 .into_issues()
                 .into_iter()
                 .map(VerificationIssue::try_from)
-                .collect::<Result<_>>()?,
+                .collect::<Result<_>>()
+                .map_err(Failure::Native)?,
             total_entries,
             suspicious_entries,
             total_size,
@@ -675,39 +1009,128 @@ impl TryFrom<exarch_core::inspection::VerificationReport> for VerificationReport
 }
 
 /// Single verification issue.
-#[napi(object)]
+///
+/// `code`, `subCode`, `relaxableBy`, `setting` and `ioKind` are those of the
+/// error a failed extraction would raise for the same finding, and pair as
+/// they do on an error (`VerificationIssue` in `index.d.ts` is this object
+/// intersected with the per-code pairing); a heuristic finding carries none.
+#[napi(object, js_name = "VerificationIssueFields")]
 #[derive(Debug, Clone)]
 pub struct VerificationIssue {
     /// Issue severity level.
     pub severity: IssueSeverity,
     /// Issue category.
     pub category: IssueCategory,
-    /// Entry path that triggered issue (if applicable).
+    /// Entry path that triggered issue (if applicable); a path that is not
+    /// valid UTF-8 or contains a backslash is rendered injectively: a backslash
+    /// is `\x5C` and each invalid byte is `\xNN`.
     pub entry_path: Option<String>,
     /// Human-readable description.
     pub message: String,
-    /// Optional context (compression ratio, target path, etc.).
-    pub context: Option<String>,
+    /// The `ErrorCode` extraction would fail with, for a refusal.
+    #[napi(ts_type = "ErrorCode")]
+    pub code: Option<String>,
+    /// Finer classification of the refusal.
+    #[napi(
+        ts_type = "InvalidArchiveSubCode | SecurityViolationSubCode | QuotaSubCode | ZipBombSubCode"
+    )]
+    pub sub_code: Option<String>,
+    /// The `SecurityConfig` setting that relaxes the refusal.
+    #[napi(ts_type = "PolicySetting")]
+    pub relaxable_by: Option<String>,
+    /// The configuration setting an `INVALID_CONFIGURATION` refusal names.
+    #[napi(ts_type = "ConfigSetting")]
+    pub setting: Option<String>,
+    /// The kind of an `IO_ERROR` refusal.
+    pub io_kind: Option<IoKind>,
+    /// The permission bits (raw archive mode) of an `'Invalid Permissions'`
+    /// refusal or of an `'Executable File'` finding.
+    pub mode: Option<u32>,
 }
 
 impl TryFrom<exarch_core::inspection::VerificationIssue> for VerificationIssue {
     type Error = Error;
 
     fn try_from(issue: exarch_core::inspection::VerificationIssue) -> Result<Self> {
+        let kind = issue.ffi_kind();
         Ok(Self {
-            severity: issue.severity.into(),
-            category: issue.category.try_into()?,
-            entry_path: issue.entry_path.map(|p| p.to_string_lossy().into_owned()),
-            message: issue.message,
-            context: issue.context,
+            severity: issue.severity().into(),
+            category: issue.category().try_into()?,
+            entry_path: issue.entry_path().map(path_text),
+            message: issue.message(),
+            code: kind.map(|kind| kind.code().as_str().to_owned()),
+            sub_code: issue.sub_code().map(|code| code.as_str().to_owned()),
+            relaxable_by: kind
+                .and_then(exarch_core::FfiKind::relaxable_by)
+                .map(|setting| setting.as_str().to_owned()),
+            setting: kind
+                .and_then(exarch_core::FfiKind::setting)
+                .map(|setting| setting.as_str().to_owned()),
+            io_kind: match kind {
+                Some(exarch_core::FfiKind::Io(io_kind)) => Some(IoKind::from(*io_kind)),
+                _ => None,
+            },
+            mode: issue.mode().map(exarch_core::RawMode::get),
         })
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests assert by panicking"
+)]
 mod tests {
     use super::*;
+    use std::assert_matches;
+
+    fn skipped(count: usize) -> exarch_core::Skips {
+        let mut skips = exarch_core::Skips::default();
+        for i in 0..count {
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, format!("f{i}"));
+            assert!(skips.record(skip).is_ok());
+        }
+        skips
+    }
+
+    fn anti(count: u64) -> exarch_core::ExtractionWarning {
+        exarch_core::ExtractionWarning::AntiItemsSkipped { count }
+    }
+
+    #[test]
+    fn test_skipped_summary_carries_counts_sample_and_io_kind() {
+        let mut skips = exarch_core::Skips::default();
+        skips
+            .record(exarch_core::Skip::new(
+                exarch_core::SkipKind::Duplicate,
+                "a",
+            ))
+            .unwrap();
+        skips
+            .record(exarch_core::Skip::new(
+                exarch_core::SkipKind::Duplicate,
+                "b",
+            ))
+            .unwrap();
+        let mut unreadable = exarch_core::Skip::new(exarch_core::SkipKind::Unreadable, "c");
+        unreadable.io_kind = Some(std::io::ErrorKind::PermissionDenied);
+        skips.record(unreadable).unwrap();
+
+        let summary = SkippedSummary::from(&skips);
+
+        let counts: Vec<(&str, u32)> = summary
+            .counts
+            .iter()
+            .map(|c| (c.kind.as_str(), c.count))
+            .collect();
+        assert_eq!(counts, [("duplicate", 2), ("unreadable", 1)]);
+        assert_eq!(summary.sample.len(), 3);
+        assert_eq!(summary.sample[2].kind, "unreadable");
+        assert_eq!(summary.sample[2].io_kind, Some(IoKind::PermissionDenied));
+        assert_eq!(summary.sample[0].io_kind, None);
+    }
+
     use exarch_core::Compressed;
     use std::time::Duration;
 
@@ -719,8 +1142,8 @@ mod tests {
         core_report.symlinks_created = 2;
         core_report.bytes_written = 1024;
         core_report.duration = Duration::from_millis(500);
-        core_report.files_skipped = 1;
-        core_report.add_warning("Test warning".to_string());
+        core_report.skipped = skipped(1);
+        core_report.add_warning(anti(1));
 
         let report = ExtractionReport::from(core_report);
 
@@ -731,7 +1154,7 @@ mod tests {
         assert_eq!(report.duration_ms, 500);
         assert_eq!(report.files_skipped, 1);
         assert_eq!(report.warnings.len(), 1);
-        assert_eq!(report.warnings[0], "Test warning");
+        assert_eq!(report.warnings[0], anti(1).to_string());
     }
 
     #[test]
@@ -765,16 +1188,16 @@ mod tests {
     #[test]
     fn test_extraction_report_multiple_warnings() {
         let mut core_report = CoreReport::new();
-        core_report.add_warning("Warning 1".to_string());
-        core_report.add_warning("Warning 2".to_string());
-        core_report.add_warning("Warning 3".to_string());
+        core_report.add_warning(anti(1));
+        core_report.add_warning(anti(2));
+        core_report.add_warning(anti(3));
 
         let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.warnings.len(), 3);
-        assert_eq!(report.warnings[0], "Warning 1");
-        assert_eq!(report.warnings[1], "Warning 2");
-        assert_eq!(report.warnings[2], "Warning 3");
+        assert_eq!(report.warnings[0], anti(1).to_string());
+        assert_eq!(report.warnings[1], anti(2).to_string());
+        assert_eq!(report.warnings[2], anti(3).to_string());
     }
 
     #[test]
@@ -816,23 +1239,26 @@ mod tests {
     #[test]
     fn test_extraction_report_warnings_order_preserved() {
         let mut core_report = CoreReport::new();
-        core_report.add_warning("First warning".to_string());
-        core_report.add_warning("Second warning".to_string());
-        core_report.add_warning("Third warning".to_string());
+        core_report.add_warning(anti(1));
+        core_report.add_warning(anti(2));
+        core_report.add_warning(anti(3));
 
         let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.warnings.len(), 3, "should have 3 warnings");
         assert_eq!(
-            report.warnings[0], "First warning",
+            report.warnings[0],
+            anti(1).to_string(),
             "first warning should be at index 0"
         );
         assert_eq!(
-            report.warnings[1], "Second warning",
+            report.warnings[1],
+            anti(2).to_string(),
             "second warning should be at index 1"
         );
         assert_eq!(
-            report.warnings[2], "Third warning",
+            report.warnings[2],
+            anti(3).to_string(),
             "third warning should be at index 2"
         );
     }
@@ -847,8 +1273,12 @@ mod tests {
         core_report.bytes_written = 1024;
         core_report.bytes_compressed = 512;
         core_report.duration = std::time::Duration::from_millis(500);
-        core_report.files_skipped = 1;
-        core_report.add_warning("Test warning".to_string());
+        core_report.skipped = skipped(1);
+        let warning = exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
+            reason: "Test warning".to_string(),
+        };
+        let expected = warning.to_string();
+        core_report.add_warning(warning);
 
         let report = CreationReport::from(core_report);
 
@@ -860,15 +1290,21 @@ mod tests {
         assert_eq!(report.duration_ms, 500);
         assert_eq!(report.files_skipped, 1);
         assert_eq!(report.warnings.len(), 1);
-        assert_eq!(report.warnings[0], "Test warning");
+        assert_eq!(report.warnings[0], expected);
     }
 
     fn sized_entry(name: &str, size: u64) -> exarch_core::inspection::ArchiveEntry {
         exarch_core::inspection::ArchiveEntry::new(
             std::path::PathBuf::from(name),
-            exarch_core::inspection::ManifestEntryKind::File,
-            size,
+            exarch_core::inspection::ManifestEntryKind::File {
+                size: exarch_core::Uncompressed(size),
+            },
         )
+    }
+
+    fn policy_issue() -> exarch_core::inspection::VerificationIssue {
+        let error = exarch_core::ArchiveError::from(exarch_core::Violation::EncryptedArchive);
+        exarch_core::inspection::VerificationIssue::from_error(&error, None)
     }
 
     // ArchiveEntry tests
@@ -879,14 +1315,17 @@ mod tests {
 
         let mut core_entry = exarch_core::inspection::ArchiveEntry::new(
             PathBuf::from("test/file.txt"),
-            exarch_core::inspection::ManifestEntryKind::File,
-            1024,
+            exarch_core::inspection::ManifestEntryKind::File {
+                size: exarch_core::Uncompressed(1024),
+            },
         );
         core_entry.compression = exarch_core::EntryCompression::Entry(Compressed(512));
-        core_entry.mode = Some(0o644);
+        core_entry.mode = Some(exarch_core::RawMode::new(0o644));
         core_entry.modified = Some(UNIX_EPOCH + std::time::Duration::from_secs(1000));
 
-        let entry = ArchiveEntry::from(core_entry);
+        let Either4::A(entry) = archive_entry(&core_entry).unwrap() else {
+            panic!("a regular file converts to a file entry");
+        };
 
         assert_eq!(entry.path, "test/file.txt");
         assert_eq!(entry.entry_type, ManifestEntryType::File);
@@ -894,8 +1333,52 @@ mod tests {
         assert_eq!(entry.compressed_size, Some(512));
         assert_eq!(entry.mode, Some(0o644));
         assert_eq!(entry.modified, Some(1_000_000));
-        assert_eq!(entry.symlink_target, None);
-        assert_eq!(entry.hardlink_target, None);
+    }
+
+    #[test]
+    fn test_symlink_entry_carries_a_typed_target() {
+        use exarch_core::inspection::LinkTarget as Core;
+        use exarch_core::inspection::ManifestEntryKind;
+
+        let entry = |target| {
+            exarch_core::inspection::ArchiveEntry::new(
+                std::path::PathBuf::from("ln"),
+                ManifestEntryKind::Symlink { target },
+            )
+        };
+        let Either4::C(recorded) = archive_entry(&entry(Core::Recorded("a/b".into()))).unwrap()
+        else {
+            panic!("a symlink converts to a symlink entry");
+        };
+        assert_matches!(
+            recorded.target,
+            Either5::A(RecordedLinkTarget { ref path, .. }) if path == "a/b"
+        );
+        let Either4::C(oversized) = archive_entry(&entry(Core::Oversized { bytes: 9000 })).unwrap()
+        else {
+            panic!("a symlink converts to a symlink entry");
+        };
+        assert_matches!(
+            oversized.target,
+            Either5::E(OversizedLinkTarget { bytes: 9000, .. })
+        );
+        let Either4::C(unread) = archive_entry(&entry(Core::Unread)).unwrap() else {
+            panic!("a symlink converts to a symlink entry");
+        };
+        assert_matches!(unread.target, Either5::C(_));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_non_utf8_entry_path_is_refused_not_rendered_lossily() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let core_entry = exarch_core::inspection::ArchiveEntry::new(
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"a\xFFb")),
+            exarch_core::inspection::ManifestEntryKind::Directory,
+        );
+        let failure = archive_entry(&core_entry).unwrap_err();
+        assert_matches!(failure, Failure::Core(CoreError::InvalidArchive(_)));
     }
 
     // ArchiveManifest tests
@@ -943,11 +1426,7 @@ mod tests {
 
     #[test]
     fn test_security_policy_issue_conversion_and_status() {
-        let core_issue = exarch_core::inspection::VerificationIssue::new(
-            CoreIssueSeverity::High,
-            CoreIssueCategory::SecurityPolicy,
-            "Security violation: symlinks not allowed".to_string(),
-        );
+        let core_issue = policy_issue();
 
         let issue = VerificationIssue::try_from(core_issue).unwrap();
         assert_eq!(issue.category, IssueCategory::SecurityPolicy);
@@ -958,17 +1437,14 @@ mod tests {
         manifest
             .add_entry(exarch_core::inspection::ArchiveEntry::new(
                 std::path::PathBuf::from("link"),
-                exarch_core::inspection::ManifestEntryKind::File,
-                0,
+                exarch_core::inspection::ManifestEntryKind::File {
+                    size: exarch_core::Uncompressed(0),
+                },
             ))
             .unwrap();
         let core_report =
             exarch_core::inspection::VerificationReport::from_entry_issues(&manifest, |_| {
-                vec![exarch_core::inspection::VerificationIssue::new(
-                    CoreIssueSeverity::High,
-                    CoreIssueCategory::SecurityPolicy,
-                    "Security violation: symlinks not allowed".to_string(),
-                )]
+                vec![policy_issue()]
             });
         let report = VerificationReport::try_from(core_report).unwrap();
         assert_eq!(report.security_status, CheckStatus::Fail);
@@ -979,24 +1455,72 @@ mod tests {
     fn test_verification_issue_conversion() {
         use std::path::PathBuf;
 
-        let mut core_issue = exarch_core::inspection::VerificationIssue::new(
-            CoreIssueSeverity::Critical,
-            CoreIssueCategory::PathTraversal,
-            "Path traversal detected".to_string(),
+        let error = exarch_core::ArchiveError::PathTraversal {
+            path: PathBuf::from("../etc/passwd"),
+        };
+        let core_issue = exarch_core::inspection::VerificationIssue::from_error(
+            &error,
+            Some(PathBuf::from("../etc/passwd")),
         );
-        core_issue.entry_path = Some(PathBuf::from("../etc/passwd"));
-        core_issue.context = Some("Attempt to escape directory".to_string());
 
         let issue = VerificationIssue::try_from(core_issue).unwrap();
 
         assert_eq!(issue.severity, IssueSeverity::Critical);
         assert_eq!(issue.category, IssueCategory::PathTraversal);
         assert_eq!(issue.entry_path, Some("../etc/passwd".to_string()));
-        assert_eq!(issue.message, "Path traversal detected");
-        assert_eq!(
-            issue.context,
-            Some("Attempt to escape directory".to_string())
-        );
+        assert_eq!(issue.message, "Path traversal detected: ../etc/passwd");
+        assert_eq!(issue.code.as_deref(), Some("PATH_TRAVERSAL"));
+        assert_eq!(issue.sub_code, None);
+        assert_eq!(issue.relaxable_by, None);
+    }
+
+    #[test]
+    fn test_policy_refusal_issue_carries_sub_code_and_setting() {
+        let issue = VerificationIssue::try_from(policy_issue()).unwrap();
+
+        assert_eq!(issue.code.as_deref(), Some("SECURITY_VIOLATION"));
+        assert_eq!(issue.sub_code.as_deref(), Some("ENCRYPTED"));
+        assert_eq!(issue.relaxable_by, None);
+    }
+
+    #[test]
+    fn test_invalid_permissions_issue_carries_the_raw_mode() {
+        let error = exarch_core::ArchiveError::InvalidPermissions {
+            path: std::path::PathBuf::from("a"),
+            mode: exarch_core::RawMode::new(0o4755),
+        };
+        let core_issue = exarch_core::inspection::VerificationIssue::from_error(&error, None);
+
+        let issue = VerificationIssue::try_from(core_issue).unwrap();
+
+        assert_eq!(issue.mode, Some(0o4755));
+    }
+
+    #[test]
+    fn test_executable_heuristic_carries_the_raw_mode() {
+        let issue = VerificationIssue::try_from(exarch_core::inspection::VerificationIssue::new(
+            exarch_core::inspection::IssueSeverity::Low,
+            exarch_core::Finding::Heuristic(exarch_core::Heuristic::ExecutableFile {
+                mode: exarch_core::RawMode::new(0o755),
+            }),
+        ))
+        .unwrap();
+
+        assert_eq!(issue.mode, Some(0o755));
+        assert_eq!(issue.code, None);
+    }
+
+    #[test]
+    fn test_heuristic_issue_carries_no_refusal_properties() {
+        let issue = VerificationIssue::try_from(exarch_core::inspection::VerificationIssue::new(
+            exarch_core::inspection::IssueSeverity::Low,
+            exarch_core::Finding::Heuristic(exarch_core::Heuristic::SuspiciousExtension),
+        ))
+        .unwrap();
+
+        assert_eq!(issue.code, None);
+        assert_eq!(issue.sub_code, None);
+        assert_eq!(issue.io_kind, None);
     }
 
     // CR-004: Overflow/saturating conversion tests
@@ -1121,7 +1645,9 @@ mod tests {
     fn test_archive_entry_saturates_size_at_i64_max() {
         let core_entry = sized_entry("test.txt", u64::MAX);
 
-        let entry = ArchiveEntry::from(core_entry);
+        let Either4::A(entry) = archive_entry(&core_entry).unwrap() else {
+            panic!("a regular file converts to a file entry");
+        };
 
         assert_eq!(entry.size, i64::MAX, "size should saturate to i64::MAX");
     }
@@ -1131,7 +1657,9 @@ mod tests {
         let mut core_entry = sized_entry("test.txt", 1024);
         core_entry.compression = exarch_core::EntryCompression::Entry(Compressed(u64::MAX));
 
-        let entry = ArchiveEntry::from(core_entry);
+        let Either4::A(entry) = archive_entry(&core_entry).unwrap() else {
+            panic!("a regular file converts to a file entry");
+        };
 
         assert_eq!(
             entry.compressed_size,

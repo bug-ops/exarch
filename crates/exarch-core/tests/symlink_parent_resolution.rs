@@ -13,9 +13,9 @@ use std::path::PathBuf;
 
 use exarch_core::CheckStatus;
 use exarch_core::ErrorCode;
+use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_with_options;
 use exarch_core::verify_archive;
 use tempfile::TempDir;
 use zip::CompressionMethod;
@@ -125,7 +125,9 @@ impl Fixture {
             .with_allow_symlinks(true)
             .with_allow_hardlinks(true);
         let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
-        extract_archive_with_options(&self.archive, self.out(), &config, &options)
+        ExtractRequest::new(&config)
+            .with_options(options)
+            .extract(&self.archive, self.out())
     }
 
     fn verify_report(&self) -> Option<exarch_core::VerificationReport> {
@@ -309,11 +311,11 @@ fn symlink_target_leaving_own_parent_directories_extracts() {
 /// through.
 fn assert_symlink_refused(result: exarch_core::Result<exarch_core::ExtractionReport>) {
     let error = result.unwrap_err();
-    let exarch_core::ArchiveError::PartialExtraction { source, .. } = &error else {
+    let exarch_core::ArchiveError::PartialExtraction(partial) = &error else {
         panic!("expected PartialExtraction, got {error:?}");
     };
-    let exarch_core::ArchiveError::Io(io) = &**source else {
-        panic!("expected Io, got {source:?}");
+    let exarch_core::ArchiveError::Io(io) = partial.cause() else {
+        panic!("expected Io, got {:?}", partial.cause());
     };
     assert_eq!(
         io.kind(),
@@ -327,10 +329,10 @@ fn assert_issue_note(fixture: &Fixture, needle: &str) {
     let note = report
         .issues()
         .iter()
-        .find(|i| i.category == exarch_core::IssueCategory::InvalidArchive)
+        .find(|i| i.category() == exarch_core::IssueCategory::InvalidArchive)
         .unwrap_or_else(|| panic!("no overwrite note: {:?}", report.issues()));
-    assert_eq!(note.severity, exarch_core::IssueSeverity::Low);
-    assert!(note.message.contains(needle), "{}", note.message);
+    assert_eq!(note.severity(), exarch_core::IssueSeverity::Low);
+    assert!(note.message().contains(needle), "{}", note.message());
 }
 
 fn resolves_to(fixture: &Fixture, link: &str, expected: &str) {

@@ -127,21 +127,18 @@ fn a_special_entry_with_data_is_found() {
 fn a_directory_entry_with_data_is_fatal_under_enforce_and_reported_by_verify() {
     let built = RawZip::new(vec![enclosing("d/", UNIX_DIRECTORY, 0x031e)]).build();
     assert_matches!(
-        open_bytes(built.bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
+        open_bytes(built.bytes.clone(), &config(ZipConsistencyPolicy::Enforce)).list(),
         Err(ArchiveError::ZipInconsistency(
             ZipInconsistency::NonRegularPayload { .. }
         ))
     );
-    let report = open_bytes(built.bytes.clone())
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(built.bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(
-        open_bytes(built.bytes)
-            .list(&config(ZipConsistencyPolicy::Ignore))
+        open_bytes(built.bytes, &config(ZipConsistencyPolicy::Ignore))
+            .list()
             .is_ok()
     );
 }
@@ -183,11 +180,8 @@ fn a_stored_regular_entry_holding_a_record_is_found_whatever_its_descriptor_stat
 #[test]
 fn a_stored_regular_entry_holding_a_record_is_fatal_under_enforce_with_plain_verify() {
     let built = RawZip::new(vec![enclosing("a.txt", 0o100_644 << 16, 0x031e)]).build();
-    let report = open_bytes(built.bytes)
-        .verify(
-            &config(ZipConsistencyPolicy::Enforce),
-            &VerificationOptions::default(),
-        )
+    let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
+        .verify(&VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_eq!(hidden_issues(&report).len(), 1);

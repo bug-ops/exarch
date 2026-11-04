@@ -12,8 +12,10 @@ use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::AdmittedSize;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::CheckedLinkTarget;
 use exarch_core::EntrySink;
 use exarch_core::ExtractionOptions;
 use exarch_core::QuotaResource;
@@ -21,9 +23,9 @@ use exarch_core::SafePath;
 use exarch_core::SanitizedMode;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
+use exarch_core::SinkExtractRequest;
 use exarch_core::SinkFull;
 use exarch_core::SinkOptions;
-use exarch_core::extract_to_sink;
 use exarch_core::formats::compression::CompressionCodec;
 use exarch_testkit::raw_zip::RawEntry;
 use sink_support::RecordingSink;
@@ -52,12 +54,9 @@ fn extract(
     reader: ArchiveReader<'_>,
     sink: &mut impl EntrySink,
 ) -> Result<exarch_core::ExtractionReport, ArchiveError> {
-    extract_to_sink(
-        reader,
-        sink,
-        &SecurityConfig::default(),
-        &SinkOptions::default(),
-    )
+    SinkExtractRequest::new(&SecurityConfig::default())
+        .with_options(SinkOptions::default())
+        .extract(reader, sink)
 }
 
 /// A sink whose methods can be made to fail.
@@ -86,7 +85,7 @@ impl EntrySink for FailingSink {
         &mut self,
         _: &SafePath,
         _: Option<SanitizedMode>,
-        _: u64,
+        _: AdmittedSize,
     ) -> io::Result<Vec<u8>> {
         if let Some(max) = self.full_at {
             return Err(io::Error::new(
@@ -108,7 +107,7 @@ impl EntrySink for FailingSink {
         Ok(())
     }
 
-    fn create_symlink(&mut self, _: &SafePath, _: &Path) -> io::Result<()> {
+    fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
         if self.fail_symlink {
             return Err(io::Error::other("symlink refused"));
         }
@@ -176,7 +175,7 @@ fn a_crc_corrupt_zip_entry_is_never_finished() {
 
     assert_matches!(
         error,
-        ArchiveError::PartialExtraction { .. } | ArchiveError::Io(_),
+        ArchiveError::PartialExtraction(_) | ArchiveError::Io(_),
         "{error:?}"
     );
     assert_eq!(sink.finished, [PathBuf::from("ok")]);
@@ -251,12 +250,14 @@ fn extract_links(
     sink: &mut impl EntrySink,
     options: SinkOptions,
 ) -> Result<exarch_core::ExtractionReport, ArchiveError> {
-    extract_to_sink(tar_reader(entries), sink, &links_config(), &options)
+    SinkExtractRequest::new(&links_config())
+        .with_options(options)
+        .extract(tar_reader(entries), sink)
 }
 
 fn is_io(error: &ArchiveError) -> bool {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => is_io(source),
+        ArchiveError::PartialExtraction(partial) => is_io(partial.cause()),
         ArchiveError::Io(_) => true,
         _ => false,
     }
@@ -320,10 +321,14 @@ fn hardlink_to_a_directory_is_invalid_for_the_sink() {
         sink_support::tar_hardlink("h", "d"),
     ];
     let error = extract_links(&entries, &mut sink, SinkOptions::default()).unwrap_err();
-    let ArchiveError::PartialExtraction { source, .. } = &error else {
+    let ArchiveError::PartialExtraction(partial) = &error else {
         panic!("{error:?}");
     };
-    assert_matches!(**source, ArchiveError::InvalidArchive(_), "{error:?}");
+    assert_matches!(
+        partial.cause(),
+        ArchiveError::InvalidArchive(_),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -335,18 +340,15 @@ fn skipped_duplicate_hardlink_is_counted_and_not_delivered() {
         sink_support::tar_hardlink("h", "t"),
     ];
     let report = extract_links(&entries, &mut sink, SinkOptions::default()).unwrap();
-    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_skipped(), 1);
     assert_eq!(sink.tree.files[Path::new("h")], b"y");
-    assert!(
-        report.warnings.iter().any(|w| w.contains("hardlink")),
-        "{:?}",
-        report.warnings
-    );
+    assert_eq!(report.skipped.count(exarch_core::SkipKind::Duplicate), 1);
+    assert!(report.warnings.is_empty());
 }
 
 fn tree_node_quota(error: &ArchiveError) -> Option<usize> {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => tree_node_quota(source),
+        ArchiveError::PartialExtraction(partial) => tree_node_quota(partial.cause()),
         ArchiveError::QuotaExceeded {
             resource: exarch_core::QuotaResource::TreeNodes { max },
         } => Some(*max),
@@ -366,13 +368,10 @@ fn a_flood_of_directory_entries_exhausts_the_node_budget() {
     let entries: Vec<_> = (0..16)
         .map(|i| sink_support::tar_dir(&format!("d{i}/")))
         .collect();
-    let error = extract_to_sink(
-        tar_reader(&entries),
-        &mut sink,
-        &small_tree_config(),
-        &SinkOptions::default(),
-    )
-    .unwrap_err();
+    let error = SinkExtractRequest::new(&small_tree_config())
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap_err();
     assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
 }
 
@@ -386,13 +385,10 @@ fn case_variant_directories_charge_the_node_budget() {
     .into_iter()
     .map(sink_support::tar_dir)
     .collect();
-    let error = extract_to_sink(
-        tar_reader(&entries),
-        &mut sink,
-        &small_tree_config(),
-        &SinkOptions::default(),
-    )
-    .unwrap_err();
+    let error = SinkExtractRequest::new(&small_tree_config())
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap_err();
     assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
 }
 
@@ -407,13 +403,10 @@ fn case_variant_directories_do_not_alias_on_a_case_sensitive_host() {
     let config = SecurityConfig::default()
         .with_max_file_count(exarch_core::non_zero!(2))
         .with_max_path_depth(exarch_core::non_zero!(2));
-    extract_to_sink(
-        tar_reader(&entries),
-        &mut sink,
-        &config,
-        &SinkOptions::default(),
-    )
-    .unwrap();
+    SinkExtractRequest::new(&config)
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap();
     assert_eq!(sink.tree.dirs.len(), 4);
 }
 
@@ -421,11 +414,63 @@ fn case_variant_directories_do_not_alias_on_a_case_sensitive_host() {
 fn an_archive_within_the_node_budget_extracts() {
     let mut sink = RecordingSink::default();
     let entries = [sink_support::tar_dir("a/"), tar_file("a/f", b"x")];
-    extract_to_sink(
-        tar_reader(&entries),
-        &mut sink,
-        &small_tree_config(),
-        &SinkOptions::default(),
-    )
-    .unwrap();
+    SinkExtractRequest::new(&small_tree_config())
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap();
+}
+
+/// Keeps what the pipeline proves about a file's size and a link's target.
+#[derive(Default)]
+struct ProofSink {
+    sizes: Vec<u64>,
+    targets: Vec<PathBuf>,
+}
+
+impl EntrySink for ProofSink {
+    type File = Vec<u8>;
+
+    fn create_directory(&mut self, _: &SafePath) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn create_file(
+        &mut self,
+        _: &SafePath,
+        _: Option<SanitizedMode>,
+        size: AdmittedSize,
+    ) -> io::Result<Vec<u8>> {
+        self.sizes.push(size.get());
+        Ok(Vec::new())
+    }
+
+    fn finish_file(&mut self, _: &SafePath, _: Vec<u8>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn create_symlink(&mut self, _: &SafePath, target: CheckedLinkTarget<'_>) -> io::Result<()> {
+        self.targets.push(target.as_path().to_path_buf());
+        Ok(())
+    }
+
+    fn create_hardlink(&mut self, _: &SafePath, _: &SafePath) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_sink_receives_the_admitted_size_and_the_validated_link_target() {
+    let mut sink = ProofSink::default();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+    let entries = [
+        tar_file("a", b"hello"),
+        sink_support::tar_symlink("l", "a"),
+        tar_file("empty", b""),
+    ];
+    SinkExtractRequest::new(&config)
+        .with_options(SinkOptions::default())
+        .extract(tar_reader(&entries), &mut sink)
+        .unwrap();
+    assert_eq!(sink.sizes, [5, 0]);
+    assert_eq!(sink.targets, [PathBuf::from("a")]);
 }

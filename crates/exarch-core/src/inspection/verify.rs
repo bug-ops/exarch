@@ -11,10 +11,10 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::Violation;
-use crate::config::Validated;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::common::check_entry_name_limits;
+use crate::formats::common::is_extension_allowed;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::inspection::integrity::IntegrityOutcome;
@@ -27,8 +27,9 @@ use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::OversizedEntry;
 use crate::inspection::report::ArchiveStructure;
+use crate::inspection::report::Finding;
+use crate::inspection::report::Heuristic;
 use crate::inspection::report::IntegrityScope;
-use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
@@ -39,6 +40,7 @@ use crate::security::fs_view::CollisionKind;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::Conflict;
 use crate::security::fs_view::FsView;
+use crate::security::fs_view::LandingLimits;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::ModelRoot as _;
 use crate::security::fs_view::NameCollision;
@@ -72,7 +74,7 @@ use crate::types::safe_symlink::require_symlinks_allowed;
 /// validated against the final tree.
 pub(crate) fn verify_manifest(
     manifest: &ArchiveManifest,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     integrity: Option<IntegrityOutcome>,
 ) -> VerificationReport {
     verify_manifest_with_structure(
@@ -87,7 +89,7 @@ pub(crate) fn verify_manifest(
 /// findings and a record count of its own.
 pub(crate) fn verify_manifest_with_structure(
     manifest: &ArchiveManifest,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     structure: &ArchiveStructure<'_>,
     integrity: Option<IntegrityOutcome>,
 ) -> VerificationReport {
@@ -105,7 +107,7 @@ pub(crate) fn verify_manifest_with_structure(
 /// names are folded instead of taking the host's rule.
 fn verify_with_tree(
     manifest: &ArchiveManifest,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     structure: &ArchiveStructure<'_>,
     integrity: Option<IntegrityOutcome>,
     make_tree: impl FnOnce(&VirtualRoot) -> VirtualTree,
@@ -181,7 +183,7 @@ pub(crate) struct ListedForVerify {
 /// `list` is the only format-specific part of verification, so
 /// `verify_archive` and every `ArchiveFormat::verify` share the rest.
 pub(crate) fn list_for_verify<F>(
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: VerificationOptions,
     progress: &mut dyn ProgressCallback,
     list: F,
@@ -208,7 +210,7 @@ where
 /// Lists with `list` and verifies the manifest, for formats whose manifest is
 /// their whole content.
 pub(crate) fn verify_with<F>(
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     options: VerificationOptions,
     progress: &mut dyn ProgressCallback,
     list: F,
@@ -229,7 +231,8 @@ where
 /// Payload integrity (checksums, decode-to-end) is not verified: the report's
 /// `integrity_status` is
 /// [`IntegrityStatus::Skipped`](crate::IntegrityStatus::Skipped).
-/// Use [`verify_archive_with_options`] to request it.
+/// Use [`VerifyRequest`](crate::VerifyRequest) with `VerificationOptions` to
+/// request it.
 ///
 /// # Arguments
 ///
@@ -276,10 +279,11 @@ where
 /// On macOS entry names are compared after NFD and a per-character case fold,
 /// on Windows after the same fold without normalisation, and elsewhere
 /// exactly. Two names that differ exactly but compare equal under that fold
-/// are reported as a [`IssueCategory::NameCollision`] (High when the kinds
-/// differ or a symlink is involved, Medium for two files or for directories
-/// that hold entries, Low for two directories that hold none), so a merge is
-/// never silent. The fold approximates the host
+/// are reported as a
+/// [`IssueCategory::NameCollision`](crate::IssueCategory::NameCollision) (High
+/// when the kinds differ or a symlink is involved, Medium for two files or for
+/// directories that hold entries, Low for two directories that hold none), so a
+/// merge is never silent. The fold approximates the host
 /// table, so a pair it merges that the host keeps apart is reported too.
 /// Windows component checks (reserved names, `:`, trailing dot or space,
 /// `<>"|?*`, control characters) run only on Windows hosts.
@@ -292,8 +296,9 @@ where
 /// fails closed and replaces nothing (a symlink over a symlink or directory,
 /// a file over a directory or symlink, a hardlink over any earlier entry; a
 /// symlink repeating an earlier symlink's target is not noted at all) the
-/// entry is only noted as a Low [`IssueCategory::InvalidArchive`] issue, so the
-/// status stays `PASS`.
+/// entry is only noted as a Low
+/// [`IssueCategory::InvalidArchive`](crate::IssueCategory::InvalidArchive)
+/// issue, so the status stays `PASS`.
 ///
 /// Hardlinks are materialized after every other entry, so their path and
 /// target are validated against the final tree.
@@ -320,7 +325,7 @@ where
 /// } else {
 ///     eprintln!("Security issues found:");
 ///     for issue in report.issues() {
-///         eprintln!("  [{}] {}", issue.severity, issue.message);
+///         eprintln!("  [{}] {}", issue.severity(), issue.message());
 ///     }
 /// }
 /// # Ok(())
@@ -330,85 +335,20 @@ pub fn verify_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {
-    verify_archive_with_options(archive_path, config, &VerificationOptions::default())
+    verify_archive_with_progress(
+        archive_path,
+        config,
+        VerificationOptions::default(),
+        &mut NoopProgress,
+    )
 }
 
-/// Verifies archive security, optionally checking payload integrity.
+/// Verifies `archive_path`, reporting progress; the body of
+/// [`VerifyRequest::verify`](crate::VerifyRequest::verify).
 ///
-/// With [`IntegrityCheck::Skip`] this is [`verify_archive`]. With
-/// [`IntegrityCheck::DecodeToEof`] the payload is decoded to the decoder's EOF
-/// during listing, so codec framing and checksums are verified, and
-/// `integrity_status` becomes `OK`, `FAILED` or `INCOMPLETE`.
-///
-/// # What a status means
-///
-/// | Format | Verified |
-/// |---|---|
-/// | ZIP | per-entry CRC-32 and exact declared size; entries are independent, so a corrupt entry does not stop the scan |
-/// | TAR | header checksums and that every declared data byte is present; no payload checksum |
-/// | tar.gz, tar.bz2, tar.xz, tar.zst | the above plus the codec's own framing and checksums (zstd only if the frame carries one) |
-/// | 7z | per-entry CRC-32 where the archive stores one, else the block CRC |
-///
-/// `OK` means every payload byte was decoded and every checksum the format has
-/// matched. Formats without payload checksums (plain TAR, 7z entries without
-/// CRC, zstd frames without a content checksum) report the weaker guarantee
-/// that the data was complete and decodable. "Decode to EOF" means the
-/// decoder's EOF: every gzip member, bzip2 stream and xz stream is decoded, and
-/// a non-zero tail after the last one is an error. The tail after a TAR
-/// end-of-archive marker is bounded by `max_tar_metadata_bytes` (at least
-/// 1 MiB), not by the decompression budget; a longer one is refused. Without
-/// integrity, verification stops at the marker and never reads the tail.
-///
-/// `INCOMPLETE` means part of the payload was not verified (decompression
-/// budget, a resource limit, a solid 7z archive while `allow_solid_archives`
-/// is off, or a TAR stream without an end-of-archive marker). It comes with a
-/// Medium issue, so the overall status is at least `WARNING`; exit code 0 does
-/// not mean integrity `OK`.
-///
-/// # Errors
-///
-/// As [`verify_archive`]. With integrity requested, a TAR entry whose content
-/// fails to decode, or whose data is cut short, is an
-/// [`ArchiveError::InvalidArchive`]: the
-/// scan cannot continue past it, and a report over the entries read so far
-/// would let security look fine for entries never inspected. Corruption in a
-/// TAR trailer (a gzip CRC, an xz index) is a `FAILED` report instead.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::DecompressionBudget;
-/// use exarch_core::IntegrityCheck;
-/// use exarch_core::IntegrityStatus;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::VerificationOptions;
-/// use exarch_core::verify_archive_with_options;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let options = VerificationOptions::default()
-///     .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT));
-/// let report = verify_archive_with_options("archive.zip", &SecurityConfig::default(), &options)?;
-/// if report.integrity_status() == IntegrityStatus::Fail {
-///     eprintln!("archive is corrupt");
-/// }
-/// # Ok(())
-/// # }
-/// ```
-pub fn verify_archive_with_options<P: AsRef<Path>>(
-    archive_path: P,
-    config: &SecurityConfig,
-    options: &VerificationOptions,
-) -> Result<VerificationReport> {
-    verify_archive_with_progress(archive_path, config, options, &mut NoopProgress)
-}
-
-/// Verifies archive security, optionally checking payload integrity, reporting
-/// progress.
-///
-/// [`verify_archive_with_options`] with a [`ProgressCallback`]: every entry of
-/// the verification scan is announced with `on_entry_start` and closed with
-/// `on_entry_complete`, and `on_complete` fires once when a report is
-/// returned. A report whose status is `Fail` is still a report.
+/// Every entry of the verification scan is announced with `on_entry_start` and
+/// closed with `on_entry_complete`, and `on_complete` fires once when a report
+/// is returned. A report whose status is `Fail` is still a report.
 ///
 /// With [`IntegrityCheck::DecodeToEof`] the events fire while each payload is
 /// decoded, so they track the work; without it the scan reads metadata only
@@ -417,63 +357,27 @@ pub fn verify_archive_with_options<P: AsRef<Path>>(
 /// archive the entries that carry no payload are announced first, then the
 /// payloads in decode order.
 ///
-/// # Errors
-///
-/// As [`verify_archive_with_options`]. `on_complete` is not called on failure;
-/// every `on_entry_start` is still paired with an `on_entry_complete`.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::NoopProgress;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::VerificationOptions;
-/// use exarch_core::VerificationStatus;
-/// use exarch_core::verify_archive_with_progress;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// # let dir = tempfile::tempdir()?;
-/// # let archive = dir.path().join("a.tar");
-/// # let mut builder = tar::Builder::new(Vec::new());
-/// # let mut header = tar::Header::new_gnu();
-/// # header.set_size(2);
-/// # header.set_mode(0o644);
-/// # builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// # std::fs::write(&archive, builder.into_inner()?)?;
-/// let report = verify_archive_with_progress(
-///     &archive,
-///     &SecurityConfig::default(),
-///     &VerificationOptions::default(),
-///     &mut NoopProgress,
-/// )?;
-/// assert_eq!(report.status(), VerificationStatus::Pass);
-/// # Ok(())
-/// # }
-/// ```
-pub fn verify_archive_with_progress<P: AsRef<Path>>(
+/// `on_complete` is not called on failure; every `on_entry_start` is still
+/// paired with an `on_entry_complete`.
+pub(crate) fn verify_archive_with_progress<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
-    options: &VerificationOptions,
+    options: VerificationOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<VerificationReport> {
-    let validated_config = config.clone().validate()?;
     let archive_path = archive_path.as_ref();
     let format = detect_format(archive_path)?;
     let report = match format.family() {
         FormatFamily::Seekable(SeekableFormat::Zip) => {
             let file = std::fs::File::open(archive_path)?;
-            ZipArchive::for_config(file, &validated_config)?.verify_with_progress(
-                &validated_config,
-                *options,
-                progress,
-            )?
+            ZipArchive::new(file, config)?.verify_with_progress(config, options, progress)?
         }
         FormatFamily::Seekable(SeekableFormat::SevenZ) => {
             let file = std::fs::File::open(archive_path)?;
-            SevenZArchive::new(file)?.verify_with_progress(&validated_config, *options, progress)?
+            SevenZArchive::new(file, config)?.verify_with_progress(config, options, progress)?
         }
-        FormatFamily::Tar(_) => verify_with(&validated_config, *options, progress, |listing| {
-            list_detected(archive_path, format, &validated_config, listing)
+        FormatFamily::Tar(_) => verify_with(config, options, progress, |listing| {
+            list_detected(archive_path, format, config, listing)
         })?,
     };
     progress.on_complete();
@@ -488,7 +392,7 @@ struct EntryOutcome {
 
 fn verify_entry(
     entry: &ArchiveEntry,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     dest: &VirtualRoot,
     tree: &mut VirtualTree,
     quota_tracker: &mut QuotaTracker,
@@ -502,7 +406,7 @@ fn verify_entry(
     let path_result = check_entry_name_limits(
         PathModel::Host,
         &entry.path,
-        matches!(entry.kind, ManifestEntryKind::File),
+        matches!(entry.kind, ManifestEntryKind::File { .. }),
         config,
     )
     .map_err(ArchiveError::Io)
@@ -512,12 +416,13 @@ fn verify_entry(
     }
 
     // Quota validation using reserve (combines all checks)
-    if let Err(e) = quota_tracker.reserve(entry.size, config) {
+    if let Err(e) = quota_tracker.reserve(entry.size(), config) {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
     // Compression ratio validation (zip bomb detection)
-    if let Err(e) = validate_entry_compression(&entry.compression, Uncompressed(entry.size), config)
+    if let Err(e) =
+        validate_entry_compression(&entry.compression, Uncompressed(entry.size()), config)
     {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
@@ -550,7 +455,7 @@ fn verify_entry(
                         .map(drop)
                 }),
             ),
-            ManifestEntryKind::File | ManifestEntryKind::Directory => None,
+            ManifestEntryKind::File { .. } | ManifestEntryKind::Directory => None,
         };
         match link_result {
             Some(Err(e)) => {
@@ -560,7 +465,7 @@ fn verify_entry(
                 hardlink_pending = true;
             }
             _ => {
-                let recorded = record_entry(tree, safe_path.as_path(), &entry.kind);
+                let recorded = record_entry(tree, safe_path, &entry.kind, config);
                 issues.extend(collision_issues(tree));
                 if let Err(error) = recorded {
                     issues.push(place_error_issue(
@@ -645,43 +550,33 @@ fn collision_issues(tree: &mut VirtualTree) -> Vec<VerificationIssue> {
         .collect()
 }
 
-/// Spells a path with combining marks and control characters escaped, so two
-/// canonically equivalent names do not read as the same text.
-fn escaped(path: &Path) -> String {
-    path.to_string_lossy()
-        .chars()
-        .flat_map(char::escape_debug)
-        .collect()
-}
-
 fn collision_issue(collision: NameCollision) -> VerificationIssue {
     let severity = match collision.kind {
         CollisionKind::Directories => IssueSeverity::Low,
         CollisionKind::DirectoriesWithContents | CollisionKind::Files => IssueSeverity::Medium,
         CollisionKind::Mixed => IssueSeverity::High,
     };
-    VerificationIssue {
+    let entry_path = collision.incoming.clone();
+    VerificationIssue::new(
         severity,
-        category: IssueCategory::NameCollision,
-        message: format!(
-            "Names \"{}\" and \"{}\" are the same name on case-insensitive or normalizing \
-             filesystems",
-            escaped(&collision.existing),
-            escaped(&collision.incoming)
-        ),
-        entry_path: Some(collision.incoming),
-        context: None,
-    }
+        Finding::Heuristic(Heuristic::NameCollision {
+            existing: collision.existing,
+            incoming: collision.incoming,
+            kind: collision.kind,
+        }),
+    )
+    .with_entry_path(Some(entry_path))
 }
 
 /// Records a successfully validated non-hardlink entry in the tree.
 fn record_entry(
     tree: &mut VirtualTree,
-    path: &Path,
+    path: &SafePath,
     kind: &ManifestEntryKind,
+    config: &SecurityConfig,
 ) -> std::result::Result<(), PlaceError> {
     let node = match kind {
-        ManifestEntryKind::File => Node::File,
+        ManifestEntryKind::File { .. } => Node::File,
         ManifestEntryKind::Directory => Node::Dir,
         ManifestEntryKind::Symlink {
             target: LinkTarget::Recorded(t),
@@ -693,14 +588,21 @@ fn record_entry(
             return Ok(());
         }
     };
-    tree.try_insert(path, node)
+    let limits = if matches!(kind, ManifestEntryKind::File { .. })
+        && !is_extension_allowed(path.as_path(), config)
+    {
+        LandingLimits::Exempt
+    } else {
+        LandingLimits::Enforced
+    };
+    tree.check_landing(path, node, limits)
 }
 
 /// Phase two for a hardlink: re-validates its link path and target against the
 /// final tree, requires the target to exist, then materializes the link.
 fn verify_deferred_hardlink(
     entry: &ArchiveEntry,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
     dest: &VirtualRoot,
     tree: &mut VirtualTree,
     hardlink_tracker: &mut HardlinkTracker,
@@ -731,7 +633,8 @@ fn verify_deferred_hardlink(
     // A file over a file is accepted by the tree, but a hardlink cannot
     // replace one: it is created exclusively.
     let occupant = tree.occupant(link_path.as_path());
-    let error = match (tree.try_insert(link_path.as_path(), Node::File), occupant) {
+    let landed = tree.check_landing(&link_path, Node::File, LandingLimits::Enforced);
+    let error = match (landed, occupant) {
         (Err(error), _) => error,
         (Ok(()), Some(occupant)) => PlaceError::Conflict(Conflict::already_exists(occupant)),
         (Ok(()), None) => return Ok(()),
@@ -757,6 +660,10 @@ fn place_error_issue(
         PlaceError::Budget(exceeded) => {
             VerificationIssue::from_error(&exceeded.into(), Some(entry.path.clone()))
         }
+        PlaceError::LandingTooLong => VerificationIssue::from_error(
+            &ArchiveError::Io(name_too_long()),
+            Some(entry.path.clone()),
+        ),
     }
 }
 
@@ -803,21 +710,17 @@ fn placement_issue(
     }
     let error = match Placement::of(kind, &conflict) {
         Placement::RefusedUnderOverwrite(occupant) => {
-            let mut issue = VerificationIssue::new(
+            return VerificationIssue::new(
                 IssueSeverity::Low,
-                IssueCategory::InvalidArchive,
-                format!(
-                    "extraction with overwrite fails at {}: an earlier entry is a {} (default \
-                     extraction skips this entry)",
-                    rel.display(),
-                    occupant.noun()
-                ),
-            );
-            issue.entry_path = entry_path;
-            return issue;
+                Finding::Heuristic(Heuristic::OverwriteConflict {
+                    rel: rel.to_path_buf(),
+                    occupant,
+                }),
+            )
+            .with_entry_path(entry_path);
         }
         Placement::ReplacesUnderOverwrite => ArchiveError::from(Violation::ConflictUnlessSkipped {
-            rel: rel.display().to_string().into(),
+            rel: crate::path_text(rel).into(),
             cause: conflict.error.to_string().into(),
         }),
         Placement::FailsAlways => {
@@ -828,7 +731,7 @@ fn placement_issue(
             };
             if kind.is_link() || crosses_link() {
                 ArchiveError::from(Violation::ConflictFails {
-                    rel: rel.display().to_string().into(),
+                    rel: crate::path_text(rel).into(),
                     cause: conflict.error.to_string().into(),
                 })
             } else {
@@ -843,9 +746,9 @@ fn placement_issue(
 /// symlinks are allowed, which `verify_entry` could not validate.
 fn unread_targets_issue(
     manifest: &ArchiveManifest,
-    config: &SecurityConfig<Validated>,
+    config: &SecurityConfig,
 ) -> Option<VerificationIssue> {
-    if !config.allowed.symlinks {
+    if !config.allowed.symlinks.is_allowed() {
         return None;
     }
     let unread = manifest
@@ -860,25 +763,17 @@ fn unread_targets_issue(
             )
         })
         .count();
-    let (subject, validated) = match unread {
-        0 => return None,
-        1 => ("symlink target was", "it was"),
-        _ => ("symlink targets were", "they were"),
-    };
-    Some(VerificationIssue::new(
-        IssueSeverity::Medium,
-        IssueCategory::SecurityPolicy,
-        format!(
-            "{unread} {subject} not read, so {validated} not validated; entries beneath or \
-             through an unread link are reported as failures (an integrity check with a \
-             decompression budget that covers the link blocks reads the targets)"
-        ),
-    ))
+    (unread > 0).then(|| {
+        VerificationIssue::new(
+            IssueSeverity::Medium,
+            Finding::Heuristic(Heuristic::UnreadSymlinkTargets { count: unread }),
+        )
+    })
 }
 
-fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig<Validated>) -> Result<()> {
-    let sanitized = sanitize_permissions(RawMode::new(mode), config);
-    (sanitized.as_u32() == mode).ok_or_else(|| ArchiveError::InvalidPermissions {
+fn check_permissions(path: &Path, mode: RawMode, config: &SecurityConfig) -> Result<()> {
+    let sanitized = sanitize_permissions(mode, config);
+    (sanitized.as_u32() == mode.get()).ok_or_else(|| ArchiveError::InvalidPermissions {
         path: path.to_path_buf(),
         mode,
     })
@@ -889,27 +784,27 @@ fn check_heuristics(entry: &ArchiveEntry) -> Vec<VerificationIssue> {
 
     // Executable file detection
     if let Some(mode) = entry.mode
-        && mode & 0o111 != 0
-        && entry.kind == ManifestEntryKind::File
+        && mode.get() & 0o111 != 0
+        && matches!(entry.kind, ManifestEntryKind::File { .. })
     {
-        issues.push(VerificationIssue {
-            severity: IssueSeverity::Low,
-            category: IssueCategory::ExecutableFile,
-            entry_path: Some(entry.path.clone()),
-            message: format!("Executable file: {}", entry.path.display()),
-            context: Some(format!("mode: {mode:#o}")),
-        });
+        issues.push(
+            VerificationIssue::new(
+                IssueSeverity::Low,
+                Finding::Heuristic(Heuristic::ExecutableFile { mode }),
+            )
+            .with_entry_path(Some(entry.path.clone())),
+        );
     }
 
     // Suspicious extension detection
     if is_suspicious_extension(&entry.path) {
-        issues.push(VerificationIssue {
-            severity: IssueSeverity::Info,
-            category: IssueCategory::SuspiciousPath,
-            entry_path: Some(entry.path.clone()),
-            message: format!("Suspicious extension: {}", entry.path.display()),
-            context: None,
-        });
+        issues.push(
+            VerificationIssue::new(
+                IssueSeverity::Info,
+                Finding::Heuristic(Heuristic::SuspiciousExtension),
+            )
+            .with_entry_path(Some(entry.path.clone())),
+        );
     }
 
     // Non-UTF8 name detection: TAR entry names are stored byte-exact, so a
@@ -920,17 +815,13 @@ fn check_heuristics(entry: &ArchiveEntry) -> Vec<VerificationIssue> {
     // used to vet archives before shipping them to a different host, so the
     // warning must not depend on which filesystem happens to be running it.
     if entry.path.to_str().is_none() {
-        issues.push(VerificationIssue {
-            severity: IssueSeverity::Medium,
-            category: IssueCategory::SuspiciousPath,
-            entry_path: Some(entry.path.clone()),
-            message: format!(
-                "Entry name is not valid UTF-8; extraction may fail on filesystems that require \
-                 UTF-8 names (e.g. APFS, NTFS): {}",
-                entry.path.display()
-            ),
-            context: None,
-        });
+        issues.push(
+            VerificationIssue::new(
+                IssueSeverity::Medium,
+                Finding::Heuristic(Heuristic::NonUtf8Name),
+            )
+            .with_entry_path(Some(entry.path.clone())),
+        );
     }
 
     issues
@@ -952,28 +843,33 @@ mod tests {
     use super::*;
     use crate::inspection::manifest::EntryCompression;
     use crate::inspection::report::CheckStatus;
+    use crate::inspection::report::IssueCategory;
     use crate::inspection::report::VerificationStatus;
     use crate::test_utils::tar_with_pax_nul_path;
     use std::io::Write;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
+    fn file() -> ManifestEntryKind {
+        ManifestEntryKind::File {
+            size: Uncompressed(0),
+        }
+    }
+
     fn manifest_of(entries: Vec<(&str, ManifestEntryKind)>) -> ArchiveManifest {
         let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
         for (path, kind) in entries {
             manifest
-                .add_entry(ArchiveEntry::new(PathBuf::from(path), kind, 0))
+                .add_entry(ArchiveEntry::new(PathBuf::from(path), kind))
                 .unwrap();
         }
         manifest
     }
 
-    fn link_config() -> SecurityConfig<Validated> {
+    fn link_config() -> SecurityConfig {
         SecurityConfig::default()
             .with_allow_symlinks(true)
             .with_allow_hardlinks(true)
-            .validate()
-            .unwrap()
     }
 
     fn symlink_to(target: &str) -> ManifestEntryKind {
@@ -994,20 +890,20 @@ mod tests {
         let issue = report
             .issues()
             .iter()
-            .find(|i| i.category == IssueCategory::SecurityPolicy)
+            .find(|i| i.category() == IssueCategory::SecurityPolicy)
             .unwrap_or_else(|| panic!("no SecurityPolicy issue: {:?}", report.issues()));
-        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.severity(), IssueSeverity::High);
         assert!(
-            issue.message.replace('\\', "/").contains(expected),
+            issue.message().replace('\\', "/").contains(expected),
             "{}",
-            issue.message
+            issue.message()
         );
     }
 
     #[test]
     fn dangling_link_used_as_a_parent_fails_the_security_status() {
         assert_link_placement_finding(
-            vec![("d", symlink_to("sub")), ("d/f", ManifestEntryKind::File)],
+            vec![("d", symlink_to("sub")), ("d/f", file())],
             "refusing to create d/f under the existing symlink at d",
         );
     }
@@ -1018,11 +914,15 @@ mod tests {
         let note: Vec<_> = report
             .issues()
             .iter()
-            .filter(|i| i.severity == IssueSeverity::Low)
+            .filter(|i| i.severity() == IssueSeverity::Low)
             .collect();
         assert_eq!(note.len(), 1, "{:?}", report.issues());
-        assert_eq!(note[0].category, IssueCategory::InvalidArchive);
-        assert!(note[0].message.contains(expected), "{}", note[0].message);
+        assert_eq!(note[0].category(), IssueCategory::InvalidArchive);
+        assert!(
+            note[0].message().contains(expected),
+            "{}",
+            note[0].message()
+        );
     }
 
     #[test]
@@ -1030,7 +930,7 @@ mod tests {
         assert_overwrite_note(
             vec![
                 ("sub", ManifestEntryKind::Directory),
-                ("d/f", ManifestEntryKind::File),
+                ("d/f", file()),
                 ("d", symlink_to("sub")),
             ],
             "extraction with overwrite fails at d: an earlier entry is a directory",
@@ -1059,23 +959,20 @@ mod tests {
     #[test]
     fn file_over_a_dir_or_symlink_is_an_overwrite_note() {
         assert_overwrite_note(
-            vec![
-                ("d/f", ManifestEntryKind::File),
-                ("d", ManifestEntryKind::File),
-            ],
+            vec![("d/f", file()), ("d", file())],
             "fails at d: an earlier entry is a directory",
         );
         assert_overwrite_note(
-            vec![("s", symlink_to("t")), ("s", ManifestEntryKind::File)],
+            vec![("s", symlink_to("t")), ("s", file())],
             "fails at s: an earlier entry is a symlink",
         );
     }
 
     #[test]
     fn hardlink_over_any_earlier_entry_is_an_overwrite_note() {
-        let target = ("t", ManifestEntryKind::File);
+        let target = ("t", file());
         for (earlier, noun) in [
-            (ManifestEntryKind::File, "file"),
+            (file(), "file"),
             (ManifestEntryKind::Directory, "directory"),
             (symlink_to("t"), "symlink"),
         ] {
@@ -1089,7 +986,7 @@ mod tests {
     #[test]
     fn symlink_over_a_file_stays_a_security_finding() {
         assert_link_placement_finding(
-            vec![("d", ManifestEntryKind::File), ("d", symlink_to("sub"))],
+            vec![("d", file()), ("d", symlink_to("sub"))],
             "extraction can fail at d unless duplicates are skipped:",
         );
     }
@@ -1113,7 +1010,7 @@ mod tests {
         assert_link_placement_finding(
             vec![
                 ("d", symlink_to("sub")),
-                ("t", ManifestEntryKind::File),
+                ("t", file()),
                 ("d/h", hardlink_to("t")),
             ],
             "refusing to create d/h under the existing symlink at d",
@@ -1122,24 +1019,21 @@ mod tests {
 
     #[test]
     fn directory_over_a_file_is_not_a_security_finding() {
-        let manifest = manifest_of(vec![
-            ("a", ManifestEntryKind::File),
-            ("a", ManifestEntryKind::Directory),
-        ]);
+        let manifest = manifest_of(vec![("a", file()), ("a", ManifestEntryKind::Directory)]);
         let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.security_status(), CheckStatus::Pass);
         assert!(
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::InvalidArchive)
+                .any(|i| i.category() == IssueCategory::InvalidArchive)
         );
     }
 
     fn manifest_with_mode(path: &str, kind: ManifestEntryKind, mode: u32) -> ArchiveManifest {
         let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
-        let mut entry = ArchiveEntry::new(PathBuf::from(path), kind, 0);
-        entry.mode = Some(mode);
+        let mut entry = ArchiveEntry::new(PathBuf::from(path), kind);
+        entry.mode = Some(RawMode::new(mode));
         manifest.add_entry(entry).unwrap();
         manifest
     }
@@ -1153,7 +1047,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .all(|i| i.category != IssueCategory::InvalidPermissions),
+                .all(|i| i.category() != IssueCategory::InvalidPermissions),
             "{:?}",
             report.issues()
         );
@@ -1163,14 +1057,10 @@ mod tests {
     fn hardlink_mode_is_not_a_permission_finding() {
         let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
         manifest
-            .add_entry(ArchiveEntry::new(
-                PathBuf::from("t"),
-                ManifestEntryKind::File,
-                0,
-            ))
+            .add_entry(ArchiveEntry::new(PathBuf::from("t"), file()))
             .unwrap();
-        let mut link = ArchiveEntry::new(PathBuf::from("h"), hardlink_to("t"), 0);
-        link.mode = Some(0o777);
+        let mut link = ArchiveEntry::new(PathBuf::from("h"), hardlink_to("t"));
+        link.mode = Some(RawMode::new(0o777));
         manifest.add_entry(link).unwrap();
 
         let report = verify_manifest(&manifest, &link_config(), None);
@@ -1179,7 +1069,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .all(|i| i.category != IssueCategory::InvalidPermissions),
+                .all(|i| i.category() != IssueCategory::InvalidPermissions),
             "{:?}",
             report.issues()
         );
@@ -1187,13 +1077,13 @@ mod tests {
 
     #[test]
     fn world_writable_regular_file_is_still_a_permission_finding() {
-        let manifest = manifest_with_mode("f", ManifestEntryKind::File, 0o666);
+        let manifest = manifest_with_mode("f", file(), 0o666);
         let report = verify_manifest(&manifest, &link_config(), None);
         assert!(
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::InvalidPermissions),
+                .any(|i| i.category() == IssueCategory::InvalidPermissions),
             "{:?}",
             report.issues()
         );
@@ -1204,14 +1094,14 @@ mod tests {
         let long = "a".repeat(1 << 20);
         let manifest = manifest_of(vec![
             ("s", symlink_to(&long)),
-            ("t", ManifestEntryKind::File),
+            ("t", file()),
             ("h", hardlink_to(&long)),
         ]);
         let report = verify_manifest(&manifest, &link_config(), None);
         let too_long = report
             .issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::InvalidArchive)
+            .filter(|i| i.category() == IssueCategory::InvalidArchive)
             .count();
         assert_eq!(too_long, 2, "{:?}", report.issues());
     }
@@ -1230,7 +1120,7 @@ mod tests {
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
 
         for entries in [
-            vec![("d", unread_symlink()), ("d/f", ManifestEntryKind::File)],
+            vec![("d", unread_symlink()), ("d/f", file())],
             vec![("d", unread_symlink()), ("l", symlink_to("d/x"))],
             vec![("d", unread_symlink()), ("l", symlink_to("d"))],
         ] {
@@ -1243,7 +1133,7 @@ mod tests {
     #[test]
     fn unread_symlinks_are_a_policy_failure_when_symlinks_are_disallowed() {
         let manifest = manifest_of(vec![("d", unread_symlink())]);
-        let config = SecurityConfig::default().validate().unwrap();
+        let config = SecurityConfig::default();
         let report = verify_manifest(&manifest, &config, None);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
@@ -1260,7 +1150,7 @@ mod tests {
         let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
-        assert!(report.issues()[0].message.contains("could not be read"));
+        assert!(report.issues()[0].message().contains("could not be read"));
     }
 
     #[test]
@@ -1283,7 +1173,7 @@ mod tests {
         let too_long = report
             .issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::InvalidArchive)
+            .filter(|i| i.category() == IssueCategory::InvalidArchive)
             .count();
         assert_eq!(too_long, 2, "{:?}", report.issues());
         assert_eq!(report.status(), VerificationStatus::Fail);
@@ -1296,7 +1186,7 @@ mod tests {
             incoming: PathBuf::from("A"),
             kind,
         };
-        let severity = |kind| collision_issue(collision(kind)).severity;
+        let severity = |kind| collision_issue(collision(kind)).severity();
         assert_eq!(severity(CollisionKind::Directories), IssueSeverity::Low);
         assert_eq!(
             severity(CollisionKind::DirectoriesWithContents),
@@ -1322,28 +1212,61 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn names_differing_in_invalid_bytes_are_not_a_collision() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
+        for name in [&b"a\xffb"[..], &b"a\xfeb"[..]] {
+            let path = PathBuf::from(OsStr::from_bytes(name));
+            manifest.add_entry(ArchiveEntry::new(path, file())).unwrap();
+        }
+        let config = link_config();
+        let report = verify_with_tree(
+            &manifest,
+            &config,
+            &ArchiveStructure::of_manifest(&manifest),
+            None,
+            |root| {
+                VirtualTree::new(
+                    root,
+                    PathModel::Host,
+                    NodeBudget::from_config(&config),
+                    CollisionRecording::Record,
+                )
+            },
+        );
+        assert!(
+            report
+                .issues()
+                .iter()
+                .all(|i| i.category() != IssueCategory::NameCollision),
+            "{:?}",
+            report.issues()
+        );
+    }
+
     fn collisions(report: &VerificationReport) -> Vec<IssueSeverity> {
         report
             .issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::NameCollision)
-            .map(|i| i.severity)
+            .filter(|i| i.category() == IssueCategory::NameCollision)
+            .map(super::super::report::VerificationIssue::severity)
             .collect()
     }
 
     #[test]
     fn hardlink_over_differently_spelled_file_is_not_a_pass() {
-        let report = verify_folding(vec![
-            ("a.txt", ManifestEntryKind::File),
-            ("A.txt", hardlink_to("a.txt")),
-        ]);
+        let report = verify_folding(vec![("a.txt", file()), ("A.txt", hardlink_to("a.txt"))]);
         assert_ne!(report.status(), VerificationStatus::Pass);
         assert_eq!(collisions(&report), [IssueSeverity::Medium]);
     }
 
     #[test]
     fn symlink_over_differently_spelled_file_is_reported_as_mixed() {
-        let report = verify_folding(vec![("a", ManifestEntryKind::File), ("A", symlink_to("x"))]);
+        let report = verify_folding(vec![("a", file()), ("A", symlink_to("x"))]);
         assert!(collisions(&report).contains(&IssueSeverity::High));
         assert_eq!(report.status(), VerificationStatus::Fail);
     }
@@ -1351,10 +1274,10 @@ mod tests {
     #[test]
     fn differently_spelled_files_and_directories_with_contents_are_reported() {
         let report = verify_folding(vec![
-            ("Images/x", ManifestEntryKind::File),
-            ("images/y", ManifestEntryKind::File),
-            ("f", ManifestEntryKind::File),
-            ("F", ManifestEntryKind::File),
+            ("Images/x", file()),
+            ("images/y", file()),
+            ("f", file()),
+            ("F", file()),
         ]);
         assert_eq!(
             collisions(&report),
@@ -1366,12 +1289,7 @@ mod tests {
     #[test]
     fn merged_directories_with_colliding_children_are_never_a_pass() {
         let entries: Vec<_> = (0..50)
-            .flat_map(|i| {
-                [
-                    (format!("a/f{i}"), ManifestEntryKind::File),
-                    (format!("A/f{i}"), ManifestEntryKind::File),
-                ]
-            })
+            .flat_map(|i| [(format!("a/f{i}"), file()), (format!("A/f{i}"), file())])
             .collect();
         let manifest = manifest_of(
             entries
@@ -1411,7 +1329,7 @@ mod tests {
         let report = verify_folding(vec![
             ("Dir", ManifestEntryKind::Directory),
             ("dir", ManifestEntryKind::Directory),
-            ("Dir/f", ManifestEntryKind::File),
+            ("Dir/f", file()),
         ]);
         assert_eq!(collisions(&report), [IssueSeverity::Medium]);
         assert_eq!(report.status(), VerificationStatus::Warning);
@@ -1422,7 +1340,7 @@ mod tests {
         let manifest = manifest_of(vec![
             ("real", ManifestEntryKind::Directory),
             ("alias", symlink_to("real")),
-            ("real/t", ManifestEntryKind::File),
+            ("real/t", file()),
             ("alias/h", hardlink_to("real/t")),
             ("again", hardlink_to("real/h")),
         ]);
@@ -1436,32 +1354,26 @@ mod tests {
         let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert!(report.issues().iter().any(|i| {
-            i.category == IssueCategory::InvalidArchive
-                && i.message.contains("hardlink target does not exist")
+            i.category() == IssueCategory::InvalidArchive
+                && i.message().contains("hardlink target does not exist")
         }));
     }
 
     #[test]
     fn phase_two_accepts_target_declared_later() {
-        let manifest = manifest_of(vec![
-            ("h", hardlink_to("later")),
-            ("later", ManifestEntryKind::File),
-        ]);
+        let manifest = manifest_of(vec![("h", hardlink_to("later")), ("later", file())]);
         let report = verify_manifest(&manifest, &link_config(), None);
         assert!(report.issues().is_empty(), "{:?}", report.issues());
     }
 
     #[test]
     fn phase_one_failure_is_not_reported_again_in_phase_two() {
-        let manifest = manifest_of(vec![
-            ("t", ManifestEntryKind::File),
-            ("h", hardlink_to("../outside")),
-        ]);
+        let manifest = manifest_of(vec![("t", file()), ("h", hardlink_to("../outside"))]);
         let report = verify_manifest(&manifest, &link_config(), None);
         let escapes = report
             .issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::HardlinkEscape)
+            .filter(|i| i.category() == IssueCategory::HardlinkEscape)
             .count();
         assert_eq!(escapes, 1);
     }
@@ -1483,10 +1395,11 @@ mod tests {
     fn test_check_heuristics_executable() {
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from("test.sh"),
-            kind: ManifestEntryKind::File,
-            size: 100,
+            kind: ManifestEntryKind::File {
+                size: Uncompressed(100),
+            },
             compression: EntryCompression::Unknown,
-            mode: Some(0o755),
+            mode: Some(RawMode::new(0o755)),
             modified: None,
         };
 
@@ -1495,7 +1408,7 @@ mod tests {
         assert!(
             issues
                 .iter()
-                .any(|i| i.category == IssueCategory::ExecutableFile)
+                .any(|i| i.category() == IssueCategory::ExecutableFile)
         );
     }
 
@@ -1503,10 +1416,11 @@ mod tests {
     fn test_check_heuristics_suspicious_extension() {
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from("malware.exe"),
-            kind: ManifestEntryKind::File,
-            size: 100,
+            kind: ManifestEntryKind::File {
+                size: Uncompressed(100),
+            },
             compression: EntryCompression::Unknown,
-            mode: Some(0o644),
+            mode: Some(RawMode::new(0o644)),
             modified: None,
         };
 
@@ -1515,7 +1429,7 @@ mod tests {
         assert!(
             issues
                 .iter()
-                .any(|i| i.category == IssueCategory::SuspiciousPath)
+                .any(|i| i.category() == IssueCategory::SuspiciousPath)
         );
     }
 
@@ -1527,17 +1441,18 @@ mod tests {
 
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from(OsStr::from_bytes(b"weird-\xFF\xFE-name.txt")),
-            kind: ManifestEntryKind::File,
-            size: 100,
+            kind: ManifestEntryKind::File {
+                size: Uncompressed(100),
+            },
             compression: EntryCompression::Unknown,
-            mode: Some(0o644),
+            mode: Some(RawMode::new(0o644)),
             modified: None,
         };
 
         let issues = check_heuristics(&entry);
         assert!(!issues.is_empty());
         assert!(issues.iter().any(|i| {
-            i.category == IssueCategory::SuspiciousPath && i.severity == IssueSeverity::Medium
+            i.category() == IssueCategory::SuspiciousPath && i.severity() == IssueSeverity::Medium
         }));
     }
 
@@ -1547,10 +1462,11 @@ mod tests {
     fn test_check_heuristics_valid_utf8_name_no_warning() {
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from("safe/file.txt"),
-            kind: ManifestEntryKind::File,
-            size: 100,
+            kind: ManifestEntryKind::File {
+                size: Uncompressed(100),
+            },
             compression: EntryCompression::Unknown,
-            mode: Some(0o644),
+            mode: Some(RawMode::new(0o644)),
             modified: None,
         };
 
@@ -1619,9 +1535,9 @@ mod tests {
         let issue = report
             .issues()
             .iter()
-            .find(|i| i.message.contains("xl extra field"))
+            .find(|i| i.message().contains("xl extra field"))
             .unwrap();
-        assert_eq!(issue.entry_path.as_deref(), Some(Path::new("a.txt")));
+        assert_eq!(issue.entry_path(), Some(Path::new("a.txt")));
     }
 
     #[test]
@@ -1650,9 +1566,9 @@ mod tests {
         let issue = report
             .issues()
             .iter()
-            .find(|i| i.message.contains("xl extra field"))
+            .find(|i| i.message().contains("xl extra field"))
             .unwrap();
-        assert_eq!(issue.entry_path.as_deref(), Some(Path::new("a.txt")));
+        assert_eq!(issue.entry_path(), Some(Path::new("a.txt")));
     }
 
     #[test]
@@ -1677,9 +1593,9 @@ mod tests {
         let issue = report
             .issues()
             .iter()
-            .find(|i| i.message.contains("data descriptor of entry 1"))
+            .find(|i| i.message().contains("data descriptor of entry 1"))
             .unwrap();
-        assert_eq!(issue.entry_path.as_deref(), Some(Path::new("a.txt")));
+        assert_eq!(issue.entry_path(), Some(Path::new("a.txt")));
     }
 
     // Regression test: verify_archive() must report an oversized entry as a
@@ -1717,9 +1633,9 @@ mod tests {
         assert_eq!(report.suspicious_entries(), 1);
         assert!(
             report.issues().iter().any(|i| {
-                i.severity == IssueSeverity::High
-                    && i.category == IssueCategory::QuotaExceeded
-                    && i.message.contains("single file size")
+                i.severity() == IssueSeverity::High
+                    && i.category() == IssueCategory::QuotaExceeded
+                    && i.message().contains("single file size")
             }),
             "expected a High-severity QuotaExceeded FileSize issue, got: {:?}",
             report.issues()
@@ -1750,7 +1666,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.message.contains("null bytes")),
+                .any(|i| i.message().contains("null bytes")),
             "expected an issue mentioning null bytes, got: {:?}",
             report.issues()
         );
@@ -1795,7 +1711,8 @@ mod tests {
         );
         assert!(
             report.issues().iter().any(|i| {
-                i.category == IssueCategory::SuspiciousPath && i.message.contains("not valid UTF-8")
+                i.category() == IssueCategory::SuspiciousPath
+                    && i.message().contains("not valid UTF-8")
             }),
             "expected a SuspiciousPath issue mentioning UTF-8, got: {:?}",
             report.issues()
@@ -1827,7 +1744,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = true;
+        config.allowed.hardlinks = crate::Admit::Allow;
         let report = verify_archive(temp_file.path(), &config)
             .expect("verify_archive must report a missing hardlink target, not error out");
 
@@ -1839,8 +1756,8 @@ mod tests {
         assert_eq!(report.suspicious_entries(), 1);
         assert!(
             report.issues().iter().any(|i| {
-                i.category == IssueCategory::SecurityPolicy
-                    && i.message.contains("hardlink target is missing")
+                i.category() == IssueCategory::SecurityPolicy
+                    && i.message().contains("hardlink target is missing")
             }),
             "expected a SecurityPolicy issue citing the missing target, got: {:?}",
             report.issues()
@@ -1871,7 +1788,7 @@ mod tests {
 
     fn hardlink_config(allowed: bool) -> SecurityConfig {
         let mut config = SecurityConfig::default();
-        config.allowed.hardlinks = allowed;
+        config.allowed.hardlinks = crate::Admit::from_allowed(allowed);
         config
     }
 
@@ -1883,8 +1800,8 @@ mod tests {
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.security_status(), crate::CheckStatus::Fail);
         assert!(report.issues().iter().any(|i| {
-            i.category == IssueCategory::SecurityPolicy
-                && i.message.contains("hardlinks not allowed")
+            i.category() == IssueCategory::SecurityPolicy
+                && i.message().contains("hardlinks not allowed")
         }));
     }
 
@@ -1894,7 +1811,7 @@ mod tests {
         let report = verify_archive(archive.path(), &hardlink_config(true)).unwrap();
 
         assert!(
-            !report.issues().iter().any(|i| i.category.is_security()),
+            !report.issues().iter().any(|i| i.category().is_security()),
             "got: {:?}",
             report.issues()
         );
@@ -1908,7 +1825,7 @@ mod tests {
         );
         let report = verify_archive(archive.path(), &hardlink_config(true)).unwrap();
 
-        assert!(!report.issues().iter().any(|i| i.category.is_security()));
+        assert!(!report.issues().iter().any(|i| i.category().is_security()));
     }
 
     #[test]
@@ -1921,7 +1838,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::HardlinkEscape),
+                .any(|i| i.category() == IssueCategory::HardlinkEscape),
             "got: {:?}",
             report.issues()
         );
@@ -1937,7 +1854,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::HardlinkEscape),
+                .any(|i| i.category() == IssueCategory::HardlinkEscape),
             "got: {:?}",
             report.issues()
         );
@@ -1948,14 +1865,14 @@ mod tests {
         for allowed in [false, true] {
             let archive = link_tar(tar::EntryType::Symlink, &[("link", None)]);
             let mut config = SecurityConfig::default();
-            config.allowed.symlinks = allowed;
+            config.allowed.symlinks = crate::Admit::from_allowed(allowed);
             let report = verify_archive(archive.path(), &config).unwrap();
 
             assert_eq!(report.status(), VerificationStatus::Fail);
             assert!(
                 report.issues().iter().any(|i| {
-                    i.category == IssueCategory::SecurityPolicy
-                        && i.message.contains("symlink target is missing")
+                    i.category() == IssueCategory::SecurityPolicy
+                        && i.message().contains("symlink target is missing")
                 }),
                 "allowed={allowed}, got: {:?}",
                 report.issues()
@@ -2002,7 +1919,7 @@ mod tests {
         assert!(!report.issues().is_empty(), "Should detect symlink");
 
         let has_symlink_issue = report.issues().iter().any(|i| {
-            matches!(i.category, IssueCategory::SecurityPolicy) && i.message.contains("symlink")
+            matches!(i.category(), IssueCategory::SecurityPolicy) && i.message().contains("symlink")
         });
 
         assert!(
@@ -2040,7 +1957,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::InvalidPermissions),
+                .any(|i| i.category() == IssueCategory::InvalidPermissions),
             "Should have InvalidPermissions issue for setuid"
         );
     }
@@ -2070,14 +1987,14 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::ExecutableFile),
+                .any(|i| i.category() == IssueCategory::ExecutableFile),
             "Should have ExecutableFile issue"
         );
         assert!(
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::SuspiciousPath),
+                .any(|i| i.category() == IssueCategory::SuspiciousPath),
             "Should have SuspiciousPath issue for .sh extension"
         );
         assert_eq!(
@@ -2113,7 +2030,7 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::HeaderMismatch)
+                .any(|i| i.category() == IssueCategory::HeaderMismatch)
         );
         assert_eq!(report.total_entries(), 1);
     }
@@ -2153,8 +2070,8 @@ mod tests {
             report
                 .issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::InvalidArchive
-                    && i.message.contains("file name too long")),
+                .any(|i| i.category() == IssueCategory::InvalidArchive
+                    && i.message().contains("file name too long")),
             "{:?}",
             report.issues()
         );

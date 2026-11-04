@@ -7,6 +7,8 @@
 //! counts as a well-formed input string. Config list entries are parsed by
 //! [`crate::Extension`] and [`crate::PathComponentName`].
 
+use std::path::Path;
+
 use crate::error::Result;
 use crate::error::Violation;
 
@@ -18,15 +20,16 @@ use crate::error::Violation;
 /// pathological inputs are rejected before reaching the archive pipeline.
 pub const MAX_PATH_LENGTH: usize = 4096;
 
-/// Validates a raw, caller-supplied path string before it enters the
-/// archive pipeline.
+/// A caller-supplied path string that passed the boundary checks.
 ///
 /// This is the shared boundary check for `exarch-python` and `exarch-node`:
 /// reject overlong strings and null bytes before doing anything else with
 /// them. It intentionally does not perform traversal, symlink, or
 /// destination-boundary checks — those require a `Path`, a `DestDir`, and a
-/// `SecurityConfig`, and are handled later by
-/// `validate_path`.
+/// `SecurityConfig`, and are handled later by `validate_path`.
+///
+/// The only constructor is [`BoundaryPath::parse`], so a binding entry point
+/// that takes a `BoundaryPath` cannot receive an unchecked string.
 ///
 /// # Check order
 ///
@@ -43,34 +46,63 @@ pub const MAX_PATH_LENGTH: usize = 4096;
 /// another, so there is no timing side channel to defend against and
 /// short-circuiting is safe.
 ///
-/// # Errors
-///
-/// Returns [`crate::ArchiveError::SecurityViolation`] if `path` contains a null
-/// byte or exceeds [`MAX_PATH_LENGTH`] bytes.
-///
 /// # Examples
 ///
 /// ```
-/// use exarch_core::validate_raw_path_str;
+/// use std::path::Path;
 ///
-/// assert!(validate_raw_path_str("archive.tar.gz").is_ok());
-/// assert!(validate_raw_path_str("bad\0path").is_err());
-/// assert!(validate_raw_path_str(&"x".repeat(5000)).is_err());
+/// use exarch_core::BoundaryPath;
+///
+/// let path = BoundaryPath::parse("archive.tar.gz".to_owned())?;
+/// assert_eq!(path.as_str(), "archive.tar.gz");
+/// assert_eq!(AsRef::<Path>::as_ref(&path), Path::new("archive.tar.gz"));
+/// assert!(BoundaryPath::parse("bad\0path".to_owned()).is_err());
+/// assert!(BoundaryPath::parse("x".repeat(5000)).is_err());
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
-pub fn validate_raw_path_str(path: &str) -> Result<()> {
-    if path.len() > MAX_PATH_LENGTH {
-        return Err(Violation::PathTooLong {
-            len: path.len(),
-            max: MAX_PATH_LENGTH,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryPath(String);
+
+impl BoundaryPath {
+    /// Checks a raw path string and keeps it as proof of the check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::SecurityViolation`] if `path` contains a
+    /// null byte or exceeds [`MAX_PATH_LENGTH`] bytes.
+    pub fn parse(path: String) -> Result<Self> {
+        if path.len() > MAX_PATH_LENGTH {
+            return Err(Violation::PathTooLong {
+                len: path.len(),
+                max: MAX_PATH_LENGTH,
+            }
+            .into());
         }
-        .into());
+
+        if path.contains('\0') {
+            return Err(Violation::NulInPathArgument.into());
+        }
+
+        Ok(Self(path))
     }
 
-    if path.contains('\0') {
-        return Err(Violation::NulInPathArgument.into());
+    /// The checked string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
-    Ok(())
+    /// The checked string, by value.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<Path> for BoundaryPath {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
 }
 
 /// Maximum length, in bytes, of a single `SecurityConfig` entry — an
@@ -83,16 +115,28 @@ mod tests {
     use super::*;
     use std::assert_matches;
 
-    #[test]
-    fn test_validate_raw_path_str_accepts_normal() {
-        assert!(validate_raw_path_str("/tmp/test.tar.gz").is_ok());
-        assert!(validate_raw_path_str("relative/path.tar").is_ok());
-        assert!(validate_raw_path_str("").is_ok());
+    fn parse(path: &str) -> Result<BoundaryPath> {
+        BoundaryPath::parse(path.to_owned())
     }
 
     #[test]
-    fn test_validate_raw_path_str_rejects_null_bytes() {
-        let err = validate_raw_path_str("/tmp/test\0malicious").expect_err("null byte");
+    fn test_parse_accepts_normal() {
+        assert!(parse("/tmp/test.tar.gz").is_ok());
+        assert!(parse("relative/path.tar").is_ok());
+        assert!(parse("").is_ok());
+    }
+
+    #[test]
+    fn test_parse_keeps_the_checked_string() {
+        let path = parse("a/b.tar").unwrap();
+        assert_eq!(path.as_str(), "a/b.tar");
+        assert_eq!(AsRef::<Path>::as_ref(&path), Path::new("a/b.tar"));
+        assert_eq!(path.into_string(), "a/b.tar");
+    }
+
+    #[test]
+    fn test_parse_rejects_null_bytes() {
+        let err = parse("/tmp/test\0malicious").expect_err("null byte");
         assert_eq!(
             err.security_violation(),
             Some(&Violation::NulInPathArgument)
@@ -104,9 +148,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_raw_path_str_rejects_too_long() {
+    fn test_parse_rejects_too_long() {
         let long_path = "x".repeat(MAX_PATH_LENGTH + 1);
-        let err = validate_raw_path_str(&long_path).expect_err("too long");
+        let err = parse(&long_path).expect_err("too long");
         assert_eq!(
             err.security_violation(),
             Some(&Violation::PathTooLong {
@@ -127,9 +171,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_raw_path_str_checks_length_before_null_byte() {
+    fn test_parse_checks_length_before_null_byte() {
         let long_path_with_null = format!("{}\0", "x".repeat(MAX_PATH_LENGTH));
-        let err = validate_raw_path_str(&long_path_with_null).expect_err("too long");
+        let err = parse(&long_path_with_null).expect_err("too long");
         assert_matches!(
             err.security_violation(),
             Some(Violation::PathTooLong { .. })
@@ -137,8 +181,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_raw_path_str_accepts_max_length() {
+    fn test_parse_accepts_max_length() {
         let max_path = "x".repeat(MAX_PATH_LENGTH);
-        assert!(validate_raw_path_str(&max_path).is_ok());
+        assert!(parse(&max_path).is_ok());
     }
 }

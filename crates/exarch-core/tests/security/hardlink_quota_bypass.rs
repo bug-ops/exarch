@@ -86,8 +86,8 @@ fn count_entries(dir: &std::path::Path) -> usize {
 /// was written before it fired. Unwraps to `(quota_error, files_extracted)`.
 fn quota_failure(err: &ArchiveError) -> (&ArchiveError, usize) {
     match err {
-        ArchiveError::PartialExtraction { source, report, .. } => {
-            (source.as_ref(), report.files_extracted)
+        ArchiveError::PartialExtraction(partial) => {
+            (partial.cause(), partial.report().files_extracted)
         }
         other => panic!("expected PartialExtraction, got: {other:?}"),
     }
@@ -112,14 +112,11 @@ fn test_hardlink_bomb_exceeds_total_size() {
         .with_allow_hardlinks(true)
         .with_max_file_size(std::num::NonZeroU64::new(target_size as u64 + 1).unwrap())
         .with_max_total_size(exarch_core::non_zero!(20_000)) // room for target + 3 links, not 4
-        .with_max_file_count(exarch_core::non_zero!(1_000))
-        .validate()
-        .unwrap();
+        .with_max_file_count(exarch_core::non_zero!(1_000));
 
-    let archive = TarArchive::new(Cursor::new(tar_data));
+    let archive = TarArchive::new(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -164,14 +161,11 @@ fn test_hardlink_bomb_exceeds_file_count() {
         .with_allow_hardlinks(true)
         .with_max_file_size(exarch_core::non_zero!(1_000_000))
         .with_max_total_size(exarch_core::non_zero!(1_000_000))
-        .with_max_file_count(exarch_core::non_zero!(3))
-        .validate()
-        .unwrap(); // target.txt + 2 hardlinks allowed, 3rd rejected
+        .with_max_file_count(exarch_core::non_zero!(3)); // target.txt + 2 hardlinks allowed, 3rd rejected
 
-    let archive = TarArchive::new(Cursor::new(tar_data));
+    let archive = TarArchive::new(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
@@ -210,15 +204,11 @@ fn test_legitimate_hardlinks_within_quota_succeed() {
         .build();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default()
-        .with_allow_hardlinks(true)
-        .validate()
-        .unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
 
-    let archive = TarArchive::new(Cursor::new(tar_data));
+    let archive = TarArchive::new(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
-        &config,
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );

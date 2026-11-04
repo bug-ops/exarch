@@ -959,19 +959,6 @@ impl VerificationIssue {
         }
     }
 
-    /// Returns a short detail line for findings that carry one (the raw mode
-    /// of an executable file), as the former `context` field did.
-    // TODO(review): front ends adopt `finding()` in w2; drop this then.
-    #[must_use]
-    pub fn context(&self) -> Option<String> {
-        match &self.finding {
-            Finding::Heuristic(Heuristic::ExecutableFile { mode }) => {
-                Some(format!("mode: {:#o}", mode.get()))
-            }
-            Finding::Refusal { .. } | Finding::Heuristic(_) => None,
-        }
-    }
-
     /// Returns the sub-code of the refusing error, when it has one.
     #[must_use]
     pub fn sub_code(&self) -> Option<crate::SubCode> {

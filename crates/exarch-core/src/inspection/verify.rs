@@ -1232,7 +1232,7 @@ mod tests {
             |root| {
                 VirtualTree::new(
                     root,
-                    PathModel::Portable,
+                    PathModel::Host,
                     NodeBudget::from_config(&config),
                     CollisionRecording::Record,
                 )

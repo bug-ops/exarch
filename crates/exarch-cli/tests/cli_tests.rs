@@ -1988,7 +1988,6 @@ fn test_create_errors_name_the_pattern_and_the_source_once() {
 /// The staged temp file is not archived as a hidden entry when the output
 /// lies inside a source directory (#931, #906).
 #[test]
-#[ignore = "blocked on core: the staged .exarch-* file is still reported as a skipped hidden entry"]
 fn test_create_inside_the_source_reports_no_skipped_staging_file() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let src = temp.path().join("src");

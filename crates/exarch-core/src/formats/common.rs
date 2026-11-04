@@ -291,7 +291,7 @@ pub fn checked_increment_files_skipped(report: &mut ExtractionReport) -> Result<
 /// by the passes that must agree with it on which files are skipped.
 #[must_use]
 pub fn is_extension_allowed(path: &Path, config: &SecurityConfig) -> bool {
-    config.is_path_extension_allowed(path.extension().and_then(|e| e.to_str()))
+    config.is_extension_allowed(path.extension().and_then(|e| e.to_str()))
 }
 
 /// Refuses an entry name `model` cannot hold.

@@ -84,7 +84,7 @@ fn config(memory: u64, policy: ZipConsistencyPolicy) -> SecurityConfig {
 
 fn unwrapped(err: ArchiveError) -> ArchiveError {
     match err {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => other,
     }
 }

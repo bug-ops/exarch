@@ -596,7 +596,7 @@ fn test_7z_no_partial_extraction_when_zero_items() {
 
     assert!(result.is_err(), "expected an error, got Ok");
     assert!(
-        !matches!(result, Err(ArchiveError::PartialExtraction { .. })),
+        !matches!(result, Err(ArchiveError::PartialExtraction(_))),
         "must NOT be PartialExtraction when zero items were written; got: {result:?}"
     );
 }
@@ -848,11 +848,11 @@ fn directory_swapped_for_symlink_mid_extraction_reports_a_typed_security_error()
         )
         .unwrap_err();
 
-    let ArchiveError::PartialExtraction { source, .. } = err else {
+    let ArchiveError::PartialExtraction(partial) = err else {
         panic!("expected PartialExtraction, got {err:?}");
     };
     assert_matches!(
-        *source,
+        partial.cause(),
         ArchiveError::PathTraversal { .. } | ArchiveError::SymlinkEscape { .. }
     );
     assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);

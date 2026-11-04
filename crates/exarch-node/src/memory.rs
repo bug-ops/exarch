@@ -28,7 +28,6 @@ use crate::abort::AbortBinding;
 use crate::config::CreationConfig;
 use crate::config::ExtractionOptions;
 use crate::config::SecurityConfig;
-use crate::config::exact_positive_bytes;
 use crate::error::Failure;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
@@ -173,13 +172,6 @@ struct MemoryJob<S> {
     format: Option<ArchiveType>,
 }
 
-fn invalid_max_bytes() -> Failure {
-    Failure::Core(exarch_core::ArchiveError::InvalidConfiguration {
-        setting: exarch_core::ConfigSetting::MaxBytes,
-        problem: exarch_core::ConfigProblem::NotPositiveWholeNumber,
-    })
-}
-
 impl<S: IntoSource> MemoryJob<S> {
     fn new(
         data: S,
@@ -230,9 +222,9 @@ impl<S: IntoSource> MemoryJob<S> {
         let prepared = self
             .max_bytes
             .map(|bytes| {
-                exact_positive_bytes(bytes)
+                exarch_core::positive_from_f64(exarch_core::ConfigSetting::MaxBytes, bytes)
                     .map(MemoryLimit::new)
-                    .ok_or_else(invalid_max_bytes)
+                    .map_err(Failure::Core)
             })
             .transpose()
             .and_then(|limit| Ok((limit, SinkOptions::try_from(&self.options)?)));

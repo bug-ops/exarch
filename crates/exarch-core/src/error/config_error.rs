@@ -118,7 +118,17 @@ impl ConfigSetting {
             Self::ZipOutputWriter => "ZIP output writer",
             Self::ParallelDecodeMemory => "parallel decode memory",
             Self::ExcludePattern => "exclude pattern",
-            other => other.as_str(),
+            Self::MaxFileSize
+            | Self::MaxTotalSize
+            | Self::MaxFileCount
+            | Self::MaxPathDepth
+            | Self::MaxCompressionRatio
+            | Self::MaxSolidCompressionRatio
+            | Self::MaxSolidBlockMemory
+            | Self::MaxTarMetadataBytes
+            | Self::MaxDecoderMemory
+            | Self::StripPrefix
+            | Self::MaxBytes => self.as_str(),
         }
     }
 }
@@ -137,14 +147,8 @@ impl ConfigSetting {
 pub enum ConfigProblem {
     /// A limit is zero.
     Zero,
-    /// A ratio is not a positive, finite number.
-    NotPositive,
     /// A byte count is negative.
     Negative,
-    /// A budget is not greater than zero.
-    NotGreaterThanZero,
-    /// A byte count is not a positive whole number.
-    NotPositiveWholeNumber,
     /// A number is NaN or infinite.
     NotFinite,
     /// A number has a fractional part.
@@ -202,10 +206,7 @@ impl fmt::Display for ConfigProblem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Zero => f.write_str("must not be zero"),
-            Self::NotPositive => f.write_str("must be positive"),
             Self::Negative => f.write_str("must not be negative"),
-            Self::NotGreaterThanZero => f.write_str("must be greater than zero"),
-            Self::NotPositiveWholeNumber => f.write_str("must be a positive whole number of bytes"),
             Self::NotFinite => f.write_str("must be a finite number"),
             Self::NotWholeNumber => f.write_str("must be a whole number"),
             Self::TooLarge { max } => write!(f, "must not exceed {max}"),
@@ -277,13 +278,13 @@ mod tests {
             ),
             (
                 ConfigSetting::MaxCompressionRatio,
-                ConfigProblem::NotPositive,
-                "max_compression_ratio must be positive",
+                ConfigProblem::NotFinite,
+                "max_compression_ratio must be a finite number",
             ),
             (
                 ConfigSetting::DecompressionBudget,
-                ConfigProblem::NotGreaterThanZero,
-                "decompression budget must be greater than zero",
+                ConfigProblem::Zero,
+                "decompression budget must not be zero",
             ),
             (
                 ConfigSetting::ArchivePath,

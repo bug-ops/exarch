@@ -299,9 +299,10 @@ fn anti_item_warning_survives_a_failing_extract() {
         extract_archive_with_options(&archive, out.path(), &SecurityConfig::default(), &options)
             .unwrap_err();
 
-    let ArchiveError::PartialExtraction { report, .. } = err else {
+    let ArchiveError::PartialExtraction(partial) = &err else {
         panic!("expected a partial extraction, got {err}");
     };
+    let report = partial.report();
     assert_eq!(
         report.warnings,
         ["skipped 1 7z anti-item (deletion markers are not applied)"]

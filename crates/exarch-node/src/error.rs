@@ -1100,9 +1100,9 @@ mod tests {
     }
 
     fn partial(writes: CorePartialWrites) -> CoreError {
-        let source = Box::new(CoreError::SymlinkEscape {
+        let source = CoreError::SymlinkEscape {
             path: PathBuf::from("ln"),
-        });
+        };
         let report = CoreExtractionReport {
             files_extracted: 2,
             bytes_written: 512,
@@ -1110,11 +1110,7 @@ mod tests {
             warnings: vec!["skipped 1 entries with disallowed extensions".to_string()],
             ..CoreExtractionReport::default()
         };
-        CoreError::PartialExtraction {
-            source,
-            report,
-            writes,
-        }
+        CoreError::PartialExtraction(exarch_core::Partial::new(source, report, writes))
     }
 
     /// Regression test for #251 and #210: a partial extraction keeps the inner

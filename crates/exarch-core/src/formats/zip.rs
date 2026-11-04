@@ -2906,7 +2906,8 @@ mod tests {
             .unwrap_err();
 
         match err {
-            ArchiveError::PartialExtraction { report, .. } => {
+            ArchiveError::PartialExtraction(partial) => {
+                let report = partial.report();
                 assert_eq!(
                     report.files_skipped, 1,
                     "the disallowed-extension skip of bad.exe before the by_index failure \

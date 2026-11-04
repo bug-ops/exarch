@@ -716,7 +716,7 @@ mod tests {
             .with_compressed_member_allowance(std::num::NonZeroU64::MIN.saturating_add(1));
 
         let error = match extract_into(listed, &dir, &stricter).unwrap_err() {
-            crate::ArchiveError::PartialExtraction { source, .. } => *source,
+            crate::ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
             other => other,
         };
 
@@ -888,7 +888,7 @@ mod tests {
 
     fn io_root(error: &crate::ArchiveError) -> &crate::ArchiveError {
         match error {
-            crate::ArchiveError::PartialExtraction { source, .. } => io_root(source),
+            crate::ArchiveError::PartialExtraction(partial) => io_root(partial.cause()),
             other => other,
         }
     }

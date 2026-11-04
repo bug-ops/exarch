@@ -73,7 +73,7 @@ fn run_tar(
 
 fn sink_capacity(error: &ArchiveError) -> Option<u64> {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => sink_capacity(source),
+        ArchiveError::PartialExtraction(partial) => sink_capacity(partial.cause()),
         ArchiveError::QuotaExceeded {
             resource: QuotaResource::SinkCapacity { max },
         } => Some(*max),
@@ -172,7 +172,7 @@ fn exceeding_the_limit_is_a_typed_quota_error_and_wraps_after_delivery() {
     )
     .unwrap_err();
 
-    assert_matches!(error, ArchiveError::PartialExtraction { .. });
+    assert_matches!(error, ArchiveError::PartialExtraction(_));
     assert_eq!(sink_capacity(&error), Some(one + 10), "{error:?}");
     assert_eq!(file_bytes(&sink, "a"), b"12345");
     assert!(sink.get(Path::new("b")).is_none());
@@ -446,11 +446,8 @@ fn extract_reader_to_memory_reports_discarded_writes_after_delivered_entries() {
     .unwrap_err();
 
     assert_matches!(
-        error,
-        ArchiveError::PartialExtraction {
-            writes: PartialWrites::Discarded,
-            ..
-        },
+        &error,
+        ArchiveError::PartialExtraction(partial) if partial.writes() == PartialWrites::Discarded,
         "{error:?}"
     );
 }

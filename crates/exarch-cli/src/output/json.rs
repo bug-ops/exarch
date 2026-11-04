@@ -736,11 +736,11 @@ mod tests {
             files_skipped: 3,
             warnings: vec!["skipped disallowed extension".to_string()],
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: exarch_core::PartialWrites::Kept,
-        };
+            exarch_core::PartialWrites::Kept,
+        ));
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         f.format_error("extract", &converted);
         let v = parsed(&f);

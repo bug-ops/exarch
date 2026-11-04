@@ -309,11 +309,11 @@ fn symlink_target_leaving_own_parent_directories_extracts() {
 /// through.
 fn assert_symlink_refused(result: exarch_core::Result<exarch_core::ExtractionReport>) {
     let error = result.unwrap_err();
-    let exarch_core::ArchiveError::PartialExtraction { source, .. } = &error else {
+    let exarch_core::ArchiveError::PartialExtraction(partial) = &error else {
         panic!("expected PartialExtraction, got {error:?}");
     };
-    let exarch_core::ArchiveError::Io(io) = &**source else {
-        panic!("expected Io, got {source:?}");
+    let exarch_core::ArchiveError::Io(io) = partial.cause() else {
+        panic!("expected Io, got {:?}", partial.cause());
     };
     assert_eq!(
         io.kind(),

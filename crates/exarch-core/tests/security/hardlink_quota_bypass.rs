@@ -86,8 +86,8 @@ fn count_entries(dir: &std::path::Path) -> usize {
 /// was written before it fired. Unwraps to `(quota_error, files_extracted)`.
 fn quota_failure(err: &ArchiveError) -> (&ArchiveError, usize) {
     match err {
-        ArchiveError::PartialExtraction { source, report, .. } => {
-            (source.as_ref(), report.files_extracted)
+        ArchiveError::PartialExtraction(partial) => {
+            (partial.cause(), partial.report().files_extracted)
         }
         other => panic!("expected PartialExtraction, got: {other:?}"),
     }

@@ -688,11 +688,11 @@ mod tests {
         let source = CoreError::QuotaExceeded {
             resource: QuotaResource::FileCount { current: 4, max: 3 },
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         Python::attach(|py| {
@@ -743,11 +743,11 @@ mod tests {
         let source = CoreError::QuotaExceeded {
             resource: QuotaResource::FileCount { current: 4, max: 3 },
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         Python::attach(|py| {
@@ -781,13 +781,13 @@ mod tests {
             bytes_written: 2,
             ..ExtractionReport::default()
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(CoreError::SymlinkEscape {
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            CoreError::SymlinkEscape {
                 path: PathBuf::from("ln"),
-            }),
+            },
             report,
-            writes: PartialWrites::RolledBack,
-        };
+            PartialWrites::RolledBack,
+        ));
 
         let py_err = convert_error(err);
         Python::attach(|py| {
@@ -815,13 +815,13 @@ mod tests {
 
     #[test]
     fn test_partial_extraction_kept_attaches_writes() {
-        let err = CoreError::PartialExtraction {
-            source: Box::new(CoreError::SymlinkEscape {
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            CoreError::SymlinkEscape {
                 path: PathBuf::from("ln"),
-            }),
-            report: exarch_core::ExtractionReport::default(),
-            writes: PartialWrites::Kept,
-        };
+            },
+            exarch_core::ExtractionReport::default(),
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         Python::attach(|py| {
@@ -879,11 +879,11 @@ mod tests {
         let source = CoreError::SymlinkEscape {
             path: PathBuf::from("/etc/passwd"),
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         assert_partial_extraction_report::<SymlinkEscapeError>(&py_err, 2, 512);
@@ -901,11 +901,11 @@ mod tests {
         let source = CoreError::HardlinkEscape {
             path: PathBuf::from("/etc/shadow"),
         };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         assert_partial_extraction_report::<HardlinkEscapeError>(&py_err, 2, 512);
@@ -921,11 +921,11 @@ mod tests {
             ..ExtractionReport::default()
         };
         let source = CoreError::from(exarch_core::Violation::EncryptedArchive);
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
+        let err = CoreError::PartialExtraction(exarch_core::Partial::new(
+            source,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
 
         let py_err = convert_error(err);
         assert_partial_extraction_report::<SecurityViolationError>(&py_err, 2, 512);

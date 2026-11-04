@@ -894,7 +894,7 @@ fn list_config_for(config: &SecurityConfig) -> SecurityConfig {
 /// allowlist admits is written, any other is skipped.
 fn is_extracted_file(entry: &ArchiveEntry, config: &SecurityConfig) -> bool {
     entry.kind == ManifestEntryKind::File
-        && config.is_path_extension_allowed(entry.path.extension().and_then(|s| s.to_str()))
+        && config.is_extension_allowed(entry.path.extension().and_then(|s| s.to_str()))
 }
 
 /// Number of entries the progress bar counts: every listed entry, or only the

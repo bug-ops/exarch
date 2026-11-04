@@ -86,7 +86,7 @@ fn config() -> SecurityConfig {
 
 fn root(error: &ArchiveError) -> &ArchiveError {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => root(source),
+        ArchiveError::PartialExtraction(partial) => root(partial.cause()),
         other => other,
     }
 }

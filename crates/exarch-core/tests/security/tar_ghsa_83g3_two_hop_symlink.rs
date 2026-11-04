@@ -123,7 +123,7 @@ fn two_hop_symlink_chain_is_rejected() {
     // hardlink escape, not an unrelated I/O error.
     let err = result.unwrap_err();
     let source = match &err {
-        ArchiveError::PartialExtraction { source, .. } => source.as_ref(),
+        ArchiveError::PartialExtraction(partial) => partial.cause(),
         other => other,
     };
     assert_matches!(

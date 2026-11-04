@@ -137,8 +137,8 @@ fn a_full_memory_sink_stays_typed_through_the_7z_abort() {
     let mut sink = MemorySink::new(MemoryLimit::new(NonZeroU64::MIN));
     let error = extract(&mut sink, "simple.7z").unwrap_err();
     let mut cause = &error;
-    while let ArchiveError::PartialExtraction { source, .. } = cause {
-        cause = source;
+    while let ArchiveError::PartialExtraction(partial) = cause {
+        cause = partial.cause();
     }
     assert_matches!(
         cause,
@@ -286,7 +286,7 @@ fn extract_bytes<S: EntrySink>(
 
 fn cause(error: &ArchiveError) -> &ArchiveError {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => cause(source),
+        ArchiveError::PartialExtraction(partial) => cause(partial.cause()),
         other => other,
     }
 }
@@ -321,7 +321,7 @@ fn an_escaping_symlink_is_refused_after_the_earlier_entries() {
         ArchiveError::SymlinkEscape { .. },
         "{error:?}"
     );
-    assert_matches!(error, ArchiveError::PartialExtraction { .. });
+    assert_matches!(error, ArchiveError::PartialExtraction(_));
     assert!(sink.tree.symlinks.is_empty());
     assert_eq!(sink.finished.len(), 1);
 }
@@ -440,7 +440,7 @@ fn a_corrupt_stream_is_a_partial_extraction_and_publishes_nothing_of_the_bad_fil
     common::flip_first(&mut bytes, b"SECOND-PAYLOAD");
     let mut sink = RecordingSink::default();
     let error = extract_bytes(bytes, &config(), &mut sink).unwrap_err();
-    assert_matches!(error, ArchiveError::PartialExtraction { .. }, "{error:?}");
+    assert_matches!(error, ArchiveError::PartialExtraction(_), "{error:?}");
     assert_eq!(sink.tree.files.len(), 1);
     assert!(sink.tree.files.contains_key(Path::new("first.txt")));
 }

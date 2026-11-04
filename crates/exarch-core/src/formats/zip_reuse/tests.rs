@@ -627,7 +627,7 @@ fn extraction_into_memory_decodes_each_entry_once_and_keeps_the_same_files() {
 
 fn sink_capacity_of(error: &crate::ArchiveError) -> Option<u64> {
     match error {
-        crate::ArchiveError::PartialExtraction { source, .. } => sink_capacity_of(source),
+        crate::ArchiveError::PartialExtraction(partial) => sink_capacity_of(partial.cause()),
         crate::ArchiveError::QuotaExceeded {
             resource: crate::QuotaResource::SinkCapacity { max },
         } => Some(*max),

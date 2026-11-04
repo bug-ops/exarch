@@ -242,8 +242,8 @@ fn portable_case_variant_directories_charge_the_node_budget() {
         .with_max_path_depth(exarch_core::non_zero!(2));
     let (result, _) = run(tar_archive(&entries), PathModel::Portable, &config);
     let mut error = &result.unwrap_err();
-    while let ArchiveError::PartialExtraction { source, .. } = error {
-        error = source;
+    while let ArchiveError::PartialExtraction(partial) = error {
+        error = partial.cause();
     }
     assert_matches!(
         error,
@@ -263,7 +263,7 @@ fn portable_symlink_chain_leaving_the_root_is_refused() {
     );
     assert_matches!(
         result.unwrap_err(),
-        ArchiveError::SymlinkEscape { .. } | ArchiveError::PartialExtraction { .. },
+        ArchiveError::SymlinkEscape { .. } | ArchiveError::PartialExtraction(_),
         "escape not refused"
     );
     assert!(sink.get(std::path::Path::new("d")).is_none());
@@ -275,7 +275,7 @@ fn all_links() -> SecurityConfig {
 
 fn root_cause(error: &ArchiveError) -> &ArchiveError {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => root_cause(source),
+        ArchiveError::PartialExtraction(partial) => root_cause(partial.cause()),
         other => other,
     }
 }

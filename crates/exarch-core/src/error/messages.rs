@@ -469,12 +469,8 @@ impl ArchiveError {
     /// ```
     #[must_use]
     pub fn into_ffi_message(self) -> FfiErrorMessage {
-        if let Self::PartialExtraction {
-            source,
-            report,
-            writes,
-        } = self
-        {
+        if let Self::PartialExtraction(partial) = self {
+            let (source, report, writes) = partial.into_parts();
             let mut msg = source.into_ffi_message();
             msg.partial = Some(match writes {
                 PartialWrites::Kept => PartialOutcome::Kept(report),
@@ -550,7 +546,7 @@ impl ArchiveError {
                 setting: Some(*setting),
             },
             Self::ReaderFormat(_) => FfiKind::InvalidConfiguration { setting: None },
-            Self::PartialExtraction { source, .. } => source.ffi_kind(),
+            Self::PartialExtraction(partial) => partial.cause().ffi_kind(),
         }
     }
 
@@ -594,7 +590,7 @@ impl ArchiveError {
                 super::config_error::message(*setting, problem)
             ),
             Self::ReaderFormat(reason) => reason.to_string(),
-            Self::PartialExtraction { source, .. } => source.ffi_description(),
+            Self::PartialExtraction(partial) => partial.cause().ffi_description(),
         }
     }
 
@@ -888,22 +884,22 @@ mod tests {
                 sub_code: SecurityViolationSubCode::Encrypted,
             }
         );
-        let wrapped = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::TarAmbiguity(
-                super::super::tar_ambiguity::TarAmbiguity::SparseEntry,
-            )),
-            report: ExtractionReport::default(),
-            writes: PartialWrites::Kept,
-        };
+        let wrapped = ArchiveError::PartialExtraction(crate::Partial::new(
+            ArchiveError::TarAmbiguity(super::super::tar_ambiguity::TarAmbiguity::SparseEntry),
+            ExtractionReport::default(),
+            PartialWrites::Kept,
+        ));
         assert_eq!(wrapped.ffi_kind(), invalid(ambiguity));
     }
 
     #[test]
     fn test_partial_extraction_sets_partial() {
-        let wrap = |writes| ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::from(Violation::EncryptedArchive)),
-            report: ExtractionReport::default(),
-            writes,
+        let wrap = |writes| {
+            ArchiveError::PartialExtraction(crate::Partial::new(
+                ArchiveError::from(Violation::EncryptedArchive),
+                ExtractionReport::default(),
+                writes,
+            ))
         };
         let kept = wrap(PartialWrites::Kept).into_ffi_message();
         assert_matches!(kept.partial, Some(PartialOutcome::Kept(_)));

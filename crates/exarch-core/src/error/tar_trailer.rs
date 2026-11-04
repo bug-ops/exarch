@@ -205,13 +205,11 @@ mod tests {
         use crate::ExtractionReport;
         use crate::PartialWrites;
 
-        let wrapped = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::TarTrailer(TarTrailerRefusal::OverCap {
-                cap: 1,
-            })),
-            report: ExtractionReport::default(),
-            writes: PartialWrites::Kept,
-        };
+        let wrapped = ArchiveError::PartialExtraction(crate::Partial::new(
+            ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: 1 }),
+            ExtractionReport::default(),
+            PartialWrites::Kept,
+        ));
         assert!(wrapped.is_security_violation());
         assert_eq!(
             wrapped.relaxable_by(),

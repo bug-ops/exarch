@@ -95,7 +95,7 @@ fn config_with_tail_limit(bytes: u64) -> SecurityConfig {
 
 fn source(error: &ArchiveError) -> &ArchiveError {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => source,
+        ArchiveError::PartialExtraction(partial) => partial.cause(),
         other => other,
     }
 }

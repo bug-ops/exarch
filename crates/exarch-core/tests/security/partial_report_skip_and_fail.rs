@@ -60,9 +60,10 @@ fn skip_only_report_still_wraps_as_partial_extraction_on_later_failure() {
     let result = extract_archive(&archive_path, dest.path(), &config);
 
     match result {
-        Err(ArchiveError::PartialExtraction { source, report, .. }) => {
+        Err(ArchiveError::PartialExtraction(partial)) => {
+            let (source, report) = (partial.cause(), partial.report());
             assert_matches!(
-                *source,
+                source,
                 ArchiveError::SymlinkEscape { .. },
                 "expected SymlinkEscape source, got: {source:?}"
             );
@@ -111,7 +112,7 @@ fn write_file_then_escape_tar(dir: &TempDir) -> std::path::PathBuf {
 
 fn partial_writes_of(result: exarch_core::Result<exarch_core::ExtractionReport>) -> PartialWrites {
     match result {
-        Err(ArchiveError::PartialExtraction { writes, .. }) => writes,
+        Err(ArchiveError::PartialExtraction(partial)) => partial.writes(),
         other => panic!("expected PartialExtraction, got: {other:?}"),
     }
 }

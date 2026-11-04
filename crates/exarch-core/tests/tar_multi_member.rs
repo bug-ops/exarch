@@ -227,7 +227,7 @@ fn quotas_span_every_member() {
             let out = TempDir::new().unwrap();
             let err = extract_archive(&archive, out.path(), &config).unwrap_err();
             let source = match err {
-                ArchiveError::PartialExtraction { source, .. } => *source,
+                ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
                 other => other,
             };
             assert_matches!(source, ArchiveError::QuotaExceeded { .. }, "{name}");
@@ -247,7 +247,7 @@ fn chunked_members(tar: &[u8], chunk: usize, encode: Encode) -> Vec<u8> {
 
 fn assert_member_cap(err: ArchiveError, members: u64, allowance: u64, label: &str) {
     let source = match err {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => other,
     };
     assert_matches!(

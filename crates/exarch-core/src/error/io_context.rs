@@ -39,6 +39,7 @@ use std::fmt;
 /// assert_eq!(ctx.context, "failed to read entry metadata");
 /// ```
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct IoContext {
     /// Static summary of the failure. Never carries path or archive entry
     /// data — safe to surface in release builds.

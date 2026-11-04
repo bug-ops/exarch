@@ -9,6 +9,7 @@ use crate::Limit;
 use crate::RatioLimit;
 use crate::closed_enum::closed_enum;
 use crate::non_zero;
+use crate::non_zero_u64;
 use crate::types::Extension;
 use crate::types::PathComponentName;
 
@@ -380,20 +381,12 @@ pub enum ParallelDecode {
     Bounded(NonZeroU64),
 }
 
-/// Builds a non-zero constant; a zero literal fails compilation.
-const fn non_zero(n: u64) -> NonZeroU64 {
-    match NonZeroU64::new(n) {
-        Some(n) => n,
-        None => panic!("constant must be non-zero"),
-    }
-}
-
 /// Default base of the compressed member allowance.
-pub(crate) const DEFAULT_MEMBER_ALLOWANCE: NonZeroU64 = non_zero(10_000);
+pub(crate) const DEFAULT_MEMBER_ALLOWANCE: NonZeroU64 = non_zero!(10_000);
 
 impl ParallelDecode {
     /// Default lookahead: 128 MiB.
-    pub const DEFAULT_BYTES: NonZeroU64 = non_zero(128 * 1024 * 1024);
+    pub const DEFAULT_BYTES: NonZeroU64 = non_zero!(128 * 1024 * 1024);
 
     /// The lookahead memory in bytes, or `None` for [`Sequential`].
     ///
@@ -419,10 +412,36 @@ impl ParallelDecode {
     }
 }
 
+impl ParallelDecode {
+    /// The mode for an optional lookahead: `None` is
+    /// [`Sequential`](Self::Sequential).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroU64;
+    ///
+    /// use exarch_core::ParallelDecode;
+    ///
+    /// assert_eq!(ParallelDecode::from_bytes(None), ParallelDecode::Sequential);
+    /// let bytes = NonZeroU64::MIN;
+    /// assert_eq!(
+    ///     ParallelDecode::from_bytes(Some(bytes)),
+    ///     ParallelDecode::Bounded(bytes)
+    /// );
+    /// ```
+    #[must_use]
+    pub const fn from_bytes(lookahead: Option<NonZeroU64>) -> Self {
+        match lookahead {
+            Some(bytes) => Self::Bounded(bytes),
+            None => Self::Sequential,
+        }
+    }
+}
+
 impl From<Option<NonZeroU64>> for ParallelDecode {
-    /// `None` is [`ParallelDecode::Sequential`].
     fn from(lookahead: Option<NonZeroU64>) -> Self {
-        lookahead.map_or(Self::Sequential, Self::Bounded)
+        Self::from_bytes(lookahead)
     }
 }
 
@@ -439,10 +458,10 @@ impl Default for ParallelDecode {
 ///
 /// # Performance Note
 ///
-/// This struct contains heap-allocated collections (`Vec<String>`). For
-/// performance, pass by reference (`&SecurityConfig`) rather than cloning. If
-/// shared ownership is needed across threads, consider wrapping in
-/// `Arc<SecurityConfig>`.
+/// This struct contains heap-allocated collections
+/// (`Vec<Extension>`/`Vec<PathComponentName>`). For performance, pass by
+/// reference (`&SecurityConfig`) rather than cloning. If shared ownership is
+/// needed across threads, consider wrapping in `Arc<SecurityConfig>`.
 ///
 /// # Examples
 ///
@@ -672,7 +691,7 @@ impl Default for SecurityConfig {
 }
 
 /// Lookahead memory of [`SecurityConfig::permissive`]: 1 GiB.
-const PERMISSIVE_PARALLEL_DECODE: NonZeroU64 = non_zero(1024 * 1024 * 1024);
+const PERMISSIVE_PARALLEL_DECODE: NonZeroU64 = non_zero!(1024 * 1024 * 1024);
 
 impl SecurityConfig {
     /// Creates a permissive configuration for trusted archives.
@@ -695,7 +714,7 @@ impl SecurityConfig {
             solid_archives: SolidArchives::Allow(SolidLimits::PERMISSIVE),
             max_tar_metadata_bytes: non_zero!(16 * 1024 * 1024), // 16 MiB for permissive
             max_decoder_memory: non_zero!(1024 * 1024 * 1024),   // 1 GiB for permissive
-            compressed_member_allowance: non_zero(100_000),
+            compressed_member_allowance: non_zero!(100_000),
             parallel_decode: ParallelDecode::Bounded(PERMISSIVE_PARALLEL_DECODE),
             ..Self::default()
         }
@@ -923,8 +942,8 @@ impl SecurityConfig {
     /// let config = SecurityConfig::default()
     ///     .try_add_allowed_extension(".txt")?
     ///     .try_add_allowed_extension("pdf")?;
-    /// assert!(config.is_extension_allowed("txt"));
-    /// assert!(!config.is_extension_allowed("exe"));
+    /// assert!(config.is_extension_allowed(Some("txt")));
+    /// assert!(!config.is_extension_allowed(Some("exe")));
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
@@ -1162,25 +1181,13 @@ impl SecurityConfig {
             .any(|banned| banned.matches(component))
     }
 
-    /// Validates whether a file extension is allowed.
-    ///
-    /// When `allowed_extensions` is empty, all extensions are permitted.
-    /// When it is non-empty, only listed extensions are permitted.
-    #[must_use]
-    pub fn is_extension_allowed(&self, extension: &str) -> bool {
-        if self.allowed_extensions.is_empty() {
-            return true;
-        }
-        self.allowed_extensions
-            .iter()
-            .any(|ext| ext.matches(extension))
-    }
-
     /// Returns `true` if a file with the given optional extension may be
     /// extracted.
     ///
-    /// When `allowed_extensions` is non-empty and `extension` is `None`
-    /// (the file has no extension), the file is treated as not allowed.
+    /// When `allowed_extensions` is empty, all files are permitted. When it is
+    /// non-empty, only listed extensions are permitted (ignoring ASCII case),
+    /// and `extension` being `None` (the file has no extension) is not
+    /// allowed.
     ///
     /// # Examples
     ///
@@ -1189,22 +1196,20 @@ impl SecurityConfig {
     ///
     /// let config = SecurityConfig::default().try_add_allowed_extension("txt")?;
     ///
-    /// assert!(config.is_path_extension_allowed(Some("txt")));
-    /// assert!(!config.is_path_extension_allowed(Some("exe")));
+    /// assert!(config.is_extension_allowed(Some("txt")));
+    /// assert!(!config.is_extension_allowed(Some("exe")));
     /// // Files without an extension are blocked when the allowlist is non-empty.
-    /// assert!(!config.is_path_extension_allowed(None));
+    /// assert!(!config.is_extension_allowed(None));
     ///
     /// // Empty allowlist permits everything, including extension-less files.
     /// let permissive = SecurityConfig::default();
-    /// assert!(permissive.is_path_extension_allowed(None));
+    /// assert!(permissive.is_extension_allowed(None));
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
-    pub fn is_path_extension_allowed(&self, extension: Option<&str>) -> bool {
-        if self.allowed_extensions.is_empty() {
-            return true;
-        }
-        extension.is_some_and(|ext| self.is_extension_allowed(ext))
+    pub fn is_extension_allowed(&self, extension: Option<&str>) -> bool {
+        self.allowed_extensions.is_empty()
+            || extension.is_some_and(|ext| self.allowed_extensions.iter().any(|a| a.matches(ext)))
     }
 
     /// The config of a list pass that precedes extraction: the same quota,
@@ -1350,18 +1355,10 @@ pub struct ReuseLimit(NonZeroU64);
 impl ReuseLimit {
     /// 32 MiB: covers a typical source archive and stays below the
     /// per-extraction decoder ceilings.
-    pub const DEFAULT: Self = Self(Self::nonzero(Self::DEFAULT_BYTES));
-    const DEFAULT_BYTES: u64 = 32 * 1024 * 1024;
+    pub const DEFAULT: Self = Self(non_zero!(32 * 1024 * 1024));
     /// 256 MiB, the most the structural check decodes in its first pass.
-    pub const MAX: Self = Self(Self::nonzero(Self::MAX_BYTES));
-    pub(crate) const MAX_BYTES: u64 = 256 * 1024 * 1024;
-
-    const fn nonzero(bytes: u64) -> NonZeroU64 {
-        match NonZeroU64::new(bytes) {
-            Some(n) => n,
-            None => NonZeroU64::MIN,
-        }
-    }
+    pub const MAX: Self = Self(non_zero!(256 * 1024 * 1024));
+    pub(crate) const MAX_BYTES: u64 = Self::MAX.0.get();
 
     /// A limit of `bytes`, clamped to [`ReuseLimit::MAX`].
     #[must_use]
@@ -1480,10 +1477,7 @@ pub struct DecompressionBudget(std::num::NonZeroU64);
 
 impl DecompressionBudget {
     /// The default budget: 500 MiB.
-    pub const DEFAULT: Self = match std::num::NonZeroU64::new(500 * 1024 * 1024) {
-        Some(bytes) => Self(bytes),
-        None => unreachable!(),
-    };
+    pub const DEFAULT: Self = Self(non_zero!(500 * 1024 * 1024));
 
     /// Creates a budget from a non-zero byte count.
     #[must_use]
@@ -1498,12 +1492,7 @@ impl DecompressionBudget {
     /// Returns [`ArchiveError::InvalidConfiguration`](crate::ArchiveError) when
     /// `bytes` is zero.
     pub fn try_from_bytes(bytes: u64) -> crate::Result<Self> {
-        std::num::NonZeroU64::new(bytes).map(Self).ok_or(
-            crate::ArchiveError::InvalidConfiguration {
-                setting: ConfigSetting::DecompressionBudget,
-                problem: ConfigProblem::NotGreaterThanZero,
-            },
-        )
+        non_zero_u64(ConfigSetting::DecompressionBudget, bytes).map(Self)
     }
 
     /// Returns the budget in bytes.
@@ -1656,8 +1645,8 @@ mod tests {
     #[test]
     fn test_extension_allowed_empty_list() {
         let config = SecurityConfig::default();
-        assert!(config.is_extension_allowed("txt"));
-        assert!(config.is_extension_allowed("pdf"));
+        assert!(config.is_extension_allowed(Some("txt")));
+        assert!(config.is_extension_allowed(Some("pdf")));
     }
 
     #[test]
@@ -1667,9 +1656,9 @@ mod tests {
             Extension::try_from("txt").unwrap(),
             Extension::try_from("pdf").unwrap(),
         ];
-        assert!(config.is_extension_allowed("txt"));
-        assert!(config.is_extension_allowed("TXT"));
-        assert!(!config.is_extension_allowed("exe"));
+        assert!(config.is_extension_allowed(Some("txt")));
+        assert!(config.is_extension_allowed(Some("TXT")));
+        assert!(!config.is_extension_allowed(Some("exe")));
     }
 
     #[test]
@@ -1995,13 +1984,13 @@ mod tests {
         let cfg = SecurityConfig::default()
             .try_add_allowed_extension(".txt")
             .unwrap();
-        assert!(cfg.is_path_extension_allowed(Some("txt")));
+        assert!(cfg.is_extension_allowed(Some("txt")));
         assert!(crate::formats::common::is_extension_allowed(
             std::path::Path::new("A.TXT"),
             &cfg
         ));
-        assert!(cfg.is_path_extension_allowed(Some("TXT")));
-        assert!(!cfg.is_path_extension_allowed(Some("md")));
+        assert!(cfg.is_extension_allowed(Some("TXT")));
+        assert!(!cfg.is_extension_allowed(Some("md")));
     }
 
     #[test]

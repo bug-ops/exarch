@@ -71,7 +71,7 @@ fn extract_rejects_xz_needing_more_than_decoder_memory() {
     let err = extract_archive(&archive, out.path(), &config_with_limit(ONE_MIB)).unwrap_err();
 
     let source = match err {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => other,
     };
     assert_decoder_memory(&source, ONE_MIB);

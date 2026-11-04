@@ -318,7 +318,7 @@ impl PySecurityConfig {
 
     /// Checks if a file extension is allowed.
     fn is_extension_allowed(&self, extension: &str) -> bool {
-        self.inner.is_extension_allowed(extension)
+        self.inner.is_extension_allowed(Some(extension))
     }
 
     // Property getters and setters

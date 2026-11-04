@@ -118,13 +118,11 @@ fn constant_refusals_carry_no_setting() {
 
 #[test]
 fn partial_extraction_delegates_relaxable_by() {
-    let err = ArchiveError::PartialExtraction {
-        source: Box::new(ArchiveError::from(super::Violation::LinksNotAllowed(
-            crate::LinkKind::Hardlink,
-        ))),
-        report: crate::ExtractionReport::default(),
-        writes: super::PartialWrites::Kept,
-    };
+    let err = ArchiveError::PartialExtraction(crate::Partial::new(
+        ArchiveError::from(super::Violation::LinksNotAllowed(crate::LinkKind::Hardlink)),
+        crate::ExtractionReport::default(),
+        super::PartialWrites::Kept,
+    ));
     assert_eq!(err.relaxable_by(), Some(PolicySetting::Hardlinks));
     assert_eq!(
         err.into_ffi_message().kind,

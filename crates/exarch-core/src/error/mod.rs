@@ -32,6 +32,7 @@ pub use tar_trailer::TarTrailerRefusal;
 pub use tar_trailer::TrailerCorruption;
 pub use types::ArchiveError;
 pub use types::CompressionRatio;
+pub use types::Partial;
 pub use types::PartialWrites;
 pub use types::PolicySetting;
 pub use types::QuotaKind;

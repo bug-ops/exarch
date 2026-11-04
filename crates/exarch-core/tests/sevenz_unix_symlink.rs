@@ -250,7 +250,7 @@ fn assert_nothing_outside(container: &TempDir, label: &str) {
 
 fn partial_source(err: ArchiveError) -> ArchiveError {
     match err {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => panic!("expected PartialExtraction, got {other:?}"),
     }
 }
@@ -718,7 +718,7 @@ fn existing_destination_symlink_is_not_replaced() {
 #[cfg(unix)]
 fn assert_symlink_refused(error: ArchiveError) {
     let error = match error {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => other,
     };
     let ArchiveError::Io(io) = &error else {
@@ -778,7 +778,7 @@ fn extract_rejects_an_oversized_non_utf8_or_empty_target() {
 
         let err = extract_archive(&path, out.path(), &allow_symlinks()).unwrap_err();
 
-        let header_refusal = !matches!(err, ArchiveError::PartialExtraction { .. });
+        let header_refusal = !matches!(err, ArchiveError::PartialExtraction(_));
         let err = if header_refusal {
             err
         } else {

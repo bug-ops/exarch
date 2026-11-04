@@ -98,11 +98,7 @@ fn verify_checksum(block: &[u8; BLOCK]) -> Result<()> {
     let actual = u64::from(byte_sum(&block[..CHECKSUM_FIELD.start]))
         + u64::from(byte_sum(&block[CHECKSUM_FIELD.end..]))
         + CHECKSUM_SPACES;
-    if declared == actual {
-        Ok(())
-    } else {
-        Err(TarAmbiguity::ChecksumMismatch.into())
-    }
+    (declared == actual).ok_or(TarAmbiguity::ChecksumMismatch.into())
 }
 
 /// Offset of the first block boundary at or after the window start, which is

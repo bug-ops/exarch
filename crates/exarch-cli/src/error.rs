@@ -302,13 +302,9 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
     // This keeps issue #204's "inner error text appears exactly once in
     // `{:#}`" guarantee: no CLI-authored `context` string below interpolates
     // data the wrapped error's own Display already carries.
-    if let ArchiveError::PartialExtraction {
-        source,
-        report,
-        writes,
-    } = err
-    {
-        let inner = convert_extraction_error(*source, archive);
+    if let ArchiveError::PartialExtraction(partial) = err {
+        let (source, report, writes) = partial.into_parts();
+        let inner = convert_extraction_error(source, archive);
         return anyhow::Error::new(PartialExtractionContext {
             report,
             writes,
@@ -318,7 +314,7 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
 
     let archive = TerminalPath::new(archive);
     let context = match &err {
-        ArchiveError::PartialExtraction { .. } => unreachable!(),
+        ArchiveError::PartialExtraction(_) => unreachable!(),
         ArchiveError::PathTraversal { .. } => format!(
             "Security violation: Archive '{archive}' attempted path traversal\n\
              HINT: This archive may be malicious. Do not extract from untrusted sources."
@@ -573,11 +569,11 @@ mod tests {
             files_skipped: 0,
             warnings: vec![],
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         let occurrences = msg.matches("hardlink_escape_path").count();
@@ -800,11 +796,11 @@ mod tests {
             files_skipped: 0,
             warnings: vec![],
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         let occurrences = msg.matches("symlink_escape_path").count();
@@ -835,11 +831,11 @@ mod tests {
             files_skipped: 2,
             warnings: vec!["skipped a broken symlink".to_string()],
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains("Files skipped: 2"), "got: {msg}");
@@ -865,11 +861,11 @@ mod tests {
             files_skipped: 0,
             warnings: vec![],
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(
@@ -901,13 +897,13 @@ mod tests {
             files_skipped: 0,
             warnings: vec![],
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::HardlinkEscape {
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            ArchiveError::HardlinkEscape {
                 path: PathBuf::from("hardlink_escape_path"),
-            }),
+            },
             report,
-            writes: PartialWrites::RolledBack,
-        };
+            PartialWrites::RolledBack,
+        ));
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(!msg.contains("written to disk"), "got: {msg}");
@@ -930,13 +926,13 @@ mod tests {
             files_skipped: 3,
             warnings: vec!["skipped 3 entries".to_string()],
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::HardlinkEscape {
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            ArchiveError::HardlinkEscape {
                 path: PathBuf::from("hardlink_escape_path"),
-            }),
+            },
             report,
-            writes: PartialWrites::RolledBack,
-        };
+            PartialWrites::RolledBack,
+        ));
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(!msg.contains("Files skipped"), "got: {msg}");
@@ -962,11 +958,11 @@ mod tests {
             files_skipped: 0,
             warnings: vec![],
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(inner),
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            inner,
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(!msg.contains("Files skipped"), "got: {msg}");
@@ -989,13 +985,13 @@ mod tests {
 
     #[test]
     fn test_partial_context_is_chain_root_with_inner_source() {
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::PathTraversal {
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            ArchiveError::PathTraversal {
                 path: PathBuf::from("../x"),
-            }),
-            report: ExtractionReport::default(),
-            writes: PartialWrites::Kept,
-        };
+            },
+            ExtractionReport::default(),
+            PartialWrites::Kept,
+        ));
         let converted = convert_extraction_error(err, Path::new("a.tar"));
         assert!(
             converted
@@ -1031,13 +1027,13 @@ mod tests {
             warnings: vec!["w\x1b[31m\nforged".to_string()],
             ..ExtractionReport::default()
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::PathTraversal {
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            ArchiveError::PathTraversal {
                 path: PathBuf::from("../x"),
-            }),
+            },
             report,
-            writes: PartialWrites::Kept,
-        };
+            PartialWrites::Kept,
+        ));
         let msg = format!("{:#}", convert_extraction_error(err, Path::new("a.tar")));
         assert!(!msg.contains('\x1b'), "got: {msg:?}");
         assert!(msg.contains("\\x1b[31m\\x0aforged"), "got: {msg:?}");

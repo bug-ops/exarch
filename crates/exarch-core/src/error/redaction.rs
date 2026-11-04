@@ -221,7 +221,7 @@ impl ArchiveError {
             | Self::OutputExists { path }
             | Self::UnknownFormat { path } => Some(sanitize_path_for_error(path)),
 
-            Self::PartialExtraction { source, .. } => source.redacted_path(),
+            Self::PartialExtraction(partial) => partial.cause().redacted_path(),
 
             Self::Io(_)
             | Self::InvalidArchive(_)
@@ -413,13 +413,13 @@ mod tests {
     /// its `source`'s redaction policy rather than exposing a path itself.
     #[test]
     fn test_partial_extraction_delegates_to_source() {
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::PathTraversal {
+        let err = ArchiveError::PartialExtraction(crate::Partial::new(
+            ArchiveError::PathTraversal {
                 path: PathBuf::from("../../etc/passwd"),
-            }),
-            report: ExtractionReport::new(),
-            writes: crate::PartialWrites::Kept,
-        };
+            },
+            ExtractionReport::new(),
+            crate::PartialWrites::Kept,
+        ));
         assert_eq!(err.redacted_path().as_deref(), Some("../../etc/passwd"));
     }
 }

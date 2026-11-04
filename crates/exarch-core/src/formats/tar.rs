@@ -2037,8 +2037,8 @@ mod tests {
         // A directory was created before the symlink escape, so the error is
         // wrapped in PartialExtraction. Unwrap one level to check the source.
         match result {
-            Err(ArchiveError::PartialExtraction { source, .. }) => {
-                assert_matches!(*source, ArchiveError::SymlinkEscape { .. });
+            Err(ArchiveError::PartialExtraction(partial)) => {
+                assert_matches!(partial.cause(), ArchiveError::SymlinkEscape { .. });
             }
             Err(ArchiveError::SymlinkEscape { .. }) => {}
             other => panic!("Expected SymlinkEscape error for symlink escape, got: {other:?}"),
@@ -2428,7 +2428,7 @@ mod tests {
         // hardlink entry fails, so the error arrives wrapped in
         // PartialExtraction; unwrap one level to check the source.
         match result {
-            Err(ArchiveError::PartialExtraction { source, .. }) => match *source {
+            Err(ArchiveError::PartialExtraction(partial)) => match partial.cause() {
                 ArchiveError::InvalidArchive(msg) => {
                     assert!(msg.to_string().contains("duplicate entry"));
                 }

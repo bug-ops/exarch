@@ -153,7 +153,7 @@ fn link_config(max_file_count: usize) -> SecurityConfig {
 
 fn root_cause(error: ArchiveError) -> ArchiveError {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => *source,
+        ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => other,
     }
 }

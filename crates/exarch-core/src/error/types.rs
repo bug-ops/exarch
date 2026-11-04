@@ -556,16 +556,112 @@ pub enum ArchiveError {
     /// ([`PartialWrites::Kept`]), was discarded by atomic rollback
     /// ([`PartialWrites::RolledBack`]), or was never written anywhere
     /// ([`PartialWrites::Discarded`]).
-    #[error("{source}")]
-    PartialExtraction {
-        /// The original error that stopped extraction.
-        #[source]
-        source: Box<Self>,
-        /// Report of what was written before the error.
+    #[error(transparent)]
+    PartialExtraction(Partial),
+}
+
+/// An extraction that stopped after recording progress.
+///
+/// The cause is never itself a partial extraction: [`Partial::new`] looks
+/// through one level of wrapping, so every accessor of [`ArchiveError`] can
+/// look through exactly one level without recursion.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveError;
+/// use exarch_core::ExtractionReport;
+/// use exarch_core::Partial;
+/// use exarch_core::PartialWrites;
+/// use exarch_core::Violation;
+///
+/// let cause = ArchiveError::from(Violation::EncryptedArchive);
+/// let inner = Partial::new(cause, ExtractionReport::default(), PartialWrites::Kept);
+/// let outer = Partial::new(
+///     ArchiveError::PartialExtraction(inner),
+///     ExtractionReport::default(),
+///     PartialWrites::RolledBack,
+/// );
+/// assert!(!matches!(outer.cause(), ArchiveError::PartialExtraction(_)));
+/// assert_eq!(outer.writes(), PartialWrites::RolledBack);
+/// ```
+#[derive(Debug)]
+pub struct Partial {
+    cause: Box<ArchiveError>,
+    report: crate::ExtractionReport,
+    writes: PartialWrites,
+}
+
+impl Partial {
+    /// Records that `cause` stopped an extraction that had produced `report`.
+    ///
+    /// A `cause` that is itself a partial extraction is unwrapped first: its
+    /// innermost cause is kept, `report` (the outer one, which accumulated the
+    /// inner) wins, and the more severe `writes` wins, so a rollback or discard
+    /// is never reported as kept.
+    #[must_use]
+    pub fn new(
+        cause: ArchiveError,
         report: crate::ExtractionReport,
-        /// Whether the reported writes are still on disk.
         writes: PartialWrites,
-    },
+    ) -> Self {
+        match cause {
+            ArchiveError::PartialExtraction(inner) => Self {
+                cause: inner.cause,
+                report,
+                writes: if writes == PartialWrites::Kept {
+                    inner.writes
+                } else {
+                    writes
+                },
+            },
+            other => Self {
+                cause: Box::new(other),
+                report,
+                writes,
+            },
+        }
+    }
+
+    /// The original error that stopped extraction.
+    #[must_use]
+    pub fn cause(&self) -> &ArchiveError {
+        &self.cause
+    }
+
+    /// What was written before the error.
+    #[must_use]
+    pub fn report(&self) -> &crate::ExtractionReport {
+        &self.report
+    }
+
+    /// Whether the reported writes are still on disk.
+    #[must_use]
+    pub const fn writes(&self) -> PartialWrites {
+        self.writes
+    }
+
+    /// Splits into the cause, the report and the fate of the writes.
+    #[must_use]
+    pub fn into_parts(self) -> (ArchiveError, crate::ExtractionReport, PartialWrites) {
+        (*self.cause, self.report, self.writes)
+    }
+
+    fn with_writes(self, writes: PartialWrites) -> Self {
+        Self { writes, ..self }
+    }
+}
+
+impl std::fmt::Display for Partial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.cause.fmt(f)
+    }
+}
+
+impl std::error::Error for Partial {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.cause)
+    }
 }
 
 closed_enum! {
@@ -637,7 +733,7 @@ impl ArchiveError {
     pub fn malformation(&self) -> Option<&Malformation> {
         match self {
             Self::InvalidArchive(malformation) => Some(malformation),
-            Self::PartialExtraction { source, .. } => source.malformation(),
+            Self::PartialExtraction(partial) => partial.cause().malformation(),
             _ => None,
         }
     }
@@ -681,7 +777,7 @@ impl ArchiveError {
         match self {
             Self::SecurityViolation { kind } => kind.relaxable_by(),
             Self::TarTrailer(refusal) => refusal.relaxable_by(),
-            Self::PartialExtraction { source, .. } => source.relaxable_by(),
+            Self::PartialExtraction(partial) => partial.cause().relaxable_by(),
             _ => None,
         }
     }
@@ -702,7 +798,7 @@ impl ArchiveError {
     pub fn security_violation(&self) -> Option<&Violation> {
         match self {
             Self::SecurityViolation { kind } => Some(kind),
-            Self::PartialExtraction { source, .. } => source.security_violation(),
+            Self::PartialExtraction(partial) => partial.cause().security_violation(),
             _ => None,
         }
     }
@@ -737,7 +833,7 @@ impl ArchiveError {
     #[must_use]
     pub fn is_security_violation(&self) -> bool {
         match self {
-            Self::PartialExtraction { source, .. } => source.is_security_violation(),
+            Self::PartialExtraction(partial) => partial.cause().is_security_violation(),
             Self::TarTrailer(refusal) => refusal.is_policy_refusal(),
             _ => matches!(
                 self,
@@ -777,7 +873,7 @@ impl ArchiveError {
     #[must_use]
     pub fn is_recoverable(&self) -> bool {
         match self {
-            Self::PartialExtraction { source, .. } => source.is_recoverable(),
+            Self::PartialExtraction(partial) => partial.cause().is_recoverable(),
             Self::TarTrailer(refusal) => refusal.is_policy_refusal(),
             _ => matches!(
                 self,
@@ -818,7 +914,7 @@ impl ArchiveError {
         match self {
             Self::InvalidArchive(m) => Some(Cow::Owned(m.to_string())),
             Self::SecurityViolation { kind } => Some(Cow::Owned(kind.to_string())),
-            Self::PartialExtraction { source, .. } => source.context(),
+            Self::PartialExtraction(partial) => partial.cause().context(),
             _ => None,
         }
     }
@@ -828,7 +924,7 @@ impl ArchiveError {
     pub fn quota_resource(&self) -> Option<&QuotaResource> {
         match self {
             Self::QuotaExceeded { resource } => Some(resource),
-            Self::PartialExtraction { source, .. } => source.quota_resource(),
+            Self::PartialExtraction(partial) => partial.cause().quota_resource(),
             _ => None,
         }
     }
@@ -848,11 +944,7 @@ impl ArchiveError {
     #[must_use]
     pub(crate) fn partial_or(report: crate::ExtractionReport, err: Self) -> Self {
         if report.total_items() > 0 || report.files_skipped > 0 || report.has_warnings() {
-            Self::PartialExtraction {
-                source: Box::new(err),
-                report,
-                writes: PartialWrites::Kept,
-            }
+            Self::PartialExtraction(Partial::new(err, report, PartialWrites::Kept))
         } else {
             err
         }
@@ -871,17 +963,18 @@ impl ArchiveError {
     /// ```
     /// use exarch_core::ArchiveError;
     /// use exarch_core::ExtractionReport;
+    /// use exarch_core::Partial;
     /// use exarch_core::PartialWrites;
     /// use exarch_core::Violation;
     ///
-    /// let err = ArchiveError::PartialExtraction {
-    ///     source: Box::new(ArchiveError::from(Violation::EncryptedArchive)),
-    ///     report: ExtractionReport::default(),
-    ///     writes: PartialWrites::Kept,
-    /// };
+    /// let err = ArchiveError::PartialExtraction(Partial::new(
+    ///     ArchiveError::from(Violation::EncryptedArchive),
+    ///     ExtractionReport::default(),
+    ///     PartialWrites::Kept,
+    /// ));
     /// match err.rolled_back() {
-    ///     ArchiveError::PartialExtraction { writes, .. } => {
-    ///         assert_eq!(writes, PartialWrites::RolledBack);
+    ///     ArchiveError::PartialExtraction(partial) => {
+    ///         assert_eq!(partial.writes(), PartialWrites::RolledBack);
     ///     }
     ///     other => panic!("unexpected: {other:?}"),
     /// }
@@ -889,11 +982,9 @@ impl ArchiveError {
     #[must_use]
     pub fn rolled_back(self) -> Self {
         match self {
-            Self::PartialExtraction { source, report, .. } => Self::PartialExtraction {
-                source,
-                report,
-                writes: PartialWrites::RolledBack,
-            },
+            Self::PartialExtraction(partial) => {
+                Self::PartialExtraction(partial.with_writes(PartialWrites::RolledBack))
+            }
             other => other,
         }
     }
@@ -904,11 +995,9 @@ impl ArchiveError {
     #[must_use]
     pub(crate) fn discarded(self) -> Self {
         match self {
-            Self::PartialExtraction { source, report, .. } => Self::PartialExtraction {
-                source,
-                report,
-                writes: PartialWrites::Discarded,
-            },
+            Self::PartialExtraction(partial) => {
+                Self::PartialExtraction(partial.with_writes(PartialWrites::Discarded))
+            }
             other => other,
         }
     }
@@ -921,17 +1010,14 @@ mod tests {
 
     #[test]
     fn test_discarded_marks_only_partial_extractions() {
-        let partial = ArchiveError::PartialExtraction {
-            source: Box::new(ArchiveError::from(Violation::EncryptedArchive)),
-            report: crate::ExtractionReport::default(),
-            writes: PartialWrites::Kept,
-        };
+        let partial = ArchiveError::PartialExtraction(crate::Partial::new(
+            ArchiveError::from(Violation::EncryptedArchive),
+            crate::ExtractionReport::default(),
+            PartialWrites::Kept,
+        ));
         assert_matches!(
             partial.discarded(),
-            ArchiveError::PartialExtraction {
-                writes: PartialWrites::Discarded,
-                ..
-            }
+            ArchiveError::PartialExtraction(partial) if partial.writes() == PartialWrites::Discarded
         );
         assert_matches!(
             ArchiveError::from(Violation::EncryptedArchive).discarded(),
@@ -1288,11 +1374,11 @@ mod tests {
                 max: 10,
             },
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(source),
-            report: ExtractionReport::new(),
-            writes: PartialWrites::Kept,
-        };
+        let err = ArchiveError::PartialExtraction(crate::Partial::new(
+            source,
+            ExtractionReport::new(),
+            PartialWrites::Kept,
+        ));
         let display = err.to_string();
         assert!(display.contains("quota exceeded"));
     }
@@ -1303,19 +1389,19 @@ mod tests {
         let security_err = ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(security_err),
-            report: ExtractionReport::new(),
-            writes: PartialWrites::Kept,
-        };
+        let err = ArchiveError::PartialExtraction(crate::Partial::new(
+            security_err,
+            ExtractionReport::new(),
+            PartialWrites::Kept,
+        ));
         assert!(err.is_security_violation());
 
         let non_security_err = ArchiveError::unclassified("bad");
-        let err2 = ArchiveError::PartialExtraction {
-            source: Box::new(non_security_err),
-            report: ExtractionReport::new(),
-            writes: PartialWrites::Kept,
-        };
+        let err2 = ArchiveError::PartialExtraction(crate::Partial::new(
+            non_security_err,
+            ExtractionReport::new(),
+            PartialWrites::Kept,
+        ));
         assert!(!err2.is_security_violation());
     }
 
@@ -1325,12 +1411,90 @@ mod tests {
         let recoverable = ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(recoverable),
-            report: ExtractionReport::new(),
-            writes: PartialWrites::Kept,
-        };
+        let err = ArchiveError::PartialExtraction(crate::Partial::new(
+            recoverable,
+            ExtractionReport::new(),
+            PartialWrites::Kept,
+        ));
         assert!(err.is_recoverable());
+    }
+
+    fn partial_with(files: usize, writes: PartialWrites) -> Partial {
+        let report = crate::ExtractionReport {
+            files_extracted: files,
+            ..crate::ExtractionReport::default()
+        };
+        Partial::new(
+            ArchiveError::from(Violation::EncryptedArchive),
+            report,
+            writes,
+        )
+    }
+
+    #[test]
+    fn test_nested_partial_keeps_the_innermost_cause_and_the_outer_report() {
+        let nested = Partial::new(
+            ArchiveError::PartialExtraction(partial_with(1, PartialWrites::Kept)),
+            crate::ExtractionReport {
+                files_extracted: 5,
+                ..crate::ExtractionReport::default()
+            },
+            PartialWrites::Kept,
+        );
+        assert_matches!(nested.cause(), ArchiveError::SecurityViolation { .. });
+        assert_eq!(nested.report().files_extracted, 5);
+    }
+
+    #[test]
+    fn test_nested_partial_keeps_the_more_severe_writes() {
+        for (inner, outer, expected) in [
+            (
+                PartialWrites::Kept,
+                PartialWrites::Kept,
+                PartialWrites::Kept,
+            ),
+            (
+                PartialWrites::RolledBack,
+                PartialWrites::Kept,
+                PartialWrites::RolledBack,
+            ),
+            (
+                PartialWrites::Discarded,
+                PartialWrites::Kept,
+                PartialWrites::Discarded,
+            ),
+            (
+                PartialWrites::Kept,
+                PartialWrites::RolledBack,
+                PartialWrites::RolledBack,
+            ),
+            (
+                PartialWrites::Kept,
+                PartialWrites::Discarded,
+                PartialWrites::Discarded,
+            ),
+        ] {
+            let nested = Partial::new(
+                ArchiveError::PartialExtraction(partial_with(1, inner)),
+                crate::ExtractionReport::default(),
+                outer,
+            );
+            assert_eq!(nested.writes(), expected, "{inner:?} inside {outer:?}");
+        }
+    }
+
+    #[test]
+    fn test_partial_or_never_nests() {
+        let inner = ArchiveError::PartialExtraction(partial_with(1, PartialWrites::Kept));
+        let report = crate::ExtractionReport {
+            files_extracted: 2,
+            ..crate::ExtractionReport::default()
+        };
+        let ArchiveError::PartialExtraction(outer) = ArchiveError::partial_or(report, inner) else {
+            panic!("expected a partial extraction");
+        };
+        assert!(!matches!(outer.cause(), ArchiveError::PartialExtraction(_)));
+        assert_eq!(outer.report().files_extracted, 2);
     }
 
     #[test]
@@ -1344,7 +1508,7 @@ mod tests {
         let result = ArchiveError::partial_or(report, err);
         assert_matches!(
             result,
-            ArchiveError::PartialExtraction { .. },
+            ArchiveError::PartialExtraction(_),
             "expected PartialExtraction when report has processed items, got: {result:?}"
         );
     }
@@ -1375,7 +1539,7 @@ mod tests {
         let result = ArchiveError::partial_or(report, err);
         assert_matches!(
             result,
-            ArchiveError::PartialExtraction { .. },
+            ArchiveError::PartialExtraction(_),
             "expected PartialExtraction when report has files_skipped > 0 but zero total_items \
              and no warnings, got: {result:?}"
         );
@@ -1392,7 +1556,7 @@ mod tests {
         let result = ArchiveError::partial_or(report, err);
         assert_matches!(
             result,
-            ArchiveError::PartialExtraction { .. },
+            ArchiveError::PartialExtraction(_),
             "expected PartialExtraction when report has a warning but zero total_items and zero \
              files_skipped, got: {result:?}"
         );
@@ -1406,11 +1570,11 @@ mod tests {
             Compressed(100),
             Uncompressed(100_000),
         ));
-        let err = ArchiveError::PartialExtraction {
-            source: Box::new(source),
-            report: ExtractionReport::new(),
-            writes: PartialWrites::Kept,
-        };
+        let err = ArchiveError::PartialExtraction(crate::Partial::new(
+            source,
+            ExtractionReport::new(),
+            PartialWrites::Kept,
+        ));
         assert_eq!(err.error_code(), crate::ErrorCode::ZipBomb);
     }
 }

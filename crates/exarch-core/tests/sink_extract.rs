@@ -176,7 +176,7 @@ fn a_crc_corrupt_zip_entry_is_never_finished() {
 
     assert_matches!(
         error,
-        ArchiveError::PartialExtraction { .. } | ArchiveError::Io(_),
+        ArchiveError::PartialExtraction(_) | ArchiveError::Io(_),
         "{error:?}"
     );
     assert_eq!(sink.finished, [PathBuf::from("ok")]);
@@ -256,7 +256,7 @@ fn extract_links(
 
 fn is_io(error: &ArchiveError) -> bool {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => is_io(source),
+        ArchiveError::PartialExtraction(partial) => is_io(partial.cause()),
         ArchiveError::Io(_) => true,
         _ => false,
     }
@@ -320,10 +320,14 @@ fn hardlink_to_a_directory_is_invalid_for_the_sink() {
         sink_support::tar_hardlink("h", "d"),
     ];
     let error = extract_links(&entries, &mut sink, SinkOptions::default()).unwrap_err();
-    let ArchiveError::PartialExtraction { source, .. } = &error else {
+    let ArchiveError::PartialExtraction(partial) = &error else {
         panic!("{error:?}");
     };
-    assert_matches!(**source, ArchiveError::InvalidArchive(_), "{error:?}");
+    assert_matches!(
+        partial.cause(),
+        ArchiveError::InvalidArchive(_),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -346,7 +350,7 @@ fn skipped_duplicate_hardlink_is_counted_and_not_delivered() {
 
 fn tree_node_quota(error: &ArchiveError) -> Option<usize> {
     match error {
-        ArchiveError::PartialExtraction { source, .. } => tree_node_quota(source),
+        ArchiveError::PartialExtraction(partial) => tree_node_quota(partial.cause()),
         ArchiveError::QuotaExceeded {
             resource: exarch_core::QuotaResource::TreeNodes { max },
         } => Some(*max),

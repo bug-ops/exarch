@@ -798,8 +798,8 @@ impl VerificationIssue {
             ArchiveError::ReaderFormat(reason) => {
                 high_invalid_archive(format!("Reader format: {reason}"))
             }
-            ArchiveError::PartialExtraction { source, .. } => {
-                return Self::from_error(source, entry_path);
+            ArchiveError::PartialExtraction(partial) => {
+                return Self::from_error(partial.cause(), entry_path);
             }
         };
 

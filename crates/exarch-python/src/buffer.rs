@@ -187,15 +187,8 @@ fn utf8(path: &Path) -> PyResult<String> {
 fn parse_max_bytes(max_bytes: Option<i128>) -> PyResult<Option<NonZeroU64>> {
     max_bytes
         .map(|bytes| {
-            u64::try_from(bytes)
-                .ok()
-                .and_then(NonZeroU64::new)
-                .ok_or_else(|| {
-                    convert_error(ArchiveError::InvalidConfiguration {
-                        setting: exarch_core::ConfigSetting::MaxBytes,
-                        problem: exarch_core::ConfigProblem::NotPositiveWholeNumber,
-                    })
-                })
+            exarch_core::positive_from_i128(exarch_core::ConfigSetting::MaxBytes, bytes)
+                .map_err(convert_error)
         })
         .transpose()
 }

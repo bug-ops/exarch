@@ -586,9 +586,10 @@ impl Occupant {
     }
 }
 
-/// Spells `path` with its components re-joined, so `./a//b` reads `a/b`.
+/// Spells `path` with its components re-joined, so `./a//b` reads `a/b`, and
+/// injectively ([`crate::path_text`]), so two names never read alike.
 pub fn normalized_display(path: &Path) -> String {
-    path.components().collect::<PathBuf>().display().to_string()
+    crate::path_text(&path.components().collect::<PathBuf>())
 }
 
 /// What stops an entry's parent chain from being a directory.
@@ -611,8 +612,8 @@ impl ParentBlocker {
         let refusal = |noun: &str| {
             format!(
                 "refusing to create {} under the existing {noun} at {}",
-                entry.components().collect::<PathBuf>().display(),
-                parent.display()
+                normalized_display(entry),
+                normalized_display(&parent)
             )
         };
         match self {
@@ -622,7 +623,7 @@ impl ParentBlocker {
             )),
             Self::Symlink => ArchiveError::from(Violation::SymlinkParent {
                 entry: normalized_display(entry).into(),
-                parent: parent.display().to_string().into(),
+                parent: normalized_display(&parent).into(),
             }),
             Self::Escape => ArchiveError::SymlinkEscape { path: parent },
         }
@@ -1742,6 +1743,23 @@ mod tests {
         let b = OsStr::from_bytes(b"a\xfeb");
         assert_ne!(portable_fold(a), portable_fold(b));
         assert_eq!(portable_fold(a), portable_fold(a));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_refusals_of_names_differing_in_invalid_bytes_differ() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
+        for blocker in [ParentBlocker::File, ParentBlocker::Symlink] {
+            let message = |entry: &[u8]| {
+                let parent = name(entry);
+                blocker.error(&parent.join("f"), &parent).to_string()
+            };
+            let (a, b) = (message(b"d\xe9"), message(b"d\xe8"));
+            assert_ne!(a, b, "{blocker:?}");
+            assert!(!a.contains('\u{FFFD}'), "{a}");
+        }
     }
 
     fn folding_tree() -> VirtualTree {

@@ -432,7 +432,7 @@ pub fn create_temp_sibling(
         std::io::ErrorKind::AlreadyExists,
         format!(
             "failed to create a unique temp file for {} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
-            Path::new(entry.as_os_str()).display()
+            crate::path_text(Path::new(entry.as_os_str()))
         ),
     ))
 }
@@ -520,7 +520,7 @@ fn replace_error(rel: &Path, err: &std::io::Error) -> std::io::Error {
         err.kind(),
         format!(
             "cannot replace the existing file at {}: {err}",
-            rel.display()
+            crate::path_text(rel)
         ),
     )
 }
@@ -992,10 +992,29 @@ mod tests {
                 err.to_string(),
                 format!(
                     "refusing to replace the existing {noun} at {}",
-                    rel.components().collect::<PathBuf>().display()
+                    normalized_display(rel)
                 )
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_refusals_of_names_differing_in_invalid_bytes_differ() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let message =
+            |bytes: &[u8]| replace_error(Path::new(OsStr::from_bytes(bytes)), &io).to_string();
+        let (a, b) = (message(b"caf\xe9"), message(b"caf\xe8"));
+        assert_ne!(a, b);
+        assert!(!a.contains('\u{FFFD}'), "{a}");
+
+        let occupant = |bytes: &[u8]| {
+            occupant_at_dest_error(Path::new(OsStr::from_bytes(bytes)), Occupant::File).to_string()
+        };
+        assert_ne!(occupant(b"caf\xe9"), occupant(b"caf\xe8"));
     }
 
     #[test]

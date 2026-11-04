@@ -2,6 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
+use std::assert_matches;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -99,10 +100,7 @@ fn file_emptied_by_strip_prefix_is_refused() {
     )
     .unwrap_err();
 
-    assert!(
-        matches!(err, ArchiveError::InvalidConfiguration { .. }),
-        "{err:?}"
-    );
+    assert_matches!(err, ArchiveError::InvalidConfiguration { .. }, "{err:?}");
     assert!(progress.starts.is_empty());
 }
 
@@ -124,10 +122,7 @@ fn symlink_emptied_by_strip_prefix_is_refused() {
     )
     .unwrap_err();
 
-    assert!(
-        matches!(err, ArchiveError::InvalidConfiguration { .. }),
-        "{err:?}"
-    );
+    assert_matches!(err, ArchiveError::InvalidConfiguration { .. }, "{err:?}");
 }
 
 /// A socket cannot be opened as a file, for any user including root.

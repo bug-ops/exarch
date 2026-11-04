@@ -347,6 +347,7 @@ mod tests {
     use super::IdentityCheck;
     use super::PinnedDir;
     use super::current_path;
+    use std::assert_matches;
     use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
@@ -417,7 +418,7 @@ mod tests {
         let pin = PinnedDir::open(&parent).expect("pin parent");
         let (_, first) = pin.entry_status(OsStr::new("dest")).expect("first");
         let (_, second) = pin.entry_status(OsStr::new("dest")).expect("second");
-        assert!(matches!(first, FileIdentity::Known { .. }));
+        assert_matches!(first, FileIdentity::Known { .. });
         assert_eq!(second.check(first), IdentityCheck::Same);
     }
 

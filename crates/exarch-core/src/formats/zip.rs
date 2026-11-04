@@ -2254,7 +2254,7 @@ mod tests {
     fn test_symlink_entry_is_refused_on_windows() {
         let target = vec![b'a'; 16];
         let zip_bytes = raw_zip_with_custom_entry("link", &target, 0, 0, 0o120_777);
-        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;

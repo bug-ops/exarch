@@ -44,6 +44,7 @@ use exarch_core::PathComponentName;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::StoredTargets;
+use exarch_core::Violation;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::detect_format;
 use exarch_core::non_zero_usize;
@@ -859,7 +860,7 @@ const MAX_LISTED_CONFLICTS: usize = 10;
 /// conflict. `conflicts` is sorted before truncation so "first N shown" is a
 /// deterministic, reproducible subset rather than whatever order the archive
 /// manifest happened to yield.
-fn conflict_message(conflicts: &[PathBuf]) -> Message {
+fn conflict_message(conflicts: &[PathBuf], mode: WriteMode) -> Message {
     let count = conflicts.len();
     let noun = if count == 1 { "file" } else { "files" };
     let verb = if count == 1 { "exists" } else { "exist" };
@@ -869,13 +870,18 @@ fn conflict_message(conflicts: &[PathBuf]) -> Message {
     sorted.sort();
 
     let remaining = count.saturating_sub(MAX_LISTED_CONFLICTS);
+    let advice = if mode == WriteMode::Force {
+        format!("{force} cannot replace it with a directory")
+    } else {
+        format!("use {force} to overwrite")
+    };
     let mut message = if remaining == 0 {
         Message::default().text(format!(
-            "{count} destination {noun} already {verb} (use {force} to overwrite):"
+            "{count} destination {noun} already {verb} ({advice}):"
         ))
     } else {
         Message::default().text(format!(
-            "{count} destination {noun} already {verb} (use {force} to overwrite); first \
+            "{count} destination {noun} already {verb} ({advice}); first \
              {MAX_LISTED_CONFLICTS} shown:"
         ))
     };
@@ -891,8 +897,10 @@ fn conflict_message(conflicts: &[PathBuf]) -> Message {
     message
 }
 
-fn conflict_error(conflicts: &[PathBuf]) -> anyhow::Error {
-    anyhow::Error::new(CliContext::new(conflict_message(conflicts).into_parts()))
+fn conflict_error(conflicts: &[PathBuf], mode: WriteMode) -> anyhow::Error {
+    anyhow::Error::new(CliContext::new(
+        conflict_message(conflicts, mode).into_parts(),
+    ))
 }
 
 /// The ban list `--banned-component` asks for: `None` keeps the default list.
@@ -1057,36 +1065,58 @@ impl WriteMode {
 struct ConflictsChecked(());
 
 impl ConflictsChecked {
-    /// Fails with the conflicting paths in [`WriteMode::Safe`]; passes in
-    /// every other mode, where files are overwritten or the extraction is
-    /// staged and refuses on its own.
+    /// Refuses, before anything is written, a destination that cannot hold the
+    /// archive.
     ///
     /// The core says every path extraction creates, the implied parent
     /// directories included, in the order it creates them, resolving absolute
     /// and Windows-prefixed names, `.` components and paths through earlier
     /// links as extraction does. Each landing is probed with
     /// `symlink_metadata`, so a conflict is reported at the path that holds
-    /// it: a file or a link at an implied parent is named there, not at the
-    /// entry below it. Anything at the landing of a file, link or hardlink
-    /// conflicts, and so does a non-directory at the landing of a directory; a
-    /// link at an implied parent is left to extraction only when it resolves to
-    /// a directory inside the destination, and is a conflict otherwise.
+    /// it: a file at an implied parent is named there, not at the entry below
+    /// it.
+    ///
+    /// In [`WriteMode::Safe`] anything at the landing of a file, link or
+    /// hardlink conflicts, and so does a non-directory at the landing of a
+    /// directory. In [`WriteMode::Force`] files are replaced by files, but a
+    /// non-directory can never be replaced by a directory, so only landings
+    /// that must be directories are checked. Staged modes write nothing into
+    /// the destination until the end and are not checked.
+    ///
+    /// A symlink at a landing is not turned into a generic conflict: the
+    /// refusal is the library's own typed one (an escaping link is a
+    /// `SymlinkEscape`, a link that does not lead to a directory is refused
+    /// like extraction does), and a link to a directory inside the destination
+    /// is left to extraction, which accepts it under `--allow-symlinks` or
+    /// refuses with that hint.
     ///
     /// # Errors
     ///
-    /// The conflicts, or a failure to inspect a landing other than its absence.
+    /// The refusal, or a failure to inspect a landing other than its absence.
     fn check(
         mode: WriteMode,
         manifest: &ArchiveManifest,
         config: &SecurityConfig,
         output_dir: &Path,
+        archive: &Path,
     ) -> Result<Self> {
-        if mode != WriteMode::Safe {
+        if !matches!(mode, WriteMode::Safe | WriteMode::Force) {
             return Ok(Self(()));
         }
         let root = output_dir.canonicalize().ok();
         let mut conflicts = Vec::new();
         for landing in manifest.landings(config) {
+            let must_be_directory = matches!(
+                landing.kind(),
+                LandingKind::ImplicitParent
+                    | LandingKind::Entry(ArchiveEntry {
+                        kind: ManifestEntryKind::Directory,
+                        ..
+                    })
+            );
+            if mode == WriteMode::Force && !must_be_directory {
+                continue;
+            }
             let target = output_dir.join(landing.path().as_path());
             let occupant = match target.symlink_metadata() {
                 Ok(occupant) => occupant,
@@ -1100,17 +1130,16 @@ impl ConflictsChecked {
                         .with_context(|| format!("failed to inspect {}", path_text(&target)));
                 }
             };
-            let conflicts_here = match landing.kind() {
-                LandingKind::Entry(entry) => match entry.kind {
-                    ManifestEntryKind::Directory => !occupant.is_dir(),
-                    _ => true,
-                },
-                LandingKind::ImplicitParent => {
-                    !occupant.is_dir() && !is_contained_directory_link(&target, root.as_deref())
+            if occupant.file_type().is_symlink() {
+                if let Some(refusal) = symlink_refusal(
+                    landing.path().as_path(),
+                    &target,
+                    must_be_directory,
+                    root.as_deref(),
+                ) {
+                    return Err(convert_error(Operation::Extract, refusal, archive));
                 }
-                _ => true,
-            };
-            if conflicts_here {
+            } else if !(must_be_directory && occupant.is_dir()) {
                 conflicts.push(target);
             }
         }
@@ -1118,21 +1147,40 @@ impl ConflictsChecked {
         if conflicts.is_empty() {
             Ok(Self(()))
         } else {
-            Err(conflict_error(&conflicts))
+            Err(conflict_error(&conflicts, mode))
         }
     }
 }
 
-/// Whether the symlink at `target` points at a directory inside `root`, the
-/// one pre-existing link extraction can write through. Whether it may is
-/// extraction's call: without `--allow-symlinks` it refuses with the flag as a
-/// hint, so the pre-check leaves such a link alone.
-fn is_contained_directory_link(target: &Path, root: Option<&Path>) -> bool {
-    root.is_some_and(|root| {
-        target
-            .canonicalize()
-            .is_ok_and(|resolved| resolved.is_dir() && resolved.starts_with(root))
-    })
+/// The library's refusal for a symlink at a landing, or `None` when the link
+/// leads to a directory inside `root` and the landing must be a directory:
+/// whether extraction may write through it is extraction's call.
+fn symlink_refusal(
+    rel: &Path,
+    target: &Path,
+    must_be_directory: bool,
+    root: Option<&Path>,
+) -> Option<ArchiveError> {
+    let resolved = target.canonicalize().ok();
+    let inside_root = resolved
+        .as_deref()
+        .zip(root)
+        .is_some_and(|(resolved, root)| resolved.starts_with(root));
+    if !must_be_directory {
+        return Some(ArchiveError::from(Violation::ReplacesSymlink {
+            rel: path_text(rel).into(),
+        }));
+    }
+    match resolved {
+        Some(resolved) if inside_root && resolved.is_dir() => None,
+        Some(_) if !inside_root => Some(ArchiveError::SymlinkEscape {
+            path: rel.to_path_buf(),
+        }),
+        _ => Some(ArchiveError::from(Violation::SymlinkParent {
+            entry: path_text(rel).into(),
+            parent: path_text(rel).into(),
+        })),
+    }
 }
 
 /// How an extraction runs, decided once from the write mode and the
@@ -1230,7 +1278,8 @@ fn plan_extraction(
         None
     } else {
         let listed = list_for_extract(&args.archive, config, reuse)?;
-        let conflicts = ConflictsChecked::check(mode, listed.manifest(), config, output_dir)?;
+        let conflicts =
+            ConflictsChecked::check(mode, listed.manifest(), config, output_dir, &args.archive)?;
         Some((listed, conflicts))
     };
 
@@ -1872,7 +1921,7 @@ mod tests {
     }
 
     fn conflict_error_message(conflicts: &[PathBuf]) -> String {
-        crate::error::terminal(&conflict_message(conflicts).into_parts())
+        crate::error::terminal(&conflict_message(conflicts, WriteMode::Safe).into_parts())
     }
 
     #[test]

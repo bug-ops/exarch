@@ -1919,13 +1919,57 @@ fn test_conflict_precheck_follows_the_landing_of_every_entry_kind() {
             .arg(&archive)
             .arg(&out);
         if conflicts {
+            let expected = if occupant == "f" {
+                "refusing to replace the existing symlink"
+            } else {
+                "already exist"
+            };
             cmd.assert()
                 .code(1)
-                .stderr(predicates::str::contains("already exist"));
+                .stderr(predicates::str::contains(expected));
         } else {
             cmd.assert().success();
         }
     }
+}
+
+/// Under `--force` a file may replace a file, but a directory can never replace
+/// a file, so a non-directory at an implied parent is refused before anything
+/// is written, as without `--force` (#933).
+#[cfg(unix)]
+#[test]
+fn test_force_still_refuses_a_non_directory_at_an_implied_parent_before_writing() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("p.tar");
+    tar_entries_archive(
+        &archive,
+        &[
+            ("first.txt", tar::EntryType::Regular, "x"),
+            ("a/b.txt", tar::EntryType::Regular, "x"),
+        ],
+    );
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+    std::fs::write(out.join("a"), "file").expect("occupant file");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--force")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let text = String::from_utf8(output).expect("utf-8 stderr");
+    assert!(text.contains("already exist"), "{text}");
+    assert!(text.contains("out/a"), "{text}");
+    assert!(
+        !out.join("first.txt").exists(),
+        "nothing may be written first"
+    );
+    assert_eq!(std::fs::read(out.join("a")).expect("kept"), b"file");
 }
 
 /// A verify issue carries the same code, sub-code and policy setting a failed
@@ -2005,6 +2049,33 @@ fn test_create_inside_the_source_reports_no_skipped_staging_file() {
     let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
     assert_eq!(json["data"]["files_skipped"], 0, "{json}");
     assert!(json["data"]["skipped_by_kind"].get("hidden").is_none());
+
+    // The archive itself is readable and holds exactly the source file, not
+    // the staging file or the archive being written.
+    let listing = exarch_cmd()
+        .arg("--json")
+        .arg("list")
+        .arg(src.join("o.tar.gz"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listing: serde_json::Value = serde_json::from_slice(&listing).expect("one JSON document");
+    let paths: Vec<_> = listing["data"]["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter_map(|e| e["path"].as_str())
+        .filter(|p| !p.ends_with('/'))
+        .collect();
+    assert_eq!(paths.len(), 1, "{listing}");
+    assert!(paths[0].ends_with("a.txt"), "{listing}");
+    exarch_cmd()
+        .arg("verify")
+        .arg(src.join("o.tar.gz"))
+        .assert()
+        .success();
 }
 
 /// A file or a link where the archive needs a directory is reported at that
@@ -2049,12 +2120,18 @@ fn test_conflict_at_an_implied_parent_is_reported_there_before_any_write() {
             .stderr
             .clone();
         let text = String::from_utf8(output).expect("utf-8 stderr");
-        assert!(text.contains("already exist"), "{text}");
-        assert!(text.contains(&format!("out/{occupant}")), "{text}");
-        assert!(
-            !text.contains(&format!("out/{occupant}/")),
-            "reported below the occupant: {text}"
-        );
+        if occupant == "a" {
+            assert!(text.contains("already exist"), "{text}");
+            assert!(text.contains(&format!("out/{occupant}")), "{text}");
+            assert!(
+                !text.contains(&format!("out/{occupant}/")),
+                "reported below the occupant: {text}"
+            );
+        } else {
+            // A link keeps the library's typed security refusal.
+            assert!(!text.contains("already exist"), "{text}");
+            assert!(text.contains("symlink") || text.contains("link"), "{text}");
+        }
         assert!(
             !out.join("first.txt").exists(),
             "nothing may be written first"
@@ -6812,12 +6889,7 @@ fn test_extract_under_unadmittable_existing_symlink_does_not_suggest_allow_symli
             .stdout
             .clone();
         let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
-        assert!(
-            json["error"]["message"]
-                .as_str()
-                .is_some_and(|m| m.contains("already exist") && m.contains(link)),
-            "{link}: {json}"
-        );
+        assert_eq!(json["error"]["kind"], "SecurityViolation", "{link}: {json}");
         assert!(
             json["error"].get("relaxable_by").is_none(),
             "{link}: {json}"

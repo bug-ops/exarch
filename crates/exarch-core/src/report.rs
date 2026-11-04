@@ -537,6 +537,7 @@ impl ProgressCallback for NoopProgress {
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn test_new_report() {
@@ -590,12 +591,12 @@ mod tests {
         let err = skips
             .record(Skip::new(SkipKind::Duplicate, "a"))
             .unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow
             }
-        ));
+        );
         assert_eq!(skips.count(SkipKind::Duplicate), usize::MAX);
         assert!(skips.sample().is_empty());
     }

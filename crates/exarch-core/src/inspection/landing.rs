@@ -190,6 +190,7 @@ impl ArchiveManifest {
     /// use exarch_core::SecurityConfig;
     /// use exarch_core::Uncompressed;
     /// use exarch_core::formats::detect::ArchiveType;
+    /// use std::assert_matches;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
@@ -200,9 +201,9 @@ impl ArchiveManifest {
     /// let config = SecurityConfig::default();
     /// let landings: Vec<_> = manifest.landings(&config).collect();
     /// assert_eq!(landings.len(), 2);
-    /// assert!(matches!(landings[0].kind(), LandingKind::ImplicitParent));
+    /// assert_matches!(landings[0].kind(), LandingKind::ImplicitParent);
     /// assert_eq!(landings[0].path().as_path(), std::path::Path::new("a"));
-    /// assert!(matches!(landings[1].kind(), LandingKind::Entry(_)));
+    /// assert_matches!(landings[1].kind(), LandingKind::Entry(_));
     /// # Ok(())
     /// # }
     /// ```

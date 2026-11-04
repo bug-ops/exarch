@@ -2013,7 +2013,7 @@ mod tests {
 
         let refused = t.check_landing(&long, Node::File, LandingLimits::Enforced);
 
-        assert!(matches!(refused, Err(PlaceError::LandingTooLong)));
+        assert_matches!(refused, Err(PlaceError::LandingTooLong));
         assert_eq!(t.occupant(Path::new(&name)), None);
         let fits = SafePath::for_test("dir/ok");
         assert!(
@@ -2024,10 +2024,10 @@ mod tests {
         // Once a link is stored, the landing is projected through it.
         put(&mut t, "alias", sym("dir"));
         let through = SafePath::for_test(&format!("alias/{}", "n".repeat(MAX_PATH_LEN)));
-        assert!(matches!(
+        assert_matches!(
             t.check_landing(&through, Node::File, LandingLimits::Enforced),
             Err(PlaceError::LandingTooLong)
-        ));
+        );
     }
 
     #[test]
@@ -2047,7 +2047,7 @@ mod tests {
 
         let long = SafePath::for_test(&format!("alias/{}", "n".repeat(MAX_PATH_LEN)));
         let refused = t.project_landing(&long, Node::File, LandingLimits::Enforced);
-        assert!(matches!(refused, Err(PlaceError::LandingTooLong)));
+        assert_matches!(refused, Err(PlaceError::LandingTooLong));
         let name = format!("real/{}", "n".repeat(MAX_PATH_LEN));
         assert_eq!(
             t.occupant(Path::new(&name)),
@@ -2056,10 +2056,10 @@ mod tests {
         );
         let missing_parents =
             SafePath::for_test(&format!("alias/p/q/{}", "n".repeat(MAX_PATH_LEN)));
-        assert!(matches!(
+        assert_matches!(
             t.project_landing(&missing_parents, Node::File, LandingLimits::Enforced),
             Err(PlaceError::LandingTooLong)
-        ));
+        );
         assert_eq!(t.occupant(Path::new("real/p")), None);
         let exempt = t.project_landing(
             &SafePath::for_test(&format!("alias/{}", "m".repeat(MAX_PATH_LEN))),

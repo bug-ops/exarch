@@ -691,12 +691,13 @@ pub struct VerificationIssue {
 /// use exarch_core::ErrorCode;
 /// use exarch_core::Finding;
 /// use exarch_core::VerificationIssue;
+/// use std::assert_matches;
 ///
 /// let error = ArchiveError::PathTraversal {
 ///     path: "../x".into(),
 /// };
 /// let issue = VerificationIssue::from_error(&error, None);
-/// assert!(matches!(issue.finding(), Finding::Refusal { .. }));
+/// assert_matches!(issue.finding(), Finding::Refusal { .. });
 /// assert_eq!(
 ///     issue.ffi_kind().map(|k| k.code()),
 ///     Some(ErrorCode::PathTraversal)

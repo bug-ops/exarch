@@ -1966,9 +1966,7 @@ fn test_create_errors_name_the_pattern_and_the_source_once() {
         .arg(fixture_path("sample.txt"))
         .assert()
         .code(1)
-        .stderr(predicates::str::contains(
-            "invalid --exclude value \"build/*\"",
-        ));
+        .stderr(predicates::str::contains("exclude pattern \"build/*\""));
 
     let missing = temp.path().join("missing-source");
     let output = exarch_cmd()
@@ -2187,6 +2185,84 @@ fn test_verify_json_reports_the_mode_of_an_invalid_permissions_refusal() {
         .filter_map(|issue| issue["mode"].as_u64())
         .collect();
     assert_eq!(modes, vec![0o4755, 0o4755], "{json}");
+}
+
+/// Each refused shape is a typed core refusal that names the pattern and its
+/// reason; the CLI adds no text of its own (#916).
+#[test]
+fn test_create_refuses_each_exclude_shape_with_the_core_reason() {
+    for (pattern, reason) in [
+        ("?.txt", "not glob syntax"),
+        ("[a", "not glob syntax"),
+        ("{a,b}", "contains a comma"),
+        ("!a.txt", "not glob syntax"),
+        (" .env", "whitespace"),
+        ("a,b", "contains a comma"),
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let out = temp.path().join("o.tar.gz");
+        let output = exarch_cmd()
+            .arg("--json")
+            .arg("create")
+            .arg("-x")
+            .arg(pattern)
+            .arg(&out)
+            .arg(fixture_path("sample.txt"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+        assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{pattern:?}");
+        assert_eq!(json["error"]["setting"], "exclude_pattern", "{pattern:?}");
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains(&format!("{pattern:?}")),
+            "{pattern:?}: {message}"
+        );
+        assert!(message.contains(reason), "{pattern:?}: {message}");
+        assert!(!out.exists(), "{pattern:?} must not create an archive");
+    }
+}
+
+/// Exclude matching works on raw name bytes, so `*.key` drops a file whose
+/// name is not valid UTF-8 (#916).
+#[cfg(unix)]
+#[test]
+fn test_exclude_pattern_matches_a_non_utf8_name() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let src = temp.path().join("src");
+    std::fs::create_dir(&src).expect("source dir");
+    std::fs::write(src.join("ok.txt"), "x").expect("source file");
+    if std::fs::write(src.join(OsStr::from_bytes(b"\xff.key")), "secret").is_err() {
+        eprintln!("skipping: this filesystem refuses non-UTF-8 names");
+        return;
+    }
+
+    let archive = temp.path().join("o.tar");
+    exarch_cmd()
+        .arg("create")
+        .arg("-x")
+        .arg("*.key")
+        .arg(&archive)
+        .arg(&src)
+        .assert()
+        .success();
+    let listing = exarch_cmd()
+        .arg("list")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(listing).expect("utf-8 listing");
+    assert!(text.contains("ok.txt"), "{text}");
+    assert!(!text.contains(".key"), "{text}");
 }
 
 #[test]

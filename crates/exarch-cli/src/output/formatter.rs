@@ -14,6 +14,7 @@ use exarch_core::SkipKind;
 use exarch_core::Skips;
 use exarch_core::SubCode;
 use exarch_core::VerificationReport;
+use exarch_core::path_text;
 use serde::Serialize;
 use serde::Serializer;
 use std::collections::BTreeMap;
@@ -210,7 +211,7 @@ impl From<&Skips> for JsonSkips {
                 .iter()
                 .map(|skip| JsonSkip {
                     kind: skip.kind.as_str(),
-                    path: skip.path.display().to_string(),
+                    path: path_text(&skip.path),
                     io_kind: skip.io_kind.map(|kind| kind.to_string()),
                 })
                 .collect(),

@@ -17,11 +17,10 @@ use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
-use exarch_core::Finding;
-use exarch_core::Heuristic;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
 use exarch_core::VerificationReport;
+use exarch_core::path_text;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Stdout;
@@ -53,7 +52,7 @@ impl From<&LinkTarget> for JsonLinkTarget {
     fn from(target: &LinkTarget) -> Self {
         match target {
             LinkTarget::Recorded(path) => Self::Recorded {
-                path: path.display().to_string(),
+                path: path_text(path),
             },
             LinkTarget::Missing => Self::Missing,
             LinkTarget::Unread => Self::Unread,
@@ -134,7 +133,7 @@ fn short_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
             .entries()
             .iter()
             .map(|e| ManifestEntry {
-                path: e.path.display().to_string(),
+                path: path_text(&e.path),
             })
             .collect(),
     }
@@ -172,7 +171,7 @@ fn long_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
             .entries()
             .iter()
             .map(|e| ManifestEntry {
-                path: e.path.display().to_string(),
+                path: path_text(&e.path),
                 entry_type: e.kind.entry_type().as_str(),
                 size: e.size(),
                 compressed_size: e.compressed_size(),
@@ -230,7 +229,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         self.success(
             Operation::Create,
             CreationOutput {
-                output_path: output_path.display().to_string(),
+                output_path: path_text(output_path),
                 files_added: report.files_added,
                 directories_added: report.directories_added,
                 symlinks_added: report.symlinks_added,
@@ -294,8 +293,8 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             category: &'static str,
             entry_path: Option<String>,
             message: String,
-            /// The raw mode of an executable file, the one observation that
-            /// carries a detail.
+            /// The raw mode of an executable file or of an invalid-permissions
+            /// refusal.
             #[serde(skip_serializing_if = "Option::is_none")]
             mode: Option<u32>,
             #[serde(flatten)]
@@ -334,12 +333,9 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .map(|i| VerificationIssue {
                 severity: i.severity().as_str(),
                 category: i.category().as_str(),
-                entry_path: i.entry_path().map(|p| p.display().to_string()),
+                entry_path: i.entry_path().map(path_text),
                 message: i.message(),
-                mode: match i.finding() {
-                    Finding::Heuristic(Heuristic::ExecutableFile { mode }) => Some(mode.get()),
-                    _ => None,
-                },
+                mode: i.mode().map(exarch_core::RawMode::get),
                 refusal: i.ffi_kind().map(JsonRefusal::from),
             })
             .collect();
@@ -356,7 +352,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                     .entries()
                     .iter()
                     .map(|e| UnverifiedEntry {
-                        path: e.path().display().to_string(),
+                        path: path_text(e.path()),
                         reason: e.reason().as_str(),
                     })
                     .collect(),

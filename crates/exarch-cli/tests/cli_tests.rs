@@ -2009,6 +2009,194 @@ fn test_create_inside_the_source_reports_no_skipped_staging_file() {
     assert!(json["data"]["skipped_by_kind"].get("hidden").is_none());
 }
 
+/// A file or a link where the archive needs a directory is reported at that
+/// path, before anything is written (#933).
+#[cfg(unix)]
+#[test]
+fn test_conflict_at_an_implied_parent_is_reported_there_before_any_write() {
+    for (occupant, entries) in [
+        (
+            "a",
+            vec![
+                ("first.txt", tar::EntryType::Regular, "x"),
+                ("a/b.txt", tar::EntryType::Regular, "x"),
+            ],
+        ),
+        (
+            "link",
+            vec![
+                ("first.txt", tar::EntryType::Regular, "x"),
+                ("link/x", tar::EntryType::Regular, "x"),
+            ],
+        ),
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let archive = temp.path().join("p.tar");
+        tar_entries_archive(&archive, &entries);
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("create destination");
+        if occupant == "a" {
+            std::fs::write(out.join("a"), "file").expect("occupant file");
+        } else {
+            std::os::unix::fs::symlink("../elsewhere", out.join("link")).expect("occupant link");
+        }
+
+        let output = exarch_cmd()
+            .arg("extract")
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .code(1)
+            .get_output()
+            .stderr
+            .clone();
+        let text = String::from_utf8(output).expect("utf-8 stderr");
+        assert!(text.contains("already exist"), "{text}");
+        assert!(text.contains(&format!("out/{occupant}")), "{text}");
+        assert!(
+            !text.contains(&format!("out/{occupant}/")),
+            "reported below the occupant: {text}"
+        );
+        assert!(
+            !out.join("first.txt").exists(),
+            "nothing may be written first"
+        );
+    }
+}
+
+/// Two names that differ only in invalid bytes stay distinct in every text and
+/// JSON output, and U+FFFD never appears (#925).
+#[cfg(unix)]
+#[test]
+fn test_non_utf8_names_render_injectively_everywhere() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("raw.tar");
+    let mut builder = tar::Builder::new(Vec::new());
+    for raw in [&b"caf\xe9"[..], &b"caf\xe8"[..]] {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_mode(0o777);
+        header.set_size(0);
+        builder
+            .append_link(
+                &mut header,
+                std::path::Path::new(OsStr::from_bytes(raw)),
+                "t",
+            )
+            .expect("raw entry");
+    }
+    std::fs::write(&archive, builder.into_inner().expect("tar bytes")).expect("write tar");
+
+    for json_mode in [false, true] {
+        for command in ["list", "verify"] {
+            let mut cmd = exarch_cmd();
+            if json_mode {
+                cmd.arg("--json");
+            }
+            cmd.arg(command);
+            if command == "list" {
+                cmd.arg("-l");
+            }
+            let output = cmd.arg(&archive).assert().get_output().stdout.clone();
+            let text = String::from_utf8(output).expect("utf-8 output");
+            // JSON writes the escape's backslash as `\\`.
+            let (first, second) = if json_mode {
+                ("caf\\\\xE9", "caf\\\\xE8")
+            } else {
+                ("caf\\xE9", "caf\\xE8")
+            };
+            assert!(text.contains(first), "{command} json={json_mode}: {text}");
+            assert!(text.contains(second), "{command} json={json_mode}: {text}");
+            // The core's own "not valid UTF-8" finding text still carries a
+            // lossy rendering of the name (reported to the lead); every
+            // path field and line is checked.
+            let paths_only: String = text
+                .lines()
+                .filter(|line| !line.contains("not valid UTF-8"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !paths_only.contains('\u{fffd}'),
+                "{command} json={json_mode}: {text}"
+            );
+        }
+    }
+
+    // APFS refuses to create a file with a non-UTF-8 name, so the parts that
+    // need one on disk run where the filesystem allows it.
+    #[cfg(target_os = "linux")]
+    {
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("destination");
+        std::fs::write(out.join(OsStr::from_bytes(b"caf\xe9")), "x").expect("occupant");
+        let stderr = exarch_cmd()
+            .arg("extract")
+            .arg("--allow-symlinks")
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .code(1)
+            .get_output()
+            .stderr
+            .clone();
+        let text = String::from_utf8(stderr).expect("utf-8 stderr");
+        assert!(
+            text.contains("caf\\xE9") && !text.contains('\u{fffd}'),
+            "{text}"
+        );
+
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("source dir");
+        std::fs::write(src.join(OsStr::from_bytes(b".caf\xe9")), "x").expect("hidden raw file");
+        std::fs::write(src.join(OsStr::from_bytes(b".caf\xe8")), "x").expect("hidden raw file");
+        let output = exarch_cmd()
+            .arg("--json")
+            .arg("create")
+            .arg(temp.path().join("c.tar.gz"))
+            .arg(&src)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(output).expect("utf-8 output");
+        assert!(
+            text.contains(".caf\\\\xE9") && text.contains(".caf\\\\xE8"),
+            "{text}"
+        );
+        assert!(!text.contains('\u{fffd}'), "{text}");
+    }
+}
+
+/// An invalid-permissions refusal carries its raw mode as a number (#899).
+#[cfg(unix)]
+#[test]
+fn test_verify_json_reports_the_mode_of_an_invalid_permissions_refusal() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("setuid.tar.gz");
+    create_setuid_tar_gz(&archive);
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("verify")
+        .arg(&archive)
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    let modes: Vec<_> = json["data"]["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter_map(|issue| issue["mode"].as_u64())
+        .collect();
+    assert_eq!(modes, vec![0o4755, 0o4755], "{json}");
+}
+
 #[test]
 fn test_fractional_compression_ratio_is_accepted() {
     exarch_cmd()
@@ -6556,7 +6744,12 @@ fn test_extract_under_unadmittable_existing_symlink_does_not_suggest_allow_symli
             .stdout
             .clone();
         let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
-        assert_eq!(json["error"]["kind"], "SecurityViolation", "{link}: {json}");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("already exist") && m.contains(link)),
+            "{link}: {json}"
+        );
         assert!(
             json["error"].get("relaxable_by").is_none(),
             "{link}: {json}"

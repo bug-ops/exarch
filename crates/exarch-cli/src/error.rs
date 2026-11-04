@@ -26,6 +26,7 @@ use exarch_core::TarTrailerRefusal;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
 use exarch_core::formats::detect::ArchiveType;
+use exarch_core::path_text;
 use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
@@ -48,7 +49,7 @@ impl Part {
     fn write_raw(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lit(text) => f.write_str(text),
-            Self::Path(path) => write!(f, "{}", path.display()),
+            Self::Path(path) => f.write_str(&path_text(path)),
             Self::Text(text) => f.write_str(text),
         }
     }

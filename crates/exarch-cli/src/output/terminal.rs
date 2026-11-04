@@ -23,6 +23,7 @@
 //! a CJK ideograph, and the Mongolian free variation selectors after a
 //! Mongolian letter.
 
+use exarch_core::path_text;
 use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Write as _;
@@ -398,7 +399,7 @@ impl<'a> TerminalPath<'a> {
 
 impl fmt::Display for TerminalPath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_escaped(f, &self.0.to_string_lossy())
+        write_escaped(f, &path_text(self.0))
     }
 }
 
@@ -643,11 +644,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn path_renders_non_utf8_lossily() {
+    fn path_renders_non_utf8_injectively() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
         let path = Path::new(OsStr::from_bytes(b"a\xffb"));
-        assert_eq!(TerminalPath::new(path).to_string(), "a\u{fffd}b");
+        assert_eq!(TerminalPath::new(path).to_string(), "a\\xFFb");
+        let other = Path::new(OsStr::from_bytes(b"a\xfeb"));
+        assert_ne!(
+            TerminalPath::new(path).to_string(),
+            TerminalPath::new(other).to_string()
+        );
+        assert!(!TerminalPath::new(path).to_string().contains('\u{fffd}'));
     }
 }

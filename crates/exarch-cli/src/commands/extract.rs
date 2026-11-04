@@ -34,6 +34,7 @@ use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::ExtractionWarning;
+use exarch_core::LandingKind;
 use exarch_core::ListOptions;
 use exarch_core::ListRequest;
 use exarch_core::ListedArchive;
@@ -46,6 +47,7 @@ use exarch_core::StoredTargets;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::detect_format;
 use exarch_core::non_zero_usize;
+use exarch_core::path_text;
 use std::cell::Cell;
 use std::env;
 use std::io;
@@ -1059,11 +1061,20 @@ impl ConflictsChecked {
     /// every other mode, where files are overwritten or the extraction is
     /// staged and refuses on its own.
     ///
-    /// Where each entry lands comes from the core, which resolves absolute and
-    /// Windows-prefixed names, `.` components and paths through earlier links
-    /// the way extraction does and leaves out the entries it would not create.
-    /// Anything already at the landing of a file, link or hardlink conflicts,
-    /// and so does a non-directory at the landing of a directory.
+    /// The core says every path extraction creates, the implied parent
+    /// directories included, in the order it creates them, resolving absolute
+    /// and Windows-prefixed names, `.` components and paths through earlier
+    /// links as extraction does. Each landing is probed with
+    /// `symlink_metadata`, so a conflict is reported at the path that holds
+    /// it: a file or a link at an implied parent is named there, not at the
+    /// entry below it. Anything at the landing of a file, link or hardlink
+    /// conflicts, and so does a non-directory at the landing of a directory; a
+    /// link at an implied parent is left to extraction only when it resolves to
+    /// a directory inside the destination, and is a conflict otherwise.
+    ///
+    /// # Errors
+    ///
+    /// The conflicts, or a failure to inspect a landing other than its absence.
     fn check(
         mode: WriteMode,
         manifest: &ArchiveManifest,
@@ -1073,18 +1084,36 @@ impl ConflictsChecked {
         if mode != WriteMode::Safe {
             return Ok(Self(()));
         }
-        let conflicts: Vec<_> = manifest
-            .landing_paths(config)
-            .filter_map(|(entry, landing)| {
-                let target = output_dir.join(landing.as_path());
-                let occupant = target.symlink_metadata().ok()?;
-                let conflicts = match entry.kind {
+        let root = output_dir.canonicalize().ok();
+        let mut conflicts = Vec::new();
+        for landing in manifest.landings(config) {
+            let target = output_dir.join(landing.path().as_path());
+            let occupant = match target.symlink_metadata() {
+                Ok(occupant) => occupant,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                // Below a conflict already reported at an ancestor.
+                Err(err) if err.kind() == io::ErrorKind::NotADirectory && !conflicts.is_empty() => {
+                    continue;
+                }
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("failed to inspect {}", path_text(&target)));
+                }
+            };
+            let conflicts_here = match landing.kind() {
+                LandingKind::Entry(entry) => match entry.kind {
                     ManifestEntryKind::Directory => !occupant.is_dir(),
                     _ => true,
-                };
-                conflicts.then_some(target)
-            })
-            .collect();
+                },
+                LandingKind::ImplicitParent => {
+                    !occupant.is_dir() && !is_contained_directory_link(&target, root.as_deref())
+                }
+                _ => true,
+            };
+            if conflicts_here {
+                conflicts.push(target);
+            }
+        }
 
         if conflicts.is_empty() {
             Ok(Self(()))
@@ -1092,6 +1121,18 @@ impl ConflictsChecked {
             Err(conflict_error(&conflicts))
         }
     }
+}
+
+/// Whether the symlink at `target` points at a directory inside `root`, the
+/// one pre-existing link extraction can write through. Whether it may is
+/// extraction's call: without `--allow-symlinks` it refuses with the flag as a
+/// hint, so the pre-check leaves such a link alone.
+fn is_contained_directory_link(target: &Path, root: Option<&Path>) -> bool {
+    root.is_some_and(|root| {
+        target
+            .canonicalize()
+            .is_ok_and(|resolved| resolved.is_dir() && resolved.starts_with(root))
+    })
 }
 
 /// How an extraction runs, decided once from the write mode and the

@@ -151,11 +151,34 @@ export interface ExarchIoDetail {
   setting?: undefined
 }
 
+/** A quota refusal; `subCode` names the quota that was exceeded. */
+export interface ExarchQuotaDetail {
+  code: 'QUOTA_EXCEEDED'
+  subCode: QuotaSubCode
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+}
+
+/** A compression ratio refusal; `subCode` names what the ratio was measured over. */
+export interface ExarchZipBombDetail {
+  code: 'ZIP_BOMB'
+  subCode: ZipBombSubCode
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+}
+
 /** Every other code carries no detail property. */
 export interface ExarchPlainCodeDetail {
   code: Exclude<
     ErrorCode,
-    'INVALID_ARCHIVE' | 'SECURITY_VIOLATION' | 'INVALID_CONFIGURATION' | 'IO_ERROR'
+    | 'INVALID_ARCHIVE'
+    | 'SECURITY_VIOLATION'
+    | 'INVALID_CONFIGURATION'
+    | 'IO_ERROR'
+    | 'QUOTA_EXCEEDED'
+    | 'ZIP_BOMB'
   >
   subCode?: undefined
   relaxableBy?: undefined
@@ -169,6 +192,8 @@ export type ExarchErrorCodeDetail =
   | ExarchSecurityViolationDetail
   | ExarchInvalidConfigurationDetail
   | ExarchIoDetail
+  | ExarchQuotaDetail
+  | ExarchZipBombDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -186,7 +211,8 @@ export type ExarchErrorOutcome =
  * for the detail properties: `code === 'INVALID_ARCHIVE'` narrows `subCode` to
  * `InvalidArchiveSubCode`, `'SECURITY_VIOLATION'` to a required
  * `SecurityViolationSubCode`, `'INVALID_CONFIGURATION'` exposes `setting` and
- * `'IO_ERROR'` a required `ioKind`. `code` is an `ErrorCode`, so a
+ * `'IO_ERROR'` a required `ioKind`, `'QUOTA_EXCEEDED'` and `'ZIP_BOMB'` a required
+ * `QuotaSubCode` or `ZipBombSubCode`. `code` is an `ErrorCode`, so a
  * `switch (err.code)` is exhaustive.
  */
 export type ExarchCoreError = ExarchErrorOutcome & ExarchErrorCodeDetail

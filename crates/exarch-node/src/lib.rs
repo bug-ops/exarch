@@ -104,11 +104,13 @@ use error::Failure;
 use error::ProgressCallbackError;
 use error::run_sync;
 use error::spawn_blocking_promise;
+use exarch_core::BoundaryPath;
 use report::ArchiveManifest;
 use report::CreationReport;
 use report::ExtractionReport;
 use report::VerificationReport;
-use utils::validate_path;
+use utils::boundary_path;
+use utils::boundary_paths;
 
 /// Result of the binding-internal operations, before conversion to a JS error.
 type CoreResult<T> = std::result::Result<T, Failure>;
@@ -242,11 +244,11 @@ fn extract_core(
     config: &exarch_core::SecurityConfig,
     options: &exarch_core::ExtractionOptions,
 ) -> CoreResult<exarch_core::ExtractionReport> {
-    validate_path(archive_path)?;
-    validate_path(output_dir)?;
+    let archive_path = boundary_path(archive_path)?;
+    let output_dir = boundary_path(output_dir)?;
     Ok(exarch_core::extract_archive_with_options(
-        archive_path,
-        output_dir,
+        &archive_path,
+        &output_dir,
         config,
         options,
     )?)
@@ -352,12 +354,11 @@ pub fn create_archive<'env>(
     )
 }
 
-fn validate_create_paths(output_path: &str, sources: &[String]) -> CoreResult<()> {
-    validate_path(output_path)?;
-    sources
-        .iter()
-        .try_for_each(|source| validate_path(source))?;
-    Ok(())
+fn boundary_create_paths(
+    output_path: &str,
+    sources: &[String],
+) -> CoreResult<(BoundaryPath, Vec<BoundaryPath>)> {
+    Ok((boundary_path(output_path)?, boundary_paths(sources)?))
 }
 
 fn create_core(
@@ -365,13 +366,8 @@ fn create_core(
     sources: &[String],
     config: &exarch_core::creation::CreationConfig,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
-    validate_create_paths(output_path, sources)?;
-    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-    Ok(exarch_core::create_archive(
-        output_path,
-        &sources_refs,
-        config,
-    )?)
+    let (output_path, sources) = boundary_create_paths(output_path, sources)?;
+    Ok(exarch_core::create_archive(&output_path, &sources, config)?)
 }
 
 /// Create an archive from source files and directories (sync).
@@ -637,10 +633,16 @@ fn create_with_progress_core(
     progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
     dispatch: ProgressDispatch,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
-    validate_create_paths(output_path, sources)?;
-    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-    run_create_with_optional_progress(output_path, &sources_refs, config, progress, dispatch)
-        .map_err(Failure::Callback)
+    let (output_path, sources) = boundary_create_paths(output_path, sources)?;
+    let sources_refs: Vec<&str> = sources.iter().map(BoundaryPath::as_str).collect();
+    run_create_with_optional_progress(
+        output_path.as_str(),
+        &sources_refs,
+        config,
+        progress,
+        dispatch,
+    )
+    .map_err(Failure::Callback)
 }
 
 /// Create an archive from source files and directories with a progress
@@ -830,8 +832,8 @@ fn list_core(
     archive_path: &str,
     config: &exarch_core::SecurityConfig,
 ) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
-    validate_path(archive_path)?;
-    Ok(exarch_core::list_archive(archive_path, config)?)
+    let archive_path = boundary_path(archive_path)?;
+    Ok(exarch_core::list_archive(&archive_path, config)?)
 }
 
 /// List archive contents without extracting (sync).
@@ -935,9 +937,9 @@ fn verify_core(
     config: &exarch_core::SecurityConfig,
     options: exarch_core::VerificationOptions,
 ) -> CoreResult<exarch_core::inspection::VerificationReport> {
-    validate_path(archive_path)?;
+    let archive_path = boundary_path(archive_path)?;
     Ok(exarch_core::verify_archive_with_options(
-        archive_path,
+        &archive_path,
         config,
         &options,
     )?)
@@ -1106,11 +1108,11 @@ pub fn extract_archive_with_progress<'env>(
         env,
         "archive extraction with progress",
         move || {
-            validate_path(&archive_path)?;
-            validate_path(&output_dir)?;
+            let archive_path = boundary_path(&archive_path)?;
+            let output_dir = boundary_path(&output_dir)?;
             run_extract_with_optional_progress(
-                &archive_path,
-                &output_dir,
+                archive_path.as_str(),
+                output_dir.as_str(),
                 &config_owned,
                 &options_owned,
                 progress,

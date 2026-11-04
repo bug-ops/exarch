@@ -366,9 +366,48 @@ describe('SecurityConfig', () => {
     for (const bad of [0, -1, 1.5, NaN, Infinity]) {
       it(`should reject ${bad} and keep the previous value`, () => {
         const config = new SecurityConfig();
-        assert.throws(() => config.setParallelDecodeMemory(bad), /positive whole number/i);
+        assert.throws(() => config.setParallelDecodeMemory(bad), {
+          code: 'INVALID_CONFIGURATION',
+          setting: 'parallel_decode_memory',
+        });
         assert.strictEqual(config.parallelDecodeMemory, 128 * MIB);
       });
     }
+  });
+
+  describe('count and size setters refuse out-of-range numbers', () => {
+    const setters = [
+      ['setMaxFileCount', 'maxFileCount', 'max_file_count'],
+      ['setMaxPathDepth', 'maxPathDepth', 'max_path_depth'],
+      ['setMaxFileSize', 'maxFileSize', 'max_file_size'],
+      ['setMaxTotalSize', 'maxTotalSize', 'max_total_size'],
+    ];
+    const bad = [-1, 0, 1.5, NaN, Infinity, -Infinity, 2 ** 53];
+
+    for (const [setter, getter, setting] of setters) {
+      for (const value of bad) {
+        it(`${setter}(${value}) throws INVALID_CONFIGURATION and keeps the limit`, () => {
+          const config = new SecurityConfig();
+          const before = config[getter];
+          assert.throws(() => config[setter](value), {
+            code: 'INVALID_CONFIGURATION',
+            setting,
+          });
+          assert.strictEqual(config[getter], before);
+        });
+      }
+    }
+
+    it('keeps a count above 2^32 instead of wrapping it', () => {
+      const config = new SecurityConfig();
+      config.setMaxFileCount(4294967306);
+      assert.strictEqual(config.maxFileCount, 4294967306);
+    });
+
+    it('accepts the largest exactly representable number', () => {
+      const config = new SecurityConfig();
+      config.setMaxFileSize(2 ** 53 - 1);
+      assert.strictEqual(config.maxFileSize, 2 ** 53 - 1);
+    });
   });
 });

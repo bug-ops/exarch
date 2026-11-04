@@ -163,6 +163,16 @@ describe('CreationConfig', () => {
       assert.ok(config.excludePatterns.includes('*.log'));
       assert.ok(config.excludePatterns.includes('node_modules'));
     });
+
+    it('should refuse a pattern with a null byte as INVALID_CONFIGURATION', () => {
+      const config = new CreationConfig();
+      const before = config.excludePatterns;
+      assert.throws(() => config.addExcludePattern('bad\0pattern'), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'exclude_pattern',
+      });
+      assert.deepStrictEqual(config.excludePatterns, before);
+    });
   });
 
   describe('compression levels', () => {

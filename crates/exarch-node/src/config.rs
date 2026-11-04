@@ -15,8 +15,7 @@ use exarch_core::RatioLimit;
 use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
 use exarch_core::creation::CompressionLevel;
-use exarch_core::non_zero_u64;
-use exarch_core::non_zero_usize;
+use exarch_core::positive_from_f64;
 use napi::Env;
 use napi::bindgen_prelude::Either;
 use napi::bindgen_prelude::Error;
@@ -28,40 +27,39 @@ use crate::error::IntoJsError;
 use crate::report::saturating_i64;
 use crate::report::unknown_variant;
 
-/// Parses a JavaScript byte count: a negative value and zero are refusals
-/// naming `setting`.
-fn byte_count(setting: ConfigSetting, size: i64) -> std::result::Result<NonZeroU64, CoreError> {
-    let bytes = u64::try_from(size).map_err(|_| CoreError::InvalidConfiguration {
-        setting,
-        problem: ConfigProblem::Negative,
-    })?;
-    non_zero_u64(setting, bytes)
+/// Parses a JavaScript byte count: a negative, fractional, non-finite or
+/// out-of-range value and zero are refusals naming `setting`.
+fn byte_count(setting: ConfigSetting, size: f64) -> std::result::Result<NonZeroU64, CoreError> {
+    positive_from_f64(setting, size)
 }
 
 /// [`byte_count`] as a bounded limit.
 fn byte_limit(
     setting: ConfigSetting,
-    size: i64,
+    size: f64,
 ) -> std::result::Result<Limit<NonZeroU64>, CoreError> {
     byte_count(setting, size).map(Limit::Bounded)
 }
 
-/// Largest integer a JavaScript number holds exactly (2^53 - 1).
-const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+/// Parses a JavaScript count the way [`byte_count`] does, for a `usize` field.
+fn count_value(setting: ConfigSetting, count: f64) -> std::result::Result<NonZeroUsize, CoreError> {
+    let count = positive_from_f64(setting, count)?;
+    NonZeroUsize::try_from(count).map_err(|_| CoreError::InvalidConfiguration {
+        setting,
+        problem: ConfigProblem::TooLarge {
+            max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+        },
+    })
+}
 
-/// A positive whole byte count held exactly by `bytes`, or `None`.
-///
-/// napi's integer conversion would truncate `1.5` to `1`; a fraction is a
-/// caller mistake and is refused instead.
+/// A count as the JavaScript number it is held in, clamped to the largest
+/// integer a number holds exactly (2^53 - 1).
 #[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "bytes is a whole number in 1..=2^53-1 here"
+    clippy::cast_precision_loss,
+    reason = "the value is clamped to 2^53 - 1, which an f64 holds exactly"
 )]
-pub fn exact_positive_bytes(bytes: f64) -> Option<NonZeroU64> {
-    let whole =
-        bytes.is_finite() && bytes.fract() == 0.0 && (1.0..=MAX_SAFE_INTEGER).contains(&bytes);
-    whole.then(|| NonZeroU64::new(bytes as u64)).flatten()
+fn exact_f64(value: usize) -> f64 {
+    u64::try_from(value).unwrap_or(u64::MAX).min((1 << 53) - 1) as f64
 }
 
 /// How ZIP archives with ambiguous structure are handled.
@@ -167,7 +165,7 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
     /// negative or zero.
     #[napi(js_name = "setMaxFileSize")]
-    pub fn set_max_file_size(&mut self, env: Env, size: i64) -> Result<&Self> {
+    pub fn set_max_file_size(&mut self, env: Env, size: f64) -> Result<&Self> {
         self.try_set_max_file_size(size)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -180,7 +178,7 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_total_size`) if size
     /// is negative or zero.
     #[napi(js_name = "setMaxTotalSize")]
-    pub fn set_max_total_size(&mut self, env: Env, size: i64) -> Result<&Self> {
+    pub fn set_max_total_size(&mut self, env: Env, size: f64) -> Result<&Self> {
         self.try_set_max_total_size(size)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -212,7 +210,7 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_count`) if count
     /// is zero.
     #[napi(js_name = "setMaxFileCount")]
-    pub fn set_max_file_count(&mut self, env: Env, count: u32) -> Result<&Self> {
+    pub fn set_max_file_count(&mut self, env: Env, count: f64) -> Result<&Self> {
         self.try_set_max_file_count(count)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -225,7 +223,7 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_path_depth`) if depth
     /// is zero.
     #[napi(js_name = "setMaxPathDepth")]
-    pub fn set_max_path_depth(&mut self, env: Env, depth: u32) -> Result<&Self> {
+    pub fn set_max_path_depth(&mut self, env: Env, depth: f64) -> Result<&Self> {
         self.try_set_max_path_depth(depth)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -288,19 +286,12 @@ impl SecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if `size` is not a positive whole number of bytes.
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `parallel_decode_memory`)
+    /// if `size` is not a positive whole number of bytes.
     #[napi(js_name = "setParallelDecodeMemory")]
-    pub fn set_parallel_decode_memory(&mut self, size: Option<f64>) -> Result<&Self> {
-        let lookahead = size
-            .map(|bytes| {
-                exact_positive_bytes(bytes).ok_or_else(|| {
-                    Error::from_reason(
-                        "parallel decode memory must be a positive whole number of bytes (use null to disable)",
-                    )
-                })
-            })
-            .transpose()?;
-        self.inner.parallel_decode = ParallelDecode::from(lookahead);
+    pub fn set_parallel_decode_memory(&mut self, env: Env, size: Option<f64>) -> Result<&Self> {
+        self.try_set_parallel_decode_memory(size)
+            .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
 
@@ -315,7 +306,7 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_solid_block_memory`)
     /// if size is negative or zero, or while solid archives are not allowed.
     #[napi(js_name = "setMaxSolidBlockMemory")]
-    pub fn set_max_solid_block_memory(&mut self, env: Env, size: i64) -> Result<&Self> {
+    pub fn set_max_solid_block_memory(&mut self, env: Env, size: f64) -> Result<&Self> {
         self.try_set_max_solid_block_memory(size)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -409,18 +400,19 @@ impl SecurityConfig {
         self.inner.max_compression_ratio.get()
     }
 
-    /// Maximum file count.
+    /// Maximum file count, or `null` when unbounded.
     #[napi(getter)]
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn get_max_file_count(&self) -> u32 {
-        self.inner.max_file_count.ceiling() as u32
+    pub fn get_max_file_count(&self) -> Option<f64> {
+        match self.inner.max_file_count {
+            Limit::Bounded(count) => Some(exact_f64(count.get())),
+            Limit::Unbounded => None,
+        }
     }
 
     /// Maximum path depth.
     #[napi(getter)]
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn get_max_path_depth(&self) -> u32 {
-        self.inner.max_path_depth.get() as u32
+    pub fn get_max_path_depth(&self) -> f64 {
+        exact_f64(self.inner.max_path_depth.get())
     }
 
     /// Whether to preserve permissions from archive.
@@ -561,13 +553,13 @@ impl SecurityConfig {
     }
 
     /// Env-free core of `setMaxFileSize`.
-    fn try_set_max_file_size(&mut self, size: i64) -> std::result::Result<(), CoreError> {
+    fn try_set_max_file_size(&mut self, size: f64) -> std::result::Result<(), CoreError> {
         self.inner.max_file_size = byte_limit(ConfigSetting::MaxFileSize, size)?;
         Ok(())
     }
 
     /// Env-free core of `setMaxTotalSize`.
-    fn try_set_max_total_size(&mut self, size: i64) -> std::result::Result<(), CoreError> {
+    fn try_set_max_total_size(&mut self, size: f64) -> std::result::Result<(), CoreError> {
         self.inner.max_total_size = byte_limit(ConfigSetting::MaxTotalSize, size)?;
         Ok(())
     }
@@ -580,20 +572,32 @@ impl SecurityConfig {
     }
 
     /// Env-free core of `setMaxFileCount`.
-    fn try_set_max_file_count(&mut self, count: u32) -> std::result::Result<(), CoreError> {
+    fn try_set_max_file_count(&mut self, count: f64) -> std::result::Result<(), CoreError> {
         self.inner.max_file_count =
-            Limit::<NonZeroUsize>::parse(ConfigSetting::MaxFileCount, count as usize)?;
+            Limit::Bounded(count_value(ConfigSetting::MaxFileCount, count)?);
         Ok(())
     }
 
     /// Env-free core of `setMaxPathDepth`.
-    fn try_set_max_path_depth(&mut self, depth: u32) -> std::result::Result<(), CoreError> {
-        self.inner.max_path_depth = non_zero_usize(ConfigSetting::MaxPathDepth, depth as usize)?;
+    fn try_set_max_path_depth(&mut self, depth: f64) -> std::result::Result<(), CoreError> {
+        self.inner.max_path_depth = count_value(ConfigSetting::MaxPathDepth, depth)?;
+        Ok(())
+    }
+
+    /// Env-free core of `setParallelDecodeMemory`.
+    fn try_set_parallel_decode_memory(
+        &mut self,
+        size: Option<f64>,
+    ) -> std::result::Result<(), CoreError> {
+        let lookahead = size
+            .map(|bytes| positive_from_f64(ConfigSetting::ParallelDecodeMemory, bytes))
+            .transpose()?;
+        self.inner.parallel_decode = ParallelDecode::from_bytes(lookahead);
         Ok(())
     }
 
     /// Env-free core of `setMaxSolidBlockMemory`.
-    fn try_set_max_solid_block_memory(&mut self, size: i64) -> std::result::Result<(), CoreError> {
+    fn try_set_max_solid_block_memory(&mut self, size: f64) -> std::result::Result<(), CoreError> {
         let max_block_memory = byte_count(ConfigSetting::MaxSolidBlockMemory, size)?;
         self.inner.solid_archives = self
             .inner
@@ -711,7 +715,7 @@ impl CreationConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
     /// negative or zero. Pass `null` to remove the limit.
     #[napi(js_name = "setMaxFileSize")]
-    pub fn set_max_file_size(&mut self, env: Env, size: Either<i64, Null>) -> Result<&Self> {
+    pub fn set_max_file_size(&mut self, env: Env, size: Either<f64, Null>) -> Result<&Self> {
         let size = match size {
             Either::A(bytes) => Some(bytes),
             Either::B(_) => None,
@@ -727,18 +731,16 @@ impl CreationConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if pattern contains null bytes.
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) if the
+    /// pattern contains null bytes.
     #[napi]
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn add_exclude_pattern(&mut self, pattern: String) -> Result<&Self> {
-        if pattern.contains('\0') {
-            return Err(Error::from_reason(
-                "pattern contains null bytes - potential security issue",
-            ));
-        }
-        let pattern = exarch_core::ExcludePattern::try_from(pattern.as_str())
-            .map_err(|err| Error::from_reason(err.to_string()))?;
-        self.inner.exclude_patterns.push(pattern);
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi cannot take a JavaScript string by reference"
+    )]
+    pub fn add_exclude_pattern(&mut self, env: Env, pattern: String) -> Result<&Self> {
+        self.try_add_exclude_pattern(&pattern)
+            .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
 
@@ -795,8 +797,15 @@ impl CreationConfig {
 }
 
 impl CreationConfig {
+    /// Env-free core of `addExcludePattern`.
+    fn try_add_exclude_pattern(&mut self, pattern: &str) -> std::result::Result<(), CoreError> {
+        let pattern = exarch_core::creation::ExcludePattern::try_from(pattern)?;
+        self.inner.exclude_patterns.push(pattern);
+        Ok(())
+    }
+
     /// Env-free core of `setMaxFileSize`; `None` removes the limit.
-    fn try_set_max_file_size(&mut self, size: Option<i64>) -> std::result::Result<(), CoreError> {
+    fn try_set_max_file_size(&mut self, size: Option<f64>) -> std::result::Result<(), CoreError> {
         self.inner.max_file_size = match size {
             Some(bytes) => byte_limit(ConfigSetting::MaxFileSize, bytes)?,
             None => Limit::Unbounded,
@@ -1002,7 +1011,7 @@ impl VerificationOptions {
     ///
     /// Returns error if `budget` is zero or negative.
     #[napi(js_name = "withIntegrityCheck")]
-    pub fn with_integrity_check(&mut self, env: Env, budget: Option<i64>) -> Result<&Self> {
+    pub fn with_integrity_check(&mut self, env: Env, budget: Option<f64>) -> Result<&Self> {
         self.try_with_integrity_check(budget)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -1011,16 +1020,16 @@ impl VerificationOptions {
     /// Whether the payload integrity check is enabled.
     #[napi(getter)]
     pub fn get_integrity_check(&self) -> bool {
-        !matches!(self.inner.integrity, exarch_core::IntegrityCheck::Skip)
+        self.inner.integrity.budget().is_some()
     }
 
     /// Budget in bytes when the integrity check is enabled.
     #[napi(getter)]
     pub fn get_decompression_budget(&self) -> Option<i64> {
-        match self.inner.integrity {
-            exarch_core::IntegrityCheck::DecodeToEof(budget) => Some(saturating_i64(budget.get())),
-            _ => None,
-        }
+        self.inner
+            .integrity
+            .budget()
+            .map(|budget| saturating_i64(budget.get()))
     }
 }
 
@@ -1033,11 +1042,11 @@ impl VerificationOptions {
     /// Env-free core of `withIntegrityCheck`.
     fn try_with_integrity_check(
         &mut self,
-        budget: Option<i64>,
+        budget: Option<f64>,
     ) -> std::result::Result<(), CoreError> {
         let budget = match budget {
             Some(bytes) => exarch_core::DecompressionBudget::try_from_bytes(
-                u64::try_from(bytes).unwrap_or_default(),
+                positive_from_f64(ConfigSetting::DecompressionBudget, bytes)?.get(),
             )?,
             None => exarch_core::DecompressionBudget::DEFAULT,
         };
@@ -1061,12 +1070,16 @@ mod tests {
 
     use super::*;
 
+    /// Largest integer a JavaScript number holds exactly.
+    const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
+    const MAX_SAFE_INT: i64 = 9_007_199_254_740_991;
+
     #[test]
     fn test_default_config() {
         let config = SecurityConfig::new();
         assert_eq!(config.get_max_file_size(), 50 * 1024 * 1024);
         assert_eq!(config.get_max_total_size(), 500 * 1024 * 1024);
-        assert_eq!(config.get_max_file_count(), 10_000);
+        assert_eq!(config.get_max_file_count(), Some(10_000.0));
         assert!(!config.get_preserve_permissions());
     }
 
@@ -1105,13 +1118,13 @@ mod tests {
     #[test]
     fn test_builder_pattern_method_chaining() {
         let mut config = SecurityConfig::new();
-        config.try_set_max_file_size(100_000_000).unwrap();
-        config.try_set_max_total_size(1_000_000_000).unwrap();
-        config.try_set_max_file_count(50_000).unwrap();
+        config.try_set_max_file_size(100_000_000.0).unwrap();
+        config.try_set_max_total_size(1_000_000_000.0).unwrap();
+        config.try_set_max_file_count(50_000.0).unwrap();
 
         assert_eq!(config.get_max_file_size(), 100_000_000);
         assert_eq!(config.get_max_total_size(), 1_000_000_000);
-        assert_eq!(config.get_max_file_count(), 50_000);
+        assert_eq!(config.get_max_file_count(), Some(50_000.0));
     }
 
     #[test]
@@ -1256,7 +1269,7 @@ mod tests {
     #[test]
     fn test_max_file_size_negative_value() {
         let mut config = SecurityConfig::new();
-        let result = config.try_set_max_file_size(-1);
+        let result = config.try_set_max_file_size(-1.0);
         assert!(result.is_err(), "negative file size should be rejected");
         assert!(
             result.unwrap_err().to_string().contains("negative"),
@@ -1267,11 +1280,11 @@ mod tests {
     #[test]
     fn test_max_file_size_i64_max() {
         let mut config = SecurityConfig::new();
-        let result = config.try_set_max_file_size(i64::MAX);
-        assert!(result.is_ok(), "i64::MAX should be accepted");
+        let result = config.try_set_max_file_size(MAX_SAFE);
+        assert!(result.is_ok(), "2^53 - 1 should be accepted");
         assert_eq!(
             config.get_max_file_size(),
-            i64::MAX,
+            MAX_SAFE_INT,
             "value should be stored correctly"
         );
     }
@@ -1279,7 +1292,7 @@ mod tests {
     #[test]
     fn test_max_total_size_negative_value() {
         let mut config = SecurityConfig::new();
-        let result = config.try_set_max_total_size(-1);
+        let result = config.try_set_max_total_size(-1.0);
         assert!(result.is_err(), "negative total size should be rejected");
         assert!(
             result.unwrap_err().to_string().contains("negative"),
@@ -1290,11 +1303,11 @@ mod tests {
     #[test]
     fn test_max_total_size_i64_max() {
         let mut config = SecurityConfig::new();
-        let result = config.try_set_max_total_size(i64::MAX);
-        assert!(result.is_ok(), "i64::MAX should be accepted");
+        let result = config.try_set_max_total_size(MAX_SAFE);
+        assert!(result.is_ok(), "2^53 - 1 should be accepted");
         assert_eq!(
             config.get_max_total_size(),
-            i64::MAX,
+            MAX_SAFE_INT,
             "value should be stored correctly"
         );
     }
@@ -1302,10 +1315,10 @@ mod tests {
     #[test]
     fn test_max_file_count_u32_max() {
         let mut config = SecurityConfig::new();
-        config.try_set_max_file_count(u32::MAX).unwrap();
+        config.try_set_max_file_count(f64::from(u32::MAX)).unwrap();
         assert_eq!(
             config.get_max_file_count(),
-            u32::MAX,
+            Some(f64::from(u32::MAX)),
             "u32::MAX should be accepted"
         );
     }
@@ -1313,10 +1326,10 @@ mod tests {
     #[test]
     fn test_max_path_depth_u32_max() {
         let mut config = SecurityConfig::new();
-        config.try_set_max_path_depth(u32::MAX).unwrap();
+        config.try_set_max_path_depth(f64::from(u32::MAX)).unwrap();
         assert_eq!(
             config.get_max_path_depth(),
-            u32::MAX,
+            f64::from(u32::MAX),
             "u32::MAX should be accepted"
         );
     }
@@ -1324,7 +1337,7 @@ mod tests {
     #[test]
     fn test_max_file_size_zero() {
         let mut config = SecurityConfig::new();
-        let err = config.try_set_max_file_size(0).unwrap_err();
+        let err = config.try_set_max_file_size(0.0).unwrap_err();
         assert_eq!(
             err.to_string(),
             "invalid configuration: max_file_size must not be zero"
@@ -1336,11 +1349,11 @@ mod tests {
     #[test]
     fn test_property_getters_return_correct_values() {
         let mut config = SecurityConfig::new();
-        config.try_set_max_file_size(100_000_000).unwrap();
-        config.try_set_max_total_size(1_000_000_000).unwrap();
+        config.try_set_max_file_size(100_000_000.0).unwrap();
+        config.try_set_max_total_size(1_000_000_000.0).unwrap();
         config.try_set_max_compression_ratio(250.0).unwrap();
-        config.try_set_max_file_count(50_000).unwrap();
-        config.try_set_max_path_depth(64).unwrap();
+        config.try_set_max_file_count(50_000.0).unwrap();
+        config.try_set_max_path_depth(64.0).unwrap();
         config.set_preserve_permissions(true);
 
         assert_eq!(
@@ -1360,12 +1373,12 @@ mod tests {
         );
         assert_eq!(
             config.get_max_file_count(),
-            50_000,
+            Some(50_000.0),
             "max_file_count getter should return set value"
         );
         assert_eq!(
             config.get_max_path_depth(),
-            64,
+            64.0,
             "max_path_depth getter should return set value"
         );
         assert!(
@@ -1410,7 +1423,7 @@ mod tests {
     fn test_max_solid_block_memory_refused_while_solid_archives_are_refused() {
         let mut config = SecurityConfig::new();
         let err = config
-            .try_set_max_solid_block_memory(256 * 1024 * 1024)
+            .try_set_max_solid_block_memory(256.0 * 1024.0 * 1024.0)
             .unwrap_err();
         assert_eq!(
             err.ffi_kind().setting(),
@@ -1423,7 +1436,7 @@ mod tests {
     fn test_disallowing_solid_archives_drops_the_limit() {
         let mut config = SecurityConfig::new();
         config.set_allow_solid_archives(true);
-        config.try_set_max_solid_block_memory(1024).unwrap();
+        config.try_set_max_solid_block_memory(1024.0).unwrap();
         config.set_allow_solid_archives(true);
         assert_eq!(config.get_max_solid_block_memory(), Some(1024));
         config.set_allow_solid_archives(false);
@@ -1434,7 +1447,7 @@ mod tests {
     fn test_max_solid_block_memory_round_trip() {
         let mut config = SecurityConfig::new();
         config.set_allow_solid_archives(true);
-        let result = config.try_set_max_solid_block_memory(256 * 1024 * 1024);
+        let result = config.try_set_max_solid_block_memory(256.0 * 1024.0 * 1024.0);
         assert!(result.is_ok());
         assert_eq!(
             config.get_max_solid_block_memory(),
@@ -1446,7 +1459,7 @@ mod tests {
     #[test]
     fn test_max_solid_block_memory_rejects_negative() {
         let mut config = SecurityConfig::new();
-        let result = config.try_set_max_solid_block_memory(-1);
+        let result = config.try_set_max_solid_block_memory(-1.0);
         assert!(result.is_err(), "negative value should be rejected");
         assert!(
             result.unwrap_err().to_string().contains("negative"),
@@ -1457,7 +1470,7 @@ mod tests {
     #[test]
     fn test_max_solid_block_memory_rejects_zero() {
         let mut config = SecurityConfig::new();
-        let result = config.try_set_max_solid_block_memory(0);
+        let result = config.try_set_max_solid_block_memory(0.0);
         assert!(result.is_err(), "zero should be rejected");
     }
 
@@ -1465,7 +1478,7 @@ mod tests {
     fn test_max_solid_block_memory_accepts_one_byte() {
         let mut config = SecurityConfig::new();
         config.set_allow_solid_archives(true);
-        let result = config.try_set_max_solid_block_memory(1);
+        let result = config.try_set_max_solid_block_memory(1.0);
         assert!(result.is_ok(), "1 byte should be accepted");
         assert_eq!(config.get_max_solid_block_memory(), Some(1));
     }
@@ -1612,8 +1625,8 @@ mod tests {
     #[test]
     fn test_builder_pattern_with_build() {
         let mut config = SecurityConfig::new();
-        config.try_set_max_file_size(100_000_000).unwrap();
-        config.try_set_max_total_size(1_000_000_000).unwrap();
+        config.try_set_max_file_size(100_000_000.0).unwrap();
+        config.try_set_max_total_size(1_000_000_000.0).unwrap();
         let result = config.build();
 
         assert_eq!(
@@ -1655,7 +1668,7 @@ mod tests {
     #[test]
     fn test_security_config_clone() {
         let mut config = SecurityConfig::new();
-        config.try_set_max_file_size(100_000_000).unwrap();
+        config.try_set_max_file_size(100_000_000.0).unwrap();
 
         let cloned = config.clone();
         assert_eq!(
@@ -1766,7 +1779,7 @@ mod tests {
         config.set_preserve_permissions(false);
         config.set_follow_symlinks(true);
         config.set_include_hidden(true);
-        config.try_set_max_file_size(Some(1_000_000)).unwrap();
+        config.try_set_max_file_size(Some(1_000_000.0)).unwrap();
 
         assert_eq!(config.get_compression_level(), 9);
         assert!(!config.get_preserve_permissions());
@@ -1792,8 +1805,8 @@ mod tests {
     #[test]
     fn test_creation_config_max_file_size_rejects_zero_and_negative() {
         let mut config = CreationConfig::new();
-        config.try_set_max_file_size(Some(10)).unwrap();
-        for bad in [0, -1] {
+        config.try_set_max_file_size(Some(10.0)).unwrap();
+        for bad in [0.0, -1.0] {
             let err = config.try_set_max_file_size(Some(bad)).unwrap_err();
             assert_matches!(
                 err,
@@ -1809,7 +1822,7 @@ mod tests {
     #[test]
     fn test_creation_config_max_file_size_none_is_unbounded() {
         let mut config = CreationConfig::new();
-        config.try_set_max_file_size(Some(10)).unwrap();
+        config.try_set_max_file_size(Some(10.0)).unwrap();
         config.try_set_max_file_size(None).unwrap();
         assert_eq!(config.get_max_file_size(), None);
         assert_eq!(config.as_core().max_file_size, Limit::Unbounded);
@@ -1818,7 +1831,7 @@ mod tests {
     #[test]
     fn test_creation_config_add_exclude_pattern() {
         let mut config = CreationConfig::new();
-        config.add_exclude_pattern("*.log".to_string()).unwrap();
+        config.try_add_exclude_pattern("*.log").unwrap();
         let patterns = config.get_exclude_patterns();
         assert!(patterns.contains(&"*.log".to_string()));
     }
@@ -1826,8 +1839,16 @@ mod tests {
     #[test]
     fn test_creation_config_add_exclude_pattern_rejects_null() {
         let mut config = CreationConfig::new();
-        let result = config.add_exclude_pattern("bad\0pattern".to_string());
-        assert!(result.is_err());
+        let err = config
+            .try_add_exclude_pattern("bad\0pattern")
+            .unwrap_err();
+        assert_matches!(
+            err,
+            CoreError::InvalidConfiguration {
+                setting: ConfigSetting::ExcludePattern,
+                problem: ConfigProblem::ContainsNul
+            }
+        );
     }
 
     #[test]
@@ -1848,26 +1869,34 @@ mod tests {
         );
 
         config
-            .set_parallel_decode_memory(Some(256.0 * 1048576.0))
+            .try_set_parallel_decode_memory(Some(256.0 * 1048576.0))
             .unwrap();
         assert_eq!(config.get_parallel_decode_memory(), Some(256 * MIB));
-        config.set_parallel_decode_memory(None).unwrap();
+        config.try_set_parallel_decode_memory(None).unwrap();
         assert_eq!(config.get_parallel_decode_memory(), None);
     }
 
     #[test]
     fn test_parallel_decode_memory_rejects_zero_and_negative() {
         let mut config = SecurityConfig::new();
-        assert!(config.set_parallel_decode_memory(Some(0.0)).is_err());
-        assert!(config.set_parallel_decode_memory(Some(-1.0)).is_err());
-        assert!(config.set_parallel_decode_memory(Some(1.5)).is_err());
-        assert!(config.set_parallel_decode_memory(Some(f64::NAN)).is_err());
+        assert!(config.try_set_parallel_decode_memory(Some(0.0)).is_err());
+        assert!(config.try_set_parallel_decode_memory(Some(-1.0)).is_err());
+        assert!(config.try_set_parallel_decode_memory(Some(1.5)).is_err());
         assert!(
             config
-                .set_parallel_decode_memory(Some(f64::INFINITY))
+                .try_set_parallel_decode_memory(Some(f64::NAN))
                 .is_err()
         );
-        assert!(config.set_parallel_decode_memory(Some(1.0e300)).is_err());
+        assert!(
+            config
+                .try_set_parallel_decode_memory(Some(f64::INFINITY))
+                .is_err()
+        );
+        assert!(
+            config
+                .try_set_parallel_decode_memory(Some(1.0e300))
+                .is_err()
+        );
         assert_eq!(config.get_parallel_decode_memory(), Some(128 * 1024 * 1024));
     }
 

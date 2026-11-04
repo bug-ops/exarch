@@ -195,6 +195,66 @@ pub enum InvalidArchiveSubCode {
     /// A failure of the ZIP reader or of the structural check built on it.
     #[napi(value = "ZIP_READER")]
     ZipReader,
+    /// A failure of the TAR reader.
+    #[napi(value = "TAR_READER")]
+    TarReader,
+    /// A failure of the 7z reader.
+    #[napi(value = "SEVENZ_READER")]
+    SevenZReader,
+}
+
+/// Value of the `subCode` property of a `QUOTA_EXCEEDED` error: the quota
+/// that was exceeded.
+// Generates the TypeScript union only; runtime values come from core's
+// `SubCode::as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaSubCode {
+    /// The number of entries.
+    #[napi(value = "FILE_COUNT")]
+    FileCount,
+    /// The summed size of every entry.
+    #[napi(value = "TOTAL_SIZE")]
+    TotalSize,
+    /// The size of one entry.
+    #[napi(value = "FILE_SIZE")]
+    FileSize,
+    /// A size or count that overflowed its integer type.
+    #[napi(value = "INTEGER_OVERFLOW")]
+    IntegerOverflow,
+    /// The memory a decoder may use.
+    #[napi(value = "DECODER_MEMORY")]
+    DecoderMemory,
+    /// The number of compressed members.
+    #[napi(value = "COMPRESSED_MEMBERS")]
+    CompressedMembers,
+    /// The number of nodes of the entry tree.
+    #[napi(value = "TREE_NODES")]
+    TreeNodes,
+    /// The capacity of an in-memory or custom sink.
+    #[napi(value = "SINK_CAPACITY")]
+    SinkCapacity,
+    /// The summed decoded size of a solid 7z block.
+    #[napi(value = "SOLID_BLOCK_MEMORY")]
+    SolidBlockMemory,
+}
+
+/// Value of the `subCode` property of a `ZIP_BOMB` error: what the refused
+/// ratio was measured over.
+// Generates the TypeScript union only; runtime values come from core's
+// `SubCode::as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZipBombSubCode {
+    /// One archive entry.
+    #[napi(value = "ENTRY")]
+    Entry,
+    /// A whole solid block.
+    #[napi(value = "SOLID_BLOCK")]
+    SolidBlock,
+    /// The TAR entries that were decoded only to be skipped.
+    #[napi(value = "SKIPPED_ENTRIES")]
+    SkippedEntries,
 }
 
 /// Value of the `setting` property of an `INVALID_CONFIGURATION` error.
@@ -1191,7 +1251,7 @@ mod tests {
     /// that is not listed, and the core path fails when core lacks one; the
     /// spellings must also equal the generated TypeScript union.
     macro_rules! mirror_maps_to_core {
-        ($test:ident, $mirror:ty, $core:ty, $union:literal, [$($variant:ident),+ $(,)?]) => {
+        ($test:ident, $mirror:ty, $core:ty, $union:literal, $spell:expr, [$($variant:ident),+ $(,)?]) => {
             #[test]
             fn $test() {
                 fn core_of(mirror: $mirror) -> $core {
@@ -1199,15 +1259,74 @@ mod tests {
                         $(<$mirror>::$variant => <$core>::$variant),+
                     }
                 }
+                let spell: fn($core) -> &'static str = $spell;
                 let mirrors = [$(<$mirror>::$variant),+];
                 let spellings: BTreeSet<String> = mirrors
                     .iter()
-                    .map(|mirror| core_of(*mirror).as_str().to_string())
+                    .map(|mirror| spell(core_of(*mirror)).to_string())
                     .collect();
                 assert_eq!(spellings.len(), mirrors.len(), "two mirror values share a core variant");
                 assert_eq!(spellings, dts_union($union));
             }
         };
+        ($test:ident, $mirror:ty, $core:ty, $union:literal, [$($variant:ident),+ $(,)?]) => {
+            mirror_maps_to_core!(
+                $test,
+                $mirror,
+                $core,
+                $union,
+                |core| core.as_str(),
+                [$($variant),+]
+            );
+        };
+    }
+
+    mirror_maps_to_core!(
+        test_every_quota_sub_code_mirror_value_is_a_core_variant,
+        QuotaSubCode,
+        exarch_core::QuotaKind,
+        "QuotaSubCode",
+        |kind| SubCode::Quota(kind).as_str(),
+        [
+            FileCount,
+            TotalSize,
+            FileSize,
+            IntegerOverflow,
+            DecoderMemory,
+            CompressedMembers,
+            TreeNodes,
+            SinkCapacity,
+            SolidBlockMemory
+        ]
+    );
+
+    mirror_maps_to_core!(
+        test_every_zip_bomb_sub_code_mirror_value_is_a_core_variant,
+        ZipBombSubCode,
+        exarch_core::ZipBombScope,
+        "ZipBombSubCode",
+        |scope| SubCode::ZipBomb(scope).as_str(),
+        [Entry, SolidBlock, SkippedEntries]
+    );
+
+    #[test]
+    fn test_quota_and_zip_bomb_errors_carry_their_sub_code() {
+        let d = described(CoreError::QuotaExceeded {
+            resource: QuotaResource::FileCount { current: 2, max: 1 },
+        });
+        assert_eq!(
+            d.props.sub_code,
+            Some(SubCode::Quota(exarch_core::QuotaKind::FileCount))
+        );
+        let d = described(CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
+            exarch_core::ZipBombScope::Entry,
+            Compressed(1),
+            Uncompressed(1_000_000),
+        )));
+        assert_eq!(
+            d.props.sub_code,
+            Some(SubCode::ZipBomb(exarch_core::ZipBombScope::Entry))
+        );
     }
 
     mirror_maps_to_core!(
@@ -1247,7 +1366,9 @@ mod tests {
             EntryName,
             DeclaredSize,
             Integrity,
-            ZipReader
+            ZipReader,
+            TarReader,
+            SevenZReader
         ]
     );
 

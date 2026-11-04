@@ -151,11 +151,34 @@ export interface ExarchIoDetail {
   setting?: undefined
 }
 
+/** A quota refusal; `subCode` names the quota that was exceeded. */
+export interface ExarchQuotaDetail {
+  code: 'QUOTA_EXCEEDED'
+  subCode: QuotaSubCode
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+}
+
+/** A compression ratio refusal; `subCode` names what the ratio was measured over. */
+export interface ExarchZipBombDetail {
+  code: 'ZIP_BOMB'
+  subCode: ZipBombSubCode
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+}
+
 /** Every other code carries no detail property. */
 export interface ExarchPlainCodeDetail {
   code: Exclude<
     ErrorCode,
-    'INVALID_ARCHIVE' | 'SECURITY_VIOLATION' | 'INVALID_CONFIGURATION' | 'IO_ERROR'
+    | 'INVALID_ARCHIVE'
+    | 'SECURITY_VIOLATION'
+    | 'INVALID_CONFIGURATION'
+    | 'IO_ERROR'
+    | 'QUOTA_EXCEEDED'
+    | 'ZIP_BOMB'
   >
   subCode?: undefined
   relaxableBy?: undefined
@@ -169,6 +192,8 @@ export type ExarchErrorCodeDetail =
   | ExarchSecurityViolationDetail
   | ExarchInvalidConfigurationDetail
   | ExarchIoDetail
+  | ExarchQuotaDetail
+  | ExarchZipBombDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -186,7 +211,8 @@ export type ExarchErrorOutcome =
  * for the detail properties: `code === 'INVALID_ARCHIVE'` narrows `subCode` to
  * `InvalidArchiveSubCode`, `'SECURITY_VIOLATION'` to a required
  * `SecurityViolationSubCode`, `'INVALID_CONFIGURATION'` exposes `setting` and
- * `'IO_ERROR'` a required `ioKind`. `code` is an `ErrorCode`, so a
+ * `'IO_ERROR'` a required `ioKind`, `'QUOTA_EXCEEDED'` and `'ZIP_BOMB'` a required
+ * `QuotaSubCode` or `ZipBombSubCode`. `code` is an `ErrorCode`, so a
  * `switch (err.code)` is exhaustive.
  */
 export type ExarchCoreError = ExarchErrorOutcome & ExarchErrorCodeDetail
@@ -306,7 +332,8 @@ export declare class CreationConfig {
    *
    * # Errors
    *
-   * Returns error if pattern contains null bytes.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) if the
+   * pattern contains null bytes.
    */
   addExcludePattern(pattern: string): this
   /** Finalizes the configuration (for API consistency). */
@@ -495,7 +522,8 @@ export declare class SecurityConfig {
    *
    * # Errors
    *
-   * Returns error if `size` is not a positive whole number of bytes.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `parallel_decode_memory`)
+   * if `size` is not a positive whole number of bytes.
    */
   setParallelDecodeMemory(size?: number | undefined | null): this
   /**
@@ -550,8 +578,8 @@ export declare class SecurityConfig {
   get maxTotalSize(): number
   /** Maximum compression ratio. */
   get maxCompressionRatio(): number
-  /** Maximum file count. */
-  get maxFileCount(): number
+  /** Maximum file count, or `null` when unbounded. */
+  get maxFileCount(): number | null
   /** Maximum path depth. */
   get maxPathDepth(): number
   /** Whether to preserve permissions from archive. */
@@ -1546,7 +1574,7 @@ export interface IntegrityGaps {
 export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
 
 /** Value of the `subCode` property of an `INVALID_ARCHIVE` error. */
-export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER' | 'LINK_TARGET' | 'DUPLICATE_ENTRY' | 'ENTRY_NAME' | 'DECLARED_SIZE' | 'INTEGRITY' | 'ZIP_READER'
+export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER' | 'LINK_TARGET' | 'DUPLICATE_ENTRY' | 'ENTRY_NAME' | 'DECLARED_SIZE' | 'INTEGRITY' | 'ZIP_READER' | 'TAR_READER' | 'SEVENZ_READER'
 
 /**
  * Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
@@ -1851,6 +1879,12 @@ export type PathModel = 'host' | 'portable'
  */
 export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes'
 
+/**
+ * Value of the `subCode` property of a `QUOTA_EXCEEDED` error: the quota
+ * that was exceeded.
+ */
+export type QuotaSubCode = 'FILE_COUNT' | 'TOTAL_SIZE' | 'FILE_SIZE' | 'INTEGER_OVERFLOW' | 'DECODER_MEMORY' | 'COMPRESSED_MEMBERS' | 'TREE_NODES' | 'SINK_CAPACITY' | 'SOLID_BLOCK_MEMORY'
+
 /** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
 export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH'
 
@@ -2123,6 +2157,12 @@ export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, con
  * ```
  */
 export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): VerificationReport
+
+/**
+ * Value of the `subCode` property of a `ZIP_BOMB` error: what the refused
+ * ratio was measured over.
+ */
+export type ZipBombSubCode = 'ENTRY' | 'SOLID_BLOCK' | 'SKIPPED_ENTRIES'
 
 /**
  * How ZIP archives with ambiguous structure are handled.

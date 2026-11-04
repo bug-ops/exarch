@@ -9,14 +9,24 @@ import type {
   InvalidArchiveSubCode,
   IoKind,
   MemoryEntry,
+  QuotaSubCode,
   SecurityViolationSubCode,
   StoredMemoryEntry,
+  ZipBombSubCode,
 } from '../../index'
 import type { MemoryExtraction } from '../../index'
 
 export function pairedSubCode(err: ExarchCoreError): string | undefined {
   if (err.code === 'INVALID_ARCHIVE') {
     const sub: InvalidArchiveSubCode | undefined = err.subCode
+    return sub
+  }
+  if (err.code === 'QUOTA_EXCEEDED') {
+    const sub: QuotaSubCode = err.subCode
+    return sub
+  }
+  if (err.code === 'ZIP_BOMB') {
+    const sub: ZipBombSubCode = err.subCode
     return sub
   }
   if (err.code === 'SECURITY_VIOLATION') {

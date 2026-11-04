@@ -41,7 +41,7 @@ use crate::run_with_optional_progress;
 use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
 use crate::stream::IntoSource;
-use crate::utils::validate_path;
+use crate::utils::boundary_paths;
 
 /// The path semantics extraction validates names against.
 // Values must equal `exarch_core::PathModel::as_str`.
@@ -397,11 +397,9 @@ fn create_to_bytes_core(
     format: ArchiveType,
     config: &exarch_core::creation::CreationConfig,
 ) -> CoreResult<CreatedArchive> {
-    sources
-        .iter()
-        .try_for_each(|source| validate_path(source))?;
+    let sources = boundary_paths(sources)?;
     let format = CreatableFormat::try_from(CoreArchiveType::from(format))?;
-    let (bytes, report) = exarch_core::create_to_bytes(sources, format, config)?;
+    let (bytes, report) = exarch_core::create_to_bytes(&sources, format, config)?;
     Ok(CreatedArchive {
         data: Uint8Array::from(bytes),
         report: CreationReport::from(report),

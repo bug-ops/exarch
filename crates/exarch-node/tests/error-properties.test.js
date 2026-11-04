@@ -128,6 +128,7 @@ describe('extraction error properties', () => {
     const config = new SecurityConfig().setMaxFileCount(1);
     await assert.rejects(extractArchive(archivePath, path.join(tempDir, 'out'), config), (err) => {
       assert.strictEqual(err.code, 'QUOTA_EXCEEDED');
+      assert.strictEqual(err.subCode, 'FILE_COUNT');
       assert.strictEqual(err.writes, 'kept');
       assert.strictEqual(typeof err.filesExtracted, 'number');
       assert.strictEqual(typeof err.bytesWritten, 'number');

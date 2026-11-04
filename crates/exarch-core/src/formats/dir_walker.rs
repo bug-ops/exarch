@@ -38,6 +38,7 @@ use crate::security::fs_view::Occupant;
 use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::classify_link;
+use crate::security::fs_view::name_too_long;
 use crate::types::SafePath;
 use crate::types::safe_path::ParentCheck;
 
@@ -244,7 +245,9 @@ impl DirWalker {
         let mut walked = PathBuf::new();
         let mut landing: Option<PathBuf> = None;
         let mut current: Option<DirRef<'r>> = None;
-        for component in dir.components() {
+        let tail = entry.strip_prefix(dir).unwrap_or_else(|_| Path::new(""));
+        let mut components = dir.components();
+        while let Some(component) = components.next() {
             let Some(leaf) = Leaf::from_component(component) else {
                 if matches!(component, std::path::Component::CurDir) {
                     continue;
@@ -256,14 +259,52 @@ impl DirWalker {
             walked.push(leaf.as_os_str());
             let parent = current.as_deref().unwrap_or_else(|| root.dir());
             let hop = self.step(root, parent, leaf, &walked, entry, missing, links)?;
+            let redirected = hop.resolved.is_some();
             match (hop.resolved, landing.as_mut()) {
                 (Some(resolved), _) => landing = Some(resolved),
                 (None, Some(landing)) => landing.push(leaf.as_os_str()),
                 (None, None) => {}
             }
+            if let (true, Some(landing)) = (redirected, landing.as_deref()) {
+                Self::ensure_fits(&hop.dir, landing, components.as_path(), tail)?;
+            }
             current = Some(hop.dir);
         }
         Ok((current.unwrap_or_else(|| DirRef::Root(root.dir())), landing))
+    }
+
+    /// Refuses, before anything is created below a symlink target, a landing
+    /// that no later component can bring under the host path limit.
+    ///
+    /// The rest of the path may still cross another symlink, which resets the
+    /// landing; only when it provably ends here is the projected length final.
+    fn ensure_fits(at: &VettedDir, landing: &Path, rest: &Path, tail: &Path) -> Result<()> {
+        let projected = landing.join(rest).join(tail);
+        if PathModel::Host.check_name_lengths(&projected).is_ok() || !Self::ends_here(at, rest) {
+            return Ok(());
+        }
+        Err(ArchiveError::Io(name_too_long()))
+    }
+
+    /// Whether `rest` below `at` holds no symlink, file or unreadable entry, so
+    /// no later component can change where the walk lands.
+    fn ends_here(at: &VettedDir, rest: &Path) -> bool {
+        let mut opened: Option<VettedDir> = None;
+        for component in rest.components() {
+            let Some(leaf) = Leaf::from_component(component) else {
+                continue;
+            };
+            let parent = opened.as_ref().unwrap_or(at);
+            match parent.probe(leaf) {
+                Ok(None) => return true,
+                Ok(Some(Occupant::Directory)) => match parent.open_dir(leaf) {
+                    Ok(next) => opened = Some(next),
+                    Err(_) => return false,
+                },
+                Ok(Some(_)) | Err(_) => return false,
+            }
+        }
+        true
     }
 
     #[expect(
@@ -589,6 +630,13 @@ mod tests {
             .unwrap_err();
 
         assert_matches!(&err, ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::InvalidFilename, "{err}");
+        assert_eq!(
+            fs::read_dir(dest.dest().as_path().join("d"))
+                .unwrap()
+                .count(),
+            0,
+            "nothing is created below the link target"
+        );
     }
 
     #[test]

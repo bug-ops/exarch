@@ -63,7 +63,7 @@ fn test_7z_security_config_integration() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_max_file_size(exarch_core::non_zero!(1024))
-        .with_max_compression_ratio(exarch_core::RatioLimit::constant(10_000.0))
+        .with_max_compression_ratio(exarch_core::ratio_limit!(10_000.0))
         .validate()
         .unwrap();
 

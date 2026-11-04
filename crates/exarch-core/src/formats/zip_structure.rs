@@ -645,13 +645,14 @@ struct EntryLayout {
     stream: Option<Compressed>,
 }
 
-fn retain_key(layout: &EntryLayout) -> RetainKey {
-    RetainKey {
+fn retain_key(layout: &EntryLayout) -> Option<RetainKey> {
+    Some(RetainKey {
+        method: ZipMethod::try_from(layout.method).ok()?,
         data_start: layout.data_start,
         compressed: crate::security::zipbomb::Compressed(layout.compressed),
         size: Uncompressed(layout.size),
         crc32: layout.crc32,
-    }
+    })
 }
 
 /// The store for the output of the census, when the mode keeps any, the
@@ -1772,7 +1773,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             let capture = self
                 .reuse
                 .as_deref_mut()
-                .and_then(|store| store.capture(retain_key(layout)));
+                .and_then(|store| retain_key(layout).and_then(|key| store.capture(key)));
             stream_end(
                 &mut *self.reader,
                 method,

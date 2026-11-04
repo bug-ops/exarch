@@ -1734,7 +1734,7 @@ fn test_solid_block_over_limit_rejected_by_extract_and_verify() {
     std::fs::write(&path, &data).unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_compression_ratio(crate::RatioLimit::constant(50.0));
+        .with_max_solid_compression_ratio(crate::ratio_limit!(50.0));
 
     let report = crate::verify_archive(&path, &config).unwrap();
     assert!(

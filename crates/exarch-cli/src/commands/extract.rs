@@ -912,6 +912,32 @@ fn listed_entry_count(manifest: &ArchiveManifest, config: &SecurityConfig) -> us
     }
 }
 
+/// The configuration the size, count, depth and ratio flags describe; a zero
+/// limit is refused here, as `InvalidConfiguration` naming the flag's setting.
+fn limited_config(args: &ExtractArgs) -> Result<SecurityConfig> {
+    let refused = |err| convert_extraction_error(err, &args.archive);
+    Ok(args
+        .parallel
+        .apply(
+            args.zip.apply(
+                args.links.apply(
+                    apply_size_limits(args.max_files, args.max_total_size, args.max_file_size)
+                        .map_err(refused)?,
+                ),
+            ),
+        )
+        .with_max_compression_ratio(
+            RatioLimit::parse(
+                ConfigSetting::MaxCompressionRatio,
+                f64::from(args.max_compression_ratio),
+            )
+            .map_err(refused)?,
+        )
+        .with_max_path_depth(
+            non_zero_usize(ConfigSetting::MaxPathDepth, args.max_path_depth).map_err(refused)?,
+        ))
+}
+
 pub fn execute(
     args: &ExtractArgs,
     formatter: &mut dyn OutputFormatter,
@@ -924,21 +950,7 @@ pub fn execute(
 
     let allowed_extensions = parse_extensions(&args.allowed_extensions)?;
 
-    let config = args
-        .parallel
-        .apply(args.zip.apply(args.links.apply(apply_size_limits(
-            args.max_files,
-            args.max_total_size,
-            args.max_file_size,
-        )?)))
-        .with_max_compression_ratio(RatioLimit::parse(
-            ConfigSetting::MaxCompressionRatio,
-            f64::from(args.max_compression_ratio),
-        )?)
-        .with_max_path_depth(non_zero_usize(
-            ConfigSetting::MaxPathDepth,
-            args.max_path_depth,
-        )?)
+    let config = limited_config(args)?
         .with_allow_absolute_paths(args.allow_absolute_paths)
         .with_allow_world_writable(args.allow_world_writable)
         .with_preserve_permissions(args.preserve_permissions)

@@ -166,14 +166,14 @@ exarch verify --strict archive.tar.gz
 ### Security Configuration
 
 ```rust
-use exarch_core::RatioLimit;
+use exarch_core::ratio_limit;
 use exarch_core::SecurityConfig;
 use exarch_core::non_zero;
 
 let config = SecurityConfig::default()
     .with_max_file_size(non_zero!(100 * 1024 * 1024))    // 100 MB
     .with_max_total_size(non_zero!(1024 * 1024 * 1024))  // 1 GB
-    .with_max_compression_ratio(RatioLimit::constant(50.0)) // 50x compression limit
+    .with_max_compression_ratio(ratio_limit!(50.0)) // 50x compression limit
     .with_allowed_extensions(vec![".tar".into(), ".gz".into()]); // optional allowlist
 ```
 

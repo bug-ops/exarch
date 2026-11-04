@@ -205,7 +205,7 @@ fn a_block_over_the_ratio_limit_is_not_decoded() {
     let strict = SecurityConfig::default()
         .with_allow_solid_archives(true)
         .with_max_solid_block_memory(crate::non_zero!(100 * 1024 * 1024))
-        .with_max_solid_compression_ratio(crate::RatioLimit::constant(10.0))
+        .with_max_solid_compression_ratio(crate::ratio_limit!(10.0))
         .validate()
         .unwrap();
 

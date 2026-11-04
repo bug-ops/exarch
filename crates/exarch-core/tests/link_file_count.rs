@@ -352,7 +352,7 @@ fn sevenz_policy_and_target_errors_win_over_the_file_count() {
         let error = extract_archive(
             &archive,
             out.path(),
-            &link_config(1).with_max_compression_ratio(exarch_core::RatioLimit::constant(10_000.0)),
+            &link_config(1).with_max_compression_ratio(exarch_core::ratio_limit!(10_000.0)),
         )
         .unwrap_err();
 

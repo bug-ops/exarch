@@ -186,3 +186,45 @@ class TestSecurityConfig:
         for raw in ("a/b", "a\\b", ".", ".."):
             with pytest.raises(ValueError):
                 config.add_banned_component(raw)
+
+
+@pytest.mark.parametrize(
+    ("apply", "setting"),
+    [
+        (lambda c: c.with_max_file_size(0), "max_file_size"),
+        (lambda c: c.with_max_total_size(0), "max_total_size"),
+        (lambda c: c.with_max_file_count(0), "max_file_count"),
+        (lambda c: c.with_max_path_depth(0), "max_path_depth"),
+        (lambda c: c.with_max_solid_block_memory(0), "max_solid_block_memory"),
+        (lambda c: c.with_max_compression_ratio(0.0), "max_compression_ratio"),
+        (lambda c: c.with_max_compression_ratio(float("nan")), "max_compression_ratio"),
+        (lambda c: c.with_max_compression_ratio(float("inf")), "max_compression_ratio"),
+    ],
+)
+def test_refused_limit_names_its_setting(apply, setting):
+    with pytest.raises(ValueError, match=setting) as caught:
+        apply(SecurityConfig())
+
+    assert caught.value.setting == setting
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["max_file_size", "max_total_size", "max_file_count", "max_path_depth"],
+)
+def test_refused_zero_assignment_names_its_setting(name):
+    config = SecurityConfig()
+
+    with pytest.raises(ValueError, match=name) as caught:
+        setattr(config, name, 0)
+
+    assert caught.value.setting == name
+
+
+def test_refused_ratio_assignment_names_its_setting():
+    config = SecurityConfig()
+
+    with pytest.raises(ValueError, match="max_compression_ratio") as caught:
+        config.max_compression_ratio = float("nan")
+
+    assert caught.value.setting == "max_compression_ratio"

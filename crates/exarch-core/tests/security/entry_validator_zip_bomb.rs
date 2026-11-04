@@ -234,7 +234,7 @@ fn test_permissive_compression_ratio() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let config = SecurityConfig::permissive()
-        .with_max_compression_ratio(exarch_core::RatioLimit::constant(1000.0))
+        .with_max_compression_ratio(exarch_core::ratio_limit!(1000.0))
         .validate()
         .unwrap();
 

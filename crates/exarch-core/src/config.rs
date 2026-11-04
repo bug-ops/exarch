@@ -450,8 +450,8 @@ impl Default for SecurityConfigFields {
         Self {
             max_file_size: Limit::Bounded(non_zero!(50 * 1024 * 1024)), // 50 MB
             max_total_size: Limit::Bounded(non_zero!(500 * 1024 * 1024)), // 500 MB
-            max_compression_ratio: RatioLimit::constant(100.0),
-            max_solid_compression_ratio: RatioLimit::constant(1000.0),
+            max_compression_ratio: crate::ratio_limit!(100.0),
+            max_solid_compression_ratio: crate::ratio_limit!(1000.0),
             max_file_count: Limit::Bounded(non_zero!(10_000)),
             max_path_depth: non_zero!(32),
             allowed: AllowedFeatures::default(), // All false
@@ -592,8 +592,8 @@ impl SecurityConfig<Unvalidated> {
                     windows_reserved_names: false,
                 },
                 preserve_permissions: true,
-                max_compression_ratio: RatioLimit::constant(1000.0),
-                max_solid_compression_ratio: RatioLimit::constant(10_000.0),
+                max_compression_ratio: crate::ratio_limit!(1000.0),
+                max_solid_compression_ratio: crate::ratio_limit!(10_000.0),
                 banned_path_components: Vec::new(),
                 allow_solid_archives: true,
                 max_solid_block_memory: non_zero!(1024 * 1024 * 1024), // 1 GB for permissive
@@ -680,8 +680,8 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default()
-    ///     .with_max_compression_ratio(exarch_core::RatioLimit::constant(50.0));
+    /// let config =
+    ///     SecurityConfig::default().with_max_compression_ratio(exarch_core::ratio_limit!(50.0));
     /// assert_eq!(config.max_compression_ratio.get(), 50.0);
     /// ```
     #[must_use]
@@ -699,7 +699,7 @@ impl SecurityConfig<Unvalidated> {
     /// use exarch_core::SecurityConfig;
     ///
     /// let config = SecurityConfig::default()
-    ///     .with_max_solid_compression_ratio(exarch_core::RatioLimit::constant(5000.0));
+    ///     .with_max_solid_compression_ratio(exarch_core::ratio_limit!(5000.0));
     /// assert_eq!(config.max_solid_compression_ratio.get(), 5000.0);
     /// ```
     #[must_use]

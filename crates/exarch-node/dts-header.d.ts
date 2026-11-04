@@ -109,8 +109,8 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
 }
 
 /**
- * An error raised by the binding itself rather than by exarch-core: a
- * negative size, an internal panic, a failed argument conversion. `code` is
+ * An error raised by the binding itself rather than by exarch-core: an
+ * internal panic, a failed argument conversion. `code` is
  * napi's status string (`GenericFailure`, `InvalidArg`, `StringExpected`, ...),
  * not an `ErrorCode`, and none of the other properties are set.
  */

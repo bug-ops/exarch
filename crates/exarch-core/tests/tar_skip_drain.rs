@@ -115,7 +115,7 @@ fn root(error: &ArchiveError) -> &ArchiveError {
 fn tight_config() -> SecurityConfig {
     SecurityConfig::default()
         .with_max_file_size(exarch_core::non_zero!(FILE_LIMIT as u64))
-        .with_max_compression_ratio(exarch_core::RatioLimit::constant(RATIO))
+        .with_max_compression_ratio(exarch_core::ratio_limit!(RATIO))
         .try_add_allowed_extension("txt")
         .unwrap()
 }
@@ -272,8 +272,7 @@ fn the_skip_bound_is_monotone_around_both_of_its_parts() {
     );
 
     // Raising the ratio removes the refusal, as the CLI hint says.
-    let relaxed =
-        tight_config().with_max_compression_ratio(exarch_core::RatioLimit::constant(1000.0));
+    let relaxed = tight_config().with_max_compression_ratio(exarch_core::ratio_limit!(1000.0));
     let outcome = extract_gz(&zeros_tar("x.img", over), &relaxed);
     assert!(outcome.is_ok(), "{outcome:?}");
 }
@@ -285,7 +284,7 @@ fn filtering_never_refuses_what_extracting_whole_would_accept() {
     std::fs::write(&archive, gzip(&zeros_tar("x.img", FILE_LIMIT))).unwrap();
     let whole = SecurityConfig::default()
         .with_max_file_size(exarch_core::non_zero!(FILE_LIMIT as u64))
-        .with_max_compression_ratio(exarch_core::RatioLimit::constant(RATIO));
+        .with_max_compression_ratio(exarch_core::ratio_limit!(RATIO));
 
     for (name, config) in [("whole", whole), ("filtered", tight_config())] {
         let existing = TempDir::new().unwrap();

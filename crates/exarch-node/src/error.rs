@@ -19,7 +19,7 @@
 //!   the fate of a partial extraction.
 //! - `cause`: the exception thrown by a JS progress callback.
 //!
-//! Errors raised by the binding itself (negative sizes, a Rust panic, a join
+//! Errors raised by the binding itself (a Rust panic, a join
 //! failure) are not core errors and keep their napi `Status` as `code`.
 
 use std::fmt;

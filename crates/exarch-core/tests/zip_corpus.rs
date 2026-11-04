@@ -475,8 +475,8 @@ fn windows_explorer_fixture_has_no_structural_findings_and_extracts() {
     assert_no_structural_finding(&archive, "explorer-windows.zip");
 
     let out = TempDir::new().unwrap();
-    let config = SecurityConfig::default()
-        .with_max_compression_ratio(exarch_core::RatioLimit::constant(1000.0));
+    let config =
+        SecurityConfig::default().with_max_compression_ratio(exarch_core::ratio_limit!(1000.0));
     extract_archive(&archive, out.path(), &config).unwrap();
     assert_eq!(std::fs::read(out.path().join("a.txt")).unwrap(), b"hello\n");
     assert_eq!(std::fs::read(out.path().join("empty")).unwrap(), b"");

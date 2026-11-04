@@ -887,8 +887,7 @@ fn a_link_over_the_ratio_limit_is_a_zip_bomb_before_any_write() {
         &dir,
         &[Item::File("a.txt", b"hi"), Item::Link("l", &target)],
     );
-    let config =
-        allow_symlinks().with_max_compression_ratio(exarch_core::RatioLimit::constant(2.0));
+    let config = allow_symlinks().with_max_compression_ratio(exarch_core::ratio_limit!(2.0));
     let out = TempDir::new().unwrap();
 
     let err = extract_archive(&path, out.path(), &config).unwrap_err();

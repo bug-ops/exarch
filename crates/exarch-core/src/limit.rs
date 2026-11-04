@@ -42,6 +42,35 @@ macro_rules! non_zero {
     };
 }
 
+/// Builds a [`RatioLimit`] from a constant, failing the build when it is not
+/// finite and positive.
+///
+/// # Examples
+///
+/// ```
+/// let ratio = exarch_core::ratio_limit!(50.0);
+/// assert_eq!(ratio.get(), 50.0);
+/// ```
+///
+/// A non-positive constant does not compile:
+///
+/// ```compile_fail
+/// let _ = exarch_core::ratio_limit!(0.0);
+/// ```
+#[macro_export]
+macro_rules! ratio_limit {
+    ($value:expr) => {
+        const {
+            match $crate::RatioLimit::new($value) {
+                ::std::option::Option::Some(ratio) => ratio,
+                ::std::option::Option::None => {
+                    panic!("ratio_limit! needs a finite, positive value")
+                }
+            }
+        }
+    };
+}
+
 /// A positive bound, or no bound.
 ///
 /// # Examples
@@ -63,6 +92,8 @@ pub enum Limit<T> {
     /// No bound.
     Unbounded,
 }
+
+const _: () = assert!(size_of::<Limit<NonZeroU64>>() == size_of::<u64>());
 
 impl<T> From<T> for Limit<T> {
     fn from(bound: T) -> Self {
@@ -197,29 +228,23 @@ impl RatioLimit {
         self.0
     }
 
-    /// A ratio from a constant, failing the build when it is not finite and
-    /// positive.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `ratio` is not finite and positive; in a `const` that is a
-    /// compile error.
+    /// A ratio from a constant: `None` unless `ratio` is finite and positive.
     ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::RatioLimit;
     ///
-    /// const LIMIT: RatioLimit = RatioLimit::constant(100.0);
-    /// assert_eq!(LIMIT.get(), 100.0);
+    /// assert_eq!(RatioLimit::new(100.0).map(RatioLimit::get), Some(100.0));
+    /// assert!(RatioLimit::new(f64::NAN).is_none());
     /// ```
     #[must_use]
-    pub const fn constant(ratio: f64) -> Self {
-        assert!(
-            ratio.is_finite() && ratio > 0.0,
-            "a ratio limit must be finite and positive"
-        );
-        Self(ratio)
+    pub const fn new(ratio: f64) -> Option<Self> {
+        if ratio.is_finite() && ratio > 0.0 {
+            Some(Self(ratio))
+        } else {
+            None
+        }
     }
 }
 

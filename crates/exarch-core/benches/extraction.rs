@@ -68,7 +68,7 @@ fn test_fixtures_dir() -> PathBuf {
 /// and increases size/depth limits for stress testing benchmarks.
 fn benchmark_config() -> SecurityConfig {
     SecurityConfig::default()
-        .with_max_compression_ratio(exarch_core::RatioLimit::constant(f64::MAX))
+        .with_max_compression_ratio(exarch_core::ratio_limit!(f64::MAX))
         .with_max_file_size(exarch_core::non_zero!(500 * 1024 * 1024))
         .with_max_total_size(exarch_core::non_zero!(1024 * 1024 * 1024))
         .with_max_path_depth(exarch_core::non_zero!(100))

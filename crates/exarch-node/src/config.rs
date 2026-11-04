@@ -15,6 +15,7 @@ use exarch_core::RatioLimit;
 use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
 use exarch_core::creation::CompressionLevel;
+use exarch_core::non_zero_u64;
 use exarch_core::non_zero_usize;
 use napi::Env;
 use napi::bindgen_prelude::Error;
@@ -25,17 +26,22 @@ use crate::error::IntoJsError;
 use crate::report::saturating_i64;
 use crate::report::unknown_variant;
 
-/// Parses a JavaScript byte count into a bounded limit: a negative value and
-/// zero are refusals naming `setting`.
-fn byte_limit(
-    setting: ConfigSetting,
-    size: i64,
-) -> std::result::Result<Limit<NonZeroU64>, CoreError> {
+/// Parses a JavaScript byte count: a negative value and zero are refusals
+/// naming `setting`.
+fn byte_count(setting: ConfigSetting, size: i64) -> std::result::Result<NonZeroU64, CoreError> {
     let bytes = u64::try_from(size).map_err(|_| CoreError::InvalidConfiguration {
         setting,
         problem: ConfigProblem::Negative,
     })?;
-    Limit::<NonZeroU64>::parse(setting, bytes)
+    non_zero_u64(setting, bytes)
+}
+
+/// [`byte_count`] as a bounded limit.
+fn byte_limit(
+    setting: ConfigSetting,
+    size: i64,
+) -> std::result::Result<Limit<NonZeroU64>, CoreError> {
+    byte_count(setting, size).map(Limit::Bounded)
 }
 
 /// Largest integer a JavaScript number holds exactly (2^53 - 1).
@@ -156,7 +162,8 @@ impl SecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if size is negative.
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
+    /// negative or zero.
     #[napi(js_name = "setMaxFileSize")]
     pub fn set_max_file_size(&mut self, env: Env, size: i64) -> Result<&Self> {
         self.try_set_max_file_size(size)
@@ -168,7 +175,8 @@ impl SecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if size is negative.
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_total_size`) if size
+    /// is negative or zero.
     #[napi(js_name = "setMaxTotalSize")]
     pub fn set_max_total_size(&mut self, env: Env, size: i64) -> Result<&Self> {
         self.try_set_max_total_size(size)
@@ -183,7 +191,8 @@ impl SecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if ratio is not a positive finite number.
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_compression_ratio`) if
+    /// ratio is not a positive finite number.
     #[napi(js_name = "setMaxCompressionRatio")]
     pub fn set_max_compression_ratio(&mut self, env: Env, ratio: f64) -> Result<&Self> {
         self.try_set_max_compression_ratio(ratio)
@@ -195,6 +204,11 @@ impl SecurityConfig {
     ///
     /// `extractArchive` counts files, symlinks and hardlinks, not directories;
     /// `listArchive` and `verifyArchive` count every entry.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_count`) if count
+    /// is zero.
     #[napi(js_name = "setMaxFileCount")]
     pub fn set_max_file_count(&mut self, env: Env, count: u32) -> Result<&Self> {
         self.try_set_max_file_count(count)
@@ -203,6 +217,11 @@ impl SecurityConfig {
     }
 
     /// Sets the maximum path depth.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_path_depth`) if depth
+    /// is zero.
     #[napi(js_name = "setMaxPathDepth")]
     pub fn set_max_path_depth(&mut self, env: Env, depth: u32) -> Result<&Self> {
         self.try_set_max_path_depth(depth)
@@ -291,7 +310,8 @@ impl SecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if size is negative or zero.
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_solid_block_memory`)
+    /// if size is negative or zero.
     #[napi(js_name = "setMaxSolidBlockMemory")]
     pub fn set_max_solid_block_memory(&mut self, env: Env, size: i64) -> Result<&Self> {
         self.try_set_max_solid_block_memory(size)
@@ -568,11 +588,7 @@ impl SecurityConfig {
 
     /// Env-free core of `setMaxSolidBlockMemory`.
     fn try_set_max_solid_block_memory(&mut self, size: i64) -> std::result::Result<(), CoreError> {
-        self.inner.max_solid_block_memory =
-            match byte_limit(ConfigSetting::MaxSolidBlockMemory, size)? {
-                Limit::Bounded(bytes) => bytes,
-                Limit::Unbounded => NonZeroU64::MAX,
-            };
+        self.inner.max_solid_block_memory = byte_count(ConfigSetting::MaxSolidBlockMemory, size)?;
         Ok(())
     }
 

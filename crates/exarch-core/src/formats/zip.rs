@@ -113,14 +113,14 @@
 //! ```no_run
 //! use exarch_core::ExtractionOptions;
 //! use exarch_core::Limit;
-//! use exarch_core::RatioLimit;
 //! use exarch_core::SecurityConfig;
 //! use exarch_core::non_zero;
+//! use exarch_core::ratio_limit;
 //!
 //! let mut config = SecurityConfig::default();
 //! config.allowed.symlinks = true; // Allow symlinks
 //! config.max_file_size = Limit::Bounded(non_zero!(100 * 1024 * 1024)); // 100 MB per file
-//! config.max_compression_ratio = RatioLimit::constant(100.0); // Allow 100:1 compression
+//! config.max_compression_ratio = ratio_limit!(100.0); // Allow 100:1 compression
 //! // ... extract with config
 //! ```
 
@@ -620,7 +620,9 @@ impl<R: Read + Seek> ZipArchive<R> {
 
     /// Opens `reader` for an extraction into a sink that shares its memory
     /// limit, keeping the output of the structural check within that limit
-    /// together with what the sink holds.
+    /// together with what the sink holds. Reuse is always in memory,
+    /// whatever `DecodeReuse` the configuration names, and bounded by the
+    /// smaller of the sink limit and `max_decoder_memory`.
     ///
     /// # Errors
     ///
@@ -1100,6 +1102,7 @@ fn replay_key<R: Read>(zip_file: &zip::read::ZipFile<'_, R>) -> Option<RetainKey
         .ok()
         .and_then(StreamMethod::of)?;
     Some(RetainKey {
+        method: ZipMethod::try_from(zip_file.compression()).ok()?,
         data_start: zip_file.data_start()?,
         compressed: crate::security::zipbomb::Compressed(zip_file.compressed_size()),
         size: crate::security::zipbomb::Uncompressed(zip_file.size()),
@@ -1230,7 +1233,7 @@ pub(crate) fn zip_entry_kind(is_dir: bool, unix_mode: Option<u32>) -> ZipEntryKi
 ///
 /// Anything else (including `deflate64`, which the `zip` crate can decode but
 /// exarch does not vet) is rejected at open time by [`admit_zip_entry`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ZipMethod {
     Stored,
     Deflate,
@@ -1672,7 +1675,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
-        config.max_compression_ratio = crate::RatioLimit::constant(10.0); // Low threshold for testing
+        config.max_compression_ratio = crate::ratio_limit!(10.0); // Low threshold for testing
         let config = config.validate().expect("valid config");
 
         let result = archive.extract(

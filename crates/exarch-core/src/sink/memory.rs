@@ -252,6 +252,14 @@ impl MemoryExtractRequest {
 /// [`PartialWrites::Discarded`](crate::PartialWrites): nothing is written to
 /// disk and the entries are dropped with the error.
 ///
+/// # Decode reuse
+///
+/// A ZIP archive is decoded once: the structural check keeps the output of
+/// its compressed entries and extraction replays it. This path always uses
+/// in-memory reuse, whatever `config.decode_reuse` says, and the kept bytes
+/// together with what the sink holds stay within the smaller of the sink's
+/// memory limit and `max_decoder_memory`.
+///
 /// # Errors
 ///
 /// Returns the errors of

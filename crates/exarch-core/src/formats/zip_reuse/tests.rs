@@ -17,6 +17,7 @@ use crate::ReuseLimit;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::formats::zip::ZipArchive;
+use crate::formats::zip::ZipMethod;
 use crate::sink::SinkUsage;
 
 fn limit(bytes: u64) -> ReuseLimit {
@@ -31,6 +32,7 @@ fn key_of(data: &[u8]) -> RetainKey {
     let mut crc = Crc::new();
     crc.update(data);
     RetainKey {
+        method: ZipMethod::Deflate,
         data_start: 30,
         compressed: Compressed(data.len() as u64),
         size: Uncompressed(data.len() as u64),
@@ -85,10 +87,12 @@ fn entries_of_a_spool_read_back_at_their_own_offsets() {
     let second = b"second one!".repeat(70);
     let (a, b) = (
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 1,
             ..key_of(&first)
         },
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 2,
             ..key_of(&second)
         },
@@ -161,14 +165,17 @@ fn a_dropped_capture_rolls_the_spool_back() {
     let third = b"after".repeat(30);
     let keys = [
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 1,
             ..key_of(&first)
         },
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 2,
             ..key_of(&dropped)
         },
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 3,
             ..key_of(&third)
         },
@@ -285,6 +292,7 @@ fn mixed_zip() -> Vec<u8> {
         ("deflated.txt", CompressionMethod::Deflated, payload(1)),
         ("empty.txt", CompressionMethod::Deflated, Vec::new()),
         ("bzip2.txt", CompressionMethod::Bzip2, payload(2)),
+        ("zstd.txt", CompressionMethod::Zstd, payload(3)),
     ];
     for (name, method, data) in entries {
         let options = SimpleFileOptions::default().compression_method(method);
@@ -514,9 +522,11 @@ fn only_non_empty_compressed_entries_are_kept_and_replayed() {
         let mut opened = open(&bytes, mode);
         extract(&mut opened, dir.path()).unwrap();
         let store = opened.archive.structure_mut().reuse_mut().unwrap();
-        assert_eq!(store.replays(), 2, "{mode:?}");
+        assert_eq!(store.replays(), 3, "{mode:?}");
         let on_disk = match mode {
-            DecodeReuse::TempFile(_) => (payload(1).len() + payload(2).len()) as u64,
+            DecodeReuse::TempFile(_) => {
+                (payload(1).len() + payload(2).len() + payload(3).len()) as u64
+            }
             _ => 0,
         };
         assert_eq!(store.used(), on_disk, "{mode:?}");
@@ -524,6 +534,10 @@ fn only_non_empty_compressed_entries_are_kept_and_replayed() {
         assert_eq!(
             std::fs::read(dir.path().join("bzip2.txt")).unwrap(),
             payload(2)
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("zstd.txt")).unwrap(),
+            payload(3)
         );
     }
 }
@@ -589,6 +603,7 @@ fn extraction_into_memory_decodes_each_entry_once_and_keeps_the_same_files() {
     for method in [
         zip::CompressionMethod::Deflated,
         zip::CompressionMethod::Bzip2,
+        zip::CompressionMethod::Zstd,
     ] {
         let bytes = zip_of(ENTRIES, method);
 
@@ -682,6 +697,7 @@ fn kept_output_and_sink_stay_within_the_shared_limit_before_every_entry() {
         .iter()
         .enumerate()
         .map(|(i, data)| RetainKey {
+            method: ZipMethod::Deflate,
             data_start: i as u64,
             ..key_of(data)
         })

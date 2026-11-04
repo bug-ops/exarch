@@ -35,6 +35,7 @@ use super::zip::ZIP_INVALID_CHECKSUM;
 use crate::DecodeReuse;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::formats::zip::ZipMethod;
 use crate::security::zipbomb::Compressed;
 use crate::security::zipbomb::Uncompressed;
 use crate::security::zipbomb::ratio_admitted;
@@ -89,6 +90,7 @@ impl ReusePlan {
 /// what the central directory declares for it, and its checksum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RetainKey {
+    pub(crate) method: ZipMethod,
     pub(crate) data_start: u64,
     pub(crate) compressed: Compressed,
     pub(crate) size: Uncompressed,
@@ -263,7 +265,11 @@ impl ReuseStore {
             Backend::Dead => return None,
         };
         let buffer = if matches!(self.backend, Backend::Memory) {
-            Vec::with_capacity(usize::try_from(key.size.0).unwrap_or(0))
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(usize::try_from(key.size.0).ok()?)
+                .ok()?;
+            buffer
         } else {
             Vec::new()
         };

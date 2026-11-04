@@ -12,5 +12,5 @@ fn main() {
         .validate()
         .unwrap();
 
-    cfg.max_compression_ratio = exarch_core::RatioLimit::constant(1.0);
+    cfg.max_compression_ratio = exarch_core::ratio_limit!(1.0);
 }

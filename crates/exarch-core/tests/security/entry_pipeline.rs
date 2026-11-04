@@ -211,6 +211,15 @@ fn hardlinks_to_files_inside_the_root_extract_and_count() {
     assert_eq!(report.files_extracted, 4);
 }
 
+#[test]
+fn a_hardlink_in_the_same_directory_as_its_target_extracts() {
+    for (target, link) in [("target.txt", "link"), ("foo/target.txt", "foo/link")] {
+        let entries = [tar_file(target, b"x"), tar_hardlink(link, target)];
+        let report = extract_tar(&entries, &links_allowed()).unwrap();
+        assert_eq!(report.files_extracted, 2, "{link} -> {target}");
+    }
+}
+
 const MIB: u64 = 1024 * 1024;
 
 fn deflated_zeros(name: &str, len: u64) -> RawEntry {

@@ -431,8 +431,9 @@ impl Followed {
 impl Followed {
     /// Resolves the link by its absolute path: there is no pinned
     /// `readlinkat` on this platform.
-    // TODO(#895): resolve handle-relatively on Windows and WASI too; realpath
-    // makes acceptance depend on the destination's absolute length there.
+    // TODO(#895-followup: Windows/WASI handle-relative walk, canonical_within):
+    // realpath makes acceptance depend on the destination's absolute length
+    // there.
     fn of(root: &PinnedRoot, _site: &LinkSite<'_>, walked: &Path) -> Self {
         let dest = root.dest();
         match classify_link(&HostFs, &dest.as_path().join(walked), dest) {
@@ -464,16 +465,22 @@ enum Pending {
 /// destination fails closed:
 ///
 /// - a `..` above the root is an escape;
-/// - an absolute target is mapped only through the destination's canonical
-///   root; any other spelling of the same place (a bind mount, another
-///   `/private` alias) is an escape, where `realpath` used to accept it;
+/// - an absolute target is mapped only through the destination's canonical root
+///   or the root as the caller wrote it (`/var/x` for `/private/var/x`); any
+///   other spelling of the same place (a bind mount, another alias) is an
+///   escape, where `realpath` used to accept it;
 /// - more than [`MAX_SYMLINK_HOPS`] links, a dangling link or a non-directory
 ///   result blocks the walk.
+///
+/// The handles of the directories entered are kept on a stack, so a `..` costs
+/// one pop; only a `..` that leaves the directory the resolution started in
+/// re-opens the ancestors from the root, once.
 #[cfg(unix)]
 struct HandleResolution<'r> {
     root: &'r PinnedRoot,
     position: PathBuf,
     dir: VettedDir,
+    parents: Vec<VettedDir>,
     hops: usize,
     pending: VecDeque<Pending>,
 }
@@ -488,6 +495,7 @@ impl<'r> HandleResolution<'r> {
             root,
             position: site.here.to_path_buf(),
             dir: site.parent.reopen().map_err(|_| ParentBlocker::Symlink)?,
+            parents: Vec::new(),
             hops: 0,
             pending: VecDeque::new(),
         };
@@ -512,11 +520,14 @@ impl<'r> HandleResolution<'r> {
             .read_link(name)
             .map_err(|_| ParentBlocker::Symlink)?;
         let relative = if target.is_absolute() {
+            let dest = self.root.dest();
             let inside = target
-                .strip_prefix(self.root.dest().as_path())
+                .strip_prefix(dest.as_path())
+                .or_else(|_| target.strip_prefix(dest.written()))
                 .map_err(|_| ParentBlocker::Escape)?
                 .to_path_buf();
             self.position.clear();
+            self.parents.clear();
             self.dir = self
                 .root
                 .dir()
@@ -548,10 +559,11 @@ impl<'r> HandleResolution<'r> {
         };
         match self.dir.probe(leaf) {
             Ok(Some(Occupant::Directory)) => {
-                self.dir = self
+                let next = self
                     .dir
                     .open_dir(leaf)
                     .map_err(|_| ParentBlocker::Symlink)?;
+                self.parents.push(std::mem::replace(&mut self.dir, next));
                 self.position.push(name);
                 Ok(())
             }
@@ -565,6 +577,10 @@ impl<'r> HandleResolution<'r> {
         if !self.position.pop() {
             return Err(ParentBlocker::Escape);
         }
+        if let Some(parent) = self.parents.pop() {
+            self.dir = parent;
+            return Ok(());
+        }
         let mut dir = self
             .root
             .dir()
@@ -574,7 +590,8 @@ impl<'r> HandleResolution<'r> {
             let Some(leaf) = Leaf::from_component(component) else {
                 return Err(ParentBlocker::Symlink);
             };
-            dir = dir.open_dir(leaf).map_err(|_| ParentBlocker::Symlink)?;
+            let next = dir.open_dir(leaf).map_err(|_| ParentBlocker::Symlink)?;
+            self.parents.push(std::mem::replace(&mut dir, next));
         }
         self.dir = dir;
         Ok(())
@@ -792,8 +809,28 @@ mod tests {
         assert!(base.join("real/sub").is_dir());
     }
 
-    // The absolute spelling is mapped only through the canonical root; another
-    // spelling of the same place is refused where `realpath` accepted it.
+    // `/var/...` written by the caller versus `/private/var/...` canonical: an
+    // absolute target spelled through the written root is accepted.
+    #[test]
+    fn an_absolute_target_spelled_through_the_written_root_is_accepted() {
+        let temp = TempDir::new().unwrap();
+        let real_root = temp.path().join("dest");
+        fs::create_dir(&real_root).unwrap();
+        let written = temp.path().join("written_alias");
+        symlink(&real_root, &written).unwrap();
+        let dest = PinnedRoot::open(DestDir::new(&written).unwrap()).unwrap();
+        assert_ne!(dest.dest().as_path(), dest.dest().written());
+        fs::create_dir(real_root.join("real")).unwrap();
+        symlink(written.join("real"), real_root.join("alias")).unwrap();
+
+        walker(true).ensure_dir(&dest, &sp("alias/sub")).unwrap();
+
+        assert!(real_root.join("real/sub").is_dir());
+    }
+
+    // The absolute spelling is mapped only through the canonical or the written
+    // root; another spelling of the same place is refused where `realpath`
+    // accepted it.
     #[test]
     fn an_absolute_target_spelled_through_another_alias_of_the_root_is_refused() {
         let (root, dest, _) = dest_with_outside();
@@ -834,6 +871,49 @@ mod tests {
         walker(true).ensure_dir(&dest, &sp("x/up/y")).unwrap();
 
         assert!(base.join("y").is_dir());
+    }
+
+    /// A link at the bottom of a deep directory whose target climbs the whole
+    /// way back up, crossed by many entries: each crossing is one handle pop
+    /// per `..`, not a re-walk from the root.
+    fn deep_climbing_link(depth: usize) -> (TempDir, PinnedRoot, String) {
+        let (root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        let deep = vec!["a"; depth].join("/");
+        walker(false).ensure_dir(&dest, &sp(&deep)).unwrap();
+        fs::create_dir(base.join("x")).unwrap();
+        let climb = vec![".."; depth].join("/");
+        symlink(format!("{climb}/x"), base.join(&deep).join("l")).unwrap();
+        (root, dest, format!("{deep}/l"))
+    }
+
+    #[test]
+    fn a_link_climbing_out_of_a_deep_directory_resolves_to_the_root_level_target() {
+        let (_root, dest, link) = deep_climbing_link(30);
+
+        walker(true)
+            .ensure_dir(&dest, &sp(&format!("{link}/sub")))
+            .unwrap();
+
+        assert!(dest.dest().as_path().join("x/sub").is_dir());
+    }
+
+    #[test]
+    fn crossing_a_deep_climbing_link_many_times_keeps_each_hop_cheap() {
+        let (_root, dest, link) = deep_climbing_link(30);
+        let started = std::time::Instant::now();
+
+        for i in 0..2000 {
+            walker(true)
+                .ensure_dir(&dest, &sp(&format!("{link}/d{i}")))
+                .unwrap();
+        }
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "2000 crossings took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

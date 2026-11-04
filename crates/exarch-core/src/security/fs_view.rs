@@ -1105,12 +1105,50 @@ impl VirtualTree {
         node: Node,
         limits: LandingLimits,
     ) -> Result<SafePath, PlaceError> {
+        if limits == LandingLimits::Enforced
+            && self
+                .projected_landing(rel.as_path())
+                .is_some_and(|landing| {
+                    projected_landing_within_limits(self.model, &landing, Path::new("")).is_err()
+                })
+        {
+            return Err(PlaceError::LandingTooLong);
+        }
         let landed = self.place_path(rel.as_path(), node)?;
         if limits == LandingLimits::Enforced {
             projected_landing_within_limits(self.model, &landed, Path::new(""))
                 .map_err(|_| PlaceError::LandingTooLong)?;
         }
         Ok(SafePath::from_normalized(landed)?)
+    }
+
+    /// Where `rel` would land, read from the tree without inserting anything:
+    /// the longest existing parent resolved through its links, then the rest of
+    /// the path as spelled. `None` when the parents do not resolve (a conflict
+    /// the insert reports itself).
+    ///
+    /// Names are taken as `rel` spells them, so a folded alias of different
+    /// byte length is only caught by the check after the insert.
+    fn projected_landing(&self, rel: &Path) -> Option<PathBuf> {
+        let name = rel.file_name()?;
+        let parent = rel.parent().unwrap_or_else(|| Path::new(""));
+        let mut missing = Vec::new();
+        let mut existing = parent;
+        loop {
+            match self.resolve(&self.root.join(existing)) {
+                Ok(Resolved::Inside { rel: base, .. }) => {
+                    let mut landing = base;
+                    landing.extend(missing.iter().rev());
+                    landing.push(name);
+                    return Some(landing);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    missing.push(existing.file_name()?);
+                    existing = existing.parent()?;
+                }
+                Ok(Resolved::Outside) | Err(_) => return None,
+            }
+        }
     }
 
     fn place_path(&mut self, rel: &Path, node: Node) -> Result<PathBuf, PlaceError> {
@@ -1819,6 +1857,19 @@ mod tests {
         let long = SafePath::for_test(&format!("alias/{}", "n".repeat(MAX_PATH_LEN)));
         let refused = t.project_landing(&long, Node::File, LandingLimits::Enforced);
         assert!(matches!(refused, Err(PlaceError::LandingTooLong)));
+        let name = format!("real/{}", "n".repeat(MAX_PATH_LEN));
+        assert_eq!(
+            t.occupant(Path::new(&name)),
+            None,
+            "a refused landing leaves no node behind"
+        );
+        let missing_parents =
+            SafePath::for_test(&format!("alias/p/q/{}", "n".repeat(MAX_PATH_LEN)));
+        assert!(matches!(
+            t.project_landing(&missing_parents, Node::File, LandingLimits::Enforced),
+            Err(PlaceError::LandingTooLong)
+        ));
+        assert_eq!(t.occupant(Path::new("real/p")), None);
         let exempt = t.project_landing(
             &SafePath::for_test(&format!("alias/{}", "m".repeat(MAX_PATH_LEN))),
             Node::File,

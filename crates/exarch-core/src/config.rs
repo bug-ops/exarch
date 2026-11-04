@@ -1437,7 +1437,10 @@ pub enum DecodeReuse {
     /// and 1.18x for 300 MiB decoded (a 140 MB ZIP). Most of the excess is
     /// system time; user time rose by about 0.05 s of the 0.13 s excess on the
     /// larger archive. [`Memory`](Self::Memory) measures 1.07x on the 100 MiB
-    /// one.
+    /// one. Writing the decoder's 256 KiB chunks to the file without the
+    /// 64 KiB buffer measured no faster, and a memory-mapped spool is ruled
+    /// out by the crate's `unsafe` ban, so this is the floor of the design.
+    /// Linux (ext4, tmpfs) is not measured.
     TempFile(ReuseLimit),
 }
 

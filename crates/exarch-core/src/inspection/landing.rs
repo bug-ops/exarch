@@ -1,0 +1,368 @@
+//! Where the entries of a listed archive land under the destination.
+//!
+//! A front end that wants to know which host paths an extraction would write
+//! (for a conflict pre-check, say) must not re-implement the entry-to-path
+//! mapping: it differs in the details that matter (Windows drive prefixes,
+//! `./` and leading separators, symlinked parents, non-file entries). This
+//! module derives the landing from the same validation and projection that
+//! `verify` and the sink use.
+
+use std::path::Path;
+use std::path::PathBuf;
+
+use crate::SecurityConfig;
+use crate::formats::common::is_extension_allowed;
+use crate::inspection::manifest::ArchiveEntry;
+use crate::inspection::manifest::ArchiveManifest;
+use crate::inspection::manifest::LinkTarget;
+use crate::inspection::manifest::ManifestEntryKind;
+use crate::security::fs_view::CollisionRecording;
+use crate::security::fs_view::LandingLimits;
+use crate::security::fs_view::Node;
+use crate::security::fs_view::NodeBudget;
+use crate::security::fs_view::PathModel;
+use crate::security::fs_view::VirtualRoot;
+use crate::security::fs_view::VirtualTree;
+use crate::types::SafePath;
+use crate::types::SafeSymlink;
+
+/// The destination-relative path an entry lands at, derived lexically.
+///
+/// The path is relative and normalized (no root, drive prefix, `.` or `..`),
+/// its name lengths fit the host, and every symlink among the earlier entries
+/// it passes through has been resolved. It is a **lexical** answer: it says
+/// nothing about what already exists on disk, so it does not claim that
+/// writing there stays inside the destination. A caller that acts on the
+/// filesystem must still use `symlink_metadata` and the extraction itself for
+/// containment.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveEntry;
+/// use exarch_core::ArchiveManifest;
+/// use exarch_core::ManifestEntryKind;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::formats::detect::ArchiveType;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
+/// manifest.add_entry(ArchiveEntry::new(
+///     "./a/b.txt".into(),
+///     ManifestEntryKind::Directory,
+/// ))?;
+/// let config = SecurityConfig::default();
+/// let landed: Vec<_> = manifest.landing_paths(&config).collect();
+/// assert_eq!(landed[0].1.as_path(), std::path::Path::new("a/b.txt"));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LandingPath(PathBuf);
+
+impl LandingPath {
+    /// The relative path.
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Consumes the value and returns the relative path.
+    #[must_use]
+    pub fn into_path_buf(self) -> PathBuf {
+        self.0
+    }
+}
+
+impl AsRef<Path> for LandingPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl ArchiveManifest {
+    /// The entries extraction would create, each with where it lands.
+    ///
+    /// Entries are judged in archive order against a model of what earlier
+    /// entries created, so a path through an earlier symlink is resolved the
+    /// way extraction resolves it. An entry that extraction would not create
+    /// is left out: one the validation refuses (traversal, a banned
+    /// component, a symlink or hardlink the config disallows, a symlink whose
+    /// target escapes), one that cannot be placed (a conflict with an earlier
+    /// entry, a landing longer than the host allows) and a regular file the
+    /// extension allowlist skips. Every other kind of entry is covered, not
+    /// only regular files.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveEntry;
+    /// use exarch_core::ArchiveManifest;
+    /// use exarch_core::ManifestEntryKind;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::formats::detect::ArchiveType;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
+    /// manifest.add_entry(ArchiveEntry::new(
+    ///     "../evil".into(),
+    ///     ManifestEntryKind::Directory,
+    /// ))?;
+    /// let config = SecurityConfig::default();
+    /// assert_eq!(manifest.landing_paths(&config).count(), 0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn landing_paths<'a>(
+        &'a self,
+        config: &SecurityConfig,
+    ) -> impl Iterator<Item = (&'a ArchiveEntry, LandingPath)> + use<'a> {
+        let root = VirtualRoot::new();
+        let mut tree = VirtualTree::new(
+            &root,
+            PathModel::Host,
+            NodeBudget::from_config(config),
+            CollisionRecording::Discard,
+        );
+        let landed: Vec<_> = self
+            .entries()
+            .iter()
+            .filter_map(|entry| {
+                land(entry, config, &root, &mut tree).map(|landing| (entry, landing))
+            })
+            .collect();
+        landed.into_iter()
+    }
+}
+
+fn land(
+    entry: &ArchiveEntry,
+    config: &SecurityConfig,
+    root: &VirtualRoot,
+    tree: &mut VirtualTree,
+) -> Option<LandingPath> {
+    let is_file = matches!(entry.kind, ManifestEntryKind::File { .. });
+    if is_file && !is_extension_allowed(&entry.path, config) {
+        return None;
+    }
+    let safe = SafePath::validate_in(&entry.path, root, config, tree).ok()?;
+    let node = match &entry.kind {
+        ManifestEntryKind::File { .. } => Node::File,
+        ManifestEntryKind::Hardlink { .. } => {
+            if !config.allowed.hardlinks.is_allowed() {
+                return None;
+            }
+            Node::File
+        }
+        ManifestEntryKind::Directory => Node::Dir,
+        ManifestEntryKind::Symlink { target } => {
+            if !config.allowed.symlinks.is_allowed() {
+                return None;
+            }
+            match target {
+                LinkTarget::Recorded(t) => {
+                    SafeSymlink::validate_in(&safe, t, root, config, tree).ok()?;
+                    Node::Symlink(t.clone())
+                }
+                LinkTarget::Unread => Node::OpaqueSymlink,
+                LinkTarget::Missing | LinkTarget::Unreadable | LinkTarget::Oversized { .. } => {
+                    return None;
+                }
+            }
+        }
+    };
+    let landed = tree
+        .project_landing(&safe, node, LandingLimits::Enforced)
+        .ok()?;
+    Some(LandingPath(landed.into_path_buf()))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::io::Cursor;
+    use std::io::Write as _;
+
+    use exarch_testkit::raw_zip::RawEntry;
+    use exarch_testkit::raw_zip::RawZip;
+
+    use super::*;
+    use crate::extract_archive;
+    use crate::list_archive;
+
+    fn config() -> SecurityConfig {
+        SecurityConfig::default()
+            .with_allow_absolute_paths(true)
+            .with_allow_symlinks(true)
+    }
+
+    fn tar_entry(
+        builder: &mut tar::Builder<Vec<u8>>,
+        name: &[u8],
+        kind: tar::EntryType,
+        link: &str,
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_mode(0o644);
+        header.set_size(u64::from(kind == tar::EntryType::Regular));
+        header.as_old_mut().name[..name.len()].copy_from_slice(name);
+        if !link.is_empty() {
+            header.set_link_name(link).unwrap();
+        }
+        header.set_cksum();
+        let data: &[u8] = if kind == tar::EntryType::Regular {
+            b"x"
+        } else {
+            b""
+        };
+        builder.append(&header, data).unwrap();
+    }
+
+    fn non_directories(root: &Path) -> BTreeSet<PathBuf> {
+        let mut found = BTreeSet::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for item in std::fs::read_dir(&dir).unwrap() {
+                let path = item.unwrap().path();
+                if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+                    stack.push(path);
+                } else {
+                    found.insert(path.strip_prefix(root).unwrap().to_path_buf());
+                }
+            }
+        }
+        found
+    }
+
+    /// The landing set of the non-directory entries must be the set of
+    /// non-directories extraction really created.
+    fn assert_landing_matches_extraction(file_name: &str, bytes: &[u8]) {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join(file_name);
+        std::fs::write(&archive, bytes).unwrap();
+        let dest = dir.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+        let config = config();
+
+        let manifest = list_archive(&archive, &config).unwrap();
+        let landed: BTreeSet<PathBuf> = manifest
+            .landing_paths(&config)
+            .filter(|(entry, _)| !matches!(entry.kind, ManifestEntryKind::Directory))
+            .map(|(_, landing)| landing.into_path_buf())
+            .collect();
+        extract_archive(&archive, &dest, &config).unwrap();
+
+        assert_eq!(landed, non_directories(&dest), "{file_name}");
+        assert!(!landed.is_empty(), "{file_name}");
+    }
+
+    #[test]
+    fn tar_landing_matches_extraction_for_dot_slash_absolute_and_linked_parents() {
+        let mut builder = tar::Builder::new(Vec::new());
+        tar_entry(&mut builder, b"./a.txt", tar::EntryType::Regular, "");
+        tar_entry(&mut builder, b"/abs.txt", tar::EntryType::Regular, "");
+        tar_entry(&mut builder, b"d/", tar::EntryType::Directory, "");
+        tar_entry(&mut builder, b"d/sub.txt", tar::EntryType::Regular, "");
+        tar_entry(&mut builder, b"link", tar::EntryType::Symlink, "d");
+        tar_entry(
+            &mut builder,
+            b"link/through.txt",
+            tar::EntryType::Regular,
+            "",
+        );
+        assert_landing_matches_extraction("a.tar", &builder.into_inner().unwrap());
+    }
+
+    #[test]
+    fn a_path_through_a_symlink_lands_at_the_resolved_path() {
+        let mut builder = tar::Builder::new(Vec::new());
+        tar_entry(&mut builder, b"d/", tar::EntryType::Directory, "");
+        tar_entry(&mut builder, b"link", tar::EntryType::Symlink, "d");
+        tar_entry(&mut builder, b"link/x.txt", tar::EntryType::Regular, "");
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        let config = config();
+
+        let manifest = list_archive(&archive, &config).unwrap();
+        let landed: Vec<_> = manifest
+            .landing_paths(&config)
+            .map(|(_, l)| l.into_path_buf())
+            .collect();
+        assert_eq!(
+            landed,
+            [
+                PathBuf::from("d"),
+                PathBuf::from("link"),
+                PathBuf::from("d/x.txt")
+            ]
+        );
+    }
+
+    #[test]
+    fn zip_landing_matches_extraction_for_backslashes_and_drive_prefixes() {
+        let entries = ["a\\b.txt", "C:\\win.txt", "/abs.txt", "plain.txt", "dir/"]
+            .iter()
+            .map(|name| RawEntry::stored(name, if name.ends_with('/') { b"" } else { b"x" }))
+            .collect();
+        let bytes = RawZip::new(entries).build().bytes;
+        assert_landing_matches_extraction("a.zip", &bytes);
+    }
+
+    #[test]
+    fn sevenz_landing_matches_extraction() {
+        let mut writer = sevenz_rust2::ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        for name in ["a.txt", "dir/b.txt", "dir/deeper/c.txt"] {
+            writer
+                .push_archive_entry(
+                    sevenz_rust2::ArchiveEntry::new_file(name),
+                    Some(Cursor::new(b"x".to_vec())),
+                )
+                .unwrap();
+        }
+        let bytes = writer.finish().unwrap().into_inner();
+        assert_landing_matches_extraction("a.7z", &bytes);
+    }
+
+    #[test]
+    fn refused_and_skipped_entries_do_not_land() {
+        let mut builder = tar::Builder::new(Vec::new());
+        tar_entry(&mut builder, b"ok.txt", tar::EntryType::Regular, "");
+        tar_entry(&mut builder, b"skip.bin", tar::EntryType::Regular, "");
+        tar_entry(
+            &mut builder,
+            b"esc",
+            tar::EntryType::Symlink,
+            "../../outside",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        let config = config().try_add_allowed_extension("txt").unwrap();
+
+        let manifest = list_archive(&archive, &config).unwrap();
+        let landed: Vec<_> = manifest
+            .landing_paths(&config)
+            .map(|(_, l)| l.into_path_buf())
+            .collect();
+        assert_eq!(landed, [PathBuf::from("ok.txt")]);
+    }
+
+    #[test]
+    fn disallowed_links_do_not_land() {
+        let mut builder = tar::Builder::new(Vec::new());
+        tar_entry(&mut builder, b"s", tar::EntryType::Symlink, "ok.txt");
+        tar_entry(&mut builder, b"h", tar::EntryType::Link, "ok.txt");
+        let _ = builder.get_mut().flush();
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        let config = config();
+
+        let manifest = list_archive(&archive, &config).unwrap();
+        let strict = SecurityConfig::default();
+        assert_eq!(manifest.landing_paths(&strict).count(), 0);
+    }
+}

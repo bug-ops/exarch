@@ -179,6 +179,7 @@ pub use inspection::IntegrityGaps;
 pub use inspection::IntegrityStatus;
 pub use inspection::IssueCategory;
 pub use inspection::IssueSeverity;
+pub use inspection::LandingPath;
 pub use inspection::LinkTarget;
 pub use inspection::ManifestEntryKind;
 pub use inspection::ManifestEntryType;

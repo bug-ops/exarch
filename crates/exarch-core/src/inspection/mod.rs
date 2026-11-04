@@ -27,11 +27,13 @@
 //! ```
 
 pub(crate) mod integrity;
+pub mod landing;
 pub mod list;
 pub mod manifest;
 pub mod report;
 pub mod verify;
 
+pub use landing::LandingPath;
 pub use list::list_archive;
 pub use list::list_archive_with_options;
 pub use list::list_archive_with_progress;

@@ -684,7 +684,7 @@ fn record_entry(
             return Ok(());
         }
     };
-    let limits = if matches!(kind, ManifestEntryKind::File)
+    let limits = if matches!(kind, ManifestEntryKind::File { .. })
         && !is_extension_allowed(path.as_path(), config)
     {
         LandingLimits::Exempt

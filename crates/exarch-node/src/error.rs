@@ -1361,6 +1361,34 @@ mod tests {
         [Entry, SolidBlock, SkippedEntries]
     );
 
+    fn spellings<T: Copy>(all: &[T], spell: impl Fn(T) -> &'static str) -> BTreeSet<String> {
+        all.iter().map(|value| spell(*value).to_string()).collect()
+    }
+
+    #[test]
+    fn test_quota_sub_code_union_matches_core_all() {
+        assert_eq!(
+            dts_union("QuotaSubCode"),
+            spellings(SubCode::QUOTA_ALL, SubCode::as_str)
+        );
+    }
+
+    #[test]
+    fn test_zip_bomb_sub_code_union_matches_core_all() {
+        assert_eq!(
+            dts_union("ZipBombSubCode"),
+            spellings(SubCode::ZIP_BOMB_ALL, SubCode::as_str)
+        );
+    }
+
+    #[test]
+    fn test_skip_kind_union_matches_core_all() {
+        assert_eq!(
+            dts_union("SkipKind"),
+            spellings(exarch_core::SkipKind::ALL, exarch_core::SkipKind::as_str)
+        );
+    }
+
     #[test]
     fn test_quota_and_zip_bomb_errors_carry_their_sub_code() {
         let d = described(CoreError::QuotaExceeded {

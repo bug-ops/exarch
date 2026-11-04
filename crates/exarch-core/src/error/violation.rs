@@ -736,6 +736,63 @@ mod tests {
         }
     }
 
+    /// The text of each `one_of_each` row, in order; callers match on these
+    /// strings, so a wording change must be a deliberate edit here.
+    const EXPECTED_TEXT: [&str; 43] = [
+        "empty path not allowed",
+        "path contains null bytes: p",
+        "path contains null bytes - potential security issue",
+        "path exceeds maximum length of 1 bytes (got 2 bytes)",
+        "banned path component: c",
+        "d",
+        "Windows reserved device name: c",
+        "path component ends with '.' or ' ': c",
+        "path component contains ':': c",
+        "path depth 2 exceeds maximum 1",
+        "symlink target depth 2 exceeds maximum 1",
+        "symlink target is empty",
+        "symlink target contains null bytes",
+        "symlink target contains banned component: c",
+        "symlink target too large: 2 bytes (max 1)",
+        "symlink target is missing",
+        "symlink target was not read, so it cannot be validated",
+        "symlink target could not be read, so it cannot be validated",
+        "symlink detected in 7z archive: n (Windows reparse point attribute set). Its target cannot be read due to sevenz-rust2 API limitations.",
+        "symlinks not allowed",
+        "hardlinks not allowed",
+        "path component is a symlink: w",
+        "refusing to create e under the existing symlink at p",
+        "refusing to replace the existing symlink at r",
+        "FIFO entries not supported",
+        "unsupported entry type: k",
+        "7z entry has an undefined Unix file type (0x1): n",
+        "d",
+        "archive root entry '.' must be a directory",
+        "archive root entry '.' must be a directory or an empty regular file",
+        "archive is encrypted (password-protected). Encrypted archives are not supported; decrypt the archive externally and try again.",
+        "encrypted entry detected: n",
+        "unsupported compression method: m",
+        "solid 7z archives are not allowed (enable allow_solid_archives)",
+        "decompressed size exceeded the declared uncompressed size of 1 bytes",
+        "decompressed size (2 bytes) does not match the declared uncompressed size (1 bytes)",
+        "hardlink target changed while it was being copied",
+        "TAR metadata read budget exceeded: more than 1 bytes read while searching for the next archive entry (long-name/long-link/PAX headers, or a run of GNU sparse extension blocks)",
+        "TAR cumulative synthetic-byte drain budget exceeded: more than 1 bytes of synthesized (unbacked) padding drained from unread entries across this archive",
+        "symlinks are not supported on this platform",
+        "extraction can fail at r unless duplicates are skipped: c",
+        "extraction fails at r: c",
+        "path p is not under root directory: r",
+    ];
+
+    #[test]
+    fn test_every_kind_renders_its_pinned_text() {
+        let kinds = one_of_each();
+        assert_eq!(kinds.len(), EXPECTED_TEXT.len());
+        for ((kind, ..), expected) in kinds.iter().zip(EXPECTED_TEXT) {
+            assert_eq!(kind.to_string(), expected, "{kind:?}");
+        }
+    }
+
     #[test]
     fn test_every_family_has_a_kind() {
         let seen: Vec<_> = one_of_each().iter().map(|(k, ..)| k.sub_code()).collect();

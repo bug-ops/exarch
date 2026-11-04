@@ -519,8 +519,10 @@ impl SecurityConfig {
     #[napi]
     #[allow(clippy::needless_pass_by_value)]
     pub fn has_banned_path_component(&self, component: String) -> bool {
-        PathComponentName::try_from(component.as_str())
-            .is_ok_and(|component| self.inner.banned_path_components.contains(&component))
+        self.inner
+            .banned_path_components
+            .iter()
+            .any(|banned| banned.matches(&component))
     }
 }
 
@@ -1598,6 +1600,10 @@ mod tests {
         assert!(
             config.has_banned_path_component(".git".to_string()),
             ".git should be in default banned components"
+        );
+        assert!(
+            config.has_banned_path_component(".GIT".to_string()),
+            "matching ignores ASCII case"
         );
     }
 

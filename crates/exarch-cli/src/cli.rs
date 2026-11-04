@@ -213,7 +213,7 @@ pub struct ExtractArgs {
     #[arg(long, default_value = "32")]
     pub max_path_depth: usize,
 
-    /// Banned path component; can be repeated.
+    /// Banned path component; can be repeated or comma-separated.
     ///
     /// When specified, replaces the default ban list (.git, .ssh, .gnupg,
     /// .aws, .kube, .docker, .env). Use an empty value to allow all

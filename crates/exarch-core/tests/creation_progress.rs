@@ -61,30 +61,25 @@ fn root_directory_is_not_reported_as_an_entry() {
 
 #[test]
 fn directory_emptied_by_strip_prefix_is_dropped() {
-    let src = TempDir::new().unwrap();
-    std::fs::create_dir(src.path().join("sub")).unwrap();
-    std::fs::write(src.path().join("sub/a.txt"), b"payload").unwrap();
-    let out = TempDir::new().unwrap();
-    let mut progress = Recorder::default();
-    let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from("sub")));
+    for name in ["out.tar.gz", "out.zip"] {
+        let src = TempDir::new().unwrap();
+        std::fs::create_dir(src.path().join("sub")).unwrap();
+        std::fs::write(src.path().join("sub/a.txt"), b"payload").unwrap();
+        let out = TempDir::new().unwrap();
+        let mut progress = Recorder::default();
+        let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from("sub")));
 
-    create_archive_with_progress(
-        out.path().join("out.tar.gz"),
-        &[src.path()],
-        &config,
-        &mut progress,
-    )
-    .unwrap();
+        create_archive_with_progress(out.path().join(name), &[src.path()], &config, &mut progress)
+            .unwrap();
 
-    assert!(
-        progress
+        let started: Vec<_> = progress
             .starts
             .iter()
-            .all(|(path, _)| !path.as_os_str().is_empty()),
-        "{:?}",
-        progress.starts
-    );
-    assert_eq!(progress.starts.len(), progress.completes.len());
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert_eq!(started, [PathBuf::from("a.txt")], "{name}");
+        assert_eq!(progress.completes, started, "{name}");
+    }
 }
 
 #[test]
@@ -113,17 +108,37 @@ fn file_emptied_by_strip_prefix_is_refused() {
 
 #[cfg(unix)]
 #[test]
-fn failing_entry_is_still_completed() {
-    use std::os::unix::fs::PermissionsExt;
+fn symlink_emptied_by_strip_prefix_is_refused() {
+    let src = TempDir::new().unwrap();
+    let link = src.path().join("link");
+    std::os::unix::fs::symlink("target", &link).unwrap();
+    let out = TempDir::new().unwrap();
+    let mut progress = Recorder::default();
+    let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from("link")));
 
+    let err = create_archive_with_progress(
+        out.path().join("out.zip"),
+        &[link.as_path()],
+        &config,
+        &mut progress,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, ArchiveError::InvalidConfiguration { .. }),
+        "{err:?}"
+    );
+}
+
+/// A socket cannot be opened as a file, for any user including root.
+#[cfg(unix)]
+#[test]
+fn failing_entry_is_still_completed() {
     for name in ["out.tar.gz", "out.zip"] {
         let src = one_file_source();
-        let secret = src.path().join("secret.txt");
-        std::fs::write(&secret, b"hidden").unwrap();
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
-        if std::fs::File::open(&secret).is_ok() {
-            continue;
-        }
+        let socket = src.path().join("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(std::fs::File::open(&socket).is_err());
         let out = TempDir::new().unwrap();
         let mut progress = Recorder::default();
 
@@ -135,11 +150,11 @@ fn failing_entry_is_still_completed() {
         );
 
         assert!(result.is_err(), "{name}");
+        assert!(!progress.starts.is_empty(), "{name}");
         assert_eq!(
             progress.starts.len(),
             progress.completes.len(),
             "{name}: {progress:?}"
         );
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 }

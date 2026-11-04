@@ -368,6 +368,16 @@ mod tests {
     }
 
     #[test]
+    fn permit_carries_the_reserved_size() {
+        let mut tracker = QuotaTracker::new();
+        let config = SecurityConfig::default().validate().expect("valid config");
+
+        let permit = tracker.reserve(1234, &config).expect("within quota");
+
+        assert_eq!(permit.into_bytes(), 1234);
+    }
+
+    #[test]
     fn test_quota_tracker_reserve() {
         let mut tracker = QuotaTracker::new();
         let config = SecurityConfig::default().validate().expect("valid config");

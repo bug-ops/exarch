@@ -721,9 +721,12 @@ fn resolve_atomic_force_replace(
 /// # Errors
 ///
 /// Returns the core refusal, naming the offending token, for an entry that
-/// can never match (for example `tar.gz` or `a/b`).
+/// can never match (for example `tar.gz` or `a/b`), and an error when values
+/// were given but hold no extension at all (an empty list would allow every
+/// extension).
 fn parse_extensions(raw: &[String]) -> Result<Vec<Extension>> {
-    raw.iter()
+    let parsed = raw
+        .iter()
         .flat_map(|s| s.split(','))
         .map(str::trim)
         .filter(|ext| !ext.is_empty())
@@ -731,7 +734,11 @@ fn parse_extensions(raw: &[String]) -> Result<Vec<Extension>> {
             Extension::try_from(ext)
                 .with_context(|| format!("invalid --allowed-extensions value {ext:?}"))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    if parsed.is_empty() && !raw.is_empty() {
+        anyhow::bail!("--allowed-extensions {raw:?} names no extension");
+    }
+    Ok(parsed)
 }
 
 /// Maximum number of conflicting destination paths listed individually in
@@ -779,7 +786,9 @@ fn conflict_error(conflicts: &[std::path::PathBuf]) -> anyhow::Error {
     anyhow::Error::new(CliContext::new(conflict_error_message(conflicts)))
 }
 
-/// Drops empty entries from raw `--banned-component` values.
+/// Expands raw `--banned-component` values into [`PathComponentName`]s: each
+/// value is split on commas like `--allowed-extensions`, tokens are trimmed
+/// and empty tokens are dropped.
 ///
 /// `SecurityConfig::validate()` rejects empty entries, but an empty value is
 /// the documented idiom for disabling the default ban list (see the
@@ -795,9 +804,11 @@ fn conflict_error(conflicts: &[std::path::PathBuf]) -> anyhow::Error {
 /// can never equal a single path component (for example `a/b` or `..`).
 fn filter_banned_components(raw: &[String]) -> Result<Vec<PathComponentName>> {
     raw.iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
         .filter(|c| !c.is_empty())
         .map(|c| {
-            PathComponentName::try_from(c.as_str())
+            PathComponentName::try_from(c)
                 .with_context(|| format!("invalid --banned-component value {c:?}"))
         })
         .collect()
@@ -1393,6 +1404,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_extensions_refuses_values_without_any_extension() {
+        for raw in [",", " ", ""] {
+            assert!(parse_extensions(&[raw.to_string()]).is_err(), "{raw:?}");
+        }
+    }
+
+    #[test]
     fn parse_extensions_filters_empty_tokens() {
         let raw = vec!["zip,,tar, ,".to_string()];
         assert_eq!(extension_names(&raw), vec!["zip", "tar"]);
@@ -1423,10 +1441,19 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn filter_banned_components_refuses_a_separator() {
-        for raw in ["a/b", "..", " "] {
+        for raw in ["a/b", ".."] {
             let err = filter_banned_components(&[raw.to_string()]).unwrap_err();
             assert!(format!("{err:#}").contains("--banned-component"), "{err:#}");
         }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn filter_banned_components_splits_on_commas_and_trims() {
+        let raw = vec![".git, .ssh ,,.env".to_string()];
+        let kept = filter_banned_components(&raw).unwrap();
+        let names: Vec<_> = kept.iter().map(PathComponentName::as_str).collect();
+        assert_eq!(names, vec![".git", ".ssh", ".env"]);
     }
 
     #[test]

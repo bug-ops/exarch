@@ -124,8 +124,8 @@ impl fmt::Display for Extension {
 /// One normal path component that archive entries may not contain.
 ///
 /// Built only through [`TryFrom<&str>`]. The value is never empty, holds no
-/// null byte or path separator, is not `.` or `..`, is not made only of ASCII
-/// whitespace or control characters, and is at most
+/// null byte or path separator, is not `.` or `..`, neither starts nor ends
+/// with an ASCII whitespace or control character, and is at most
 /// [`MAX_CONFIG_ENTRY_LENGTH`] bytes, so it can equal a single component.
 /// Matching ignores ASCII case.
 ///
@@ -138,6 +138,7 @@ impl fmt::Display for Extension {
 /// assert!(banned.matches(".GIT"));
 /// assert!(PathComponentName::try_from("a/b").is_err());
 /// assert!(PathComponentName::try_from("..").is_err());
+/// assert!(PathComponentName::try_from(" .git").is_err());
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -165,17 +166,21 @@ impl TryFrom<&str> for PathComponentName {
 
     /// # Errors
     ///
-    /// Returns [`ArchiveError::InvalidConfiguration`] for an empty or
-    /// whitespace-only value, a null byte, a path separator, `.`, `..`, or a
-    /// value over [`MAX_CONFIG_ENTRY_LENGTH`] bytes.
+    /// Returns [`ArchiveError::InvalidConfiguration`] for an empty value, one
+    /// with leading or trailing ASCII whitespace or control characters, a null
+    /// byte, a path separator, `.`, `..`, or a value over
+    /// [`MAX_CONFIG_ENTRY_LENGTH`] bytes.
     fn try_from(value: &str) -> Result<Self> {
         check_length_and_nul(value, Self::FIELD)?;
-        if value.is_empty()
-            || value
-                .chars()
-                .all(|c| c.is_ascii_whitespace() || c.is_ascii_control())
-        {
+        if value.is_empty() {
             return Err(invalid(Self::FIELD, "must not be empty"));
+        }
+        let is_blank = |c: char| c.is_ascii_whitespace() || c.is_ascii_control();
+        if value.starts_with(is_blank) || value.ends_with(is_blank) {
+            return Err(invalid(
+                Self::FIELD,
+                "must not start or end with whitespace or control characters",
+            ));
         }
         if has_separator(value) {
             return Err(invalid(Self::FIELD, "must not contain a path separator"));
@@ -272,6 +277,10 @@ mod tests {
             "",
             " ",
             "\t",
+            " .git",
+            ".git ",
+            "\n.git",
+            ".git\u{7f}",
             ".",
             "..",
             "a/b",

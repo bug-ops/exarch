@@ -2102,6 +2102,72 @@ fn test_force_refuses_a_symlink_at_a_file_landing_and_writes_nothing_through_it(
     );
 }
 
+/// The conflict pre-check does not depend on the destination's absolute
+/// length: an entry whose landing is under the host path limit extracts even
+/// when destination plus landing is over it (#895, #945).
+#[cfg(unix)]
+#[test]
+fn test_deep_destination_does_not_abort_the_conflict_pre_check() {
+    let landing = tail_of_len(954);
+    let name_len = landing.len();
+    for zip in [false, true] {
+        for force in [false, true] {
+            let temp = TempDir::new().expect("failed to create temp dir");
+            let archive = temp.path().join(if zip { "deep.zip" } else { "deep.tar" });
+            if zip {
+                let bytes = RawZip::new(vec![RawEntry::stored(&landing, b"x")])
+                    .build()
+                    .bytes;
+                std::fs::write(&archive, bytes).expect("write zip");
+            } else {
+                let mut builder = tar::Builder::new(Vec::new());
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_mode(0o644);
+                header.set_size(1);
+                builder
+                    .append_data(&mut header, &landing, &b"x"[..])
+                    .expect("deep entry");
+                std::fs::write(&archive, builder.into_inner().expect("tar bytes"))
+                    .expect("write tar");
+            }
+
+            let mut parent = temp.path().to_path_buf();
+            let mut index = 0;
+            while parent.as_os_str().len() + 1 + name_len + 8 <= HOST_PATH_LIMIT {
+                parent.push(format!("pad{index:0>37}"));
+                index += 1;
+            }
+            std::fs::create_dir_all(&parent).expect("deep parent");
+            let dest = parent.join("out");
+            assert!(
+                dest.as_os_str().len() + 1 + name_len > HOST_PATH_LIMIT,
+                "the absolute landing must be over the host limit"
+            );
+
+            let mut cmd = exarch_cmd();
+            cmd.arg("--json").arg("extract");
+            if force {
+                cmd.arg("--force");
+            }
+            let output = cmd
+                .arg(&archive)
+                .arg(&dest)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            let json: serde_json::Value =
+                serde_json::from_slice(&output).expect("one JSON document");
+            assert_eq!(
+                json["data"]["files_extracted"], 1,
+                "zip={zip} force={force}: {json}"
+            );
+        }
+    }
+}
+
 /// A verify issue carries the same code, sub-code and policy setting a failed
 /// extraction reports (#899).
 #[test]

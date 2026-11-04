@@ -1121,6 +1121,11 @@ impl ConflictsChecked {
             let occupant = match target.symlink_metadata() {
                 Ok(occupant) => occupant,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                // The absolute path is over the host limit: extraction places
+                // the entry through directory handles and does not depend on
+                // the destination's length, so it decides, and Safe mode never
+                // overwrites what it finds.
+                Err(err) if err.kind() == io::ErrorKind::InvalidFilename => continue,
                 // Below a conflict already reported at an ancestor.
                 Err(err) if err.kind() == io::ErrorKind::NotADirectory && !conflicts.is_empty() => {
                     continue;

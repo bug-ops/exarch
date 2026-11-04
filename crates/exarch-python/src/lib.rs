@@ -776,7 +776,7 @@ impl PyProgressAdapter {
 
 impl exarch_core::ProgressCallback for PyProgressAdapter {
     fn on_entry_start(&mut self, path: &std::path::Path, position: exarch_core::EntryPosition) {
-        let total = position.total.known().unwrap_or(0);
+        let total = position.total.known();
         let current = position.current.get();
         if self.callback_error.is_some() {
             return;
@@ -858,6 +858,8 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVerificationIssue>()?;
     m.add_class::<PyIntegrityGaps>()?;
     m.add_class::<PyUnverifiedEntry>()?;
+    m.add_class::<report::PySkips>()?;
+    m.add_class::<report::PySkip>()?;
     m.add_class::<buffer::PySinkOptions>()?;
     m.add_class::<buffer::PyMemoryEntry>()?;
     m.add_class::<buffer::PyMemoryFile>()?;

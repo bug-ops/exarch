@@ -58,6 +58,15 @@ _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
 _DecodeReuse = Literal["off", "memory", "temp_file"]
+_SkipKind = Literal[
+    "duplicate",
+    "extension_not_allowed",
+    "excluded",
+    "hidden",
+    "over_max_file_size",
+    "symlink_unsupported",
+    "unreadable",
+]
 _ErrorCode = Literal[
     "PATH_TRAVERSAL",
     "SYMLINK_ESCAPE",
@@ -547,7 +556,17 @@ class CreationConfig:
         ...
 
     def with_exclude_patterns(self, patterns: list[str]) -> CreationConfig:
-        """Sets exclude patterns."""
+        """
+        Sets exclude patterns, matched against the archive entry path.
+
+        A name (``build``), ``name*`` or ``*name`` matches one path component at
+        any depth; a pattern with a separator (``docs/build``) matches that
+        path from the archive root and its subtree.
+
+        Raises ``InvalidConfigurationError`` (``setting == "exclude_pattern"``)
+        for an empty pattern, ``.``, ``..``, an absolute path, a bare ``*``,
+        an inner or repeated ``*``, or ``*`` combined with a separator.
+        """
         ...
 
     def with_max_file_size(self, size: int | None) -> CreationConfig:
@@ -573,6 +592,51 @@ class CreationConfig:
     def build(self) -> CreationConfig:
         """Finalizes the configuration."""
         ...
+
+class Skip:
+    """One entry an operation left out."""
+
+    @property
+    def kind(self) -> _SkipKind:
+        """Why the entry was skipped."""
+        ...
+
+    @property
+    def path(self) -> str:
+        """The entry's path as the operation names it."""
+        ...
+
+    @property
+    def io_kind(self) -> str | None:
+        """The description of the I/O failure behind an "unreadable" skip."""
+        ...
+
+class Skipped:
+    """
+    Everything an operation left out: exact counts per kind plus a bounded
+    sample of the individual entries.
+    """
+
+    @property
+    def total(self) -> int:
+        """How many entries were skipped, over all kinds."""
+        ...
+
+    @property
+    def counts(self) -> dict[_SkipKind, int]:
+        """The exact count of each kind that occurred."""
+        ...
+
+    @property
+    def sample(self) -> list[Skip]:
+        """The first skipped entries (at most 64)."""
+        ...
+
+    def count(self, kind: _SkipKind) -> int:
+        """The exact count of one kind; ValueError for an unknown kind."""
+        ...
+
+    def __len__(self) -> int: ...
 
 class ExtractionReport:
     """
@@ -608,7 +672,12 @@ class ExtractionReport:
 
     @property
     def files_skipped(self) -> int:
-        """Number of files skipped due to security checks."""
+        """Number of entries skipped, over all kinds."""
+        ...
+
+    @property
+    def skipped(self) -> Skipped:
+        """The skipped entries by kind."""
         ...
 
     @property
@@ -663,7 +732,12 @@ class CreationReport:
 
     @property
     def files_skipped(self) -> int:
-        """Number of files skipped."""
+        """Number of entries skipped, over all kinds (excluded, hidden, over the size limit, ...)."""
+        ...
+
+    @property
+    def skipped(self) -> Skipped:
+        """The skipped entries by kind."""
         ...
 
     @property
@@ -920,8 +994,13 @@ class VerificationReport:
         """Returns true if there are any critical severity issues."""
         ...
 
-ProgressCallbackFn = Callable[[str, int, int, int], None]
-"""Progress callback: (path, total, current, bytes_written) -> None."""
+ProgressCallbackFn = Callable[[str, int | None, int, int], None]
+"""
+Progress callback: (path, total, current, bytes_written) -> None.
+
+``current`` counts from 1. ``total`` is None when the number of entries is not
+known up front, as when a TAR stream is read.
+"""
 
 def extract_archive(
     archive_path: str | Path,
@@ -1614,6 +1693,7 @@ class PathTraversalError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class SymlinkEscapeError(ArchiveError):
@@ -1633,6 +1713,7 @@ class SymlinkEscapeError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class HardlinkEscapeError(ArchiveError):
@@ -1652,6 +1733,7 @@ class HardlinkEscapeError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class ZipBombError(ArchiveError):
@@ -1672,6 +1754,7 @@ class ZipBombError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     sub_code: _ZipBombSubCode
     warnings: list[str]
 
@@ -1692,6 +1775,7 @@ class InvalidPermissionsError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class QuotaExceededError(ArchiveError):
@@ -1712,6 +1796,7 @@ class QuotaExceededError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     sub_code: _QuotaSubCode
     warnings: list[str]
 
@@ -1733,6 +1818,7 @@ class ZipInconsistencyError(SecurityViolationError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
 
 class SecurityViolationError(ArchiveError):
@@ -1761,6 +1847,7 @@ class SecurityViolationError(ArchiveError):
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    skipped: Skipped
     warnings: list[str]
     relaxable_by: _PolicySetting | None
     sub_code: _SecurityViolationSubCode | None

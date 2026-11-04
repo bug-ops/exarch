@@ -236,6 +236,10 @@ fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
             let _ = exc_value.setattr("bytes_written", report.bytes_written);
             let _ = exc_value.setattr("files_skipped", report.files_skipped());
             let _ = exc_value.setattr(
+                "skipped",
+                crate::report::PySkips::from(report.skipped.clone()),
+            );
+            let _ = exc_value.setattr(
                 "warnings",
                 report
                     .warnings

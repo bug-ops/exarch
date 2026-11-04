@@ -1,6 +1,9 @@
 //! Python bindings for report types.
 
 use exarch_core::ExtractionReport as CoreExtractionReport;
+use exarch_core::Skip as CoreSkip;
+use exarch_core::SkipKind;
+use exarch_core::Skips as CoreSkips;
 use exarch_core::creation::CreationReport as CoreCreationReport;
 use exarch_core::inspection::IntegrityGaps;
 use exarch_core::inspection::manifest::ArchiveEntry;
@@ -10,6 +13,112 @@ use exarch_core::inspection::report::VerificationIssue;
 use exarch_core::inspection::report::VerificationReport;
 use pyo3::prelude::*;
 use std::collections::BTreeMap;
+
+use crate::buffer::parse_one;
+
+/// One entry an operation left out.
+///
+/// # Attributes
+///
+/// * `kind` - Why it was skipped (`"duplicate"`, `"extension_not_allowed"`,
+///   `"excluded"`, `"hidden"`, `"over_max_file_size"`, `"symlink_unsupported"`
+///   or `"unreadable"`)
+/// * `path` - The entry's path as the operation names it
+/// * `io_kind` - The description of the I/O failure behind an `"unreadable"`
+///   skip, else `None`
+#[pyclass(name = "Skip", frozen)]
+pub struct PySkip {
+    kind: SkipKind,
+    path: String,
+    io_kind: Option<String>,
+}
+
+#[pymethods]
+impl PySkip {
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind.as_str()
+    }
+
+    #[getter]
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[getter]
+    fn io_kind(&self) -> Option<&str> {
+        self.io_kind.as_deref()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Skip(kind={:?}, path={:?})", self.kind.as_str(), self.path)
+    }
+}
+
+impl From<&CoreSkip> for PySkip {
+    fn from(skip: &CoreSkip) -> Self {
+        Self {
+            kind: skip.kind,
+            path: skip.path.to_string_lossy().into_owned(),
+            io_kind: skip.io_kind.map(|kind| kind.to_string()),
+        }
+    }
+}
+
+/// Everything an operation left out: exact counts per kind plus a bounded
+/// sample of the individual entries.
+///
+/// # Attributes
+///
+/// * `total` - How many entries were skipped, over all kinds
+/// * `counts` - The exact count of each kind that occurred
+/// * `sample` - The first skipped entries (at most 64)
+#[pyclass(name = "Skipped", frozen)]
+#[derive(Clone)]
+pub struct PySkips {
+    inner: CoreSkips,
+}
+
+#[pymethods]
+impl PySkips {
+    #[getter]
+    fn total(&self) -> usize {
+        self.inner.total()
+    }
+
+    /// The exact count of `kind`, which must be one of the kind strings.
+    fn count(&self, kind: &str) -> PyResult<usize> {
+        parse_one("kind", SkipKind::ALL, SkipKind::as_str, kind).map(|kind| self.inner.count(kind))
+    }
+
+    #[getter]
+    fn counts(&self) -> BTreeMap<&'static str, usize> {
+        SkipKind::ALL
+            .iter()
+            .map(|kind| (kind.as_str(), self.inner.count(*kind)))
+            .filter(|(_, count)| *count > 0)
+            .collect()
+    }
+
+    #[getter]
+    fn sample(&self) -> Vec<PySkip> {
+        self.inner.sample().iter().map(PySkip::from).collect()
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.total()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Skipped(total={})", self.inner.total())
+    }
+}
+
+impl From<CoreSkips> for PySkips {
+    fn from(inner: CoreSkips) -> Self {
+        Self { inner }
+    }
+}
 
 /// Report of an archive extraction operation.
 ///
@@ -22,7 +131,8 @@ use std::collections::BTreeMap;
 /// * `symlinks_created` - Number of symlinks created
 /// * `bytes_written` - Total bytes written to disk
 /// * `duration_ms` - Extraction duration in milliseconds
-/// * `files_skipped` - Number of files skipped due to security checks
+/// * `files_skipped` - Number of entries skipped
+/// * `skipped` - The skipped entries by kind
 /// * `warnings` - List of warning messages
 #[pyclass(name = "ExtractionReport")]
 #[derive(Clone)]
@@ -62,10 +172,16 @@ impl PyExtractionReport {
         self.inner.duration.as_millis()
     }
 
-    /// Number of files skipped due to security checks.
+    /// Number of entries skipped, over all kinds.
     #[getter]
     fn files_skipped(&self) -> usize {
         self.inner.files_skipped()
+    }
+
+    /// The skipped entries by kind.
+    #[getter]
+    fn skipped(&self) -> PySkips {
+        PySkips::from(self.inner.skipped.clone())
     }
 
     /// Returns a copy of the warning messages list.
@@ -182,6 +298,11 @@ impl PyCreationReport {
     #[getter]
     fn files_skipped(&self) -> usize {
         self.inner.files_skipped()
+    }
+
+    #[getter]
+    fn skipped(&self) -> PySkips {
+        PySkips::from(self.inner.skipped.clone())
     }
 
     #[getter]
@@ -1042,6 +1163,7 @@ mod tests {
         use exarch_core::PolicySetting;
         use exarch_core::QuotaKind;
         use exarch_core::SecurityViolationSubCode;
+        use exarch_core::SkipKind;
         use exarch_core::SubCode;
         use exarch_core::UnverifiedReason;
         use exarch_core::ZipBombScope;
@@ -1096,6 +1218,7 @@ mod tests {
                 InvalidArchiveSubCode::as_str,
             ),
             literal_line("_PathModel", PathModel::ALL, PathModel::as_str),
+            literal_line("_SkipKind", SkipKind::ALL, SkipKind::as_str),
             literal_line("_ErrorCode", ErrorCode::ALL, ErrorCode::as_str),
             literal_line("_QuotaSubCode", QuotaKind::ALL, |kind| {
                 SubCode::Quota(kind).as_str()

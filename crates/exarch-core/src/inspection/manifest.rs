@@ -255,6 +255,38 @@ impl ArchiveEntry {
         }
     }
 
+    /// Returns the entry path as text.
+    ///
+    /// Front ends that expose paths as strings call this so that every one
+    /// applies the same policy: a path that is not valid UTF-8 is refused
+    /// rather than rendered lossily, because a lossy rendering could give two
+    /// distinct entries one name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Malformation::EntryPathNotUtf8`] when the path is not valid
+    /// UTF-8.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    ///
+    /// use exarch_core::ArchiveEntry;
+    /// use exarch_core::ManifestEntryKind;
+    ///
+    /// let entry = ArchiveEntry::new(PathBuf::from("a/b.txt"), ManifestEntryKind::Directory);
+    /// assert_eq!(entry.utf8_path()?, "a/b.txt");
+    /// # Ok::<(), exarch_core::Malformation>(())
+    /// ```
+    pub fn utf8_path(&self) -> std::result::Result<&str, Malformation> {
+        self.path
+            .to_str()
+            .ok_or_else(|| Malformation::EntryPathNotUtf8 {
+                path: self.path.clone(),
+            })
+    }
+
     /// Returns the uncompressed size in bytes: the size of a regular file, and
     /// 0 for every other kind.
     #[must_use]
@@ -586,6 +618,10 @@ closed_enum! {
     ///
     /// Unlike `EntryType`, this enum is used for read-only listing
     /// and does not enforce security constraints.
+    ///
+    /// Closed by design: a new variant is a breaking change, and every
+    /// front end pins [`ALL`](Self::ALL) in a drift test so it cannot go
+    /// unnoticed.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ManifestEntryType {
         /// Regular file
@@ -682,6 +718,25 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(manifest.total_size(), 5);
+    }
+
+    #[test]
+    fn test_utf8_path_accepts_text_and_refuses_other_bytes() {
+        let text = ArchiveEntry::new(PathBuf::from("a/é.txt"), ManifestEntryKind::Directory);
+        assert_eq!(text.utf8_path().unwrap(), "a/é.txt");
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+
+            let raw = PathBuf::from(OsStr::from_bytes(b"a/\xff"));
+            let entry = ArchiveEntry::new(raw.clone(), ManifestEntryKind::Directory);
+            assert_matches!(
+                entry.utf8_path(),
+                Err(Malformation::EntryPathNotUtf8 { path }) if path == raw
+            );
+        }
     }
 
     #[test]

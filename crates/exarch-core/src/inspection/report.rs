@@ -592,6 +592,10 @@ fn determine_security_status(issues: &[VerificationIssue]) -> CheckStatus {
 
 closed_enum! {
     /// Overall verification status.
+    ///
+    /// Closed by design: a new variant is a breaking change, and every
+    /// front end pins [`ALL`](Self::ALL) in a drift test so it cannot go
+    /// unnoticed.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum VerificationStatus {
         /// All checks passed
@@ -607,6 +611,10 @@ closed_enum! {
 
 closed_enum! {
     /// Status of a specific check category.
+    ///
+    /// Closed by design: a new variant is a breaking change, and every
+    /// front end pins [`ALL`](Self::ALL) in a drift test so it cannot go
+    /// unnoticed.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum CheckStatus {
         /// Check passed
@@ -819,6 +827,10 @@ impl VerificationIssue {
 
 closed_enum! {
     /// Issue severity levels (ordered from least to most severe for Ord).
+    ///
+    /// Closed by design: a new variant is a breaking change, and every
+    /// front end pins [`ALL`](Self::ALL) in a drift test so it cannot go
+    /// unnoticed.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     pub enum IssueSeverity {
         /// Informational

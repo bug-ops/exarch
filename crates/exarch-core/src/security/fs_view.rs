@@ -1942,7 +1942,8 @@ mod tests {
         let alias = components(KELVIN, count);
         assert!(stored.len() <= MAX_PATH_LEN && alias.len() > MAX_PATH_LEN);
         let long = "n".repeat(MAX_PATH_LEN);
-        let cases: Vec<(&str, fn(&mut VirtualTree), String)> = vec![
+        type Setup = fn(&mut VirtualTree);
+        let cases: Vec<(&str, Setup, String)> = vec![
             ("no link, short", |_| {}, "a/b".to_owned()),
             ("no link, long", |_| {}, format!("a/{long}")),
             (
@@ -1985,7 +1986,6 @@ mod tests {
         }
         // A spelling that folds onto a shorter stored one: both entry points
         // judge it by the spelling the entry uses.
-        let stored_spelling = stored.clone();
         let setup: fn(&mut VirtualTree) = |t| {
             let count = MAX_PATH_LEN / (KELVIN.len() * 80) + 1;
             put(t, &components("k", count), Node::Dir);
@@ -1998,8 +1998,8 @@ mod tests {
         );
         assert_eq!(decision(setup, &rel, true).0, "too long");
         assert_eq!(
-            decision(setup, &format!("{stored_spelling}/f"), true).0,
-            decision(setup, &format!("{stored_spelling}/f"), false).0
+            decision(setup, &format!("{stored}/f"), true).0,
+            decision(setup, &format!("{stored}/f"), false).0
         );
     }
 

@@ -180,6 +180,9 @@ a regression test.
 - Place integration tests in `tests/` directory
 - Security validators must have **100% test coverage**
 - Overall project coverage target: **80%+**
+- Write `assert_matches!(value, pattern)`, never `assert!(matches!(value, pattern))`:
+  the CI Format Check job rejects the latter in every tracked `.rs` file, and
+  `cargo fmt` and `clippy` do not catch it
 
 ### CVE Regression Tests
 

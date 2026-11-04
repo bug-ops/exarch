@@ -115,6 +115,7 @@ struct Slot {
 pub struct Taken(Kept);
 
 /// Kept output ready to be written: owned bytes, or a reader over the spool.
+#[derive(Debug)]
 pub enum Retained<'s> {
     /// Bytes checked against the entry's length and CRC-32.
     Bytes(Vec<u8>),
@@ -484,6 +485,7 @@ fn check_kept(bytes: &[u8], key: &RetainKey) -> io::Result<()> {
 
 /// Reads kept bytes and checks them against the entry's declared length and
 /// CRC-32 at the end, failing as the `zip` crate does for a damaged entry.
+#[derive(Debug)]
 pub struct ReplayReader<S> {
     inner: S,
     crc: Crc,

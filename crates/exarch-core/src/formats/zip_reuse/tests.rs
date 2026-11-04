@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
@@ -718,8 +719,8 @@ fn kept_output_and_sink_stay_within_the_shared_limit_before_every_entry() {
 
     let taken = store.take(&keys[0]).unwrap();
     assert_eq!(store.used(), 0);
-    assert!(matches!(
+    assert_matches!(
         store.retained(taken, &keys[0]).unwrap(),
         Retained::Bytes(bytes) if bytes == entries[0]
-    ));
+    );
 }

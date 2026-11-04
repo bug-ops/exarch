@@ -15,6 +15,18 @@ export interface AbortSignalLike {
 }
 
 /**
+ * The value a progress callback receives for each entry: its path, the number
+ * of entries (`null` while it is not known, as for a TAR stream), its 1-based
+ * position and the bytes written for it so far (always `0` at entry start).
+ */
+export type ProgressArgs = [
+  path: string,
+  total: number | null,
+  current: number,
+  bytesWritten: number,
+]
+
+/**
  * Properties of an error raised by exarch-core.
  *
  * `message` is the human-readable description only; everything

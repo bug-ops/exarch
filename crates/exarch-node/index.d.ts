@@ -15,6 +15,18 @@ export interface AbortSignalLike {
 }
 
 /**
+ * The value a progress callback receives for each entry: its path, the number
+ * of entries (`null` while it is not known, as for a TAR stream), its 1-based
+ * position and the bytes written for it so far (always `0` at entry start).
+ */
+export type ProgressArgs = [
+  path: string,
+  total: number | null,
+  current: number,
+  bytesWritten: number,
+]
+
+/**
  * Properties of an error raised by exarch-core.
  *
  * `message` is the human-readable description only; everything
@@ -903,7 +915,8 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * * `sources` - Array of source files/directories to include
  * * `config` - Optional `CreationConfig` (uses defaults if omitted)
  * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
- *   string, total: number, current: number, bytesWritten: number]) => void`
+ *   string, total: number | null, current: number, bytesWritten: number]) =>
+ *   void`
  *
  * # Returns
  *
@@ -1002,9 +1015,10 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * * `sources` - Array of source files/directories to include
  * * `config` - Optional `CreationConfig` (uses defaults if omitted)
  * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
- *   string, total: number, current: number, bytesWritten: number]) => void`.
- *   See the sections above: calls arrive only after this function returns, and
- *   a throw becomes an `uncaughtException` rather than an error from here.
+ *   string, total: number | null, current: number, bytesWritten: number]) =>
+ *   void`. See the sections above: calls arrive only after this function
+ *   returns, and a throw becomes an `uncaughtException` rather than an error
+ *   from here.
  *
  * # Returns
  *
@@ -1030,7 +1044,7 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * console.log(`Created archive with ${report.filesAdded} files`);
  * ```
  */
-export declare function createArchiveWithProgressSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): CreationReport
+export declare function createArchiveWithProgressSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): CreationReport
 
 /** An archive created in memory. */
 export interface CreatedArchive {
@@ -1058,8 +1072,13 @@ export interface CreationReport {
   bytesCompressed: number
   /** Duration of the creation operation in milliseconds. */
   durationMs: number
-  /** Number of files skipped (due to filters or errors). */
+  /**
+   * Number of entries skipped, over all reasons (filters, size limit,
+   * unreadable entries, unsupported symlinks).
+   */
   filesSkipped: number
+  /** The skipped entries by reason. */
+  skipped: SkippedSummary
   /** Warnings generated during creation. */
   warnings: Array<string>
 }
@@ -1439,7 +1458,7 @@ export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | As
  * );
  * ```
  */
-export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): MemoryExtraction
+export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): MemoryExtraction
 
 /**
  * Extract an archive to the specified directory with a progress callback
@@ -1468,7 +1487,8 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `options` - Optional `ExtractionOptions` (uses defaults if omitted)
  * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
- *   string, total: number, current: number, bytesWritten: number]) => void`
+ *   string, total: number | null, current: number, bytesWritten: number]) =>
+ *   void`
  *
  * # Returns
  *
@@ -1554,9 +1574,14 @@ export interface ExtractionReport {
   bytesWritten: number
   /** Extraction duration in milliseconds. */
   durationMs: number
-  /** Number of files skipped due to security checks. */
+  /** Number of entries skipped, over all reasons. */
   filesSkipped: number
-  /** List of warning messages. */
+  /** The skipped entries by reason. */
+  skipped: SkippedSummary
+  /**
+   * Descriptions of conditions worth surfacing that are not skipped
+   * entries.
+   */
   warnings: Array<string>
 }
 
@@ -1756,7 +1781,7 @@ export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIte
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): ArchiveManifest
+export declare function listArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): ArchiveManifest
 
 /**
  * List archive contents without extracting (sync).
@@ -1887,6 +1912,38 @@ export type QuotaSubCode = 'FILE_COUNT' | 'TOTAL_SIZE' | 'FILE_SIZE' | 'INTEGER_
 
 /** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
 export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH'
+
+/** How many entries were skipped for one reason. */
+export interface SkipCount {
+  /** Why the entries were skipped. */
+  kind: SkipKind
+  /** How many entries, saturated at `2^32 - 1`. */
+  count: number
+}
+
+/** Why an entry was left out of an extraction or a creation. */
+export type SkipKind = 'duplicate' | 'extension_not_allowed' | 'excluded' | 'hidden' | 'over_max_file_size' | 'symlink_unsupported' | 'unreadable'
+
+/** One skipped entry. */
+export interface SkippedEntry {
+  /** The entry path as the operation names it. */
+  path: string
+  /** Why the entry was skipped. */
+  kind: SkipKind
+  /** The I/O failure behind an `'unreadable'` skip. */
+  ioKind?: IoKind
+}
+
+/**
+ * Everything an operation left out: exact counts per reason plus a bounded
+ * sample of the individual entries.
+ */
+export interface SkippedSummary {
+  /** Exact count per reason; reasons with no skip are absent. */
+  counts: Array<SkipCount>
+  /** The first skipped entries in the order they were skipped, at most 64. */
+  sample: Array<SkippedEntry>
+}
 
 /** Number of items left unverified for one reason. */
 export interface UnverifiedCount {
@@ -2124,7 +2181,7 @@ export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncI
  * );
  * ```
  */
-export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): VerificationReport
+export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): VerificationReport
 
 /**
  * Verify archive security (sync).

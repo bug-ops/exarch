@@ -470,7 +470,7 @@ const WRAP_PROGRESS_CALLBACK_JS: &str = js_with_normalizer!(
 /// Argument extraction, by contrast, always runs synchronously on the JS
 /// thread before the future is constructed, which is exactly where
 /// `Env`/`Function` access is valid.
-pub struct ProgressCallback(ThreadsafeFunction<(String, i64, i64, i64)>);
+pub struct ProgressCallback(ThreadsafeFunction<ProgressArgs>);
 
 impl TypeName for ProgressCallback {
     fn type_name() -> &'static str {
@@ -509,7 +509,7 @@ impl FromNapiValue for ProgressCallback {
             Env::from_raw(env).run_script(WRAP_PROGRESS_CALLBACK_JS)?;
         let wrapped = factory.call(callback.to_unknown())?;
         let tsfn = wrapped
-            .build_threadsafe_function::<(String, i64, i64, i64)>()
+            .build_threadsafe_function::<ProgressArgs>()
             .callee_handled::<true>()
             .build_callback(|ctx| Ok(ctx.value))?;
         Ok(Self(tsfn))
@@ -540,7 +540,8 @@ impl FromNapiValue for ProgressCallback {
 /// * `sources` - Array of source files/directories to include
 /// * `config` - Optional `CreationConfig` (uses defaults if omitted)
 /// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
-///   string, total: number, current: number, bytesWritten: number]) => void`
+///   string, total: number | null, current: number, bytesWritten: number]) =>
+///   void`
 ///
 /// # Returns
 ///
@@ -630,7 +631,7 @@ fn create_with_progress_core(
     output_path: &str,
     sources: &[String],
     config: &exarch_core::creation::CreationConfig,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
@@ -686,9 +687,10 @@ fn create_with_progress_core(
 /// * `sources` - Array of source files/directories to include
 /// * `config` - Optional `CreationConfig` (uses defaults if omitted)
 /// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
-///   string, total: number, current: number, bytesWritten: number]) => void`.
-///   See the sections above: calls arrive only after this function returns, and
-///   a throw becomes an `uncaughtException` rather than an error from here.
+///   string, total: number | null, current: number, bytesWritten: number]) =>
+///   void`. See the sections above: calls arrive only after this function
+///   returns, and a throw becomes an `uncaughtException` rather than an error
+///   from here.
 ///
 /// # Returns
 ///
@@ -720,7 +722,7 @@ pub fn create_archive_with_progress_sync(
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
 ) -> Result<CreationReport> {
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
@@ -749,7 +751,7 @@ fn run_create_with_optional_progress(
     output_path: &str,
     sources: &[&str],
     config: &exarch_core::creation::CreationConfig,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
 ) -> std::result::Result<exarch_core::creation::CreationReport, Box<ProgressCallbackError>> {
     progress.map_or_else(
@@ -1016,7 +1018,8 @@ pub fn verify_archive_sync(
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
 /// * `options` - Optional `ExtractionOptions` (uses defaults if omitted)
 /// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
-///   string, total: number, current: number, bytesWritten: number]) => void`
+///   string, total: number | null, current: number, bytesWritten: number]) =>
+///   void`
 ///
 /// # Returns
 ///
@@ -1131,7 +1134,7 @@ fn run_extract_with_optional_progress(
     output_dir: &str,
     config: &exarch_core::SecurityConfig,
     options: &exarch_core::ExtractionOptions,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
 ) -> std::result::Result<exarch_core::ExtractionReport, Box<ProgressCallbackError>> {
     progress.map_or_else(
         || {
@@ -1170,6 +1173,11 @@ fn run_extract_with_optional_progress(
     )
 }
 
+/// The value a progress callback receives: path, entry count (`None` while the
+/// archive's entry count is unknown, as for a TAR stream), 1-based index and
+/// bytes written for the entry.
+pub(crate) type ProgressArgs = (String, Option<i64>, i64, i64);
+
 /// Adapter that calls a JavaScript progress callback from a Rust worker thread.
 ///
 /// Shared by extraction and creation. The JavaScript callback receives `(err:
@@ -1187,10 +1195,9 @@ fn run_extract_with_optional_progress(
 /// so extraction/creation keeps running, but there is no value in repeatedly
 /// invoking a callback already known to be broken.
 struct NodeProgressAdapter {
-    tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
+    tsfn: ThreadsafeFunction<ProgressArgs>,
     dispatch: ProgressDispatch,
     current_entry_bytes: i64,
-    total: usize,
     callback_error: Option<Error>,
     abort: AbortHandle,
 }
@@ -1203,7 +1210,7 @@ struct NodeProgressAdapter {
 /// which receives the successful value so it can keep its counters; the value
 /// itself is discarded.
 fn run_with_optional_progress<T>(
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
     abort: AbortHandle,
     run: impl FnOnce(&mut dyn exarch_core::ProgressCallback) -> CoreResult<T>,
@@ -1244,7 +1251,7 @@ enum ProgressDispatch {
 
 impl NodeProgressAdapter {
     fn new(
-        tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
+        tsfn: ThreadsafeFunction<ProgressArgs>,
         dispatch: ProgressDispatch,
         abort: AbortHandle,
     ) -> Self {
@@ -1253,7 +1260,6 @@ impl NodeProgressAdapter {
             tsfn,
             dispatch,
             current_entry_bytes: 0,
-            total: 0,
             callback_error: None,
         }
     }
@@ -1267,15 +1273,14 @@ impl NodeProgressAdapter {
 
 impl exarch_core::ProgressCallback for NodeProgressAdapter {
     fn on_entry_start(&mut self, path: &std::path::Path, position: exarch_core::EntryPosition) {
-        let total = position.total.known().unwrap_or(0);
+        let total = position.total.known();
         let current = position.current.get();
         if self.callback_error.is_some() || self.abort.check().is_err() {
             return;
         }
         self.current_entry_bytes = 0;
-        self.total = total;
         let path_str = path.to_string_lossy().into_owned();
-        let total_i64 = i64::try_from(total).unwrap_or(i64::MAX);
+        let total_i64 = total.map(|total| i64::try_from(total).unwrap_or(i64::MAX));
         let current_i64 = i64::try_from(current).unwrap_or(i64::MAX);
         let value = Ok((path_str, total_i64, current_i64, self.current_entry_bytes));
         match self.dispatch {

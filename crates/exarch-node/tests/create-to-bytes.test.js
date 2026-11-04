@@ -118,8 +118,8 @@ describe('extractArchiveToMemoryWithProgress', () => {
     assert.deepStrictEqual(
       calls.map(([, total, current]) => [total, current]),
       [
-        [0, 1],
-        [0, 2],
+        [null, 1],
+        [null, 2],
       ]
     );
     assert.deepStrictEqual(
@@ -200,8 +200,8 @@ describe('extractArchiveToMemoryWithProgress', () => {
       assert.deepStrictEqual(
         calls.map(([, total, current]) => [total, current]),
         [
-          [0, 1],
-          [0, 2],
+          [null, 1],
+          [null, 2],
         ]
       );
     });

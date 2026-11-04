@@ -33,7 +33,7 @@ function assertProgressCallShape(err, arg) {
   assert.strictEqual(err, null);
   const [entryPath, total, current, bytesWritten] = arg;
   assert.strictEqual(typeof entryPath, 'string');
-  assert.strictEqual(typeof total, 'number');
+  assert.ok(total === null || typeof total === 'number', 'total is a number or null');
   assert.strictEqual(typeof current, 'number');
   assert.strictEqual(typeof bytesWritten, 'number');
 }

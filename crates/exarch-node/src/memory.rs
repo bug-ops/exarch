@@ -22,6 +22,7 @@ use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
 
 use crate::CoreResult;
+use crate::ProgressArgs;
 use crate::ProgressCallback;
 use crate::ProgressDispatch;
 use crate::abort::AbortBinding;
@@ -256,7 +257,7 @@ impl<S: IntoSource> MemoryJob<S> {
     /// report counters.
     fn run_with_progress(
         self,
-        progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+        progress: Option<ThreadsafeFunction<ProgressArgs>>,
         dispatch: ProgressDispatch,
     ) -> CoreResult<MemoryExtraction> {
         let (report, sink) = run_with_optional_progress(
@@ -638,7 +639,7 @@ pub fn extract_archive_to_memory_with_progress_sync(
     max_bytes: Option<f64>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
 ) -> Result<MemoryExtraction> {
     let job = MemoryJob::new(&*data, config, options, max_bytes, path_model, format);
 

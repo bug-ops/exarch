@@ -7,6 +7,7 @@ use napi::bindgen_prelude::Uint8Array;
 use napi_derive::napi;
 
 use crate::CoreResult;
+use crate::ProgressArgs;
 use crate::ProgressCallback;
 use crate::ProgressDispatch;
 use crate::abort::AbortBinding;
@@ -51,7 +52,7 @@ fn list_with_progress_core(
     data: impl IntoSource,
     config: &exarch_core::SecurityConfig,
     format: Option<ArchiveType>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
 ) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
     run_with_optional_progress(
@@ -74,7 +75,7 @@ fn verify_with_progress_core(
     config: &exarch_core::SecurityConfig,
     options: exarch_core::VerificationOptions,
     format: Option<ArchiveType>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
 ) -> CoreResult<exarch_core::inspection::VerificationReport> {
     run_with_optional_progress(
@@ -462,7 +463,7 @@ pub fn list_archive_bytes_with_progress_sync(
     data: Uint8Array,
     config: Option<&SecurityConfig>,
     format: Option<ArchiveType>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
@@ -522,7 +523,7 @@ pub fn verify_archive_bytes_with_progress_sync(
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
     format: Option<ArchiveType>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    progress: Option<ThreadsafeFunction<ProgressArgs>>,
 ) -> Result<VerificationReport> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());

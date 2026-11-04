@@ -1839,9 +1839,7 @@ mod tests {
     #[test]
     fn test_creation_config_add_exclude_pattern_rejects_null() {
         let mut config = CreationConfig::new();
-        let err = config
-            .try_add_exclude_pattern("bad\0pattern")
-            .unwrap_err();
+        let err = config.try_add_exclude_pattern("bad\0pattern").unwrap_err();
         assert_matches!(
             err,
             CoreError::InvalidConfiguration {

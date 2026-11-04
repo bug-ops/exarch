@@ -179,7 +179,7 @@ rules of every platform instead of this host's.
 `listArchiveBytesWithProgress`, `verifyArchiveBytesWithProgress` and
 `extractArchiveToMemoryWithProgress` (async only) take a `progress` callback as
 their last argument, called with `(err, [path, total, current, bytesWritten])`;
-`current` counts from 1 and `total` is 0 for TAR. A throwing callback does not
+`current` counts from 1 and `total` is `null` while the entry count is unknown (a TAR stream). A throwing callback does not
 abort the run; if the run succeeded the promise rejects with
 `PROGRESS_CALLBACK_ERROR` and the result is discarded.
 
@@ -332,7 +332,8 @@ interface ExtractionReport {
   symlinksCreated: number;    // Number of symlinks created
   bytesWritten: number;       // Total bytes written
   durationMs: number;         // Extraction duration in milliseconds
-  filesSkipped: number;       // Files skipped (e.g. duplicates)
+  filesSkipped: number;       // Entries skipped, over all reasons
+  skipped: { counts: { kind: SkipKind; count: number }[]; sample: SkippedEntry[] }; // by reason
   warnings: string[];         // Warning messages from extraction
 }
 ```
@@ -369,7 +370,7 @@ const result = await extractArchiveWithProgress(
 | `outputDir` | `string` | Directory where files will be extracted |
 | `config` | `SecurityConfig \| undefined` | Optional security configuration |
 | `options` | `ExtractionOptions \| undefined` | Optional extraction options |
-| `progress` | `(err: Error \| null, arg: [path: string, total: number, current: number, bytesWritten: number]) => void \| undefined` | Optional progress callback |
+| `progress` | `(err: Error \| null, arg: ProgressArgs) => void \| undefined` | Optional progress callback |
 
 **Returns:** `Promise<ExtractionReport>`
 
@@ -401,7 +402,7 @@ const result = await createArchiveWithProgress(
 | `outputPath` | `string` | Path to the output archive file |
 | `sources` | `string[]` | Source files/directories to include |
 | `config` | `CreationConfig \| undefined` | Optional creation configuration |
-| `progress` | `(err: Error \| null, arg: [path: string, total: number, current: number, bytesWritten: number]) => void \| undefined` | Optional progress callback |
+| `progress` | `(err: Error \| null, arg: ProgressArgs) => void \| undefined` | Optional progress callback |
 
 **Returns:** `Promise<CreationReport>`
 
@@ -439,7 +440,7 @@ console.log(`Created archive with ${result.filesAdded} files`);
 | `outputPath` | `string` | Path to the output archive file |
 | `sources` | `string[]` | Source files/directories to include |
 | `config` | `CreationConfig \| undefined` | Optional creation configuration |
-| `progress` | `(err: Error \| null, arg: [path: string, total: number, current: number, bytesWritten: number]) => void \| undefined` | Optional progress callback. See the note above: calls arrive only after this function returns. |
+| `progress` | `(err: Error \| null, arg: ProgressArgs) => void \| undefined` | Optional progress callback. See the note above: calls arrive only after this function returns. |
 
 **Returns:** `CreationReport`
 

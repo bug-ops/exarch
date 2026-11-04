@@ -163,6 +163,29 @@ describe('createArchive output handling', () => {
     assert.strictEqual(fs.readFileSync(outputPath, 'utf8'), 'previous');
   });
 
+  it('reports excluded entries by reason', () => {
+    fs.writeFileSync(path.join(sourceDir, 'debug.log'), 'log content');
+    const config = new CreationConfig();
+    config.addExcludePattern('*.log');
+    const report = createArchiveSync(path.join(tempDir, 'skips.tar.gz'), [sourceDir], config);
+    assert.ok(report.filesSkipped >= 1);
+    assert.deepStrictEqual(
+      report.skipped.counts.find((c) => c.kind === 'excluded'),
+      { kind: 'excluded', count: report.filesSkipped }
+    );
+    assert.ok(
+      report.skipped.sample.some((s) => s.path.endsWith('debug.log') && s.kind === 'excluded')
+    );
+  });
+
+  it('refuses an unsupported exclude pattern shape', () => {
+    const config = new CreationConfig();
+    assert.throws(() => config.addExcludePattern('*.m*'), {
+      code: 'INVALID_CONFIGURATION',
+      setting: 'exclude_pattern',
+    });
+  });
+
   it('replaces an existing archive on success', () => {
     const outputPath = path.join(tempDir, 'replace.tar.gz');
     fs.writeFileSync(outputPath, 'previous');

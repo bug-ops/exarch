@@ -1301,6 +1301,22 @@ mod tests {
     );
 
     mirror_maps_to_core!(
+        test_every_skip_kind_mirror_value_is_a_core_variant,
+        crate::report::SkipKind,
+        exarch_core::SkipKind,
+        "SkipKind",
+        [
+            Duplicate,
+            ExtensionNotAllowed,
+            Excluded,
+            Hidden,
+            OverMaxFileSize,
+            SymlinkUnsupported,
+            Unreadable
+        ]
+    );
+
+    mirror_maps_to_core!(
         test_every_zip_bomb_sub_code_mirror_value_is_a_core_variant,
         ZipBombSubCode,
         exarch_core::ZipBombScope,

@@ -14,6 +14,8 @@ use napi::Error;
 use napi::Result;
 use napi_derive::napi;
 
+use crate::error::IoKind;
+
 pub fn saturating_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
@@ -444,6 +446,96 @@ impl TryFrom<CoreIssueCategory> for IssueCategory {
     }
 }
 
+/// Why an entry was left out of an extraction or a creation.
+// Generates the TypeScript union only; runtime values come from core's
+// `SkipKind::as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipKind {
+    /// A pre-existing destination entry kept under the skip-duplicates policy.
+    #[napi(value = "duplicate")]
+    Duplicate,
+    /// A file refused by the extension allowlist.
+    #[napi(value = "extension_not_allowed")]
+    ExtensionNotAllowed,
+    /// An entry matched by a creation exclude pattern.
+    #[napi(value = "excluded")]
+    Excluded,
+    /// A hidden entry left out by a creation configuration.
+    #[napi(value = "hidden")]
+    Hidden,
+    /// A file larger than the creation file size limit.
+    #[napi(value = "over_max_file_size")]
+    OverMaxFileSize,
+    /// A symlink that cannot be stored.
+    #[napi(value = "symlink_unsupported")]
+    SymlinkUnsupported,
+    /// An entry that could not be read.
+    #[napi(value = "unreadable")]
+    Unreadable,
+}
+
+/// How many entries were skipped for one reason.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct SkipCount {
+    /// Why the entries were skipped.
+    #[napi(ts_type = "SkipKind")]
+    pub kind: String,
+    /// How many entries, saturated at `2^32 - 1`.
+    pub count: u32,
+}
+
+/// One skipped entry.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct SkippedEntry {
+    /// The entry path as the operation names it.
+    pub path: String,
+    /// Why the entry was skipped.
+    #[napi(ts_type = "SkipKind")]
+    pub kind: String,
+    /// The I/O failure behind an `'unreadable'` skip.
+    pub io_kind: Option<IoKind>,
+}
+
+/// Everything an operation left out: exact counts per reason plus a bounded
+/// sample of the individual entries.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct SkippedSummary {
+    /// Exact count per reason; reasons with no skip are absent.
+    pub counts: Vec<SkipCount>,
+    /// The first skipped entries in the order they were skipped, at most 64.
+    pub sample: Vec<SkippedEntry>,
+}
+
+impl From<&exarch_core::Skips> for SkippedSummary {
+    fn from(skips: &exarch_core::Skips) -> Self {
+        Self {
+            counts: exarch_core::SkipKind::ALL
+                .iter()
+                .filter_map(|kind| {
+                    let count = skips.count(*kind);
+                    (count > 0).then(|| SkipCount {
+                        kind: kind.as_str().to_owned(),
+                        count: saturating_u32(count),
+                    })
+                })
+                .collect(),
+            sample: skips
+                .sample()
+                .iter()
+                .map(|skip| SkippedEntry {
+                    path: skip.path.to_string_lossy().into_owned(),
+                    kind: skip.kind.as_str().to_owned(),
+                    io_kind: skip.io_kind.map(IoKind::from),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Report of an archive extraction operation.
 ///
 /// Contains statistics and metadata about the extraction process.
@@ -460,9 +552,12 @@ pub struct ExtractionReport {
     pub bytes_written: i64,
     /// Extraction duration in milliseconds.
     pub duration_ms: i64,
-    /// Number of files skipped due to security checks.
+    /// Number of entries skipped, over all reasons.
     pub files_skipped: u32,
-    /// List of warning messages.
+    /// The skipped entries by reason.
+    pub skipped: SkippedSummary,
+    /// Descriptions of conditions worth surfacing that are not skipped
+    /// entries.
     pub warnings: Vec<String>,
 }
 
@@ -479,6 +574,7 @@ impl From<CoreReport> for ExtractionReport {
             bytes_written: saturating_i64(report.bytes_written),
             duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
             files_skipped: saturating_u32(report.files_skipped()),
+            skipped: SkippedSummary::from(&report.skipped),
             warnings: report.warnings.iter().map(ToString::to_string).collect(),
         }
     }
@@ -502,8 +598,11 @@ pub struct CreationReport {
     pub bytes_compressed: i64,
     /// Duration of the creation operation in milliseconds.
     pub duration_ms: i64,
-    /// Number of files skipped (due to filters or errors).
+    /// Number of entries skipped, over all reasons (filters, size limit,
+    /// unreadable entries, unsupported symlinks).
     pub files_skipped: u32,
+    /// The skipped entries by reason.
+    pub skipped: SkippedSummary,
     /// Warnings generated during creation.
     pub warnings: Vec<String>,
 }
@@ -519,6 +618,7 @@ impl From<exarch_core::creation::CreationReport> for CreationReport {
             bytes_compressed: saturating_i64(report.bytes_compressed),
             duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
             files_skipped: saturating_u32(report.files_skipped()),
+            skipped: SkippedSummary::from(&report.skipped),
             warnings: report.warnings.iter().map(ToString::to_string).collect(),
         }
     }
@@ -721,6 +821,40 @@ mod tests {
     fn anti(count: u64) -> exarch_core::ExtractionWarning {
         exarch_core::ExtractionWarning::AntiItemsSkipped { count }
     }
+
+    #[test]
+    fn test_skipped_summary_carries_counts_sample_and_io_kind() {
+        let mut skips = exarch_core::Skips::default();
+        skips
+            .record(exarch_core::Skip::new(
+                exarch_core::SkipKind::Duplicate,
+                "a",
+            ))
+            .unwrap();
+        skips
+            .record(exarch_core::Skip::new(
+                exarch_core::SkipKind::Duplicate,
+                "b",
+            ))
+            .unwrap();
+        let mut unreadable = exarch_core::Skip::new(exarch_core::SkipKind::Unreadable, "c");
+        unreadable.io_kind = Some(std::io::ErrorKind::PermissionDenied);
+        skips.record(unreadable).unwrap();
+
+        let summary = SkippedSummary::from(&skips);
+
+        let counts: Vec<(&str, u32)> = summary
+            .counts
+            .iter()
+            .map(|c| (c.kind.as_str(), c.count))
+            .collect();
+        assert_eq!(counts, [("duplicate", 2), ("unreadable", 1)]);
+        assert_eq!(summary.sample.len(), 3);
+        assert_eq!(summary.sample[2].kind, "unreadable");
+        assert_eq!(summary.sample[2].io_kind, Some(IoKind::PermissionDenied));
+        assert_eq!(summary.sample[0].io_kind, None);
+    }
+
     use exarch_core::Compressed;
     use std::time::Duration;
 

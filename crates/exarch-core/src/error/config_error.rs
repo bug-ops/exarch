@@ -71,6 +71,18 @@ closed_enum! {
         ParallelDecodeMemory => "parallel_decode_memory",
         /// An entry of the creation exclude patterns.
         ExcludePattern => "exclude_pattern",
+        /// The ZIP structure policy.
+        ZipConsistency => "zip_consistency",
+        /// The path model of a sink extraction.
+        PathModel => "path_model",
+        /// The archive format of an extraction or listing.
+        ArchiveFormat => "archive_format",
+        /// The decode reuse mode of an extraction.
+        DecodeReuse => "decode_reuse",
+        /// The byte limit of a decode reuse mode.
+        DecodeReuseLimit => "decode_reuse_limit",
+        /// The kind of an entry skip.
+        SkipKind => "skip_kind",
     }
 }
 
@@ -109,6 +121,12 @@ impl ConfigSetting {
             Self::ZipOutputWriter => "ZIP output writer",
             Self::ParallelDecodeMemory => "parallel decode memory",
             Self::ExcludePattern => "exclude pattern",
+            Self::ZipConsistency => "zip consistency",
+            Self::PathModel => "path model",
+            Self::ArchiveFormat => "archive format",
+            Self::DecodeReuse => "decode reuse",
+            Self::DecodeReuseLimit => "decode reuse limit",
+            Self::SkipKind => "skip kind",
             Self::MaxFileSize
             | Self::MaxTotalSize
             | Self::MaxFileCount
@@ -178,6 +196,8 @@ pub enum ConfigProblem {
     InnerDot,
     /// The entry is `.` or `..`.
     DotEntry,
+    /// The value is not one of the allowed values.
+    NotOneOf,
     /// The entry is longer than the maximum.
     TooLong {
         /// The longest accepted length in bytes.
@@ -194,6 +214,7 @@ impl fmt::Display for ConfigProblem {
         match self {
             Self::Zero => f.write_str("must not be zero"),
             Self::Negative => f.write_str("must not be negative"),
+            Self::NotOneOf => f.write_str("is not one of the allowed values"),
             Self::NotFinite => f.write_str("must be a finite number"),
             Self::NotWholeNumber => f.write_str("must be a whole number"),
             Self::TooLarge { max } => write!(f, "must not exceed {max}"),
@@ -286,6 +307,11 @@ mod tests {
                 ConfigSetting::AtomicExtraction,
                 ConfigProblem::CannotTargetSink,
                 "atomic extraction renames a directory and cannot target a sink",
+            ),
+            (
+                ConfigSetting::DecodeReuse,
+                ConfigProblem::NotOneOf,
+                "decode reuse is not one of the allowed values",
             ),
             (
                 ConfigSetting::StripPrefix,

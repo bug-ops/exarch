@@ -111,6 +111,12 @@ _ConfigSetting = Literal[
     "max_bytes",
     "parallel_decode_memory",
     "exclude_pattern",
+    "zip_consistency",
+    "path_model",
+    "archive_format",
+    "decode_reuse",
+    "decode_reuse_limit",
+    "skip_kind",
 ]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 

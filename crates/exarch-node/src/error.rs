@@ -326,6 +326,24 @@ pub enum ConfigSetting {
     /// `exclude_pattern`.
     #[napi(value = "exclude_pattern")]
     ExcludePattern,
+    /// `zip_consistency`.
+    #[napi(value = "zip_consistency")]
+    ZipConsistency,
+    /// `path_model`.
+    #[napi(value = "path_model")]
+    PathModel,
+    /// `archive_format`.
+    #[napi(value = "archive_format")]
+    ArchiveFormat,
+    /// `decode_reuse`.
+    #[napi(value = "decode_reuse")]
+    DecodeReuse,
+    /// `decode_reuse_limit`.
+    #[napi(value = "decode_reuse_limit")]
+    DecodeReuseLimit,
+    /// `skip_kind`.
+    #[napi(value = "skip_kind")]
+    SkipKind,
 }
 
 /// Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
@@ -1431,7 +1449,13 @@ mod tests {
             ZipOutputWriter,
             MaxBytes,
             ParallelDecodeMemory,
-            ExcludePattern
+            ExcludePattern,
+            ZipConsistency,
+            PathModel,
+            ArchiveFormat,
+            DecodeReuse,
+            DecodeReuseLimit,
+            SkipKind
         ]
     );
 

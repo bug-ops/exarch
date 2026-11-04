@@ -240,6 +240,10 @@ where
 /// The first error the callback returned is kept as `E`, so the caller keeps
 /// its own error type instead of recovering it from a side slot.
 ///
+/// Closed by design: a failure is either the caller's own or the archive's, so
+/// a `match` over both variants needs no wildcard arm and the compiler flags
+/// any variant a future change adds.
+///
 /// # Examples
 ///
 /// ```
@@ -255,7 +259,6 @@ where
 /// );
 /// ```
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum CallbackError<E> {
     /// The callback returned this error for an entry, which ended the
     /// extraction. It takes precedence over the archive error the aborted

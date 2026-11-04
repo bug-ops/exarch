@@ -1156,13 +1156,9 @@ impl VirtualTree {
                 Node::Dir => Ok(()),
                 Node::File => Err(Conflict::already_exists_at(Occupant::File, rel)),
                 Node::OpaqueSymlink => Err(Conflict::already_exists_at(Occupant::Symlink, rel)),
-                Node::Symlink(_) => {
-                    if self.resolves_to_dir(&self.root.join(rel)) {
-                        Ok(())
-                    } else {
-                        Err(Conflict::already_exists_at(Occupant::Symlink, rel))
-                    }
-                }
+                Node::Symlink(_) => self
+                    .resolves_to_dir(&self.root.join(rel))
+                    .ok_or_else(|| Conflict::already_exists_at(Occupant::Symlink, rel)),
             },
             (Some(id), node @ (Node::Symlink(_) | Node::OpaqueSymlink)) => {
                 match self.node(id).kind {

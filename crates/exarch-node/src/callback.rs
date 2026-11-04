@@ -36,7 +36,6 @@ use crate::memory::MemoryEntry;
 use crate::memory::PathModel;
 use crate::report::ArchiveType;
 use crate::report::ExtractionReport;
-use crate::report::unknown_variant;
 use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
 use crate::stream::IntoSource;
@@ -173,7 +172,6 @@ impl CallbackJob {
             .map_err(|err| match err {
                 CallbackError::Callback(failure) => failure,
                 CallbackError::Archive(err) => err.into(),
-                _ => Failure::Native(unknown_variant("callback error", "unknown")),
             })
         })
     }

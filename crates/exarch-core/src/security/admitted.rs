@@ -26,10 +26,8 @@ use crate::types::safe_path::Resolved;
 /// The declared sizes of one entry, as the validators consume them.
 #[derive(Debug, Clone, Copy)]
 pub struct EntrySize {
-    /// Declared uncompressed size.
-    pub uncompressed: Uncompressed,
-    /// Declared compressed size, when the format records one.
-    pub compressed: Option<Compressed>,
+    uncompressed: Uncompressed,
+    compressed: Option<Compressed>,
 }
 
 impl EntrySize {
@@ -40,6 +38,18 @@ impl EntrySize {
             uncompressed,
             compressed,
         }
+    }
+
+    /// The declared uncompressed size.
+    #[must_use]
+    pub const fn uncompressed(&self) -> Uncompressed {
+        self.uncompressed
+    }
+
+    /// The declared compressed size, when the format records one.
+    #[must_use]
+    pub const fn compressed(&self) -> Option<Compressed> {
+        self.compressed
     }
 
     /// Checks the declared sizes against the configured compression-ratio

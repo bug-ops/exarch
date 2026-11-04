@@ -273,7 +273,7 @@ impl<'a> ValidatorCore<'a> {
         check_name_limits(view, &safe_path, false, self.config)?;
         size.check_ratio(self.config)?;
         require_symlinks_allowed(self.config)?;
-        self.reserve_symlink(size.uncompressed.0)?;
+        self.reserve_symlink(size.uncompressed().0)?;
         let symlink = SafeSymlink::validate_in(&safe_path, target, root, self.config, view)?;
         self.symlink_seen = true;
         Ok(ValidatedSymlink { symlink })

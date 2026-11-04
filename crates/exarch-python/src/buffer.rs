@@ -657,9 +657,6 @@ pub fn extract_archive_to_callback(
                 Ok(report) => Ok(Ok(report)),
                 Err(CallbackError::Callback(err)) => Ok(Err(err)),
                 Err(CallbackError::Archive(err)) => Err(convert_error(err)),
-                Err(_) => Err(PyRuntimeError::new_err(
-                    "exarch-python is older than exarch-core: unknown callback error",
-                )),
             }
         })
     });

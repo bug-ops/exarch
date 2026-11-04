@@ -4,6 +4,8 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
 
+#[cfg(unix)]
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -250,6 +252,14 @@ mod landing {
         assert!(out.path().join("d").join(rest()).join("f").is_file());
     }
 
+    /// Linux-sized entries need ~34 components, above the default depth cap.
+    #[cfg(unix)]
+    fn deep_config() -> SecurityConfig {
+        SecurityConfig::default()
+            .with_allow_symlinks(true)
+            .with_max_path_depth(NonZeroUsize::new(64).unwrap())
+    }
+
     #[cfg(unix)]
     const TOO_LONG: &str = "file name too long";
 
@@ -318,7 +328,7 @@ mod landing {
     #[cfg(unix)]
     #[test]
     fn the_landing_limit_is_exact_and_independent_of_the_destination_length() {
-        let config = SecurityConfig::default().with_allow_symlinks(true);
+        let config = deep_config();
         for shape in Shape::ALL {
             // `cc` is one byte longer than `d`, so the landing is one byte
             // longer than the entry.
@@ -366,7 +376,7 @@ mod landing {
         let archive = base.path().join("escape.tar");
         std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
 
-        let config = SecurityConfig::default().with_allow_symlinks(true);
+        let config = deep_config();
         let err = extract_archive(&archive, &dest, &config).unwrap_err();
 
         assert!(!err.to_string().contains(TOO_LONG), "{err}");

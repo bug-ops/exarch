@@ -88,9 +88,7 @@ def test_forged_zip_compressed_size_is_declared_size(temp_dir):
 
 
 def test_zip_without_an_end_record_is_zip_reader(temp_dir):
-    error = _extract(
-        temp_dir, "no_eocd.zip", b"PK\x03\x04" + bytes(60), exarch.SecurityConfig()
-    )
+    error = _extract(temp_dir, "no_eocd.zip", b"PK\x03\x04" + bytes(60), exarch.SecurityConfig())
 
     assert error.sub_code == "ZIP_READER"
     assert "failed to open ZIP archive" in str(error)

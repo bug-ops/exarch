@@ -499,7 +499,10 @@ class CreationConfig:
 
     @max_file_size.setter
     def max_file_size(self, value: int | None) -> None:
-        """Sets the limit; ``None`` removes it. Raises ``ValueError`` naming ``max_file_size`` for zero."""
+        """Sets the limit; ``None`` removes it.
+
+        Raises ``ValueError`` naming ``max_file_size`` for zero.
+        """
         ...
 
     def build(self) -> CreationConfig:

@@ -970,6 +970,13 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * Creation runs on the tokio blocking thread pool. The progress callback is
  * dispatched back to the JavaScript thread via a threadsafe function.
  *
+ * A callback that throws cancels the creation: nothing is published and a
+ * previous output stays untouched, and the promise rejects with
+ * `PROGRESS_CALLBACK_ERROR` and the throw as `cause`. Cancellation is noticed
+ * at the start of the next entry, so a failure of the entry whose callback
+ * threw is an independent core error and wins (the throw is then its
+ * `cause`).
+ *
  * # Arguments
  *
  * * `output_path` - Path to output archive file

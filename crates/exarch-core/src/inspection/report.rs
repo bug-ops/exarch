@@ -956,6 +956,12 @@ impl VerificationIssue {
         }
     }
 
+    /// Returns the sub-code of the refusing error, when it has one.
+    #[must_use]
+    pub fn sub_code(&self) -> Option<crate::SubCode> {
+        self.ffi_kind().and_then(FfiKind::sub_code)
+    }
+
     /// Returns the typed discriminants of the refusing error, or `None` for a
     /// [`Heuristic`].
     ///

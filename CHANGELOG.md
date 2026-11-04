@@ -112,7 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking**: the option and progress function variants, `Archive`, `ArchiveBuilder` and the creator traits are removed; use the request types, and `ArchiveFormat` is sealed (#912, #897, #908, #901, #PR).
 - **Breaking**: `CreationConfig::format` is removed; state it on `OutputFile::with_format` (#915, #PR).
 - **Breaking**: creation stages its output and renames it into place, replacing an existing file atomically with its mode, refusing non-regular outputs and never archiving its own output; it adds about 4-10 ms of fsync per archive (#931, #PR).
-- **Breaking**: a raising or throwing creation progress callback cancels creation and keeps the previous archive (#931, #PR).
+- **Breaking**: a raising or throwing creation progress callback cancels creation and keeps the previous archive; in Node only the async variant can (#931, #953, #PR).
 - **Breaking**: `ListedArchive` carries its extraction policy (`ListRequest::for_extraction`) and `extract` takes `ListedExtractOptions` (#901, #PR).
 - **Breaking**: `ProgressCallback::on_entry_start` takes an `EntryPosition`, and reports are `#[non_exhaustive]` with typed `Skips` and warnings (#904, #905, #906, #PR).
 - **Breaking**: `ExcludePattern` refuses `?[]{}!`, commas, edge whitespace and unsupported shapes, matches the entry path and compares raw bytes (#916, #PR).

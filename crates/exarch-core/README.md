@@ -182,7 +182,7 @@ The output is staged in a temporary file in its directory (which must be writabl
 | [`ExtractionReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.ExtractionReport.html) | Extraction statistics, warnings, and skipped-entry counts |
 | [`CreationReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.CreationReport.html) | Creation statistics and results |
 | [`ArchiveError`](https://docs.rs/exarch-core/latest/exarch_core/enum.ArchiveError.html) | Error types for all operations |
-| [`ValidationReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.ValidationReport.html) | Per-entry verification result (re-exported at crate root) |
+| [`VerificationIssue`](https://docs.rs/exarch-core/latest/exarch_core/struct.VerificationIssue.html) | One typed `verify` finding with its code, sub-code and message |
 
 ### Readers, Sinks and Writers
 

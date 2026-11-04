@@ -140,10 +140,7 @@ impl<'a, State> FilteredWalker<'a, State> {
 
         // Check file size limit (only for regular files)
         let size = get_file_size(&metadata);
-        if entry_type == EntryType::File
-            && let Some(max_size) = self.config.max_file_size
-            && size > max_size
-        {
+        if entry_type == EntryType::File && !self.config.max_file_size.admits(size) {
             return Ok(None); // Filter out
         }
 
@@ -544,7 +541,7 @@ mod tests {
         fs::write(root.join("small.txt"), "tiny").unwrap(); // 4 bytes
         fs::write(root.join("large.txt"), "a".repeat(1000)).unwrap(); // 1000 bytes
 
-        let config = CreationConfig::default().with_max_file_size(Some(100));
+        let config = CreationConfig::default().with_max_file_size(crate::non_zero!(100));
 
         let walker = FilteredWalker::new(root, &config);
         let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();

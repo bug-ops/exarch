@@ -670,11 +670,20 @@ pub fn create_directory<P: ParentCheck>(
 /// violation, the category `verify` reports for it).
 ///
 /// The path-based `lstat` here only chooses the error message; the fd-relative
-/// walk in [`DirWalker::ensure_dir`] enforces the same refusals again.
+/// walk in [`DirWalker::ensure_dir`] enforces the same refusals again. A name
+/// the host cannot look up by path (too long, or invalid on Windows) is left to
+/// that walk, as a missing one is.
 fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Result<()> {
     let file_type = match probe.lstat() {
         Ok(metadata) => metadata.file_type(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
+            ) =>
+        {
+            return Ok(());
+        }
         Err(e) => {
             return Err(blocked_parent_error(&HostFs, dest, rel).unwrap_or_else(|| e.into()));
         }

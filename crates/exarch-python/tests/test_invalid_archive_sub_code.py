@@ -87,6 +87,15 @@ def test_forged_zip_compressed_size_is_declared_size(temp_dir):
     assert error.sub_code == "DECLARED_SIZE"
 
 
+def test_zip_without_an_end_record_is_zip_reader(temp_dir):
+    error = _extract(
+        temp_dir, "no_eocd.zip", b"PK\x03\x04" + bytes(60), exarch.SecurityConfig()
+    )
+
+    assert error.sub_code == "ZIP_READER"
+    assert "failed to open ZIP archive" in str(error)
+
+
 def _gzip_with_bad_second_block(data, split):
     gz = bytearray(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff")
     for index, block in enumerate((data[:split], data[split:])):

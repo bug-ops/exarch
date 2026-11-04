@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 use super::DestDir;
 pub(crate) use super::parent_check::ParentCheck;
+pub(crate) use super::parent_check::ParentVetting;
 pub(crate) use super::parent_check::Resolved;
 #[cfg(any(unix, target_os = "wasi"))]
 pub(crate) use super::parent_check::Walked;
@@ -307,7 +308,7 @@ impl<P: ParentCheck> SafePath<P> {
         // probe; a walker-backed target vets the parent at write time instead.
         if let Some(parent) = resolved
             .parent()
-            .filter(|parent| *parent != dest && P::PROBES_PARENT)
+            .filter(|parent| *parent != dest && matches!(P::VETTING, ParentVetting::Validator))
         {
             match view.canonicalize(parent, root) {
                 Ok(Containment::Within(_)) => {}
@@ -339,7 +340,7 @@ impl<P: ParentCheck> SafePath<P> {
                         path: path.to_path_buf(),
                     });
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound || defers_to_walker::<P>(&e) => {
                     if !paths_start_with(&resolved, dest) {
                         return Err(ArchiveError::PathTraversal {
                             path: path.to_path_buf(),
@@ -398,6 +399,13 @@ impl<P: ParentCheck> SafePath<P> {
     pub fn into_path_buf(self) -> PathBuf {
         self.0
     }
+}
+
+/// Whether a canonicalize failure is a name the host cannot resolve by path
+/// (past its length limit, or invalid on Windows) that the walker's
+/// handle-relative walk decides instead.
+fn defers_to_walker<P: ParentCheck>(err: &std::io::Error) -> bool {
+    P::VETTING == ParentVetting::Walker && err.kind() == std::io::ErrorKind::InvalidFilename
 }
 
 /// Why a path component is hazardous on Windows.
@@ -1834,5 +1842,62 @@ mod tests {
             ValidationContext::<HostFs>::new(false).with_walker(root.backs_parent_probe());
         SafePath::validate_with_context(path, &dest, &config, &deferred)
             .expect("the walker vets the parent at write time");
+    }
+
+    struct NameTooLongFs;
+
+    impl crate::security::fs_view::FsView for NameTooLongFs {
+        type Root = DestDir;
+
+        fn path_model(&self) -> crate::security::fs_view::PathModel {
+            HostFs.path_model()
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            HostFs.exists(path)
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            HostFs.is_dir(path)
+        }
+
+        fn is_symlink(&self, path: &Path) -> std::io::Result<bool> {
+            HostFs.is_symlink(path)
+        }
+
+        fn canonicalize(
+            &self,
+            _path: &Path,
+            _root: &DestDir,
+        ) -> std::io::Result<crate::security::fs_view::Containment> {
+            Err(std::io::ErrorKind::InvalidFilename.into())
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_name_past_the_host_limit_is_left_to_the_walker_only_when_it_vets_the_parent() {
+        use crate::formats::pinned_dir::PinnedRoot;
+
+        let (temp, dest) = create_test_dest();
+        let config = default_config();
+        let view = NameTooLongFs;
+        let path = Path::new("sub/f");
+
+        let resolved = SafePath::<Resolved>::validate_with_context_in(
+            path,
+            &dest,
+            &config,
+            &ValidationContext::<NameTooLongFs>::new(true),
+            &view,
+        );
+        assert_matches!(resolved, Err(ArchiveError::Io(ref e))
+            if e.kind() == std::io::ErrorKind::InvalidFilename, "{resolved:?}");
+
+        let root = PinnedRoot::open_for_test(temp.path()).expect("setup");
+        let walked =
+            ValidationContext::<NameTooLongFs>::new(true).with_walker(root.backs_parent_probe());
+        SafePath::validate_with_context_in(path, &dest, &config, &walked, &view)
+            .expect("the walker decides a name past the host limit");
     }
 }

@@ -131,6 +131,7 @@ use super::zstd_window::ZstdWindows;
 use super::zstd_window::walk as walk_zstd_windows;
 use crate::ArchiveError;
 use crate::Limit;
+use crate::Malformation;
 use crate::Result;
 use crate::ZipConsistencyPolicy;
 use crate::error::CentralRecordOrdinal;
@@ -681,9 +682,7 @@ impl DirectoryMap {
                 archive
                     .by_index_data(index)
                     .map(|entry| entry.central_header_start())
-                    .map_err(|e| {
-                        ArchiveError::unclassified(format!("failed to read entry {index}: {e}"))
-                    })
+                    .map_err(|e| entry_unreadable(index, &e))
             })
             .collect::<Result<_>>()?;
         Ok(Self {
@@ -838,12 +837,22 @@ fn reader_fault<R>(shared: &Shared<R>, error: ArchiveError) -> ArchiveError {
 }
 
 fn open_reader<R: Read + Seek>(reader: R) -> Result<ZipReader<R>> {
-    ZipReader::new(reader)
-        .map_err(|e| ArchiveError::unclassified(format!("failed to open ZIP archive: {e}")))
+    ZipReader::new(reader).map_err(|e| {
+        ArchiveError::from(Malformation::ZipArchiveUnreadable {
+            detail: e.to_string().into(),
+        })
+    })
+}
+
+fn entry_unreadable(index: usize, error: &zip::result::ZipError) -> ArchiveError {
+    ArchiveError::from(Malformation::ZipEntryUnreadable {
+        index,
+        detail: error.to_string().into(),
+    })
 }
 
 fn census_disagreement() -> ArchiveError {
-    ArchiveError::unclassified("ZIP central directory census disagrees with reader")
+    ArchiveError::from(Malformation::ZipCensusDisagreement)
 }
 
 /// Result of opening every entry.
@@ -877,9 +886,9 @@ fn scan_entries<R: Read + Seek>(
 
     for index in 0..archive.len() {
         if consistent {
-            let file = archive.by_index_raw(index).map_err(|e| {
-                ArchiveError::unclassified(format!("failed to read entry {index}: {e}"))
-            })?;
+            let file = archive
+                .by_index_raw(index)
+                .map_err(|e| entry_unreadable(index, &e))?;
             admit_zip_entry(&file, &mut budget)?;
             scan.layouts.push(layout_of(&file, index)?);
             continue;
@@ -907,7 +916,7 @@ fn scan_entries<R: Read + Seek>(
             if is_password_required(&e) {
                 common::encrypted_archive_error()
             } else {
-                ArchiveError::unclassified(format!("failed to read entry {index}: {e}"))
+                entry_unreadable(index, &e)
             }
         })?;
         admit_zip_entry(&file, &mut budget)?;
@@ -931,7 +940,7 @@ fn scan_entries<R: Read + Seek>(
 }
 
 fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<EntryLayout> {
-    let invalid = || ArchiveError::unclassified("ZIP entry data range is not representable");
+    let invalid = || ArchiveError::from(Malformation::ZipDataRangeUnrepresentable);
     let data_start = file.data_start().ok_or_else(invalid)?;
     Ok(EntryLayout {
         entry: ZipEntryIndex::new(index),

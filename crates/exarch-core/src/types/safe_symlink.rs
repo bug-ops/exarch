@@ -407,6 +407,8 @@ fn canonical_within<V: FsView>(
     root: &V::Root,
     link_path: &Path,
 ) -> Result<PathBuf> {
+    // TODO(#895): resolve handle-relatively; realpath makes acceptance depend
+    // on absolute length
     match view.canonicalize(current, root) {
         Ok(Containment::Within(canonical)) => Ok(canonical),
         Ok(Containment::Escapes) | Err(_) => Err(ArchiveError::SymlinkEscape {

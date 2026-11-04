@@ -18,7 +18,9 @@ use exarch_core::creation::CompressionLevel;
 use exarch_core::non_zero_u64;
 use exarch_core::non_zero_usize;
 use napi::Env;
+use napi::bindgen_prelude::Either;
 use napi::bindgen_prelude::Error;
+use napi::bindgen_prelude::Null;
 use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
@@ -621,7 +623,7 @@ impl SecurityConfig {
 /// | `preserve_permissions` | true |
 /// | `follow_symlinks` | false (secure) |
 /// | `include_hidden` | false |
-/// | `max_file_size` | None (no limit) |
+/// | `max_file_size` | `null` (no limit) |
 /// | `exclude_patterns` | `[".git", ".DS_Store", "*.tmp"]` |
 #[napi]
 #[derive(Debug, Clone)]
@@ -692,26 +694,22 @@ impl CreationConfig {
         self
     }
 
-    /// Sets maximum size for a single file in bytes.
+    /// Sets maximum size for a single file in bytes, or `null` for no limit.
     ///
     /// Files larger than this limit will be skipped.
     ///
     /// # Errors
     ///
-    /// Returns a plain argument error if size is negative. Unlike the
-    /// `SecurityConfig` limits, zero is accepted here and removes the limit.
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
+    /// negative or zero. Pass `null` to remove the limit.
     #[napi(js_name = "setMaxFileSize")]
-    pub fn set_max_file_size(&mut self, size: i64) -> Result<&Self> {
-        if size < 0 {
-            return Err(Error::from_reason("max file size cannot be negative"));
-        }
-        #[expect(
-            clippy::cast_sign_loss,
-            reason = "the value is non-negative at this point"
-        )]
-        {
-            self.inner.max_file_size = if size == 0 { None } else { Some(size as u64) };
-        }
+    pub fn set_max_file_size(&mut self, env: Env, size: Either<i64, Null>) -> Result<&Self> {
+        let size = match size {
+            Either::A(bytes) => Some(bytes),
+            Either::B(_) => None,
+        };
+        self.try_set_max_file_size(size)
+            .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
 
@@ -765,10 +763,13 @@ impl CreationConfig {
         self.inner.include_hidden
     }
 
-    /// Maximum file size in bytes.
+    /// Maximum file size in bytes, or `null` when unbounded.
     #[napi(getter)]
     pub fn get_max_file_size(&self) -> Option<i64> {
-        self.inner.max_file_size.map(saturating_i64)
+        match self.inner.max_file_size {
+            Limit::Bounded(bound) => Some(saturating_i64(bound.get())),
+            Limit::Unbounded => None,
+        }
     }
 
     /// List of exclude patterns.
@@ -779,6 +780,15 @@ impl CreationConfig {
 }
 
 impl CreationConfig {
+    /// Env-free core of `setMaxFileSize`; `None` removes the limit.
+    fn try_set_max_file_size(&mut self, size: Option<i64>) -> std::result::Result<(), CoreError> {
+        self.inner.max_file_size = match size {
+            Some(bytes) => byte_limit(ConfigSetting::MaxFileSize, bytes)?,
+            None => Limit::Unbounded,
+        };
+        Ok(())
+    }
+
     /// Env-free core of `setCompressionLevel`, so the validation is testable
     /// without a JS environment.
     fn try_set_compression_level(&mut self, level: u32) -> std::result::Result<(), CoreError> {
@@ -1005,7 +1015,7 @@ mod tests {
         assert_eq!(config.get_max_solid_block_memory(), i64::MAX);
 
         let mut creation = CreationConfig::new();
-        creation.inner.max_file_size = Some(u64::MAX);
+        creation.inner.max_file_size = exarch_core::Limit::Bounded(NonZeroU64::MAX);
         assert_eq!(creation.get_max_file_size(), Some(i64::MAX));
     }
 
@@ -1656,7 +1666,7 @@ mod tests {
         config.set_preserve_permissions(false);
         config.set_follow_symlinks(true);
         config.set_include_hidden(true);
-        config.set_max_file_size(1_000_000).unwrap();
+        config.try_set_max_file_size(Some(1_000_000)).unwrap();
 
         assert_eq!(config.get_compression_level(), 9);
         assert!(!config.get_preserve_permissions());
@@ -1680,16 +1690,29 @@ mod tests {
     }
 
     #[test]
-    fn test_creation_config_max_file_size_negative() {
+    fn test_creation_config_max_file_size_rejects_zero_and_negative() {
         let mut config = CreationConfig::new();
-        let result = config.set_max_file_size(-1);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("cannot be negative")
-        );
+        config.try_set_max_file_size(Some(10)).unwrap();
+        for bad in [0, -1] {
+            let err = config.try_set_max_file_size(Some(bad)).unwrap_err();
+            assert!(matches!(
+                err,
+                CoreError::InvalidConfiguration {
+                    setting: ConfigSetting::MaxFileSize,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(config.get_max_file_size(), Some(10));
+    }
+
+    #[test]
+    fn test_creation_config_max_file_size_none_is_unbounded() {
+        let mut config = CreationConfig::new();
+        config.try_set_max_file_size(Some(10)).unwrap();
+        config.try_set_max_file_size(None).unwrap();
+        assert_eq!(config.get_max_file_size(), None);
+        assert_eq!(config.as_core().max_file_size, Limit::Unbounded);
     }
 
     #[test]

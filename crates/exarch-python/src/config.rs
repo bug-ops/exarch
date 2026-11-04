@@ -28,6 +28,10 @@ fn bytes_limit(setting: ConfigSetting, value: u64) -> PyResult<Limit<NonZeroU64>
     Limit::<NonZeroU64>::parse(setting, value).map_err(convert_error)
 }
 
+fn optional_bytes_limit(setting: ConfigSetting, value: Option<u64>) -> PyResult<Limit<NonZeroU64>> {
+    value.map_or(Ok(Limit::Unbounded), |bytes| bytes_limit(setting, bytes))
+}
+
 fn count_limit(setting: ConfigSetting, value: usize) -> PyResult<Limit<NonZeroUsize>> {
     Limit::<NonZeroUsize>::parse(setting, value).map_err(convert_error)
 }
@@ -673,10 +677,17 @@ impl PyCreationConfig {
         slf
     }
 
-    /// Sets maximum file size in bytes.
-    fn with_max_file_size(mut slf: PyRefMut<'_, Self>, size: Option<u64>) -> PyRefMut<'_, Self> {
-        slf.inner.max_file_size = size;
-        slf
+    /// Sets maximum file size in bytes; `None` removes the limit.
+    ///
+    /// # Errors
+    ///
+    /// Raises the configuration error if `size` is zero.
+    fn with_max_file_size(
+        mut slf: PyRefMut<'_, Self>,
+        size: Option<u64>,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.max_file_size = optional_bytes_limit(ConfigSetting::MaxFileSize, size)?;
+        Ok(slf)
     }
 
     /// Finalizes the configuration.
@@ -743,12 +754,16 @@ impl PyCreationConfig {
 
     #[getter]
     fn get_max_file_size(&self) -> Option<u64> {
-        self.inner.max_file_size
+        match self.inner.max_file_size {
+            Limit::Bounded(bound) => Some(bound.get()),
+            Limit::Unbounded => None,
+        }
     }
 
     #[setter]
-    fn set_max_file_size(&mut self, value: Option<u64>) {
-        self.inner.max_file_size = value;
+    fn set_max_file_size(&mut self, value: Option<u64>) -> PyResult<()> {
+        self.inner.max_file_size = optional_bytes_limit(ConfigSetting::MaxFileSize, value)?;
+        Ok(())
     }
 
     /// Returns a debug string representation.

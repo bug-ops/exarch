@@ -6105,3 +6105,51 @@ fn test_extract_refuses_a_corrupt_gzip_trailer() {
         .stderr(predicate::str::contains("TAR end-of-archive marker"));
     assert!(!dest.exists());
 }
+
+#[test]
+fn test_create_json_refuses_a_zero_max_file_size() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("out.tar.gz");
+
+    let output = exarch_cmd()
+        .arg("create")
+        .arg("--json")
+        .arg("--max-file-size")
+        .arg("0")
+        .arg(&archive)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["error"]["kind"], "InvalidConfiguration");
+    assert_eq!(json["error"]["setting"], "max_file_size");
+    assert!(!archive.exists(), "no archive may be created");
+}
+
+#[test]
+fn test_extract_json_reports_zip_reader_sub_code() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("no_eocd.zip");
+    let mut bytes = b"PK\x03\x04".to_vec();
+    bytes.resize(64, 0);
+    std::fs::write(&archive, bytes).expect("write archive");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(&archive)
+        .arg(temp.path().join("out"))
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["error"]["kind"], "InvalidArchive");
+    assert_eq!(json["error"]["sub_code"], "ZIP_READER");
+}

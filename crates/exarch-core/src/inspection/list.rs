@@ -719,7 +719,9 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             if is_password_required(&e) {
                 return encrypted_archive_error();
             }
-            ArchiveError::unclassified(format!("failed to read ZIP entry: {e}"))
+            ArchiveError::from(Malformation::ZipListedEntryUnreadable {
+                detail: e.to_string().into(),
+            })
         })?;
 
         // Route through the same QuotaTracker used by extraction: per-file
@@ -803,7 +805,10 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
         let target = if entry_type == ManifestEntryType::Symlink {
             let mut sym_entry = archive.by_index(i).map_err(|e| {
-                ArchiveError::unclassified(format!("failed to re-read ZIP entry {i}: {e}"))
+                ArchiveError::from(Malformation::ZipEntryRereadFailed {
+                    index: i,
+                    detail: e.to_string().into(),
+                })
             })?;
             let declared = sym_entry.size();
             if list_mode == ListMode::VerifyPreflight && declared > MAX_SYMLINK_TARGET_BYTES as u64

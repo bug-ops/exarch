@@ -170,6 +170,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
+use crate::DecodeReuse;
 use crate::ExtractionOptions;
 use crate::Malformation;
 use crate::QuotaResource;
@@ -223,7 +224,10 @@ pub(crate) enum DuplicatePolicy {
 /// What a sink extraction honours of [`ExtractionOptions`].
 ///
 /// Atomic extraction renames a directory, which a sink does not have, so the
-/// only setting that carries over is the duplicate policy.
+/// only setting that carries over from path-based options is the duplicate
+/// policy. [`decode_reuse`](Self::decode_reuse) is never carried over: a sink
+/// keeps nothing between the structural check and the write unless it is asked
+/// to here.
 ///
 /// # Examples
 ///
@@ -243,12 +247,47 @@ pub struct SinkOptions {
     /// Skip an entry whose destination path an earlier entry already holds
     /// (the default) instead of failing.
     pub skip_duplicates: bool,
+
+    /// Where a ZIP extraction keeps the output its structural check already
+    /// decoded, so deflate entries are decoded once instead of twice.
+    ///
+    /// Defaults to [`DecodeReuse::Off`]: with a callback or a custom sink,
+    /// every deflate entry is decoded twice, once by the structural check and
+    /// once for the sink. Callback extraction runs in O(buffer) memory in that
+    /// default, and any reuse adds to it.
+    ///
+    /// Measured (2026-11, release build, wall time of
+    /// `extract_reader_to_callback`) on a 100 MiB deflate ZIP of ten 10 MiB
+    /// members: [`DecodeReuse::Memory`]
+    /// at [`ReuseLimit::DEFAULT`](crate::ReuseLimit::DEFAULT) (32 MiB, so three
+    /// members are kept) takes about 14% less time than `Off`, and at
+    /// [`ReuseLimit::MAX`](crate::ReuseLimit::MAX) (every member kept) about
+    /// 47% less. A member above the limit gains nothing: one 40 MiB member
+    /// took the same time at the default limit as with `Off`.
+    ///
+    /// Opting in has these costs:
+    ///
+    /// - [`DecodeReuse::Memory`] holds up to its
+    ///   [`ReuseLimit`](crate::ReuseLimit) on the heap. The limit counts only
+    ///   the store; at its peak the process holds the store, the entry being
+    ///   delivered and the sink's own copy of it.
+    /// - [`DecodeReuse::TempFile`] writes the plaintext of the archive to the
+    ///   platform's temporary directory until the extraction ends, which may be
+    ///   RAM on a tmpfs.
+    /// - An entry above the [`ReuseLimit`](crate::ReuseLimit) is still decoded
+    ///   twice.
+    ///
+    /// [`MemorySink`] extraction through
+    /// [`extract_reader_to_memory`] always
+    /// reuses in memory within its own limit and ignores this field.
+    pub decode_reuse: DecodeReuse,
 }
 
 impl Default for SinkOptions {
     fn default() -> Self {
         Self {
             skip_duplicates: true,
+            decode_reuse: DecodeReuse::Off,
         }
     }
 }
@@ -258,6 +297,29 @@ impl SinkOptions {
     #[must_use]
     pub const fn with_skip_duplicates(mut self, skip: bool) -> Self {
         self.skip_duplicates = skip;
+        self
+    }
+
+    /// Sets where a ZIP extraction keeps the output of its structural check.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DecodeReuse;
+    /// use exarch_core::ReuseLimit;
+    /// use exarch_core::SinkOptions;
+    ///
+    /// let options =
+    ///     SinkOptions::default().with_decode_reuse(DecodeReuse::Memory(ReuseLimit::DEFAULT));
+    /// assert_eq!(
+    ///     options.decode_reuse,
+    ///     DecodeReuse::Memory(ReuseLimit::DEFAULT)
+    /// );
+    /// assert_eq!(SinkOptions::default().decode_reuse, DecodeReuse::Off);
+    /// ```
+    #[must_use]
+    pub const fn with_decode_reuse(mut self, reuse: DecodeReuse) -> Self {
+        self.decode_reuse = reuse;
         self
     }
 }
@@ -277,6 +339,7 @@ impl SinkOptions {
     pub(crate) const fn duplicates_of(options: &ExtractionOptions) -> Self {
         Self {
             skip_duplicates: options.skip_duplicates,
+            decode_reuse: DecodeReuse::Off,
         }
     }
 }
@@ -299,6 +362,7 @@ impl TryFrom<&ExtractionOptions> for SinkOptions {
         }
         Ok(Self {
             skip_duplicates: options.skip_duplicates,
+            decode_reuse: DecodeReuse::Off,
         })
     }
 }

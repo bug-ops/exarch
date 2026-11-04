@@ -96,6 +96,18 @@ closed_enum! {
         DeclaredSize => "DECLARED_SIZE",
         /// An entry whose integrity decode failed.
         Integrity => "INTEGRITY",
+        /// A failure of the ZIP reader or of the structural check built on it:
+        /// the archive or an entry cannot be opened or read, the census and
+        /// the reader disagree about the central directory, an entry's data
+        /// range is not representable, or the zstd entries cannot be walked
+        /// within the archive extent.
+        ///
+        /// It also covers I/O failures the `zip` crate wraps into its own
+        /// errors. A wrapped I/O error surfaces as [`ErrorCode::IoError`] during
+        /// the structure scan at open, where the reader's own fault is
+        /// preferred, but as this code when extraction, listing or the
+        /// descriptor-tail re-read hit it.
+        ZipReader => "ZIP_READER",
     }
 }
 

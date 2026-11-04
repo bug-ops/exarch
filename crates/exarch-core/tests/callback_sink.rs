@@ -2,6 +2,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+mod common;
 mod sink_support;
 
 use std::assert_matches;
@@ -15,10 +16,13 @@ use exarch_core::ArchiveReader;
 use exarch_core::CallbackEntry;
 use exarch_core::CallbackError;
 use exarch_core::CallbackSink;
+use exarch_core::DecodeReuse;
+use exarch_core::ExtractionOptions;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
 use exarch_core::MemoryExtractRequest;
 use exarch_core::NoopProgress;
+use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::SinkOptions;
 use exarch_core::extract_reader_to_callback;
@@ -317,4 +321,52 @@ fn an_archive_error_is_transparent_in_the_chain() {
 
     assert_eq!(err.to_string(), expected);
     assert!(err.source().is_none());
+}
+
+const ZIP_ENTRIES: usize = 6;
+const ZIP_ENTRY_LEN: usize = 30_000;
+
+fn zip_files(reuse: DecodeReuse) -> Vec<(PathBuf, Vec<u8>)> {
+    let bytes = common::deflated_zip(ZIP_ENTRIES, ZIP_ENTRY_LEN);
+    let reader = ArchiveReader::from_bytes(bytes, None).unwrap();
+    let request = MemoryExtractRequest::default()
+        .with_options(SinkOptions::default().with_decode_reuse(reuse));
+    let mut files = Vec::new();
+    extract_reader_to_callback(
+        reader,
+        &request,
+        |path, entry| {
+            if let CallbackEntry::Stored(MemoryEntry::File { data, .. }) = entry {
+                files.push((path.as_path().to_path_buf(), data));
+            }
+            Ok::<(), Stop>(())
+        },
+        &mut NoopProgress,
+    )
+    .unwrap();
+    files
+}
+
+#[test]
+fn sink_options_never_inherit_decode_reuse_from_path_options() {
+    assert_eq!(SinkOptions::default().decode_reuse, DecodeReuse::Off);
+    let path_options =
+        ExtractionOptions::default().with_decode_reuse(DecodeReuse::Memory(ReuseLimit::MAX));
+    let converted = SinkOptions::try_from(&path_options).unwrap();
+    assert_eq!(converted.decode_reuse, DecodeReuse::Off);
+}
+
+#[test]
+fn every_decode_reuse_mode_delivers_the_same_zip_entries() {
+    let off = zip_files(DecodeReuse::Off);
+    assert_eq!(off.len(), ZIP_ENTRIES);
+    for (index, (_, data)) in off.iter().enumerate() {
+        assert_eq!(data, &common::wordy(index, ZIP_ENTRY_LEN));
+    }
+    for reuse in [
+        DecodeReuse::Memory(ReuseLimit::DEFAULT),
+        DecodeReuse::TempFile(ReuseLimit::DEFAULT),
+    ] {
+        assert_eq!(zip_files(reuse), off, "{reuse:?}");
+    }
 }

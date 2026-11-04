@@ -30,3 +30,30 @@ class TestCompressionLevel:
         config = CreationConfig().with_compression_level(9)
         config.compression_level = None
         assert config.compression_level == 6
+
+
+class TestMaxFileSize:
+    def test_default_is_unbounded(self):
+        assert CreationConfig().max_file_size is None
+
+    def test_builder_and_setter_round_trip(self):
+        assert CreationConfig().with_max_file_size(1024).max_file_size == 1024
+        config = CreationConfig()
+        config.max_file_size = 2048
+        assert config.max_file_size == 2048
+
+    def test_none_removes_the_limit(self):
+        config = CreationConfig().with_max_file_size(1024).with_max_file_size(None)
+        assert config.max_file_size is None
+        config = CreationConfig().with_max_file_size(1024)
+        config.max_file_size = None
+        assert config.max_file_size is None
+
+    def test_zero_is_refused_and_names_its_setting(self):
+        with pytest.raises(ValueError, match="max_file_size") as caught:
+            CreationConfig().with_max_file_size(0)
+        assert caught.value.setting == "max_file_size"
+        config = CreationConfig().with_max_file_size(1024)
+        with pytest.raises(ValueError, match="max_file_size"):
+            config.max_file_size = 0
+        assert config.max_file_size == 1024

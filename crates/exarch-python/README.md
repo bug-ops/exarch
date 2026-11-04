@@ -213,7 +213,7 @@ except exarch.SecurityViolationError as e:
     # e.sub_code names the refusal family, e.g. "PATH_NAME", "LINK_POLICY" or "ENCRYPTED"
     print(f"Security violation ({e.relaxable_by}, {e.sub_code}): {e}")
 except exarch.InvalidArchiveError as e:
-    # e.sub_code is "TAR_AMBIGUITY", "TAR_TRAILER", "LINK_TARGET", "DUPLICATE_ENTRY", "ENTRY_NAME", "DECLARED_SIZE" or "INTEGRITY", else None
+    # e.sub_code is "TAR_AMBIGUITY", "TAR_TRAILER", "ZIP_READER", "LINK_TARGET", "DUPLICATE_ENTRY", "ENTRY_NAME", "DECLARED_SIZE" or "INTEGRITY", else None
     print(f"Invalid archive ({e.sub_code}): {e}")
 except exarch.ArchiveError as e:
     print(f"Extraction failed: {e}")

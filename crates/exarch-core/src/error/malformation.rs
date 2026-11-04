@@ -132,6 +132,43 @@ pub enum Malformation {
         /// What failed.
         detail: Box<str>,
     },
+    /// The `zip` crate cannot open the archive.
+    ZipArchiveUnreadable {
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The `zip` crate cannot read an entry while the archive is checked.
+    ZipEntryUnreadable {
+        /// The central-directory index of the entry.
+        index: usize,
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The `zip` crate cannot open an entry for extraction.
+    ZipEntryOpenFailed {
+        /// The central-directory index of the entry.
+        index: usize,
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The `zip` crate cannot open an entry a second time.
+    ZipEntryRereadFailed {
+        /// The central-directory index of the entry.
+        index: usize,
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The `zip` crate cannot read an entry while the archive is listed.
+    ZipListedEntryUnreadable {
+        /// The reader's description of the failure.
+        detail: Box<str>,
+    },
+    /// The central directory the census read is not the one the reader read.
+    ZipCensusDisagreement,
+    /// An entry's data range does not fit in 64 bits.
+    ZipDataRangeUnrepresentable,
+    /// The zstd entries could not be walked within the archive extent.
+    ZipZstdWalkIncomplete,
     /// A refusal with no family of its own.
     Unclassified(Unclassified),
 }
@@ -165,6 +202,14 @@ impl Malformation {
             | Self::BlockSizeUnaccounted
             | Self::TotalSizeOverflow => Some(C::DeclaredSize),
             Self::IntegrityCheckFailed { .. } => Some(C::Integrity),
+            Self::ZipArchiveUnreadable { .. }
+            | Self::ZipEntryUnreadable { .. }
+            | Self::ZipEntryOpenFailed { .. }
+            | Self::ZipEntryRereadFailed { .. }
+            | Self::ZipListedEntryUnreadable { .. }
+            | Self::ZipCensusDisagreement
+            | Self::ZipDataRangeUnrepresentable
+            | Self::ZipZstdWalkIncomplete => Some(C::ZipReader),
             Self::Unclassified(_) => None,
         }
     }
@@ -222,6 +267,30 @@ impl fmt::Display for Malformation {
             Self::TotalSizeOverflow => f.write_str("archive total size overflows u64"),
             Self::IntegrityCheckFailed { location, detail } => {
                 write!(f, "integrity check failed {location}: {detail}")
+            }
+            Self::ZipArchiveUnreadable { detail } => {
+                write!(f, "failed to open ZIP archive: {detail}")
+            }
+            Self::ZipEntryUnreadable { index, detail } => {
+                write!(f, "failed to read entry {index}: {detail}")
+            }
+            Self::ZipEntryOpenFailed { index, detail } => {
+                write!(f, "failed to open zip entry {index}: {detail}")
+            }
+            Self::ZipEntryRereadFailed { index, detail } => {
+                write!(f, "failed to re-read ZIP entry {index}: {detail}")
+            }
+            Self::ZipListedEntryUnreadable { detail } => {
+                write!(f, "failed to read ZIP entry: {detail}")
+            }
+            Self::ZipCensusDisagreement => {
+                f.write_str("ZIP central directory census disagrees with reader")
+            }
+            Self::ZipDataRangeUnrepresentable => {
+                f.write_str("ZIP entry data range is not representable")
+            }
+            Self::ZipZstdWalkIncomplete => {
+                f.write_str("ZIP zstd entries could not be walked within the archive extent")
             }
             Self::Unclassified(Unclassified(reason)) => f.write_str(reason),
         }
@@ -363,6 +432,59 @@ mod tests {
                 "integrity check failed at f: crc",
                 Some(C::Integrity),
             ),
+            (
+                Malformation::ZipArchiveUnreadable {
+                    detail: "bad".into(),
+                },
+                "failed to open ZIP archive: bad",
+                Some(C::ZipReader),
+            ),
+            (
+                Malformation::ZipEntryUnreadable {
+                    index: 2,
+                    detail: "bad".into(),
+                },
+                "failed to read entry 2: bad",
+                Some(C::ZipReader),
+            ),
+            (
+                Malformation::ZipEntryOpenFailed {
+                    index: 2,
+                    detail: "bad".into(),
+                },
+                "failed to open zip entry 2: bad",
+                Some(C::ZipReader),
+            ),
+            (
+                Malformation::ZipEntryRereadFailed {
+                    index: 2,
+                    detail: "bad".into(),
+                },
+                "failed to re-read ZIP entry 2: bad",
+                Some(C::ZipReader),
+            ),
+            (
+                Malformation::ZipListedEntryUnreadable {
+                    detail: "bad".into(),
+                },
+                "failed to read ZIP entry: bad",
+                Some(C::ZipReader),
+            ),
+            (
+                Malformation::ZipCensusDisagreement,
+                "ZIP central directory census disagrees with reader",
+                Some(C::ZipReader),
+            ),
+            (
+                Malformation::ZipDataRangeUnrepresentable,
+                "ZIP entry data range is not representable",
+                Some(C::ZipReader),
+            ),
+            (
+                Malformation::ZipZstdWalkIncomplete,
+                "ZIP zstd entries could not be walked within the archive extent",
+                Some(C::ZipReader),
+            ),
             (Malformation::unclassified("anything"), "anything", None),
         ]
     }
@@ -388,6 +510,7 @@ mod tests {
             C::EntryName,
             C::DeclaredSize,
             C::Integrity,
+            C::ZipReader,
         ] {
             assert!(produced.contains(&code), "{code:?}");
         }

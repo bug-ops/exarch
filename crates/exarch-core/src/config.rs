@@ -1305,9 +1305,18 @@ impl ReuseLimit {
 ///
 /// Reuse applies to extractions that write into a directory
 /// ([`extract_archive`](crate::extract_archive) and
-/// [`ListedArchive::extract`](crate::ListedArchive::extract)); sink, callback
-/// and reader paths, listing and verification never keep output. Bzip2 and zstd
-/// entries are always decoded twice.
+/// [`ListedArchive::extract`](crate::ListedArchive::extract)). Sink and
+/// callback extraction keeps output only when
+/// [`SinkOptions::decode_reuse`](crate::SinkOptions::decode_reuse) opts in, and
+/// defaults to `Off`; listing and verification never keep output. Bzip2 and
+/// zstd entries are always decoded twice.
+///
+/// An entry above the mode's [`ReuseLimit`] is decoded twice whatever the mode
+/// is: the default [`ReuseLimit::DEFAULT`] of 32 MiB leaves a larger member
+/// decoded twice under [`extract_archive`](crate::extract_archive). With
+/// `TempFile` the plaintext of the kept entries sits in the temporary
+/// directory until the extraction ends, and the limit bounds only the store,
+/// not the memory the entry being written uses on top of it.
 ///
 /// # Examples
 ///
@@ -1335,6 +1344,16 @@ pub enum DecodeReuse {
     /// tmpfs, so it is RAM there) and holds the plaintext of the archive until
     /// the extraction ends. When no temporary file can be created, or on WASI,
     /// nothing is kept.
+    ///
+    /// Writing the spool and reading it back is paid in kernel time on every
+    /// byte kept. Measured (2026-11, macOS, release CLI, a shared host at a
+    /// load average of 5 to 12, deflate ZIPs of 10 MiB members at a
+    /// compression ratio of about 2.2): 1.15x the wall time of the build
+    /// before decode reuse for an archive of 100 MiB decoded (a 47 MB ZIP)
+    /// and 1.18x for 300 MiB decoded (a 140 MB ZIP). Most of the excess is
+    /// system time; user time rose by about 0.05 s of the 0.13 s excess on the
+    /// larger archive. [`Memory`](Self::Memory) measures 1.07x on the 100 MiB
+    /// one.
     TempFile(ReuseLimit),
 }
 

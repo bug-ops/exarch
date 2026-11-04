@@ -22,9 +22,19 @@ pub trait ParentCheck: sealed::Sealed {
     #[doc(hidden)]
     type Proof<'r>;
 
-    /// Whether validation resolves the parent directory itself.
+    /// Who vets the parent directory.
     #[doc(hidden)]
-    const PROBES_PARENT: bool;
+    const VETTING: ParentVetting;
+}
+
+/// Who vets the parent directory of a validated path.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentVetting {
+    /// Validation canonicalizes the parent itself.
+    Validator,
+    /// A directory walker on a pinned root vets the parent at write time.
+    Walker,
 }
 
 /// The parent directory was resolved during validation, so the path is safe
@@ -37,7 +47,7 @@ impl sealed::Sealed for Resolved {}
 impl ParentCheck for Resolved {
     type Proof<'r> = ();
 
-    const PROBES_PARENT: bool = true;
+    const VETTING: ParentVetting = ParentVetting::Validator;
 }
 
 /// The parent directory is vetted at write time by a directory walker on a
@@ -53,5 +63,5 @@ impl sealed::Sealed for Walked {}
 impl ParentCheck for Walked {
     type Proof<'r> = crate::formats::pinned_dir::WalkerBacked<'r>;
 
-    const PROBES_PARENT: bool = false;
+    const VETTING: ParentVetting = ParentVetting::Walker;
 }

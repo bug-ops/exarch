@@ -1,11 +1,13 @@
 //! Configuration for archive creation operations.
 
 use crate::ArchiveError;
+use crate::Limit;
 use crate::Result;
 use crate::config::Unvalidated;
 use crate::config::Validated;
 use crate::formats::detect::CreatableFormat;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::PathBuf;
@@ -104,10 +106,10 @@ pub struct CreationConfigFields {
     /// Maximum size for a single file in bytes.
     ///
     /// Files larger than this limit will be skipped.
-    /// `None` means no limit.
+    /// [`Limit::Unbounded`] means no limit; a zero limit is unrepresentable.
     ///
-    /// Default: `None`.
-    pub max_file_size: Option<u64>,
+    /// Default: [`Limit::Unbounded`].
+    pub max_file_size: Limit<NonZeroU64>,
 
     /// Patterns to exclude from the archive.
     ///
@@ -151,7 +153,7 @@ impl Default for CreationConfigFields {
         Self {
             follow_symlinks: false,
             include_hidden: false,
-            max_file_size: None,
+            max_file_size: Limit::Unbounded,
             exclude_patterns: vec![
                 ".git".to_string(),
                 ".DS_Store".to_string(),
@@ -242,7 +244,7 @@ impl Default for CreationConfig<Unvalidated> {
     /// Default values:
     /// - `follow_symlinks`: `false`
     /// - `include_hidden`: `false`
-    /// - `max_file_size`: `None`
+    /// - `max_file_size`: [`Limit::Unbounded`]
     /// - `exclude_patterns`: `[".git", ".DS_Store", "*.tmp"]`
     /// - `strip_prefix`: `None`
     /// - `compression_level`: 6
@@ -295,19 +297,26 @@ impl CreationConfig<Unvalidated> {
         self
     }
 
-    /// Sets the maximum file size.
+    /// Sets the maximum file size; larger files are skipped.
+    ///
+    /// Pass a [`NonZeroU64`] for a bound or [`Limit::Unbounded`] for none.
     ///
     /// # Examples
     ///
     /// ```
+    /// use exarch_core::Limit;
     /// use exarch_core::creation::CreationConfig;
     ///
-    /// let config = CreationConfig::default().with_max_file_size(Some(1024 * 1024));
-    /// assert_eq!(config.max_file_size, Some(1024 * 1024));
+    /// let config = CreationConfig::default().with_max_file_size(exarch_core::non_zero!(1024 * 1024));
+    /// assert!(config.max_file_size.admits(1024 * 1024));
+    /// assert!(!config.max_file_size.admits(1024 * 1024 + 1));
+    ///
+    /// let config = config.with_max_file_size(Limit::Unbounded);
+    /// assert_eq!(config.max_file_size, Limit::Unbounded);
     /// ```
     #[must_use]
-    pub fn with_max_file_size(mut self, max_size: Option<u64>) -> Self {
-        self.fields.max_file_size = max_size;
+    pub fn with_max_file_size(mut self, max_size: impl Into<Limit<NonZeroU64>>) -> Self {
+        self.fields.max_file_size = max_size.into();
         self
     }
 
@@ -440,7 +449,7 @@ mod tests {
         let config = CreationConfig::default();
         assert!(!config.follow_symlinks);
         assert!(!config.include_hidden);
-        assert_eq!(config.max_file_size, None);
+        assert_eq!(config.max_file_size, Limit::Unbounded);
         assert_eq!(config.exclude_patterns.len(), 3);
         assert!(config.exclude_patterns.contains(&".git".to_string()));
         assert!(config.exclude_patterns.contains(&".DS_Store".to_string()));
@@ -457,7 +466,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_follow_symlinks(true)
             .with_include_hidden(true)
-            .with_max_file_size(Some(1024 * 1024))
+            .with_max_file_size(crate::non_zero!(1024 * 1024))
             .with_exclude_patterns(vec!["*.log".to_string()])
             .with_strip_prefix(Some(PathBuf::from("/base")))
             .with_compression_level(level)
@@ -466,7 +475,10 @@ mod tests {
 
         assert!(config.follow_symlinks);
         assert!(config.include_hidden);
-        assert_eq!(config.max_file_size, Some(1024 * 1024));
+        assert_eq!(
+            config.max_file_size,
+            Limit::Bounded(crate::non_zero!(1024 * 1024))
+        );
         assert_eq!(config.exclude_patterns, vec!["*.log".to_string()]);
         assert_eq!(config.strip_prefix, Some(PathBuf::from("/base")));
         assert_eq!(config.compression_level, level);

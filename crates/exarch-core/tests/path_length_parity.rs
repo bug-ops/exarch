@@ -110,18 +110,22 @@ const HOST_PATH_LIMIT: usize = 4095;
 #[cfg(windows)]
 const HOST_PATH_LIMIT: usize = 32767;
 
-/// A name of exactly `len` bytes made of components of at most `COMPONENT`.
-fn name_of_len(len: usize) -> String {
+/// A name of exactly `len` bytes made of components of at most `component_max`.
+fn name_of_len_in(len: usize, component_max: usize) -> String {
     let mut name = String::new();
     while name.len() < len {
         if !name.is_empty() {
             name.push('/');
         }
         let room = len - name.len();
-        name.push_str(&"n".repeat(room.min(COMPONENT)));
+        name.push_str(&"n".repeat(room.min(component_max)));
     }
     assert_eq!(name.len(), len);
     name
+}
+
+fn name_of_len(len: usize) -> String {
+    name_of_len_in(len, COMPONENT)
 }
 
 #[cfg(unix)]
@@ -244,5 +248,163 @@ mod landing {
         extract_archive(&archive, out.path(), &config).unwrap();
 
         assert!(out.path().join("d").join(rest()).join("f").is_file());
+    }
+
+    const TOO_LONG: &str = "file name too long";
+
+    #[derive(Clone, Copy, Debug)]
+    enum Shape {
+        FileUnderShortDirs,
+        FileWithMaxLeaf,
+        DirectoryEntry,
+    }
+
+    impl Shape {
+        const ALL: [Self; 3] = [
+            Self::FileUnderShortDirs,
+            Self::FileWithMaxLeaf,
+            Self::DirectoryEntry,
+        ];
+
+        fn kind(self) -> tar::EntryType {
+            match self {
+                Self::DirectoryEntry => tar::EntryType::Directory,
+                Self::FileUnderShortDirs | Self::FileWithMaxLeaf => tar::EntryType::Regular,
+            }
+        }
+
+        /// An entry of exactly `len` bytes below the link `d`.
+        fn entry(self, len: usize) -> String {
+            match self {
+                Self::FileUnderShortDirs => format!("d/{}/f", name_of_len_in(len - 4, 127)),
+                Self::FileWithMaxLeaf => {
+                    format!("d/{}/{}", name_of_len(len - 3 - 255), "l".repeat(255))
+                }
+                Self::DirectoryEntry => format!("d/{}", name_of_len_in(len - 2, 127)),
+            }
+        }
+    }
+
+    /// `d -> cc` with a short `cc`, so only the tail makes the landing long.
+    fn archive_below_short_chain(shape: Shape, entry_len: usize) -> (TempDir, PathBuf) {
+        let body: &[u8] = match shape {
+            Shape::DirectoryEntry => b"",
+            Shape::FileUnderShortDirs | Shape::FileWithMaxLeaf => b"x",
+        };
+        let mut builder = tar::Builder::new(Vec::new());
+        builder
+            .append_data(&mut header(tar::EntryType::Directory, 0), "cc", &b""[..])
+            .unwrap();
+        builder
+            .append_link(&mut header(tar::EntryType::Symlink, 0), "d", "cc")
+            .unwrap();
+        builder
+            .append_data(
+                &mut header(shape.kind(), body.len() as u64),
+                shape.entry(entry_len),
+                body,
+            )
+            .unwrap();
+        let dir = TempDir::new().unwrap();
+        let archive = dir.path().join("short-chain.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        (dir, archive)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_landing_limit_is_exact_and_independent_of_the_destination_length() {
+        let config = SecurityConfig::default().with_allow_symlinks(true);
+        for shape in Shape::ALL {
+            // `cc` is one byte longer than `d`, so the landing is one byte
+            // longer than the entry.
+            for (entry_len, accepted) in [(HOST_PATH_LIMIT - 1, true), (HOST_PATH_LIMIT, false)] {
+                let (_dir, archive) = archive_below_short_chain(shape, entry_len);
+                let out = TempDir::new().unwrap();
+                let result = extract_archive(&archive, out.path(), &config);
+                let case = format!("{shape:?} entry of {entry_len} bytes");
+                if accepted {
+                    let report = result.unwrap_or_else(|e| panic!("{case}: {e:?}"));
+                    let (files, dirs) = match shape {
+                        Shape::DirectoryEntry => (0, 2),
+                        Shape::FileUnderShortDirs | Shape::FileWithMaxLeaf => (1, 1),
+                    };
+                    assert_eq!(
+                        (report.files_extracted, report.directories_created),
+                        (files, dirs),
+                        "{case}"
+                    );
+                } else {
+                    let err = result
+                        .err()
+                        .unwrap_or_else(|| panic!("{case} was accepted"));
+                    assert!(err.to_string().contains(TOO_LONG), "{case}: {err}");
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_preexisting_symlink_out_of_the_root_still_refuses_a_long_tail() {
+        let base = TempDir::new().unwrap();
+        let dest = base.path().join("dest");
+        let outside = base.path().join("outside");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("d")).unwrap();
+
+        let entry = Shape::FileUnderShortDirs.entry(HOST_PATH_LIMIT - 1);
+        let mut builder = tar::Builder::new(Vec::new());
+        builder
+            .append_data(&mut header(tar::EntryType::Regular, 1), &entry, &b"x"[..])
+            .unwrap();
+        let archive = base.path().join("escape.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+
+        let config = SecurityConfig::default().with_allow_symlinks(true);
+        let err = extract_archive(&archive, &dest, &config).unwrap_err();
+
+        assert!(!err.to_string().contains(TOO_LONG), "{err}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    // Pins the refusal of #895: the link `d -> chain` resolves by absolute
+    // path, so a chain within the relative limit but past the absolute one
+    // is refused as a symlink parent. Flip this when #895 lands.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_chain_past_the_absolute_limit_is_refused_as_a_symlink_parent() {
+        let chain = name_of_len(HOST_PATH_LIMIT - 8);
+        let mut builder = tar::Builder::new(Vec::new());
+        builder
+            .append_data(
+                &mut header(tar::EntryType::Regular, 1),
+                format!("{chain}/x"),
+                &b"x"[..],
+            )
+            .unwrap();
+        builder
+            .append_link(&mut header(tar::EntryType::Symlink, 0), "d", &chain)
+            .unwrap();
+        builder
+            .append_data(&mut header(tar::EntryType::Regular, 1), "d/f", &b"x"[..])
+            .unwrap();
+        let dir = TempDir::new().unwrap();
+        let archive = dir.path().join("chain.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+
+        let config = SecurityConfig::default().with_allow_symlinks(true);
+        let out = TempDir::new().unwrap();
+        let err = extract_archive(&archive, out.path(), &config).unwrap_err();
+
+        std::assert_matches!(
+            err.ffi_kind(),
+            exarch_core::FfiKind::SecurityViolation {
+                sub_code: exarch_core::SecurityViolationSubCode::ExistingSymlink,
+                ..
+            },
+            "{err}"
+        );
     }
 }

@@ -64,7 +64,7 @@ describe('createArchiveWithProgress', () => {
   // Regression test for #465 on the creation path: before this fix the
   // captured callback error was dropped on the floor and the promise resolved
   // with the report, giving the caller no indication their callback threw.
-  it('preserves the creation report when the callback throws', async () => {
+  it('cancels the creation and writes nothing when the callback throws', async () => {
     await assert.rejects(
       () =>
         createArchiveWithProgress(outputPath, [sourceDir], null, () => {
@@ -72,8 +72,8 @@ describe('createArchiveWithProgress', () => {
         }),
       (err) => {
         assert.strictEqual(err.code, 'PROGRESS_CALLBACK_ERROR');
-        assert.strictEqual(err.filesAdded, 2);
-        assert.strictEqual(typeof err.bytesWritten, 'number');
+        assert.strictEqual(err.filesAdded, undefined);
+        assert.strictEqual(err.bytesWritten, undefined);
         // The throw's own text and stack must stay out of the message —
         // `cause` is the only channel for the callback's detail.
         assert.ok(!err.message.includes('boom from progress callback'));
@@ -81,8 +81,21 @@ describe('createArchiveWithProgress', () => {
         return true;
       }
     );
-    // The archive really was written, which is why the report must survive.
-    assert.ok(fs.existsSync(outputPath));
+    assert.strictEqual(fs.existsSync(outputPath), false);
+    assert.deepStrictEqual(fs.readdirSync(tempDir).sort(), ['source']);
+  });
+
+  it('keeps a previous archive unchanged and leaves no temp file when the callback throws', async () => {
+    fs.writeFileSync(outputPath, 'previous');
+    await assert.rejects(
+      () =>
+        createArchiveWithProgress(outputPath, [sourceDir], null, () => {
+          throw new Error('boom');
+        }),
+      { code: 'PROGRESS_CALLBACK_ERROR' }
+    );
+    assert.strictEqual(fs.readFileSync(outputPath, 'utf8'), 'previous');
+    assert.deepStrictEqual(fs.readdirSync(tempDir).sort(), ['output.tar.gz', 'source']);
   });
 
   // A throwing progress callback must not mask a core error: callers grep the
@@ -193,7 +206,7 @@ describe('createArchiveWithProgress', () => {
   // Regression test for #473, in-process: a callback throwing a primitive no
   // longer crashes the host, so this can be asserted directly like the
   // `Error`-throw case above instead of needing a child process.
-  it('preserves the creation report when the callback throws a primitive', async () => {
+  it('cancels the creation when the callback throws a primitive', async () => {
     await assert.rejects(
       () =>
         createArchiveWithProgress(outputPath, [sourceDir], null, () => {
@@ -201,13 +214,12 @@ describe('createArchiveWithProgress', () => {
         }),
       (err) => {
         assert.strictEqual(err.code, 'PROGRESS_CALLBACK_ERROR');
-        assert.strictEqual(err.filesAdded, 2);
         assert.strictEqual(err.cause.message, 'progress callback threw a non-object value: oops');
         assert.strictEqual(err.cause.cause, 'oops');
         return true;
       }
     );
-    assert.ok(fs.existsSync(outputPath));
+    assert.strictEqual(fs.existsSync(outputPath), false);
   });
 
   // Regression test for the #473 review: a non-function `progress` argument

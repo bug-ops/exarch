@@ -698,6 +698,12 @@ pub enum ProgressCallbackError {
         /// The archive that was written.
         report: CoreCreationReport,
     },
+    /// The JS progress callback threw during a creation, which was cancelled:
+    /// nothing was written and a previous output is untouched.
+    CreationCancelled {
+        /// The JS throw, attached as `cause`.
+        source: Error,
+    },
     /// The JS progress callback threw while a listing itself succeeded; the
     /// manifest is discarded.
     ListCallback {
@@ -876,6 +882,20 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     source,
                 )
             }
+            ProgressCallbackError::CreationCancelled { source } => Described {
+                description:
+                    "progress callback threw, creation was cancelled and nothing was written"
+                        .to_owned(),
+                props: ErrorProps {
+                    code: JsCode::ProgressCallback,
+                    relaxable_by: None,
+                    sub_code: None,
+                    setting: None,
+                    io_kind: None,
+                    details: Details::None,
+                    cause: Some(source),
+                },
+            },
             ProgressCallbackError::ListCallback { source } => {
                 describe_callback_over_success("listing", Details::None, source)
             }
@@ -1102,6 +1122,9 @@ impl fmt::Display for Failure {
                 }
                 ProgressCallbackError::CreationCallback { .. } => {
                     f.write_str("progress callback threw after successful creation")
+                }
+                ProgressCallbackError::CreationCancelled { .. } => {
+                    f.write_str("progress callback threw, creation was cancelled")
                 }
                 ProgressCallbackError::ListCallback { .. } => {
                     f.write_str("progress callback threw after successful listing")

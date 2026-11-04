@@ -103,8 +103,9 @@ export interface ExarchErrorDiscarded extends ExarchErrorBase {
 }
 
 /**
- * A progress callback threw while a listing or a verification succeeded; the
- * result was discarded.
+ * A progress callback threw while a listing or a verification succeeded (the
+ * result was discarded), or during a creation (cancelled: nothing was written
+ * and a previous output is untouched).
  */
 export interface ExarchErrorReadCallback extends ExarchErrorBase {
   code: 'PROGRESS_CALLBACK_ERROR'

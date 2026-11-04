@@ -711,7 +711,9 @@ fn create_with_progress_core(
 /// `uncaughtException` on the turn that delivered the call, observable via
 /// `process.on('uncaughtException', ...)`. It is never merged into a
 /// `PROGRESS_CALLBACK_ERROR` result the way `createArchiveWithProgress` merges
-/// it, and it cannot be caught by wrapping this call in `try`/`catch`.
+/// it, and it cannot be caught by wrapping this call in `try`/`catch`. For the
+/// same reason a throw cannot cancel the creation (`createArchiveWithProgress`
+/// does): the archive is already written and committed when the callback runs.
 ///
 /// The primitive-throw crash documented on `createArchiveWithProgress` does
 /// **not** apply here: that defect lives in the await-the-result dispatch path,
@@ -820,6 +822,13 @@ fn run_create_with_optional_progress(
                     Err(Box::new(ProgressCallbackError::CreationCallback {
                         source,
                         report,
+                    }))
+                }
+                (Err(exarch_core::ArchiveError::Io(io)), Some(source))
+                    if io.kind() == std::io::ErrorKind::Interrupted =>
+                {
+                    Err(Box::new(ProgressCallbackError::CreationCancelled {
+                        source,
                     }))
                 }
                 (Err(source), callback) => {
@@ -1351,6 +1360,10 @@ impl exarch_core::ProgressCallback for NodeProgressAdapter {
     fn on_entry_complete(&mut self, _path: &std::path::Path) {}
 
     fn on_complete(&mut self) {}
+
+    fn is_cancelled(&mut self) -> bool {
+        self.callback_error.is_some()
+    }
 }
 
 #[cfg(test)]

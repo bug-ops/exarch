@@ -103,8 +103,9 @@ export interface ExarchErrorDiscarded extends ExarchErrorBase {
 }
 
 /**
- * A progress callback threw while a listing or a verification succeeded; the
- * result was discarded.
+ * A progress callback threw while a listing or a verification succeeded (the
+ * result was discarded), or during a creation (cancelled: nothing was written
+ * and a previous output is untouched).
  */
 export interface ExarchErrorReadCallback extends ExarchErrorBase {
   code: 'PROGRESS_CALLBACK_ERROR'
@@ -1038,7 +1039,9 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * `uncaughtException` on the turn that delivered the call, observable via
  * `process.on('uncaughtException', ...)`. It is never merged into a
  * `PROGRESS_CALLBACK_ERROR` result the way `createArchiveWithProgress` merges
- * it, and it cannot be caught by wrapping this call in `try`/`catch`.
+ * it, and it cannot be caught by wrapping this call in `try`/`catch`. For the
+ * same reason a throw cannot cancel the creation (`createArchiveWithProgress`
+ * does): the archive is already written and committed when the callback runs.
  *
  * The primitive-throw crash documented on `createArchiveWithProgress` does
  * **not** apply here: that defect lives in the await-the-result dispatch path,

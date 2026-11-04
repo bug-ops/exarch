@@ -157,7 +157,7 @@ SO THAT a web handler never writes an untrusted archive to disk
 | FR-013 | Every path delivered to a sink SHALL be relative, normalized, free of `..`, a root or a prefix, and already resolved through the symlinks of earlier entries; parent directories SHALL NOT be announced; hardlinks SHALL be delivered after every other entry | must |
 | FR-014 | Validation SHALL assume an empty namespace and count the bytes the archive produces, not what the sink stores; duplicates SHALL follow `SinkOptions::skip_duplicates` (default true) exactly as the path-based API | must |
 | FR-015 | A sink error SHALL end the extraction as `ArchiveError::Io` when no entry was delivered and as `PartialExtraction` wrapping it afterwards; an `io::ErrorKind::QuotaExceeded` error carrying `SinkFull` SHALL map to `QuotaExceeded { resource: SinkCapacity { max } }` | must |
-| FR-016 | `SinkOptions` (`#[non_exhaustive]`, Copy) SHALL carry only `skip_duplicates`; `SinkOptions::try_from(&ExtractionOptions)` SHALL fail with `InvalidConfiguration` when `atomic` is set, since atomic extraction renames a directory (#794, #808) | must |
+| FR-016 | `SinkOptions` (`#[non_exhaustive]`, Copy) SHALL carry `skip_duplicates` and `decode_reuse: DecodeReuse` (default `Off`, set through `with_decode_reuse`; #890, #946); `SinkOptions::try_from(&ExtractionOptions)` SHALL carry only the duplicate policy and set `decode_reuse` to `Off`, and SHALL fail with `InvalidConfiguration` when `atomic` is set, since atomic extraction renames a directory (#794, #808) | must |
 | FR-017 | Symlinks SHALL be delivered on every platform, including hosts where the path-based API refuses to create them; a hardlink to a directory SHALL be `InvalidArchive`; a directory or file entry through a dangling symlink, or over a file or symlink, SHALL be refused with the same entry-naming message as `extract` and `verify` (#802, #803) | must |
 | FR-018 | For a 7z source the file-table checks (admission, ratios, quotas, link policy, paths, name lengths for the sink's `PathModel`) SHALL run and refuse before any block is decoded or any entry is delivered (#772, #785) | must |
 | FR-019 | The in-memory destination model SHALL charge each distinct name against a node budget of `max_file_count * max_path_depth + 1`; exhausting it SHALL fail with `QuotaExceeded { resource: TreeNodes { max } }`; a link path that leaves the root and returns SHALL be refused as an escape | must |
@@ -228,6 +228,7 @@ SO THAT a web handler never writes an untrusted archive to disk
 | NFR-003 | Type safety | A zero `MemoryLimit`, an uncreatable writer format, a sink option that needs a directory and an unvalidated file admission SHALL be unrepresentable or rejected at construction, not checked per call |
 | NFR-004 | Portability | The reader, sink and writer APIs need no filesystem; the crate builds for `wasm32-wasip1` |
 | NFR-005 | Layering | Bindings only convert types and bytes; all validation stays in `exarch-core` |
+| NFR-006 | Resource bounds | A ZIP extraction through `extract_reader_to_callback` or a custom `EntrySink` runs in O(buffer) memory by default (each deflate entry is decoded twice); `SinkOptions::decode_reuse` is opt-in: `DecodeReuse::Memory` holds up to its caller-supplied `ReuseLimit` on the heap (the limit counts only the store, not the delivered entry or the sink's own copy), `DecodeReuse::TempFile` writes the archive plaintext to the platform temporary directory (possibly RAM on a tmpfs) until the extraction ends, and an entry above the limit is still decoded twice; `extract_reader_to_memory` always reuses in memory within its own limit and ignores the field (#890, #946; temp-file cost follow-up #929) |
 
 ## 5. Data Model
 
@@ -237,7 +238,7 @@ SO THAT a web handler never writes an untrusted archive to disk
 | `SeekableFormat` | `#[non_exhaustive]` formats needing `Seek` | `Zip`, `SevenZ`; `as_str()` |
 | `ReaderFormatError` | `#[non_exhaustive]` reader format failures | `Unrecognized`, `NeedsSeek(SeekableFormat)`, `NotAtStart(SeekableFormat)` |
 | `EntrySink` | Receiver of validated entries | `File: Write`, `path_model`, `create_directory`, `create_file`, `finish_file`, `create_symlink`, `create_hardlink` |
-| `SinkOptions` | Duplicate policy of a sink run | `skip_duplicates` (default true) |
+| `SinkOptions` | Duplicate policy and ZIP decode reuse of a sink run | `skip_duplicates` (default true), `decode_reuse` (default `DecodeReuse::Off`) |
 | `SinkFull` | Payload of a sink's `QuotaExceeded` error | `new(max)`, `max()` |
 | `MemorySink` / `MemoryLimit` / `MemoryEntry` / `MemoryEntryKind` / `MemoryFile` | In-memory sink and its parts | see FR-030 to FR-032 |
 | `PathModel` | Path semantics of a destination | `Host`, `Portable`; `as_str()` |

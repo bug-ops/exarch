@@ -56,17 +56,45 @@ fn push_text(out: &mut String, text: &str) {
     }
 }
 
-#[cfg(unix)]
-fn push_path(out: &mut String, path: &Path) {
-    use std::os::unix::ffi::OsStrExt;
+/// Renders raw bytes of an archive name as text, by the rules of
+/// [`path_text`].
+///
+/// Valid UTF-8 is kept as it is except for backslashes (`\x5C`), and each
+/// invalid byte is written `\xNN`. Use it for names that are held as bytes, as
+/// they are stored in the archive, so two names that differ only in invalid
+/// bytes never render alike.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::bytes_text;
+///
+/// assert_eq!(bytes_text(b"caf\xc3\xa9"), "caf\u{e9}");
+/// assert_eq!(bytes_text(b"caf\xe9"), "caf\\xE9");
+/// assert_ne!(bytes_text(b"caf\xe9"), bytes_text(b"caf\xe8"));
+/// ```
+#[must_use]
+pub fn bytes_text(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    push_bytes(&mut out, bytes);
+    out
+}
 
-    for chunk in path.as_os_str().as_bytes().utf8_chunks() {
+fn push_bytes(out: &mut String, bytes: &[u8]) {
+    for chunk in bytes.utf8_chunks() {
         push_text(out, chunk.valid());
         for byte in chunk.invalid() {
             // Writing to a String cannot fail.
             let _ = write!(out, "\\x{byte:02X}");
         }
     }
+}
+
+#[cfg(unix)]
+fn push_path(out: &mut String, path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+
+    push_bytes(out, path.as_os_str().as_bytes());
 }
 
 #[cfg(windows)]

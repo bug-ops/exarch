@@ -916,7 +916,7 @@ fn scan_entries<R: Read + Seek>(
             scan.findings.push_with(Slot::Mismatch, || {
                 classify(&error).finding(
                     ZipEntryIndex::new(index),
-                    String::from_utf8_lossy(file.name_raw()).into_owned(),
+                    crate::bytes_text(file.name_raw()),
                 )
             });
         }
@@ -1194,7 +1194,7 @@ fn walk_directory<R: Read + Seek>(
             reader.read_exact(&mut name)?;
             findings.push_with(Slot::Duplicate, || ZipInconsistency::DuplicateName {
                 record: ordinal,
-                name: String::from_utf8_lossy(&name).into_owned(),
+                name: crate::bytes_text(&name),
             });
             walk.shadowed += 1;
             walk.shadowed_headers

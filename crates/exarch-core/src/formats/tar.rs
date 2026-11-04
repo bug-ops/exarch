@@ -704,7 +704,7 @@ pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> Result
             TarAmbiguity::NonRegularPayload {
                 kind,
                 size,
-                path: String::from_utf8_lossy(&entry.path_bytes()).into_owned(),
+                path: crate::bytes_text(&entry.path_bytes()),
             },
         ));
     }
@@ -717,7 +717,7 @@ pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> Result
         size => Err(ArchiveError::TarAmbiguity(
             TarAmbiguity::DirectoryNamedPayload {
                 size,
-                path: String::from_utf8_lossy(&entry.path_bytes()).into_owned(),
+                path: crate::bytes_text(&entry.path_bytes()),
             },
         )),
     }

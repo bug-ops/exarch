@@ -4,7 +4,7 @@ use crate::SecurityConfig;
 
 /// A Unix permission mode exactly as an archive header records it.
 ///
-/// The only consumer is [`sanitize_permissions`], so a raw mode cannot be
+/// The only consumer is `sanitize_permissions`, so a raw mode cannot be
 /// passed where a [`SanitizedMode`] is expected, and the reverse.
 ///
 /// # Examples
@@ -32,14 +32,14 @@ impl RawMode {
 }
 
 /// A Unix permission mode that has already passed through
-/// [`sanitize_permissions`].
+/// `sanitize_permissions`.
 ///
 /// This newtype closes the gap between "a raw mode read from an archive
 /// header" and "a mode safe to apply to an extracted file": both are
 /// otherwise a plain `u32`, so a caller could pass an unsanitized mode to
 /// permission-setting code by mistake, with the invariant living only in a
 /// doc comment. `SanitizedMode` can only be constructed by
-/// [`sanitize_permissions`] — its single field is private, so external
+/// `sanitize_permissions` — its single field is private, so external
 /// callers (and other modules in this crate) cannot fabricate one that
 /// skipped the setuid/setgid/world-writable stripping.
 ///

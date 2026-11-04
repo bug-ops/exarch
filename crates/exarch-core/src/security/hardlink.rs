@@ -44,7 +44,7 @@ pub fn require_hardlinks_allowed(config: &SecurityConfig) -> Result<()> {
         .ok_or_else(|| Violation::LinksNotAllowed(LinkKind::Hardlink).into())
 }
 
-/// A hardlink target that passed [`HardlinkTracker`] validation.
+/// A hardlink target that passed `HardlinkTracker` validation.
 ///
 /// The path is relative, non-empty and free of NUL bytes, root and prefix
 /// components; every normal component passed the component checks, and the
@@ -54,7 +54,7 @@ pub fn require_hardlinks_allowed(config: &SecurityConfig) -> Result<()> {
 /// not a proof about what is on disk at that time.
 ///
 /// There is no public constructor: the only producer is
-/// [`HardlinkTracker`]'s validation, so a hardlink target cannot be assembled
+/// `HardlinkTracker`'s validation, so a hardlink target cannot be assembled
 /// from an unchecked path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HardlinkTarget(PathBuf);

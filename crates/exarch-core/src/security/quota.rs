@@ -10,12 +10,12 @@ use crate::SecurityConfig;
 use crate::security::zipbomb::Uncompressed;
 
 /// Proof that a file's size was successfully reserved against a
-/// [`QuotaTracker`].
+/// `QuotaTracker`.
 ///
 /// This is a capability token that records the byte count it reserved, so the
 /// write cap is read from the permit and cannot be re-supplied by a caller
 /// that reserved one quantity and enforces another (GHSA-5j8q). Its only
-/// producers are [`QuotaTracker::reserve`] and the crate-private
+/// producers are `QuotaTracker::reserve` and the crate-private
 /// `QuotaTracker::charge` — the private field means no other code, in or out of
 /// this crate, can assemble one directly. The extraction pipeline reserves one
 /// when it admits a file, and spends it into an [`AdmittedSize`] for the

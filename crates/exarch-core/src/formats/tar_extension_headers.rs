@@ -80,7 +80,7 @@ struct PathOverrides {
 
 fn lossy(bytes: &[u8]) -> String {
     let shown = &bytes[..bytes.len().min(MAX_ECHOED_BYTES)];
-    let mut text = String::from_utf8_lossy(shown).into_owned();
+    let mut text = crate::bytes_text(shown);
     if shown.len() < bytes.len() {
         text.push_str("...");
     }

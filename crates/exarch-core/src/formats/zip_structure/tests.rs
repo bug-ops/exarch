@@ -237,6 +237,26 @@ fn duplicate_names_are_found_even_though_the_crate_collapses_them() {
 }
 
 #[test]
+fn duplicates_that_differ_only_in_invalid_bytes_are_reported_apart() {
+    let message = |name: &[u8]| {
+        let entry = |data: &[u8]| RawEntry {
+            name: name.to_vec(),
+            ..RawEntry::stored("x", data)
+        };
+        let built = RawZip::new(vec![entry(b"first"), entry(b"EVIL")]).build();
+        let archive = open_bytes(built.bytes, &SecurityConfig::default());
+        let [finding] = archive.structure().findings() else {
+            panic!("expected one finding");
+        };
+        crate::ArchiveError::ZipInconsistency(finding.clone()).to_string()
+    };
+    let (a, b) = (message(b"caf\xe9"), message(b"caf\xe8"));
+    assert_ne!(a, b);
+    assert!(a.contains("xE9") && b.contains("xE8"), "{a} / {b}");
+    assert!(!a.contains('\u{FFFD}'), "{a}");
+}
+
+#[test]
 fn central_records_past_the_end_count_are_found() {
     let mut zip = two_files();
     zip.end_count = Some(1);

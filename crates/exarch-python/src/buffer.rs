@@ -6,7 +6,9 @@ use std::path::Path;
 use exarch_core::ArchiveError;
 use exarch_core::CallbackEntry;
 use exarch_core::CallbackError;
+use exarch_core::CreateRequest;
 use exarch_core::DecodeReuse;
+use exarch_core::ListRequest;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
 use exarch_core::MemoryExtractRequest;
@@ -16,6 +18,7 @@ use exarch_core::PartialWrites;
 use exarch_core::PathModel;
 use exarch_core::ReuseLimit;
 use exarch_core::SanitizedMode;
+use exarch_core::VerifyRequest;
 use exarch_core::extract_reader_to_callback;
 use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::detect::ArchiveType;
@@ -71,6 +74,12 @@ fn parse_variant<T: Copy>(
     value
         .map(|value| parse_one(what, all, as_str, value))
         .transpose()
+}
+
+/// Parses the string form of a format that can be created.
+pub fn parse_creatable_format(format: &str) -> PyResult<CreatableFormat> {
+    let format = parse_one("format", ArchiveType::ALL, ArchiveType::as_str, format)?;
+    CreatableFormat::try_from(format).map_err(convert_error)
 }
 
 /// Parses the string form shared with `ArchiveType::as_str`.
@@ -694,7 +703,6 @@ pub fn list_archive_bytes_with_progress(
     let format = parse_format(format.as_deref())?;
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let options = exarch_core::ListOptions::default();
 
     let slot = data.failure_slot();
     let result = run_with_optional_progress(
@@ -703,7 +711,9 @@ pub fn list_archive_bytes_with_progress(
         progress,
         |progress| {
             let reader = data.into_reader(format)?;
-            exarch_core::list_reader_with_progress(reader, config_ref, &options, progress)
+            ListRequest::new(config_ref)
+                .with_progress(progress)
+                .list_reader(reader)
         },
         |_, _| {},
     );
@@ -777,7 +787,10 @@ pub fn verify_archive_bytes_with_progress(
         progress,
         |progress| {
             let reader = data.into_reader(format)?;
-            exarch_core::verify_reader_with_progress(reader, config_ref, options_ref, progress)
+            VerifyRequest::new(config_ref)
+                .with_options(*options_ref)
+                .with_progress(progress)
+                .verify_reader(reader)
         },
         |_, _| {},
     );
@@ -1033,8 +1046,7 @@ pub fn create_archive_to_bytes(
     format: String,
     config: Option<&PyCreationConfig>,
 ) -> PyResult<PyCreatedArchive> {
-    let format = parse_one("format", ArchiveType::ALL, ArchiveType::as_str, &format)?;
-    let format = CreatableFormat::try_from(format).map_err(convert_error)?;
+    let format = parse_creatable_format(&format)?;
     let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
     let source_paths: Vec<String> = sources_list
         .iter()
@@ -1044,7 +1056,7 @@ pub fn create_archive_to_bytes(
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
     let (bytes, report) = catch_panic_as_py_err("archive creation", || {
-        py.detach(|| exarch_core::create_to_bytes(&source_paths, format, config_ref))
+        py.detach(|| CreateRequest::new(config_ref).to_bytes(format, &source_paths))
     })?;
 
     Ok(PyCreatedArchive {
@@ -1096,13 +1108,12 @@ pub fn list_archive_bytes(
     let format = parse_format(format.as_deref())?;
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let options = exarch_core::ListOptions::default();
 
     let slot = data.failure_slot();
     let result = catch_panic_as_py_err("archive listing", || {
         py.detach(|| {
             let reader = data.into_reader(format)?;
-            exarch_core::list_reader(reader, config_ref, &options)
+            ListRequest::new(config_ref).list_reader(reader)
         })
     });
     let manifest = slot.surface(result)?;
@@ -1159,7 +1170,9 @@ pub fn verify_archive_bytes(
     let result = catch_panic_as_py_err("archive verification", || {
         py.detach(|| {
             let reader = data.into_reader(format)?;
-            exarch_core::verify_reader(reader, config_ref, options_ref)
+            VerifyRequest::new(config_ref)
+                .with_options(*options_ref)
+                .verify_reader(reader)
         })
     });
     let report = slot.surface(result)?;

@@ -1061,19 +1061,32 @@ def create_archive(
     output_path: str | Path,
     sources: list[str | Path],
     config: CreationConfig | None = None,
+    format: _ArchiveType | None = None,
+    overwrite: bool = True,
 ) -> CreationReport:
     """
     Create an archive from source files and directories.
+
+    The archive is written to a temporary file next to ``output_path`` (whose
+    directory must be writable) and renamed into place when complete, so a
+    failed creation leaves ``output_path`` as it was. The output and its
+    temporary file are never archived, even inside a source directory.
 
     Args:
         output_path: Path to output archive file (str or pathlib.Path)
         sources: List of source files/directories to include (str or pathlib.Path)
         config: Optional CreationConfig (uses defaults if None)
+        format: The format to write whatever the extension is (for example
+            "Zip" for a ``.whl``); None detects it from the extension
+        overwrite: Replace an existing regular file or symlink, keeping its
+            permission bits (default); False refuses any existing output
 
     Returns:
         CreationReport with creation statistics
 
     Raises:
+        OutputExistsError: ``overwrite`` is False and ``output_path`` exists
+        InvalidConfigurationError: ``output_path`` is a directory, FIFO or device
         ValueError: Invalid arguments
         IOError: I/O operation failed
         UnsupportedFormatError: Archive format not supported
@@ -1085,9 +1098,13 @@ def create_archive_with_progress(
     sources: list[str | Path],
     config: CreationConfig | None = None,
     progress: ProgressCallbackFn | None = None,
+    format: _ArchiveType | None = None,
+    overwrite: bool = True,
 ) -> CreationReport:
     """
     Create an archive with progress reporting.
+
+    ``format`` and ``overwrite`` are as in create_archive.
 
     Args:
         output_path: Path to output archive file (str or pathlib.Path)

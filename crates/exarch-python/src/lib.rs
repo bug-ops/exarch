@@ -18,6 +18,11 @@ use config::PySecurityConfig;
 use config::PyVerificationOptions;
 use error::convert_error;
 use error::register_exceptions;
+use exarch_core::CreateRequest;
+use exarch_core::ExtractRequest;
+use exarch_core::ListRequest;
+use exarch_core::OutputFile;
+use exarch_core::VerifyRequest;
 use report::PyArchiveEntry;
 use report::PyArchiveManifest;
 use report::PyCreationReport;
@@ -135,12 +140,9 @@ fn extract_archive(
     // for performance.
     let report = catch_panic_as_py_err("extraction", || {
         py.detach(|| {
-            exarch_core::extract_archive_with_options(
-                &archive_path,
-                &output_dir,
-                config_ref,
-                options_ref,
-            )
+            ExtractRequest::new(config_ref)
+                .with_options(options_ref.clone())
+                .extract(&archive_path, &output_dir)
         })
     })?;
 
@@ -255,12 +257,18 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
 /// report = create_archive("output.tar.gz", ["src/"], config)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (output_path, sources, config=None))]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "pyo3 cannot extract `&str` under abi3-py39"
+)]
+#[pyo3(signature = (output_path, sources, config=None, format=None, overwrite=true))]
 fn create_archive(
     py: Python<'_>,
     output_path: &Bound<'_, PyAny>,
     sources: &Bound<'_, PyAny>,
     config: Option<&PyCreationConfig>,
+    format: Option<String>,
+    overwrite: bool,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_string(py, output_path)?;
 
@@ -273,12 +281,27 @@ fn create_archive(
 
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let output = output_file(output_path, overwrite, format.as_deref())?;
 
     let report = catch_panic_as_py_err("archive creation", || {
-        py.detach(|| exarch_core::create_archive(&output_path, &source_paths, config_ref))
+        py.detach(|| CreateRequest::new(config_ref).create(&output, &source_paths))
     })?;
 
     Ok(PyCreationReport::from(report))
+}
+
+/// The output file of a creation: replaced or refused when it exists, in the
+/// stated format or the one its extension names.
+fn output_file(path: String, overwrite: bool, format: Option<&str>) -> PyResult<OutputFile> {
+    let output = if overwrite {
+        OutputFile::replace(path)
+    } else {
+        OutputFile::create_new(path)
+    };
+    match format {
+        Some(format) => buffer::parse_creatable_format(format).map(|f| output.with_format(f)),
+        None => Ok(output),
+    }
 }
 
 /// List archive contents without extracting.
@@ -320,7 +343,7 @@ fn list_archive(
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
     let manifest = catch_panic_as_py_err("archive listing", || {
-        py.detach(|| exarch_core::list_archive(&archive_path, config_ref))
+        py.detach(|| ListRequest::new(config_ref).list(&archive_path))
     })?;
 
     Ok(PyArchiveManifest::from(manifest))
@@ -379,7 +402,9 @@ fn verify_archive(
 
     let report = catch_panic_as_py_err("archive verification", || {
         py.detach(|| {
-            exarch_core::verify_archive_with_options(&archive_path, config_ref, options_ref)
+            VerifyRequest::new(config_ref)
+                .with_options(*options_ref)
+                .verify(&archive_path)
         })
     })?;
 
@@ -447,13 +472,19 @@ fn verify_archive(
 /// )
 /// ```
 #[pyfunction]
-#[pyo3(signature = (output_path, sources, config=None, progress=None))]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "pyo3 cannot extract `&str` under abi3-py39"
+)]
+#[pyo3(signature = (output_path, sources, config=None, progress=None, format=None, overwrite=true))]
 fn create_archive_with_progress(
     py: Python<'_>,
     output_path: &Bound<'_, PyAny>,
     sources: &Bound<'_, PyAny>,
     config: Option<&PyCreationConfig>,
     progress: Option<Py<PyAny>>,
+    format: Option<String>,
+    overwrite: bool,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_string(py, output_path)?;
 
@@ -467,18 +498,20 @@ fn create_archive_with_progress(
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
+    let output = output_file(output_path, overwrite, format.as_deref())?;
+
     let report = catch_panic_as_py_result("archive creation with progress", || {
-        run_create_with_optional_progress(py, &output_path, &source_paths, config_ref, progress)
+        run_create_with_optional_progress(py, &output, &source_paths, config_ref, progress)
     })?;
 
     Ok(PyCreationReport::from(report))
 }
 
-/// Runs `create_archive_with_progress` routed to the Python callback when
+/// Runs a `CreateRequest` routed to the Python callback when
 /// present, or with the GIL released and a no-op reporter when absent.
 fn run_create_with_optional_progress(
     py: Python<'_>,
-    output_path: &str,
+    output: &OutputFile,
     source_paths: &[String],
     config: &exarch_core::creation::CreationConfig,
     progress: Option<Py<PyAny>>,
@@ -488,12 +521,9 @@ fn run_create_with_optional_progress(
             // No progress callback - can release GIL
             let mut noop = exarch_core::NoopProgress;
             py.detach(|| {
-                exarch_core::create_archive_with_progress(
-                    output_path,
-                    source_paths,
-                    config,
-                    &mut noop,
-                )
+                CreateRequest::new(config)
+                    .with_progress(&mut noop)
+                    .create(output, source_paths)
             })
             .map_err(convert_error)
         },
@@ -501,12 +531,9 @@ fn run_create_with_optional_progress(
             // CRITICAL: Do NOT release GIL when using Python callback!
             // Python callback requires GIL to call into Python.
             let mut callback = PyProgressAdapter::new(py_callback);
-            let result = exarch_core::create_archive_with_progress(
-                output_path,
-                source_paths,
-                config,
-                &mut callback,
-            );
+            let result = CreateRequest::new(config)
+                .with_progress(&mut callback)
+                .create(output, source_paths);
             merge_progress_result(py, result, callback.into_callback_error(), |exc, report| {
                 let _ = exc.setattr("files_added", report.files_added);
                 let _ = exc.setattr("bytes_written", report.bytes_written);
@@ -669,7 +696,7 @@ fn extract_archive_with_progress(
     Ok(PyExtractionReport::from(report))
 }
 
-/// Runs `extract_archive_with_options_and_progress` routed to the Python
+/// Runs an `ExtractRequest` routed to the Python
 /// callback when present, or with the GIL released and a no-op reporter when
 /// absent.
 fn run_extract_with_optional_progress(
@@ -685,13 +712,10 @@ fn run_extract_with_optional_progress(
             // No progress callback - can release GIL
             let mut noop = exarch_core::NoopProgress;
             py.detach(|| {
-                exarch_core::extract_archive_with_options_and_progress(
-                    archive_path,
-                    output_dir,
-                    config,
-                    options,
-                    &mut noop,
-                )
+                ExtractRequest::new(config)
+                    .with_options(options.clone())
+                    .with_progress(&mut noop)
+                    .extract(archive_path, output_dir)
             })
             .map_err(convert_error)
         },
@@ -699,13 +723,10 @@ fn run_extract_with_optional_progress(
             // CRITICAL: Do NOT release GIL when using Python callback!
             // Python callback requires GIL to call into Python.
             let mut callback = PyProgressAdapter::new(py_callback);
-            let result = exarch_core::extract_archive_with_options_and_progress(
-                archive_path,
-                output_dir,
-                config,
-                options,
-                &mut callback,
-            );
+            let result = ExtractRequest::new(config)
+                .with_options(options.clone())
+                .with_progress(&mut callback)
+                .extract(archive_path, output_dir);
             merge_progress_result(py, result, callback.into_callback_error(), |exc, report| {
                 let _ = exc.setattr("files_extracted", report.files_extracted);
                 let _ = exc.setattr("bytes_written", report.bytes_written);

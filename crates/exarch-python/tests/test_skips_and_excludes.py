@@ -32,8 +32,10 @@ def test_hidden_entries_are_counted(tmp_path, source):
     report = exarch.create_archive(tmp_path / "o.tar", [source])
 
     assert report.skipped.count("hidden") == 1
-    assert report.skipped.sample[0].kind == "hidden"
-    assert report.skipped.sample[0].io_kind is None
+    hidden = [skip for skip in report.skipped.sample if skip.kind == "hidden"]
+    assert len(hidden) == 1
+    assert hidden[0].path.endswith(".hidden")
+    assert hidden[0].io_kind is None
 
 
 def test_unknown_kind_is_a_value_error(tmp_path, source):

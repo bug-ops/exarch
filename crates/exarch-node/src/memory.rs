@@ -432,7 +432,10 @@ fn create_to_bytes_core(
 /// const { data, report } = await createArchiveToBytes(['src/'], 'TarGz');
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive_to_bytes<'env>(
     env: &'env Env,
     sources: Vec<String>,
@@ -473,7 +476,10 @@ pub fn create_archive_to_bytes<'env>(
 /// const { data } = createArchiveToBytesSync(['src/'], 'Zip');
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive_to_bytes_sync(
     env: Env,
     sources: Vec<String>,
@@ -579,7 +585,10 @@ pub fn extract_archive_to_memory<'env>(
 /// const { entries } = extractArchiveToMemorySync(fs.readFileSync('a.zip'));
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn extract_archive_to_memory_sync(
     env: Env,
     data: Uint8Array,

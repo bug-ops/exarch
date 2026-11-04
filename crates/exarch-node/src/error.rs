@@ -1166,7 +1166,11 @@ impl fmt::Display for Failure {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests assert by panicking"
+)]
 mod tests {
     use exarch_core::Compressed;
     use exarch_core::InvalidArchiveSubCode as CoreInvalidArchiveSubCode;

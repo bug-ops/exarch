@@ -31,7 +31,11 @@ pub fn boundary_paths(paths: &[String]) -> Result<Vec<BoundaryPath>, CoreError> 
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests assert by panicking"
+)]
 mod tests {
     use super::*;
     use exarch_core::MAX_PATH_LENGTH;

@@ -23,8 +23,10 @@ use napi::bindgen_prelude::Null;
 use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
+use crate::error::Failure;
 use crate::error::IntoJsError;
 use crate::report::saturating_i64;
+use crate::report::saturating_u32;
 use crate::report::unknown_variant;
 
 /// Parses a JavaScript byte count: a negative, fractional, non-finite or
@@ -62,20 +64,32 @@ fn bounded_bytes(limit: Limit<NonZeroU64>) -> Option<i64> {
 
 /// Parses a JavaScript compression level: only a whole number from 1 to 9 is
 /// accepted, whatever `napi` would make of it as an integer.
+///
+/// A whole number that fits `u32` outside 1..=9 is core's
+/// `INVALID_COMPRESSION_LEVEL` and names the level exactly. Any other number
+/// (a fraction, `NaN`, an infinity, a negative or a value above `u32::MAX`)
+/// has no exact level to name, so it is a plain `InvalidArg` that reports the
+/// number as given instead of a different level.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "a whole number in 0..=u32::MAX is converted; the saturating cast only feeds the error"
+    reason = "the value is a whole number in 0..=u32::MAX here"
 )]
-fn compression_level(level: f64) -> std::result::Result<CompressionLevel, CoreError> {
+fn compression_level(level: f64) -> std::result::Result<CompressionLevel, Failure> {
     let whole =
         level.is_finite() && level.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&level);
     if whole {
-        return CompressionLevel::try_from(level as u32);
+        return Ok(CompressionLevel::try_from(level as u32)?);
     }
-    Err(CoreError::InvalidCompressionLevel {
-        level: level as u32,
-    })
+    let given = if level.is_infinite() {
+        if level > 0.0 { "Infinity" } else { "-Infinity" }.to_owned()
+    } else {
+        level.to_string()
+    };
+    Err(Failure::Native(Error::new(
+        napi::Status::InvalidArg,
+        format!("compression level must be a whole number from 1 to 9, got {given}"),
+    )))
 }
 
 /// A count as the JavaScript number it is held in, clamped to the largest
@@ -395,14 +409,20 @@ impl SecurityConfig {
 
     /// Checks if a path component is allowed.
     #[napi]
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi passes JavaScript arguments by value"
+    )]
     pub fn is_path_component_allowed(&self, component: String) -> bool {
         self.inner.is_path_component_allowed(&component)
     }
 
     /// Checks if a file extension is allowed.
     #[napi]
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi passes JavaScript arguments by value"
+    )]
     pub fn is_extension_allowed(&self, extension: String) -> bool {
         self.inner.is_extension_allowed(Some(&extension))
     }
@@ -525,14 +545,16 @@ impl SecurityConfig {
 
     /// Returns the number of allowed extensions.
     #[napi]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn get_allowed_extensions_count(&self) -> u32 {
-        self.inner.allowed_extensions.len() as u32
+        saturating_u32(self.inner.allowed_extensions.len())
     }
 
     /// Checks if a specific extension is in the allowed list.
     #[napi]
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi passes JavaScript arguments by value"
+    )]
     pub fn has_allowed_extension(&self, ext: String) -> bool {
         Extension::try_from(ext.as_str())
             .is_ok_and(|ext| self.inner.allowed_extensions.contains(&ext))
@@ -554,14 +576,16 @@ impl SecurityConfig {
 
     /// Returns the number of banned path components.
     #[napi]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn get_banned_path_components_count(&self) -> u32 {
-        self.inner.banned_path_components.len() as u32
+        saturating_u32(self.inner.banned_path_components.len())
     }
 
     /// Checks if a specific component is in the banned list.
     #[napi]
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi passes JavaScript arguments by value"
+    )]
     pub fn has_banned_path_component(&self, component: String) -> bool {
         self.inner
             .banned_path_components
@@ -853,7 +877,7 @@ impl CreationConfig {
 
     /// Env-free core of `setCompressionLevel`, so the validation is testable
     /// without a JS environment.
-    fn try_set_compression_level(&mut self, level: f64) -> std::result::Result<(), CoreError> {
+    fn try_set_compression_level(&mut self, level: f64) -> std::result::Result<(), Failure> {
         self.inner.compression_level = compression_level(level)?;
         Ok(())
     }
@@ -1888,6 +1912,30 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn test_compression_level_reports_the_value_it_was_given() {
+        let mut config = CreationConfig::new();
+        for (level, expected) in [
+            (1.5, "got 1.5"),
+            (-3.0, "got -3"),
+            (f64::NAN, "got NaN"),
+            (f64::INFINITY, "got Infinity"),
+            (4_294_967_302.0, "got 4294967302"),
+        ] {
+            let Err(Failure::Native(err)) = config.try_set_compression_level(level) else {
+                panic!("{level} must be refused as a native argument error");
+            };
+            assert!(err.reason.ends_with(expected), "{}", err.reason);
+        }
+        assert_matches!(
+            config.try_set_compression_level(10.0),
+            Err(Failure::Core(CoreError::InvalidCompressionLevel {
+                level: 10
+            }))
+        );
+        assert_eq!(config.get_compression_level(), 6);
     }
 
     #[test]

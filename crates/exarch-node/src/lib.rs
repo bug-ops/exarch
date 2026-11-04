@@ -212,7 +212,10 @@ const _: () = assert!(
 /// const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn extract_archive<'env>(
     env: &'env Env,
     archive_path: String,
@@ -287,7 +290,10 @@ fn extract_core(
 /// const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn extract_archive_sync(
     env: Env,
     archive_path: String,
@@ -372,7 +378,10 @@ fn output_file(
 /// const report = await createArchive('output.tar.gz', ['src/'], config);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive<'env>(
     env: &'env Env,
     output_path: String,
@@ -438,7 +447,10 @@ fn create_core(
 /// console.log(`Created archive with ${report.filesAdded} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive_sync(
     env: Env,
     output_path: String,
@@ -639,7 +651,10 @@ impl FromNapiValue for ProgressCallback {
 /// console.log(`Created archive with ${report.filesAdded} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive_with_progress<'env>(
     env: &'env Env,
     output_path: String,
@@ -757,7 +772,10 @@ fn create_with_progress_core(
 /// console.log(`Created archive with ${report.filesAdded} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn create_archive_with_progress_sync(
     env: Env,
     output_path: String,
@@ -864,7 +882,10 @@ fn run_create_with_optional_progress(
 /// }
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn list_archive<'env>(
     env: &'env Env,
     archive_path: String,
@@ -916,7 +937,10 @@ fn list_core(
 /// }
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn list_archive_sync(
     env: Env,
     archive_path: String,
@@ -964,7 +988,10 @@ pub fn list_archive_sync(
 /// }
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn verify_archive<'env>(
     env: &'env Env,
     archive_path: String,
@@ -1024,7 +1051,10 @@ fn verify_core(
 /// }
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn verify_archive_sync(
     env: Env,
     archive_path: String,
@@ -1136,7 +1166,10 @@ pub fn verify_archive_sync(
 /// console.log(`Extracted ${report.filesExtracted} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn extract_archive_with_progress<'env>(
     env: &'env Env,
     archive_path: String,

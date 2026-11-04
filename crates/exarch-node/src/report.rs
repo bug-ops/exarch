@@ -26,6 +26,11 @@ pub fn saturating_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+/// Whole milliseconds of `duration`, clamped to `i64::MAX`.
+pub fn saturating_millis(duration: std::time::Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
 pub fn saturating_i64(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
@@ -569,7 +574,6 @@ pub struct ExtractionReport {
 }
 
 impl From<CoreReport> for ExtractionReport {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn from(report: CoreReport) -> Self {
         // Use saturating conversions to prevent silent wraparound on overflow
         // This ensures audit trails remain accurate even for very large
@@ -579,7 +583,7 @@ impl From<CoreReport> for ExtractionReport {
             directories_created: saturating_u32(report.directories_created),
             symlinks_created: saturating_u32(report.symlinks_created),
             bytes_written: saturating_i64(report.bytes_written),
-            duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
+            duration_ms: saturating_millis(report.duration),
             files_skipped: saturating_u32(report.files_skipped()),
             skipped: SkippedSummary::from(&report.skipped),
             warnings: report.warnings.iter().map(ToString::to_string).collect(),
@@ -615,7 +619,6 @@ pub struct CreationReport {
 }
 
 impl From<exarch_core::creation::CreationReport> for CreationReport {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn from(report: exarch_core::creation::CreationReport) -> Self {
         Self {
             files_added: saturating_u32(report.files_added),
@@ -623,7 +626,7 @@ impl From<exarch_core::creation::CreationReport> for CreationReport {
             symlinks_added: saturating_u32(report.symlinks_added),
             bytes_written: saturating_i64(report.bytes_written),
             bytes_compressed: saturating_i64(report.bytes_compressed),
-            duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
+            duration_ms: saturating_millis(report.duration),
             files_skipped: saturating_u32(report.files_skipped()),
             skipped: SkippedSummary::from(&report.skipped),
             warnings: report.warnings.iter().map(ToString::to_string).collect(),
@@ -875,7 +878,6 @@ struct EntryCommon {
     modified: Option<i64>,
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn entry_common(entry: &exarch_core::inspection::ArchiveEntry) -> CoreResult<EntryCommon> {
     Ok(EntryCommon {
         path: entry
@@ -887,7 +889,7 @@ fn entry_common(entry: &exarch_core::inspection::ArchiveEntry) -> CoreResult<Ent
         modified: entry.modified.and_then(|t| {
             t.duration_since(std::time::UNIX_EPOCH)
                 .ok()
-                .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+                .map(saturating_millis)
         }),
     })
 }
@@ -1074,7 +1076,11 @@ impl TryFrom<exarch_core::inspection::VerificationIssue> for VerificationIssue {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests assert by panicking"
+)]
 mod tests {
     use super::*;
     use std::assert_matches;

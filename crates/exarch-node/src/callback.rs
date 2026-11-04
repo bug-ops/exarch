@@ -300,7 +300,10 @@ pub fn extract_archive_to_callback<'env>(
 /// extractArchiveToCallbackSync(fs.readFileSync('a.zip'), (entry) => names.push(entry.path));
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value"
+)]
 pub fn extract_archive_to_callback_sync<'env>(
     env: Env,
     data: Uint8Array,

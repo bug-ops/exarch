@@ -1756,6 +1756,7 @@ def verify_archive_bytes_with_progress(
         is raised with the callback's exception chained as __cause__.
     """
     ...
+
 @final
 class CreatedArchive:
     """The result of create_archive_to_bytes."""

@@ -1844,8 +1844,10 @@ mod tests {
             .expect("the walker vets the parent at write time");
     }
 
+    #[cfg(unix)]
     struct NameTooLongFs;
 
+    #[cfg(unix)]
     impl crate::security::fs_view::FsView for NameTooLongFs {
         type Root = DestDir;
 

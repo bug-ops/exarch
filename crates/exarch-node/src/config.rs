@@ -992,6 +992,7 @@ impl VerificationOptions {
 )]
 mod tests {
     use exarch_core::MAX_CONFIG_ENTRY_LENGTH;
+    use std::assert_matches;
 
     use super::*;
 
@@ -1695,13 +1696,13 @@ mod tests {
         config.try_set_max_file_size(Some(10)).unwrap();
         for bad in [0, -1] {
             let err = config.try_set_max_file_size(Some(bad)).unwrap_err();
-            assert!(matches!(
+            assert_matches!(
                 err,
                 CoreError::InvalidConfiguration {
                     setting: ConfigSetting::MaxFileSize,
                     ..
                 }
-            ));
+            );
         }
         assert_eq!(config.get_max_file_size(), Some(10));
     }

@@ -76,6 +76,7 @@ impl<V: FsView, P: ParentCheck> ValidationContext<'_, V, P> {
 mod tests {
     use super::*;
     use crate::types::safe_path::ParentVetting;
+    use std::assert_matches;
 
     #[cfg(unix)]
     #[test]
@@ -91,13 +92,9 @@ mod tests {
 
     #[test]
     fn test_parent_probe_is_a_property_of_the_state() {
-        const {
-            assert!(matches!(Resolved::VETTING, ParentVetting::Validator));
-        }
+        assert_matches!(Resolved::VETTING, ParentVetting::Validator);
         #[cfg(unix)]
-        const {
-            assert!(matches!(Walked::VETTING, ParentVetting::Walker));
-        }
+        assert_matches!(Walked::VETTING, ParentVetting::Walker);
     }
 
     #[test]

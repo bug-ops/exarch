@@ -250,8 +250,10 @@ mod landing {
         assert!(out.path().join("d").join(rest()).join("f").is_file());
     }
 
+    #[cfg(unix)]
     const TOO_LONG: &str = "file name too long";
 
+    #[cfg(unix)]
     #[derive(Clone, Copy, Debug)]
     enum Shape {
         FileUnderShortDirs,
@@ -259,6 +261,7 @@ mod landing {
         DirectoryEntry,
     }
 
+    #[cfg(unix)]
     impl Shape {
         const ALL: [Self; 3] = [
             Self::FileUnderShortDirs,
@@ -285,6 +288,7 @@ mod landing {
         }
     }
 
+    #[cfg(unix)]
     /// `d -> cc` with a short `cc`, so only the tail makes the landing long.
     fn archive_below_short_chain(shape: Shape, entry_len: usize) -> (TempDir, PathBuf) {
         let body: &[u8] = match shape {

@@ -143,8 +143,28 @@ fn replace_swaps_in_a_complete_archive() {
     }
 }
 
+/// Runs `work` on a thread and fails instead of hanging if it never returns,
+/// which is what an archive that includes its own growing output does.
+fn within_timeout(work: impl FnOnce() + Send + 'static) {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        work();
+        let _ = done.send(());
+    });
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .is_ok(),
+        "creation did not finish: the archive includes its own output"
+    );
+}
+
 #[test]
 fn the_output_is_never_archived_even_inside_a_source_directory() {
+    within_timeout(never_archived_inside_a_source_directory);
+}
+
+fn never_archived_inside_a_source_directory() {
     for name in OUTPUTS {
         let src = source();
         let output = src.path().join(name);

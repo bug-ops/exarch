@@ -878,7 +878,8 @@ pub fn verify_reader_with_progress(
 
 /// Extracts an archive read from a reader into an [`EntrySink`].
 ///
-/// Equivalent to [`extract_to_sink_with_progress`] with a [`NoopProgress`](crate::NoopProgress).
+/// Equivalent to [`extract_to_sink_with_progress`] with a
+/// [`NoopProgress`](crate::NoopProgress).
 ///
 /// Every entry passes the validation pipeline of [`extract_archive`] and is
 /// then delivered to `sink` instead of being written under a directory. See the

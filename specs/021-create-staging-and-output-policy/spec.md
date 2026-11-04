@@ -171,16 +171,16 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FR-012 | `Replace` SHALL NOT preserve owner, ACLs or extended attributes of the replaced file; the doc comment SHALL say so | must |
 | FR-013 | `CreateNew` SHALL publish with `persist_noclobber`; a file that appeared between staging and publishing SHALL yield `OutputExists` with the file untouched | must |
 | FR-014 | WHEN `persist_noclobber` fails for a reason other than "already exists" (the hard-link primitive is missing on FAT and exFAT), THE SYSTEM SHALL reserve the name with `File::create_new` and rename the staged file over the reservation; a failed rename SHALL remove the reservation only after its identity (device and inode on Unix) is confirmed, and otherwise SHALL leave it and name it in the error | must |
-| FR-015 | The walker SHALL exclude the staged file and the target from the archive by path: the entry's file name is compared first, then its canonical parent; file identity SHALL NOT be used because it is not stable on Windows. The name comparison is case-sensitive | must |
+| FR-015 | The walker SHALL exclude the staged file and the target from the archive by path, before the hidden-file filter and without counting them as skips (a staged `.exarch-*` file is hidden, and must not appear as a `Hidden` skip): the entry's file name is compared first, then its canonical parent; file identity SHALL NOT be used because it is not stable on Windows. The name comparison is case-sensitive | must |
 | FR-016 | `create_archive(path, sources, config)` SHALL mean `OutputFile::replace(path)` with `FromExtension` | must |
 | FR-017 | `CreateRequest::write(ArchiveWriter, sources)` and `CreateRequest::to_bytes(CreatableFormat, sources)` SHALL be unaffected by staging; `CreationReport::bytes_compressed` for `create` SHALL be the size of the published file | must |
 | FR-018 | WHEN `create` writes a ZIP, THE SYSTEM SHALL read the staged file back to compute the extraction-ratio warning (`CreationWarning::ZipRatioOverDefaultLimit` / `ZipRatioCheckFailed`) before the rename | should |
 | FR-019 | `ExcludePattern` SHALL be a `#[non_exhaustive]` enum with variants `Exact { name }`, `Prefix { prefix }` (`name*`), `Suffix { suffix }` (`*name`) and `Path { relative }`; the variants are themselves `#[non_exhaustive]`, so values are built only by `TryFrom<&str>` / `FromStr` and printed by a round-tripping `Display` | must |
 | FR-020 | A pattern without a separator and without `*` SHALL be `Exact`; one with a single leading or trailing `*` SHALL be `Suffix` or `Prefix`; one with a separator and no `*` SHALL be `Path`, anchored at the archive root, matching that relative path and its subtree. A bare name matches one path component at any depth | must |
-| FR-021 | THE SYSTEM SHALL refuse with `InvalidConfiguration { setting: ExcludePattern, .. }`: an empty pattern, a NUL byte, a pattern over 255 bytes, `.` or `..`, an absolute path, a bare `*`, an inner or double `*`, and a separator combined with `*` (e.g. `build/*`, `a*b`) | must |
+| FR-021 | THE SYSTEM SHALL refuse with `InvalidConfiguration { setting: ExcludePattern, problem: ExcludePatternRefused { pattern, reason } }`, where `reason` is an `ExcludeRefusal` (`empty`, `too_long`, `contains_nul`, `dot_entry`, `absolute`, `unsupported_wildcard`, `wildcard_with_separator`, `glob_metacharacter`, `padded_with_blank`, `contains_comma`) and the message names the pattern: an empty pattern, a NUL byte, a pattern over 255 bytes, `.` or `..`, an absolute path, a bare `*`, an inner or double `*`, a separator combined with `*` (e.g. `build/*`, `a*b`), any of `?`, `[`, `]`, `{`, `}` and `!` (glob look-alikes that would be matched literally), a comma (it reads as a list separator), and leading or trailing whitespace or control characters | must |
 | FR-022 | Patterns SHALL match the archive entry path (after `strip_prefix` and multi-source naming), the name shown by `list`, and SHALL NOT match the ancestors of the source root | must |
 | FR-023 | `CreationConfig::exclude_patterns` SHALL be `Vec<ExcludePattern>`; `with_exclude_patterns` takes `Vec<ExcludePattern>`; there SHALL be no unparsed-string setter, so a refused shape cannot be stored | must |
-| FR-024 | Entries dropped by an exclude pattern or by the hidden-file rule SHALL be counted in `CreationReport::skipped` as `SkipKind::Excluded` and `SkipKind::Hidden`; the other creation skips are `OverMaxFileSize` and `SymlinkUnsupported` | must |
+| FR-024 | Matching SHALL compare raw bytes of path components (`OsStr::as_encoded_bytes`), so a non-UTF-8 name is matched, not skipped or lossily converted. Entries dropped by an exclude pattern or by the hidden-file rule SHALL be counted in `CreationReport::skipped` as `SkipKind::Excluded` and `SkipKind::Hidden`; the other creation skips are `OverMaxFileSize` and `SymlinkUnsupported` | must |
 | FR-025 | `CreateRequest` SHALL document `# Errors` once; `ArchiveCreator`, `FormatCreator`, `TarCreator`, `ZipCreator` and the public `creation::{tar,zip}::create_*` SHALL NOT exist; creation SHALL dispatch by `CreationFamily` | must |
 
 ### Surfaces
@@ -189,8 +189,8 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 |----|------------|----------|
 | FR-040 | THE CLI `create` SHALL map `--force` to `OutputFile::replace` and its absence to `OutputFile::create_new`; it SHALL NOT call `exists()` or `remove_file`; `OutputExists` SHALL carry a hint naming `--force`; a directory, FIFO or device output SHALL be an `InvalidConfiguration` for `output_path` with and without `--force` | must |
 | FR-041 | THE CLI `create -x` SHALL parse patterns with `ExcludePattern::try_from` after clap; a refused shape SHALL exit 1 with the JSON envelope (`setting: exclude_pattern`) and write no archive; the `-x` help text SHALL name the shapes | must |
-| FR-042 | Python `create_archive` and `create_archive_with_progress` SHALL take `format: str | None` and `overwrite: bool = True`; `overwrite=False` maps to `create_new` and raises `OutputExistsError` (a `FileExistsError`); a refused exclude pattern SHALL raise `InvalidConfigurationError` with `setting == "exclude_pattern"` | must |
-| FR-043 | Node `createArchive*` SHALL replace an existing output atomically (`OutputFile::replace`); it does not expose `OutputFormat::Explicit`; `addExcludePattern` SHALL throw `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'` for a refused shape | must |
+| FR-042 | Python `create_archive` and `create_archive_with_progress` SHALL take `format: str | None` and `overwrite: bool = True`; `overwrite=False` maps to `create_new` and raises `OutputExistsError` (a `FileExistsError`); a refused exclude pattern SHALL raise `InvalidConfigurationError` with `setting == "exclude_pattern"`; a progress callback that raises SHALL cancel the creation (nothing is committed, a previous archive stays) | must |
+| FR-043 | Node `createArchive*` SHALL replace an existing output atomically (`OutputFile::replace`); it takes an optional trailing `CreateOptions { format?: ArchiveType, overwrite?: boolean }` (default replace; `overwrite: false` maps to `create_new`, `format` to `OutputFile::with_format`, `'SevenZ'` is refused); `addExcludePattern` SHALL throw `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'` for a refused shape | must |
 
 ## 4. Non-Functional Requirements
 
@@ -199,7 +199,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | NFR-001 | Reliability | No creation outcome leaves a partial archive at the target; the only residue is the documented FAT/exFAT reservation window (FR-014) |
 | NFR-002 | Security | The staged file is never wider than `0o600` while written when it will replace a file; a replaced file's mode is never widened and never gains setuid, setgid or sticky bits |
 | NFR-003 | Compatibility | BREAKING: the parent directory of the output must be writable, and the output is replaced by rename (a hard link to the old file no longer sees the new content) |
-| NFR-004 | Performance | `commit` fsyncs every created archive (`sync_all`); creation of many small archives pays this cost |
+| NFR-004 | Performance | `commit` fsyncs every created archive (`sync_all`) and then, best effort, its parent directory; creation of many small archives pays a fixed cost of about 4 to 10 ms each (measured) |
 
 ## 5. Data Model
 
@@ -228,6 +228,9 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | `Replace` over a symlink to a regular file | The link itself is replaced; the mode comes from the file it pointed to |
 | `Replace` of a read-only file | The new archive carries the read-only mode (set after the write); the rename still succeeds when the directory is writable |
 | Pattern `target/` or `src/gen` | `Path`, anchored at the archive root |
+| Pattern `*.{a,b}`, `file?.txt`, `[ab]`, `!x`, `a,b` or `" a"` | Refused (`glob_metacharacter`, `contains_comma`, `padded_with_blank`); the message names the pattern |
+| A non-UTF-8 file name and a pattern | Matched by raw bytes |
+| The progress callback raises (or throws) during creation | Creation stops with `Interrupted`, the staged file is deleted and the previous archive is kept (Python and Node surface the callback's exception) |
 | Pattern `*.tmp` and a source root under `x.tmp/` | Ancestors are not matched; the archive is not empty |
 | Single-file top-level source matching an exclude pattern | Not filtered (unchanged behavior) |
 

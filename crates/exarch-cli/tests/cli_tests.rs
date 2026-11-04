@@ -7073,6 +7073,12 @@ fn test_extract_under_unadmittable_existing_symlink_does_not_suggest_allow_symli
             .clone();
         let stderr = String::from_utf8(stderr).expect("UTF-8 stderr");
         assert!(!stderr.contains("--allow-symlinks"), "{link}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "refusing to create {link}/x under the existing symlink at {link}"
+            )),
+            "{link}: {stderr}"
+        );
 
         let stdout = exarch_cmd()
             .arg("extract")

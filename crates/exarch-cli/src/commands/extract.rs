@@ -1105,7 +1105,8 @@ impl ConflictsChecked {
         }
         let root = output_dir.canonicalize().ok();
         let mut conflicts = Vec::new();
-        for landing in manifest.landings(config) {
+        let landings: Vec<_> = manifest.landings(config).collect();
+        for (index, landing) in landings.iter().enumerate() {
             let must_be_directory = matches!(
                 landing.kind(),
                 LandingKind::ImplicitParent
@@ -1136,10 +1137,16 @@ impl ConflictsChecked {
                 }
             };
             if occupant.file_type().is_symlink() {
+                let rel = landing.path().as_path();
+                let entry_below = landings[index + 1..]
+                    .iter()
+                    .map(|later| later.path().as_path())
+                    .find(|later| *later != rel && later.starts_with(rel));
                 if let Some(refusal) = symlink_refusal(
-                    landing.path().as_path(),
+                    rel,
                     &target,
                     must_be_directory,
+                    entry_below,
                     root.as_deref(),
                 ) {
                     return Err(convert_error(Operation::Extract, refusal, archive));
@@ -1157,13 +1164,18 @@ impl ConflictsChecked {
     }
 }
 
-/// The library's refusal for a symlink at a landing, or `None` when the link
-/// leads to a directory inside `root` and the landing must be a directory:
-/// whether extraction may write through it is extraction's call.
+/// The library's refusal for a symlink at the landing `rel`, or `None` when
+/// the link leads to a directory inside `root` and the landing must be a
+/// directory: whether extraction may write through it is extraction's call.
+///
+/// `entry_below` is the first landing under `rel`, the entry that needs the
+/// link to be a directory; it is `None` when `rel` is itself a directory entry,
+/// which would replace the link.
 fn symlink_refusal(
     rel: &Path,
     target: &Path,
     must_be_directory: bool,
+    entry_below: Option<&Path>,
     root: Option<&Path>,
 ) -> Option<ArchiveError> {
     let resolved = target.canonicalize().ok();
@@ -1181,10 +1193,15 @@ fn symlink_refusal(
         Some(_) if !inside_root => Some(ArchiveError::SymlinkEscape {
             path: rel.to_path_buf(),
         }),
-        _ => Some(ArchiveError::from(Violation::SymlinkParent {
-            entry: path_text(rel).into(),
-            parent: path_text(rel).into(),
-        })),
+        _ => Some(ArchiveError::from(entry_below.map_or_else(
+            || Violation::ReplacesSymlink {
+                rel: path_text(rel).into(),
+            },
+            |entry| Violation::SymlinkParent {
+                entry: path_text(entry).into(),
+                parent: path_text(rel).into(),
+            },
+        ))),
     }
 }
 

@@ -14,6 +14,7 @@ use super::zip_reuse::Retained;
 
 use crate::ArchiveError;
 use crate::ExtractionReport;
+use crate::Malformation;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -448,10 +449,9 @@ impl ExtractTarget for HostTarget<'_> {
                     *hardlink_duplicate_skips = hardlink_duplicate_skips.saturating_add(1);
                     return Ok(());
                 }
-                return Err(ArchiveError::InvalidArchive(format!(
-                    "duplicate entry: {}",
-                    link.as_path().display()
-                )));
+                return Err(ArchiveError::from(Malformation::DuplicateEntry {
+                    path: link.as_path().to_path_buf(),
+                }));
             }
             Err(e) => return Err(ArchiveError::Io(e)),
         };
@@ -499,10 +499,9 @@ impl HostTarget<'_> {
         };
         let meta = file.metadata()?;
         if !meta.is_file() {
-            return Err(ArchiveError::InvalidArchive(format!(
-                "hardlink target is not a regular file: {}",
-                target.as_path().display()
-            )));
+            return Err(ArchiveError::from(Malformation::HardlinkTargetNotRegular {
+                target: target.as_path().to_path_buf(),
+            }));
         }
         #[cfg(unix)]
         let mode = {

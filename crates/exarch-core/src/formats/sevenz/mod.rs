@@ -424,7 +424,7 @@ impl From<sevenz_rust2::Error> for ArchiveError {
                 io_err.kind(),
                 format!("{path}: {io_err}"),
             )),
-            other => Self::InvalidArchive(format!("7z error: {other}")),
+            other => Self::unclassified(format!("7z error: {other}")),
         }
     }
 }

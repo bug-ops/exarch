@@ -1333,7 +1333,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_invalid_archive() {
-        let error = ArchiveError::InvalidArchive("bad header".into());
+        let error = ArchiveError::unclassified("bad header");
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity, IssueSeverity::High);
         assert_eq!(issue.category, IssueCategory::InvalidArchive);

@@ -155,7 +155,7 @@ fn inferred_creation_is_rejected_for_zip_family() {
         match result {
             Err(ArchiveError::InvalidArchive(msg)) => {
                 assert!(
-                    msg.contains(ext),
+                    msg.to_string().contains(ext),
                     ".{ext} error should mention the extension (got: {msg})",
                 );
             }

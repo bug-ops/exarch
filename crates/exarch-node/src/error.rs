@@ -175,6 +175,21 @@ pub enum InvalidArchiveSubCode {
     /// The stream after the TAR end-of-archive marker is corrupt or truncated.
     #[napi(value = "TAR_TRAILER")]
     TarTrailer,
+    /// A link entry whose target is missing, unreadable or unusable.
+    #[napi(value = "LINK_TARGET")]
+    LinkTarget,
+    /// An entry path that is already taken.
+    #[napi(value = "DUPLICATE_ENTRY")]
+    DuplicateEntry,
+    /// An entry path or name that cannot be read.
+    #[napi(value = "ENTRY_NAME")]
+    EntryName,
+    /// A declared size that contradicts the archive.
+    #[napi(value = "DECLARED_SIZE")]
+    DeclaredSize,
+    /// An entry whose integrity decode failed.
+    #[napi(value = "INTEGRITY")]
+    Integrity,
 }
 
 /// Value of the `subCode` property of a `SECURITY_VIOLATION` error.

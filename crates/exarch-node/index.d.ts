@@ -31,7 +31,7 @@ export interface ExarchErrorBase extends Error {
    * failure, when it has one, and of every core `SECURITY_VIOLATION`
    * (`SecurityViolationSubCode`). The interfaces are discriminated by `writes`,
    * not `code`, so the pairing is not narrowed per code: `INVALID_ARCHIVE`
-   * carries `'TAR_AMBIGUITY'` or `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries
+   * carries one of the `InvalidArchiveSubCode` values, `SECURITY_VIOLATION` carries
    * one of the `SecurityViolationSubCode` values.
    */
   subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
@@ -1412,7 +1412,7 @@ export interface IntegrityGaps {
 export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
 
 /** Value of the `subCode` property of an `INVALID_ARCHIVE` error. */
-export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER'
+export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER' | 'LINK_TARGET' | 'DUPLICATE_ENTRY' | 'ENTRY_NAME' | 'DECLARED_SIZE' | 'INTEGRITY'
 
 /** Issue category. */
 export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete' | 'Header Mismatch' | 'Duplicate Entry' | 'Overlapping Entries' | 'Hidden Entry' | 'Name Collision' | 'Archive Note'

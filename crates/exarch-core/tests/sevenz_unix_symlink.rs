@@ -333,7 +333,7 @@ fn list_marks_a_target_with_a_corrupt_checksum_unreadable() {
     );
     assert_matches!(
         extract_archive(&path, TempDir::new().unwrap().path(), &allow_symlinks()),
-        Err(ArchiveError::InvalidArchive(reason)) if reason.contains("failed to read 7z symlink target")
+        Err(ArchiveError::InvalidArchive(reason)) if reason.to_string().contains("failed to read 7z symlink target")
     );
 }
 
@@ -1006,7 +1006,7 @@ fn a_corrupt_link_inside_a_solid_block_fails_extract() {
 
     assert_matches!(
         partial_source(err),
-        ArchiveError::InvalidArchive(reason) if reason.contains("failed to read 7z symlink target")
+        ArchiveError::InvalidArchive(reason) if reason.to_string().contains("failed to read 7z symlink target")
     );
     assert!(out.join("a.txt").exists());
     assert!(std::fs::symlink_metadata(out.join("l1")).is_err());
@@ -1151,7 +1151,7 @@ fn assert_orphan_block_refused(path: &Path, mapping: [Option<usize>; 2]) {
     let err = extract_archive(path, out.path(), &SecurityConfig::default()).unwrap_err();
     assert_matches!(
         err,
-        ArchiveError::InvalidArchive(reason) if reason.contains("do not account for")
+        ArchiveError::InvalidArchive(reason) if reason.to_string().contains("do not account for")
     );
     for name in ["a", "b"] {
         assert_eq!(std::fs::read(out.path().join(name)).unwrap(), b"sentinel");

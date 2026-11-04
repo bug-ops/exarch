@@ -2,6 +2,7 @@
 
 use crate::ArchiveError;
 use crate::CompressionRatio;
+use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::ZipBombDetails;
@@ -149,9 +150,10 @@ impl DeclaredCompressedBudget {
     /// Returns [`ArchiveError::InvalidArchive`] when `declared` exceeds what
     /// is left of the budget.
     pub fn charge(&mut self, declared: u64) -> Result<()> {
-        self.remaining = self.remaining.checked_sub(declared).ok_or_else(|| {
-            ArchiveError::InvalidArchive("declared compressed size exceeds archive length".into())
-        })?;
+        self.remaining = self
+            .remaining
+            .checked_sub(declared)
+            .ok_or_else(|| ArchiveError::from(Malformation::DeclaredCompressedExceedsArchive))?;
         Ok(())
     }
 }

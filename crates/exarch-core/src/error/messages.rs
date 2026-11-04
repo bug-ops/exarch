@@ -85,6 +85,16 @@ closed_enum! {
         TarAmbiguity => "TAR_AMBIGUITY",
         /// A corrupt or truncated stream after the TAR end-of-archive marker.
         TarTrailer => "TAR_TRAILER",
+        /// A link entry whose target is missing, unreadable or unusable.
+        LinkTarget => "LINK_TARGET",
+        /// An entry path that is already taken.
+        DuplicateEntry => "DUPLICATE_ENTRY",
+        /// An entry path or name that cannot be read.
+        EntryName => "ENTRY_NAME",
+        /// A declared size that contradicts the archive.
+        DeclaredSize => "DECLARED_SIZE",
+        /// An entry whose integrity decode failed.
+        Integrity => "INTEGRITY",
     }
 }
 
@@ -449,8 +459,9 @@ impl ArchiveError {
     /// ```
     /// use exarch_core::ArchiveError;
     /// use exarch_core::ErrorCode;
+    /// use exarch_core::Malformation;
     ///
-    /// let err = ArchiveError::InvalidArchive("bad".into());
+    /// let err = ArchiveError::from(Malformation::PackSizesOverflow);
     /// assert_eq!(err.ffi_kind().code(), ErrorCode::InvalidArchive);
     /// ```
     #[must_use]
@@ -466,7 +477,9 @@ impl ArchiveError {
                 relaxable_by: kind.relaxable_by(),
                 sub_code: kind.sub_code(),
             },
-            Self::InvalidArchive(_) => FfiKind::InvalidArchive { sub_code: None },
+            Self::InvalidArchive(m) => FfiKind::InvalidArchive {
+                sub_code: m.sub_code(),
+            },
             Self::TarAmbiguity(_) => FfiKind::InvalidArchive {
                 sub_code: Some(InvalidArchiveSubCode::TarAmbiguity),
             },
@@ -687,7 +700,7 @@ mod tests {
                 resource: QuotaResource::IntegerOverflow,
             },
             ArchiveError::from(Violation::EncryptedArchive),
-            ArchiveError::InvalidArchive("test".into()),
+            ArchiveError::unclassified("test"),
             ArchiveError::Io(std::io::Error::other("test")),
             ArchiveError::InvalidPermissions {
                 path: PathBuf::from("test"),
@@ -813,10 +826,7 @@ mod tests {
             }
         );
 
-        assert_eq!(
-            ArchiveError::InvalidArchive("x".into()).ffi_kind(),
-            invalid(None)
-        );
+        assert_eq!(ArchiveError::unclassified("x").ffi_kind(), invalid(None));
         assert_eq!(
             ArchiveError::from(Violation::EncryptedArchive).ffi_kind(),
             FfiKind::SecurityViolation {

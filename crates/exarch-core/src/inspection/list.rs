@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use crate::ArchiveError;
 use crate::ListOptions;
+use crate::Malformation;
 use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
@@ -496,7 +497,7 @@ fn list_tar_entries<R: std::io::Read>(
     let skip_limits = SkipLimits::of(config);
 
     let mut entries = budgeted_tar_entries(&mut archive, budget)
-        .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read TAR entries: {e}")))?;
+        .map_err(|e| ArchiveError::unclassified(format!("failed to read TAR entries: {e}")))?;
 
     while let Some(entry_result) = entries.next_entry() {
         let mut entry = entry_result?.check(config.max_tar_metadata_bytes)?;
@@ -511,7 +512,11 @@ fn list_tar_entries<R: std::io::Read>(
 
             let path = entry
                 .path()
-                .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
+                .map_err(|e| {
+                    ArchiveError::from(Malformation::EntryPathUnreadable {
+                        detail: e.to_string().into(),
+                    })
+                })?
                 .into_owned();
 
             // Route through the same QuotaTracker used by extraction: per-file
@@ -618,7 +623,11 @@ fn tar_link_target<R: Read>(entry: &tar::Entry<'_, R>, list_mode: ListMode) -> R
     };
     let target = entry
         .link_name()
-        .map_err(|e| ArchiveError::InvalidArchive(format!("invalid link target: {e}")))?
+        .map_err(|e| {
+            ArchiveError::from(Malformation::LinkTargetUnreadable {
+                detail: e.to_string().into(),
+            })
+        })?
         .map(std::borrow::Cow::into_owned);
     match target {
         Some(t) => classify_link_target(t, kind, list_mode),
@@ -628,9 +637,9 @@ fn tar_link_target<R: Read>(entry: &tar::Entry<'_, R>, list_mode: ListMode) -> R
         // `extract` rejects this via `to_entry_type` (formats/tar.rs) with the
         // same message; mirrored here for list/extract parity; skipped in
         // verify's pre-flight since `verify_entry` reports a missing target.
-        None if list_mode == ListMode::Strict => Err(ArchiveError::InvalidArchive(format!(
-            "{kind} missing target"
-        ))),
+        None if list_mode == ListMode::Strict => {
+            Err(ArchiveError::from(Malformation::LinkTargetMissing(kind)))
+        }
         None => Ok(LinkTarget::Missing),
     }
 }
@@ -710,7 +719,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             if is_password_required(&e) {
                 return encrypted_archive_error();
             }
-            ArchiveError::InvalidArchive(format!("failed to read ZIP entry: {e}"))
+            ArchiveError::unclassified(format!("failed to read ZIP entry: {e}"))
         })?;
 
         // Route through the same QuotaTracker used by extraction: per-file
@@ -721,7 +730,12 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         // pre-existing divergence.
         let raw_name = entry
             .name()
-            .map_err(|e| ArchiveError::InvalidArchive(format!("invalid entry name: {e}")))?
+            .map_err(|e| {
+                ArchiveError::from(Malformation::EntryNameUnreadable {
+                    index: None,
+                    detail: e.to_string().into(),
+                })
+            })?
             .into_owned();
         let path = match list_mode {
             ListMode::Strict => resolve_zip_entry_path(&raw_name, config)?,
@@ -789,7 +803,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
         let target = if entry_type == ManifestEntryType::Symlink {
             let mut sym_entry = archive.by_index(i).map_err(|e| {
-                ArchiveError::InvalidArchive(format!("failed to re-read ZIP entry {i}: {e}"))
+                ArchiveError::unclassified(format!("failed to re-read ZIP entry {i}: {e}"))
             })?;
             let declared = sym_entry.size();
             if list_mode == ListMode::VerifyPreflight && declared > MAX_SYMLINK_TARGET_BYTES as u64
@@ -1174,9 +1188,12 @@ fn validate_link_target(target: &Path, kind: LinkKind, mode: ListMode) -> Result
 fn classify_link_target(target: PathBuf, kind: LinkKind, mode: ListMode) -> Result<LinkTarget> {
     validate_link_target(&target, kind, mode)?;
     match LinkTarget::classify(target, kind) {
-        LinkTarget::Oversized { bytes } if mode == ListMode::Strict => Err(
-            ArchiveError::InvalidArchive(format!("{kind} target too long: {bytes} bytes")),
-        ),
+        LinkTarget::Oversized { bytes } if mode == ListMode::Strict => {
+            Err(ArchiveError::from(Malformation::LinkTargetTooLong {
+                kind,
+                bytes,
+            }))
+        }
         classified => Ok(classified),
     }
 }
@@ -2803,7 +2820,7 @@ mod tests {
         let result = list_archive(temp_file.path(), &config);
         match result {
             Err(ArchiveError::InvalidArchive(msg)) => {
-                assert_eq!(msg, "symlink missing target");
+                assert_eq!(msg.to_string(), "symlink missing target");
             }
             other => panic!("expected InvalidArchive for missing symlink target, got: {other:?}"),
         }
@@ -2829,7 +2846,7 @@ mod tests {
         let result = list_archive(temp_file.path(), &config);
         match result {
             Err(ArchiveError::InvalidArchive(msg)) => {
-                assert_eq!(msg, "hardlink missing target");
+                assert_eq!(msg.to_string(), "hardlink missing target");
             }
             other => panic!("expected InvalidArchive for missing hardlink target, got: {other:?}"),
         }
@@ -3266,7 +3283,7 @@ mod tests {
         let result = list_archive(temp_file.path(), &SecurityConfig::default());
         assert_matches!(
             result,
-            Err(ArchiveError::InvalidArchive(msg)) if msg == "hardlink target too long: 100000 bytes"
+            Err(ArchiveError::InvalidArchive(msg)) if msg.to_string() == "hardlink target too long: 100000 bytes"
         );
     }
 

@@ -136,6 +136,7 @@ use crate::ArchiveError;
 use crate::DecodeReuse;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::Malformation;
 use crate::MemorySink;
 use crate::ProgressCallback;
 use crate::Result;
@@ -743,8 +744,8 @@ impl<R: Read + Seek> ZipArchive<R> {
         // skipped it.
         let limit = ZstdWindowLog::of(config);
         match self.structure.zstd_windows() {
-            ZstdWindows::OverBudget => Err(ArchiveError::InvalidArchive(
-                "ZIP zstd entries could not be walked within the archive extent".into(),
+            ZstdWindows::OverBudget => Err(ArchiveError::unclassified(
+                "ZIP zstd entries could not be walked within the archive extent",
             )),
             ZstdWindows::Largest(window) if !limit.admits(window) => {
                 Err(ArchiveError::QuotaExceeded {
@@ -810,7 +811,10 @@ impl<R: Read + Seek> ZipArchive<R> {
         config: &SecurityConfig<Validated>,
     ) -> Result<PathBuf> {
         let raw_name = zip_file.name().map_err(|e| {
-            ArchiveError::InvalidArchive(format!("invalid entry name at {index}: {e}"))
+            ArchiveError::from(Malformation::EntryNameUnreadable {
+                index: Some(index),
+                detail: e.to_string().into(),
+            })
         })?;
         resolve_zip_entry_path(&raw_name, config)
     }
@@ -932,7 +936,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                     let err = if is_password_required(&e) {
                         common::encrypted_archive_error()
                     } else {
-                        ArchiveError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
+                        ArchiveError::unclassified(format!("failed to open zip entry {i}: {e}"))
                     };
                     push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
@@ -941,8 +945,10 @@ impl<R: Read + Seek> ZipArchive<R> {
             let entry_path = match zip_file.name() {
                 Ok(name) => PathBuf::from(name.as_ref()),
                 Err(e) => {
-                    let err =
-                        ArchiveError::InvalidArchive(format!("invalid entry name at {i}: {e}"));
+                    let err = ArchiveError::from(Malformation::EntryNameUnreadable {
+                        index: Some(i),
+                        detail: e.to_string().into(),
+                    });
                     push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
                 }
@@ -1121,7 +1127,9 @@ impl ZipEntryAdapter {
             .take(common::MAX_STORED_SYMLINK_TARGET)
             .read_to_end(&mut target_bytes)
             .map_err(|e| {
-                ArchiveError::InvalidArchive(format!("failed to read symlink target: {e}"))
+                ArchiveError::from(Malformation::SymlinkTargetUnreadable {
+                    detail: e.to_string().into(),
+                })
             })?;
 
         common::symlink_target_from_bytes(&target_bytes)
@@ -1174,9 +1182,9 @@ pub(crate) fn read_zip_symlink_target_checked<R: Read>(
                 pass.record(slot, entry_path, DecodeOutcome::Failed(failure))?;
             }
             failure => {
-                return Err(ArchiveError::InvalidArchive(format!(
-                    "failed to read symlink target: {failure}"
-                )));
+                return Err(ArchiveError::from(Malformation::SymlinkTargetUnreadable {
+                    detail: failure.to_string().into(),
+                }));
             }
         }
     }
@@ -2344,7 +2352,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 err,
-                ArchiveError::InvalidArchive(ref msg) if msg.contains("UTF-8"),
+                ArchiveError::InvalidArchive(ref msg) if msg.to_string().contains("UTF-8"),
                 "expected InvalidArchive(UTF-8), got: {err:?}"
             );
         }

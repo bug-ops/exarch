@@ -53,7 +53,7 @@ fn write_archive(dir: &TempDir, bytes: &[u8]) -> std::path::PathBuf {
 fn assert_exceeds_archive(error: Option<ArchiveError>) {
     assert_matches!(
         error,
-        Some(ArchiveError::InvalidArchive(reason)) if reason == EXCEEDS_ARCHIVE
+        Some(ArchiveError::InvalidArchive(reason)) if reason.to_string() == EXCEEDS_ARCHIVE
     );
 }
 

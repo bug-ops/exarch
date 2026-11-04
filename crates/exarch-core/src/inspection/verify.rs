@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::ArchiveError;
 use crate::IntegrityCheck;
+use crate::Malformation;
 use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
@@ -721,10 +722,11 @@ fn verify_deferred_hardlink(
         return Err(issue(hardlink_target_missing(target)));
     }
     if tree.resolves_to_dir(&target_full) {
-        return Err(issue(ArchiveError::InvalidArchive(format!(
-            "hardlink target is a directory: {}",
-            target.display()
-        ))));
+        return Err(issue(ArchiveError::from(
+            Malformation::HardlinkTargetDirectory {
+                target: target.clone(),
+            },
+        )));
     }
     // A file over a file is accepted by the tree, but a hardlink cannot
     // replace one: it is created exclusively.

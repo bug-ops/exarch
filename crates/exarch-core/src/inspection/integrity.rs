@@ -18,6 +18,7 @@ use std::path::Path;
 
 use crate::ArchiveError;
 use crate::DecompressionBudget;
+use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::TarTrailerRefusal;
@@ -170,7 +171,10 @@ impl DecodeFailure {
     fn into_error(self, location: &str) -> ArchiveError {
         match self {
             Self::Checksum | Self::Malformed(_) | Self::Truncated { .. } => {
-                ArchiveError::InvalidArchive(format!("integrity check failed {location}: {self}"))
+                ArchiveError::from(Malformation::IntegrityCheckFailed {
+                    location: location.into(),
+                    detail: self.to_string().into(),
+                })
             }
             Self::DeclaredSizeOverrun { declared } => declared_size_exceeded(declared),
             Self::ResourceLimit(e) | Self::NotDecodable(e) => e,

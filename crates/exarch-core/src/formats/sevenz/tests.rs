@@ -2603,7 +2603,7 @@ fn refusal_messages_after_resizing(sizes: [u64; 2]) -> Vec<String> {
         .into_iter()
         .filter(|r| matches!(r.scope, RefusalScope::Block(_)))
         .map(|r| match r.error {
-            ArchiveError::InvalidArchive(message) => message,
+            ArchiveError::InvalidArchive(message) => message.to_string(),
             other => panic!("unexpected refusal {other:?}"),
         })
         .collect()

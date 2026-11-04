@@ -399,7 +399,7 @@ impl TarReadBudget {
     /// Classifies an error `tar` raised while reading toward the next entry.
     fn classify(&self, e: &io::Error) -> crate::ArchiveError {
         budget_violation(e).unwrap_or_else(|| {
-            self.prefer_fault(crate::ArchiveError::InvalidArchive(format!(
+            self.prefer_fault(crate::ArchiveError::unclassified(format!(
                 "failed to read TAR entry: {e}"
             )))
         })
@@ -1110,8 +1110,8 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
         }
         if self.budget.0.abandoned.load(Ordering::Relaxed) {
             self.poisoned = true;
-            return Some(Err(crate::ArchiveError::InvalidArchive(
-                "TAR read continued after an abandoned entry".into(),
+            return Some(Err(crate::ArchiveError::unclassified(
+                "TAR read continued after an abandoned entry",
             )));
         }
         if let Some(details) = self.budget.skip_trip() {
@@ -1451,7 +1451,7 @@ mod tests {
         let mut source = SourceRead::new(EioThenData(false), tap.clone());
         let (_reader, budget) =
             budgeted_reader_with(Cursor::new(Vec::new()), 16, TapSource::Tapped(tap));
-        let verdict = || ArchiveError::InvalidArchive("bad header".into());
+        let verdict = || ArchiveError::unclassified("bad header");
 
         source.read(&mut [0u8; 4]).unwrap_err();
         assert_matches!(

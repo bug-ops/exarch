@@ -450,7 +450,7 @@ fn anti_item_inside_a_solid_block_fails_closed_before_any_write() {
 
         let err = extract_archive(&archive, out.path(), &config).unwrap_err();
 
-        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.contains(refusal),
+        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().contains(refusal),
             "anti item at {anti_at}: {err:?}"
         );
         assert!(dir_names(&out).is_empty(), "anti item at {anti_at}");

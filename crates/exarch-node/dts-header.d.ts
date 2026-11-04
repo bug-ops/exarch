@@ -31,7 +31,7 @@ export interface ExarchErrorBase extends Error {
    * failure, when it has one, and of every core `SECURITY_VIOLATION`
    * (`SecurityViolationSubCode`). The interfaces are discriminated by `writes`,
    * not `code`, so the pairing is not narrowed per code: `INVALID_ARCHIVE`
-   * carries `'TAR_AMBIGUITY'` or `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries
+   * carries one of the `InvalidArchiveSubCode` values, `SECURITY_VIOLATION` carries
    * one of the `SecurityViolationSubCode` values.
    */
   subCode?: InvalidArchiveSubCode | SecurityViolationSubCode

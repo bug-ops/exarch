@@ -11,6 +11,7 @@ use super::header::SevenZHeader;
 use super::lzma2::DecodeKnobs;
 use crate::ArchiveError;
 use crate::EntryCompression;
+use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
@@ -116,7 +117,10 @@ impl LinkReadFailure {
             Self::Truncated => "its data ends early".to_owned(),
             Self::Checksum => "checksum mismatch".to_owned(),
         };
-        ArchiveError::InvalidArchive(format!("failed to read 7z symlink target {name}: {why}"))
+        ArchiveError::from(Malformation::SevenZipSymlinkTargetUnreadable {
+            name: name.into(),
+            detail: why.into(),
+        })
     }
 }
 
@@ -194,8 +198,8 @@ impl<T> LinkTable<T> {
             .last()
             .is_some_and(|&(last, _)| last >= file_index)
         {
-            return Err(ArchiveError::InvalidArchive(
-                "7z link entries are out of order".into(),
+            return Err(ArchiveError::unclassified(
+                "7z link entries are out of order",
             ));
         }
         self.entries.push((file_index, value));

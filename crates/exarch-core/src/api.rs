@@ -1115,7 +1115,7 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
     };
     if is_zip_family_alias(ext) {
         let ext_lower = ext.to_ascii_lowercase();
-        return Err(ArchiveError::InvalidArchive(format!(
+        return Err(ArchiveError::unclassified(format!(
             "creation for .{ext_lower} isn't supported: the format is ZIP-based but \
              requires extra structure (signing, manifests, ordering) that exarch \
              doesn't produce. Use .zip, or set CreationConfig::format = Some(\

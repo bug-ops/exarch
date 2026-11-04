@@ -6,6 +6,7 @@ use super::header::BlockIndex;
 use super::header::SevenZHeader;
 use crate::ArchiveError;
 use crate::EntryCompression;
+use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SolidBlock;
@@ -75,9 +76,7 @@ pub fn sevenz_entry_compression(
     let data_region = source_len
         .checked_sub(SIGNATURE_HEADER_SIZE)
         .and_then(|len| len.checked_sub(archive.pack_pos()))
-        .ok_or_else(|| {
-            ArchiveError::InvalidArchive("declared compressed size exceeds archive length".into())
-        })?;
+        .ok_or_else(|| ArchiveError::from(Malformation::DeclaredCompressedExceedsArchive))?;
     let mut budget = DeclaredCompressedBudget::new(data_region);
     for &pack_size in archive.pack_sizes() {
         budget.charge(pack_size)?;
@@ -95,7 +94,7 @@ pub fn sevenz_entry_compression(
             .iter()
             .try_fold(0u64, |acc, &size| acc.checked_add(size))
             .map(Compressed)
-            .ok_or_else(|| ArchiveError::InvalidArchive("7z pack sizes overflow".into()))
+            .ok_or_else(|| ArchiveError::from(Malformation::PackSizesOverflow))
     };
 
     let mut block_uncompressed = vec![0u64; header.block_count()];
@@ -326,8 +325,8 @@ pub(super) fn admit_sevenz_block(
             return Err(not_decodable(common::encrypted_archive_error()));
         }
         let needed = coder_memory(coder, output).ok_or_else(|| {
-            not_decodable(ArchiveError::InvalidArchive(
-                "7z block uses an unsupported coder or malformed coder properties".into(),
+            not_decodable(ArchiveError::unclassified(
+                "7z block uses an unsupported coder or malformed coder properties",
             ))
         })?;
         memory = memory.saturating_add(needed);
@@ -345,8 +344,8 @@ pub(super) fn admit_sevenz_block(
     // TODO(#769): compare stream files with sub-streams once sevenz-rust2
     // exposes the count; the size sum misses zero-size shifts
     if declared_size != Some(block.get_unpack_size()) {
-        return Err(not_decodable(ArchiveError::InvalidArchive(
-            "7z block's files do not account for its decoded size".into(),
+        return Err(not_decodable(ArchiveError::from(
+            Malformation::BlockSizeUnaccounted,
         )));
     }
     Ok(())

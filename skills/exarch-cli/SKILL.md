@@ -450,7 +450,7 @@ Every subcommand's `--json` output uses the same envelope:
 
 `data` is absent on error, `error` is absent on success.
 
-`error.sub_code` is present on every `SecurityViolation` and on a TAR `InvalidArchive`, and is
+`error.sub_code` is present on every `SecurityViolation` and on an `InvalidArchive` that has a family, and is
 absent on every other error, so branch on it instead of parsing `message`. On a `SecurityViolation`
 it names the family of the refusal: `PATH_NAME` (an entry path refused by name rules: banned
 component, NUL byte, empty path, reserved or unsafe name), `PATH_DEPTH`, `LINK_TARGET` (an empty,
@@ -465,7 +465,10 @@ binary: a TAR entry named `.git/config` gives `SecurityViolation`, `PATH_NAME` a
 `banned_components`; a symlink entry gives `LINK_POLICY` and `symlinks`; a FIFO entry gives
 `ENTRY_TYPE` and no `relaxable_by`.
 
-On an `InvalidArchive`, `TAR_AMBIGUITY` marks a TAR
+On an `InvalidArchive`, five more families mark refusals that were once plain text: `LINK_TARGET` (a link
+entry whose target is missing, unreadable, too long or, for a hardlink, absent, a directory or not a
+regular file), `DUPLICATE_ENTRY`, `ENTRY_NAME` (an entry path or name that cannot be read), `DECLARED_SIZE` (a
+declared size that contradicts the archive) and `INTEGRITY` (an integrity decode that failed). `TAR_AMBIGUITY` marks a TAR
 header that readers parse differently (a size or checksum field that is not plain octal, a PAX
 record problem, a payload declared on a directory or link, and the other cases listed under the TAR
 consistency checks). `TAR_TRAILER` marks the stream after the end-of-archive marker of a compressed
@@ -477,7 +480,8 @@ with the debug binary on four TARs: a size field `+0000000005` gives `kind` `Inv
 `sub_code` `TAR_AMBIGUITY`; a gzip member followed by `\0\0\0garbage` gives `InvalidArchive`,
 `TAR_TRAILER`; a gzip member followed by a second member of 5 MiB of zeros gives `SecurityViolation`,
 `TAR_TRAILER` and `relaxable_by` `max_tar_metadata_bytes`; a file of `A` bytes gives `InvalidArchive`
-and no `sub_code`.
+and no `sub_code`. A hardlink to a missing target gives `InvalidArchive` and
+`LINK_TARGET`, and a symlink entry with an empty link name gives `InvalidArchive` and `LINK_TARGET` (both verified live with the debug binary).
 
 `error.relaxable_by` is present only on a `SecurityViolation` that a core `SecurityConfig` setting
 relaxes, and names the setting whose current value refused the entry: `symlinks`, `hardlinks`,

@@ -679,7 +679,7 @@ impl DirectoryMap {
                     .by_index_data(index)
                     .map(|entry| entry.central_header_start())
                     .map_err(|e| {
-                        ArchiveError::InvalidArchive(format!("failed to read entry {index}: {e}"))
+                        ArchiveError::unclassified(format!("failed to read entry {index}: {e}"))
                     })
             })
             .collect::<Result<_>>()?;
@@ -836,11 +836,11 @@ fn reader_fault<R>(shared: &Shared<R>, error: ArchiveError) -> ArchiveError {
 
 fn open_reader<R: Read + Seek>(reader: R) -> Result<ZipReader<R>> {
     ZipReader::new(reader)
-        .map_err(|e| ArchiveError::InvalidArchive(format!("failed to open ZIP archive: {e}")))
+        .map_err(|e| ArchiveError::unclassified(format!("failed to open ZIP archive: {e}")))
 }
 
 fn census_disagreement() -> ArchiveError {
-    ArchiveError::InvalidArchive("ZIP central directory census disagrees with reader".into())
+    ArchiveError::unclassified("ZIP central directory census disagrees with reader")
 }
 
 /// Result of opening every entry.
@@ -875,7 +875,7 @@ fn scan_entries<R: Read + Seek>(
     for index in 0..archive.len() {
         if consistent {
             let file = archive.by_index_raw(index).map_err(|e| {
-                ArchiveError::InvalidArchive(format!("failed to read entry {index}: {e}"))
+                ArchiveError::unclassified(format!("failed to read entry {index}: {e}"))
             })?;
             admit_zip_entry(&file, &mut budget)?;
             scan.layouts.push(layout_of(&file, index)?);
@@ -904,7 +904,7 @@ fn scan_entries<R: Read + Seek>(
             if is_password_required(&e) {
                 common::encrypted_archive_error()
             } else {
-                ArchiveError::InvalidArchive(format!("failed to read entry {index}: {e}"))
+                ArchiveError::unclassified(format!("failed to read entry {index}: {e}"))
             }
         })?;
         admit_zip_entry(&file, &mut budget)?;
@@ -928,8 +928,7 @@ fn scan_entries<R: Read + Seek>(
 }
 
 fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<EntryLayout> {
-    let invalid =
-        || ArchiveError::InvalidArchive("ZIP entry data range is not representable".into());
+    let invalid = || ArchiveError::unclassified("ZIP entry data range is not representable");
     let data_start = file.data_start().ok_or_else(invalid)?;
     Ok(EntryLayout {
         entry: ZipEntryIndex::new(index),

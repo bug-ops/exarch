@@ -27,7 +27,7 @@ fn vector() -> PathBuf {
 }
 
 fn assert_invalid_archive(result: &Result<impl std::fmt::Debug, ArchiveError>) {
-    assert_matches!(result, Err(ArchiveError::InvalidArchive(m)) if m.starts_with("failed to open 7z archive: "),
+    assert_matches!(result, Err(ArchiveError::InvalidArchive(m)) if m.to_string().starts_with("failed to open 7z archive: "),
         "expected InvalidArchive, got {result:?}"
     );
 }

@@ -476,7 +476,10 @@ mod tests {
 
     #[test]
     fn test_invalid_archive_conversion() {
-        let err = CoreError::InvalidArchive("corrupted header".to_string());
+        let err = CoreError::from(exarch_core::Malformation::EntryNameUnreadable {
+            index: None,
+            detail: "corrupted header".into(),
+        });
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
         assert!(

@@ -128,6 +128,8 @@ use tar::Archive;
 use crate::ArchiveError;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::LinkKind;
+use crate::Malformation;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -315,7 +317,11 @@ impl<R: Read> TarArchive<R> {
 
         let path = entry
             .path()
-            .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
+            .map_err(|e| {
+                ArchiveError::from(Malformation::EntryPathUnreadable {
+                    detail: e.to_string().into(),
+                })
+            })?
             .into_owned();
 
         require_non_empty_name(&path)?;
@@ -424,7 +430,7 @@ impl<R: Read> TarArchive<R> {
         );
         let mut inner_archive = Archive::new(budgeted);
         let mut entries = budgeted_tar_entries(&mut inner_archive, budget)
-            .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read entries: {e}")))?;
+            .map_err(|e| ArchiveError::unclassified(format!("failed to read entries: {e}")))?;
 
         let skip_limits = SkipLimits::of(config);
         let mut ctx = ExtractionContext {
@@ -634,9 +640,14 @@ impl TarEntryAdapter {
                 let target = tar_entry
                     .link_name()
                     .map_err(|e| {
-                        ArchiveError::InvalidArchive(format!("failed to read symlink name: {e}"))
+                        ArchiveError::from(Malformation::LinkNameUnreadable {
+                            kind: LinkKind::Symlink,
+                            detail: e.to_string().into(),
+                        })
                     })?
-                    .ok_or_else(|| ArchiveError::InvalidArchive("symlink missing target".into()))?
+                    .ok_or_else(|| {
+                        ArchiveError::from(Malformation::LinkTargetMissing(LinkKind::Symlink))
+                    })?
                     .into_owned();
                 Ok(EntryType::Symlink { target })
             }
@@ -644,9 +655,14 @@ impl TarEntryAdapter {
                 let target = tar_entry
                     .link_name()
                     .map_err(|e| {
-                        ArchiveError::InvalidArchive(format!("failed to read hardlink name: {e}"))
+                        ArchiveError::from(Malformation::LinkNameUnreadable {
+                            kind: LinkKind::Hardlink,
+                            detail: e.to_string().into(),
+                        })
                     })?
-                    .ok_or_else(|| ArchiveError::InvalidArchive("hardlink missing target".into()))?
+                    .ok_or_else(|| {
+                        ArchiveError::from(Malformation::LinkTargetMissing(LinkKind::Hardlink))
+                    })?
                     .into_owned();
                 Ok(EntryType::Hardlink { target })
             }
@@ -2076,7 +2092,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(ArchiveError::InvalidArchive(msg)) => {
-                assert!(msg.contains("hardlink target does not exist"));
+                assert!(msg.to_string().contains("hardlink target does not exist"));
             }
             _ => panic!("Expected InvalidArchive error for missing hardlink target"),
         }
@@ -2142,7 +2158,7 @@ mod tests {
             .expect("hardlink must not block on a FIFO target")
             .expect("setup");
         let err = outcome.expect_err("a FIFO target must be refused");
-        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.contains("not a regular file"));
+        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().contains("not a regular file"));
         assert!(!temp.path().join("loot.txt").exists());
     }
 
@@ -2430,11 +2446,13 @@ mod tests {
         // PartialExtraction; unwrap one level to check the source.
         match result {
             Err(ArchiveError::PartialExtraction { source, .. }) => match *source {
-                ArchiveError::InvalidArchive(msg) => assert!(msg.contains("duplicate entry")),
+                ArchiveError::InvalidArchive(msg) => {
+                    assert!(msg.to_string().contains("duplicate entry"));
+                }
                 other => panic!("Expected InvalidArchive duplicate-entry error, got: {other:?}"),
             },
             Err(ArchiveError::InvalidArchive(msg)) => {
-                assert!(msg.contains("duplicate entry"));
+                assert!(msg.to_string().contains("duplicate entry"));
             }
             other => panic!("Expected InvalidArchive duplicate-entry error, got: {other:?}"),
         }

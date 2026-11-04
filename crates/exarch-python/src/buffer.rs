@@ -175,10 +175,11 @@ impl PyMemoryEntry {
 /// distinct entries into one name.
 fn utf8(path: &Path) -> PyResult<String> {
     path.to_str().map(str::to_owned).ok_or_else(|| {
-        convert_error(ArchiveError::InvalidArchive(format!(
-            "entry path is not valid UTF-8: {}",
-            path.display()
-        )))
+        convert_error(ArchiveError::from(
+            exarch_core::Malformation::EntryPathNotUtf8 {
+                path: path.to_path_buf(),
+            },
+        ))
     })
 }
 

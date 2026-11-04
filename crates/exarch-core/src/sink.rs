@@ -171,6 +171,7 @@ use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::ExtractionOptions;
+use crate::Malformation;
 use crate::QuotaResource;
 use crate::Result;
 use crate::SecurityConfig;
@@ -869,10 +870,9 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             return Err(hardlink_target_missing(target.as_path()));
         }
         if self.tree.resolves_to_dir(&full) {
-            return Err(ArchiveError::InvalidArchive(format!(
-                "hardlink target is a directory: {}",
-                target.as_path().display()
-            )));
+            return Err(ArchiveError::from(Malformation::HardlinkTargetDirectory {
+                target: target.as_path().to_path_buf(),
+            }));
         }
         if self.tree.occupant(link.as_path()).is_some() {
             if tally.options.duplicate_policy() == DuplicatePolicy::Skip {
@@ -880,10 +880,9 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                 *hardlink_duplicate_skips = hardlink_duplicate_skips.saturating_add(1);
                 return Ok(());
             }
-            return Err(ArchiveError::InvalidArchive(format!(
-                "duplicate entry: {}",
-                link.as_path().display()
-            )));
+            return Err(ArchiveError::from(Malformation::DuplicateEntry {
+                path: link.as_path().to_path_buf(),
+            }));
         }
 
         let resolved_target = self.resolved_target(link.as_path(), target.as_path())?;

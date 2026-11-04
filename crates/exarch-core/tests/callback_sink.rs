@@ -311,7 +311,7 @@ fn a_callback_error_exposes_its_source() {
 fn an_archive_error_is_transparent_in_the_chain() {
     use std::error::Error as _;
 
-    let inner = ArchiveError::InvalidArchive("bad".to_owned());
+    let inner = ArchiveError::from(exarch_core::Malformation::PackSizesOverflow);
     let expected = inner.to_string();
     let err: CallbackError<io::Error> = CallbackError::Archive(inner);
 

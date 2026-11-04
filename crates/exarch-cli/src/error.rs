@@ -1011,7 +1011,9 @@ mod tests {
 
     #[test]
     fn test_invalid_archive_reason_appears_once() {
-        let err = ArchiveError::InvalidArchive("distinctive-reason".to_string());
+        let err = ArchiveError::from(exarch_core::Malformation::SymlinkTargetUnreadable {
+            detail: "distinctive-reason".into(),
+        });
         let converted = convert_extraction_error(err, Path::new("a.tar"));
         let msg = format!("{converted:#}");
         assert_eq!(msg.matches("distinctive-reason").count(), 1, "got: {msg}");

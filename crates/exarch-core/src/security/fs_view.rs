@@ -1634,7 +1634,7 @@ fn fold(name: &OsStr) -> Cow<'_, OsStr> {
     let folded = if text.is_ascii() {
         text.to_ascii_uppercase()
     } else {
-        fold_unicode(&text)
+        fold_unicode(text)
     };
     Cow::Owned(OsString::from(folded))
 }

@@ -214,6 +214,7 @@ impl DestDir {
     /// resolved (`/var/x` where [`as_path`](Self::as_path) says
     /// `/private/var/x`). Only an absolute symlink target is ever read
     /// through it, to recognize a link the destination already holds.
+    #[cfg(unix)]
     #[inline]
     #[must_use]
     pub(crate) fn written(&self) -> &Path {

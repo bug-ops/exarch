@@ -17,7 +17,7 @@ pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> Comman
             args.links
                 .apply(args.limits.apply(SecurityConfig::default())?),
         ),
-    );
+    )?;
 
     let options = if args.check_integrity {
         let budget = match args.decompression_budget {

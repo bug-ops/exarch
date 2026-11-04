@@ -791,13 +791,17 @@ fn resolve_atomic_force_replace(
     match kind {
         DestEntryKind::Directory => {}
         DestEntryKind::Symlink => anyhow::bail!(
-            "cannot use --atomic --force: destination {} is a symlink; pass the resolved \
+            "cannot use {atomic} {force}: destination {} is a symlink; pass the resolved \
              target path instead",
-            dest_display.display()
+            dest_display.display(),
+            atomic = Flag::Atomic.long(),
+            force = Flag::Force.long(),
         ),
         DestEntryKind::Other => anyhow::bail!(
-            "cannot use --atomic --force: destination {} already exists and is not a directory",
-            dest_display.display()
+            "cannot use {atomic} {force}: destination {} already exists and is not a directory",
+            dest_display.display(),
+            atomic = Flag::Atomic.long(),
+            force = Flag::Force.long(),
         ),
     }
 
@@ -822,12 +826,13 @@ fn resolve_atomic_force_replace(
 fn parse_extensions(tokens: &[ListToken]) -> Result<Vec<Extension>> {
     let parsed = items(tokens)
         .map(|ext| {
-            Extension::try_from(ext)
-                .with_context(|| format!("invalid --allowed-extensions value {ext:?}"))
+            Extension::try_from(ext).with_context(|| {
+                format!("invalid {} value {ext:?}", Flag::AllowedExtensions.long())
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     if parsed.is_empty() && !tokens.is_empty() {
-        anyhow::bail!("--allowed-extensions names no extension");
+        anyhow::bail!("{} names no extension", Flag::AllowedExtensions.long());
     }
     Ok(parsed)
 }
@@ -908,12 +913,16 @@ fn banned_components(tokens: &[ListToken]) -> Result<Option<Vec<PathComponentNam
         BannedComponentsArg::Replace(tokens) => {
             let components = items(&tokens)
                 .map(|component| {
-                    PathComponentName::try_from(component)
-                        .with_context(|| format!("invalid --banned-component value {component:?}"))
+                    PathComponentName::try_from(component).with_context(|| {
+                        format!(
+                            "invalid {} value {component:?}",
+                            Flag::BannedComponent.long()
+                        )
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?;
             if components.is_empty() {
-                anyhow::bail!("--banned-component names no component");
+                anyhow::bail!("{} names no component", Flag::BannedComponent.long());
             }
             Ok(Some(components))
         }
@@ -1000,7 +1009,7 @@ fn limited_config(args: &ExtractArgs) -> Result<SecurityConfig, ArchiveError> {
             args.links
                 .apply(args.limits.apply(SecurityConfig::default())?),
         ),
-    );
+    )?;
     match args.max_path_depth {
         Some(depth) => {
             Ok(config.with_max_path_depth(non_zero_usize(ConfigSetting::MaxPathDepth, depth)?))

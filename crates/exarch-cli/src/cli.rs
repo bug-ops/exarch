@@ -12,6 +12,7 @@ use exarch_core::RatioLimit;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::ZipConsistencyPolicy;
+use exarch_core::non_zero_u64;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -87,11 +88,13 @@ impl LinkPolicyArgs {
 
 /// Quota and ratio flags shared by `extract`, `list` and `verify`.
 ///
-/// clap checks syntax only (a number, with a K/M/G/T suffix for sizes) into
-/// raw values; [`apply`](Self::apply) hands them to core, which refuses zero,
-/// fractions of a count and non-finite ratios as `InvalidConfiguration`, so
-/// every refusal is one JSON-safe error with exit status 1. A flag that is
-/// omitted leaves the core default in place.
+/// clap checks syntax only into raw values: a whole number, with a K/M/G/T
+/// suffix for sizes, or a number for the ratio. A value that does not parse
+/// (`--max-files 2.5`, `--max-total-size abc`) is a usage error with exit
+/// status 2. [`apply`](Self::apply) hands what parsed to core, which refuses
+/// zero and a ratio that is zero, negative or not finite as
+/// `InvalidConfiguration`, so every such refusal is one JSON-safe error with
+/// exit status 1. A flag that is omitted leaves the core default in place.
 #[derive(clap::Args, Clone, Copy)]
 pub struct LimitArgs {
     /// Maximum number of entries
@@ -224,16 +227,39 @@ pub struct ParallelDecodeArgs {
     /// (default: 128M). A stock 7-Zip archive has 64 MiB runs, about 100 MiB
     /// per extra concurrent run; archives with small runs need far less.
     #[arg(long, value_name = "SIZE|off", value_parser = parse_parallel_decode)]
-    pub parallel_decode_memory: Option<ParallelDecode>,
+    pub parallel_decode_memory: Option<ParallelDecodeValue>,
+}
+
+/// The raw value of `--parallel-decode-memory`: `off`, or a byte count that
+/// core still has to accept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParallelDecodeValue {
+    /// Decode on one thread.
+    Off,
+    /// A lookahead memory of this many bytes.
+    Bytes(u64),
 }
 
 impl ParallelDecodeArgs {
     /// Applies the flag to `config`, leaving the default when it is omitted.
-    pub fn apply(self, config: SecurityConfig) -> SecurityConfig {
-        match self.parallel_decode_memory {
-            Some(mode) => config.with_parallel_decode(mode),
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidConfiguration` naming `parallel_decode_memory` for a
+    /// size of zero (`off` is the way to decode on one thread).
+    pub fn apply(self, config: SecurityConfig) -> Result<SecurityConfig, ArchiveError> {
+        Ok(match self.parallel_decode_memory {
             None => config,
-        }
+            Some(ParallelDecodeValue::Off) => {
+                config.with_parallel_decode(ParallelDecode::Sequential)
+            }
+            Some(ParallelDecodeValue::Bytes(bytes)) => {
+                config.with_parallel_decode(ParallelDecode::from_bytes(Some(non_zero_u64(
+                    ConfigSetting::ParallelDecodeMemory,
+                    bytes,
+                )?)))
+            }
+        })
     }
 }
 
@@ -427,7 +453,7 @@ pub struct VerifyArgs {
     /// Integrity is INCOMPLETE when part of the payload could not be verified
     /// (budget, resource limit, solid 7z without --allow-solid-archives, TAR
     /// without an end-of-archive marker). Exit code 0 does not mean integrity
-    /// OK: use --strict to exit with status 2 on INCOMPLETE.
+    /// OK: use --strict to exit with status 3 on INCOMPLETE.
     #[arg(long)]
     pub check_integrity: bool,
 
@@ -441,7 +467,7 @@ pub struct VerifyArgs {
     )]
     pub decompression_budget: Option<u64>,
 
-    /// Treat warnings as errors and exit with status code 2
+    /// Treat warnings as errors and exit with status code 3
     #[arg(long)]
     pub strict: bool,
 }
@@ -500,13 +526,11 @@ fn parse_ratio(s: &str) -> Result<f64, String> {
         .map_err(|_| format!("`{s}` is not a number"))
 }
 
-fn parse_parallel_decode(s: &str) -> Result<ParallelDecode, String> {
+fn parse_parallel_decode(s: &str) -> Result<ParallelDecodeValue, String> {
     if s.trim().eq_ignore_ascii_case("off") {
-        return Ok(ParallelDecode::Sequential);
+        return Ok(ParallelDecodeValue::Off);
     }
-    NonZeroU64::new(parse_byte_size(s)?)
-        .map(ParallelDecode::Bounded)
-        .ok_or_else(|| "parallel decode memory must be greater than zero (use off)".to_string())
+    parse_byte_size(s).map(ParallelDecodeValue::Bytes)
 }
 
 /// Parse byte size with optional suffix (K, M, G, T)
@@ -947,14 +971,27 @@ mod tests {
     fn test_parallel_decode_memory_parses_sizes_and_off() {
         assert_eq!(
             parse_parallel_decode("256M"),
-            Ok(ParallelDecode::Bounded(
-                NonZeroU64::new(256 * 1024 * 1024).unwrap()
-            ))
+            Ok(ParallelDecodeValue::Bytes(256 * 1024 * 1024))
         );
-        assert_eq!(parse_parallel_decode("off"), Ok(ParallelDecode::Sequential));
-        assert_eq!(parse_parallel_decode("OFF"), Ok(ParallelDecode::Sequential));
-        assert!(parse_parallel_decode("0").is_err());
+        assert_eq!(parse_parallel_decode("off"), Ok(ParallelDecodeValue::Off));
+        assert_eq!(parse_parallel_decode("OFF"), Ok(ParallelDecodeValue::Off));
+        assert_eq!(
+            parse_parallel_decode("0"),
+            Ok(ParallelDecodeValue::Bytes(0))
+        );
         assert!(parse_parallel_decode("lots").is_err());
+    }
+
+    #[test]
+    fn a_zero_parallel_decode_memory_is_refused_by_core_naming_its_setting() {
+        let args = ParallelDecodeArgs {
+            parallel_decode_memory: Some(ParallelDecodeValue::Bytes(0)),
+        };
+        let err = args.apply(SecurityConfig::default()).unwrap_err();
+        assert_eq!(
+            err.ffi_kind().setting().unwrap().as_str(),
+            "parallel_decode_memory"
+        );
     }
 
     #[test]
@@ -966,6 +1003,7 @@ mod tests {
         assert_eq!(
             args.parallel
                 .apply(SecurityConfig::default())
+                .unwrap()
                 .parallel_decode,
             default
         );
@@ -981,7 +1019,7 @@ mod tests {
         else {
             panic!("expected extract command");
         };
-        let config = args.parallel.apply(SecurityConfig::default());
+        let config = args.parallel.apply(SecurityConfig::default()).unwrap();
         assert_eq!(config.parallel_decode, ParallelDecode::Sequential);
 
         let Commands::Verify(args) =
@@ -989,7 +1027,7 @@ mod tests {
         else {
             panic!("expected verify command");
         };
-        let config = args.parallel.apply(SecurityConfig::default());
+        let config = args.parallel.apply(SecurityConfig::default()).unwrap();
         assert_eq!(
             config.parallel_decode,
             ParallelDecode::Bounded(NonZeroU64::new(1 << 30).unwrap())

@@ -6,30 +6,49 @@
 
 use serde::Serialize;
 
-/// A command that runs against an archive and can fail with an archive error.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Operation {
-    Extract,
-    Create,
-    List,
-    Verify,
+/// Declares a fieldless enum together with its text table and its `ALL` list
+/// from one variant list, so a variant cannot be left out of either.
+macro_rules! closed_list {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident => $text_fn:ident {
+            $($(#[$vmeta:meta])* $variant:ident => $text:literal),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis enum $name {
+            $($(#[$vmeta])* $variant),+
+        }
+
+        impl $name {
+            /// Every variant, in declaration order.
+            #[cfg(test)]
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            /// The variant's text.
+            pub const fn $text_fn(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text),+
+                }
+            }
+        }
+    };
+}
+
+closed_list! {
+    /// A command that runs against an archive and can fail with an archive
+    /// error.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Operation => name {
+        Extract => "extract",
+        Create => "create",
+        List => "list",
+        Verify => "verify",
+    }
 }
 
 impl Operation {
-    #[cfg(test)]
-    pub const ALL: [Self; 4] = [Self::Extract, Self::Create, Self::List, Self::Verify];
-
-    /// The subcommand name, as typed on the command line.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Extract => "extract",
-            Self::Create => "create",
-            Self::List => "list",
-            Self::Verify => "verify",
-        }
-    }
-
     /// Whether this operation's subcommand declares `flag`.
     ///
     /// Checked against the clap definition by
@@ -47,61 +66,35 @@ impl Operation {
                 matches!(self, Self::Extract | Self::List | Self::Verify)
             }
             Flag::MaxFileSize => true,
-            Flag::BannedComponent | Flag::MaxPathDepth => matches!(self, Self::Extract),
+            Flag::AllowedExtensions | Flag::Atomic | Flag::BannedComponent | Flag::MaxPathDepth => {
+                matches!(self, Self::Extract)
+            }
             Flag::Force => matches!(self, Self::Extract | Self::Create),
         }
     }
 }
 
-/// A long flag a hint may tell the user to pass.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Flag {
-    AllowSymlinks,
-    AllowHardlinks,
-    AllowSolidArchives,
-    BannedComponent,
-    Force,
-    MaxCompressionRatio,
-    MaxFiles,
-    MaxFileSize,
-    MaxPathDepth,
-    MaxTotalSize,
-    ZipConsistency,
+closed_list! {
+    /// A long flag a hint may tell the user to pass.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Flag => long {
+        AllowSymlinks => "--allow-symlinks",
+        AllowHardlinks => "--allow-hardlinks",
+        AllowSolidArchives => "--allow-solid-archives",
+        AllowedExtensions => "--allowed-extensions",
+        Atomic => "--atomic",
+        BannedComponent => "--banned-component",
+        Force => "--force",
+        MaxCompressionRatio => "--max-compression-ratio",
+        MaxFiles => "--max-files",
+        MaxFileSize => "--max-file-size",
+        MaxPathDepth => "--max-path-depth",
+        MaxTotalSize => "--max-total-size",
+        ZipConsistency => "--zip-consistency",
+    }
 }
 
 impl Flag {
-    #[cfg(test)]
-    pub const ALL: [Self; 11] = [
-        Self::AllowSymlinks,
-        Self::AllowHardlinks,
-        Self::AllowSolidArchives,
-        Self::BannedComponent,
-        Self::Force,
-        Self::MaxCompressionRatio,
-        Self::MaxFiles,
-        Self::MaxFileSize,
-        Self::MaxPathDepth,
-        Self::MaxTotalSize,
-        Self::ZipConsistency,
-    ];
-
-    /// The flag as typed, with its leading dashes.
-    pub const fn long(self) -> &'static str {
-        match self {
-            Self::AllowSymlinks => "--allow-symlinks",
-            Self::AllowHardlinks => "--allow-hardlinks",
-            Self::AllowSolidArchives => "--allow-solid-archives",
-            Self::BannedComponent => "--banned-component",
-            Self::Force => "--force",
-            Self::MaxCompressionRatio => "--max-compression-ratio",
-            Self::MaxFiles => "--max-files",
-            Self::MaxFileSize => "--max-file-size",
-            Self::MaxPathDepth => "--max-path-depth",
-            Self::MaxTotalSize => "--max-total-size",
-            Self::ZipConsistency => "--zip-consistency",
-        }
-    }
-
     /// The flag's name without the dashes, as clap reports it.
     #[cfg(test)]
     pub fn id(self) -> &'static str {
@@ -117,11 +110,11 @@ mod tests {
     #[test]
     fn every_flag_matches_its_subcommand() {
         let command = crate::cli::Cli::command();
-        for operation in Operation::ALL {
+        for &operation in Operation::ALL {
             let sub = command
                 .find_subcommand(operation.name())
                 .unwrap_or_else(|| panic!("no subcommand {}", operation.name()));
-            for flag in Flag::ALL {
+            for &flag in Flag::ALL {
                 let declared = sub
                     .get_arguments()
                     .any(|arg| arg.get_long() == Some(flag.id()));
@@ -138,7 +131,7 @@ mod tests {
 
     #[test]
     fn operation_serializes_as_its_subcommand_name() {
-        for operation in Operation::ALL {
+        for &operation in Operation::ALL {
             let value = serde_json::to_value(operation).unwrap_or_default();
             assert_eq!(value, operation.name());
         }

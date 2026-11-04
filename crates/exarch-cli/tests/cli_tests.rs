@@ -1488,8 +1488,10 @@ fn test_parallel_decode_memory_zero_is_rejected() {
         .arg("0")
         .arg(workspace_fixture("simple.7z"))
         .assert()
-        .code(2)
-        .stderr(predicates::str::contains("greater than zero"));
+        .code(1)
+        .stderr(predicates::str::contains(
+            "parallel decode memory must not be zero",
+        ));
 }
 
 #[test]
@@ -1949,6 +1951,63 @@ fn test_verify_issues_carry_typed_refusal_fields() {
     assert_eq!(issue["sub_code"], "LINK_POLICY");
     assert_eq!(issue["relaxable_by"], "symlinks");
     assert!(issue.get("context").is_none());
+}
+
+/// A refused exclude pattern is named, and a missing source gets a hint about
+/// the source with its path printed once (#916).
+#[test]
+fn test_create_errors_name_the_pattern_and_the_source_once() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("create")
+        .arg("-x")
+        .arg("build/*")
+        .arg(temp.path().join("o.tar.gz"))
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains(
+            "invalid --exclude value \"build/*\"",
+        ));
+
+    let missing = temp.path().join("missing-source");
+    let output = exarch_cmd()
+        .arg("create")
+        .arg(temp.path().join("o.tar.gz"))
+        .arg(&missing)
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("Verify the source path exists"))
+        .get_output()
+        .stderr
+        .clone();
+    let text = String::from_utf8(output).expect("utf-8 stderr");
+    assert_eq!(text.matches("missing-source").count(), 1, "{text}");
+}
+
+/// The staged temp file is not archived as a hidden entry when the output
+/// lies inside a source directory (#931, #906).
+#[test]
+#[ignore = "blocked on core: the staged .exarch-* file is still reported as a skipped hidden entry"]
+fn test_create_inside_the_source_reports_no_skipped_staging_file() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let src = temp.path().join("src");
+    std::fs::create_dir(&src).expect("source dir");
+    std::fs::write(src.join("a.txt"), "a").expect("source file");
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("create")
+        .arg(src.join("o.tar.gz"))
+        .arg(&src)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["data"]["files_skipped"], 0, "{json}");
+    assert!(json["data"]["skipped_by_kind"].get("hidden").is_none());
 }
 
 #[test]

@@ -21,6 +21,7 @@ use exarch_core::PathComponentName;
 use exarch_core::PolicySetting;
 use exarch_core::QuotaKind;
 use exarch_core::SecurityConfig;
+use exarch_core::SkipKind;
 use exarch_core::TarTrailerRefusal;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
@@ -122,16 +123,20 @@ pub fn raw(parts: &[Part]) -> String {
 pub struct Message(Vec<Part>);
 
 impl Message {
+    /// Appends text written in the source, which may span lines.
     pub fn lit(mut self, text: &'static str) -> Self {
         self.0.push(Part::Lit(text));
         self
     }
 
+    /// Appends a path, escaped for a terminal and exact in `--json`.
     pub fn path(mut self, path: &Path) -> Self {
         self.0.push(Part::Path(path.to_path_buf()));
         self
     }
 
+    /// Appends single-line text that may derive from an archive, escaped for a
+    /// terminal and exact in `--json`.
     pub fn text(mut self, text: impl Into<String>) -> Self {
         self.0.push(Part::Text(text.into()));
         self
@@ -145,6 +150,7 @@ impl Message {
         }
     }
 
+    /// The finished list of parts.
     pub fn into_parts(self) -> Vec<Part> {
         self.0
     }
@@ -295,6 +301,12 @@ impl PartialExtractionContext {
                     message = message
                         .lit("\nFiles skipped: ")
                         .text(r.files_skipped().to_string());
+                    for &kind in SkipKind::ALL {
+                        let count = r.skipped.count(kind);
+                        if count > 0 {
+                            message = message.lit("\n    ").text(format!("{kind}: {count}"));
+                        }
+                    }
                 }
                 if !r.warnings.is_empty() {
                     message = message.lit("\nWarnings:");
@@ -564,9 +576,8 @@ fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message
                  destination symlink); no flag relaxes this check.",
             ),
         ArchiveError::Io(_) => message.lit("Failed to process '").path(archive).lit("'"),
-        ArchiveError::UnknownFormat { path } => message
-            .lit("Cannot determine archive format: ")
-            .path(path)
+        ArchiveError::UnknownFormat { .. } => message
+            .lit("Cannot determine archive format")
             .hint(Some(format!("Supported formats: {}", supported_formats()))),
         ArchiveError::SecurityViolation { .. }
         | ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }) => message
@@ -584,20 +595,24 @@ fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message
             .lit("Invalid configuration: ")
             .text(setting.describe(problem))
             .lit("\nHINT: Check the flags you passed and their allowed value ranges."),
-        ArchiveError::SourceNotFound { path } => message
-            .lit("Source path not found: ")
-            .path(path)
-            .lit("\nHINT: Verify the archive path exists and is readable."),
-        ArchiveError::SourceNotAccessible { path } => message
-            .lit("Source path is not accessible: ")
-            .path(path)
-            .lit("\nHINT: Check file permissions on the archive."),
-        ArchiveError::OutputExists { path } => {
-            message.lit("Output path already exists: ").path(path).hint(
-                op.accepts(Flag::Force)
-                    .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
-            )
+        ArchiveError::SourceNotFound { .. } => message.lit("Source path not found").lit(match op {
+            Operation::Create => "\nHINT: Verify the source path exists and is readable.",
+            Operation::Extract | Operation::List | Operation::Verify => {
+                "\nHINT: Verify the archive path exists and is readable."
+            }
+        }),
+        ArchiveError::SourceNotAccessible { .. } => {
+            message.lit("Source path is not accessible").lit(match op {
+                Operation::Create => "\nHINT: Check file permissions on the source.",
+                Operation::Extract | Operation::List | Operation::Verify => {
+                    "\nHINT: Check file permissions on the archive."
+                }
+            })
         }
+        ArchiveError::OutputExists { .. } => message.lit("Output path already exists").hint(
+            op.accepts(Flag::Force)
+                .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
+        ),
         ArchiveError::InvalidPermissions { mode, .. } => message.text(format!(
             "Invalid permissions {:#o}: blocked by security policy.",
             mode.get()
@@ -1342,14 +1357,14 @@ mod tests {
 
     #[test]
     fn hints_name_only_flags_their_operation_accepts() {
-        for op in Operation::ALL {
+        for &op in Operation::ALL {
             for err in hint_probes() {
                 let converted = convert_error(op, err, Path::new("a.tar"));
                 let msg = converted
                     .downcast_ref::<CliContext>()
                     .map(|c| raw(&c.parts()))
                     .unwrap_or_default();
-                for flag in Flag::ALL {
+                for &flag in Flag::ALL {
                     assert!(
                         op.accepts(flag) || !msg.contains(flag.long()),
                         "{} hint names {} it does not accept: {msg}",

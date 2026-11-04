@@ -46,6 +46,7 @@ impl EntryName {
         }
     }
 
+    /// The name as an OS string, for the `*at` syscalls.
     pub(super) fn as_os_str(&self) -> &OsStr {
         &self.0
     }

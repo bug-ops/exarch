@@ -44,8 +44,10 @@ pub fn execute(
 
     // Add user exclude patterns to defaults
     for pattern in &args.exclude {
-        let pattern = ExcludePattern::try_from(pattern.as_str())
-            .map_err(|err| convert_error(Operation::Create, err, &args.output))?;
+        let pattern = ExcludePattern::try_from(pattern.as_str()).map_err(|err| {
+            convert_error(Operation::Create, err, &args.output)
+                .context(format!("invalid --exclude value {pattern:?}"))
+        })?;
         config.exclude_patterns.push(pattern);
     }
 

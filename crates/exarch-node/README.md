@@ -323,6 +323,21 @@ Synchronous version. Blocks the event loop until extraction completes.
 
 **Returns:** `ExtractionReport`
 
+### Listing entries
+
+`listArchive` returns entries as a union discriminated by `entryType`
+(`ArchiveEntry`): a `'File'` has `size`, a `'Symlink'` or `'Hardlink'` has a
+`target` that is itself a union discriminated by `state` (`'recorded'` with a
+`path`, `'missing'`, `'unread'`, `'unreadable'` or `'oversized'` with `bytes`),
+and a `'Directory'` has neither. `mode` is the raw archive mode. An entry whose
+name is not valid UTF-8 makes the listing fail with `INVALID_ARCHIVE` and
+`subCode: 'ENTRY_NAME'` rather than being rendered lossily; verification
+issues and skip samples write each invalid byte of such a path as `\xNN`.
+
+`verifyArchive` issues carry the typed refusal behind a finding: `code`,
+`subCode`, `relaxableBy`, `setting` and `ioKind`, paired as on an error
+(`VerificationIssue` in `index.d.ts`); the former `context` string is gone.
+
 ### `ExtractionReport`
 
 ```typescript

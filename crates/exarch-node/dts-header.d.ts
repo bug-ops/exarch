@@ -259,3 +259,41 @@ export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
 
 /** What a `MemoryEntry` holds. */
 export type MemoryEntryKind = MemoryEntry['kind']
+
+/**
+ * A link target of a listing, discriminated by `state`: only a `'recorded'`
+ * target has a `path`, and only an `'oversized'` one has `bytes`.
+ */
+export type LinkTarget =
+  | RecordedLinkTarget
+  | MissingLinkTarget
+  | UnreadLinkTarget
+  | UnreadableLinkTarget
+  | OversizedLinkTarget
+
+/**
+ * One entry of a listing, discriminated by `entryType`: only a file has a
+ * `size`, only a link has a `target`.
+ */
+export type ArchiveEntry =
+  | ManifestFileEntry
+  | ManifestDirectoryEntry
+  | ManifestSymlinkEntry
+  | ManifestHardlinkEntry
+
+/** The detail of a verification finding that is a heuristic, not a refusal. */
+export interface HeuristicIssueDetail {
+  code?: undefined
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+}
+
+/**
+ * A verification finding. A refusal carries the `code` and the properties the
+ * error extraction would raise has for it, paired as on `ExarchCoreError`; a
+ * heuristic carries none of them.
+ */
+export type VerificationIssue = VerificationIssueFields &
+  (ExarchErrorCodeDetail | HeuristicIssueDetail)

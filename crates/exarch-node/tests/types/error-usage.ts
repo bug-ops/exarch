@@ -14,7 +14,37 @@ import type {
   StoredMemoryEntry,
   ZipBombSubCode,
 } from '../../index'
-import type { MemoryExtraction } from '../../index'
+import type { ArchiveEntry, MemoryExtraction, VerificationIssue } from '../../index'
+
+export function describeListed(entry: ArchiveEntry): string {
+  switch (entry.entryType) {
+    case 'File':
+      return `${entry.size}`
+    case 'Directory':
+      return entry.path
+    case 'Symlink':
+    case 'Hardlink':
+      return entry.target.state === 'recorded' ? entry.target.path : entry.target.state
+  }
+}
+
+export function sizeIsFileOnly(entry: ArchiveEntry): void {
+  if (entry.entryType === 'Directory') {
+    // @ts-expect-error a directory has no size
+    void entry.size
+  }
+}
+
+export function issueCodes(issue: VerificationIssue): string | undefined {
+  if (issue.code === 'SECURITY_VIOLATION') {
+    const sub: SecurityViolationSubCode = issue.subCode
+    return sub
+  }
+  if (issue.code === undefined) {
+    return issue.subCode
+  }
+  return issue.code
+}
 
 export function pairedSubCode(err: ExarchCoreError): string | undefined {
   if (err.code === 'INVALID_ARCHIVE') {

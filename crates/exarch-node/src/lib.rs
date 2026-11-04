@@ -111,6 +111,7 @@ use report::ExtractionReport;
 use report::VerificationReport;
 use utils::boundary_path;
 use utils::boundary_paths;
+use utils::path_text;
 
 /// Result of the binding-internal operations, before conversion to a JS error.
 type CoreResult<T> = std::result::Result<T, Failure>;
@@ -825,16 +826,16 @@ pub fn list_archive<'env>(
         env,
         "archive listing",
         move || list_core(&archive_path, &config_owned),
-        ArchiveManifest::try_from,
+        Ok,
     )
 }
 
 fn list_core(
     archive_path: &str,
     config: &exarch_core::SecurityConfig,
-) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
+) -> CoreResult<ArchiveManifest> {
     let archive_path = boundary_path(archive_path)?;
-    Ok(exarch_core::ListRequest::new(config).list(&archive_path)?)
+    ArchiveManifest::try_from(exarch_core::ListRequest::new(config).list(&archive_path)?)
 }
 
 /// List archive contents without extracting (sync).
@@ -874,11 +875,9 @@ pub fn list_archive_sync(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let manifest = run_sync(env, "archive listing", || {
+    run_sync(env, "archive listing", || {
         list_core(&archive_path, config_ref)
-    })?;
-
-    ArchiveManifest::try_from(manifest)
+    })
 }
 
 /// Verify archive security (async).
@@ -929,7 +928,7 @@ pub fn verify_archive<'env>(
         env,
         "archive verification",
         move || verify_core(&archive_path, &config_owned, options_owned),
-        VerificationReport::try_from,
+        Ok,
     )
 }
 
@@ -937,11 +936,13 @@ fn verify_core(
     archive_path: &str,
     config: &exarch_core::SecurityConfig,
     options: exarch_core::VerificationOptions,
-) -> CoreResult<exarch_core::inspection::VerificationReport> {
+) -> CoreResult<VerificationReport> {
     let archive_path = boundary_path(archive_path)?;
-    Ok(exarch_core::VerifyRequest::new(config)
-        .with_options(options)
-        .verify(&archive_path)?)
+    VerificationReport::try_from(
+        exarch_core::VerifyRequest::new(config)
+            .with_options(options)
+            .verify(&archive_path)?,
+    )
 }
 
 /// Verify archive security (sync).
@@ -985,11 +986,9 @@ pub fn verify_archive_sync(
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = run_sync(env, "archive verification", || {
+    run_sync(env, "archive verification", || {
         verify_core(&archive_path, config_ref, *options_ref)
-    })?;
-
-    VerificationReport::try_from(report)
+    })
 }
 
 /// Extract an archive to the specified directory with a progress callback
@@ -1279,7 +1278,7 @@ impl exarch_core::ProgressCallback for NodeProgressAdapter {
             return;
         }
         self.current_entry_bytes = 0;
-        let path_str = path.to_string_lossy().into_owned();
+        let path_str = path_text(path);
         let total_i64 = total.map(|total| i64::try_from(total).unwrap_or(i64::MAX));
         let current_i64 = i64::try_from(current).unwrap_or(i64::MAX);
         let value = Ok((path_str, total_i64, current_i64, self.current_entry_bytes));

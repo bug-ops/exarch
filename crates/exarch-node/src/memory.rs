@@ -69,7 +69,7 @@ impl From<PathModel> for CorePathModel {
 /// The `kind` of a [`MemoryFileEntry`].
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryFileKind {
+pub enum FileKind {
     /// A regular file.
     #[napi(value = "file")]
     File,
@@ -78,7 +78,7 @@ pub enum MemoryFileKind {
 /// The `kind` of a [`MemoryDirectoryEntry`].
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryDirectoryKind {
+pub enum DirectoryKind {
     /// A directory the archive names explicitly.
     #[napi(value = "directory")]
     Directory,
@@ -87,7 +87,7 @@ pub enum MemoryDirectoryKind {
 /// The `kind` of a [`MemorySymlinkEntry`].
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemorySymlinkKind {
+pub enum SymlinkKind {
     /// A symbolic link, stored as data.
     #[napi(value = "symlink")]
     Symlink,
@@ -96,7 +96,7 @@ pub enum MemorySymlinkKind {
 /// The `kind` of a [`MemoryHardlinkEntry`].
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryHardlinkKind {
+pub enum HardlinkKind {
     /// A hard link to an already delivered entry, by reference.
     #[napi(value = "hardlink")]
     Hardlink,
@@ -108,7 +108,7 @@ pub struct MemoryFileEntry {
     /// Entry path, relative, as delivered by extraction.
     pub path: String,
     /// Always `'file'`.
-    pub kind: MemoryFileKind,
+    pub kind: FileKind,
     /// The file's bytes as a `Uint8Array` (a plain `Uint8Array`, not a
     /// `Buffer`; input parameters accept both).
     pub data: Uint8Array,
@@ -123,7 +123,7 @@ pub struct MemoryDirectoryEntry {
     /// Entry path, relative, as delivered by extraction.
     pub path: String,
     /// Always `'directory'`.
-    pub kind: MemoryDirectoryKind,
+    pub kind: DirectoryKind,
 }
 
 /// A symbolic link extracted into memory as data.
@@ -132,7 +132,7 @@ pub struct MemorySymlinkEntry {
     /// Entry path, relative, as delivered by extraction.
     pub path: String,
     /// Always `'symlink'`.
-    pub kind: MemorySymlinkKind,
+    pub kind: SymlinkKind,
     /// The target as the archive spells it, relative to the link.
     pub target: String,
 }
@@ -144,7 +144,7 @@ pub struct MemoryHardlinkEntry {
     /// Entry path, relative, as delivered by extraction.
     pub path: String,
     /// Always `'hardlink'`.
-    pub kind: MemoryHardlinkKind,
+    pub kind: HardlinkKind,
     /// The root-relative resolved path of an already delivered entry, a file
     /// or an earlier hardlink.
     pub target: String,
@@ -173,17 +173,17 @@ fn stored_entry(path: &Path, entry: CoreMemoryEntry) -> CoreResult<StoredEntry> 
     Ok(match entry {
         CoreMemoryEntry::File { data, mode } => Either3::A(MemoryFileEntry {
             path,
-            kind: MemoryFileKind::File,
+            kind: FileKind::File,
             data: Uint8Array::from(data),
             mode: mode.map(SanitizedMode::as_u32),
         }),
         CoreMemoryEntry::Directory => Either3::B(MemoryDirectoryEntry {
             path,
-            kind: MemoryDirectoryKind::Directory,
+            kind: DirectoryKind::Directory,
         }),
         CoreMemoryEntry::Symlink { target } => Either3::C(MemorySymlinkEntry {
             path,
-            kind: MemorySymlinkKind::Symlink,
+            kind: SymlinkKind::Symlink,
             target: utf8(&target)?,
         }),
         _ => return Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
@@ -200,7 +200,7 @@ pub fn callback_entry(path: &Path, entry: CallbackEntry) -> CoreResult<MemoryEnt
         }),
         CallbackEntry::Hardlink { target } => Ok(Either4::D(MemoryHardlinkEntry {
             path: utf8(path)?,
-            kind: MemoryHardlinkKind::Hardlink,
+            kind: HardlinkKind::Hardlink,
             target: utf8(target.as_path())?,
         })),
         _ => Err(Failure::Native(unknown_variant("memory entry", "unknown"))),

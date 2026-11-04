@@ -29,9 +29,9 @@ fn list_core(
     data: impl IntoSource,
     config: &exarch_core::SecurityConfig,
     format: Option<ArchiveType>,
-) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
+) -> CoreResult<ArchiveManifest> {
     data.run(format, |reader| {
-        Ok(exarch_core::ListRequest::new(config).list_reader(reader)?)
+        ArchiveManifest::try_from(exarch_core::ListRequest::new(config).list_reader(reader)?)
     })
 }
 
@@ -40,11 +40,13 @@ fn verify_core(
     config: &exarch_core::SecurityConfig,
     options: exarch_core::VerificationOptions,
     format: Option<ArchiveType>,
-) -> CoreResult<exarch_core::inspection::VerificationReport> {
+) -> CoreResult<VerificationReport> {
     data.run(format, |reader| {
-        Ok(exarch_core::VerifyRequest::new(config)
-            .with_options(options)
-            .verify_reader(reader)?)
+        VerificationReport::try_from(
+            exarch_core::VerifyRequest::new(config)
+                .with_options(options)
+                .verify_reader(reader)?,
+        )
     })
 }
 
@@ -54,16 +56,18 @@ fn list_with_progress_core(
     format: Option<ArchiveType>,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
-) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
+) -> CoreResult<ArchiveManifest> {
     run_with_optional_progress(
         progress,
         dispatch,
         data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
-                Ok(exarch_core::ListRequest::new(config)
-                    .with_progress(progress)
-                    .list_reader(reader)?)
+                ArchiveManifest::try_from(
+                    exarch_core::ListRequest::new(config)
+                        .with_progress(progress)
+                        .list_reader(reader)?,
+                )
             })
         },
         |source, _| ProgressCallbackError::ListCallback { source },
@@ -77,17 +81,19 @@ fn verify_with_progress_core(
     format: Option<ArchiveType>,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
-) -> CoreResult<exarch_core::inspection::VerificationReport> {
+) -> CoreResult<VerificationReport> {
     run_with_optional_progress(
         progress,
         dispatch,
         data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
-                Ok(exarch_core::VerifyRequest::new(config)
-                    .with_options(options)
-                    .with_progress(progress)
-                    .verify_reader(reader)?)
+                VerificationReport::try_from(
+                    exarch_core::VerifyRequest::new(config)
+                        .with_options(options)
+                        .with_progress(progress)
+                        .verify_reader(reader)?,
+                )
             })
         },
         |source, _| ProgressCallbackError::VerifyCallback { source },
@@ -141,7 +147,7 @@ pub fn list_archive_bytes<'env>(
         env,
         "archive listing",
         move || list_core(data, &config_owned, format),
-        ArchiveManifest::try_from,
+        Ok,
         move |env| detach.run(env),
     )
 }
@@ -180,11 +186,9 @@ pub fn list_archive_bytes_sync(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let manifest = run_sync(env, "archive listing", || {
+    run_sync(env, "archive listing", || {
         list_core(&*data, config_ref, format)
-    })?;
-
-    ArchiveManifest::try_from(manifest)
+    })
 }
 
 /// Verify the security of an archive held in memory (async).
@@ -228,7 +232,7 @@ pub fn verify_archive_bytes<'env>(
         env,
         "archive verification",
         move || verify_core(data, &config_owned, options_owned, format),
-        VerificationReport::try_from,
+        Ok,
         move |env| detach.run(env),
     )
 }
@@ -272,11 +276,9 @@ pub fn verify_archive_bytes_sync(
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = run_sync(env, "archive verification", || {
+    run_sync(env, "archive verification", || {
         verify_core(&*data, config_ref, *options_ref, format)
-    })?;
-
-    VerificationReport::try_from(report)
+    })
 }
 
 /// List the contents of an archive held in memory with a progress callback
@@ -344,7 +346,7 @@ pub fn list_archive_bytes_with_progress<'env>(
                 ProgressDispatch::Awaited,
             )
         },
-        ArchiveManifest::try_from,
+        Ok,
         move |env| detach.run(env),
     )
 }
@@ -418,7 +420,7 @@ pub fn verify_archive_bytes_with_progress<'env>(
                 ProgressDispatch::Awaited,
             )
         },
-        VerificationReport::try_from,
+        Ok,
         move |env| detach.run(env),
     )
 }
@@ -468,7 +470,7 @@ pub fn list_archive_bytes_with_progress_sync(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let manifest = run_sync(env, "archive listing with progress", move || {
+    run_sync(env, "archive listing with progress", move || {
         list_with_progress_core(
             &*data,
             config_ref,
@@ -476,9 +478,7 @@ pub fn list_archive_bytes_with_progress_sync(
             progress,
             ProgressDispatch::Deferred,
         )
-    })?;
-
-    ArchiveManifest::try_from(manifest)
+    })
 }
 
 /// Verify the security of an archive held in memory with a progress callback
@@ -530,7 +530,7 @@ pub fn verify_archive_bytes_with_progress_sync(
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = run_sync(env, "archive verification with progress", move || {
+    run_sync(env, "archive verification with progress", move || {
         verify_with_progress_core(
             &*data,
             config_ref,
@@ -539,7 +539,5 @@ pub fn verify_archive_bytes_with_progress_sync(
             progress,
             ProgressDispatch::Deferred,
         )
-    })?;
-
-    VerificationReport::try_from(report)
+    })
 }

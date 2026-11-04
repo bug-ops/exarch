@@ -1333,6 +1333,22 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_partial_extraction_lists_skips_per_kind() {
+        let mut report = exarch_core::ExtractionReport::new();
+        report.skipped = crate::test_support::skips(2);
+        let context = PartialExtractionContext {
+            report,
+            writes: PartialWrites::Kept,
+            inner: anyhow::anyhow!("inner"),
+        };
+        let text = context.to_string();
+        assert!(
+            text.contains("Files skipped: 2\n    duplicate: 2"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn discarded_extraction_says_nothing_was_written() {
         let context = PartialExtractionContext {
             report: ExtractionReport::default(),

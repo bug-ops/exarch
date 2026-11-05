@@ -9,7 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-09-02
-updated: 2026-11-04
+updated: 2026-11-05
 status: implemented
 related:
   - "[[constitution]]"
@@ -28,7 +28,7 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-core / security (`security::permissions`), plus six growth-prone public
 > enums across `exarch-core`, `exarch-cli`, `exarch-python`, `exarch-node`
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Origin**: #549, #551 (#554, v0.6.1)
 > **Status**: implemented — this spec documents shipped behavior, extracted as its own unit
 > because it introduces a reusable pattern (sealed-newtype for a sanitized value, plus

@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-04
+updated: 2026-11-05
 status: draft
 related:
   - "[[constitution]]"
@@ -27,7 +27,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-python
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Build**: maturin + pyo3 0.30
 > **Source**: extracted from [[001-exarch-system/spec]]
 
@@ -148,7 +148,7 @@ THEN extraction respects those settings
 | FR-072 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL raise `SecurityViolationError` (via the shared `exarch_core::BoundaryPath::parse()` (replaced `validate_raw_path_str`, #927) and the existing `convert_error()` path) at the Python boundary before calling into Rust (v0.6.0, #406 — previously a bare `ValueError`) | must |
 | FR-073 | WHEN no Python progress callback is provided, THE SYSTEM SHALL release the GIL during extraction/creation | must |
 | FR-074 | WHEN a Python progress callback is provided, THE SYSTEM SHALL NOT release the GIL (callback requires GIL to invoke Python) | must |
-| FR-075 | Rust `ArchiveError` variants SHALL map to specific Python exception types; `SourceNotFound` → `SourceNotFoundError` (also `FileNotFoundError`), `SourceNotAccessible` → `SourceNotAccessibleError` (also `PermissionError`), `OutputExists` → `OutputExistsError` (also `FileExistsError`), `InvalidCompressionLevel` → `InvalidCompressionLevelError` and `InvalidConfiguration` → `InvalidConfigurationError` (both also `ValueError`; see FR-094); `PartialExtraction` → the specific inner exception type (e.g. `SymlinkEscapeError`, `QuotaExceededError`) with `files_extracted` and `bytes_written` attributes attached to that exception; since v0.8.0 the class, message and attributes all derive from one `exarch_core::ArchiveError::into_ffi_message()` (a typed `FfiKind` plus `PartialOutcome`), and the binding only picks the Python class per `FfiKind` (`FfiKind::Io(kind)` maps to the matching `OSError`; core `ReaderFormat` errors map to `UnknownFormatError` for an unrecognized format and `ValueError` otherwise) (#758, #768) | must |
+| FR-075 | Rust `ArchiveError` variants SHALL map to specific Python exception types; `SourceNotFound` → `SourceNotFoundError` (also `FileNotFoundError`), `SourceNotAccessible` → `SourceNotAccessibleError` (also `OSError`, not `PermissionError`, because the variant covers any read failure such as `EIO` or `ELOOP`; the instance carries `errno` from the OS error, `strerror` and `filename`), `OutputExists` → `OutputExistsError` (also `FileExistsError`), `InvalidCompressionLevel` → `InvalidCompressionLevelError` and `InvalidConfiguration` → `InvalidConfigurationError` (both also `ValueError`; see FR-094); `PartialExtraction` → the specific inner exception type (e.g. `SymlinkEscapeError`, `QuotaExceededError`) with `files_extracted` and `bytes_written` attributes attached to that exception; since v0.8.0 the class, message and attributes all derive from one `exarch_core::ArchiveError::into_ffi_message()` (a typed `FfiKind` plus `PartialOutcome`), and the binding only picks the Python class per `FfiKind` (`FfiKind::Io(kind)` maps to the matching `OSError`; core `ReaderFormat` errors map to `UnknownFormatError` for an unrecognized format and `ValueError` otherwise) (#758, #768) | must |
 | FR-076 | ALL Python exception types SHALL be subclasses of `ExarchError(Exception)` | must |
 | FR-077 | `PySecurityConfig` and `PyCreationConfig` SHALL expose the same fluent builder API as the Rust counterparts | must |
 | FR-078 | `PyExtractionReport`, `PyCreationReport`, `PyArchiveManifest`, and `PyVerificationReport` SHALL expose all fields as Python attributes | must |
@@ -179,6 +179,8 @@ THEN extraction respects those settings
 | FR-103 | File inputs SHALL be split once, in `FileInput::new`, into `Seekable` and `Stream` (`StreamFile` has no `Seek`), and `parse_zip_consistency` SHALL share core's `parse_one` (#928) | should |
 | FR-104 | A progress callback that raises during `create_archive_with_progress` SHALL cancel the creation through `ProgressCallback::is_cancelled`: nothing is committed, a previous archive stays, and the callback's exception wins over the core `Interrupted` error (`KeyboardInterrupt` included); extraction keeps its run-to-completion behavior (FR-080) (#931) | must |
 | FR-105 | The stub `exarch.pyi` SHALL be checked by `mypy --strict` in CI (blocking) and `stubtest`: `_CreatableFormat` excludes `SevenZ`, `SinkOptions` has `__new__`, leaf classes are `@final`, `CreationConfig` exposes properties, the typing aliases (`AnyMemoryEntry`, `AnyArchiveEntry`, `AnyLinkTarget`, `ProgressCallbackFn`) are importable at runtime, and sub-code and kind literals are derived by drift tests from core consts (`SubCode::QUOTA_ALL`, `ZIP_BOMB_ALL`); `ArchiveError.code` stays an instance attribute | should |
+| FR-106 | `SourceNotAccessibleError` SHALL be raised for an unreadable creation source with `errno` set from the underlying OS error (`errno.EACCES` for a mode-000 file), `strerror` set to the sanitized error text and `filename` set to the redacted source path; `str(err)` names the file and the OS error; the path and the I/O text pass through the shared `exarch_core::error::redaction` (see FR-081), carried to the binding as `FfiErrorMessage::raw_os_error` and the source-fault fields of `FfiKind`; callers that caught `PermissionError` for this error SHALL catch `SourceNotAccessibleError` or `OSError` (breaking, #956) | must |
+| FR-107 | Every enumerated string argument SHALL be parsed through core `ClosedEnum::parse_for`, so a value outside the set raises `InvalidConfigurationError` with the `setting` and the allowed values listed (see [[003-config-api/spec]] FR-056); the creation format uses `CreatableFormat::from_str`; `exarch.pyi` lists the `durability` setting literal | must |
 
 ## 4. Non-Functional Requirements
 
@@ -215,7 +217,7 @@ ExarchError(Exception)           # catch-all alias; same class as ArchiveError
 ArchiveError(Exception)          # base exception (renamed from ExtractionError in v0.4.1); every instance has `code`
   OutputExistsError(ArchiveError, FileExistsError)            # #919
   SourceNotFoundError(ArchiveError, FileNotFoundError)        # #919
-  SourceNotAccessibleError(ArchiveError, PermissionError)     # #919
+  SourceNotAccessibleError(ArchiveError, OSError)             # #919, #956
   InvalidConfigurationError(ArchiveError, ValueError)         # #919, carries `setting`
   InvalidCompressionLevelError(ArchiveError, ValueError)      # #919
   PathTraversalError(ArchiveError)      # may carry files_extracted, bytes_written
@@ -248,7 +250,8 @@ Use `getattr(e, "writes", None) == "kept"` to detect files left on disk.
 
 > [!note] Error mapping corrections (#209, #210, #251)
 > - `SourceNotFound`, `SourceNotAccessible`, and `OutputExists` now raise
->   `PyIOError` (was `InvalidArchiveError`).
+>   `PyIOError` (was `InvalidArchiveError`); `SourceNotAccessibleError` subclasses
+>   `OSError` with `errno`, `strerror` and `filename` since #956.
 > - `InvalidCompressionLevel` and `InvalidConfiguration` now raise
 >   `PyValueError` (was `InvalidArchiveError`).
 > - In v0.4.0, `PartialExtraction` incorrectly collapsed all partial-extraction

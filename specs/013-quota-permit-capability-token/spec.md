@@ -9,7 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-08-04
-updated: 2026-11-04
+updated: 2026-11-05
 status: implemented
 related:
   - "[[constitution]]"
@@ -26,7 +26,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / security (`security::quota`, `security::validator`)
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Origin**: #436, #439, #440, #447 (v0.6.0); `EntryCount` and link counting (#719, #724, v0.7.0)
 > **Status**: implemented — this spec documents shipped behavior, extracted from
 > [[001-security-pipeline/spec]] and [[002-format-handlers/spec]] because it introduces

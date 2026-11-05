@@ -28,7 +28,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / formats (`formats::zip`), inspection (`inspection::list`, `inspection::verify`, `inspection::report`), config (`SecurityConfig`); mapping layers in `exarch-cli`, `exarch-python`, `exarch-node`
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Origin**: #637 (new issue)
 > **Type / priority**: enhancement (hardening), P2
 > **Status**: implemented with #637, #654 and #655, and extended through 0.7.0 by #671, #680, #682, #683, #686, #687 and #728 (see section 11 for decisions, deviations and residuals)

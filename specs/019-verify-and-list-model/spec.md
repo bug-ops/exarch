@@ -9,7 +9,7 @@ tags:
   - rust
   - inspection
 created: 2026-10-26
-updated: 2026-11-04
+updated: 2026-11-05
 status: implemented
 related:
   - "[[constitution]]"
@@ -32,7 +32,7 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-core / `inspection` (`manifest`, `report`, `verify`, `list`, `integrity`),
 > `config` (`VerificationOptions`, `ListOptions`), `security::fs_view`
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Origin**: v0.7.0 inspection work (typed manifest, derived report status, opt-in integrity check)
 > **Status**: implemented — this spec documents shipped behavior, extracted as its own unit because
 > the archived monolithic [[001-exarch-system/spec]] only describes the pre-0.7.0 flat shapes

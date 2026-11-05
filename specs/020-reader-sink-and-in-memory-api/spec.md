@@ -10,7 +10,7 @@ tags:
   - in-memory
   - bindings
 created: 2026-11-02
-updated: 2026-11-04
+updated: 2026-11-05
 status: implemented
 related:
   - "[[constitution]]"
@@ -31,7 +31,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core (`reader`, `sink`, `sink::memory`, `writer`, `api`, `formats::target`, `formats::sevenz::{extract,host,sink}`, `security::{admitted,fs_view}`), `exarch-python` (`buffer`), `exarch-node` (`memory`, `buffer`)
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Origin**: v0.8.0 — #771 (reader APIs, WASI), #787 (sink, memory sink, detection, writers, bindings), #790 (progress variants, `of_type`, `create_to_bytes`), #808 (`SinkOptions`, `SinkFull`, `CreatableFormat`, typed `ExtractTarget`)
 > **Status**: implemented — documents shipped behavior; the archive-from-a-path API of [[002-format-handlers/spec]] is unchanged
 
@@ -243,7 +243,7 @@ SO THAT a web handler never writes an untrusted archive to disk
 | FR-100 | `ListRequest::for_extraction(path, DecodeReuse)` (taking the extraction `SecurityConfig` and the `ListOptions`) SHALL return a `ListedArchive` whose `manifest()` is the list result and whose `extract(output_dir, &ListedExtractOptions { atomic, skip_duplicates }, progress)` extracts the listed archive under the stored extraction config (the list pass runs under `SecurityConfig::for_listing()`; `extract_under` and `list_archive_for_extraction` were removed, #901, #912), so a caller that must inspect an archive before extracting it (conflict check, progress total) does not pay a second decode (v0.8.0, #828, #884) | must |
 | FR-101 | For a gz, bz2 or xz TAR the list pass SHALL spool the decoder output to an unnamed temporary file up to 256 MiB, and `extract` SHALL read the spool instead of decoding again; plain TAR and zstd TAR (a codec that decodes faster than a disk round trip) SHALL keep nothing | must |
 | FR-102 | `extract` SHALL decode again, exactly as without a listing, whenever the spool cannot be trusted to equal a fresh decode: the decoder failed or did not reach its end, the decoded stream exceeds the limit or a spool write failed, or (until #901) the extraction's `max_decoder_memory` was below the one the list pass decoded under — since #901 the extraction runs under the config the `ListedArchive` stores, a mismatch is unrepresentable and `Kept::serves` is a `debug_assert!`; a fallback is chosen by size and contents, never as a security property, and extraction validates every entry again; a read error during the replay SHALL be `Io` with its errno (v0.8.0, #828, #882, #884) | must |
-| FR-103 | For a ZIP the `ListedArchive` SHALL keep the parsed archive open and reuse the deflate output of the structure check per `DecodeReuse` (see [[003-config-api/spec]]): `Off` keeps nothing, `Memory(ReuseLimit)` keeps decoded entries in memory up to the limit, `TempFile(ReuseLimit)` in an unnamed temporary file (nothing is kept on WASI or when none can be created); `ReuseLimit` is at most 256 MiB, kept output is clamped to `max_decoder_memory` and `max_total_size`, and entries over `max_file_size` or `max_compression_ratio` are not kept; the library default is `Memory(32 MiB)` and the CLI `extract --decode-reuse <off\|memory\|temp-file>` defaults to memory up to 256 MiB; bzip2 and zstd output of the check are kept as well, and `extract_reader_to_memory` always reuses in memory (v0.8.0, #857, #866, #884, #894) | must |
+| FR-103 | For a ZIP the `ListedArchive` SHALL keep the parsed archive open and reuse the deflate output of the structure check per `DecodeReuse` (see [[003-config-api/spec]]): `Off` keeps nothing, `Memory(ReuseLimit)` keeps decoded entries in memory up to the limit, `TempFile(ReuseLimit)` in an unnamed temporary file (nothing is kept on WASI or when none can be created; a spool on a Linux tmpfs or ramfs is charged like `Memory`, see [[002-format-handlers/spec]] FR-061; the TAR spool of the `ListedArchive` is still uncharged); `ReuseLimit` is at most 256 MiB, kept output is clamped to `max_decoder_memory` and `max_total_size`, and entries over `max_file_size` or `max_compression_ratio` are not kept; the library default is `Memory(32 MiB)` and the CLI `extract --decode-reuse <off\|memory\|temp-file>` defaults to memory up to 256 MiB; bzip2 and zstd output of the check are kept as well, and `extract_reader_to_memory` always reuses in memory (v0.8.0, #857, #866, #884, #894) | must |
 | FR-104 | `exarch extract` into an existing destination SHALL decode a gz, bz2 or xz TAR once, and `exarch extract --atomic` SHALL decode a TAR once, so a refusal arrives as a `rolled_back` partial report instead of a pre-write error and the progress bar has no total (v0.8.0, #828, #842) | must |
 
 ## 4. Non-Functional Requirements

@@ -19,9 +19,6 @@ const path = require('node:path');
 const os = require('node:os');
 const { createArchiveSync } = require('../index.js');
 
-// `IoContext::context` for the walkdir failure in `creation::walker`.
-const WALK_CONTEXT = 'directory walk failed';
-
 /**
  * Reports whether the compiled binding redacts host paths.
  *
@@ -56,7 +53,7 @@ describe('IoContext error redaction', () => {
     }
   });
 
-  it('keeps the walk-failure context without leaking the source path or OS detail', (t) => {
+  it('names an unreadable source without leaking the host path or OS detail', (t) => {
     if (process.platform === 'win32') {
       return t.skip('POSIX permission bits do not gate directory reads');
     }
@@ -77,19 +74,17 @@ describe('IoContext error redaction', () => {
     try {
       createArchiveSync(path.join(tempDir, 'out.tar.gz'), [source]);
     } catch (err) {
+      assert.strictEqual(err.code, 'SOURCE_NOT_ACCESSIBLE');
       message = err.message;
     } finally {
       fs.chmodSync(source, 0o755);
     }
 
     assert.ok(message !== null, 'expected createArchiveSync to fail on an unreadable source');
-    assert.ok(message.includes(WALK_CONTEXT), `lost IoContext context, got: ${message}`);
+    assert.ok(message.includes('confidential-source'), `lost the source name, got: ${message}`);
 
     if (redactionActive(tempDir)) {
-      assert.ok(
-        !message.includes('confidential-source'),
-        `host path leaked in release build, got: ${message}`
-      );
+      assert.ok(!message.includes(tempDir), `host path leaked in release build, got: ${message}`);
       assert.ok(
         !message.includes('Permission denied'),
         `raw OS detail leaked in release build, got: ${message}`

@@ -7,7 +7,7 @@ import exarch
 DUAL_CLASSES = [
     (exarch.OutputExistsError, FileExistsError),
     (exarch.SourceNotFoundError, FileNotFoundError),
-    (exarch.SourceNotAccessibleError, PermissionError),
+    (exarch.SourceNotAccessibleError, OSError),
     (exarch.InvalidConfigurationError, ValueError),
     (exarch.InvalidCompressionLevelError, ValueError),
 ]

@@ -482,8 +482,10 @@ struct SpoolTee<R> {
 impl<R: Read> SpoolTee<R> {
     fn new(inner: R, limit: u64) -> Self {
         // Without a temporary file the only loss is the optimisation.
+        // TODO(#960): on a tmpfs the spool (up to the replay limit) sits in RAM
+        // and is not charged to any budget.
         let spool = crate::formats::common::open_spool()
-            .map(|file| BufWriter::with_capacity(SPOOL_BUFFER, file));
+            .map(|spool| BufWriter::with_capacity(SPOOL_BUFFER, spool.file));
         Self {
             inner,
             spool,

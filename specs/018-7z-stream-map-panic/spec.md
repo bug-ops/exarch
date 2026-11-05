@@ -28,7 +28,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / formats (`formats::sevenz`: `admit`, `verify`, `links`, `decode`, `mod`), inspection (`inspection::list`); mapping layers in `exarch-cli`, `exarch-python`, `exarch-node` are unchanged
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Origin**: continuous-improvement finding at HEAD `c95a85b` ; issue #746, fixed by #752 (0.7.0)
 > **Type / priority**: bug (panic / denial of service on untrusted input), P1
 > **Dependency**: `sevenz-rust2` 0.24.1 when implemented (#752); 0.24.2 minimum since v0.8.0 (#770), which rejects the header itself at open

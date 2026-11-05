@@ -64,14 +64,91 @@ use crate::types::SafeSymlink;
 use crate::types::dest_dir::ProbePath;
 use crate::types::safe_path::ParentCheck;
 
-/// Opens the anonymous spool file, or `None` where none can be created.
+/// Where a spool's bytes live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpoolBacking {
+    /// A disk-backed filesystem, or one that could not be classified.
+    #[cfg(not(target_os = "wasi"))]
+    Disk,
+    /// Memory (tmpfs or ramfs): every byte spooled counts against RAM.
+    Ram,
+}
+
+impl SpoolBacking {
+    /// Classifies the filesystem `file` lives on.
+    ///
+    /// Only Linux and Android are classified; a failed `fstatfs` and every
+    /// other target report [`Self::Disk`].
+    #[cfg(not(target_os = "wasi"))]
+    fn of(file: &File) -> Self {
+        cfg_select! {
+            any(target_os = "linux", target_os = "android") => rustix::fs::fstatfs(file)
+                .map_or(Self::Disk, |stat| {
+                    Self::from_fs_type(i128::from(stat.f_type))
+                }),
+            _ => {
+                let _ = file;
+                Self::Disk
+            }
+        }
+    }
+
+    /// Maps a `statfs` `f_type` to a backing. The width and signedness of
+    /// `f_type` vary by architecture, so only its low 32 bits are compared.
+    #[cfg(any(target_os = "linux", target_os = "android", test))]
+    fn from_fs_type(f_type: i128) -> Self {
+        // NOTE: the kernel's `TMPFS_MAGIC` and `RAMFS_MAGIC` from
+        // `linux/magic.h`, spelled here so the mapping runs on every host;
+        // libc defines only the first, and a Linux test pins it to libc's.
+        const TMPFS_MAGIC: i128 = 0x0102_1994;
+        const RAMFS_MAGIC: i128 = 0x8584_58f6;
+        let low = f_type & 0xFFFF_FFFF;
+        if low == TMPFS_MAGIC || low == RAMFS_MAGIC {
+            Self::Ram
+        } else {
+            Self::Disk
+        }
+    }
+}
+
+/// An anonymous spool file and where its bytes live.
+#[derive(Debug)]
+pub struct TempSpool {
+    /// The unnamed temporary file.
+    pub file: File,
+    /// Whether writing to it consumes memory.
+    pub backing: SpoolBacking,
+}
+
+impl TempSpool {
+    /// A spool over `file`, classified by the filesystem it lives on.
+    #[cfg(not(target_os = "wasi"))]
+    fn new(file: File) -> Self {
+        let backing = SpoolBacking::of(&file);
+        Self { file, backing }
+    }
+
+    /// An anonymous spool forced to report `backing`, for tests that must
+    /// exercise the RAM path on a host whose temporary directory is on disk.
+    #[cfg(test)]
+    pub(crate) fn with_backing(backing: SpoolBacking) -> Option<Self> {
+        Some(Self {
+            file: tempfile::tempfile().ok()?,
+            backing,
+        })
+    }
+}
+
+/// Opens the anonymous spool, or `None` where none can be created.
 ///
 /// WASI has no temporary directory and `std::env::temp_dir` panics there, so
 /// no temporary file is attempted on that target.
-pub fn open_spool() -> Option<File> {
+pub fn open_spool() -> Option<TempSpool> {
+    // TODO(#959): Linux timings for ext4 and tmpfs; tmpfs detection on FreeBSD
+    // and macOS RAM disks.
     cfg_select! {
         target_os = "wasi" => None,
-        _ => tempfile::tempfile().ok(),
+        _ => tempfile::tempfile().ok().map(TempSpool::new),
     }
 }
 
@@ -1849,5 +1926,51 @@ mod tests {
         }));
         assert!(outcome.is_err());
         assert_eq!(progress.0, 1, "Drop must not fire the callback again");
+    }
+}
+
+#[cfg(test)]
+mod spool_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_forced_backing_is_reported() {
+        let spool = TempSpool::with_backing(SpoolBacking::Ram).unwrap();
+        assert_eq!(spool.backing, SpoolBacking::Ram);
+    }
+
+    #[test]
+    fn fs_type_magics_classify_on_every_host() {
+        assert_eq!(SpoolBacking::from_fs_type(0x0102_1994), SpoolBacking::Ram);
+        assert_eq!(SpoolBacking::from_fs_type(0x8584_58f6), SpoolBacking::Ram);
+        assert_eq!(
+            SpoolBacking::from_fs_type(i128::from(0x8584_58f6_u32.cast_signed())),
+            SpoolBacking::Ram,
+            "a sign-extended 32-bit f_type"
+        );
+        assert_eq!(SpoolBacking::from_fs_type(0xEF53), SpoolBacking::Disk);
+        assert_eq!(SpoolBacking::from_fs_type(0), SpoolBacking::Disk);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn the_tmpfs_magic_matches_libc() {
+        assert_eq!(
+            SpoolBacking::from_fs_type(i128::from(libc::TMPFS_MAGIC)),
+            SpoolBacking::Ram
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn a_file_in_dev_shm_is_ram_backed() {
+        let dir = Path::new("/dev/shm");
+        if !dir.is_dir() {
+            return;
+        }
+        let file = tempfile::tempfile_in(dir).unwrap();
+        assert_eq!(SpoolBacking::of(&file), SpoolBacking::Ram);
     }
 }

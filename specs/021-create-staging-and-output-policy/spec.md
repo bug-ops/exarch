@@ -10,7 +10,7 @@ tags:
   - security
   - rust
 created: 2026-11-04
-updated: 2026-11-04
+updated: 2026-11-05
 status: implemented
 related:
   - "[[constitution]]"
@@ -28,7 +28,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / `request` (`OutputFile`, `OutputPolicy`, `OutputFormat`, `CreateRequest`), `creation::staged`, `creation::filters`, `creation::walker`
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Origin**: #931 (staged output), #915 (format moved off `CreationConfig`), #916 (typed exclude patterns) — 50-issue batch, 2026-11-04
 > **Status**: implemented — documents the behavior that shipped in that batch
 
@@ -161,7 +161,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FR-002 | `OutputFile` SHALL be built only by `OutputFile::create_new(path)` and `OutputFile::replace(path)`, optionally followed by `with_format(CreatableFormat)`; accessors are `path()`, `policy()` and `format()` | must |
 | FR-003 | `OutputFormat` SHALL be `#[non_exhaustive]` with `FromExtension` (default) and `Explicit(CreatableFormat)`; the ZIP-family extension refusal (`.apk`, `.whl`, `.epub`, ...) SHALL apply only to `FromExtension` | must |
 | FR-004 | `CreationConfig::format` and `CreationConfig::with_format` SHALL NOT exist; `ArchiveCreator` SHALL NOT exist | must |
-| FR-005 | WHEN `CreateRequest::create(&OutputFile, sources)` runs, THE SYSTEM SHALL write the archive to a temporary file (prefix `.exarch-`) in the canonical parent directory of the target and publish it by rename only after the archive is complete and `sync_all` succeeded | must |
+| FR-005 | WHEN `CreateRequest::create(&OutputFile, sources)` runs, THE SYSTEM SHALL write the archive to a temporary file (prefix `.exarch-`) in the canonical parent directory of the target and publish it by rename only after the archive is complete and, under the default `Durability::Synced`, `sync_all` of the file succeeded (the parent directory is synced after the rename) | must |
 | FR-006 | WHEN creation fails for any reason before the rename, THE SYSTEM SHALL delete the temporary file and leave the target path exactly as it was (absent, or holding the previous file) | must |
 | FR-007 | Everything that can refuse the target SHALL be decided before any source is read: the target kind, `OutputExists`, the parent directory | must |
 | FR-008 | The target kind SHALL be decided by `symlink_metadata(target)` (and `metadata(target)` for a symlink): absent is accepted by both policies; a regular file, a symlink to a regular file and a dangling symlink are accepted by `Replace` and refused by `CreateNew` with `ArchiveError::OutputExists`; anything else (directory, FIFO, device, symlink to a non-regular file) SHALL be refused by both policies with `InvalidConfiguration { setting: OutputPath, problem: NotSupported }`, which takes precedence over `OutputExists` | must |
@@ -183,6 +183,9 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FR-024 | Matching SHALL compare raw bytes of path components (`OsStr::as_encoded_bytes`), so a non-UTF-8 name is matched, not skipped or lossily converted. Entries dropped by an exclude pattern or by the hidden-file rule SHALL be counted in `CreationReport::skipped` as `SkipKind::Excluded` and `SkipKind::Hidden`; the other creation skips are `OverMaxFileSize` and `SymlinkUnsupported` | must |
 | FR-025 | `CreateRequest` SHALL document `# Errors` once; `ArchiveCreator`, `FormatCreator`, `TarCreator`, `ZipCreator` and the public `creation::{tar,zip}::create_*` SHALL NOT exist; creation SHALL dispatch by `CreationFamily` | must |
 | FR-026 | WITH `include_hidden = false`, THE walker SHALL NOT enter a hidden directory below a source root and SHALL count it once as `SkipKind::Hidden`; hidden is decided on the raw name bytes (a leading `.`); a hidden source root named by the caller, a file source and `include_hidden = true` SHALL be unchanged; with `follow_symlinks` the visible name of a link decides whether it is hidden, not its target's (BREAKING: contents of hidden directories that were previously archived and then filtered are no longer read) | must |
+| FR-027 | `Durability` (`closed_enum!`, `#[non_exhaustive]`: `Synced` default, `Unsynced`; `ConfigSetting::Durability`) SHALL be set on `OutputFile` (`with_durability`, `durability()`) and passed to `StagedOutput::commit(self, Durability)`; `Synced` flushes the staged file and then the parent directory, `Unsynced` flushes neither; the rename stays atomic under both | must |
+| FR-028 | The `Unsynced` documentation SHALL state that after a crash or power loss a `Replace` target can be empty or truncated and a `CreateNew` file can be empty, and that write-back errors (NFS, quota, delayed-allocation `ENOSPC`) are not reported, so an `Ok` result does not mean the bytes reached disk | must |
+| FR-029 | WHEN a creation source exists but cannot be read (open, metadata, read, readlink, directory read, or the top-level `lstat`), THE SYSTEM SHALL fail with `ArchiveError::SourceNotAccessible { path, error: io::Error }` (Display `source path is not accessible: {path}: {error}`); `NotFound` and `NotADirectory` give `SourceNotFound` (a file removed mid-walk included); a directory-walk loop with no I/O cause keeps the `Io` `directory walk failed` context; one helper (`creation::source_error`) maps every site, and a reader wrapper records the first read fault that is not `Interrupted` so a failed copy is reported with its cause; the field is named `error`, not `#[source]`, keeping the error-chain rule | must |
 
 ### Surfaces
 
@@ -190,8 +193,8 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 |----|------------|----------|
 | FR-040 | THE CLI `create` SHALL map `--force` to `OutputFile::replace` and its absence to `OutputFile::create_new`; it SHALL NOT call `exists()` or `remove_file`; `OutputExists` SHALL carry a hint naming `--force`; a directory, FIFO or device output SHALL be an `InvalidConfiguration` for `output_path` with and without `--force` | must |
 | FR-041 | THE CLI `create -x` SHALL parse patterns with `ExcludePattern::try_from` after clap; a refused shape SHALL exit 1 with the JSON envelope (`setting: exclude_pattern`) and write no archive; the `-x` help text SHALL name the shapes | must |
-| FR-042 | Python `create_archive` and `create_archive_with_progress` SHALL take `format: str | None` and `overwrite: bool = True`; `overwrite=False` maps to `create_new` and raises `OutputExistsError` (a `FileExistsError`); a refused exclude pattern SHALL raise `InvalidConfigurationError` with `setting == "exclude_pattern"`; a progress callback that raises SHALL cancel the creation (nothing is committed, a previous archive stays) | must |
-| FR-043 | Node `createArchive*` SHALL replace an existing output atomically (`OutputFile::replace`); it takes an optional trailing `CreateOptions { format?: ArchiveType, overwrite?: boolean }` (default replace; `overwrite: false` maps to `create_new`, `format` to `OutputFile::with_format`, `'SevenZ'` is refused); `addExcludePattern` SHALL throw `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'` for a refused shape | must |
+| FR-042 | Python `create_archive` and `create_archive_with_progress` SHALL take `format: str | None` and `overwrite: bool = True`; `overwrite=False` maps to `create_new` and raises `OutputExistsError` (a `FileExistsError`); a refused exclude pattern SHALL raise `InvalidConfigurationError` with `setting == "exclude_pattern"`; a progress callback that raises SHALL cancel the creation (nothing is committed, a previous archive stays); both take `durability: str = "synced"` (`"synced"` or `"unsynced"`, parsed with `ClosedEnum::parse_for`) | must |
+| FR-043 | Node `createArchive*` SHALL replace an existing output atomically (`OutputFile::replace`); it takes an optional trailing `CreateOptions { format?: CreatableFormat, overwrite?: boolean, durability?: Durability }` (`CreatableFormat` is a napi string enum without `'SevenZ'`, `Durability` is `'Synced' | 'Unsynced'`; a value outside either enum is refused by napi-rs with its own `InvalidArg` text, not `INVALID_CONFIGURATION`, the one intended divergence from the other bindings) (default replace; `overwrite: false` maps to `create_new`, `format` to `OutputFile::with_format`, `'SevenZ'` is refused); `addExcludePattern` SHALL throw `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'` for a refused shape | must |
 
 ## 4. Non-Functional Requirements
 
@@ -219,6 +222,8 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | Source does not exist | Fails before publishing; target unchanged; no temporary file |
+| A source file or directory exists but is unreadable (for example mode 000) | `SourceNotAccessible { path, error }` naming the file and the OS error; nothing is published and the target is unchanged |
+| A source vanishes during the walk | `SourceNotFound` |
 | Target is a directory, FIFO, device or `/dev/stdout` | `InvalidConfiguration { OutputPath, NotSupported }` for both policies, before any work |
 | Target is a directory and policy is `CreateNew` | Same `InvalidConfiguration`, not `OutputExists` |
 | `CreateNew` and a file appears after staging | `OutputExists`; the raced file is untouched; temporary file deleted |

@@ -3401,6 +3401,72 @@ fn test_create_handles_readonly_source_files() {
     assert!(archive.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn test_create_names_the_unreadable_source_in_text_and_json() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let tree = temp.path().join("bad");
+    std::fs::create_dir(&tree).expect("failed to create tree");
+    std::fs::write(tree.join("ok.txt"), "x").expect("failed to write file");
+    let unreadable = tree.join("unread.txt");
+    std::fs::write(&unreadable, "y").expect("failed to write file");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))
+        .expect("failed to drop permissions");
+    if std::fs::File::open(&unreadable).is_ok() {
+        return;
+    }
+    let archive = temp.path().join("out.tar.gz");
+
+    exarch_cmd()
+        .arg("create")
+        .arg(&archive)
+        .arg(&tree)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Source path is not accessible"))
+        .stderr(predicate::str::contains("unread.txt"))
+        .stderr(predicate::str::contains("Permission denied"));
+    assert!(!archive.exists());
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("create")
+        .arg(&archive)
+        .arg(&tree)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["error"]["kind"], "SourceNotAccessible");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unread.txt")),
+        "{json}"
+    );
+}
+
+#[test]
+fn test_create_missing_source_is_source_not_found_in_json() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("create")
+        .arg(temp.path().join("out.tar.gz"))
+        .arg(temp.path().join("missing"))
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["error"]["kind"], "SourceNotFound");
+}
+
 #[test]
 fn test_create_empty_file() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -3639,7 +3705,7 @@ fn test_extract_and_verify_name_an_entry_under_a_file() {
     let output = verify.get_output();
     let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
     assert!(
-        String::from_utf8_lossy(&combined)
+        String::from_utf8_lossy_owned(combined)
             .replace('\\', "/")
             .contains(text)
     );

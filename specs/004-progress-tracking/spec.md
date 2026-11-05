@@ -8,7 +8,7 @@ tags:
   - progress
   - rust
 created: 2026-05-20
-updated: 2026-11-04
+updated: 2026-11-05
 status: draft
 related:
   - "[[constitution]]"
@@ -28,7 +28,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / report, io
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 ## 1. Overview
@@ -199,7 +199,7 @@ ProgressCallback: Send
 | SC-001 | `on_complete` not called on failure | Regression test (issue #170, fixed in v0.4.0) |
 | SC-002 | Progress overhead vs no-progress | < 5% throughput penalty (measured in bench) |
 | SC-003 | All format handlers (TAR, ZIP, 7z) call progress callbacks per-entry | Fixed in v0.4.0 (#170, #191) |
-| SC-004 | Node.js creation progress parity with extraction | `createArchiveWithProgress`/`createArchiveWithProgressSync` added (v0.6.0, #455), reusing the core creation request (`CreateRequest::with_progress` since #912) and the existing `NodeProgressAdapter`; JS integration tests cover the per-entry callback shape and `progress=null`/omitted paths (#456) |
+| SC-004 | Node.js creation progress parity with extraction | `createArchiveWithProgress` added (v0.6.0, #455; the `createArchiveWithProgressSync` variant was removed in #953, since a synchronous creation cannot be cancelled by a throwing callback), reusing the core creation request (`CreateRequest::with_progress` since #912) and the existing `NodeProgressAdapter`; JS integration tests cover the per-entry callback shape and `progress=null`/omitted paths (#456) |
 
 ## 8. Agent Boundaries
 

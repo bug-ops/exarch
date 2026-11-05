@@ -1,7 +1,9 @@
 //! Node.js bindings for `ExtractionReport`.
 
+use exarch_core::Durability as CoreDurability;
 use exarch_core::ExtractionReport as CoreReport;
 use exarch_core::formats::detect::ArchiveType as CoreArchiveType;
+use exarch_core::formats::detect::CreatableFormat as CoreCreatableFormat;
 use exarch_core::inspection::CheckStatus as CoreCheckStatus;
 use exarch_core::inspection::IntegrityGaps as CoreIntegrityGaps;
 use exarch_core::inspection::IntegrityStatus as CoreIntegrityStatus;
@@ -96,6 +98,73 @@ impl From<ArchiveType> for CoreArchiveType {
             ArchiveType::TarZst => Self::TarZst,
             ArchiveType::Zip => Self::Zip,
             ArchiveType::SevenZ => Self::SevenZ,
+        }
+    }
+}
+
+/// Archive format that can be created: `ArchiveType` without `'SevenZ'`.
+// Values must equal `exarch_core::formats::detect::CreatableFormat::NAMES`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreatableFormat {
+    /// Uncompressed TAR.
+    #[napi(value = "Tar")]
+    Tar,
+    /// Gzip-compressed TAR.
+    #[napi(value = "TarGz")]
+    TarGz,
+    /// Bzip2-compressed TAR.
+    #[napi(value = "TarBz2")]
+    TarBz2,
+    /// XZ-compressed TAR.
+    #[napi(value = "TarXz")]
+    TarXz,
+    /// Zstd-compressed TAR.
+    #[napi(value = "TarZst")]
+    TarZst,
+    /// ZIP.
+    #[napi(value = "Zip")]
+    Zip,
+}
+
+impl From<CreatableFormat> for CoreCreatableFormat {
+    fn from(value: CreatableFormat) -> Self {
+        match value {
+            CreatableFormat::Tar => Self::Tar,
+            CreatableFormat::TarGz => Self::TarGz,
+            CreatableFormat::TarBz2 => Self::TarBz2,
+            CreatableFormat::TarXz => Self::TarXz,
+            CreatableFormat::TarZst => Self::TarZst,
+            CreatableFormat::Zip => Self::Zip,
+        }
+    }
+}
+
+/// Whether a created archive is flushed to stable storage before success is
+/// reported.
+///
+/// `'synced'` (the default) flushes the file and its directory entry.
+/// `'unsynced'` skips both and is faster, but after a crash or power loss a
+/// replaced output can be empty or truncated and a new output can be empty,
+/// and write-back errors (network filesystems, quotas, delayed allocation) are
+/// not reported, so success does not prove the bytes reached the disk.
+// Values must equal `exarch_core::Durability::NAMES`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Flush the file and its directory entry.
+    #[napi(value = "synced")]
+    Synced,
+    /// Skip the flushes.
+    #[napi(value = "unsynced")]
+    Unsynced,
+}
+
+impl From<Durability> for CoreDurability {
+    fn from(value: Durability) -> Self {
+        match value {
+            Durability::Synced => Self::Synced,
+            Durability::Unsynced => Self::Unsynced,
         }
     }
 }
@@ -1687,6 +1756,29 @@ mod tests {
     }
 
     #[test]
+    fn test_creatable_format_maps_onto_every_core_variant() {
+        let all = [
+            CreatableFormat::Tar,
+            CreatableFormat::TarGz,
+            CreatableFormat::TarBz2,
+            CreatableFormat::TarXz,
+            CreatableFormat::TarZst,
+            CreatableFormat::Zip,
+        ];
+        let mapped: Vec<_> = all.into_iter().map(CoreCreatableFormat::from).collect();
+        assert_eq!(mapped, CoreCreatableFormat::ALL);
+    }
+
+    #[test]
+    fn test_durability_maps_onto_every_core_variant() {
+        let mapped: Vec<_> = [Durability::Synced, Durability::Unsynced]
+            .into_iter()
+            .map(CoreDurability::from)
+            .collect();
+        assert_eq!(mapped, CoreDurability::ALL);
+    }
+
+    #[test]
     fn test_issue_category_try_from_covers_every_core_variant() {
         let mapped: Vec<_> = CoreIssueCategory::ALL
             .iter()
@@ -1747,10 +1839,29 @@ mod tests {
     }
 
     #[test]
+    fn test_creatable_format_union_is_the_core_names() {
+        let names: Vec<String> = CoreCreatableFormat::NAMES
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect();
+        let line = format!("export type CreatableFormat = {}", names.join(" | "));
+        assert!(
+            include_str!("../index.d.ts").lines().any(|l| l == line),
+            "index.d.ts out of sync with CreatableFormat::NAMES, expected:\n{line}"
+        );
+    }
+
+    #[test]
     fn test_index_d_ts_unions_match_core_enums() {
         let dts = include_str!("../index.d.ts");
         let expected = [
             union_line("ArchiveType", CoreArchiveType::ALL, CoreArchiveType::as_str),
+            union_line(
+                "CreatableFormat",
+                CoreCreatableFormat::ALL,
+                CoreCreatableFormat::as_str,
+            ),
+            union_line("Durability", CoreDurability::ALL, CoreDurability::as_str),
             union_line(
                 "IssueCategory",
                 CoreIssueCategory::ALL,

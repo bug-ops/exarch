@@ -32,7 +32,7 @@ status: permanent
 
 ## II. Technology Stack
 
-- Language: Rust, MSRV 1.98.0
+- Language: Rust, MSRV 1.99.1
 - Targets: native platforms and `wasm32-wasip1` for `exarch-core` and `exarch-cli` (CI job `wasm`, wasmtime smoke test; v0.8.0)
 - CLI: `clap` 4.x with derive macros
 - Python bindings: `pyo3` 0.29, `maturin`, GIL released during I/O

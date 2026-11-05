@@ -106,8 +106,9 @@ use error::run_sync;
 use error::spawn_blocking_promise;
 use exarch_core::BoundaryPath;
 use report::ArchiveManifest;
-use report::ArchiveType;
+use report::CreatableFormat;
 use report::CreationReport;
+use report::Durability;
 use report::ExtractionReport;
 use report::VerificationReport;
 use utils::boundary_path;
@@ -325,28 +326,32 @@ pub fn extract_archive_sync(
 pub struct CreateOptions {
     /// The archive format, instead of the one the output extension names (how
     /// a `.apk` or `.whl` is written as a plain ZIP). `'SevenZ'` cannot be
-    /// created.
-    pub format: Option<ArchiveType>,
+    /// created and is not part of the type.
+    pub format: Option<CreatableFormat>,
     /// Whether an existing output may be replaced. Defaults to `true`.
     pub overwrite: Option<bool>,
+    /// Whether the archive is flushed to stable storage before success is
+    /// reported: `'synced'` (the default) or `'unsynced'`. See `Durability`
+    /// for the crash and write-back hazards of `'unsynced'`.
+    pub durability: Option<Durability>,
 }
 
 /// The output of a creation as the core request takes it.
-fn output_file(
-    output_path: &BoundaryPath,
-    options: &CreateOptions,
-) -> CoreResult<exarch_core::OutputFile> {
+fn output_file(output_path: &BoundaryPath, options: &CreateOptions) -> exarch_core::OutputFile {
     let file = if options.overwrite.unwrap_or(true) {
         exarch_core::OutputFile::replace(output_path.as_str())
     } else {
         exarch_core::OutputFile::create_new(output_path.as_str())
     };
-    Ok(match options.format {
-        Some(format) => file.with_format(exarch_core::formats::detect::CreatableFormat::try_from(
-            exarch_core::formats::detect::ArchiveType::from(format),
-        )?),
+    let file = match options.format {
+        Some(format) => file.with_format(format.into()),
         None => file,
-    })
+    };
+    file.with_durability(
+        options
+            .durability
+            .map_or_default(exarch_core::Durability::from),
+    )
 }
 
 /// Create an archive from source files and directories (async).
@@ -415,7 +420,7 @@ fn create_core(
     options: &CreateOptions,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
-    let output = output_file(&output_path, options)?;
+    let output = output_file(&output_path, options);
     Ok(exarch_core::CreateRequest::new(config).create(&output, &sources)?)
 }
 
@@ -511,10 +516,10 @@ const WRAP_PROGRESS_CALLBACK_JS: &str = js_with_normalizer!(
 /// Shared by `createArchiveWithProgress` and `extractArchiveWithProgress` —
 /// the two entry points that dispatch through `ProgressDispatch::Awaited`
 /// (`call_async_catch`) and therefore share the primitive-throw crash this
-/// type exists to prevent. `createArchiveWithProgressSync` dispatches
-/// through `ProgressDispatch::Deferred` (plain `ThreadsafeFunction::call`)
-/// instead, which never enters the buggy code path in the first place — see
-/// its own doc comment — so it takes a raw `ThreadsafeFunction` unchanged.
+/// type exists to prevent. The sync variants that dispatch through
+/// `ProgressDispatch::Deferred` (plain `ThreadsafeFunction::call`) never enter
+/// the buggy code path in the first place, so they take a raw
+/// `ThreadsafeFunction` unchanged.
 ///
 /// The wrapping must happen inside [`FromNapiValue::from_napi_value`] rather
 /// than in the body of an `async fn` like `extract_archive_with_progress`:
@@ -639,10 +644,8 @@ impl FromNapiValue for ProgressCallback {
 /// mechanism to `extractArchiveWithProgress`, which shares more detail on
 /// why this is necessary). This does **not** cover an `async` progress
 /// callback whose returned `Promise` rejects with a primitive — a
-/// `try`/`catch` only observes synchronous throws — nor
-/// `createArchiveWithProgressSync`'s deferred dispatch, which never enters
-/// the affected code path to begin with (see its own doc comment). Keep
-/// `progress` synchronous.
+/// `try`/`catch` only observes synchronous throws. Keep `progress`
+/// synchronous.
 ///
 /// # Examples
 ///
@@ -702,110 +705,9 @@ fn create_with_progress_core(
     dispatch: ProgressDispatch,
 ) -> CoreResult<exarch_core::creation::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
-    let output = output_file(&output_path, options)?;
+    let output = output_file(&output_path, options);
     run_create_with_optional_progress(&output, &sources, config, progress, dispatch)
         .map_err(Failure::Callback)
-}
-
-/// Create an archive from source files and directories with a progress
-/// callback (sync).
-///
-/// Synchronous version of `createArchiveWithProgress`. Blocks the event loop
-/// until creation completes. Prefer the async version for most use cases.
-///
-/// # `progress` does not report live during this call
-///
-/// `progress` is dispatched through the same threadsafe-function mechanism as
-/// the async variant, which only ever delivers calls on a turn of the Node.js
-/// event loop. Because this function blocks that same event loop until it
-/// returns, **every queued call is delivered only after
-/// `createArchiveWithProgressSync` has already returned** — none of them fire
-/// during the call, so `progress` cannot be used to report *live* progress
-/// here. Use `createArchiveWithProgress` instead if you need progress updates
-/// while creation is still running.
-///
-/// ## A throwing `progress` surfaces as an `uncaughtException`
-///
-/// Because every call is delivered after this function has already returned,
-/// there is no return value left to carry a callback throw: this function has
-/// resolved with its `CreationReport` by then. A throw therefore propagates the
-/// way any throw from a deferred callback does — as a process-level
-/// `uncaughtException` on the turn that delivered the call, observable via
-/// `process.on('uncaughtException', ...)`. It is never merged into a
-/// `PROGRESS_CALLBACK_ERROR` result the way `createArchiveWithProgress` merges
-/// it, and it cannot be caught by wrapping this call in `try`/`catch`. For the
-/// same reason a throw cannot cancel the creation (`createArchiveWithProgress`
-/// does): the archive is already written and committed when the callback runs.
-///
-/// The primitive-throw crash documented on `createArchiveWithProgress` does
-/// **not** apply here: that defect lives in the await-the-result dispatch path,
-/// which this function cannot use (awaiting a call that only the blocked event
-/// loop can deliver would deadlock). Queued calls take the plain dispatch path
-/// instead, where a thrown primitive reaches `uncaughtException` intact just
-/// like a thrown `Error`.
-///
-/// # Arguments
-///
-/// * `output_path` - Path to output archive file
-/// * `sources` - Array of source files/directories to include
-/// * `config` - Optional `CreationConfig` (uses defaults if omitted)
-/// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
-///   string, total: number | null, current: number, bytesWritten: number]) =>
-///   void`. See the sections above: calls arrive only after this function
-///   returns, and a throw becomes an `uncaughtException` rather than an error
-///   from here.
-///
-/// # Returns
-///
-/// `CreationReport` with creation statistics
-///
-/// # Errors
-///
-/// Returns error if path validation fails, archive creation fails, or I/O
-/// errors occur. See `createArchive` for the full list of error codes.
-///
-/// # Examples
-///
-/// ```javascript
-/// const report = createArchiveWithProgressSync(
-///   'output.tar.gz',
-///   ['source_dir/'],
-///   null,
-///   (err, [path, total, current, bytesWritten]) => {
-///     // Fires only after createArchiveWithProgressSync has already returned.
-///     console.log(`${current}/${total}: ${path}`);
-///   },
-/// );
-/// console.log(`Created archive with ${report.filesAdded} files`);
-/// ```
-#[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
-pub fn create_archive_with_progress_sync(
-    env: Env,
-    output_path: String,
-    sources: Vec<String>,
-    config: Option<&CreationConfig>,
-    progress: Option<ThreadsafeFunction<ProgressArgs>>,
-    options: Option<CreateOptions>,
-) -> Result<CreationReport> {
-    let default_config = exarch_core::creation::CreationConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let options = options.unwrap_or_default();
-
-    run_sync(env, "archive creation with progress", || {
-        create_with_progress_core(
-            &output_path,
-            &sources,
-            config_ref,
-            &options,
-            progress,
-            ProgressDispatch::Deferred,
-        )
-    })
-    .map(CreationReport::from)
 }
 
 /// Runs `create_archive_with_progress` routing to the JS callback when
@@ -813,9 +715,7 @@ pub fn create_archive_with_progress_sync(
 ///
 /// A core creation failure and a JS callback throw can occur in the same run;
 /// both are carried out of here so neither is silently dropped, mirroring
-/// [`run_extract_with_optional_progress`]. Under
-/// [`ProgressDispatch::Deferred`] no throw is ever observable here — the
-/// callback runs only after the caller has returned.
+/// [`run_extract_with_optional_progress`].
 fn run_create_with_optional_progress(
     output: &exarch_core::OutputFile,
     sources: &[BoundaryPath],

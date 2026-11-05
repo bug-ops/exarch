@@ -1,6 +1,6 @@
 /**
  * Tests for the *WithProgress functions (extractArchiveWithProgress,
- * createArchiveWithProgress, createArchiveWithProgressSync).
+ * createArchiveWithProgress).
  *
  * Covers both the callback-invoked path (per-entry callback shape) and the
  * progress=null/undefined path (callback omission must not throw).
@@ -13,7 +13,6 @@ const os = require('node:os');
 const {
   extractArchiveWithProgress,
   createArchiveWithProgress,
-  createArchiveWithProgressSync,
   createArchiveSync,
 } = require('../index.js');
 
@@ -160,61 +159,6 @@ describe('createArchiveWithProgress (async)', () => {
 
   it('creates the archive normally when progress is undefined', async () => {
     const report = await createArchiveWithProgress(outputPath, [sourceDir]);
-
-    assert.ok(report.filesAdded >= 2);
-    assert.ok(fs.existsSync(outputPath));
-  });
-});
-
-describe('createArchiveWithProgressSync', () => {
-  let tempDir;
-  let sourceDir;
-  let outputPath;
-
-  beforeEach(() => {
-    tempDir = createTempDir();
-    sourceDir = path.join(tempDir, 'source');
-    fs.mkdirSync(sourceDir);
-    createTestFiles(sourceDir);
-    outputPath = path.join(tempDir, 'output.tar.gz');
-  });
-
-  afterEach(() => {
-    if (tempDir && fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it('invokes the callback exactly once per entry with (path, total, current, bytesWritten)', async () => {
-    const calls = [];
-    const report = createArchiveWithProgressSync(outputPath, [sourceDir], null, (err, arg) => {
-      calls.push(arg);
-      assertProgressCallShape(err, arg);
-    });
-
-    assert.ok(report.filesAdded >= 2);
-    assert.ok(fs.existsSync(outputPath));
-
-    // The ThreadsafeFunction is dispatched via NonBlocking mode, so queued
-    // calls are only flushed on later event loop turns even though this
-    // *Sync call has already returned. Same fixture as the async variant:
-    // its 2 files mean 2 calls; the source directory is not an entry.
-    await waitUntil(() => calls.length >= 2);
-    assert.strictEqual(calls.length, 2, 'expected exactly one callback per created entry');
-
-    const currents = calls.map(([, , current]) => current);
-    assert.deepStrictEqual(currents, [1, 2]);
-  });
-
-  it('creates the archive normally when progress is null', () => {
-    const report = createArchiveWithProgressSync(outputPath, [sourceDir], null, null);
-
-    assert.ok(report.filesAdded >= 2);
-    assert.ok(fs.existsSync(outputPath));
-  });
-
-  it('creates the archive normally when progress is undefined', () => {
-    const report = createArchiveWithProgressSync(outputPath, [sourceDir]);
 
     assert.ok(report.filesAdded >= 2);
     assert.ok(fs.existsSync(outputPath));

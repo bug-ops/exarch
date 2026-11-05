@@ -10,8 +10,6 @@ use exarch_core::MemorySink;
 use exarch_core::PathModel as CorePathModel;
 use exarch_core::SanitizedMode;
 use exarch_core::extract_reader_to_memory;
-use exarch_core::formats::detect::ArchiveType as CoreArchiveType;
-use exarch_core::formats::detect::CreatableFormat;
 use napi::Env;
 use napi::bindgen_prelude::Either3;
 use napi::bindgen_prelude::Either4;
@@ -35,6 +33,7 @@ use crate::error::run_sync;
 use crate::error::spawn_blocking_promise;
 use crate::error::spawn_blocking_promise_with;
 use crate::report::ArchiveType;
+use crate::report::CreatableFormat;
 use crate::report::CreationReport;
 use crate::report::ExtractionReport;
 use crate::report::unknown_variant;
@@ -393,12 +392,12 @@ pub struct CreatedArchive {
 
 fn create_to_bytes_core(
     sources: &[String],
-    format: ArchiveType,
+    format: CreatableFormat,
     config: &exarch_core::creation::CreationConfig,
 ) -> CoreResult<CreatedArchive> {
     let sources = boundary_paths(sources)?;
-    let format = CreatableFormat::try_from(CoreArchiveType::from(format))?;
-    let (bytes, report) = exarch_core::CreateRequest::new(config).to_bytes(format, &sources)?;
+    let (bytes, report) =
+        exarch_core::CreateRequest::new(config).to_bytes(format.into(), &sources)?;
     Ok(CreatedArchive {
         data: Uint8Array::from(bytes),
         report: CreationReport::from(report),
@@ -414,7 +413,7 @@ fn create_to_bytes_core(
 /// # Arguments
 ///
 /// * `sources` - Array of source files/directories to include
-/// * `format` - The archive format; `'SevenZ'` cannot be created
+/// * `format` - The archive format (`CreatableFormat`, which has no `'SevenZ'`)
 /// * `config` - Optional `CreationConfig` (uses defaults if omitted)
 ///
 /// # Returns
@@ -423,8 +422,7 @@ fn create_to_bytes_core(
 ///
 /// # Errors
 ///
-/// Rejects with `INVALID_CONFIGURATION` for `'SevenZ'`, and with the errors of
-/// `createArchive` otherwise.
+/// Rejects with the errors of `createArchive`.
 ///
 /// # Examples
 ///
@@ -439,7 +437,7 @@ fn create_to_bytes_core(
 pub fn create_archive_to_bytes<'env>(
     env: &'env Env,
     sources: Vec<String>,
-    format: ArchiveType,
+    format: CreatableFormat,
     config: Option<&CreationConfig>,
 ) -> Result<PromiseRaw<'env, CreatedArchive>> {
     let config_owned: exarch_core::creation::CreationConfig =
@@ -483,7 +481,7 @@ pub fn create_archive_to_bytes<'env>(
 pub fn create_archive_to_bytes_sync(
     env: Env,
     sources: Vec<String>,
-    format: ArchiveType,
+    format: CreatableFormat,
     config: Option<&CreationConfig>,
 ) -> Result<CreatedArchive> {
     let default_config = exarch_core::creation::CreationConfig::default();
@@ -609,8 +607,7 @@ pub fn extract_archive_to_memory_sync(
 /// Blocks the event loop until extraction completes. Same as
 /// `extractArchiveToMemoryWithProgress`, except that the calls to `progress`
 /// are queued and arrive only after this function has returned; a throw there
-/// becomes an `uncaughtException`, not an error from here (see
-/// `createArchiveWithProgressSync`).
+/// becomes an `uncaughtException`, not an error from here.
 ///
 /// # Arguments
 ///

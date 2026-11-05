@@ -4,6 +4,7 @@ use exarch_core::ArchiveError as CoreError;
 use exarch_core::ErrorCode;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
+use exarch_core::FfiSourceFault;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting;
 use exarch_core::SubCode;
@@ -12,7 +13,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyFileExistsError;
 use pyo3::exceptions::PyFileNotFoundError;
-use pyo3::exceptions::PyPermissionError;
+use pyo3::exceptions::PyOSError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -99,11 +100,8 @@ static OUTPUT_EXISTS: DualClass =
     DualClass::new("OutputExistsError", PyFileExistsError::type_object, &[]);
 static SOURCE_NOT_FOUND: DualClass =
     DualClass::new("SourceNotFoundError", PyFileNotFoundError::type_object, &[]);
-static SOURCE_NOT_ACCESSIBLE: DualClass = DualClass::new(
-    "SourceNotAccessibleError",
-    PyPermissionError::type_object,
-    &[],
-);
+static SOURCE_NOT_ACCESSIBLE: DualClass =
+    DualClass::new("SourceNotAccessibleError", PyOSError::type_object, &[]);
 static INVALID_CONFIGURATION: DualClass = DualClass::new(
     "InvalidConfigurationError",
     PyValueError::type_object,
@@ -173,6 +171,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
         kind,
         description,
         partial,
+        source_fault,
         ..
     } = err.into_ffi_message();
     let code = kind.code();
@@ -180,6 +179,9 @@ pub fn convert_error(err: CoreError) -> PyErr {
         PyErr::from(std::io::Error::new(io_kind, description))
     } else {
         let err = class_for(kind.code()).unwrap_or(new_base_error)(description);
+        if let Some(fault) = source_fault {
+            set_os_error_fields(&err, &fault);
+        }
         set_optional_str(
             &err,
             "relaxable_by",
@@ -221,6 +223,21 @@ fn set_optional_str(err: &PyErr, name: &str, value: Option<&'static str>) {
             let _ = err.value(py).setattr(name, value);
         });
     }
+}
+
+/// Sets `errno`, `strerror` and `filename` of an `OSError`-based exception from
+/// an unreadable creation source, so `str(err)` names the file and the OS
+/// error.
+fn set_os_error_fields(err: &PyErr, fault: &FfiSourceFault) {
+    Python::attach(|py| {
+        let value = err.value(py);
+        // setattr failures are silenced to preserve the `PyErr` signature.
+        if let Some(errno) = fault.raw_os_error {
+            let _ = value.setattr("errno", errno);
+        }
+        let _ = value.setattr("strerror", fault.text.as_str());
+        let _ = value.setattr("filename", fault.name.as_str());
+    });
 }
 
 /// Attaches `writes`, and while the writes remain on disk the report counters
@@ -349,6 +366,7 @@ mod tests {
             (
                 CoreError::SourceNotAccessible {
                     path: std::path::PathBuf::from("src"),
+                    error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
                 },
                 &SOURCE_NOT_ACCESSIBLE,
                 "SOURCE_NOT_ACCESSIBLE",

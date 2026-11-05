@@ -8,7 +8,7 @@ tags:
   - cli
   - rust
 created: 2026-05-20
-updated: 2026-11-04
+updated: 2026-11-05
 status: draft
 related:
   - "[[constitution]]"
@@ -28,7 +28,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-cli
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 ## 1. Overview
@@ -188,7 +188,7 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-100 | WHEN `create` writes a ZIP, THE CLI SHALL surface the core warning for entries that default extraction would refuse as a zip bomb, naming the entry count and the `--max-compression-ratio` value that admits them, and `create --help` SHALL say so (v0.8.0, #801, #808) | should |
 | FR-101 | THE CLI SHALL build for `wasm32-wasip1` and pass a wasmtime smoke test in CI (v0.8.0, #755, #771) | should |
 | FR-102 | THE `--json` error envelope SHALL carry `error.sub_code` (the stable `SubCode` id, e.g. `TAR_AMBIGUITY`, `PATH_NAME`) always for a `SecurityViolation` and for an `InvalidArchive` that has a family (a `Malformation` with a sub-code, a TAR ambiguity or trailer refusal, a ZIP reader failure), and `error.setting` (the stable `ConfigSetting` id) for an `InvalidConfiguration` that names one; both are absent otherwise (v0.8.0, #865, #870, #887, #889, #894, #946) | must |
-| FR-103 | `extract` SHALL accept `--decode-reuse <off\|memory\|temp-file>` choosing where the ZIP structure check keeps what it decodes so compressed entries are not decoded twice; the default is memory up to 256 MiB, never more than `--max-total-size` or the decoder memory limit, it has no effect under `--zip-consistency ignore`, `temp-file` keeps the plaintext in an unnamed file in the temporary directory until extraction ends, and entries that do not fit are decoded again (v0.8.0, #857, #884) | should |
+| FR-103 | `extract` SHALL accept `--decode-reuse <off\|memory\|temp-file>` choosing where the ZIP structure check keeps what it decodes so compressed entries are not decoded twice; the default is memory up to 256 MiB, never more than `--max-total-size` or the decoder memory limit, it has no effect under `--zip-consistency ignore`, `temp-file` keeps the plaintext in an unnamed file in the temporary directory until extraction ends, and entries that do not fit are decoded again; on Linux and Android a `temp-file` spool on a tmpfs or ramfs is detected and charged against the decoder memory limit like `memory`, while a RAM-disk temporary directory elsewhere is not detected (v0.8.0, #857, #884, #950) | should |
 | FR-104 | WHEN `extract` writes into an existing destination, THE CLI SHALL list a gz, bz2 or xz TAR and extract it from one decode (`ListedArchive`); `--atomic` SHALL decode a TAR once, so a refusal arrives as a `rolled_back` partial report and the progress bar has no total (v0.8.0, #828, #842) | should |
 | FR-105 | THE CLI SHALL compare the identity of the swap directories in `--atomic --force` through a typed `FileIdentity` (`Known { dev, ino }` or `Unknown`, with no `PartialEq`), so a platform that offers no stable identity cannot make a comparison succeed vacuously; `--force` SHALL replace an existing regular file through a sibling temp file and rename (see [[002-format-handlers/spec]] FR-052) (v0.8.0, #819, #878, #888) | must |
 | FR-106 | THE CLI SHALL map every command result to one exit status through an exhaustive match in `main() -> ExitCode`: `Outcome` to `ExitStatus { 0, 1, StrictWarning = 3 }`; status 2 is reserved for clap usage errors; there SHALL be no sentinel errors (#932) | must |
@@ -213,6 +213,7 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-125 | Entry names and paths SHALL be shown through `exarch_core::path_text` in text and `--json` alike (a backslash as `\x5C`, invalid bytes as `\xNN`), so distinct names never print alike and no U+FFFD appears, finding texts included; `skills/exarch-cli/SKILL.md` documents exit codes, the limit boundary, `link_target`, skips by kind, verify issue fields, the conflict rule and the `create` semantics (#925, checked against the binary by the CLI developer) | must |
 | FR-126 | WHEN `create` runs without `--include-hidden`, THE CLI SHALL leave out hidden files and SHALL NOT enter a hidden directory below a source root (counted once as a `hidden` skip); a hidden source root named by the caller, a file source and `--include-hidden` are unchanged; with `--follow-symlinks` the visible name of a link decides, so `keys -> .ssh` is archived; the check compares raw name bytes (#916, see [[021-create-staging-and-output-policy/spec]] FR-026) | must |
 | FR-127 | The `extract --force` pre-check SHALL, before any write, refuse a non-directory where a directory landing (an entry or an implied parent) is needed, and a symlink at a file landing ("refusing to replace the existing symlink"); typed symlink refusals (`SecurityViolation` with its `relaxable_by`) SHALL be preserved by the pre-check rather than flattened to a generic message (#933, #765) | must |
+| FR-128 | WHEN `create` meets a source that exists but cannot be read, THE CLI SHALL exit 1 with `Source path is not accessible` naming the file and the OS error, and `--json` SHALL report `error.kind` `SourceNotAccessible` (was `IoError`); a missing source stays `SourceNotFound`; no archive is left at the output path (#956) | must |
 
 ## 4. Non-Functional Requirements
 

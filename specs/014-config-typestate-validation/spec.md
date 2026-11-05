@@ -9,7 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-08-04
-updated: 2026-11-04
+updated: 2026-11-05
 status: obsolete
 superseded_by: "[[003-config-api/spec]]"
 obsolete_reason: "The Unvalidated/Validated typestate, validate() and the phantom markers were removed in the 50-issue batch (#898); SecurityConfig and CreationConfig are plain structs with public fields. Remove this spec at the next release."
@@ -28,7 +28,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / config, creation
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Origin**: #433, #434, #435 (`SecurityConfig`), #443 (`CreationConfig`) — v0.6.0
 > **Status**: implemented — this spec documents shipped behavior, extracted from
 > [[003-config-api/spec]] because it introduces a reusable pattern (typestate-enforced

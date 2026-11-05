@@ -8,7 +8,7 @@ tags:
   - security
   - rust
 created: 2026-05-20
-updated: 2026-11-04
+updated: 2026-11-05
 status: draft
 related:
   - "[[constitution]]"
@@ -29,7 +29,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / security
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 ## 1. Overview
@@ -206,6 +206,11 @@ THEN the written file has those bits cleared; the mode carried by the validated 
 | FR-043 | THE SYSTEM SHALL check a 7z solid block against `SolidLimits::max_block_memory` per block (see [[003-config-api/spec]] FR-052); the evidence that a declared per-block sum bounds decoder output is that `admit_sevenz_block` refuses a block unless the sum of its files' declared sizes equals the block's unpack size (`BlockSizeUnaccounted`) and decoding is bounded by `take(file.size)` or `CrcChecked(unpack_size)` (#911, #896) | must |
 | FR-044 | `exarch_core::path_text(&Path) -> String` SHALL render any path injectively: a backslash is `\x5C`, each invalid byte of a Unix path `\xNN`, each unpaired UTF-16 unit of a Windows path `\uNNNN`, so two distinct names never print alike (`exarch_core::bytes_text(&[u8])` does the same for names read as raw archive bytes and is used for archive-stored names in TAR and ZIP diagnostics); core messages for verify findings and for parent, replace, temp-file and strip-prefix refusals, the CLI (text and `--json`) and Node use it, while host paths in messages keep their native spelling and Python converts entry paths losslessly with `os.fsdecode` instead (#925) | must |
 | FR-045 | `VirtualTree` SHALL track whether it holds any link or alias (`links_seen`, `aliases_seen`); `guard_landing` SHALL settle the projected landing length before an entry is inserted, and `check_landing` (used by `verify`) SHALL decide like `project_landing` (pinned by a test) while doing no second projection when the tree has no links or aliases; measured: `verify` is within 2 percent of the previous release (#903, #945, #895) | must |
+| FR-046 | WHEN link validation probes a link's parent components or a target component, THE SYSTEM SHALL treat only `NotFound` and `NotADirectory` as absence; a probe that fails for any other reason (`InvalidFilename` is reported as the existing name-too-long `Io` refusal, everything else as `SymlinkEscape`, a hardlink keeping its `HardlinkEscape` wrapper) SHALL refuse the link; `verify_parent_not_symlink` SHALL NOT gate on `exists()`, and `VirtualTree` SHALL report absence as `NotFound`/`NotADirectory` so `verify` and `list` verdicts match the host | must |
+| FR-047 | On Unix and WASI, link targets SHALL be resolved handle-relatively by `LinkCursor` (`formats/handle_resolution.rs`) from a held directory handle instead of per-component path probes: the cursor consumes components while holding its handle, takes the link's parent components as a separate parent prefix (an existing symlink there is refused, a missing name switches to a lexical tail, and a `..` in the target may pop any prefix component), keeps at most 32 ancestor handles (a `..` past the window re-opens from the root), follows at most `MAX_SYMLINK_HOPS` per top-level link, and refuses with `Io` rather than `SymlinkEscape` when a handle cannot be opened for resource reasons (`EMFILE`, `ENFILE`, `ENOMEM`); acceptance SHALL NOT depend on the absolute length of the destination path | must |
+| FR-048 | `FsView::resolve_link_target(link_rel, target, root)` (with a `LinkBase` of `LinkDirectory` or `Destination` for hardlinks) SHALL be the single entry for parent check and target resolution: the default implementation (used by `VirtualTree`, test views and Windows `HostFs`) is the fail-closed path-based resolution of FR-046; `HostFs` on Unix and WASI overrides it and opens the destination by path on each call, which serves the public `SafeSymlink::validate(&DestDir)` only; extraction SHALL validate links through `PinnedHostFs`, which runs the cursor on the extraction's own `PinnedRoot`, so a destination path swapped after the root was pinned does not change a verdict; extraction SHALL NOT construct plain `HostFs` for link validation | must |
+| FR-049 | On Unix and WASI an absolute link target spelled through an alias other than the canonical or the written destination path SHALL be refused; on WASI only the canonical spelling is mapped | must |
+| FR-050 | Windows keeps path-based resolution (the default implementation, fail-closed); handle-relative link reading there is a deferred follow-up (#958, marker `TODO(#958)` in `dir_walker.rs`) | should |
 
 ## 4. Non-Functional Requirements
 
@@ -341,6 +346,15 @@ THEN the written file has those bits cleared; the mode carried by the validated 
 > `SafePath`/`QuotaPermit` sealed-type pattern. Full detail, including the six enums newly marked
 > `#[non_exhaustive]` (`ArchiveError`, `QuotaResource`, and others outside this pipeline), is tracked
 > in [[016-sanitized-mode-and-non-exhaustive-enums/spec]].
+
+> [!note] Revision 2026-11-05: link resolution is handle-relative and probes fail closed (#949, #952)
+> A parent or target probe that fails for any reason other than absence refuses the link (FR-046);
+> on Unix and WASI targets are resolved by a handle-holding `LinkCursor` and extraction validates
+> against the descriptor it holds (FR-047, FR-048). Measured on macOS (criterion, release, 10
+> samples): a deep-chain fixture (30 links, 31-component directories, 2000 files) 12.4 s at the base
+> and about 0.5 to 0.6x of that after the change; 10k link entries at depth 20 within 1.03x of the
+> base. About 40 percent of the remaining deep-chain time is `SafePath::validate_with_context_in`
+> canonicalizing per file entry, left as a follow-up. Windows stays path-based (follow-up #958).
 
 > [!note] v0.7.0: typed `SecurityViolation`, link and root rules, counted links (#653, #714, #719, #723, #724, #741, #757)
 > `ArchiveError::SecurityViolation` gained `relaxable_by: Option<PolicySetting>` and is

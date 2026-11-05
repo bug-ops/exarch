@@ -12,8 +12,8 @@ use crate::Violation;
 use crate::security::fs_view::FsView;
 #[cfg(any(test, feature = "testing"))]
 use crate::security::fs_view::HostFs;
+use crate::security::fs_view::LinkBase;
 use crate::security::fs_view::LinkKind;
-use crate::security::fs_view::ModelRoot as _;
 #[cfg(any(test, feature = "testing"))]
 use crate::types::DestDir;
 use crate::types::SafePath;
@@ -21,7 +21,6 @@ use crate::types::dest_dir::ProbePath;
 use crate::types::safe_path::ParentCheck;
 use crate::types::safe_path::check_component_for;
 use crate::types::safe_symlink::has_root_or_prefix;
-use crate::types::safe_symlink::resolve_through_symlinks_in;
 
 /// Error for a hardlink whose target is absent when the link is created.
 pub fn hardlink_target_missing(target: &Path) -> ArchiveError {
@@ -220,7 +219,6 @@ impl HardlinkTracker {
         config: &SecurityConfig,
         view: &V,
     ) -> Result<HardlinkTarget> {
-        let dest = root.as_path();
         require_hardlinks_allowed(config)?;
 
         // Reject empty targets: they do not point anywhere.
@@ -271,10 +269,11 @@ impl HardlinkTracker {
         // extraction root via on-disk resolution even though string
         // normalization would pass (two-hop chain bypass,
         // GHSA-83g3-92jg-28cx variant — #116).
-        let resolved = resolve_through_symlinks_in(dest, target, root, link_path.as_path(), view)
+        let resolved = view
+            .resolve_link_target(link_path.as_path(), target, LinkBase::Destination, root)
             .map_err(|_| ArchiveError::HardlinkEscape {
-            path: link_path.as_path().to_path_buf(),
-        })?;
+                path: link_path.as_path().to_path_buf(),
+            })?;
 
         // Track this hardlink target (H-PERF-6: use entry API)
         self.seen_targets

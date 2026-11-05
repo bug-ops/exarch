@@ -262,6 +262,15 @@ Extract an archive to the specified directory with security validation.
 
 **Note:** Since v0.4.0, `create_archive` raises `FileNotFoundError` for missing sources, `FileExistsError` when the output already exists without overwrite, and `ValueError` for invalid compression levels — matching standard Python conventions.
 
+`create_archive` and `create_archive_with_progress` take `durability="synced"`
+(the default) or `"unsynced"`. `"synced"` flushes the archive and its directory
+entry before returning. `"unsynced"` skips both, which is faster, but after a
+crash or power loss a replaced output can be empty or truncated and a new
+output can be empty, and write-back errors (network filesystems, quotas,
+delayed allocation) are not reported, so success does not prove the bytes
+reached the disk. Any other value raises `InvalidConfigurationError` with
+`setting == "durability"`.
+
 ### `extract_archive_with_progress(archive_path, output_dir, config, progress)`
 
 Extract an archive with a progress callback. The GIL is held when a callback is provided and released otherwise.

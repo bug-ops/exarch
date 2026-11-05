@@ -543,11 +543,16 @@ pub enum ArchiveError {
         path: PathBuf,
     },
 
-    /// Source path is not accessible.
-    #[error("source path is not accessible: {path}")]
+    /// A creation source exists but cannot be read.
+    ///
+    /// Covers opening, reading, listing and resolving a source, so `error`
+    /// keeps the cause (permission, I/O failure, link loop).
+    #[error("source path is not accessible: {path}: {error}")]
     SourceNotAccessible {
         /// The source path.
         path: PathBuf,
+        /// The failure that made the source unreadable.
+        error: std::io::Error,
     },
 
     /// Output file already exists.
@@ -1344,10 +1349,12 @@ mod tests {
     fn test_source_not_accessible_error() {
         let err = ArchiveError::SourceNotAccessible {
             path: PathBuf::from("/restricted/path"),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         };
         let display = err.to_string();
         assert!(display.contains("source path is not accessible"));
         assert!(display.contains("/restricted/path"));
+        assert!(display.contains("permission denied"));
         assert!(!err.is_security_violation());
     }
 

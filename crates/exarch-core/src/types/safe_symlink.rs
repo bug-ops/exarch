@@ -16,6 +16,7 @@ use super::safe_path::check_component_for;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
+use crate::security::fs_view::LinkBase;
 use crate::security::fs_view::ModelRoot as _;
 
 /// A validated symlink that is safe for extraction.
@@ -84,6 +85,15 @@ impl SafeSymlink {
     ///    be resolved against the extracted tree is rejected
     /// 7. Verify resolved target stays within destination directory
     ///
+    /// # Destination handle
+    ///
+    /// On Unix and WASI the target is resolved handle-relatively from the
+    /// destination, which this call opens by its path each time. An
+    /// extraction validates against the descriptor it holds for its whole run
+    /// instead, so a caller that extracts while the destination path may be
+    /// replaced must use the extraction API rather than this function. On other
+    /// platforms the target is resolved by path.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
@@ -135,7 +145,6 @@ impl<P: ParentCheck> SafeSymlink<P> {
         config: &SecurityConfig,
         view: &V,
     ) -> Result<Self> {
-        let dest = root.as_path();
         require_symlinks_allowed(config)?;
 
         // 1.5. Reject empty targets: an empty target does not point anywhere
@@ -202,24 +211,16 @@ impl<P: ParentCheck> SafeSymlink<P> {
             .into());
         }
 
-        // 3. Verify the parent directory chain (not the link itself, which
-        //    extraction skips or replaces) contains no symlinks (TOCTOU
-        //    protection)
-        // This prevents race conditions where an attacker replaces a parent
-        // directory with a symlink between validation and extraction
-        // time.
-        verify_parent_not_symlink(link.as_path(), dest, view)?;
-
-        // 4. Resolve target against link's parent directory, following any
-        // on-disk symlinks encountered during traversal.
+        // 3-4. Verify the parent directory chain (not the link itself, which
+        // extraction skips or replaces) contains no symlinks, and resolve the
+        // target against the link's parent directory, following any on-disk
+        // symlinks encountered during traversal.
         //
         // String-based normalization is insufficient: a target component that
         // is already a symlink written to disk by a previous entry can redirect
         // subsequent `..` traversal outside the extraction root (two-hop chain,
         // GHSA-83g3-92jg-28cx variant — issue #116).
-        let link_parent = link.as_path().parent().unwrap_or_else(|| Path::new(""));
-        let link_parent_full = dest.join(link_parent);
-        resolve_through_symlinks_in(&link_parent_full, target, root, link.as_path(), view)?;
+        view.resolve_link_target(link.as_path(), target, LinkBase::LinkDirectory, root)?;
 
         Ok(Self {
             link: link.clone(),
@@ -334,23 +335,68 @@ fn verify_parent_not_symlink<V: FsView>(path: &Path, dest: &Path, view: &V) -> R
     for component in path.parent().unwrap_or_else(|| Path::new("")).components() {
         current.push(component);
 
-        // Check if current path exists and is a symlink
-        if view.exists(&current) {
-            let is_symlink =
-                view.is_symlink(&current)
-                    .map_err(|_| ArchiveError::SymlinkEscape {
-                        path: path.to_path_buf(),
-                    })?;
-
-            if is_symlink {
+        match probe_is_symlink(view, &current, path)? {
+            Some(true) => {
                 return Err(ArchiveError::SymlinkEscape {
                     path: path.to_path_buf(),
                 });
             }
+            Some(false) => {}
+            None => break,
         }
     }
 
     Ok(())
+}
+
+/// The path-keyed form of [`FsView::resolve_link_target`]: vets the parents of
+/// `link` for [`LinkBase::LinkDirectory`], then resolves `target` through
+/// `view`'s probes.
+///
+/// # Errors
+///
+/// See [`FsView::resolve_link_target`].
+pub(crate) fn resolve_link_target_by_path<V: FsView>(
+    view: &V,
+    link: &Path,
+    target: &Path,
+    base: LinkBase,
+    root: &V::Root,
+) -> Result<PathBuf> {
+    let dest = root.as_path();
+    let start = match base {
+        LinkBase::LinkDirectory => {
+            verify_parent_not_symlink(link, dest, view)?;
+            dest.join(link.parent().unwrap_or_else(|| Path::new("")))
+        }
+        LinkBase::Destination => dest.to_path_buf(),
+    };
+    resolve_through_symlinks_in(&start, target, root, link, view)
+}
+
+/// Asks `view` whether `path` is a symlink, failing closed.
+///
+/// `None` means nothing exists at `path` (missing, or below a file), so
+/// nothing can lie below it either. A name past the host limit is the usual
+/// name-too-long refusal; any other failure to inspect `path` refuses the link.
+fn probe_is_symlink<V: FsView>(view: &V, path: &Path, link_path: &Path) -> Result<Option<bool>> {
+    match view.is_symlink(path) {
+        Ok(is_symlink) => Ok(Some(is_symlink)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidFilename => {
+            Err(ArchiveError::Io(error))
+        }
+        Err(_) => Err(ArchiveError::SymlinkEscape {
+            path: link_path.to_path_buf(),
+        }),
+    }
 }
 
 /// Resolves `target` step by step from `start`, following any on-disk symlinks
@@ -375,17 +421,7 @@ fn verify_parent_not_symlink<V: FsView>(path: &Path, dest: &Path, view: &V) -> R
 ///   of `start`.
 /// - `fs::canonicalize` fails for a symlink component (e.g., `ELOOP` for
 ///   circular chains).
-pub(crate) fn resolve_through_symlinks(
-    start: &Path,
-    target: &Path,
-    dest: &DestDir,
-    link_path: &Path,
-) -> Result<PathBuf> {
-    resolve_through_symlinks_in(start, target, dest, link_path, &HostFs)
-}
-
-/// [`resolve_through_symlinks`] against an arbitrary [`FsView`].
-pub(crate) fn resolve_through_symlinks_in<V: FsView>(
+fn resolve_through_symlinks_in<V: FsView>(
     start: &Path,
     target: &Path,
     root: &V::Root,
@@ -402,7 +438,7 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
                 // resolve it before applying `..` so the pop
                 // operates on the real filesystem topology
                 // rather than the string representation.
-                if view.is_symlink(&current).unwrap_or(false) {
+                if probe_is_symlink(view, &current, link_path)? == Some(true) {
                     current = canonical_within(view, &current, root, link_path)?;
                 }
                 if !(start.starts_with(&current) || view.is_dir(&current)) || !current.pop() {
@@ -416,7 +452,7 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
                 current.push(name);
                 // Resolve the component immediately if it is a symlink so that
                 // any subsequent `..` steps use the real resolved path.
-                if view.is_symlink(&current).unwrap_or(false) {
+                if probe_is_symlink(view, &current, link_path)? == Some(true) {
                     current = canonical_within(view, &current, root, link_path)?;
                 }
             }
@@ -500,7 +536,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_target_through_a_link_past_the_host_path_limit_is_a_length_refusal_not_an_escape() {
+    fn a_target_through_a_link_past_the_host_path_limit_resolves_handle_relatively() {
         use crate::formats::dir_walker::DirWalker;
         use crate::formats::pinned_dir::PinnedRoot;
         use crate::security::fs_view::MAX_SYMLINK_TARGET_LEN;
@@ -518,11 +554,7 @@ mod tests {
 
         let result = SafeSymlink::validate(&link, Path::new("s/x"), &dest, &config);
 
-        assert_matches!(
-            result,
-            Err(ArchiveError::Io(ref error)) if error.kind() == std::io::ErrorKind::InvalidFilename,
-            "{result:?}"
-        );
+        assert_matches!(result, Ok(_), "{result:?}");
     }
 
     #[test]
@@ -1225,6 +1257,37 @@ mod tests {
         }
 
         #[test]
+        fn a_target_below_a_file_resolves_the_same_in_both_views() {
+            assert_matches!(
+                host_resolve(
+                    |root| std::fs::write(root.join("f"), b"x").expect("file"),
+                    "",
+                    "f/x"
+                ),
+                Ok(_)
+            );
+            assert_matches!(tree_resolve(|t| put(t, "f", Node::File), "", "f/x"), Ok(_));
+        }
+
+        #[test]
+        fn a_parent_chain_through_a_file_is_not_a_symlink_refusal_in_both_views() {
+            let temp = TempDir::new().expect("tempdir");
+            let root = temp.path().canonicalize().expect("canonical root");
+            std::fs::write(root.join("f"), b"x").expect("file");
+            assert_matches!(
+                verify_parent_not_symlink(Path::new("f/g/l"), &root, &HostFs),
+                Ok(())
+            );
+
+            let mut tree = VirtualTree::for_test(&VirtualRoot::at("/dest"));
+            put(&mut tree, "f", Node::File);
+            assert_matches!(
+                verify_parent_not_symlink(Path::new("f/g/l"), Path::new("/dest"), &tree),
+                Ok(())
+            );
+        }
+
+        #[test]
         fn parent_dir_after_symlinked_directory_uses_resolved_location() {
             assert_matches!(
                 tree_resolve(
@@ -1236,6 +1299,390 @@ mod tests {
                     "x/.."
                 ),
                 Ok(_)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    mod link_table {
+        use super::*;
+        use crate::formats::pinned_dir::PinnedRoot;
+        use crate::security::fs_view::Node;
+        use crate::security::fs_view::PinnedHostFs;
+        use crate::security::fs_view::VirtualRoot;
+        use crate::security::fs_view::VirtualTree;
+
+        struct Case {
+            name: &'static str,
+            dirs: &'static [&'static str],
+            files: &'static [&'static str],
+            links: &'static [(&'static str, &'static str)],
+            link: &'static str,
+            target: &'static str,
+            accepted: bool,
+        }
+
+        const fn case(
+            name: &'static str,
+            link: &'static str,
+            target: &'static str,
+            accepted: bool,
+        ) -> Case {
+            Case {
+                name,
+                dirs: &[],
+                files: &[],
+                links: &[],
+                link,
+                target,
+                accepted,
+            }
+        }
+
+        const CASES: &[Case] = &[
+            case(
+                "implicit parent, dotdot back into the root",
+                "newdir/l",
+                "../x",
+                true,
+            ),
+            case(
+                "implicit parents, dotdot past the root",
+                "newdir/l",
+                "../../x",
+                false,
+            ),
+            case("dotdot past the root", "l", "../x", false),
+            case("missing name then dotdot", "l", "d/..", false),
+            Case {
+                files: &["f"],
+                ..case("below a file", "l", "f/x", true)
+            },
+            Case {
+                files: &["f"],
+                ..case("dotdot out of a file", "l", "f/..", false)
+            },
+            Case {
+                dirs: &["d"],
+                ..case("dotdot out of a directory", "l", "d/../x", true)
+            },
+            Case {
+                dirs: &["d"],
+                links: &[("s", "d")],
+                ..case("through a link to a directory", "l", "s/x", true)
+            },
+            Case {
+                dirs: &["d"],
+                links: &[("s", "d")],
+                ..case("dotdot out of a link to a directory", "l", "s/../x", true)
+            },
+            Case {
+                links: &[("s", "missing")],
+                ..case("through a dangling link", "l", "s/x", false)
+            },
+            Case {
+                links: &[("s", "..")],
+                ..case("through a link out of the root", "l", "s/x", false)
+            },
+            Case {
+                dirs: &["d"],
+                links: &[("s", "d")],
+                ..case("parent that is a link", "s/l", "x", false)
+            },
+            Case {
+                files: &["f"],
+                ..case("parent chain below a file", "f/g/l", "x", true)
+            },
+            Case {
+                dirs: &["a", "b"],
+                links: &[("a/up", "../b")],
+                ..case("link chain back into a sibling", "l", "a/up/x", true)
+            },
+        ];
+
+        fn host_dest(case: &Case) -> (TempDir, DestDir) {
+            let temp = TempDir::new().expect("tempdir");
+            let root = temp.path().canonicalize().expect("canonical root");
+            for dir in case.dirs {
+                std::fs::create_dir_all(root.join(dir)).expect("dir");
+            }
+            for file in case.files {
+                std::fs::write(root.join(file), b"x").expect("file");
+            }
+            for (name, target) in case.links {
+                std::os::unix::fs::symlink(target, root.join(name)).expect("link");
+            }
+            let dest = DestDir::new(root).expect("dest");
+            (temp, dest)
+        }
+
+        fn tree_of(case: &Case) -> VirtualTree {
+            let mut tree = VirtualTree::for_test(&VirtualRoot::at("/dest"));
+            let mut put = |path: &str, node: Node| {
+                tree.insert(Path::new(path), node).expect("insert");
+            };
+            for dir in case.dirs {
+                put(dir, Node::Dir);
+            }
+            for file in case.files {
+                put(file, Node::File);
+            }
+            for (name, target) in case.links {
+                put(name, Node::Symlink(PathBuf::from(target)));
+            }
+            tree
+        }
+
+        fn verdict(result: &Result<PathBuf>, case: &Case, view: &str) {
+            let accepted = result.is_ok();
+            assert_eq!(
+                accepted, case.accepted,
+                "{} ({view}): {result:?}",
+                case.name
+            );
+            if let Err(error) = result {
+                assert_matches!(error, ArchiveError::SymlinkEscape { .. }, "{}", case.name);
+            }
+        }
+
+        #[test]
+        fn every_view_gives_the_same_verdict() {
+            for case in CASES {
+                let (link, target) = (Path::new(case.link), Path::new(case.target));
+                let base = LinkBase::LinkDirectory;
+
+                let (_temp, dest) = host_dest(case);
+                verdict(
+                    &resolve_link_target_by_path(&HostFs, link, target, base, &dest),
+                    case,
+                    "path",
+                );
+                verdict(
+                    &HostFs.resolve_link_target(link, target, base, &dest),
+                    case,
+                    "handle",
+                );
+                let pinned = PinnedRoot::open_for_test(dest.as_path()).expect("pin");
+                verdict(
+                    &PinnedHostFs::new(&pinned).resolve_link_target(link, target, base, &dest),
+                    case,
+                    "pinned",
+                );
+
+                let root = VirtualRoot::at("/dest");
+                verdict(
+                    &tree_of(case).resolve_link_target(link, target, base, &root),
+                    case,
+                    "virtual",
+                );
+            }
+        }
+
+        #[test]
+        fn a_hardlink_target_resolves_from_the_destination_in_every_view() {
+            let case = Case {
+                dirs: &["d"],
+                links: &[("s", "d")],
+                ..case("hardlink through a link", "x/h", "s/../d/f", true)
+            };
+            let (link, target) = (Path::new(case.link), Path::new(case.target));
+            let base = LinkBase::Destination;
+            let (_temp, dest) = host_dest(&case);
+            verdict(
+                &resolve_link_target_by_path(&HostFs, link, target, base, &dest),
+                &case,
+                "path",
+            );
+            verdict(
+                &HostFs.resolve_link_target(link, target, base, &dest),
+                &case,
+                "handle",
+            );
+            let root = VirtualRoot::at("/dest");
+            verdict(
+                &tree_of(&case).resolve_link_target(link, target, base, &root),
+                &case,
+                "virtual",
+            );
+        }
+    }
+
+    mod failing_probes {
+        use super::*;
+        use crate::security::fs_view::Containment;
+        use std::io::ErrorKind;
+
+        /// Host view whose `is_symlink` fails with `kind` at one path.
+        struct FailingProbe {
+            at: PathBuf,
+            kind: ErrorKind,
+        }
+
+        impl FsView for FailingProbe {
+            type Root = DestDir;
+
+            fn path_model(&self) -> crate::security::fs_view::PathModel {
+                HostFs.path_model()
+            }
+
+            fn exists(&self, path: &Path) -> bool {
+                HostFs.exists(path)
+            }
+
+            fn is_dir(&self, path: &Path) -> bool {
+                HostFs.is_dir(path)
+            }
+
+            fn is_symlink(&self, path: &Path) -> std::io::Result<bool> {
+                if path == self.at {
+                    return Err(self.kind.into());
+                }
+                HostFs.is_symlink(path)
+            }
+
+            fn canonicalize(&self, path: &Path, root: &DestDir) -> std::io::Result<Containment> {
+                HostFs.canonicalize(path, root)
+            }
+        }
+
+        const LINK: &str = "link";
+
+        fn fixture() -> (TempDir, PathBuf, DestDir) {
+            let temp = TempDir::new().expect("tempdir");
+            let root = temp.path().canonicalize().expect("canonical root");
+            std::fs::create_dir_all(root.join("a/b/c")).expect("deep fixture");
+            let dest = DestDir::new(root.clone()).expect("dest");
+            (temp, root, dest)
+        }
+
+        fn resolve_with(kind: ErrorKind) -> Result<PathBuf> {
+            let (_temp, root, dest) = fixture();
+            let view = FailingProbe {
+                at: root.join("a/b"),
+                kind,
+            };
+            resolve_through_symlinks_in(&root, Path::new("a/b/c/x"), &dest, Path::new(LINK), &view)
+        }
+
+        fn verify_with(kind: ErrorKind) -> Result<()> {
+            let (_temp, root, _dest) = fixture();
+            let view = FailingProbe {
+                at: root.join("a/b"),
+                kind,
+            };
+            verify_parent_not_symlink(Path::new("a/b/c/l"), &root, &view)
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Verdict {
+            Absent,
+            Refused,
+            TooLong,
+        }
+
+        fn verdict_of<T: std::fmt::Debug>(result: &Result<T>) -> Verdict {
+            match result {
+                Ok(_) => Verdict::Absent,
+                Err(ArchiveError::SymlinkEscape { .. }) => Verdict::Refused,
+                Err(ArchiveError::Io(e)) if e.kind() == ErrorKind::InvalidFilename => {
+                    Verdict::TooLong
+                }
+                Err(other) => panic!("unexpected refusal: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_probe_that_fails_is_judged_the_same_for_parents_and_targets() {
+            const TABLE: &[(ErrorKind, Verdict)] = &[
+                (ErrorKind::NotFound, Verdict::Absent),
+                (ErrorKind::NotADirectory, Verdict::Absent),
+                (ErrorKind::PermissionDenied, Verdict::Refused),
+                (ErrorKind::Other, Verdict::Refused),
+                (ErrorKind::InvalidFilename, Verdict::TooLong),
+            ];
+            for &(kind, expected) in TABLE {
+                assert_eq!(
+                    verdict_of(&resolve_with(kind)),
+                    expected,
+                    "target, {kind:?}"
+                );
+                assert_eq!(verdict_of(&verify_with(kind)), expected, "parent, {kind:?}");
+            }
+        }
+
+        #[test]
+        fn a_name_past_the_host_limit_is_judged_by_the_host_probe_itself() {
+            let (_temp, root, dest) = fixture();
+            let long = "a".repeat(300);
+            assert_eq!(
+                verdict_of(&verify_parent_not_symlink(
+                    Path::new(&format!("{long}/l")),
+                    &root,
+                    &HostFs
+                )),
+                Verdict::TooLong
+            );
+            assert_eq!(
+                verdict_of(&resolve_through_symlinks_in(
+                    &root,
+                    Path::new(&format!("{long}/x")),
+                    &dest,
+                    Path::new(LINK),
+                    &HostFs
+                )),
+                Verdict::TooLong
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_file_in_the_way_is_absence_for_host_and_model_alike() {
+            use crate::security::fs_view::Node;
+            use crate::security::fs_view::VirtualRoot;
+            use crate::security::fs_view::VirtualTree;
+
+            let (_temp, root, dest) = fixture();
+            std::fs::write(root.join("f"), b"x").expect("file");
+            let mut tree = VirtualTree::for_test(&VirtualRoot::at("/dest"));
+            tree.insert(Path::new("f"), Node::File).expect("insert");
+            let virtual_root = VirtualRoot::at("/dest");
+
+            for (link, target) in [("f/l", "x"), ("f/g/l", "x"), ("l", "f/x"), ("l", "f/g/x")] {
+                let host =
+                    verify_parent_not_symlink(Path::new(link), &root, &HostFs).and_then(|()| {
+                        resolve_through_symlinks_in(
+                            &root,
+                            Path::new(target),
+                            &dest,
+                            Path::new(link),
+                            &HostFs,
+                        )
+                        .map(drop)
+                    });
+                let model = verify_parent_not_symlink(Path::new(link), Path::new("/dest"), &tree)
+                    .and_then(|()| {
+                        resolve_through_symlinks_in(
+                            Path::new("/dest"),
+                            Path::new(target),
+                            &virtual_root,
+                            Path::new(link),
+                            &tree,
+                        )
+                        .map(drop)
+                    });
+                assert_eq!(verdict_of(&host), Verdict::Absent, "{link} -> {target}");
+                assert_eq!(verdict_of(&model), Verdict::Absent, "{link} -> {target}");
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_dangling_link_in_the_parent_chain_is_refused() {
+            let (_temp, root, _dest) = fixture();
+            std::os::unix::fs::symlink("missing", root.join("d")).expect("dangling link");
+            assert_matches!(
+                verify_parent_not_symlink(Path::new("d/l"), &root, &HostFs),
+                Err(ArchiveError::SymlinkEscape { .. })
             );
         }
     }

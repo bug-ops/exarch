@@ -40,6 +40,7 @@ _UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "si
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
+_Durability = Literal["synced", "unsynced"]
 _InvalidArchiveSubCode = Literal[
     "TAR_AMBIGUITY",
     "TAR_TRAILER",
@@ -125,6 +126,7 @@ _ConfigSetting = Literal[
     "decode_reuse",
     "decode_reuse_limit",
     "skip_kind",
+    "durability",
 ]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 
@@ -1313,6 +1315,7 @@ def create_archive(
     config: CreationConfig | None = None,
     format: _CreatableFormat | None = None,
     overwrite: bool = True,
+    durability: _Durability = "synced",
 ) -> CreationReport:
     """
     Create an archive from source files and directories.
@@ -1330,6 +1333,11 @@ def create_archive(
             "Zip" for a ``.whl``); None detects it from the extension
         overwrite: Replace an existing regular file or symlink, keeping its
             permission bits (default); False refuses any existing output
+        durability: "synced" (default) flushes the archive and its directory
+            entry before returning. "unsynced" skips both: faster, but after a
+            crash or power loss a replaced output can be empty or truncated and
+            a new output can be empty, and write-back errors (network
+            filesystems, quotas, delayed allocation) are not reported
 
     Returns:
         CreationReport with creation statistics
@@ -1350,11 +1358,12 @@ def create_archive_with_progress(
     progress: ProgressCallbackFn | None = None,
     format: _CreatableFormat | None = None,
     overwrite: bool = True,
+    durability: _Durability = "synced",
 ) -> CreationReport:
     """
     Create an archive with progress reporting.
 
-    ``format`` and ``overwrite`` are as in create_archive.
+    ``format``, ``overwrite`` and ``durability`` are as in create_archive.
 
     Args:
         output_path: Path to output archive file (str or pathlib.Path)
@@ -1826,8 +1835,12 @@ class SourceNotFoundError(ArchiveError, FileNotFoundError):
 
     ...
 
-class SourceNotAccessibleError(ArchiveError, PermissionError):
-    """A source path cannot be read (``code == "SOURCE_NOT_ACCESSIBLE"``)."""
+class SourceNotAccessibleError(ArchiveError, OSError):
+    """
+    A source path exists but cannot be read (``code == "SOURCE_NOT_ACCESSIBLE"``).
+
+    ``errno`` and ``strerror`` carry the OS error when there is one.
+    """
 
     ...
 

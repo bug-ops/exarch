@@ -1077,7 +1077,7 @@ impl VerificationIssue {
                 IssueCategory::InvalidArchive,
                 format!("Source not found: {}", path.display()),
             ),
-            ArchiveError::SourceNotAccessible { path } => (
+            ArchiveError::SourceNotAccessible { path, .. } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
                 format!("Source not accessible: {}", path.display()),
@@ -1607,7 +1607,10 @@ mod tests {
         let path = PathBuf::from("C:\\out\\a.tar");
         let errors = [
             ArchiveError::SourceNotFound { path: path.clone() },
-            ArchiveError::SourceNotAccessible { path: path.clone() },
+            ArchiveError::SourceNotAccessible {
+                path: path.clone(),
+                error: std::io::Error::other("test"),
+            },
             ArchiveError::OutputExists { path: path.clone() },
             ArchiveError::UnknownFormat { path: path.clone() },
         ];
@@ -1976,6 +1979,7 @@ mod tests {
     fn test_verification_issue_from_source_not_accessible() {
         let error = ArchiveError::SourceNotAccessible {
             path: PathBuf::from("/restricted"),
+            error: std::io::Error::other("test"),
         };
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity(), IssueSeverity::High);

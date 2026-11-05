@@ -20,7 +20,9 @@ use config::PyVerificationOptions;
 use error::convert_error;
 use error::register_exceptions;
 use exarch_core::BoundaryPath;
+use exarch_core::ConfigSetting;
 use exarch_core::CreateRequest;
+use exarch_core::Durability;
 use exarch_core::ExtractRequest;
 use exarch_core::ListRequest;
 use exarch_core::OutputFile;
@@ -236,6 +238,11 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
 ///   `"Zip"` for a `.whl`); `None` detects it from the extension
 /// * `overwrite` - Replace an existing regular file or symlink, keeping its
 ///   permission bits (default); `False` refuses any existing output
+/// * `durability` - `"synced"` (default) flushes the archive and its directory
+///   entry before returning; `"unsynced"` skips both, which is faster but after
+///   a crash or power loss a replaced output can be empty or truncated and a
+///   new output can be empty, and write-back errors (network filesystems,
+///   quotas, delayed allocation) are not reported
 ///
 /// The archive is written to a temporary file next to `output_path` (whose
 /// directory must be writable) and renamed into place when complete, so a
@@ -272,7 +279,7 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
     clippy::needless_pass_by_value,
     reason = "pyo3 cannot extract `&str` under abi3-py39"
 )]
-#[pyo3(signature = (output_path, sources, config=None, format=None, overwrite=true))]
+#[pyo3(signature = (output_path, sources, config=None, format=None, overwrite=true, durability=None))]
 fn create_archive(
     py: Python<'_>,
     output_path: &Bound<'_, PyAny>,
@@ -280,6 +287,7 @@ fn create_archive(
     config: Option<&PyCreationConfig>,
     format: Option<String>,
     overwrite: bool,
+    durability: Option<String>,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_boundary(py, output_path)?;
 
@@ -292,7 +300,12 @@ fn create_archive(
 
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let output = output_file(&output_path, overwrite, format.as_deref())?;
+    let output = output_file(
+        &output_path,
+        overwrite,
+        format.as_deref(),
+        durability.as_deref(),
+    )?;
 
     let report = catch_panic_as_py_err("archive creation", || {
         py.detach(|| CreateRequest::new(config_ref).create(&output, &source_paths))
@@ -302,18 +315,28 @@ fn create_archive(
 }
 
 /// The output file of a creation: replaced or refused when it exists, in the
-/// stated format or the one its extension names.
-fn output_file(path: &BoundaryPath, overwrite: bool, format: Option<&str>) -> PyResult<OutputFile> {
+/// stated format or the one its extension names, flushed or not.
+fn output_file(
+    path: &BoundaryPath,
+    overwrite: bool,
+    format: Option<&str>,
+    durability: Option<&str>,
+) -> PyResult<OutputFile> {
     let path = AsRef::<Path>::as_ref(path).to_path_buf();
     let output = if overwrite {
         OutputFile::replace(path)
     } else {
         OutputFile::create_new(path)
     };
-    match format {
-        Some(format) => buffer::parse_creatable_format(format).map(|f| output.with_format(f)),
-        None => Ok(output),
-    }
+    let output = match format {
+        Some(format) => output.with_format(buffer::parse_creatable_format(format)?),
+        None => output,
+    };
+    let durability = durability
+        .map(|value| buffer::parse_one::<Durability>(ConfigSetting::Durability, value))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(output.with_durability(durability))
 }
 
 /// List archive contents without extracting.
@@ -434,6 +457,7 @@ fn verify_archive(
 /// * `progress` - Optional progress callback function
 /// * `format` - As in `create_archive`
 /// * `overwrite` - As in `create_archive`
+/// * `durability` - As in `create_archive`
 ///
 /// Progress callback signature: `(path: str, total: int | None, current: int,
 /// bytes_written: int) -> None`; `current` counts from 1 and `total` is `None`
@@ -478,9 +502,10 @@ fn verify_archive(
 #[pyfunction]
 #[expect(
     clippy::needless_pass_by_value,
-    reason = "pyo3 cannot extract `&str` under abi3-py39"
+    clippy::too_many_arguments,
+    reason = "pyo3 cannot extract `&str` under abi3-py39; the keyword arguments are the Python signature"
 )]
-#[pyo3(signature = (output_path, sources, config=None, progress=None, format=None, overwrite=true))]
+#[pyo3(signature = (output_path, sources, config=None, progress=None, format=None, overwrite=true, durability=None))]
 fn create_archive_with_progress(
     py: Python<'_>,
     output_path: &Bound<'_, PyAny>,
@@ -489,6 +514,7 @@ fn create_archive_with_progress(
     progress: Option<Py<PyAny>>,
     format: Option<String>,
     overwrite: bool,
+    durability: Option<String>,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_boundary(py, output_path)?;
 
@@ -502,7 +528,12 @@ fn create_archive_with_progress(
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let output = output_file(&output_path, overwrite, format.as_deref())?;
+    let output = output_file(
+        &output_path,
+        overwrite,
+        format.as_deref(),
+        durability.as_deref(),
+    )?;
 
     let report = catch_panic_as_py_result("archive creation with progress", || {
         run_create_with_optional_progress(py, &output, &source_paths, config_ref, progress)

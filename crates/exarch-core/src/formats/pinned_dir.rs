@@ -379,9 +379,11 @@ mod imp {
         }
 
         /// Reads the target of the symlink `name`.
-        #[cfg(unix)]
         pub(crate) fn read_link(&self, name: Leaf<'_>) -> io::Result<std::path::PathBuf> {
+            #[cfg(unix)]
             use std::os::unix::ffi::OsStringExt;
+            #[cfg(target_os = "wasi")]
+            use std::os::wasi::ffi::OsStringExt;
 
             let target = rustix::fs::readlinkat(&self.0, name.as_os_str(), Vec::new())?;
             Ok(std::path::PathBuf::from(std::ffi::OsString::from_vec(
@@ -1007,7 +1009,7 @@ mod windows_tests {
             .ok()?;
         out.status
             .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .then(|| String::from_utf8_lossy_owned(out.stdout).trim().to_owned())
     }
 
     #[test]

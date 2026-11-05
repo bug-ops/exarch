@@ -66,13 +66,10 @@ describe('createArchiveToBytes', () => {
     });
   }
 
-  it('rejects SevenZ', async () => {
-    await assert.rejects(createArchiveToBytes([source], 'SevenZ'), {
-      code: 'INVALID_CONFIGURATION',
-    });
-    assert.throws(() => createArchiveToBytesSync([source], 'SevenZ'), {
-      code: 'INVALID_CONFIGURATION',
-    });
+  it('refuses SevenZ at the boundary: it is not a creatable format', async () => {
+    const expected = { code: 'InvalidArg', message: /SevenZ.*CreatableFormat/ };
+    assert.throws(() => createArchiveToBytesSync([source], 'SevenZ'), expected);
+    assert.throws(() => createArchiveToBytes([source], 'SevenZ'), expected);
   });
 
   it('rejects a missing source', async () => {

@@ -10,6 +10,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::closed_enum::closed_enum;
+use crate::formats::detect::ExtractOnlyFormat;
 
 closed_enum! {
     /// A configuration value or required input that was refused.
@@ -83,6 +84,8 @@ closed_enum! {
         DecodeReuseLimit => "decode_reuse_limit",
         /// The kind of an entry skip.
         SkipKind => "skip_kind",
+        /// The durability of a created archive file.
+        Durability => "durability",
     }
 }
 
@@ -103,6 +106,7 @@ impl ConfigSetting {
     pub fn describe(self, problem: &ConfigProblem) -> String {
         match problem {
             ConfigProblem::NoneProvided => format!("no {} provided", self.label()),
+            ConfigProblem::NotCreatable { .. } => problem.to_string(),
             other => format!("{} {other}", self.label()),
         }
     }
@@ -116,7 +120,7 @@ impl ConfigSetting {
             Self::BannedPathComponent => "banned path component",
             Self::OutputPath => "output path",
             Self::SourcePaths => "source paths",
-            Self::CreationFormat => "7z archive creation",
+            Self::CreationFormat => "creation format",
             Self::AtomicExtraction => "atomic extraction",
             Self::ZipOutputWriter => "ZIP output writer",
             Self::ParallelDecodeMemory => "parallel decode memory",
@@ -137,6 +141,7 @@ impl ConfigSetting {
             | Self::MaxTarMetadataBytes
             | Self::MaxDecoderMemory
             | Self::StripPrefix
+            | Self::Durability
             | Self::MaxBytes => self.as_str(),
         }
     }
@@ -197,7 +202,15 @@ pub enum ConfigProblem {
     /// The entry is `.` or `..`.
     DotEntry,
     /// The value is not one of the allowed values.
-    NotOneOf,
+    NotOneOf {
+        /// The accepted string forms.
+        allowed: &'static [&'static str],
+    },
+    /// The format can be read but not created.
+    NotCreatable {
+        /// The extract-only format that was asked for.
+        format: ExtractOnlyFormat,
+    },
     /// The entry is longer than the maximum.
     TooLong {
         /// The longest accepted length in bytes.
@@ -285,7 +298,20 @@ impl fmt::Display for ConfigProblem {
         match self {
             Self::Zero => f.write_str("must not be zero"),
             Self::Negative => f.write_str("must not be negative"),
-            Self::NotOneOf => f.write_str("is not one of the allowed values"),
+            Self::NotOneOf { allowed } => {
+                write!(
+                    f,
+                    "is not one of the allowed values: {}",
+                    allowed.join(", ")
+                )
+            }
+            Self::NotCreatable { format } => {
+                write!(
+                    f,
+                    "{} archive creation is not supported",
+                    format.extension()
+                )
+            }
             Self::NotFinite => f.write_str("must be a finite number"),
             Self::NotWholeNumber => f.write_str("must be a whole number"),
             Self::TooLarge { max } => write!(f, "must not exceed {max}"),
@@ -383,7 +409,9 @@ mod tests {
             ),
             (
                 ConfigSetting::CreationFormat,
-                ConfigProblem::NotSupported,
+                ConfigProblem::NotCreatable {
+                    format: ExtractOnlyFormat::SevenZ,
+                },
                 "7z archive creation is not supported",
             ),
             (
@@ -393,8 +421,10 @@ mod tests {
             ),
             (
                 ConfigSetting::DecodeReuse,
-                ConfigProblem::NotOneOf,
-                "decode reuse is not one of the allowed values",
+                ConfigProblem::NotOneOf {
+                    allowed: crate::DecodeReuseKind::NAMES,
+                },
+                "decode reuse is not one of the allowed values: off, memory, temp_file",
             ),
             (
                 ConfigSetting::StripPrefix,

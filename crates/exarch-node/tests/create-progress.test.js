@@ -1,5 +1,5 @@
 /**
- * Tests for createArchiveWithProgress / createArchiveWithProgressSync,
+ * Tests for createArchiveWithProgress,
  * covering the #465 regression on the creation path: a throwing progress
  * callback must neither crash the process nor silently discard the result of
  * the creation that already ran.
@@ -118,8 +118,7 @@ describe('createArchiveWithProgress', () => {
           throw new Error('boom from progress callback');
         }),
       (err) => {
-        assert.strictEqual(err.code, 'IO_ERROR');
-        assert.strictEqual(err.ioKind, 'PermissionDenied');
+        assert.strictEqual(err.code, 'SOURCE_NOT_ACCESSIBLE');
         assert.ok(!err.message.includes('boom from progress callback'));
         assert.strictEqual(err.cause.message, 'boom from progress callback');
         return true;
@@ -305,91 +304,6 @@ describe('createArchiveWithProgress', () => {
         assert.strictEqual(err.cause.cause, 'Symbol(boom)');
         return true;
       }
-    );
-  });
-});
-
-describe('createArchiveWithProgressSync', () => {
-  let tempDir;
-  let sourceDir;
-  let outputPath;
-
-  beforeEach(() => {
-    tempDir = createTempDir();
-    sourceDir = path.join(tempDir, 'source');
-    fs.mkdirSync(sourceDir);
-    fs.writeFileSync(path.join(sourceDir, 'hello.txt'), 'Hello, World!');
-    outputPath = path.join(tempDir, 'output.tar.gz');
-  });
-
-  afterEach(() => {
-    if (tempDir && fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  // Every queued call is delivered only after this function has returned, so
-  // there is no result left to merge a callback throw into. The throw takes
-  // the ordinary deferred-callback route instead: an uncaughtException, which
-  // the caller can observe — unlike the async variant, it is NOT reported as
-  // a PROGRESS_CALLBACK_ERROR rejection.
-  const syncThrowScript = (thrown) => `
-    const exarch = require(${INDEX_JS});
-    process.on('uncaughtException', (err) => {
-      console.log('UNCAUGHT:' + (err && err.message ? err.message : String(err)));
-      process.exit(0);
-    });
-    const report = exarch.createArchiveWithProgressSync(
-      ${JSON.stringify(outputPath)},
-      [${JSON.stringify(sourceDir)}],
-      null,
-      () => { throw ${thrown}; },
-    );
-    console.log('RETURNED:' + report.filesAdded);
-  `;
-
-  it('returns the report and reports a throwing callback as an uncaughtException (child process)', () => {
-    const result = spawnSync(
-      process.execPath,
-      ['-e', syncThrowScript("new Error('boom from progress callback')")],
-      { encoding: 'utf8' }
-    );
-
-    assert.strictEqual(
-      result.status,
-      0,
-      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`
-    );
-    // The report is returned normally: the callback had not run yet.
-    assert.match(result.stdout, /RETURNED:1/);
-    assert.ok(
-      result.stdout.includes('UNCAUGHT:boom from progress callback'),
-      `expected the throw to surface as uncaughtException, got stdout=${result.stdout}`
-    );
-  });
-
-  // The primitive-throw crash that afflicts the async variants does NOT apply
-  // here: the sync path cannot await its dispatch (the blocked event loop is
-  // the only thing that can deliver it), so it never enters the napi-rs
-  // `call_async_catch` code path that mishandles primitive exception values.
-  it('reports a thrown primitive as an uncaughtException too, without crashing (child process)', () => {
-    const result = spawnSync(process.execPath, ['-e', syncThrowScript("'oops'")], {
-      encoding: 'utf8',
-    });
-
-    assert.strictEqual(
-      result.status,
-      0,
-      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`
-    );
-    assert.match(result.stdout, /RETURNED:1/);
-    assert.ok(
-      result.stdout.includes('UNCAUGHT:oops'),
-      `expected the primitive throw to surface as uncaughtException, got stdout=${result.stdout}`
-    );
-    assert.ok(
-      !result.stderr.includes('Call JavaScript callback failed'),
-      `sync dispatch must not hit the call_async_catch primitive bug, got stderr=${result.stderr}`
     );
   });
 });

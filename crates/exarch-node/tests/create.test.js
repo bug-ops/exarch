@@ -230,10 +230,27 @@ describe('createArchive output handling', () => {
     assert.strictEqual(listArchiveSync(outputPath).format, 'Zip');
   });
 
-  it('format SevenZ cannot be created', () => {
+  it('format SevenZ is not a creatable format and is refused at the boundary', () => {
     assert.throws(
       () => createArchiveSync(path.join(tempDir, 'a.7z'), [sourceDir], null, { format: 'SevenZ' }),
-      (err) => typeof err.code === 'string' && err.code !== 'GenericFailure'
+      { code: 'InvalidArg', message: /SevenZ.*CreatableFormat/ }
     );
+  });
+
+  for (const durability of ['synced', 'unsynced']) {
+    it(`durability ${durability} creates the archive`, () => {
+      const outputPath = path.join(tempDir, `${durability}.tar.gz`);
+      createArchiveSync(outputPath, [sourceDir], null, { durability });
+      assert.ok(listArchiveSync(outputPath).entries.length > 0);
+    });
+  }
+
+  it('an unknown durability is refused at the boundary and writes nothing', () => {
+    const outputPath = path.join(tempDir, 'never.tar.gz');
+    assert.throws(() => createArchiveSync(outputPath, [sourceDir], null, { durability: 'fsync' }), {
+      code: 'InvalidArg',
+      message: /fsync.*Durability/,
+    });
+    assert.ok(!fs.existsSync(outputPath));
   });
 });

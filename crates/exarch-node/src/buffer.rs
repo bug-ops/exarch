@@ -445,8 +445,7 @@ pub fn verify_archive_bytes_with_progress<'env>(
 /// Blocks the event loop until listing completes. Same as
 /// `listArchiveBytesWithProgress`, except that the calls to `progress` are
 /// queued and arrive only after this function has returned; a throw there
-/// becomes an `uncaughtException`, not an error from here (see
-/// `createArchiveWithProgressSync`).
+/// becomes an `uncaughtException`, not an error from here.
 ///
 /// # Arguments
 ///
@@ -504,8 +503,7 @@ pub fn list_archive_bytes_with_progress_sync(
 /// Blocks the event loop until verification completes. Same as
 /// `verifyArchiveBytesWithProgress`, except that the calls to `progress` are
 /// queued and arrive only after this function has returned; a throw there
-/// becomes an `uncaughtException`, not an error from here (see
-/// `createArchiveWithProgressSync`).
+/// becomes an `uncaughtException`, not an error from here.
 ///
 /// # Arguments
 ///

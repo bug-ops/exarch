@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-04
+updated: 2026-11-05
 status: draft
 related:
   - "[[constitution]]"
@@ -27,7 +27,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-node
-> **MSRV**: Rust 1.98.0
+> **MSRV**: Rust 1.99.1
 > **Build**: napi-rs 3.x + tokio runtime
 > **Source**: extracted from [[001-exarch-system/spec]]
 
@@ -130,7 +130,7 @@ THEN extraction respects those settings
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-080 | THE SYSTEM SHALL expose async Node.js functions returning Promises: `extractArchive`, `extractArchiveWithProgress`, `createArchive`, `createArchiveWithProgress`, `createArchiveWithProgressSync`, `listArchive`, `verifyArchive` (`createArchiveWithProgress`/`Sync` added v0.6.0, #455, mirroring the existing `extractArchiveWithProgress` async/sync pattern via the shared `NodeProgressAdapter`) | must |
+| FR-080 | THE SYSTEM SHALL expose async Node.js functions returning Promises: `extractArchive`, `extractArchiveWithProgress`, `createArchive`, `createArchiveWithProgress`, `listArchive`, `verifyArchive` (`createArchiveWithProgress` added v0.6.0, #455, via the shared `NodeProgressAdapter`; the `createArchiveWithProgressSync` variant was removed in #953 because a callback that throws cannot cancel a synchronous creation) | must |
 | FR-081 | ALL async operations SHALL run on the libuv thread pool, not the main event loop thread | must |
 | FR-082 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL throw a synchronous JavaScript Error before spawning a thread | must |
 | FR-083 | Every rejected Promise and synchronous throw SHALL be an `Error` (`ExarchError` in `index.d.ts`) whose `message` is the human-readable description only and whose machine-readable data is in typed properties built from `exarch_core::ArchiveError::into_ffi_message()` (BREAKING in v0.8.0, #758, #760, #768): `code` (`ErrorCode`, the stable upper-snake core code, or `PROGRESS_CALLBACK_ERROR`), `relaxableBy?` (`PolicySetting`), `writes?` (`PartialWrites`: `'kept'`, `'rolled_back'`, `'discarded'`), and, when `writes === 'kept'`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`; when `PartialExtraction` wraps an inner error, `code` is the inner error's code. The types `ErrorCode`, `PolicySetting`, `PartialWrites` and `ExarchError` (a union discriminated on `writes`, including `ExarchNativeError` for binding-raised errors whose `code` is napi's status string) are exported | must |
@@ -163,7 +163,8 @@ THEN extraction respects those settings
 | FR-110 | The progress callback tuple SHALL be `ProgressArgs = [path, total: number \| null, current, bytesWritten]` with `total` `null` while the count is unknown; reports SHALL carry `skipped: SkippedSummary { counts: { kind, count }[], sample: SkippedEntry[] }` (kind typed `SkipKind`, `ioKind?: IoKind`), `filesSkipped` is the total over all reasons, `warnings` stay `string[]`, and the error object of a kept partial extraction carries `skipped` as well as `filesSkipped`; the tuple is the exported alias `ProgressArgs` in every progress-taking function, listing and verification included (#904, #906) | must |
 | FR-111 | `VerificationIssue` SHALL carry `code`, `subCode`, `relaxableBy`, `setting` and `ioKind` from the core finding (typed as the generated fields intersected with `ExarchErrorCodeDetail \| HeuristicIssueDetail`); `context` is removed; `mode?: number` carries the raw mode of an invalid-permissions finding (#899) | must |
 | FR-112 | Listing SHALL refuse a non-UTF-8 entry name or link target with `INVALID_ARCHIVE` (`ENTRY_NAME`) through core `ArchiveEntry::utf8_path()`; verify issue paths, integrity gap paths, skip samples and progress paths SHALL use an injective `path_text` rendering (core `exarch_core::path_text`: `\` is written `\x5C`, each invalid Unix byte `\xNN`, each unpaired UTF-16 unit `\uNNNN`), so a literal name `a\xFFb` and a name with the byte 0xFF stay distinct; a caller cannot recover the original bytes (no `pathBytes` field); the `INVALID_ARCHIVE` error of a refused listing carries the same rendering as `nonUtf8EntryPath` (#925) | must |
-| FR-113 | `createArchive*` SHALL take an optional trailing `CreateOptions { format?: ArchiveType, overwrite?: boolean }` (`createArchiveWithProgress*` after the progress argument): the default replaces an existing output atomically (`OutputFile::replace`), `overwrite: false` maps to `create_new` and rejects with `OUTPUT_EXISTS`, `format` maps to `OutputFile::with_format` and `'SevenZ'` is refused; a failed creation leaves any previous archive untouched (see [[021-create-staging-and-output-policy/spec]]); a progress callback that throws cancels the creation of the async variants (the sync variant `createArchive*Sync` cannot cancel, follow-up #953; nothing is written, `PROGRESS_CALLBACK_ERROR`, typed `ExarchErrorReadCallback`/`ExarchErrorCreationCallback`); `addExcludePattern` parses with core `ExcludePattern::try_from` (#912, #915, #931, #916) | must |
+| FR-113 | `createArchive*` SHALL take an optional trailing `CreateOptions { format?: CreatableFormat, overwrite?: boolean, durability?: Durability }` (`createArchiveWithProgress` after the progress argument; `CreatableFormat` is a napi string enum without `'SevenZ'`, so `'SevenZ'` is a TypeScript compile error and a napi `InvalidArg` refusal; `Durability` is `'Synced' | 'Unsynced'`, see [[021-create-staging-and-output-policy/spec]] FR-027): the default replaces an existing output atomically (`OutputFile::replace`), `overwrite: false` maps to `create_new` and rejects with `OUTPUT_EXISTS`, `format` maps to `OutputFile::with_format` and `'SevenZ'` is refused; a failed creation leaves any previous archive untouched (see [[021-create-staging-and-output-policy/spec]]); a progress callback that throws cancels the creation (nothing is written, `PROGRESS_CALLBACK_ERROR`, typed `ExarchErrorReadCallback`/`ExarchErrorCreationCallback`); `addExcludePattern` parses with core `ExcludePattern::try_from` (#912, #915, #931, #916) | must |
+| FR-114 | `createArchiveToBytes` and `createArchiveToBytesSync` SHALL take `format: CreatableFormat`; the Node `ConfigSetting` mirror SHALL include `'durability'`, and a test SHALL pin that the napi `CreatableFormat` and `Durability` values equal the core `NAMES` | must |
 
 ## 4. Non-Functional Requirements
 
@@ -234,7 +235,7 @@ function verifyArchive(
 function listArchiveBytes(data: Uint8Array, config?: SecurityConfig, format?: ArchiveType): Promise<ArchiveManifest>
 function verifyArchiveBytes(data: Uint8Array, config?: SecurityConfig, options?: VerificationOptions, format?: ArchiveType): Promise<VerificationReport>
 function extractArchiveToMemory(data: Uint8Array, config?: SecurityConfig, options?: SinkOptions, maxBytes?: number, pathModel?: PathModel, format?: ArchiveType): Promise<MemoryExtraction>
-function createArchiveToBytes(sources: string[], format: ArchiveType, config?: CreationConfig): Promise<CreatedArchive>
+function createArchiveToBytes(sources: string[], format: CreatableFormat, config?: CreationConfig): Promise<CreatedArchive>
 
 class SecurityConfig {
     setMaxFileSize(size: number): this
@@ -303,7 +304,7 @@ class ExtractionOptions {
 > the more realistic failure of forwarding an optional property that was never actually set (e.g.
 > `cfg.setAllowSymlinks(userOpts.allowSymlinks)` where `userOpts.allowSymlinks` is `undefined`).
 
-> [!note] Unreleased (v0.6.0): `createArchiveWithProgress`/`createArchiveWithProgressSync` (#455, #456)
+> [!note] Unreleased (v0.6.0): `createArchiveWithProgress` (#455, #456); the `Sync` variant was removed in #953
 > Mirror the existing `extractArchiveWithProgress` async/sync pattern, reusing
 > the core creation request (`CreateRequest::with_progress` since #912) and the existing `NodeProgressAdapter`
 > threadsafe-function bridge — no new core security logic. JS integration tests cover the
@@ -327,7 +328,7 @@ Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.
 | `InvalidConfiguration`, `ReaderFormat(NeedsSeek \| NotAtStart)` | `INVALID_CONFIGURATION` (also a rejected setter value), with `setting` naming the `ConfigSetting` when it names one (v0.8.0, #870, #894) |
 | `InvalidArchive` | `INVALID_ARCHIVE`, with `subCode` (an `InvalidArchiveSubCode`) set when the failure is classified: `TAR_AMBIGUITY`, `TAR_TRAILER`, `LINK_TARGET`, `DUPLICATE_ENTRY`, `ENTRY_NAME`, `DECLARED_SIZE`, `INTEGRITY`, `ZIP_READER`, `TAR_READER` or `SEVENZ_READER` (#865, #887, #889, #894, #946; see [[001-security-pipeline/spec]] FR-028) |
 | `Io` | `IO_ERROR`, with `ioKind` (an `IoKind`, fallback `'Other'`) |
-| `SourceNotFound`, `SourceNotAccessible`, `OutputExists`, `InvalidCompressionLevel` | `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`, `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL` |
+| `SourceNotFound`, `SourceNotAccessible`, `OutputExists`, `InvalidCompressionLevel` | `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`, `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL`; an unreadable creation source is `SOURCE_NOT_ACCESSIBLE` (was `IO_ERROR`), with the path and the I/O text redacted by the shared core redaction (#956) |
 | `PartialExtraction` | The inner error's `code`; `writes` is `'kept'` with `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` set, `'rolled_back'` after an atomic rollback, or `'discarded'` after an in-memory extraction, the last two without counters (v0.6.0, #508; v0.7.0, #735, #747; v0.8.0, #760, #800) |
 | progress callback threw | `PROGRESS_CALLBACK_ERROR` (Node-only), the throw as `cause` (FR-100) |
 | entry callback threw or rejected | `ENTRY_CALLBACK_ERROR` (Node-only), the thrown value as `cause` (FR-103, v0.8.0, #842) |
@@ -365,7 +366,6 @@ Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.
 | Progress callback throws an `Error`, object, or bare primitive during `extractArchiveWithProgress`/`createArchiveWithProgress` | Captured; rejects the returned Promise instead of crashing the process (v0.6.0, #465, #473); since v0.8.0 the rejection has `code` `PROGRESS_CALLBACK_ERROR` when the operation succeeded and the throw as `cause` |
 | `extractArchiveToMemory` with `atomic` or a `maxBytes` that is not a positive whole number, or `createArchiveToBytes` with `'SevenZ'` | Rejects with `INVALID_CONFIGURATION` (v0.8.0); a `format` or `pathModel` outside the string unions is a napi argument error, not a core code |
 | Format cannot be detected from the bytes | Rejects with `UNKNOWN_FORMAT` (v0.8.0) |
-| Progress callback throws during `createArchiveWithProgressSync` | Surfaces as an ordinary `uncaughtException` after the function has already returned its `CreationReport` — cannot be merged into the result (documented limitation, unaffected by #465/#473 since it never enters the awaiting dispatch path) |
 
 ## 7. Success Criteria
 

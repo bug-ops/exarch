@@ -707,3 +707,98 @@ fn kept_output_and_sink_stay_within_the_shared_limit_before_every_entry() {
         Retained::Bytes(bytes) if bytes == entries[0]
     );
 }
+
+fn ram_spooled(max: u64) -> ReuseStore {
+    let spool = TempSpool::with_backing(SpoolBacking::Ram).unwrap();
+    ReuseStore::with_spool(plan(DecodeReuse::TempFile(limit(max))), spool)
+}
+
+fn keyed(entries: &[Vec<u8>]) -> Vec<RetainKey> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, data)| RetainKey {
+            method: ZipMethod::Deflate,
+            data_start: i as u64,
+            ..key_of(data)
+        })
+        .collect()
+}
+
+#[test]
+fn a_ram_spool_is_charged_like_memory_and_evicts_by_truncation() {
+    let usage = SinkUsage::default();
+    let mut store = ram_spooled(1 << 20);
+    store.share_limit_with_sink(usage.clone(), 100);
+
+    let entries: Vec<Vec<u8>> = [40_u8, 30, 20]
+        .iter()
+        .map(|n| vec![*n; usize::from(*n)])
+        .collect();
+    let keys = keyed(&entries);
+    for (key, data) in keys.iter().zip(&entries) {
+        capture_all(&mut store, *key, data);
+    }
+    store.seal();
+    assert_eq!(store.used(), 90);
+
+    usage.set(50);
+    store.make_room(10);
+    assert_eq!(store.used(), 40);
+    assert!(store.holds(&keys[0]));
+    assert!(!store.holds(&keys[1]));
+    assert!(!store.holds(&keys[2]));
+    assert_eq!(replayed(&mut store, &keys[0]).unwrap(), entries[0]);
+
+    let again = vec![9_u8; 25];
+    let key = RetainKey {
+        data_start: 7,
+        ..key_of(&again)
+    };
+    capture_all(&mut store, key, &again);
+    store.seal();
+    assert_eq!(replayed(&mut store, &key).unwrap(), again);
+}
+
+#[test]
+fn a_disk_spool_is_not_evicted_by_the_sink_budget() {
+    let usage = SinkUsage::default();
+    let mut store = spooled(1 << 20);
+    store.share_limit_with_sink(usage.clone(), 100);
+    let entries = vec![vec![1_u8; 40], vec![2_u8; 40]];
+    let keys = keyed(&entries);
+    for (key, data) in keys.iter().zip(&entries) {
+        capture_all(&mut store, *key, data);
+    }
+    usage.set(90);
+    store.make_room(10);
+    assert!(keys.iter().all(|key| store.holds(key)));
+}
+
+#[test]
+fn eviction_never_cuts_below_the_entry_just_taken() {
+    let usage = SinkUsage::default();
+    let mut store = ram_spooled(1 << 20);
+    store.share_limit_with_sink(usage.clone(), 100);
+    let entries = vec![vec![1_u8; 40], vec![2_u8; 30], vec![3_u8; 20]];
+    let keys = keyed(&entries);
+    for (key, data) in keys.iter().zip(&entries) {
+        capture_all(&mut store, *key, data);
+    }
+    store.seal();
+
+    // Extraction takes an entry, then makes room for the sink, then reads it.
+    let taken = store.take(&keys[1]).unwrap();
+    usage.set(100);
+    store.make_room(0);
+    assert!(!store.holds(&keys[0]));
+    assert!(!store.holds(&keys[2]));
+    match store.retained(taken, &keys[1]).unwrap() {
+        Retained::Spooled(mut reader) => {
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out).unwrap();
+            assert_eq!(out, entries[1]);
+        }
+        Retained::Bytes(_) => panic!("a spool hands out a reader"),
+    }
+}

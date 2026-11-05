@@ -31,6 +31,8 @@ use std::io::Write;
 
 use flate2::Crc;
 
+use super::common::SpoolBacking;
+use super::common::TempSpool;
 use super::zip::ZIP_INVALID_CHECKSUM;
 use crate::DecodeReuse;
 use crate::SecurityConfig;
@@ -133,6 +135,21 @@ struct SinkBudget {
 struct SpoolFile {
     writer: BufWriter<File>,
     len: u64,
+    backing: SpoolBacking,
+    /// End of the entry last handed out by [`ReuseStore::take`]; a RAM spool
+    /// is never truncated below it while that entry may still be read.
+    held_end: u64,
+}
+
+impl SpoolFile {
+    fn new(spool: TempSpool) -> Self {
+        Self {
+            writer: BufWriter::with_capacity(SPOOL_BUFFER, spool.file),
+            len: 0,
+            backing: spool.backing,
+            held_end: 0,
+        }
+    }
 }
 
 impl SpoolFile {
@@ -182,12 +199,21 @@ impl ReuseStore {
         let backend = match plan.mode {
             DecodeReuse::Memory(_) => Backend::Memory,
             DecodeReuse::TempFile(_) => {
-                let writer = BufWriter::with_capacity(SPOOL_BUFFER, super::common::open_spool()?);
-                Backend::Spool(SpoolFile { writer, len: 0 })
+                Backend::Spool(SpoolFile::new(super::common::open_spool()?))
             }
             DecodeReuse::Off => return None,
         };
-        Some(Self {
+        Some(Self::with_backend(plan, backend))
+    }
+
+    /// A temporary-file store over `spool`, so a test can force its backing.
+    #[cfg(test)]
+    pub(crate) fn with_spool(plan: ReusePlan, spool: TempSpool) -> Self {
+        Self::with_backend(plan, Backend::Spool(SpoolFile::new(spool)))
+    }
+
+    fn with_backend(plan: ReusePlan, backend: Backend) -> Self {
+        Self {
             plan,
             limit: plan.limit,
             used: 0,
@@ -198,7 +224,7 @@ impl ReuseStore {
             sink: None,
             #[cfg(test)]
             replays: std::sync::atomic::AtomicUsize::new(0),
-        })
+        }
     }
 
     fn disable(&mut self) {
@@ -216,11 +242,15 @@ impl ReuseStore {
     }
 
     /// Evicts the most recently kept entries, which extraction reaches last,
-    /// until at most `room` bytes are kept in memory. An evicted entry is
-    /// decoded again from the archive.
+    /// until at most `room` bytes are kept in memory, or in a spool that lives
+    /// in memory. An evicted entry is decoded again from the archive.
     fn fit(&mut self, room: u64) {
-        if !matches!(self.backend, Backend::Memory) {
-            return;
+        match &self.backend {
+            Backend::Memory => {}
+            Backend::Spool(spool) if spool.backing == SpoolBacking::Ram => {
+                return self.fit_ram_spool(room);
+            }
+            Backend::Spool(_) | Backend::Dead => return,
         }
         while self.used > room {
             let Some((_, key)) = self.order.pop_last() else {
@@ -233,6 +263,36 @@ impl ReuseStore {
             {
                 self.used = self.used.saturating_sub(bytes.len() as u64);
             }
+        }
+    }
+
+    /// [`Self::fit`] for a spool in memory: the file's length is what is
+    /// charged, and an evicted entry is cut off the end of the file.
+    ///
+    /// Offsets rise with sequence, so the entry evicted last-first is the
+    /// file's tail. Entries already handed out leave their bytes in place:
+    /// the file is cut no lower than the one still being read, and its
+    /// consumed prefix is charged until the extraction ends.
+    fn fit_ram_spool(&mut self, room: u64) {
+        while self.used > room {
+            let Some((_, key)) = self.order.pop_last() else {
+                return;
+            };
+            let Some(Slot {
+                kept: Kept::Spooled { offset, .. },
+                ..
+            }) = self.index.remove(&key)
+            else {
+                continue;
+            };
+            let Backend::Spool(spool) = &mut self.backend else {
+                return;
+            };
+            if spool.truncate_to(offset.max(spool.held_end)).is_err() {
+                self.disable();
+                return;
+            }
+            self.used = spool.len;
         }
     }
 
@@ -301,8 +361,14 @@ impl ReuseStore {
     pub(crate) fn take(&mut self, key: &RetainKey) -> Option<Taken> {
         let slot = self.index.remove(key)?;
         self.order.remove(&slot.sequence);
-        if let Kept::Memory(bytes) = &slot.kept {
-            self.used = self.used.saturating_sub(bytes.len() as u64);
+        match (&slot.kept, &mut self.backend) {
+            (Kept::Memory(bytes), _) => {
+                self.used = self.used.saturating_sub(bytes.len() as u64);
+            }
+            (Kept::Spooled { offset, len }, Backend::Spool(spool)) => {
+                spool.held_end = offset.saturating_add(*len);
+            }
+            (Kept::Spooled { .. }, Backend::Memory | Backend::Dead) => {}
         }
         #[cfg(test)]
         self.replays

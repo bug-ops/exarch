@@ -239,9 +239,10 @@ pub fn check_trailing_headers(
 /// size), a header without a ustar magic must leave the `prefix` area empty,
 /// and GNU sparse entries are refused. A local PAX header must have unique,
 /// well-formed records, no GNU sparse or `SCHILY.realsize` records and no GNU
-/// long name or link record overriding its `path` or `linkpath`. A global PAX
-/// header (`git archive` writes one carrying only a `comment`) must be
-/// well-formed, must not carry `path`, `linkpath` or `size`, and must not
+/// long name or link record overriding its `path` or `linkpath`, and no `size`
+/// record in the same extension chain as a GNU long name or link record. A
+/// global PAX header (`git archive` writes one carrying only a `comment`) must
+/// be well-formed, must not carry `path`, `linkpath` or `size`, and must not
 /// follow a local header or a GNU long record.
 ///
 /// `metadata_limit` bounds how much of a global header is read. `preceding`

@@ -132,6 +132,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Core: TAR extension header chains that readers interpret differently are refused (`TarAmbiguity::StackedSizeRecord`) (#957).
 - Core: `verify` judged only an entry's own name length and passed a landing through an in-archive symlink that `extract` refused as too long; verify, sinks and the directory walker share one landing projection (#945, #903, #954).
 - Core and CLI: a failed `create` leaves no empty archive at the output path and `create --force` no longer deletes the previous archive before the new one succeeds (#931, #954).
 - Core and CLI: `create` with an exclude pattern such as `*.tmp` no longer produces an empty archive when the source sits under a matching directory (#916, #954).

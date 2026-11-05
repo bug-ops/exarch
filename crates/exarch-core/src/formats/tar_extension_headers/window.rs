@@ -136,11 +136,16 @@ pub(super) fn check_window(
         check_zero_padding(bytes.get(..offset))?;
     }
     let mut seen: Vec<TarExtensionKind> = Vec::new();
+    let mut pax_has_size = false;
     loop {
         let block = block_at(bytes, offset).ok_or(TarAmbiguity::WindowMismatch)?;
         verify_checksum(block)?;
         let size = declared_size(block)?;
         let Some(kind) = extension_kind_of(block) else {
+            let has_long = seen.iter().any(|k| *k != TarExtensionKind::Pax);
+            if pax_has_size && has_long {
+                return Err(TarAmbiguity::StackedSizeRecord.into());
+            }
             return check_final_header(window, block, offset, header_pos, file_pos);
         };
         if seen.contains(&kind) {
@@ -155,6 +160,7 @@ pub(super) fn check_window(
             .ok_or(TarAmbiguity::WindowMismatch)?;
         if kind == TarExtensionKind::Pax {
             check_record_framing(body)?;
+            pax_has_size = pax_declares_size(body);
         } else {
             check_long_record(kind, body)?;
         }
@@ -164,6 +170,13 @@ pub(super) fn check_window(
             .ok_or(TarAmbiguity::WindowMismatch)?;
         check_zero_padding(bytes.get(body_end..offset))?;
     }
+}
+
+/// Whether a framed PAX body holds a `size` record.
+fn pax_declares_size(body: &[u8]) -> bool {
+    tar::PaxExtensions::new(body)
+        .flatten()
+        .any(|record| record.key_bytes() == b"size")
 }
 
 /// Checks the padding after a trailing global PAX header, in the window the

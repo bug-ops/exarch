@@ -879,6 +879,7 @@ mod tests {
             A::LocalBeforeGlobal,
             A::LongRecordBeforeGlobal,
             A::StackedLongRecord { key: Key::Path },
+            A::StackedSizeRecord,
             A::UnrecognizedHeader { kind: Ext::Pax },
             A::SparseEntry,
             A::NonCanonicalNumber { field: Field::Size },

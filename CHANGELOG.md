@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `ZIP_READER` sub-code for ZIP reader failures in Python, Node and CLI `--json`; messages unchanged (#889, #946).
 - Core: `ExtractRequest`, `ListRequest`, `VerifyRequest`, `SinkExtractRequest` and `CreateRequest` carry options and progress as setters (#912, #954).
 - Core: `OutputFile`, `OutputPolicy`, `OutputFormat` and `ListedExtractOptions` (#931, #915, #901, #954).
-- Core: `Durability` (`Synced` default, `Unsynced`) on `OutputFile`, Node `CreateOptions.durability` and Python `durability=` skip the creation fsyncs (#953, #PR).
+- Core: `Durability` (`Synced` default, `Unsynced`) on `OutputFile`, Node `CreateOptions.durability` and Python `durability=` skip the creation fsyncs (#953, #961).
 - Core: `ArchiveManifest::landings` (entries and implied parent directories) and `landing_paths` with `LandingPath` (#933, #954).
 - Core: `path_text` and `bytes_text` render paths and archive names injectively, plus `VerificationIssue::mode`, `ProgressCallback::is_cancelled` and `ArchiveEntry::utf8_path` (#925, #899, #931, #954).
 - Core: `positive_from_i128`, `positive_from_f64`, `ParallelDecode::from_bytes`, `ArchiveType::is_tar` and `IntegrityCheck::budget` (#921, #941, #922, #954).
@@ -129,12 +129,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking (Node)**: setters refuse out-of-range numbers instead of wrapping, `ExarchError` pairs `code` with its properties, listing entries are unions by kind, and a non-UTF-8 entry name fails listing with `ENTRY_NAME` (#917, #924, #923, #910, #925, #926, #954).
 - **Breaking (CLI)**: `verify --strict` exits 3, zero or non-finite limits exit 1 with the JSON envelope, `list -H` needs `-l`, `-x` refuses unsupported patterns, and `verify --json` issues carry typed fields instead of `context` (#932, #938, #940, #943, #899, #916, #954).
 - CLI: `create` keeps the previous archive on failure, `--force` swaps atomically, listed extraction honors the permission and link flags, and the conflict pre-check uses `landings` (#931, #936, #901, #933, #954).
-- Core: `ConfigProblem::NotOneOf` carries `allowed`, so every refused closed-set value lists the accepted ones; `ClosedEnum` and `DecodeReuseKind` back the parsing, and `ExtractOnlyFormat` types the 7z creation refusal (#955, #PR).
-- **Breaking (Python)**: `SourceNotAccessibleError` derives from `OSError` instead of `PermissionError` and sets `errno`, `strerror` and `filename`; the Python `ReuseKind` is replaced by the core `DecodeReuseKind` (#956, #PR).
-- **Breaking**: an unreadable creation source is `SourceNotAccessible` with its path and cause (CLI `--json` kind, Node code `SOURCE_NOT_ACCESSIBLE`) or `SourceNotFound`, not `Io`; the CLI permission hint shows only for permission errors (#956, #PR).
-- **Breaking (Node)**: `createArchiveWithProgressSync` is removed (use `createArchiveWithProgress`), and `CreateOptions.format` and the `createArchiveToBytes` format are typed `CreatableFormat` without `SevenZ` (#953, #PR).
-- Core: symlink and hardlink targets resolve handle-relatively from the pinned destination on Unix and WASI, so acceptance no longer depends on the destination's absolute length; deep link chains extract about twice as fast (#952, #949, #PR).
-- MSRV 1.99.1 (#951, #PR).
+- Core: `ConfigProblem::NotOneOf` carries `allowed`, so every refused closed-set value lists the accepted ones; `ClosedEnum` and `DecodeReuseKind` back the parsing, and `ExtractOnlyFormat` types the 7z creation refusal (#955, #961).
+- **Breaking (Python)**: `SourceNotAccessibleError` derives from `OSError` instead of `PermissionError` and sets `errno`, `strerror` and `filename`; the Python `ReuseKind` is replaced by the core `DecodeReuseKind` (#956, #961).
+- **Breaking**: an unreadable creation source is `SourceNotAccessible` with its path and cause (CLI `--json` kind, Node code `SOURCE_NOT_ACCESSIBLE`) or `SourceNotFound`, not `Io`; the CLI permission hint shows only for permission errors (#956, #961).
+- **Breaking (Node)**: `createArchiveWithProgressSync` is removed (use `createArchiveWithProgress`), and `CreateOptions.format` and the `createArchiveToBytes` format are typed `CreatableFormat` without `SevenZ` (#953, #961).
+- Core: symlink and hardlink targets resolve handle-relatively from the pinned destination on Unix and WASI, so acceptance no longer depends on the destination's absolute length; deep link chains extract about twice as fast (#952, #949, #961).
+- MSRV 1.99.1 (#951, #961).
 
 
 ### Fixed
@@ -162,9 +162,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `exarch extract` of a compressed TAR into an existing directory no longer panics on WASI (#867, #888).
 - Core: `on_entry_complete` fires for every started archive entry on creation, including failures (#874, #888).
 - Core: a read error during the replay of a listed TAR spool is reported as `Io` with its errno instead of `InvalidArchive` (#882, #894).
-- Core: a symlink probe that fails for any reason other than absence now refuses the link instead of being read as "not a symlink" (#PR).
-- Python: an unknown creation `format` is refused with `creation format is not one of the allowed values: ...` instead of a message about 7z (#955, #PR).
-- Core: the ZIP `--decode-reuse temp-file` spool on a Linux tmpfs or ramfs is charged like `memory` (#950, #PR).
+- Core: a symlink probe that fails for any reason other than absence now refuses the link instead of being read as "not a symlink" (#961).
+- Python: an unknown creation `format` is refused with `creation format is not one of the allowed values: ...` instead of a message about 7z (#955, #961).
+- Core: the ZIP `--decode-reuse temp-file` spool on a Linux tmpfs or ramfs is charged like `memory` (#950, #961).
 
 ## [0.8.0] - 2026-11-02
 

@@ -22,7 +22,7 @@ related:
 
 # Feature: SanitizedMode Newtype and Non-Exhaustive Enum Hardening
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > `ValidatedEntry` and `ValidatedEntryType` were removed (#900) and `types::EntryType` became crate-private; the sanitized mode now travels in `ValidatedFile`. New enums follow the same rule: `SkipKind`, `Admit`, `ManifestEntryType`, `CheckStatus`, `IssueSeverity` and `VerificationStatus` are closed (`closed_enum`, with `ALL` and a drift test per consumer), while `ExtractionReport`, `CreationReport`, `IoContext`, `ExcludePattern`, `Heuristic`, `OutputPolicy` and `OutputFormat` are `#[non_exhaustive]`; `CallbackError` is deliberately closed (#905, #922, #899, #906, #911).
 
 > [!info] Metadata

@@ -24,7 +24,7 @@ related:
 
 # Feature: Security Pipeline
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > `EntryValidator`, `ValidatedEntry`, `ValidatedEntryType` and `ValidationReport` were removed (#900) and the `Unvalidated`/`Validated` typestate with them (#898); older notes below that name them describe the design of the release they mention. Current names: `ValidatorCore`, `ValidatedFile`, `ValidatedSymlink`, `ValidatedHardlink`, `AdmittedSize`, `CheckedLinkTarget`, `VirtualTree::project_landing`. See FR-018 and FR-036 to FR-043.
 
 > [!info] Metadata

@@ -26,7 +26,7 @@ related:
 
 # Feature: Reader, Sink and In-Memory API
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > The free functions `list_reader*`, `verify_reader*`, `extract_to_sink*`, `create_to_writer*`, `create_to_bytes`, `*_with_progress` and `list_archive_for_extraction` were removed (#912); their roles are `ListRequest`, `VerifyRequest`, `SinkExtractRequest` and `CreateRequest`. `EntrySink::create_file*` takes `AdmittedSize` and `create_symlink` takes `CheckedLinkTarget` (#909); `ListedArchive` owns the extraction config (#901); `CallbackError` is exhaustive (#922); the binding sink options are a `SinkOptions` class (#926). Requirement rows below are rewritten accordingly (names in the Origin line describe the release).
 
 > [!info] Metadata

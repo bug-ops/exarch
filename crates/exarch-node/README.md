@@ -113,9 +113,9 @@ console.log(`Extracted ${result.filesExtracted} files`);
 import { extractArchive, SecurityConfig } from 'exarch-rs';
 
 const config = new SecurityConfig()
-  .maxFileSize(100 * 1024 * 1024)   // 100 MB per file
-  .maxTotalSize(1024 * 1024 * 1024) // 1 GB total
-  .maxFileCount(10_000);             // Max 10k files
+  .setMaxFileSize(100 * 1024 * 1024)   // 100 MB per file
+  .setMaxTotalSize(1024 * 1024 * 1024) // 1 GB total
+  .setMaxFileCount(10_000);             // Max 10k files
 
 const result = await extractArchive('archive.tar.gz', '/output', config);
 ```
@@ -304,7 +304,7 @@ If a progress callback throws while the operation itself succeeds, the rejection
 
 ## API
 
-### `extractArchive(archivePath, outputDir, config?)`
+### `extractArchive(archivePath, outputDir, config?, options?)`
 
 Extract an archive asynchronously with security validation.
 
@@ -315,10 +315,11 @@ Extract an archive asynchronously with security validation.
 | `archivePath` | `string` | Path to the archive file |
 | `outputDir` | `string` | Directory where files will be extracted |
 | `config` | `SecurityConfig` | Optional security configuration |
+| `options` | `ExtractionOptions` | Optional `new ExtractionOptions().withAtomic(true)` / `.withSkipDuplicates(true)` |
 
 **Returns:** `Promise<ExtractionReport>`
 
-### `extractArchiveSync(archivePath, outputDir, config?)`
+### `extractArchiveSync(archivePath, outputDir, config?, options?)`
 
 Synchronous version. Blocks the event loop until extraction completes.
 
@@ -423,7 +424,7 @@ can be empty or truncated and a new output can be empty, and write-back errors
 (network filesystems, quotas, delayed allocation) are not reported, so success
 does not prove the bytes reached the disk.
 
-### `createArchiveWithProgress(outputPath, sources, config?, progress?)`
+### `createArchiveWithProgress(outputPath, sources, config?, progress?, options?)`
 
 Async archive creation with an optional progress callback, invoked once per entry.
 
@@ -452,6 +453,7 @@ const result = await createArchiveWithProgress(
 | `sources` | `string[]` | Source files/directories to include |
 | `config` | `CreationConfig \| undefined` | Optional creation configuration |
 | `progress` | `(err: Error \| null, arg: ProgressArgs) => void \| undefined` | Optional progress callback |
+| `options` | `CreateOptions \| undefined` | Optional `{ format, overwrite, durability }` (see Create options) |
 
 **Returns:** `Promise<CreationReport>`
 
@@ -461,12 +463,12 @@ Builder-style security configuration.
 
 ```typescript
 const config = new SecurityConfig()
-  .maxFileSize(bytes)                        // Max size per file
-  .maxTotalSize(bytes)                       // Max total extraction size
-  .maxFileCount(count)                       // Max number of files
-  .maxCompressionRatio(n)                    // Max compression ratio (zip bomb detection)
-  .allowedExtensions([".txt", ".md"])        // Restrict to a set of extensions
-  .bannedPathComponents(["__MACOSX"])        // Skip these path components
+  .setMaxFileSize(bytes)                     // Max size per file
+  .setMaxTotalSize(bytes)                    // Max total extraction size
+  .setMaxFileCount(count)                    // Max number of files
+  .setMaxCompressionRatio(n)                 // Max compression ratio (zip bomb detection)
+  .addAllowedExtension(".txt")               // Restrict to a set of extensions (repeatable)
+  .addBannedComponent("__MACOSX")            // Skip this path component (repeatable)
   .setAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
   .setZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'
   .setParallelDecodeMemory(256 * 1024 * 1024); // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread

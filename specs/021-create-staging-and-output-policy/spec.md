@@ -29,8 +29,8 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-core / `request` (`OutputFile`, `OutputPolicy`, `OutputFormat`, `CreateRequest`), `creation::staged`, `creation::filters`, `creation::walker`
 > **MSRV**: Rust 1.99.1
-> **Origin**: #931 (staged output), #915 (format moved off `CreationConfig`), #916 (typed exclude patterns) — 50-issue batch, 2026-11-04
-> **Status**: implemented — documents the behavior that shipped in that batch
+> **Origin**: #931 (staged output), #915 (format moved off `CreationConfig`), #916 (typed exclude patterns) — 50-issue batch, 2026-11-04, shipped in 0.9.0 (#956, #953, #961 added typed source errors and durability)
+> **Status**: implemented — documents the behavior that shipped in 0.9.0
 
 ## 1. Overview
 

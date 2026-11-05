@@ -7,164 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-05
+
 ### Added
 
-- Core: `list_archive_for_extraction` and `ListedArchive` reuse the list pass's decode for gz, bz2 and xz TAR up to 256 MiB and keep a listed ZIP open for extraction, and `ArchiveReader::of_stream` opens a non-seekable TAR stream (#828, #884).
-- Python: the in-memory functions accept binary file objects as well as bytes (#828).
-- Tests: the ZIP corpus builds a Windows Explorer archive on Windows CI, and a Windows 7-Zip reparse-point symlink test covers 7z (#828).
-- Core: `CallbackSink` hands each verified in-memory entry to a closure as a `CallbackEntry`, and a hardlink carries its validated `SafePath` target (#842, #884).
-- Python: `extract_archive_to_callback` delivers each entry to a callable and re-raises its exception unchanged (#842).
-- Node: `extractArchiveToCallback` (async and sync), `AsyncIterable` input for TAR in the async in-memory functions, three sync `WithProgress` variants, and the `STREAM_ERROR` and `ENTRY_CALLBACK_ERROR` codes (#842).
-- Node: the seven async in-memory functions that take an `AsyncIterable` accept an optional trailing `signal` (`AbortSignalLike`); aborting rejects with the new `ABORT_ERR` code and frees the blocking worker (#848).
-- Core: `ArchiveError::ffi_kind()` is public, with `InvalidArchiveSubCode` and `SecurityViolationSubCode` naming the TAR ambiguity and TAR trailer refusals (#865).
-- Python: `sub_code` attribute on `InvalidArchiveError` and `SecurityViolationError`; Node: `subCode` property with typings; CLI `--json`: `error.sub_code` (#865).
-- Core: `DecodeReuse`, `ReuseLimit` and `ExtractionOptions::decode_reuse` keep the deflate output of the ZIP structure check so extraction decodes an entry once (#857, #884).
-- CLI: `extract --decode-reuse <off|memory|temp-file>`, default `memory` up to 256 MiB (#857, #884).
-- Core: `extract_reader_to_callback` and the typed `CallbackError<E>`; the Python and Node callback extractions use them (#860, #884).
-- Core: `ZipBombScope::SkippedEntries` (#863, #884).
-- Core: `SinkOptions::decode_reuse` (off by default) lets callback and custom sinks reuse the ZIP census decode (#890, #946).
-- Core: `ZIP_READER` sub-code for ZIP reader failures in Python, Node and CLI `--json`; messages unchanged (#889, #946).
-- Core: `ExtractRequest`, `ListRequest`, `VerifyRequest`, `SinkExtractRequest` and `CreateRequest` carry options and progress as setters (#912, #954).
-- Core: `OutputFile`, `OutputPolicy`, `OutputFormat` and `ListedExtractOptions` (#931, #915, #901, #954).
-- Core: `Durability` (`Synced` default, `Unsynced`) on `OutputFile`, Node `CreateOptions.durability` and Python `durability=` skip the creation fsyncs (#953, #961).
-- Core: `ArchiveManifest::landings` (entries and implied parent directories) and `landing_paths` with `LandingPath` (#933, #954).
-- Core: `path_text` and `bytes_text` render paths and archive names injectively, plus `VerificationIssue::mode`, `ProgressCallback::is_cancelled` and `ArchiveEntry::utf8_path` (#925, #899, #931, #954).
-- Core: `positive_from_i128`, `positive_from_f64`, `ParallelDecode::from_bytes`, `ArchiveType::is_tar` and `IntegrityCheck::budget` (#921, #941, #922, #954).
-- Core: `SubCode::{Quota, ZipBomb}`, the `TAR_READER` and `SEVENZ_READER` sub-codes, `SolidMemoryScope`, and new `ConfigSetting` variants with `ConfigProblem::NotOneOf` (#918, #930, #911, #919, #954).
-- Python: `code` on every exception with real `OutputExistsError` and `SourceNotFoundError` classes, `create_archive(format=, overwrite=)` and `skipped` on reports (#919, #915, #906, #954).
-- Node: `ioKind`, typed `subCode`, `skipped` on reports, `createArchive*` options `{ format, overwrite }` and `nonUtf8EntryPath` (#920, #918, #906, #915, #925, #954).
-- CLI: skipped entries are reported by reason in text and `--json` (#906, #954).
+- Core: request types `ExtractRequest`, `ListRequest`, `VerifyRequest`, `SinkExtractRequest`, `MemoryExtractRequest` and `CreateRequest` carry options and progress as setters, with `OutputFile`, `OutputPolicy`, `OutputFormat`, `ListedExtractOptions` and `Durability` (`Synced` default, `Unsynced`) (#828, #901, #912, #915, #931, #953, #954, #961).
+- Core: `list_archive_for_extraction` and `ListedArchive` reuse the list pass's decode (gz, bz2, xz TAR up to 256 MiB; a listed ZIP stays open), and `ArchiveReader::of_stream` opens a non-seekable TAR stream (#828, #884).
+- Core: `CallbackSink`, `CallbackEntry`, `extract_reader_to_callback` and the typed `CallbackError<E>` hand each verified entry to a closure; a hardlink carries its validated `SafePath` target (#842, #860, #884).
+- Core: `DecodeReuse`, `ReuseLimit`, `ExtractionOptions::decode_reuse` and `SinkOptions::decode_reuse` (off by default) keep the ZIP structure-check decode so extraction decodes an entry once; the CLI gains `extract --decode-reuse <off|memory|temp-file>`, default `memory` up to 256 MiB (#857, #866, #884, #890, #894, #946).
+- Core: `ArchiveError::ffi_kind()` is public, and the sub-codes `InvalidArchiveSubCode`, `SecurityViolationSubCode`, `SubCode::{Quota, ZipBomb}`, `TAR_READER`, `SEVENZ_READER` and `ZIP_READER` classify errors, with `ZipBombScope::SkippedEntries`, `SolidMemoryScope` and new `ConfigSetting` variants with `ConfigProblem::NotOneOf` (#863, #865, #889, #911, #918, #919, #930, #884, #946, #954).
+- Core: `ArchiveManifest::landings`, `landing_paths` and `LandingPath`; `path_text` and `bytes_text` render names injectively; `VerificationIssue::mode`, `ProgressCallback::is_cancelled`, `ArchiveEntry::utf8_path`, `positive_from_i128`, `positive_from_f64`, `ParallelDecode::from_bytes`, `ArchiveType::is_tar` and `IntegrityCheck::budget` (#899, #921, #922, #925, #931, #933, #941, #954).
+- Python: in-memory functions accept binary file objects, `extract_archive_to_callback` re-raises the callable's exception unchanged, `sub_code` and `code` on exceptions with real `OutputExistsError` and `SourceNotFoundError` classes, `create_archive(format=, overwrite=, durability=)` and `skipped` on reports (#828, #842, #865, #906, #915, #919, #953, #954, #961).
+- Node: `extractArchiveToCallback` (async and sync), `AsyncIterable` TAR input, sync `WithProgress` variants, trailing `signal` with the `ABORT_ERR` code, `STREAM_ERROR` and `ENTRY_CALLBACK_ERROR` codes, `subCode`, `ioKind`, `skipped` on reports, `createArchive*` options `{ format, overwrite, durability }` and `nonUtf8EntryPath` (#842, #848, #856, #865, #906, #915, #918, #920, #925, #953, #954, #961).
+- CLI: skipped entries are reported by reason in text and `--json`, and `--json` errors carry `error.sub_code` (#865, #906, #954).
+- Tests: Windows Explorer, 7-Zip reparse-point and WinRAR archives in the ZIP and 7z corpus (#828, #856).
 
 ### Changed
 
-- **Breaking**: `CreationConfig::max_file_size` is `Limit<NonZeroU64>`; zero is refused in core, CLI, Node and Python, and Node takes `null` and Python `None` for no limit (#893, #902, #946).
-- **Breaking**: `SinkOptions` gains the `decode_reuse` field (#890, #946).
-- Core: TAR and ZIP overwrite (`--force`) replaces the destination file through a sibling temp file and rename instead of writing through the existing inode (#819).
-- Core: ZIP verification of data-descriptor entries covers deflate and every scanned method without `--check-integrity`, and a descriptor must carry the entry's CRC-32 to end a scanned entry (#821).
-- Core: an overwritten file is now replaced even when read-only, needs a writable parent directory, loses its previous owner, ACLs and extended attributes, and takes `0666 & ~umask` when no mode is passed (#822).
-- **BREAKING:** `list`, `verify` and `extract` refuse TAR constructs that readers parse differently, with `InvalidArchive`: a directory, symlink or hardlink with a payload, GNU sparse entries, signed or control-character size and checksum fields, a `prefix` field without a ustar magic, duplicate, empty-key, over-long or `GNU.sparse.*` PAX records, PAX `path`/`linkpath` stacked with GNU long name/link records, and global PAX headers that override `path`, `linkpath` or `size`, are malformed, or follow a local header or a GNU long record (#820).
-- Core: ZIP verification of data-descriptor entries refuses undecidable deflate ranges, record signatures behind a stream end, nameless headers carrying an extra field and headers straddling the declared end, and no longer flags ZIP files stored whole in a streamed entry; deflated entries past the 256 MiB per-archive decode budget that hold a record signature are reported too (`--zip-consistency ignore` skips these checks) (#827).
-- **BREAKING:** `extract_bytes_to_memory` is replaced by `MemoryExtractRequest` and `extract_reader_to_memory`; `utf8_entry_path` is removed and `ArchiveError::discarded` is crate-private (#828).
-- **BREAKING (bindings):** an entry below a dangling or looping symlink raises `SecurityViolation` instead of an I/O error, and below a contained non-directory link `SecurityViolation` instead of `SymlinkEscape` (#828).
-- `exarch extract` into an existing destination decodes a gz, bz2 or xz TAR once instead of twice (#828).
-- **BREAKING:** `list`, `verify` and `extract` refuse non-canonical checksum or size fields in TAR `x`, `L` and `K` headers, non-canonical local PAX record framing and the PAX `SCHILY.realsize` record, with `InvalidArchive` (#829).
-- **BREAKING:** `list`, `verify` and `extract` refuse non-zero padding after TAR `x`, `g`, `L` and `K` bodies and `L`/`K` bodies that do not end in a single NUL, with `InvalidArchive` (#837).
-- **BREAKING:** ZIP verification refuses directory and special entries that carry data and compressed entries whose stream ends before the declared range with a record behind it; new `ZipInconsistency::{NonRegularPayload, StreamEndUnknown}`, `HiddenRegion::StreamTail`, `ZipNonRegularKind` and `ZipStreamUndecided` (#837).
-- Core: ZIP verification checks stored data-descriptor entries from their first descriptor signature, whatever sizes the descriptor states; a stored entry holding a nested archive with signed descriptors is now reported (#837).
-- Core: ZIP entry-data checks run once at open under `--zip-consistency enforce` with a bounded decode budget and recheck allowance scaled by `max_total_size`, and `--zip-consistency ignore` skips them (#837).
-- Core: extraction writes, renames, unlinks and symlinks below the destination go through a pinned directory descriptor on Unix and WASI, closing the component-swap window left by path-based checks (#842).
-- Core: a hardlink to a non-regular target is `InvalidArchive`, and a target that changes size during the copy is a `SecurityViolation`; the copy no longer uses `copy_file_range` (#842).
-- Core: a file created with a mode is created owner-only and then set to the exact mode (#842).
-- Node: `index.d.ts` uses `AsyncIterable`, which needs the `es2018` lib (#842).
-- `exarch extract --atomic` decodes a TAR once, so a refusal now arrives as a `rolled_back` partial report instead of a pre-write error, and its progress bar has no total (#842).
-- **BREAKING:** `ArchiveError::TarAmbiguity(TarAmbiguity)` (`#[non_exhaustive]`) replaces the `InvalidArchive` string for TAR header ambiguities; its `code` and FFI kind stay `InvalidArchive`, `context()` is `None` and the message text is unchanged (#846).
-- Core: the extension allowlist is applied after path validation and before quota in TAR, ZIP, 7z and list; skipped entries no longer count against `max_total_size`, the list pass charges them to `max_file_count` only, and TAR and ZIP now validate the path of a skipped entry like 7z, so a disallowed `../x.bin` or an entry below an existing file or dangling symlink is refused instead of skipped; ZIP still skips a disallowed high-ratio entry, which 7z refuses (#846).
-- Core: the ZIP and 7z extraction proof tokens are bound to their archive and the validated-file proof is built only by the validator (internal) (#846).
-- Core: an entry below a planted symlink that leaves the destination fails with `SymlinkEscape` instead of `PathTraversal` during extraction, as `verify` already reports (#846).
-- Dependencies: `half` is pinned to 2.4.1 with a Dependabot ignore, which drops the duplicate `syn` 2, `zerocopy` and `zerocopy-derive` (#846).
-
-- **BREAKING:** extract, list and the in-memory APIs read a compressed TAR to the end of its stream and refuse a bad gzip CRC or ISIZE, a corrupt later member and a tail over `max_tar_metadata_bytes` (at least 1 MiB, relaxable); `verify --check-integrity` applies the same cap, `.tar.zst` zero tails are refused, and `TarArchive::new` drains the reader (#848).
-- **BREAKING:** `SecurityConfig::validate()` rejects `max_tar_metadata_bytes = u64::MAX` (#848).
-- **BREAKING:** a TAR directory, symlink or hardlink payload refusal is `TarAmbiguity::{NonRegularPayload, DirectoryNamedPayload}` with the new `TarNonRegularKind`, and its message gains the `ambiguous TAR header: ` prefix (#848).
-- **BREAKING:** ZIP plain verify, list and extract refuse an entry hidden behind the stream end of a bzip2 or zstd data-descriptor entry (#848).
-- Core: extraction lends the pinned destination root to top-level entries instead of reopening it per entry (#848).
-- Node: docs no longer say the gzip CRC is unchecked (#848).
-- **BREAKING:** `max_decoder_memory` bounds the zstd window of TAR and ZIP (largest power of two at or below the limit, at most 128 MiB), and `list`, `verify` and `extract` refuse a ZIP whose zstd entry declares a larger window with `QuotaExceeded`; legacy (pre-v0.8) zstd frames are no longer decoded (#856).
-- **BREAKING:** gzip members and bzip2 streams beyond `SecurityConfig::with_compressed_member_allowance` plus one per 16 KiB of output are refused with `QuotaExceeded { CompressedMembers }`; `SecurityConfigFields` gains `compressed_member_allowance`, a `NonZeroU64` (#856, #884).
-- **BREAKING:** `ArchiveError::TarTrailer(TarTrailerRefusal)` replaces `InvalidArchive` and `SecurityViolation` for over-cap, corrupt and truncated compressed TAR tails; binding and JSON kinds are unchanged, `context()` is `None` (#856).
-- Node: `signal` also aborts `Uint8Array` calls at the next archive read and at each progress callback (#856).
-- Tests: WinRAR-produced ZIPs (header shape only) in the ZIP corpus (#856).
-- Build: `lzma-rust2` is held at 0.23 so one LZMA2 decoder is linked; dependabot ignores 0.24 until the next `sevenz-rust2` release (#856).
-- **BREAKING:** `FfiKind::InvalidArchive` is a struct variant and `FfiKind::SecurityViolation` gains `sub_code`; both are `#[non_exhaustive]` (#865).
-- **BREAKING (Windows):** extraction writes, renames and deletes below the destination go through a pinned directory handle, and a target other than Unix, WASI or Windows no longer compiles (#865).
-- Dependencies: `windows-sys` 0.61 is a direct dependency of `exarch-core` on Windows, with a Dependabot ignore for 0.62 and later (#865).
-- CI: the clippy job runs on `windows-latest` as well, and `EXARCH_REQUIRE_PRIVILEGED_TESTS` makes the mount-point test mandatory there (#865).
-- **BREAKING:** `list_archive_for_extraction` takes a `DecodeReuse`, and the library default `Memory(32 MiB)` keeps deflate output only up to that size (#857, #884).
-- Core: kept ZIP output is clamped to `max_decoder_memory` and `max_total_size`, and entries over `max_file_size` or `max_compression_ratio` are not kept (#857, #884).
-- Core: ZIP extraction decodes deflate entries once; bzip2/zstd, in-memory extraction and the library default above 32 MiB still decode twice (#857, #866, #884).
-- **BREAKING:** `MemoryEntry::Hardlink` is removed: callback closures receive `CallbackEntry`, so `MemorySink::into_entries` can no longer hold a hardlink (#859, #884).
-- **BREAKING:** `SafePath`, `SafeSymlink`, `ValidatedFile`, `PendingFile`, `ValidatedSymlink`, `ValidatedHardlink` and `ValidationContext` gain a defaulted type parameter, `ExtractTarget` gains `type Parent`, and `DestDir::join_path` is removed (breaking against v0.8.0) (#861, #884).
-- **BREAKING:** `TarNonRegularKind` displays lowercase and `with_compressed_member_allowance` takes a `NonZeroU64` (#862, #884).
-- **BREAKING:** a compressed TAR whose entries skipped by the allowlist or as duplicates decode beyond `max_compression_ratio` times the input read is refused with `ZipBomb` (`SkippedEntries`) (#863, #884).
-- CI: the release-profile test job runs on `main` only (#886).
-- **BREAKING:** `ArchiveFormat::{extract,list,verify}` take `self`, the trait is no longer dyn-usable and `format_name` is removed; a second operation on one `TarArchive` is a compile error (#875, #881, #888).
-- **BREAKING:** sizes are typed: `validate_compression_ratio(Compressed, Uncompressed, ..)`, `EntryValidator::validate_entry(path, &EntryType, EntrySize, Option<RawMode>)`, `sanitize_permissions(RawMode, ..)`, `ZipBombDetails::new`; `ExtractTarget::file` loses `size`, and `QuotaPermit` carries the reserved bytes (#869, #879, #881, #888).
-- **BREAKING:** `ValidatedEntryType::Hardlink.target` is a `HardlinkTarget`, `SafeSymlink::link_path()` is `link()`, and the `exarch_core::validate_config_entry` re-export is removed (#873, #888).
-- **BREAKING:** allowed extensions and banned path components are typed (`Extension`, `PathComponentName`): a leading dot is normalized (`.txt` matches `txt`), and values with edge whitespace or control characters, an inner dot in an extension or a separator in a component are refused in core, Python, Node and CLI (#871, #888).
-- **BREAKING:** `CreationConfig::compression_level` is a `CompressionLevel`, the builders are infallible, Python `None` resets it to 6 and the getters return a number; `compression_level_to_*` helpers are removed (#876, #888).
-- **BREAKING:** `ArchiveError::SecurityViolation` carries a typed `Violation` kind instead of a reason string, with `security_violation()`, `context() -> Option<Cow<str>>`, and sub-code and relaxability derived from the kind; the `InvalidArchive` half is typed separately (#872, #887, #888).
-- **BREAKING:** archive creation no longer reports the source root as an entry, so progress and `total_entries` drop by one per source directory; a file or symlink emptied by `strip_prefix` is `InvalidConfiguration` and an emptied directory is skipped; `ProgressTracker::{on_entry_start,on_entry_complete,callback}` are replaced by a guard that always pairs the callbacks (#874, #880, #888).
-- Core, Python, Node and CLI: `QuotaKind`, `SubCode` and `FfiKind::{relaxable_by,sub_code}` drive front end error mapping, with drift tests, and the CLI quota hint names the right option (#877, #888).
-- CLI: `--banned-component` takes comma-separated values, `""` disables the list, and a value naming no component or `--allowed-extensions` naming no extension is an error (#871, #888).
-- CLI: the atomic swap compares a typed `FileIdentity` with an explicit unknown case on non-Unix (#878, #888).
-- Core: `ArchiveFormat` internals use `Option<RawMode>` and a private duplicate policy instead of `Option<u32>` and a bool (#881, #888).
-- **BREAKING:** `ArchiveError::InvalidArchive` carries a typed `Malformation` with a stable `sub_code` for five families (link target, duplicate entry, entry name, declared size, integrity), exposed as `sub_code` in Python, `subCode` in Node and `error.sub_code` in CLI `--json`; the ZIP, TAR and 7z reader failures stay `Unclassified` (#887, #894).
-- **BREAKING:** `ArchiveError::InvalidConfiguration` carries a `ConfigSetting` and a `ConfigProblem` instead of a reason string, and `FfiKind::InvalidConfiguration` names the setting, exposed as `setting` in Python, Node and CLI `--json` `error.setting` (#870, #894).
-- **BREAKING:** `SecurityConfig` limits are typed (`Limit<NonZeroU64>`, `RatioLimit`, `NonZero*`); zero and non-finite limits cannot be built and `validate()` no longer rejects anything, `u64::MAX` is a valid `max_tar_metadata_bytes`, and Node and Python setters and the CLI refuse a zero limit when it is set (#870, #894).
-- **BREAKING:** `MemorySink::new` is no longer `const`, and `EntrySink` gains the provided method `create_file_from` (#866, #894).
-- Core: `DecodeReuse` also keeps the bzip2 and zstd output of the ZIP structure check and serves `extract_reader_to_memory`, bringing those paths to about 1.0x of the single-decode baseline (#866, #894).
-- Core: `extract` refuses an entry that lands above the host path limit through an archive symlink on every platform, before creating any directory below the link (#885, #894).
-- Core: `verify` with the integrity check bounds the decode of allowlist-skipped compressed TAR entries as `extract` and `list` do (#868, #894).
-- Docs and benches: the documented `validation` bench commands name `--features testing` (#883, #894).
-- Docs: specifications in `specs/` synced with the changes since v0.8.0, covering sub-codes, TAR ambiguity and ZIP descriptor refusals, pinned directory descriptors, callback and listing-for-extraction APIs, typed limits and config errors, and the binding surfaces (#948).
-- **Breaking**: `SecurityConfig` and `CreationConfig` are plain structs; the `Validated` typestate and `validate()` are removed (#898, #954).
-- **Breaking**: `AllowedFeatures` fields are `Admit`, and the solid settings are one `SolidArchives::{Refuse, Allow(SolidLimits)}` (#911, #954).
-- **Breaking (security relaxation)**: the solid memory limit is checked per block; a multi-block solid archive passes when `max_total_size` is raised above `max_block_memory`, and the archive-wide sum still applies while it is unbounded (#911, #954).
-- **Breaking**: the option and progress function variants, `Archive`, `ArchiveBuilder` and the creator traits are removed; use the request types, and `ArchiveFormat` is sealed (#912, #897, #908, #901, #954).
-- **Breaking**: `CreationConfig::format` is removed; state it on `OutputFile::with_format` (#915, #954).
-- **Breaking**: creation stages its output and renames it into place, replacing an existing file atomically with its mode, refusing non-regular outputs and never archiving its own output; it adds about 4-10 ms of fsync per archive (#931, #954).
-- **Breaking**: a raising or throwing creation progress callback cancels creation and keeps the previous archive; in Node only the async variant can (#931, #953, #954).
-- **Breaking**: `ListedArchive` carries its extraction policy (`ListRequest::for_extraction`) and `extract` takes `ListedExtractOptions` (#901, #954).
-- **Breaking**: `ProgressCallback::on_entry_start` takes an `EntryPosition`, and reports are `#[non_exhaustive]` with typed `Skips` and warnings (#904, #905, #906, #954).
-- **Breaking**: `ExcludePattern` refuses `?[]{}!`, commas, edge whitespace and unsupported shapes, matches the entry path and compares raw bytes (#916, #954).
-- **Breaking**: the public `EntryValidator` pipeline is removed, sinks take `AdmittedSize` and `CheckedLinkTarget`, and `CallbackError` is exhaustive (#900, #909, #922, #954).
-- **Breaking (security, fail-closed)**: pre-existing symlinks in the destination resolve handle-relatively on Unix; an absolute target is accepted through the written or canonical root only, and other aliases and re-entering targets are refused (#895, #954).
-- Changed (performance): a chain of links with many nested components and `..` costs about 1.2x on a 30-link x 31-component stress shape; a single link is as fast or faster, and no link result is cached (#895, #952, #954).
-- **Breaking**: `ArchiveEntry::size()` exists for regular files only, `mode` is `Option<RawMode>`, and `VerificationIssue` has private fields with `finding()`, `ffi_kind()` and `sub_code()` instead of `context` (#910, #899, #954).
-- **Breaking**: `PartialExtraction` wraps a never-nested `Partial`, `InvalidPermissions::mode` is a `RawMode`, `validate_raw_path_str` is `BoundaryPath::parse`, and several `ConfigProblem` and `ConfigSetting` variants are removed (#907, #910, #927, #913, #901, #954).
-- **Breaking**: entry names in verify findings and error messages render through `path_text`, so a backslash prints as `\x5C` and an invalid byte as `\xNN` (#925, #954).
-- Core: TAR and 7z reader refusals are typed and `is_extension_allowed` takes `Option<&str>` (#930, #913, #954).
-- **Breaking (security)**: archive creation with `include_hidden = false` no longer enters hidden directories, so `.ssh/id_rsa`, `.aws/credentials` and `.gnupg/*` are not archived; a hidden directory counts once as a hidden skip (#954).
-- **Breaking (Python)**: limit setters raise `InvalidConfigurationError`, entries are per-kind classes, `VerificationIssue.context` is replaced by typed fields, and non-UTF-8 paths decode with `os.fsdecode` (#921, #923, #910, #899, #925, #926, #954).
-- **Breaking (Node)**: setters refuse out-of-range numbers instead of wrapping, `ExarchError` pairs `code` with its properties, listing entries are unions by kind, and a non-UTF-8 entry name fails listing with `ENTRY_NAME` (#917, #924, #923, #910, #925, #926, #954).
-- **Breaking (CLI)**: `verify --strict` exits 3, zero or non-finite limits exit 1 with the JSON envelope, `list -H` needs `-l`, `-x` refuses unsupported patterns, and `verify --json` issues carry typed fields instead of `context` (#932, #938, #940, #943, #899, #916, #954).
-- CLI: `create` keeps the previous archive on failure, `--force` swaps atomically, listed extraction honors the permission and link flags, and the conflict pre-check uses `landings` (#931, #936, #901, #933, #954).
-- Core: `ConfigProblem::NotOneOf` carries `allowed`, so every refused closed-set value lists the accepted ones; `ClosedEnum` and `DecodeReuseKind` back the parsing, and `ExtractOnlyFormat` types the 7z creation refusal (#955, #961).
-- **Breaking (Python)**: `SourceNotAccessibleError` derives from `OSError` instead of `PermissionError` and sets `errno`, `strerror` and `filename`; the Python `ReuseKind` is replaced by the core `DecodeReuseKind` (#956, #961).
-- **Breaking**: an unreadable creation source is `SourceNotAccessible` with its path and cause (CLI `--json` kind, Node code `SOURCE_NOT_ACCESSIBLE`) or `SourceNotFound`, not `Io`; the CLI permission hint shows only for permission errors (#956, #961).
-- **Breaking (Node)**: `createArchiveWithProgressSync` is removed (use `createArchiveWithProgress`), and `CreateOptions.format` and the `createArchiveToBytes` format are typed `CreatableFormat` without `SevenZ` (#953, #961).
-- Core: symlink and hardlink targets resolve handle-relatively from the pinned destination on Unix and WASI, so acceptance no longer depends on the destination's absolute length; deep link chains extract about twice as fast (#952, #949, #961).
-- MSRV 1.99.1 (#951, #961).
-
+- **Breaking**: MSRV is 1.99.1 (#951, #961).
+- **Breaking**: `SecurityConfig` and `CreationConfig` are plain structs without the `Validated` typestate; limits are typed (`Limit<NonZeroU64>`, `RatioLimit`, `NonZero*`, `CompressionLevel`), zero and non-finite values cannot be built, and `CreationConfig::format` moves to `OutputFile::with_format` (#870, #876, #894, #898, #915, #946, #954).
+- **Breaking**: the option and progress function variants, `Archive`, `ArchiveBuilder`, the creator traits, `extract_bytes_to_memory`, `MemoryEntry::Hardlink` and the public `EntryValidator` pipeline are removed in favor of the request types; `ArchiveFormat` is sealed, takes `self` and is not dyn-usable (#828, #859, #875, #881, #888, #897, #900, #908, #912, #954).
+- **Breaking**: sizes, modes, links and names are typed: `Compressed`, `Uncompressed`, `EntrySize`, `AdmittedSize`, `RawMode`, `HardlinkTarget`, `CheckedLinkTarget`, `Extension`, `PathComponentName`, `BoundaryPath`, with `SafePath` and the validated-entry types gaining a defaulted type parameter and `ArchiveEntry::size()` limited to regular files (#861, #869, #871, #873, #879, #884, #888, #900, #907, #910, #954).
+- **Breaking**: errors are typed: `SecurityViolation` carries a `Violation`, `InvalidArchive` a `Malformation` with a stable `sub_code`, `InvalidConfiguration` a `ConfigSetting` and `ConfigProblem`, plus `TarAmbiguity`, `TarTrailer`, `FfiKind` with sub-codes, `VerificationIssue` with typed fields instead of `context`, and a never-nested `Partial` inside `PartialExtraction`; Python, Node and `--json` expose them as `sub_code`, `subCode`, `setting` and `error.setting` (#846, #856, #865, #870, #872, #887, #894, #899, #910, #954).
+- **Breaking**: `ProgressCallback::on_entry_start` takes an `EntryPosition`, reports are `#[non_exhaustive]` with typed `Skips` and warnings, and creation no longer reports the source root as an entry, so progress and `total_entries` drop by one per source directory (#874, #880, #904, #905, #906, #954).
+- **Breaking**: `ListedArchive` carries its extraction policy and `extract` takes `ListedExtractOptions`; `list_archive_for_extraction` takes a `DecodeReuse` with library default `Memory(32 MiB)` (#857, #884, #901, #954).
+- **Breaking**: creation stages its output and renames it into place, replaces an existing file atomically with its mode, refuses non-regular outputs, never archives its own output, adds about 4-10 ms of fsync per archive, and a raising progress callback cancels it and keeps the previous archive (#931, #953, #954).
+- **Breaking (security)**: creation with `include_hidden = false` no longer enters hidden directories, so `.ssh`, `.aws` and `.gnupg` content is not archived (#954).
+- **Breaking (security, fail-closed)**: pre-existing destination symlinks resolve handle-relatively; an absolute target is accepted through the written or canonical root only, and other aliases and re-entering targets are refused (#895, #954).
+- **Breaking (security relaxation)**: the solid memory limit is checked per block, so a multi-block solid archive passes when `max_total_size` exceeds `max_block_memory` (#911, #954).
+- **Breaking**: `list`, `verify` and `extract` refuse TAR constructs that readers parse differently with `InvalidArchive`: payloads on directories, symlinks and hardlinks, GNU sparse entries, signed, control-character or non-canonical size and checksum fields, non-zero header-body padding, duplicate, empty-key, over-long, `GNU.sparse.*` or `SCHILY.realsize` PAX records, stacked PAX and GNU name records, and misplaced or overriding global PAX headers (#820, #829, #837, #848, #957).
+- **Breaking**: compressed TAR is read to the end of its stream and refuses a bad gzip CRC or ISIZE, a corrupt later member, a zero tail on `.tar.zst` and a tail over `max_tar_metadata_bytes` (at least 1 MiB, relaxable); members beyond `with_compressed_member_allowance` and skipped entries decoding beyond `max_compression_ratio` are refused (#848, #856, #863, #884).
+- **Breaking**: `max_decoder_memory` bounds the zstd window of TAR and ZIP (at most 128 MiB), and legacy pre-v0.8 zstd frames are no longer decoded (#856).
+- **Breaking**: ZIP verification refuses directory and special entries with data, undecidable deflate ranges, record signatures behind a stream end, entries hidden behind a bzip2 or zstd descriptor entry and stored descriptor entries holding nested signed descriptors, with new `ZipInconsistency`, `HiddenRegion::StreamTail`, `ZipNonRegularKind` and `ZipStreamUndecided`; `--zip-consistency ignore` skips the entry-data checks (#821, #827, #837, #848).
+- **Breaking (Windows)**: extraction writes, renames and deletes go through a pinned directory handle, and a target other than Unix, WASI or Windows no longer compiles (#865).
+- **Breaking (bindings)**: an entry below a dangling, looping or contained non-directory link raises `SecurityViolation`, and an unreadable creation source is `SourceNotAccessible` or `SourceNotFound` instead of `Io` (#828, #956, #961).
+- **Breaking (Python)**: limit setters raise `InvalidConfigurationError`, entries are per-kind classes, non-UTF-8 paths decode with `os.fsdecode`, `SourceNotAccessibleError` derives from `OSError`, and `ReuseKind` is replaced by `DecodeReuseKind` (#899, #910, #921, #923, #925, #926, #954, #956, #961).
+- **Breaking (Node)**: setters refuse out-of-range numbers, `ExarchError` pairs `code` with its properties, listing entries are unions by kind, a non-UTF-8 entry name fails with `ENTRY_NAME`, `createArchiveWithProgressSync` is removed, `CreateOptions.format` is `CreatableFormat`, and `index.d.ts` needs the `es2018` lib (#842, #910, #917, #923, #924, #925, #926, #953, #954, #961).
+- **Breaking (CLI)**: `verify --strict` exits 3, zero or non-finite limits exit 1 with the JSON envelope, `list -H` needs `-l`, `-x` refuses unsupported patterns, `--banned-component` takes comma-separated values and `""` disables the list, and `ExcludePattern` refuses `?[]{}!` and edge whitespace (#871, #899, #916, #932, #938, #940, #943, #954).
+- Core: extraction writes, renames, unlinks and symlinks go through a pinned directory descriptor on Unix and WASI, links resolve handle-relatively from it, and the destination root is lent to top-level entries (#842, #848, #949, #952, #961).
+- Core: `--force` replaces a TAR, ZIP or 7z destination through a sibling temp file and rename, even when read-only, losing owner, ACLs and xattrs; a created file is owner-only until its exact mode is set (#819, #822, #842).
+- Core: the extension allowlist runs after path validation and before quota, skipped entries no longer count against `max_total_size`, and TAR and ZIP validate a skipped entry's path like 7z (#846).
+- Core: ZIP extraction decodes deflate, bzip2 and zstd entries once within the reuse limit, and entry-data checks run once at open with a bounded budget (#837, #857, #866, #884).
+- Core: a hardlink to a non-regular target is `InvalidArchive`, and a target changing size during the copy is a `SecurityViolation` (#842).
+- Core: `extract` refuses a landing above the host path limit through an archive symlink on every platform before creating any directory below the link (#885, #894).
+- Core: an entry below a planted escaping symlink fails with `SymlinkEscape` during extraction, as `verify` reports (#846).
+- Core: entry names in findings and messages render through `path_text` (`\x5C`, `\xNN`) (#925, #954).
+- Performance: a single link is as fast or faster, a 30-link x 31-component chain costs about 1.2x, and deep link chains extract about twice as fast (#895, #949, #952, #954, #961).
+- CLI: `extract` decodes a compressed TAR once, `--atomic` reports a refusal as a `rolled_back` partial report, `create` keeps the previous archive on failure and `--force` swaps atomically (#828, #842, #931, #936, #954).
+- Dependencies: `lzma-rust2` held at 0.23 so one LZMA2 decoder is linked, `half` 2.7.1, `windows-sys` 0.61 as a Windows dependency, and Node tooling `@biomejs/biome` 2.6.5, `@napi-rs/cli` 3.10.12 and TypeScript 7.0.2.
+- CI: clippy runs on `windows-latest` with `EXARCH_REQUIRE_PRIVILEGED_TESTS`, and the release-profile tests run on `main` only (#865, #886).
+- Docs: specifications in `specs/` synced with the changes since v0.8.0 (#947, #948).
 
 ### Fixed
 
-- Core: TAR extension header chains that readers interpret differently are refused (`TarAmbiguity::StackedSizeRecord`) (#957).
-- Core: `verify` judged only an entry's own name length and passed a landing through an in-archive symlink that `extract` refused as too long; verify, sinks and the directory walker share one landing projection (#945, #903, #954).
-- Core and CLI: a failed `create` leaves no empty archive at the output path and `create --force` no longer deletes the previous archive before the new one succeeds (#931, #954).
-- Core and CLI: `create` with an exclude pattern such as `*.tmp` no longer produces an empty archive when the source sits under a matching directory (#916, #954).
-- Node: `setMaxFileCount(-1)` and other out-of-range setter values no longer wrap into an unlimited quota (#917, #954).
-- CLI: the create progress bar follows the entry total core reports, and `--json` error messages keep archive text exact (#942, #934, #954).
-- Core: a landing through an archive symlink is accepted or refused by its relative length on every platform, not by the host realpath of the destination, and a directory entry at the limit is no longer refused one byte early (#892, #946).
-- `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#828).
-- 7z `--force` no longer deletes the existing file before the replacement is decoded (#828).
-- A hardlink copy takes the sanitized mode of its target, so a pre-existing setuid, setgid or world-writable target no longer yields a wider copy (#842).
-- Core: small-file extraction no longer resolves every parent path with `realpath` on Unix and WASI, because the pinned directory walk already checks each component at write time; the 11-15% slowdown on archives with many small files drops to about 3% (#836, #846).
-- Core: path containment is compared case-sensitively on macOS, so a planted symlink to a case-variant sibling of the destination is refused (#846).
-- Core and CLI: `extract --allowed-extensions` extracts the same files from 7z, ZIP and TAR whatever the destination state, and entries it skips leave no directories behind (#831, #846).
-- Core and CLI: a pre-existing dangling or file-pointing symlink in the destination is refused as not relaxable instead of suggesting `--allow-symlinks` (#835, #846).
-- Tests: a real Windows Explorer ZIP and a Windows 7-Zip reparse-point symlink 7z are committed as fixtures with host-independent tests (#824, #825, #846).
-- Tests: property tests skip Windows reserved device names in generated path components (#848).
-- Core: a ZIP or TAR source read error keeps its errno and is reported as `Io` instead of `InvalidArchive` (#858, #884).
-- Core: `extract` refuses an entry name above the host limit as `list` and `verify` do (#864, #884).
-- Core: compressed TAR entries refused by quota are no longer decoded to their end (#863, #884).
-- Node: `extractArchiveToCallback` keeps the `AbortSignal` reason when the abort is raised from `onEntry` (#860, #884).
-- Core: `exarch extract` of a compressed TAR into an existing directory no longer panics on WASI (#867, #888).
-- Core: `on_entry_complete` fires for every started archive entry on creation, including failures (#874, #888).
-- Core: a read error during the replay of a listed TAR spool is reported as `Io` with its errno instead of `InvalidArchive` (#882, #894).
-- Core: a symlink probe that fails for any reason other than absence now refuses the link instead of being read as "not a symlink" (#961).
-- Python: an unknown creation `format` is refused with `creation format is not one of the allowed values: ...` instead of a message about 7z (#955, #961).
-- Core: the ZIP `--decode-reuse temp-file` spool on a Linux tmpfs or ramfs is charged like `memory` (#950, #961).
+- Core: `verify` and sinks share one landing projection with `extract`, so a landing through an archive symlink is accepted by its relative length on every platform and a directory at the limit is no longer refused one byte early (#892, #903, #945, #946, #954).
+- Core and CLI: a failed `create` leaves no empty archive, `--force` no longer deletes the previous archive first, and an exclude pattern such as `*.tmp` no longer empties the archive of a source under a matching directory (#916, #931, #954).
+- Core: a hardlink copy takes the sanitized mode of its target, a symlink probe failing for any reason but absence refuses the link, and path containment on macOS is case-sensitive (#842, #846, #961).
+- Core: `extract` and `verify` name the entry and blocking file or symlink with one category, and 7z `--force` no longer deletes the file before the replacement is decoded (#828).
+- Core: small-file extraction no longer resolves every parent with `realpath`, cutting a 11-15% slowdown to about 3% (#836, #846).
+- Core and CLI: `--allowed-extensions` extracts the same files from 7z, ZIP and TAR and leaves no directories for skipped entries, and a dangling or file-pointing destination symlink is refused as not relaxable (#831, #835, #846).
+- Core: source read errors, listed TAR spool replay errors and ZIP reader failures keep their errno and are `Io`, entries above the host name limit are refused as in `list`, quota-refused compressed TAR entries are not decoded to the end, and `on_entry_complete` fires for every started creation entry (#858, #864, #863, #874, #882, #884, #888, #889).
+- Core: a ZIP `--decode-reuse temp-file` spool on tmpfs or ramfs is charged like `memory`, and extraction of a compressed TAR into an existing directory no longer panics on WASI (#867, #888, #950, #961).
+- Node: out-of-range setter values no longer wrap into an unlimited quota, and `extractArchiveToCallback` keeps the abort reason raised from `onEntry` (#860, #884, #917, #954).
+- Python: an unknown creation `format` is refused with a message listing the allowed values (#955, #961).
+- CLI: the create progress bar follows the entry total core reports, and `--json` messages keep archive text exact (#934, #942, #954).
 
 ## [0.8.0] - 2026-11-02
 
@@ -2363,7 +2269,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/bug-ops/exarch/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/bug-ops/exarch/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bug-ops/exarch/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/bug-ops/exarch/compare/v0.6.0...v0.6.1

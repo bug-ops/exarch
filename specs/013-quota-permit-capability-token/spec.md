@@ -21,7 +21,7 @@ related:
 
 # Feature: Quota Permit Capability Token
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > `EntryValidator`, `ValidatedEntry` and `ValidatedEntryType` were removed (#900); the permit is carried only by `ValidatedFile` (and `ValidatedHardlink`) from `ValidatorCore`, and `EntrySink::create_file*` takes the permit's bytes as `AdmittedSize` (#909). `QuotaTracker::reserve` takes `&SecurityConfig` (the typestate is gone, #898). Rows below are rewritten accordingly; version notes still name the release they describe.
 
 > [!info] Metadata

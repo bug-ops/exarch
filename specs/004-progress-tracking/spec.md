@@ -23,7 +23,7 @@ related:
 
 # Feature: Progress Tracking
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > `on_entry_start` takes an `EntryPosition` (#904); skips are typed and counted per kind in the reports (#906); the progress-variant free functions became `with_progress` on request types (#912); reports are `#[non_exhaustive]` (#905); the CLI bar for `create` follows the real total (#942).
 
 > [!info] Metadata

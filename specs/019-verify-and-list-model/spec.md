@@ -26,7 +26,7 @@ related:
 
 # Feature: Verify and List Reporting Model
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > `ArchiveEntry` carries `size()` and a typed `mode` (#910); `VerificationIssue` holds a typed `Finding` with private fields (#899); `ArchiveEntry::utf8_path` (#925); `ArchiveManifest::landing_paths` (#933); verify shares the landing projection with extract (#945); entry points are request types (#912). See FR-057 to FR-064; rows that conflict are rewritten in place.
 
 > [!info] Metadata

@@ -252,7 +252,7 @@ work.
 `extractArchiveToMemoryWithProgressSync`, `listArchiveBytesWithProgressSync` and
 `verifyArchiveBytesWithProgressSync` take the progress callback last; its calls
 arrive only after the function has returned, and a throw there is an
-`uncaughtException`, as with `createArchiveWithProgressSync`.
+`uncaughtException`.
 
 `createArchiveToBytes(sources, format)` (and `createArchiveToBytesSync`) builds
 an archive in memory and resolves to `{ data, report }`:
@@ -404,14 +404,24 @@ silently excluding nothing.
 
 ### Create options
 
-`createArchive`, `createArchiveSync` and the `WithProgress` variants take an
-optional trailing `CreateOptions` argument: `{ format?: ArchiveType; overwrite?: boolean }`.
+`createArchive`, `createArchiveSync` and `createArchiveWithProgress` take an
+optional trailing `CreateOptions` argument:
+`{ format?: CreatableFormat; overwrite?: boolean; durability?: Durability }`.
 `overwrite` defaults to `true`: an existing output is replaced when creation
 succeeds, and a failed creation leaves it untouched; `overwrite: false`
 refuses an existing output with `OUTPUT_EXISTS`. `format` overrides the format
 the output extension names, which is how a `.apk` or `.whl` is written as a
-plain ZIP (`'SevenZ'` cannot be created). `createArchiveToBytes` takes its
-format as an argument and has no output file.
+plain ZIP. `CreatableFormat` is `ArchiveType` without `'SevenZ'`, which cannot
+be created: passing it is refused at the boundary with an `InvalidArg` error
+from napi-rs, not an exarch error code. `createArchiveToBytes` takes a
+`CreatableFormat` as an argument and has no output file.
+
+`durability` is `'synced'` (the default) or `'unsynced'`. `'synced'` flushes
+the archive and its directory entry before the call succeeds. `'unsynced'`
+skips both, which is faster, but after a crash or power loss a replaced output
+can be empty or truncated and a new output can be empty, and write-back errors
+(network filesystems, quotas, delayed allocation) are not reported, so success
+does not prove the bytes reached the disk.
 
 ### `createArchiveWithProgress(outputPath, sources, config?, progress?)`
 
@@ -444,44 +454,6 @@ const result = await createArchiveWithProgress(
 | `progress` | `(err: Error \| null, arg: ProgressArgs) => void \| undefined` | Optional progress callback |
 
 **Returns:** `Promise<CreationReport>`
-
-### `createArchiveWithProgressSync(outputPath, sources, config?, progress?)`
-
-Synchronous version. Blocks the event loop until creation completes.
-
-**`progress` does not report live during this call.** It is dispatched
-through the same threadsafe-function mechanism as the async variant, which
-only ever delivers calls on a turn of the Node.js event loop. Because this
-function blocks that same event loop until it returns, every queued call is
-delivered only *after* `createArchiveWithProgressSync` has already
-returned — none of them fire while creation is running. Use
-`createArchiveWithProgress` instead if you need live progress updates.
-
-```typescript
-import { createArchiveWithProgressSync } from 'exarch-rs';
-
-const result = createArchiveWithProgressSync(
-  'backup.tar.gz',
-  ['src/', 'package.json'],
-  undefined,  // CreationConfig or undefined
-  (err, [path, total, current, bytesWritten]) => {
-    // Fires only after createArchiveWithProgressSync has already returned.
-    console.log(`[${current}/${total}] ${path}`);
-  }
-);
-console.log(`Created archive with ${result.filesAdded} files`);
-```
-
-**Parameters:**
-
-| Name | Type | Description |
-|------|------|-------------|
-| `outputPath` | `string` | Path to the output archive file |
-| `sources` | `string[]` | Source files/directories to include |
-| `config` | `CreationConfig \| undefined` | Optional creation configuration |
-| `progress` | `(err: Error \| null, arg: ProgressArgs) => void \| undefined` | Optional progress callback. See the note above: calls arrive only after this function returns. |
-
-**Returns:** `CreationReport`
 
 ### `SecurityConfig`
 

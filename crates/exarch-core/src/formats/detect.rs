@@ -1,9 +1,13 @@
 //! Archive format detection.
 
 use std::path::Path;
+use std::str::FromStr;
 
 use crate::ArchiveError;
+use crate::ConfigProblem;
+use crate::ConfigSetting;
 use crate::Result;
+use crate::closed_enum::ClosedEnum;
 use crate::closed_enum::closed_enum;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::sevenz::SEVENZ_MAGIC;
@@ -118,6 +122,44 @@ closed_enum! {
     }
 }
 
+closed_enum! {
+    /// Archive formats exarch can read but not create.
+    ///
+    /// Together with [`CreatableFormat`] it partitions [`ArchiveType`], so a
+    /// refusal to create a format names a value that cannot be a creatable one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::formats::detect::ExtractOnlyFormat;
+    ///
+    /// assert_eq!(ExtractOnlyFormat::SevenZ.extension(), "7z");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ExtractOnlyFormat {
+        /// 7z archive.
+        SevenZ => "SevenZ",
+    }
+}
+
+impl ExtractOnlyFormat {
+    /// The canonical file extension, without a leading dot.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::SevenZ => "7z",
+        }
+    }
+
+    fn not_creatable(self) -> ArchiveError {
+        ArchiveError::InvalidConfiguration {
+            setting: ConfigSetting::CreationFormat,
+            problem: ConfigProblem::NotCreatable { format: self },
+        }
+    }
+}
+
 /// How a [`CreatableFormat`] is written: a TAR stream with an optional codec,
 /// or a ZIP container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,8 +211,8 @@ impl TryFrom<ArchiveType> for CreatableFormat {
 
     /// # Errors
     ///
-    /// Returns [`ArchiveError::InvalidConfiguration`] for 7z, which cannot be
-    /// created.
+    /// Returns [`ArchiveError::InvalidConfiguration`] with
+    /// [`ConfigProblem::NotCreatable`] for 7z, which cannot be created.
     fn try_from(format: ArchiveType) -> Result<Self> {
         match format {
             ArchiveType::Tar => Ok(Self::Tar),
@@ -179,8 +221,47 @@ impl TryFrom<ArchiveType> for CreatableFormat {
             ArchiveType::TarXz => Ok(Self::TarXz),
             ArchiveType::TarZst => Ok(Self::TarZst),
             ArchiveType::Zip => Ok(Self::Zip),
-            ArchiveType::SevenZ => Err(crate::writer::sevenz_creation_unsupported()),
+            ArchiveType::SevenZ => Err(ExtractOnlyFormat::SevenZ.not_creatable()),
         }
+    }
+}
+
+impl FromStr for CreatableFormat {
+    type Err = ArchiveError;
+
+    /// Parses the string form shared with [`ArchiveType::as_str`].
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::CreationFormat`]: [`ConfigProblem::NotCreatable`] for
+    /// the spelling of a format that can only be read, and
+    /// [`ConfigProblem::NotOneOf`] listing the creatable formats for any other
+    /// string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::formats::detect::CreatableFormat;
+    ///
+    /// assert_eq!(
+    ///     "Zip".parse::<CreatableFormat>().unwrap(),
+    ///     CreatableFormat::Zip
+    /// );
+    /// let err = "SevenZ".parse::<CreatableFormat>().unwrap_err();
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "invalid configuration: 7z archive creation is not supported"
+    /// );
+    /// ```
+    fn from_str(value: &str) -> Result<Self> {
+        if let Some(format) = ExtractOnlyFormat::ALL
+            .iter()
+            .find(|format| format.as_str() == value)
+        {
+            return Err(format.not_creatable());
+        }
+        <Self as ClosedEnum>::parse_for(ConfigSetting::CreationFormat, value)
     }
 }
 
@@ -496,6 +577,56 @@ mod tests {
     use super::*;
     use std::assert_matches;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_creatable_format_parses_from_its_name() {
+        for &format in CreatableFormat::ALL {
+            assert_eq!(format.as_str().parse::<CreatableFormat>().unwrap(), format);
+        }
+    }
+
+    #[test]
+    fn an_unknown_creation_format_lists_the_creatable_formats_only() {
+        for text in ["zip", "ZIP", "tar.gz", "bogus", "", "7z"] {
+            let err = text.parse::<CreatableFormat>().unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "invalid configuration: creation format is not one of the allowed values: \
+                 Tar, TarGz, TarBz2, TarXz, TarZst, Zip",
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_extract_only_format_is_not_creatable() {
+        let from_name = "SevenZ".parse::<CreatableFormat>().unwrap_err();
+        let from_type = CreatableFormat::try_from(ArchiveType::SevenZ).unwrap_err();
+        for err in [from_name, from_type] {
+            assert_matches!(
+                err,
+                ArchiveError::InvalidConfiguration {
+                    setting: ConfigSetting::CreationFormat,
+                    problem: ConfigProblem::NotCreatable {
+                        format: ExtractOnlyFormat::SevenZ
+                    },
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn creatable_and_extract_only_formats_partition_the_archive_types() {
+        let mut names: Vec<&str> = CreatableFormat::NAMES
+            .iter()
+            .chain(ExtractOnlyFormat::NAMES)
+            .copied()
+            .collect();
+        names.sort_unstable();
+        let mut all: Vec<&str> = ArchiveType::NAMES.to_vec();
+        all.sort_unstable();
+        assert_eq!(names, all);
+    }
 
     #[test]
     fn test_archive_type_as_str_matches_display_and_is_unique() {

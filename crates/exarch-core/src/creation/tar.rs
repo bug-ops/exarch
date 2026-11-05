@@ -13,6 +13,9 @@ use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressReader;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
+use crate::creation::source::FaultSlotReader;
+use crate::creation::source::copy_outcome;
+use crate::creation::source::source_error;
 use crate::creation::staged::ExcludedOutput;
 use crate::creation::walker::Collected;
 use crate::creation::walker::EntryType;
@@ -136,7 +139,7 @@ fn add_directory_to_tar<W: Write>(
     header.set_size(0);
 
     if config.preserve_permissions {
-        let metadata = std::fs::metadata(dir_path)?;
+        let metadata = std::fs::metadata(dir_path).map_err(|e| source_error(dir_path, e))?;
         set_permissions(&mut header, &metadata);
     } else {
         // Deterministic, traversable default (mirrors tar-rs's
@@ -167,8 +170,8 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
     report: &mut CreationReport,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
-    let file = File::open(file_path)?;
-    let metadata = file.metadata()?;
+    let file = File::open(file_path).map_err(|e| source_error(file_path, e))?;
+    let metadata = file.metadata().map_err(|e| source_error(file_path, e))?;
     let size = metadata.len();
 
     let mut header = Header::new_gnu();
@@ -179,8 +182,13 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
         set_permissions(&mut header, &metadata);
     }
 
-    let mut tracked_file = ProgressReader::new(file, progress);
-    builder.append_data(&mut header, archive_path, &mut tracked_file)?;
+    let mut fault = None;
+    let appended = {
+        let mut tracked_file =
+            ProgressReader::new(FaultSlotReader::new(file, &mut fault), progress);
+        builder.append_data(&mut header, archive_path, &mut tracked_file)
+    };
+    copy_outcome(appended, fault, file_path)?;
 
     report.files_added += 1;
     report.bytes_written += size;

@@ -829,7 +829,10 @@ export type ArchiveType = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability'
+
+/** Archive format that can be created: `ArchiveType` without `'SevenZ'`. */
+export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip'
 
 /**
  * Create an archive from source files and directories (async).
@@ -904,7 +907,7 @@ export declare function createArchiveSync(outputPath: string, sources: Array<str
  * # Arguments
  *
  * * `sources` - Array of source files/directories to include
- * * `format` - The archive format; `'SevenZ'` cannot be created
+ * * `format` - The archive format (`CreatableFormat`, which has no `'SevenZ'`)
  * * `config` - Optional `CreationConfig` (uses defaults if omitted)
  *
  * # Returns
@@ -913,8 +916,7 @@ export declare function createArchiveSync(outputPath: string, sources: Array<str
  *
  * # Errors
  *
- * Rejects with `INVALID_CONFIGURATION` for `'SevenZ'`, and with the errors of
- * `createArchive` otherwise.
+ * Rejects with the errors of `createArchive`.
  *
  * # Examples
  *
@@ -922,7 +924,7 @@ export declare function createArchiveSync(outputPath: string, sources: Array<str
  * const { data, report } = await createArchiveToBytes(['src/'], 'TarGz');
  * ```
  */
-export declare function createArchiveToBytes(sources: Array<string>, format: ArchiveType, config?: CreationConfig | undefined | null): Promise<CreatedArchive>
+export declare function createArchiveToBytes(sources: Array<string>, format: CreatableFormat, config?: CreationConfig | undefined | null): Promise<CreatedArchive>
 
 /**
  * Create an archive from source files and directories into memory (sync).
@@ -948,7 +950,7 @@ export declare function createArchiveToBytes(sources: Array<string>, format: Arc
  * const { data } = createArchiveToBytesSync(['src/'], 'Zip');
  * ```
  */
-export declare function createArchiveToBytesSync(sources: Array<string>, format: ArchiveType, config?: CreationConfig | undefined | null): CreatedArchive
+export declare function createArchiveToBytesSync(sources: Array<string>, format: CreatableFormat, config?: CreationConfig | undefined | null): CreatedArchive
 
 /**
  * Create an archive from source files and directories with a progress
@@ -1020,10 +1022,8 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * mechanism to `extractArchiveWithProgress`, which shares more detail on
  * why this is necessary). This does **not** cover an `async` progress
  * callback whose returned `Promise` rejects with a primitive — a
- * `try`/`catch` only observes synchronous throws — nor
- * `createArchiveWithProgressSync`'s deferred dispatch, which never enters
- * the affected code path to begin with (see its own doc comment). Keep
- * `progress` synchronous.
+ * `try`/`catch` only observes synchronous throws. Keep `progress`
+ * synchronous.
  *
  * # Examples
  *
@@ -1040,81 +1040,6 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * ```
  */
 export declare function createArchiveWithProgress(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, options?: CreateOptions | undefined | null): Promise<CreationReport>
-
-/**
- * Create an archive from source files and directories with a progress
- * callback (sync).
- *
- * Synchronous version of `createArchiveWithProgress`. Blocks the event loop
- * until creation completes. Prefer the async version for most use cases.
- *
- * # `progress` does not report live during this call
- *
- * `progress` is dispatched through the same threadsafe-function mechanism as
- * the async variant, which only ever delivers calls on a turn of the Node.js
- * event loop. Because this function blocks that same event loop until it
- * returns, **every queued call is delivered only after
- * `createArchiveWithProgressSync` has already returned** — none of them fire
- * during the call, so `progress` cannot be used to report *live* progress
- * here. Use `createArchiveWithProgress` instead if you need progress updates
- * while creation is still running.
- *
- * ## A throwing `progress` surfaces as an `uncaughtException`
- *
- * Because every call is delivered after this function has already returned,
- * there is no return value left to carry a callback throw: this function has
- * resolved with its `CreationReport` by then. A throw therefore propagates the
- * way any throw from a deferred callback does — as a process-level
- * `uncaughtException` on the turn that delivered the call, observable via
- * `process.on('uncaughtException', ...)`. It is never merged into a
- * `PROGRESS_CALLBACK_ERROR` result the way `createArchiveWithProgress` merges
- * it, and it cannot be caught by wrapping this call in `try`/`catch`. For the
- * same reason a throw cannot cancel the creation (`createArchiveWithProgress`
- * does): the archive is already written and committed when the callback runs.
- *
- * The primitive-throw crash documented on `createArchiveWithProgress` does
- * **not** apply here: that defect lives in the await-the-result dispatch path,
- * which this function cannot use (awaiting a call that only the blocked event
- * loop can deliver would deadlock). Queued calls take the plain dispatch path
- * instead, where a thrown primitive reaches `uncaughtException` intact just
- * like a thrown `Error`.
- *
- * # Arguments
- *
- * * `output_path` - Path to output archive file
- * * `sources` - Array of source files/directories to include
- * * `config` - Optional `CreationConfig` (uses defaults if omitted)
- * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
- *   string, total: number | null, current: number, bytesWritten: number]) =>
- *   void`. See the sections above: calls arrive only after this function
- *   returns, and a throw becomes an `uncaughtException` rather than an error
- *   from here.
- *
- * # Returns
- *
- * `CreationReport` with creation statistics
- *
- * # Errors
- *
- * Returns error if path validation fails, archive creation fails, or I/O
- * errors occur. See `createArchive` for the full list of error codes.
- *
- * # Examples
- *
- * ```javascript
- * const report = createArchiveWithProgressSync(
- *   'output.tar.gz',
- *   ['source_dir/'],
- *   null,
- *   (err, [path, total, current, bytesWritten]) => {
- *     // Fires only after createArchiveWithProgressSync has already returned.
- *     console.log(`${current}/${total}: ${path}`);
- *   },
- * );
- * console.log(`Created archive with ${report.filesAdded} files`);
- * ```
- */
-export declare function createArchiveWithProgressSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, options?: CreateOptions | undefined | null): CreationReport
 
 /** An archive created in memory. */
 export interface CreatedArchive {
@@ -1136,11 +1061,17 @@ export interface CreateOptions {
   /**
    * The archive format, instead of the one the output extension names (how
    * a `.apk` or `.whl` is written as a plain ZIP). `'SevenZ'` cannot be
-   * created.
+   * created and is not part of the type.
    */
-  format?: ArchiveType
+  format?: CreatableFormat
   /** Whether an existing output may be replaced. Defaults to `true`. */
   overwrite?: boolean
+  /**
+   * Whether the archive is flushed to stable storage before success is
+   * reported: `'synced'` (the default) or `'unsynced'`. See `Durability`
+   * for the crash and write-back hazards of `'unsynced'`.
+   */
+  durability?: Durability
 }
 
 /**
@@ -1174,6 +1105,18 @@ export interface CreationReport {
 
 /** The `kind` of a [`MemoryDirectoryEntry`]. */
 export type DirectoryKind = 'directory'
+
+/**
+ * Whether a created archive is flushed to stable storage before success is
+ * reported.
+ *
+ * `'synced'` (the default) flushes the file and its directory entry.
+ * `'unsynced'` skips both and is faster, but after a crash or power loss a
+ * replaced output can be empty or truncated and a new output can be empty,
+ * and write-back errors (network filesystems, quotas, delayed allocation) are
+ * not reported, so success does not prove the bytes reached the disk.
+ */
+export type Durability = 'synced' | 'unsynced'
 
 /**
  * Value of the `code` property on errors surfaced to JavaScript.
@@ -1525,8 +1468,7 @@ export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | As
  * Blocks the event loop until extraction completes. Same as
  * `extractArchiveToMemoryWithProgress`, except that the calls to `progress`
  * are queued and arrive only after this function has returned; a throw there
- * becomes an `uncaughtException`, not an error from here (see
- * `createArchiveWithProgressSync`).
+ * becomes an `uncaughtException`, not an error from here.
  *
  * # Arguments
  *
@@ -1860,8 +1802,7 @@ export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIte
  * Blocks the event loop until listing completes. Same as
  * `listArchiveBytesWithProgress`, except that the calls to `progress` are
  * queued and arrive only after this function has returned; a throw there
- * becomes an `uncaughtException`, not an error from here (see
- * `createArchiveWithProgressSync`).
+ * becomes an `uncaughtException`, not an error from here.
  *
  * # Arguments
  *
@@ -2376,8 +2317,7 @@ export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncI
  * Blocks the event loop until verification completes. Same as
  * `verifyArchiveBytesWithProgress`, except that the calls to `progress` are
  * queued and arrive only after this function has returned; a throw there
- * becomes an `uncaughtException`, not an error from here (see
- * `createArchiveWithProgressSync`).
+ * becomes an `uncaughtException`, not an error from here.
  *
  * # Arguments
  *

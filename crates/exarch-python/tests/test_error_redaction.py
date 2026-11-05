@@ -12,16 +12,13 @@ CI's debug `cargo nextest` run only covers the debug branch. This module is
 where the release-mode behaviour is asserted against the compiled extension.
 """
 
+import errno
 import os
 import sys
 
 import pytest
 
 import exarch
-
-# `IoContext::context` for the walkdir failure in `creation::walker`.
-WALK_CONTEXT = "directory walk failed"
-
 
 def _redaction_active(temp_dir):
     """Report whether the compiled extension redacts host paths.
@@ -40,7 +37,7 @@ def _redaction_active(temp_dir):
 @pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX permission bits do not gate directory reads"
 )
-def test_directory_walk_failure_keeps_context_without_leaking_detail(temp_dir):
+def test_unreadable_source_names_the_source_without_leaking_host_detail(temp_dir):
     source = temp_dir / "confidential-source"
     source.mkdir()
     (source / "payload.txt").write_text("data")
@@ -51,16 +48,22 @@ def test_directory_walk_failure_keeps_context_without_leaking_detail(temp_dir):
         pytest.skip("mode 000 does not block reads for this user (running as root?)")
 
     try:
-        with pytest.raises(OSError) as excinfo:
+        with pytest.raises(exarch.SourceNotAccessibleError) as excinfo:
             exarch.create_archive(str(temp_dir / "out.tar.gz"), [str(source)])
     finally:
         os.chmod(source, 0o755)
 
     message = str(excinfo.value)
-    assert WALK_CONTEXT in message, f"lost IoContext context, got: {message!r}"
+    assert "confidential-source" in message, f"lost the source name, got: {message!r}"
+
+    err = excinfo.value
+    assert err.errno == errno.EACCES
+    assert os.path.basename(err.filename) == "confidential-source"
+    assert err.strerror, "strerror must stay informative"
 
     if _redaction_active(temp_dir):
-        assert "confidential-source" not in message, (
+        assert err.filename == "confidential-source"
+        assert str(temp_dir) not in message, (
             f"host path leaked in release build, got: {message!r}"
         )
         assert "Permission denied" not in message, (

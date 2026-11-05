@@ -30,6 +30,7 @@ use exarch_core::formats::detect::ArchiveType;
 use exarch_core::path_text;
 use std::borrow::Cow;
 use std::fmt;
+use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -615,14 +616,18 @@ fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message
                 "\nHINT: Verify the archive path exists and is readable."
             }
         }),
-        ArchiveError::SourceNotAccessible { .. } => {
-            message.lit("Source path is not accessible").lit(match op {
-                Operation::Create => "\nHINT: Check file permissions on the source.",
-                Operation::Extract | Operation::List | Operation::Verify => {
-                    "\nHINT: Check file permissions on the archive."
+        ArchiveError::SourceNotAccessible { error, .. } => message
+            .lit("Source path is not accessible")
+            .lit(if error.kind() == io::ErrorKind::PermissionDenied {
+                match op {
+                    Operation::Create => "\nHINT: Check file permissions on the source.",
+                    Operation::Extract | Operation::List | Operation::Verify => {
+                        "\nHINT: Check file permissions on the archive."
+                    }
                 }
-            })
-        }
+            } else {
+                ""
+            }),
         ArchiveError::OutputExists { .. } => message.lit("Output path already exists").hint(
             op.accepts(Flag::Force)
                 .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
@@ -663,6 +668,28 @@ mod tests {
     use exarch_core::Violation;
     use std::io;
     use std::path::PathBuf;
+
+    fn source_not_accessible_message(kind: io::ErrorKind) -> String {
+        let err = ArchiveError::SourceNotAccessible {
+            path: PathBuf::from("src/a.txt"),
+            error: io::Error::from(kind),
+        };
+        format!(
+            "{:?}",
+            convert_error(Operation::Create, err, Path::new("o.tar"))
+        )
+    }
+
+    #[test]
+    fn the_permission_hint_is_shown_for_permission_failures_only() {
+        let denied = source_not_accessible_message(io::ErrorKind::PermissionDenied);
+        assert!(denied.contains("Check file permissions"), "{denied}");
+        for kind in [io::ErrorKind::Other, io::ErrorKind::TimedOut] {
+            let other = source_not_accessible_message(kind);
+            assert!(other.contains("Source path is not accessible"), "{other}");
+            assert!(!other.contains("permissions"), "{other}");
+        }
+    }
 
     #[test]
     fn test_convert_path_traversal_error() {

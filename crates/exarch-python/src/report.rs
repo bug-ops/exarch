@@ -98,13 +98,7 @@ impl PySkips {
 
     /// The exact count of `kind`, which must be one of the kind strings.
     fn count(&self, kind: &str) -> PyResult<usize> {
-        parse_one(
-            ConfigSetting::SkipKind,
-            SkipKind::ALL,
-            SkipKind::as_str,
-            kind,
-        )
-        .map(|kind| self.inner.count(kind))
+        parse_one::<SkipKind>(ConfigSetting::SkipKind, kind).map(|kind| self.inner.count(kind))
     }
 
     #[getter]
@@ -1518,8 +1512,8 @@ mod tests {
             ),
             literal_line(
                 "_DecodeReuse",
-                crate::buffer::ReuseKind::ALL,
-                crate::buffer::ReuseKind::as_str,
+                exarch_core::DecodeReuseKind::ALL,
+                exarch_core::DecodeReuseKind::as_str,
             ),
         ];
         let flat = flatten_literals(pyi);

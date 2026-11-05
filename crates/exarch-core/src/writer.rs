@@ -13,7 +13,6 @@ use std::io::Seek;
 use std::io::Write;
 use std::path::Path;
 
-use crate::ArchiveError;
 use crate::CreationConfig;
 use crate::CreationReport;
 use crate::ProgressCallback;
@@ -56,13 +55,6 @@ impl<W: Write> Write for CountingWriter<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
-    }
-}
-
-pub(crate) fn sevenz_creation_unsupported() -> ArchiveError {
-    ArchiveError::InvalidConfiguration {
-        setting: crate::ConfigSetting::CreationFormat,
-        problem: crate::ConfigProblem::NotSupported,
     }
 }
 
@@ -124,7 +116,7 @@ impl<'a> ArchiveWriter<'a> {
     ///
     /// The writer must be positioned at offset 0 when the archive is created,
     /// otherwise creation fails with
-    /// [`InvalidConfiguration`](ArchiveError::InvalidConfiguration).
+    /// [`InvalidConfiguration`](crate::ArchiveError::InvalidConfiguration).
     #[must_use]
     pub fn zip<W: Write + Seek + Send + 'a>(writer: W) -> Self {
         Self {
@@ -189,6 +181,7 @@ impl<'a> ArchiveWriter<'a> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::ArchiveError;
     use crate::CreateRequest;
     use crate::SecurityConfig;
     use crate::api::create_archive;

@@ -20,6 +20,7 @@ use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
 use crate::Result;
+use crate::request::Durability;
 use crate::request::OutputPolicy;
 
 /// What currently occupies the target path.
@@ -208,8 +209,9 @@ impl StagedOutput {
         (self.temp.as_file_mut(), &self.excluded)
     }
 
-    /// Writes the archive to disk and publishes it at the target, then syncs
-    /// the parent directory on a best-effort basis (Unix).
+    /// Publishes the archive at the target. Under [`Durability::Synced`] the
+    /// file is flushed first and the parent directory is synced afterwards on
+    /// a best-effort basis (Unix); [`Durability::Unsynced`] skips both.
     ///
     /// The mode of a replaced file is applied after the write, right before the
     /// rename. [`OutputPolicy::CreateNew`] never overwrites: a file that
@@ -219,7 +221,11 @@ impl StagedOutput {
     ///
     /// Returns an error if syncing, setting the mode or renaming fails; the
     /// temporary file is deleted and the target is untouched.
-    pub(crate) fn commit(self) -> Result<()> {
+    pub(crate) fn commit(self, durability: Durability) -> Result<()> {
+        self.commit_with(durability, &HostFlush)
+    }
+
+    fn commit_with(self, durability: Durability, flush: &impl Flush) -> Result<()> {
         let Self {
             temp,
             target,
@@ -227,7 +233,9 @@ impl StagedOutput {
             permissions,
             ..
         } = self;
-        temp.as_file().sync_all()?;
+        if durability == Durability::Synced {
+            flush.file(temp.as_file())?;
+        }
         if let Some(permissions) = permissions {
             temp.as_file().set_permissions(permissions)?;
         }
@@ -238,8 +246,33 @@ impl StagedOutput {
                 .map_err(|failed| ArchiveError::Io(failed.error))?,
             OutputPolicy::CreateNew => publish_new(temp, &target)?,
         }
-        sync_parent(&target);
+        if durability == Durability::Synced {
+            flush.parent(&target);
+        }
         Ok(())
+    }
+}
+
+/// The two flushes of a synced commit, behind a seam so a test can observe
+/// that an unsynced commit performs neither.
+trait Flush {
+    /// Flushes the staged archive file to stable storage.
+    fn file(&self, file: &File) -> io::Result<()>;
+
+    /// Flushes the directory entry of the published `target`, best effort.
+    fn parent(&self, target: &Path);
+}
+
+/// Flushes through the operating system.
+struct HostFlush;
+
+impl Flush for HostFlush {
+    fn file(&self, file: &File) -> io::Result<()> {
+        file.sync_all()
+    }
+
+    fn parent(&self, target: &Path) {
+        sync_parent(target);
     }
 }
 
@@ -354,9 +387,17 @@ mod tests {
         StagedOutput::begin(&dir.join(name), policy)
     }
 
-    fn write_and_commit(mut staged: StagedOutput, bytes: &[u8]) -> Result<()> {
+    fn write_and_commit(staged: StagedOutput, bytes: &[u8]) -> Result<()> {
+        write_and_commit_with(staged, bytes, Durability::Synced)
+    }
+
+    fn write_and_commit_with(
+        mut staged: StagedOutput,
+        bytes: &[u8],
+        durability: Durability,
+    ) -> Result<()> {
         io::Write::write_all(staged.parts().0, bytes).unwrap();
-        staged.commit()
+        staged.commit(durability)
     }
 
     #[test]
@@ -374,6 +415,64 @@ mod tests {
         write_and_commit(out, b"new").unwrap();
         assert_eq!(fs::read(dir.path().join("a.tar")).unwrap(), b"new");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[derive(Default)]
+    struct Recorder(std::cell::RefCell<Vec<&'static str>>);
+
+    impl Flush for Recorder {
+        fn file(&self, _: &File) -> io::Result<()> {
+            self.0.borrow_mut().push("file");
+            Ok(())
+        }
+
+        fn parent(&self, _: &Path) {
+            self.0.borrow_mut().push("parent");
+        }
+    }
+
+    fn flushes(durability: Durability) -> Vec<&'static str> {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = Recorder::default();
+        let mut out = staged(dir.path(), "a.tar", OutputPolicy::CreateNew).unwrap();
+        io::Write::write_all(out.parts().0, b"new").unwrap();
+        out.commit_with(durability, &recorder).unwrap();
+        assert_eq!(fs::read(dir.path().join("a.tar")).unwrap(), b"new");
+        recorder.0.into_inner()
+    }
+
+    #[test]
+    fn synced_flushes_the_file_then_the_parent() {
+        assert_eq!(flushes(Durability::Synced), ["file", "parent"]);
+    }
+
+    #[test]
+    fn unsynced_flushes_neither_the_file_nor_the_parent() {
+        assert!(flushes(Durability::Unsynced).is_empty());
+    }
+
+    #[test]
+    fn the_default_durability_is_synced() {
+        assert_eq!(Durability::default(), Durability::Synced);
+    }
+
+    #[test]
+    fn every_durability_publishes_under_both_policies() {
+        for durability in Durability::ALL {
+            for policy in [OutputPolicy::CreateNew, OutputPolicy::Replace] {
+                let dir = tempfile::tempdir().unwrap();
+                fs::write(dir.path().join("old.tar"), b"old").unwrap();
+                let name = "old.tar";
+                let name = if policy == OutputPolicy::CreateNew {
+                    "a.tar"
+                } else {
+                    name
+                };
+                let out = staged(dir.path(), name, policy).unwrap();
+                write_and_commit_with(out, b"new", *durability).unwrap();
+                assert_eq!(fs::read(dir.path().join(name)).unwrap(), b"new");
+            }
+        }
     }
 
     #[test]

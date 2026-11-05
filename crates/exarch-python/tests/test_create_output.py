@@ -115,3 +115,24 @@ def test_working_progress_callback_still_commits(tmp_path, source):
 
     assert seen
     assert tarfile.is_tarfile(out)
+
+
+@pytest.mark.parametrize("durability", ["synced", "unsynced"])
+@pytest.mark.parametrize("create", ["create_archive", "create_archive_with_progress"])
+def test_durability_is_accepted_by_both_creation_functions(tmp_path, source, durability, create):
+    out = tmp_path / "out.tar"
+
+    getattr(exarch, create)(out, [source], durability=durability)
+
+    assert tarfile.open(out).getnames() == ["a.txt"]
+
+
+def test_an_unknown_durability_raises_a_typed_error(tmp_path, source):
+    out = tmp_path / "out.tar"
+
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        exarch.create_archive(out, [source], durability="fsync")
+
+    assert info.value.setting == "durability"
+    assert "synced, unsynced" in str(info.value)
+    assert not out.exists()

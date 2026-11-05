@@ -214,7 +214,7 @@ impl ArchiveError {
             | Self::InvalidPermissions { path, .. } => Some(format_entry_path_for_error(path)),
 
             Self::SourceNotFound { path }
-            | Self::SourceNotAccessible { path }
+            | Self::SourceNotAccessible { path, .. }
             | Self::OutputExists { path }
             | Self::UnknownFormat { path } => Some(sanitize_path_for_error(path)),
 
@@ -362,6 +362,7 @@ mod tests {
             },
             ArchiveError::SourceNotAccessible {
                 path: host_path.clone(),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             },
             ArchiveError::OutputExists {
                 path: host_path.clone(),

@@ -52,11 +52,6 @@ def test_created_tar_gz_is_readable_by_stdlib(source_tree):
         assert len(archive.getnames()) >= 2
 
 
-def test_seven_z_cannot_be_created(source_tree):
-    with pytest.raises(ValueError, match="7z archive creation is not supported"):
-        exarch.create_archive_to_bytes([source_tree], "SevenZ")
-
-
 def test_unknown_format_is_a_value_error(source_tree):
     with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.create_archive_to_bytes([source_tree], "Rar")

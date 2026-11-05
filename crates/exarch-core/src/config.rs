@@ -1424,10 +1424,22 @@ pub enum DecodeReuse {
     Memory(ReuseLimit),
     /// Keep decoded entries in an unnamed temporary file, up to the limit.
     ///
-    /// The file lives in the platform's temporary directory (memory on a
-    /// tmpfs, so it is RAM there) and holds the plaintext of the archive until
-    /// the extraction ends. When no temporary file can be created, or on WASI,
-    /// nothing is kept.
+    /// The file lives in the platform's temporary directory and holds the
+    /// plaintext of the archive until the extraction ends. When no temporary
+    /// file can be created, or on WASI, nothing is kept.
+    ///
+    /// On Linux and Android a file that lands on a tmpfs or ramfs is detected
+    /// and charged like [`Memory`](Self::Memory): its length counts against
+    /// the shared decoder-memory budget, and when an extraction into a sink
+    /// needs room the latest kept entries are cut off the end of the file and
+    /// decoded again. The bytes of entries already extracted are not released
+    /// until the extraction ends, so a RAM-backed spool is charged
+    /// conservatively: evicting an entry below the one currently being read
+    /// frees nothing, because the file is never cut lower than that entry's
+    /// end. The Linux detection is compiled and exercised only by CI; it has
+    /// not been run on a Linux host. On every other target the file is assumed
+    /// to be on disk, so a temporary directory that is a RAM disk (FreeBSD
+    /// tmpfs, a macOS RAM disk) holds the spool in memory outside the budget.
     ///
     /// Writing the spool and reading it back is paid in kernel time on every
     /// byte kept. Measured (2026-11, macOS, release CLI, a shared host at a
@@ -1441,7 +1453,46 @@ pub enum DecodeReuse {
     /// 64 KiB buffer measured no faster, and a memory-mapped spool is ruled
     /// out by the crate's `unsafe` ban, so this is the floor of the design.
     /// Linux (ext4, tmpfs) is not measured.
+    ///
+    /// The archive's own listing pass for TAR, which also spools to a
+    /// temporary file, is not charged to this budget.
     TempFile(ReuseLimit),
+}
+
+closed_enum! {
+    /// The mode of a [`DecodeReuse`] without its limit, as the front ends spell
+    /// it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DecodeReuse;
+    /// use exarch_core::DecodeReuseKind;
+    ///
+    /// assert_eq!(DecodeReuse::Off.kind(), DecodeReuseKind::Off);
+    /// assert_eq!(DecodeReuseKind::TempFile.as_str(), "temp_file");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum DecodeReuseKind {
+        /// [`DecodeReuse::Off`].
+        Off => "off",
+        /// [`DecodeReuse::Memory`].
+        Memory => "memory",
+        /// [`DecodeReuse::TempFile`].
+        TempFile => "temp_file",
+    }
+}
+
+impl DecodeReuse {
+    /// The mode without its limit.
+    #[must_use]
+    pub const fn kind(self) -> DecodeReuseKind {
+        match self {
+            Self::Off => DecodeReuseKind::Off,
+            Self::Memory(_) => DecodeReuseKind::Memory,
+            Self::TempFile(_) => DecodeReuseKind::TempFile,
+        }
+    }
 }
 
 impl Default for DecodeReuse {

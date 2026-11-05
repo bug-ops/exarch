@@ -10,6 +10,7 @@ pub(crate) mod compression;
 pub mod config;
 pub(crate) mod progress;
 pub mod report;
+pub(crate) mod source;
 pub(crate) mod staged;
 pub mod tar;
 pub mod zip;

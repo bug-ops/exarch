@@ -20,6 +20,7 @@ pub use malformation::Unclassified;
 pub use messages::ErrorCode;
 pub use messages::FfiErrorMessage;
 pub use messages::FfiKind;
+pub use messages::FfiSourceFault;
 pub use messages::InvalidArchiveSubCode;
 pub use messages::PartialOutcome;
 pub use messages::SecurityViolationSubCode;

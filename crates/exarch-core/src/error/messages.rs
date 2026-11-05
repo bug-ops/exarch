@@ -490,6 +490,41 @@ pub struct FfiErrorMessage {
 
     /// Set when the error came from a partially completed extraction.
     pub partial: Option<PartialOutcome>,
+
+    /// The failure behind an unreadable creation source, so a binding can
+    /// expose `errno`, `strerror` and `filename`.
+    pub source_fault: Option<FfiSourceFault>,
+}
+
+/// What a binding needs of an unreadable creation source, redacted like the
+/// rest of the message.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveError;
+///
+/// let error = ArchiveError::SourceNotAccessible {
+///     path: "src/a.txt".into(),
+///     error: std::io::Error::from_raw_os_error(13),
+/// };
+/// let fault = error.into_ffi_message().source_fault.unwrap();
+/// assert_eq!(fault.raw_os_error, Some(13));
+/// assert!(fault.name.ends_with("a.txt"));
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct FfiSourceFault {
+    /// The OS error number, when the failure has one.
+    pub raw_os_error: Option<i32>,
+
+    /// The error text: the full `Display` in debug builds, the `ErrorKind`
+    /// description in release builds.
+    pub text: String,
+
+    /// The source path as the shared policy redacts it: the file name only in
+    /// release builds.
+    pub name: String,
 }
 
 impl FfiErrorMessage {
@@ -498,6 +533,7 @@ impl FfiErrorMessage {
             kind,
             description,
             partial: None,
+            source_fault: None,
         }
     }
 }
@@ -538,7 +574,15 @@ impl ArchiveError {
             });
             return msg;
         }
-        FfiErrorMessage::new(self.ffi_kind(), self.ffi_description())
+        let mut msg = FfiErrorMessage::new(self.ffi_kind(), self.ffi_description());
+        if let Self::SourceNotAccessible { error, .. } = &self {
+            msg.source_fault = Some(FfiSourceFault {
+                raw_os_error: error.raw_os_error(),
+                text: sanitize_io_error_for_error(error),
+                name: self.redacted_path().unwrap_or_default(),
+            });
+        }
+        msg
     }
 
     /// The binding-facing class of this error, without consuming it.
@@ -634,8 +678,11 @@ impl ArchiveError {
                 format!("invalid permissions for {path}: {:#o}", mode.get())
             }
             Self::SourceNotFound { .. } => format!("source path not found: {path}"),
-            Self::SourceNotAccessible { .. } => {
-                format!("source path is not accessible: {path}")
+            Self::SourceNotAccessible { error, .. } => {
+                format!(
+                    "source path is not accessible: {path}: {}",
+                    sanitize_io_error_for_error(error)
+                )
             }
             Self::OutputExists { .. } => format!("output file already exists: {path}"),
             Self::InvalidCompressionLevel { level } => {
@@ -822,6 +869,7 @@ mod tests {
             },
             ArchiveError::SourceNotAccessible {
                 path: PathBuf::from("test"),
+                error: std::io::Error::other("test"),
             },
             ArchiveError::OutputExists {
                 path: PathBuf::from("test"),

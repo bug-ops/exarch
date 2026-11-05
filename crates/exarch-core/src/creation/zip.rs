@@ -17,6 +17,7 @@ use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::report::CreationWarning;
+use crate::creation::source::source_error;
 use crate::creation::staged::ExcludedOutput;
 use crate::creation::walker::Collected;
 use crate::creation::walker::EntryType;
@@ -203,8 +204,8 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     progress: &mut dyn ProgressCallback,
     buffer: &mut [u8],
 ) -> Result<()> {
-    let mut file = File::open(file_path)?;
-    let metadata = file.metadata()?;
+    let mut file = File::open(file_path).map_err(|e| source_error(file_path, e))?;
+    let metadata = file.metadata().map_err(|e| source_error(file_path, e))?;
     let size = metadata.len();
 
     // Check file size limit
@@ -243,7 +244,11 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     // Copy file contents with progress tracking and reusable buffer
     let mut bytes_written = 0u64;
     loop {
-        let bytes_read = file.read(buffer)?;
+        let bytes_read = match file.read(buffer) {
+            Ok(bytes_read) => bytes_read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(source_error(file_path, e)),
+        };
         if bytes_read == 0 {
             break;
         }

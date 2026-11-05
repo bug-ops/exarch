@@ -703,12 +703,7 @@ fn parse_parallel_decode_memory(value: Option<PyInteger>) -> PyResult<ParallelDe
 
 /// Parses the string form shared with `ZipConsistencyPolicy::as_str`.
 fn parse_zip_consistency(value: &str) -> PyResult<ZipConsistencyPolicy> {
-    parse_one(
-        ConfigSetting::ZipConsistency,
-        ZipConsistencyPolicy::ALL,
-        ZipConsistencyPolicy::as_str,
-        value,
-    )
+    parse_one(ConfigSetting::ZipConsistency, value)
 }
 
 impl PySecurityConfig {

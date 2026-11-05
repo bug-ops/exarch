@@ -31,6 +31,7 @@ use crate::api::extract_staged;
 use crate::api::extract_to_sink_reusing;
 use crate::api::extract_validated;
 use crate::api::resolve_output_format;
+use crate::closed_enum::closed_enum;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
 use crate::creation::progress::check_cancelled;
@@ -538,6 +539,45 @@ pub enum OutputPolicy {
     Replace,
 }
 
+closed_enum! {
+    /// Whether a created archive is flushed to stable storage before it is
+    /// reported as written.
+    ///
+    /// `Synced` (the default) flushes the archive file and then its parent
+    /// directory entry, so a published archive survives a crash or power
+    /// loss.
+    ///
+    /// `Unsynced` skips both flushes and is faster, with these hazards:
+    ///
+    /// - After a crash or power loss a [`Replace`](OutputPolicy::Replace)
+    ///   target can be empty or truncated, and a
+    ///   [`CreateNew`](OutputPolicy::CreateNew) file can be empty.
+    /// - Write-back errors (network filesystems, quotas, delayed-allocation
+    ///   `ENOSPC`) are not reported, so an `Ok` result does not mean the bytes
+    ///   reached the disk.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::Durability;
+    /// use exarch_core::OutputFile;
+    ///
+    /// assert_eq!(Durability::default(), Durability::Synced);
+    /// let out = OutputFile::replace("scratch.tar").with_durability(Durability::Unsynced);
+    /// assert_eq!(out.durability(), Durability::Unsynced);
+    /// ```
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum Durability {
+        /// Flush the file and its directory entry before reporting success
+        #[default]
+        Synced => "synced",
+
+        /// Skip the flushes; see the type documentation for the hazards
+        Unsynced => "unsynced",
+    }
+}
+
 /// How the archive format of an [`OutputFile`] is chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -602,6 +642,7 @@ pub struct OutputFile {
     path: PathBuf,
     policy: OutputPolicy,
     format: OutputFormat,
+    durability: Durability,
 }
 
 impl OutputFile {
@@ -622,6 +663,7 @@ impl OutputFile {
             path,
             policy,
             format: OutputFormat::FromExtension,
+            durability: Durability::Synced,
         }
     }
 
@@ -629,6 +671,14 @@ impl OutputFile {
     #[must_use]
     pub const fn with_format(mut self, format: CreatableFormat) -> Self {
         self.format = OutputFormat::Explicit(format);
+        self
+    }
+
+    /// Sets whether the archive is flushed to stable storage before success is
+    /// reported.
+    #[must_use]
+    pub const fn with_durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
         self
     }
 
@@ -648,6 +698,12 @@ impl OutputFile {
     #[must_use]
     pub const fn format(&self) -> OutputFormat {
         self.format
+    }
+
+    /// Whether the archive is flushed to stable storage.
+    #[must_use]
+    pub const fn durability(&self) -> Durability {
+        self.durability
     }
 }
 
@@ -745,7 +801,7 @@ impl<'a> CreateRequest<'a> {
             check_cancelled(progress)?;
             Ok(report)
         })?;
-        staged.commit()?;
+        staged.commit(output.durability())?;
         Ok(report)
     }
 

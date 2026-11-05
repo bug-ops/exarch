@@ -12,6 +12,8 @@ use crate::SkipKind;
 use crate::Skips;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
+use crate::creation::source::source_error;
+use crate::creation::source::walk_error;
 use crate::creation::staged::ExcludedOutput;
 use std::fs::Metadata;
 use std::ops::Deref;
@@ -109,12 +111,7 @@ impl<'a> FilteredWalker<'a> {
             loop {
                 let entry = match walker.next()? {
                     Ok(entry) => entry,
-                    Err(e) => {
-                        // Convert walkdir error to ArchiveError
-                        return Some(Err(ArchiveError::Io(std::io::Error::other(
-                            IoContext::new("directory walk failed", e.to_string()),
-                        ))));
-                    }
+                    Err(e) => return Some(Err(walk_error(e, self.root))),
                 };
                 if self.is_hidden_directory(&entry) {
                     walker.skip_current_dir();
@@ -170,21 +167,11 @@ impl<'a> FilteredWalker<'a> {
         relative: PathBuf,
     ) -> Result<Option<WalkItem>> {
         let path = entry.path().to_path_buf();
-        let metadata = entry.metadata().map_err(|e| {
-            ArchiveError::Io(std::io::Error::other(IoContext::new(
-                "failed to read entry metadata",
-                format!("{}: {e}", path.display()),
-            )))
-        })?;
+        let metadata = entry.metadata().map_err(|e| walk_error(e, &path))?;
 
         // Determine entry type
         let entry_type = if metadata.is_symlink() {
-            let target = std::fs::read_link(&path).map_err(|e| {
-                ArchiveError::Io(std::io::Error::other(IoContext::new(
-                    "failed to read symlink target",
-                    format!("{}: {e}", path.display()),
-                )))
-            })?;
+            let target = std::fs::read_link(&path).map_err(|e| source_error(&path, e))?;
             EntryType::Symlink { target }
         } else if metadata.is_dir() {
             EntryType::Directory
@@ -363,11 +350,7 @@ pub fn collect_entries<P: AsRef<Path>>(
         // missing) is still treated as a present source; it is later
         // classified as EntryType::Symlink below. The result is reused
         // in the single-file branch to avoid a second lstat.
-        let Ok(metadata) = path.symlink_metadata() else {
-            return Err(ArchiveError::SourceNotFound {
-                path: path.to_path_buf(),
-            });
-        };
+        let metadata = path.symlink_metadata().map_err(|e| source_error(path, e))?;
 
         // `metadata.is_dir()` (from the lstat above) is required here instead
         // of `path.is_dir()` (stat, follows symlinks), so that a
@@ -406,7 +389,7 @@ pub fn collect_entries<P: AsRef<Path>>(
             };
 
             let entry_type = if metadata.is_symlink() {
-                let target = std::fs::read_link(path)?;
+                let target = std::fs::read_link(path).map_err(|e| source_error(path, e))?;
                 EntryType::Symlink { target }
             } else {
                 EntryType::File

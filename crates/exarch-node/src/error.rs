@@ -349,6 +349,9 @@ pub enum ConfigSetting {
     /// `skip_kind`.
     #[napi(value = "skip_kind")]
     SkipKind,
+    /// `durability`.
+    #[napi(value = "durability")]
+    Durability,
 }
 
 /// Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
@@ -1538,7 +1541,8 @@ mod tests {
             ArchiveFormat,
             DecodeReuse,
             DecodeReuseLimit,
-            SkipKind
+            SkipKind,
+            Durability
         ]
     );
 
@@ -1736,7 +1740,10 @@ mod tests {
                 mode: exarch_core::RawMode::new(0o644),
             },
             CoreError::SourceNotFound { path: path.clone() },
-            CoreError::SourceNotAccessible { path: path.clone() },
+            CoreError::SourceNotAccessible {
+                path: path.clone(),
+                error: std::io::Error::other("x"),
+            },
             CoreError::OutputExists { path: path.clone() },
             CoreError::UnknownFormat { path },
         ];

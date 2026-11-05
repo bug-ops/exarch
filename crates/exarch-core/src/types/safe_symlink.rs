@@ -334,23 +334,43 @@ fn verify_parent_not_symlink<V: FsView>(path: &Path, dest: &Path, view: &V) -> R
     for component in path.parent().unwrap_or_else(|| Path::new("")).components() {
         current.push(component);
 
-        // Check if current path exists and is a symlink
-        if view.exists(&current) {
-            let is_symlink =
-                view.is_symlink(&current)
-                    .map_err(|_| ArchiveError::SymlinkEscape {
-                        path: path.to_path_buf(),
-                    })?;
-
-            if is_symlink {
+        match probe_is_symlink(view, &current, path)? {
+            Some(true) => {
                 return Err(ArchiveError::SymlinkEscape {
                     path: path.to_path_buf(),
                 });
             }
+            Some(false) => {}
+            None => break,
         }
     }
 
     Ok(())
+}
+
+/// Asks `view` whether `path` is a symlink, failing closed.
+///
+/// `None` means nothing exists at `path` (missing, or below a file), so
+/// nothing can lie below it either. A name past the host limit is the usual
+/// name-too-long refusal; any other failure to inspect `path` refuses the link.
+fn probe_is_symlink<V: FsView>(view: &V, path: &Path, link_path: &Path) -> Result<Option<bool>> {
+    match view.is_symlink(path) {
+        Ok(is_symlink) => Ok(Some(is_symlink)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidFilename => {
+            Err(ArchiveError::Io(error))
+        }
+        Err(_) => Err(ArchiveError::SymlinkEscape {
+            path: link_path.to_path_buf(),
+        }),
+    }
 }
 
 /// Resolves `target` step by step from `start`, following any on-disk symlinks
@@ -402,7 +422,7 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
                 // resolve it before applying `..` so the pop
                 // operates on the real filesystem topology
                 // rather than the string representation.
-                if view.is_symlink(&current).unwrap_or(false) {
+                if probe_is_symlink(view, &current, link_path)? == Some(true) {
                     current = canonical_within(view, &current, root, link_path)?;
                 }
                 if !(start.starts_with(&current) || view.is_dir(&current)) || !current.pop() {
@@ -416,7 +436,7 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
                 current.push(name);
                 // Resolve the component immediately if it is a symlink so that
                 // any subsequent `..` steps use the real resolved path.
-                if view.is_symlink(&current).unwrap_or(false) {
+                if probe_is_symlink(view, &current, link_path)? == Some(true) {
                     current = canonical_within(view, &current, root, link_path)?;
                 }
             }
@@ -1225,6 +1245,37 @@ mod tests {
         }
 
         #[test]
+        fn a_target_below_a_file_resolves_the_same_in_both_views() {
+            assert_matches!(
+                host_resolve(
+                    |root| std::fs::write(root.join("f"), b"x").expect("file"),
+                    "",
+                    "f/x"
+                ),
+                Ok(_)
+            );
+            assert_matches!(tree_resolve(|t| put(t, "f", Node::File), "", "f/x"), Ok(_));
+        }
+
+        #[test]
+        fn a_parent_chain_through_a_file_is_not_a_symlink_refusal_in_both_views() {
+            let temp = TempDir::new().expect("tempdir");
+            let root = temp.path().canonicalize().expect("canonical root");
+            std::fs::write(root.join("f"), b"x").expect("file");
+            assert_matches!(
+                verify_parent_not_symlink(Path::new("f/g/l"), &root, &HostFs),
+                Ok(())
+            );
+
+            let mut tree = VirtualTree::for_test(&VirtualRoot::at("/dest"));
+            put(&mut tree, "f", Node::File);
+            assert_matches!(
+                verify_parent_not_symlink(Path::new("f/g/l"), Path::new("/dest"), &tree),
+                Ok(())
+            );
+        }
+
+        #[test]
         fn parent_dir_after_symlinked_directory_uses_resolved_location() {
             assert_matches!(
                 tree_resolve(
@@ -1236,6 +1287,136 @@ mod tests {
                     "x/.."
                 ),
                 Ok(_)
+            );
+        }
+    }
+
+    mod failing_probes {
+        use super::*;
+        use crate::security::fs_view::Containment;
+        use std::io::ErrorKind;
+
+        /// Host view whose `is_symlink` fails with `kind` at one path.
+        struct FailingProbe {
+            at: PathBuf,
+            kind: ErrorKind,
+        }
+
+        impl FsView for FailingProbe {
+            type Root = DestDir;
+
+            fn path_model(&self) -> crate::security::fs_view::PathModel {
+                HostFs.path_model()
+            }
+
+            fn exists(&self, path: &Path) -> bool {
+                HostFs.exists(path)
+            }
+
+            fn is_dir(&self, path: &Path) -> bool {
+                HostFs.is_dir(path)
+            }
+
+            fn is_symlink(&self, path: &Path) -> std::io::Result<bool> {
+                if path == self.at {
+                    return Err(self.kind.into());
+                }
+                HostFs.is_symlink(path)
+            }
+
+            fn canonicalize(&self, path: &Path, root: &DestDir) -> std::io::Result<Containment> {
+                HostFs.canonicalize(path, root)
+            }
+        }
+
+        const LINK: &str = "link";
+
+        fn fixture() -> (TempDir, PathBuf, DestDir) {
+            let temp = TempDir::new().expect("tempdir");
+            let root = temp.path().canonicalize().expect("canonical root");
+            std::fs::create_dir_all(root.join("a/b/c")).expect("deep fixture");
+            let dest = DestDir::new(root.clone()).expect("dest");
+            (temp, root, dest)
+        }
+
+        fn resolve_with(kind: ErrorKind) -> Result<PathBuf> {
+            let (_temp, root, dest) = fixture();
+            let view = FailingProbe {
+                at: root.join("a/b"),
+                kind,
+            };
+            resolve_through_symlinks_in(&root, Path::new("a/b/c/x"), &dest, Path::new(LINK), &view)
+        }
+
+        fn verify_with(kind: ErrorKind) -> Result<()> {
+            let (_temp, root, _dest) = fixture();
+            let view = FailingProbe {
+                at: root.join("a/b"),
+                kind,
+            };
+            verify_parent_not_symlink(Path::new("a/b/c/l"), &root, &view)
+        }
+
+        #[test]
+        fn a_target_probe_that_fails_refuses_the_link() {
+            assert_matches!(
+                resolve_with(ErrorKind::PermissionDenied),
+                Err(ArchiveError::SymlinkEscape { .. })
+            );
+            assert_matches!(
+                resolve_with(ErrorKind::Other),
+                Err(ArchiveError::SymlinkEscape { .. })
+            );
+        }
+
+        #[test]
+        fn a_target_probe_past_the_name_limit_is_a_length_refusal() {
+            assert_matches!(
+                resolve_with(ErrorKind::InvalidFilename),
+                Err(ArchiveError::Io(ref e)) if e.kind() == ErrorKind::InvalidFilename
+            );
+        }
+
+        #[test]
+        fn a_target_probe_that_finds_nothing_is_not_a_refusal() {
+            assert_matches!(resolve_with(ErrorKind::NotFound), Ok(_));
+            assert_matches!(resolve_with(ErrorKind::NotADirectory), Ok(_));
+        }
+
+        #[test]
+        fn a_parent_probe_that_fails_refuses_the_link() {
+            assert_matches!(
+                verify_with(ErrorKind::PermissionDenied),
+                Err(ArchiveError::SymlinkEscape { .. })
+            );
+            assert_matches!(
+                verify_with(ErrorKind::Other),
+                Err(ArchiveError::SymlinkEscape { .. })
+            );
+        }
+
+        #[test]
+        fn a_parent_probe_past_the_name_limit_is_a_length_refusal() {
+            assert_matches!(
+                verify_with(ErrorKind::InvalidFilename),
+                Err(ArchiveError::Io(ref e)) if e.kind() == ErrorKind::InvalidFilename
+            );
+        }
+
+        #[test]
+        fn a_parent_probe_that_finds_nothing_is_not_a_refusal() {
+            assert_matches!(verify_with(ErrorKind::NotFound), Ok(()));
+            assert_matches!(verify_with(ErrorKind::NotADirectory), Ok(()));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_dangling_link_in_the_parent_chain_is_refused() {
+            let (_temp, root, _dest) = fixture();
+            std::os::unix::fs::symlink("missing", root.join("d")).expect("dangling link");
+            assert_matches!(
+                verify_parent_not_symlink(Path::new("d/l"), &root, &HostFs),
+                Err(ArchiveError::SymlinkEscape { .. })
             );
         }
     }

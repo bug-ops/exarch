@@ -1007,7 +1007,7 @@ mod windows_tests {
             .ok()?;
         out.status
             .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .then(|| String::from_utf8_lossy_owned(out.stdout).trim().to_owned())
     }
 
     #[test]

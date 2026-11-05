@@ -81,16 +81,10 @@ describe('IoContext error redaction', () => {
     }
 
     assert.ok(message !== null, 'expected createArchiveSync to fail on an unreadable source');
-    assert.ok(
-      message.includes('confidential-source'),
-      `lost the source name, got: ${message}`
-    );
+    assert.ok(message.includes('confidential-source'), `lost the source name, got: ${message}`);
 
     if (redactionActive(tempDir)) {
-      assert.ok(
-        !message.includes(tempDir),
-        `host path leaked in release build, got: ${message}`
-      );
+      assert.ok(!message.includes(tempDir), `host path leaked in release build, got: ${message}`);
       assert.ok(
         !message.includes('Permission denied'),
         `raw OS detail leaked in release build, got: ${message}`

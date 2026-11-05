@@ -29,7 +29,9 @@ def _create_to_bytes(tmp_path, source, fmt):
 
 @pytest.mark.parametrize("create", [_create_to_path, _create_to_bytes])
 @pytest.mark.parametrize("fmt", ["zip", "ZIP", "tar.gz", "bogus", "", "7z"])
-def test_unknown_format_names_the_creation_format_and_lists_the_values(tmp_path, source, create, fmt):
+def test_unknown_format_names_the_creation_format_and_lists_the_values(
+    tmp_path, source, create, fmt
+):
     with pytest.raises(exarch.InvalidConfigurationError) as info:
         create(tmp_path, source, fmt)
 

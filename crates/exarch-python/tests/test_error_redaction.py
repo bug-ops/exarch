@@ -20,6 +20,7 @@ import pytest
 
 import exarch
 
+
 def _redaction_active(temp_dir):
     """Report whether the compiled extension redacts host paths.
 
@@ -63,9 +64,7 @@ def test_unreadable_source_names_the_source_without_leaking_host_detail(temp_dir
 
     if _redaction_active(temp_dir):
         assert err.filename == "confidential-source"
-        assert str(temp_dir) not in message, (
-            f"host path leaked in release build, got: {message!r}"
-        )
+        assert str(temp_dir) not in message, f"host path leaked in release build, got: {message!r}"
         assert "Permission denied" not in message, (
             f"raw OS detail leaked in release build, got: {message!r}"
         )

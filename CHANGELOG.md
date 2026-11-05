@@ -54,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: entry names in findings and messages render through `path_text` (`\x5C`, `\xNN`) (#925, #954).
 - Performance: a single link is as fast or faster, a 30-link x 31-component chain costs about 1.2x, and deep link chains extract about twice as fast (#895, #949, #952, #954, #961).
 - CLI: `extract` decodes a compressed TAR once, `--atomic` reports a refusal as a `rolled_back` partial report, `create` keeps the previous archive on failure and `--force` swaps atomically (#828, #842, #931, #936, #954).
-- Dependencies: `lzma-rust2` held at 0.23 so one LZMA2 decoder is linked, `half` 2.7.1, `windows-sys` 0.61 as a Windows dependency, and Node tooling `@biomejs/biome` 2.6.5, `@napi-rs/cli` 3.10.12 and TypeScript 7.0.2.
+- Dependencies: `lzma-rust2` held at 0.23 so one LZMA2 decoder is linked, `half` 2.7.1, `windows-sys` 0.61 as a Windows dependency, and Node tooling `@biomejs/biome` 2.6.5, `@napi-rs/cli` 3.10.12 and TypeScript 7.0.2 (#963).
 - CI: clippy runs on `windows-latest` with `EXARCH_REQUIRE_PRIVILEGED_TESTS`, and the release-profile tests run on `main` only (#865, #886).
 - Docs: specifications in `specs/` synced with the changes since v0.8.0 (#947, #948).
 

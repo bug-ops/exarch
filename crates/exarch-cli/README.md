@@ -138,18 +138,19 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--max-files` | 10000 | Maximum number of entries to extract (files, symlinks, hardlinks and directories) |
-| `--max-total-size` | - | Maximum total extracted size (supports K/M/G/T suffixes) |
-| `--max-file-size` | - | Maximum single file size |
+| `--max-total-size` | 500M | Maximum total extracted size (supports K/M/G/T suffixes) |
+| `--max-file-size` | 50M | Maximum single file size (supports K/M/G/T suffixes) |
 | `--max-compression-ratio` | 100 | Maximum compression ratio (zip bomb protection); does not apply to solid 7z blocks, which use a fixed 1000x limit |
 | `--allowed-extensions` | — | Extract only entries whose extension is in the allowlist (repeatable; comma-separated values accepted; leading dots optional) |
 | `--max-path-depth` | 32 | Maximum path depth for extracted entries |
-| `--banned-component` | — | Banned path component (repeatable; replaces the default ban list when provided) |
+| `--banned-component` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` | Banned path component (repeatable; comma-separated values accepted; replaces the default ban list when provided; an exactly empty value `""` allows all) |
 | `--allow-absolute-paths` | false | Allow entries with absolute paths (stripped to relative on extraction) |
 | `--allow-symlinks` | false | Allow symlinks (within extraction directory) |
 | `--allow-hardlinks` | false | Allow hardlinks (within extraction directory) |
 | `--allow-solid-archives` | false | Allow solid 7z archives (multiple files compressed as one block) |
 | `--zip-consistency` | enforce | `enforce` rejects ZIP archives whose local and central headers disagree, that repeat a name, overlap entries or hide records; `ignore` keeps the central directory interpretation (also accepted by `list` and `verify`) |
 | `--parallel-decode-memory` | 128M | Memory for decoding independent LZMA2 runs of a 7z block ahead on worker threads (K/M/G/T suffixes), or `off` to decode on one thread (also accepted by `verify`). A stock 7-Zip archive has 64 MiB runs and needs about 100 MiB per extra concurrent run; archives with small runs need far less |
+| `--decode-reuse` | memory | Where ZIP structure-check output is kept so compressed entries are not decoded twice: `off`, `memory` (up to 256 MiB) or `temp-file` (up to 256 MiB in an unnamed temporary file). No effect with `--zip-consistency ignore` |
 | `--allow-world-writable` | false | Allow world-writable files in extracted archives |
 | `--preserve-permissions` | false | Preserve file permissions from archive |
 | `--force` | false | Overwrite existing files |
@@ -226,7 +227,7 @@ exarch list [OPTIONS] <ARCHIVE>
 | Option | Description |
 |--------|-------------|
 | `--long`, `-l` | Show detailed file information |
-| `--human-readable`, `-H` | Show sizes in human-readable format |
+| `--human-readable`, `-H` | Show sizes in human-readable format (requires `--long`) |
 | `--read-link-targets` | Read 7z symlink targets, which decodes the blocks that hold them; without it a 7z link shows `(target not read)` |
 | `--zip-consistency` | `enforce` (default) rejects ZIP archives whose headers disagree; `ignore` keeps the central directory interpretation |
 | `--max-files`, `--max-total-size`, `--max-file-size` | Limits applied while listing |
@@ -247,13 +248,13 @@ exarch verify [OPTIONS] <ARCHIVE>
 # Report any security warnings
 exarch verify archive.tar.gz
 
-# Treat warnings as errors (exit 2 on warnings, exit 1 on failure)
+# Treat warnings as errors (exit 3 on warnings, exit 1 on failure)
 exarch verify --strict archive.tar.gz
 
 # Also decode the payload to verify checksums (Integrity: OK, FAILED or INCOMPLETE)
 exarch verify --check-integrity archive.zip
 
-# Treat an incomplete integrity check as an error (exit 2)
+# Treat an incomplete integrity check as an error (exit 3)
 exarch verify --check-integrity --strict archive.7z
 
 # Verify with JSON output for scripting
@@ -264,8 +265,8 @@ exarch verify --json archive.tar.gz | jq '.data.status'
 
 | Option | Description |
 |--------|-------------|
-| `--strict` | Exit with code 2 if the report contains warnings (e.g. setuid bits, world-writable files). Without this flag, warnings result in exit 0. |
-| `--check-integrity` | Decode the payload to its end to verify checksums and codec framing. Integrity is `INCOMPLETE` when part of it could not be verified (budget, resource limit, solid 7z without `--allow-solid-archives`, TAR without an end-of-archive marker); exit code 0 does not mean integrity `OK`, use `--strict` to exit 2 |
+| `--strict` | Exit with code 3 if the report contains warnings (e.g. setuid bits, world-writable files). Without this flag, warnings result in exit 0. |
+| `--check-integrity` | Decode the payload to its end to verify checksums and codec framing. Integrity is `INCOMPLETE` when part of it could not be verified (budget, resource limit, solid 7z without `--allow-solid-archives`, TAR without an end-of-archive marker); exit code 0 does not mean integrity `OK`, use `--strict` to exit 3 |
 | `--decompression-budget` | Extra bytes `--check-integrity` may decode beyond listing (default 500M, independent of `--max-total-size`); requires `--check-integrity` |
 | `--max-files` | Maximum number of entries to scan |
 | `--max-total-size` | Maximum total archive size to scan |

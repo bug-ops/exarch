@@ -22,7 +22,7 @@ related:
 
 # Feature: Python Bindings
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > Error classes with `code`, `SinkOptions`, per-kind entry classes, typed skips, `create_archive(format=, overwrite=)`, integer-limit boundary and lossless paths. See FR-094 to FR-103; rows that conflict (FR-072, FR-075, FR-079, FR-088, FR-089) are rewritten in place.
 
 > [!info] Metadata

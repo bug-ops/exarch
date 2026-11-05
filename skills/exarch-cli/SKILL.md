@@ -5,7 +5,7 @@ license: MIT OR Apache-2.0
 compatibility: Requires the `exarch` binary (cargo install exarch-cli, or build from this workspace with cargo build -p exarch-cli). MSRV 1.99.1 if building from source.
 metadata:
   author: bug-ops
-  version: "0.7.0"
+  version: "0.9.0"
 ---
 
 # exarch CLI
@@ -158,7 +158,7 @@ extract or verify that archive with `--max-compression-ratio 218`. Only a path c
 (the archive is read back once); a library caller that supplies its own writer gets no warning.
 Verified live: `exarch create r.zip src` for a 5000-byte `B` run prints the warning and exits `0`.
 
-`exarch` refuses to *create* 7z archives (7z is extract-only) and refuses to create archives
+`exarch` refuses to *create* 7z archives (7z is extract-only: `InvalidConfiguration`, setting `creation_format`, exit `1`, verified live) and refuses to create archives
 under ZIP-family extensions that carry extra format semantics: `.jar`, `.war`, `.ear`, `.nar`,
 `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` — use plain
 `.zip` for those cases.
@@ -496,7 +496,7 @@ A `QuotaExceeded` error also carries a `sub_code` naming the exhausted limit (`F
 `error.setting` is present only on an `InvalidConfiguration` error and names the refused setting by its
 stable snake_case id (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`,
 `max_compression_ratio`, `decompression_budget`, `allowed_extension`, `banned_path_component`, `output_path`,
-`source_paths`, ...). A zero limit is refused when the flag is applied, so `list --max-files 0 --json` gives
+`source_paths`, `creation_format`, ...). A zero limit is refused when the flag is applied, so `list --max-files 0 --json` gives
 `kind` `InvalidConfiguration`, `setting` `max_file_count` and message
 `invalid configuration: max_file_count must not be zero` (verified live with the debug binary). clap checks only the syntax of a limit flag (a number, with `K`/`M`/`G`/`T` suffixes for sizes); every value the library refuses is refused when the flag is applied, for `extract`, `list` and `verify` alike: a zero `--max-files`, `--max-total-size`, `--max-file-size` or `--max-path-depth`, a zero, negative or non-finite `--max-compression-ratio` and a zero `--decompression-budget` exit `1` with the JSON envelope under `--json` (`kind` `InvalidConfiguration`, `setting` naming the flag), and in text mode print `Error: Invalid configuration: <setting> ...` followed by `HINT: Check the flags you passed and their allowed value ranges.` for all three commands. Only a value clap cannot parse (`--max-files abc`, `--max-files 2.5`, `--max-compression-ratio x`) is a usage error with exit `2` and plain text. Verified live with the debug binary: `--json list --max-compression-ratio 0` and `--json list --max-files 0` print one `InvalidConfiguration` envelope and exit `1`.
 

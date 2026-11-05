@@ -33,8 +33,6 @@ describe('ExarchError declarations', () => {
         'es2022',
         '--module',
         'commonjs',
-        '--moduleResolution',
-        'node',
         path.join(__dirname, 'types', 'error-usage.ts'),
       ],
       { encoding: 'utf8', cwd: ROOT }

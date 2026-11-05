@@ -33,7 +33,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 
 ```toml
 [dependencies]
-exarch-core = "0.8"
+exarch-core = "0.9"
 ```
 
 > [!IMPORTANT]
@@ -146,7 +146,7 @@ exarch provides defense-in-depth protection against common archive vulnerabiliti
 | Zip bombs | Detects high compression ratios | Enabled (100x limit) |
 | TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads | Enabled (4 MiB, 16 MiB for `permissive()`) |
 | Permission sanitization | Strips setuid/setgid bits | Enabled |
-| Size limits | Configurable file and total size limits | 50 MB / 10 GB |
+| Size limits | Configurable file and total size limits | 50 MB / 500 MB |
 
 > [!CAUTION]
 > Enabling symlinks or hardlinks should only be done when you fully trust the archive source.
@@ -159,22 +159,20 @@ The `verify` command accepts `--strict` to treat warnings as errors:
 # Exit 0 — only hard failures are errors
 exarch verify archive.tar.gz
 
-# Exit 2 if any warnings are found (e.g. setuid bits), exit 1 on failure
+# Exit 3 if any warnings are found (e.g. setuid bits), exit 1 on failure
 exarch verify --strict archive.tar.gz
 ```
 
 ### Security Configuration
 
 ```rust
-use exarch_core::ratio_limit;
-use exarch_core::SecurityConfig;
-use exarch_core::non_zero;
+use exarch_core::{non_zero, ratio_limit, Extension, SecurityConfig};
 
 let config = SecurityConfig::default()
     .with_max_file_size(non_zero!(100 * 1024 * 1024))    // 100 MB
     .with_max_total_size(non_zero!(1024 * 1024 * 1024))  // 1 GB
     .with_max_compression_ratio(ratio_limit!(50.0)) // 50x compression limit
-    .with_allowed_extensions(vec![".tar".into(), ".gz".into()]); // optional allowlist
+    .with_allowed_extensions(vec![Extension::try_from(".tar")?, Extension::try_from(".gz")?]); // optional allowlist
 ```
 
 > [!IMPORTANT]
@@ -195,7 +193,7 @@ let config = SecurityConfig::default()
 | 7z | `.7z` | ✅ | — | ✅ | ✅ | lzma, lzma2 |
 
 > [!NOTE]
-> ZIP-family formats share the ZIP container but add extra structure - signing (`.apk`/`.aab`/`.ipa`/`.appx`/`.msix`), checksum manifests (`.whl`), ordering rules (`.epub`), or descriptor files (`.war`/`.ear`/`.vsix`/`.nbm`) - which exarch doesn't produce. Creation is rejected to avoid silently emitting a bare ZIP with a misleading extension; callers who want that can set `CreationConfig::format = Some(exarch_core::formats::detect::ArchiveType::Zip)` explicitly.
+> ZIP-family formats share the ZIP container but add extra structure - signing (`.apk`/`.aab`/`.ipa`/`.appx`/`.msix`), checksum manifests (`.whl`), ordering rules (`.epub`), or descriptor files (`.war`/`.ear`/`.vsix`/`.nbm`) - which exarch doesn't produce. Creation is rejected to avoid silently emitting a bare ZIP with a misleading extension; callers who want that can state `CreatableFormat::Zip` with `OutputFile::with_format`.
 
 > [!NOTE]
 > 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. A 7z archive holding a Windows reparse point is refused as a whole; a Unix `S_IFLNK` symlink is read and validated through the symlink policy, so it is created only with symlinks allowed, and a 7z FIFO, socket or device node is refused.

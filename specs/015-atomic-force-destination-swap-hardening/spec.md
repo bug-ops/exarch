@@ -21,7 +21,7 @@ related:
 
 # Feature: Atomic-Force Destination Swap Hardening
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > The swap is now planned once (`WriteMode`, `ExtractPlan::Replace`), names are a single-component `EntryName`, and the displaced destination is held by a `DisplacedDestination` guard that restores it on any early exit (#935, #936). FR-014 to FR-016 add these; FR-001 to FR-013 are unchanged.
 
 > [!info] Metadata

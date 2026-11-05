@@ -232,6 +232,7 @@ Extract an archive to the specified directory with security validation.
 | `archive_path` | `str \| Path` | Path to the archive file |
 | `output_dir` | `str \| Path` | Directory where files will be extracted |
 | `config` | `SecurityConfig` | Optional security configuration |
+| `options` | `ExtractionOptions` | Optional `ExtractionOptions().with_atomic(True)` / `.with_skip_duplicates(...)` |
 
 **Returns:** `ExtractionReport`
 
@@ -260,7 +261,11 @@ Extract an archive to the specified directory with security validation.
 | `InvalidArchiveError` | Archive is corrupted |
 | `IOError` | I/O operation failed |
 
-**Note:** Since v0.4.0, `create_archive` raises `FileNotFoundError` for missing sources, `FileExistsError` when the output already exists without overwrite, and `ValueError` for invalid compression levels — matching standard Python conventions.
+### `create_archive(output_path, sources, config=None, format=None, overwrite=True, durability="synced")`
+
+Create an archive from files and directories. The archive is staged in a temporary file next to `output_path` (its directory must be writable) and renamed into place when complete, so a failed creation leaves the output as it was. `format` states the format when the extension does not (for example `"Zip"` for a `.whl`); `overwrite=False` refuses any existing output.
+
+**Note:** `create_archive` raises `FileNotFoundError` for missing sources, `OutputExistsError` (a `FileExistsError` subclass) when the output exists and `overwrite=False`, and `ValueError` for invalid compression levels — matching standard Python conventions.
 
 `create_archive` and `create_archive_with_progress` take `durability="synced"`
 (the default) or `"unsynced"`. `"synced"` flushes the archive and its directory

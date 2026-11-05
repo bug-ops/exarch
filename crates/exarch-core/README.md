@@ -14,7 +14,7 @@ This crate is part of the [exarch](https://github.com/bug-ops/exarch) workspace.
 
 ```toml
 [dependencies]
-exarch-core = "0.8"
+exarch-core = "0.9"
 ```
 
 > [!IMPORTANT]
@@ -43,16 +43,14 @@ fn main() -> Result<(), exarch_core::ArchiveError> {
 > Since v0.6.1, `ArchiveError`, `QuotaResource`, `ArchiveType`, `CompressionCodec`, `IssueCategory`, and `EntryType` are `#[non_exhaustive]` too — an exhaustive `match` on any of them (including the `Error Handling` example below) needs a wildcard `_` arm.
 
 ```rust
-use exarch_core::ratio_limit;
-use exarch_core::SecurityConfig;
-use exarch_core::non_zero;
+use exarch_core::{non_zero, ratio_limit, Extension, SecurityConfig};
 
 let config = SecurityConfig::default()
     .with_max_file_size(non_zero!(100 * 1024 * 1024))    // 100 MB per file
     .with_max_total_size(non_zero!(1024 * 1024 * 1024))  // 1 GB total
     .with_max_file_count(non_zero!(10_000))              // Max 10k files
     .with_max_compression_ratio(ratio_limit!(50.0)) // 50x compression limit
-    .with_allowed_extensions(vec![".tar".into(), ".gz".into()]); // optional allowlist
+    .with_allowed_extensions(vec![Extension::try_from(".tar")?, Extension::try_from(".gz")?]); // optional allowlist
 ```
 
 Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_solid_archives`, `with_solid_limits`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`, `with_decode_reuse`.
@@ -86,7 +84,7 @@ exarch-core provides defense-in-depth protection against common archive vulnerab
 | Zip bombs | Detects high compression ratios | Enabled (100x limit) |
 | TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads | Enabled (4 MiB, 16 MiB for `permissive()`) |
 | Permission sanitization | Strips setuid/setgid bits | Enabled |
-| Size limits | Configurable file and total size limits | 50 MB / 10 GB |
+| Size limits | Configurable file and total size limits | 50 MB / 500 MB |
 | Decoder memory | Bounds the xz dictionary and the zstd window (TAR and ZIP) by `max_decoder_memory` | Enabled (256 MiB) |
 | Compressed members | Bounds gzip members and bzip2 streams by `compressed_member_allowance` plus one per 16 KiB of output | Enabled (10,000) |
 
@@ -114,12 +112,12 @@ println!("Created {} files", report.files_added);
 `create_archive` replaces an existing output atomically once the archive is complete; a failed creation leaves the output as it was. Use `CreateRequest` with an `OutputFile` to refuse an existing file or to state the format:
 
 ```rust
-use exarch_core::{CreateRequest, CreationConfig, OutputFile};
+use exarch_core::{CreateRequest, CreationConfig, ExcludePattern, OutputFile};
 use exarch_core::creation::CompressionLevel;
 
 let config = CreationConfig::default()
     .with_compression_level(CompressionLevel::try_from(9u8)?)
-    .with_exclude_patterns(vec!["*.log".into(), "target/".into()]);
+    .with_exclude_patterns(vec![ExcludePattern::try_from("*.log")?, ExcludePattern::try_from("target/")?]);
 let report = CreateRequest::new(&config).create(
     &OutputFile::create_new("project.tar.gz"),
     &["src/", "Cargo.toml", "README.md"],
@@ -134,6 +132,7 @@ The output is staged in a temporary file in its directory (which must be writabl
 |--------|---------|-------------|
 | `follow_symlinks` | `false` | Follow symbolic links |
 | `include_hidden` | `false` | Include hidden files (.*) |
+| `max_file_size` | unbounded | Skip files above this size (`Limit<NonZeroU64>`) |
 | `compression_level` | `6` | Compression level (1-9) |
 | `exclude_patterns` | `[".git", ".DS_Store", "*.tmp"]` | Glob patterns to exclude |
 | `strip_prefix` | `None` | Strip prefix from paths |

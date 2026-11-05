@@ -22,7 +22,7 @@ related:
 
 # Feature: Node.js Bindings
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > `ExarchError` union, `IoKind`, `SinkOptions`, entry unions, number-to-limit boundary, `total: null`, skipped summary, injective path rendering and staged `createArchive`. See FR-106 to FR-113; rows that conflict (FR-090, FR-101) are rewritten in place.
 
 > [!info] Metadata

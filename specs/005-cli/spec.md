@@ -23,7 +23,7 @@ related:
 
 # Feature: CLI
 
-> [!note] Revision 2026-11-04 (50-issue batch)
+> [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > Exit status 3 for `verify --strict` warnings, shared `LimitArgs`, typed JSON (`Envelope`, `link_target`, skips by kind, verify issue codes), staged `create`, typed `-x` patterns, library-derived conflict check and request-type migration. See FR-106 to FR-124; rows below that conflict (FR-063, FR-064, FR-065, FR-074, FR-075, FR-077, FR-082, FR-087) are rewritten in place.
 
 > [!info] Metadata

@@ -224,19 +224,11 @@ fn ghsa_vmf3_gnu_longlink_traversal_benign_ustar_linkname_rejected() {
     );
 }
 
-/// GHSA-vmf3 core shape: a PAX `size` record precedes an intermediary GNU
-/// long-name ('L') header, then a zero-declared-size real entry, then a
-/// trailing entry. The PAX `size` record is accumulated and, per the
-/// dependency's `is_extension_header` guard, is *not* applied to the
-/// intermediary 'L' header (which uses its own declared length) — instead it
-/// is applied to the next real (non-metadata) entry, exactly like an
-/// ordinary PAX-preceding-a-file record. That entry surfaces under the GNU
-/// long name with the PAX-declared size, and no separately-named smuggled
-/// entry ever appears. A vulnerable parser that mis-applied the size to the
-/// 'L' header itself would shift framing differently and could expose a
-/// distinctly-named smuggled member instead.
+/// GHSA-vmf3 / GHSA-p5w9 shape: a PAX `size` record stacked with a GNU
+/// long-name header makes cpython resume parsing inside the entry's declared
+/// data, so the archive is refused instead of being read differently per tool.
 #[test]
-fn ghsa_vmf3_pax_size_framing_before_gnu_longname_smuggled_member_absent() {
+fn ghsa_p5w9_pax_size_stacked_with_gnu_longname_is_refused() {
     let mut t = Vec::new();
     let recs = pax_record(b"size", b"1024");
     pax_header(&mut t, &recs);
@@ -247,21 +239,12 @@ fn ghsa_vmf3_pax_size_framing_before_gnu_longname_smuggled_member_absent() {
     eof(&mut t);
 
     let (result, temp) = extract(&t);
-    let report = result.expect("well-formed archive must extract");
-    assert_eq!(report.files_extracted, 1, "exactly one entry must surface");
-    assert!(
-        temp.path().join("visible.txt").exists(),
-        "the entry must surface under its GNU long name"
+    assert_matches!(
+        result,
+        Err(ArchiveError::TarAmbiguity(TarAmbiguity::StackedSizeRecord))
     );
-    assert!(
-        !temp.path().join("trailer.txt").exists(),
-        "the trailing entry must not appear as a separately-named member \
-         (its bytes were consumed as data of the PAX-sized entry)"
-    );
-    assert!(
-        !temp.path().join("placeholder.txt").exists(),
-        "the entry must be visible only under its GNU long name, never its raw header name"
-    );
+    assert!(!temp.path().join("visible.txt").exists());
+    assert!(!temp.path().join("trailer.txt").exists());
 }
 
 // ─────────────────────────────────────────────────────────────────────────

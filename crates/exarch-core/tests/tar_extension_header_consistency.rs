@@ -329,6 +329,30 @@ fn pax_linkpath_with_gnu_long_link_is_refused() {
 }
 
 #[test]
+fn pax_size_with_gnu_long_record_is_refused_in_either_order() {
+    let pax = extension(PAX_LOCAL, &[("size", "1100")]);
+    let file = entry("benign", REGULAR, b"AAA");
+    let hidden = entry(".ssh/authorized_keys", REGULAR, b"PAYLOAD");
+    for kind in [GNU_LONG_NAME, GNU_LONG_LINK] {
+        let long = gnu_long(kind, "decoy.txt");
+        for headers in [[pax.clone(), long.clone()], [long, pax.clone()]] {
+            let bytes = tar_of(&[headers.concat(), file.clone(), hidden.clone()]);
+            assert_refused_everywhere(&bytes, TarAmbiguity::StackedSizeRecord);
+        }
+    }
+}
+
+#[test]
+fn pax_without_size_with_gnu_long_record_is_accepted() {
+    let pax = extension(PAX_LOCAL, &[("mtime", "1")]);
+    let long = gnu_long(GNU_LONG_NAME, "long.txt");
+    let bytes = tar_of(&[[pax, long].concat(), entry("placeholder", REGULAR, b"x")]);
+    let dir = TempDir::new().unwrap();
+    let path = write_archive(&dir, &bytes);
+    verify_archive(&path, &config()).unwrap();
+}
+
+#[test]
 fn global_header_overriding_entry_fields_is_refused() {
     for (key, value) in [("path", "../g.txt"), ("linkpath", "/etc"), ("size", "0")] {
         let bytes = tar_of(&[

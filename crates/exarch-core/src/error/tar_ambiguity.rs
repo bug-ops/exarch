@@ -233,6 +233,10 @@ pub enum TarAmbiguity {
         key: TarPathKey,
     },
 
+    /// A PAX `size` record shares an extension chain with a GNU long name or
+    /// link record, so readers disagree on where the entry's data ends.
+    StackedSizeRecord,
+
     /// An `x`, `L` or `K` header without a ustar or GNU magic.
     UnrecognizedHeader {
         /// The kind of extension header.
@@ -322,6 +326,9 @@ impl std::fmt::Display for TarAmbiguity {
                 f,
                 "PAX `{key}` record and a GNU long {} record both describe the same entry",
                 key.long_record()
+            ),
+            Self::StackedSizeRecord => f.write_str(
+                "PAX `size` record and a GNU long name or link record share one extension chain",
             ),
             Self::UnrecognizedHeader { kind } => write!(
                 f,

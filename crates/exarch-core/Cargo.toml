@@ -72,3 +72,7 @@ required-features = ["testing"]
 [[bench]]
 name = "progress"
 harness = false
+
+[[bench]]
+name = "symlink_resolution"
+harness = false

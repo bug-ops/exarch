@@ -56,6 +56,9 @@ use crate::QuotaResource;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::closed_enum::closed_enum;
+#[cfg(any(unix, target_os = "wasi"))]
+use crate::formats::handle_resolution::LinkCursor;
+use crate::formats::pinned_dir::PinnedRoot;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::safe_path::ParentCheck;
@@ -405,6 +408,16 @@ pub enum Containment {
     Escapes,
 }
 
+/// What the target of a link is relative to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkBase {
+    /// The directory the link sits in (a symlink target); the parents of the
+    /// link are vetted as well.
+    LinkDirectory,
+    /// The root itself (a hardlink target).
+    Destination,
+}
+
 /// Filesystem probes needed while validating archive entries.
 pub trait FsView {
     /// The root type a validator resolves paths against in this view.
@@ -435,6 +448,35 @@ pub trait FsView {
     /// Returns an error if a component is missing or the chain cannot be
     /// resolved.
     fn canonicalize(&self, path: &Path, root: &Self::Root) -> io::Result<Containment>;
+
+    /// Resolves the target of the link at `link` (relative to `root`) through
+    /// the links this view already holds, and returns where it lands.
+    ///
+    /// For [`LinkBase::LinkDirectory`] the parents of `link` are vetted first:
+    /// an existing symlink among them is refused. Every probe that fails for a
+    /// reason other than absence refuses the link.
+    ///
+    /// The default resolves by path through [`FsView::is_symlink`] and
+    /// [`FsView::canonicalize`]; a view that can hold directory handles
+    /// overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SymlinkEscape` when the target leaves `root`, runs through a
+    /// link that dangles or loops, or cannot be inspected, and an I/O error for
+    /// a name past the host's limits.
+    fn resolve_link_target(
+        &self,
+        link: &Path,
+        target: &Path,
+        base: LinkBase,
+        root: &Self::Root,
+    ) -> crate::Result<PathBuf>
+    where
+        Self: Sized,
+    {
+        crate::types::safe_symlink::resolve_link_target_by_path(self, link, target, base, root)
+    }
 }
 
 /// Case-insensitive path prefix check for macOS/Windows.
@@ -493,6 +535,88 @@ impl FsView for HostFs {
 
     fn canonicalize(&self, path: &Path, root: &DestDir) -> io::Result<Containment> {
         std::fs::canonicalize(path).map(|canonical| contain(canonical, root.as_path()))
+    }
+
+    #[cfg(any(unix, target_os = "wasi"))]
+    fn resolve_link_target(
+        &self,
+        link: &Path,
+        target: &Path,
+        base: LinkBase,
+        root: &DestDir,
+    ) -> crate::Result<PathBuf> {
+        resolve_pinned(&PinnedRoot::open(root.clone())?, link, target, base)
+    }
+}
+
+#[cfg(any(unix, target_os = "wasi"))]
+fn resolve_pinned(
+    root: &PinnedRoot,
+    link: &Path,
+    target: &Path,
+    base: LinkBase,
+) -> crate::Result<PathBuf> {
+    LinkCursor::for_target(root, link, base, target)
+        .map(|resolved| root.dest().as_path().join(resolved))
+        .map_err(|refusal| refusal.into_error(link))
+}
+
+/// The real filesystem, with link targets resolved against the destination
+/// handle an extraction already holds.
+///
+/// Behaves like [`HostFs`] except that, on Unix and WASI, links are resolved
+/// handle-relatively from the extraction's [`PinnedRoot`], the same descriptor
+/// every write goes through. [`HostFs`] opens the destination by path on every
+/// call instead, so only an extraction should rely on the pinned form.
+#[derive(Debug, Clone, Copy)]
+pub struct PinnedHostFs<'r> {
+    #[cfg_attr(
+        not(any(unix, target_os = "wasi")),
+        expect(dead_code, reason = "only the handle-relative resolver reads the root")
+    )]
+    root: &'r PinnedRoot,
+}
+
+impl<'r> PinnedHostFs<'r> {
+    /// Resolves link targets against `root`, the handle the extraction writes
+    /// through.
+    pub const fn new(root: &'r PinnedRoot) -> Self {
+        Self { root }
+    }
+}
+
+impl FsView for PinnedHostFs<'_> {
+    type Root = DestDir;
+
+    fn path_model(&self) -> PathModel {
+        HostFs.path_model()
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        HostFs.exists(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        HostFs.is_dir(path)
+    }
+
+    fn is_symlink(&self, path: &Path) -> io::Result<bool> {
+        HostFs.is_symlink(path)
+    }
+
+    fn canonicalize(&self, path: &Path, root: &DestDir) -> io::Result<Containment> {
+        HostFs.canonicalize(path, root)
+    }
+
+    #[cfg(any(unix, target_os = "wasi"))]
+    fn resolve_link_target(
+        &self,
+        link: &Path,
+        target: &Path,
+        base: LinkBase,
+        _root: &DestDir,
+    ) -> crate::Result<PathBuf> {
+        resolve_pinned(self.root, link, target, base)
     }
 }
 

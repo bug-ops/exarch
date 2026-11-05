@@ -27,8 +27,10 @@ use crate::security::admitted::PendingFile;
 use crate::security::admitted::ValidatedFile;
 use crate::security::admitted::ValidatedHardlink;
 use crate::security::context::ValidationContext;
-use crate::security::fs_view::HostFs;
+use crate::security::fs_view::FsView;
+use crate::security::fs_view::LinkBase;
 use crate::security::fs_view::Occupant;
+use crate::security::fs_view::PinnedHostFs;
 use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::sanitize_permissions;
@@ -44,7 +46,6 @@ use crate::types::safe_path::ParentCheck;
 use crate::types::safe_path::Resolved;
 #[cfg(any(unix, target_os = "wasi"))]
 use crate::types::safe_path::Walked;
-use crate::types::safe_symlink::resolve_through_symlinks;
 
 use super::common;
 use super::dir_walker::DirWalker;
@@ -214,22 +215,21 @@ pub trait ExtractTarget {
 /// Takes the core and root as separate borrows, so a caller can validate
 /// through `&mut` core while the context holds the root.
 #[cfg(any(unix, target_os = "wasi"))]
-pub(super) fn host_context<'r>(
+pub(super) fn host_context<'r, V: FsView>(
     core: &ValidatorCore<'_>,
     root: &'r PinnedRoot,
-) -> ValidationContext<'r, HostFs, HostParent> {
-    core.context::<HostFs>()
-        .with_walker(root.backs_parent_probe())
+) -> ValidationContext<'r, V, HostParent> {
+    core.context::<V>().with_walker(root.backs_parent_probe())
 }
 
 /// A validation context for a target without a pinned root: the validator
 /// resolves each parent itself.
 #[cfg(not(any(unix, target_os = "wasi")))]
-pub(super) fn host_context<'r>(
+pub(super) fn host_context<'r, V: FsView>(
     core: &ValidatorCore<'_>,
     _root: &'r PinnedRoot,
-) -> ValidationContext<'r, HostFs, HostParent> {
-    core.context::<HostFs>()
+) -> ValidationContext<'r, V, HostParent> {
+    core.context::<V>()
 }
 
 /// Extraction onto the real filesystem.
@@ -278,7 +278,7 @@ impl<'a> HostTarget<'a> {
             request.size,
             request.mode,
             self.root.dest(),
-            &HostFs,
+            &PinnedHostFs::new(&self.root),
             &ctx,
         )
     }
@@ -311,8 +311,13 @@ impl ExtractTarget for HostTarget<'_> {
 
     fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath<HostParent>> {
         let ctx = host_context(&self.core, &self.root);
-        self.core
-            .validate_directory_in(path, size, self.root.dest(), &HostFs, &ctx)
+        self.core.validate_directory_in(
+            path,
+            size,
+            self.root.dest(),
+            &PinnedHostFs::new(&self.root),
+            &ctx,
+        )
     }
 
     fn validate_symlink(
@@ -323,7 +328,14 @@ impl ExtractTarget for HostTarget<'_> {
     ) -> Result<SafeSymlink<HostParent>> {
         let ctx = host_context(&self.core, &self.root);
         self.core
-            .validate_symlink_in(path, target, size, self.root.dest(), &HostFs, &ctx)
+            .validate_symlink_in(
+                path,
+                target,
+                size,
+                self.root.dest(),
+                &PinnedHostFs::new(&self.root),
+                &ctx,
+            )
             .map(|validated| validated.symlink)
     }
 
@@ -334,8 +346,14 @@ impl ExtractTarget for HostTarget<'_> {
         size: EntrySize,
     ) -> Result<ValidatedHardlink<HostParent>> {
         let ctx = host_context(&self.core, &self.root);
-        self.core
-            .validate_hardlink_in(path, target, size, self.root.dest(), &HostFs, &ctx)
+        self.core.validate_hardlink_in(
+            path,
+            target,
+            size,
+            self.root.dest(),
+            &PinnedHostFs::new(&self.root),
+            &ctx,
+        )
     }
 
     fn directory(&mut self, path: &SafePath<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
@@ -551,9 +569,14 @@ impl HostTarget<'_> {
             path: link.as_path().to_path_buf(),
         };
         let dest = self.root.dest();
-        let resolved =
-            resolve_through_symlinks(dest.as_path(), target.as_path(), dest, link.as_path())
-                .map_err(|_| escape())?;
+        let resolved = PinnedHostFs::new(&self.root)
+            .resolve_link_target(
+                link.as_path(),
+                target.as_path(),
+                LinkBase::Destination,
+                dest,
+            )
+            .map_err(|_| escape())?;
         let inside = resolved
             .strip_prefix(dest.as_path())
             .map_err(|_| escape())?;
@@ -583,5 +606,117 @@ fn not_found_as(err: ArchiveError, missing: impl FnOnce() -> ArchiveError) -> Ar
     match err {
         ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => missing(),
         other => other,
+    }
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::security::Uncompressed;
+    use std::assert_matches;
+
+    fn config() -> SecurityConfig {
+        SecurityConfig::default()
+            .with_allow_symlinks(true)
+            .with_allow_hardlinks(true)
+    }
+
+    /// A target on a destination whose path is then given to another
+    /// directory: `held` is set up in the directory the target holds, `decoy`
+    /// in the one now at its path.
+    fn replaced_destination<'a>(
+        temp: &tempfile::TempDir,
+        config: &'a SecurityConfig,
+        held: impl FnOnce(&Path),
+        decoy: impl FnOnce(&Path),
+    ) -> HostTarget<'a> {
+        let dest = temp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        held(&dest);
+        let target = HostTarget::create(&dest, config).unwrap();
+        std::fs::rename(&dest, temp.path().join("moved")).unwrap();
+        std::fs::create_dir(&dest).unwrap();
+        decoy(&dest);
+        target
+    }
+
+    fn size() -> EntrySize {
+        EntrySize::new(Uncompressed(0), None)
+    }
+
+    fn escaping_link(dest: &Path) {
+        std::os::unix::fs::symlink("..", dest.join("up")).unwrap();
+    }
+
+    #[test]
+    fn a_symlink_is_judged_by_the_held_destination_not_its_path() {
+        let config = config();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut target = replaced_destination(&temp, &config, escaping_link, |_| {});
+        let refused = target.validate_symlink(Path::new("l"), Path::new("up/x"), size());
+        assert_matches!(
+            refused,
+            Err(ArchiveError::SymlinkEscape { .. }),
+            "{refused:?}"
+        );
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut target = replaced_destination(&temp, &config, |_| {}, escaping_link);
+        let accepted = target.validate_symlink(Path::new("l"), Path::new("up/x"), size());
+        assert_matches!(accepted, Ok(_), "{accepted:?}");
+    }
+
+    #[test]
+    fn a_hardlink_is_judged_by_the_held_destination_not_its_path() {
+        let config = config();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut target = replaced_destination(&temp, &config, escaping_link, |_| {});
+        let refused = target.validate_hardlink(Path::new("h"), Path::new("up/x"), size());
+        assert_matches!(
+            refused,
+            Err(ArchiveError::HardlinkEscape { .. }),
+            "{refused:?}"
+        );
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut target = replaced_destination(&temp, &config, |_| {}, escaping_link);
+        let accepted = target.validate_hardlink(Path::new("h"), Path::new("up/x"), size());
+        assert_matches!(accepted, Ok(_), "{accepted:?}");
+    }
+
+    #[test]
+    fn a_hardlink_source_is_opened_through_the_held_destination_not_its_path() {
+        use std::io::Read as _;
+
+        let config = config();
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut target = replaced_destination(
+            &temp,
+            &config,
+            |dest| {
+                std::fs::create_dir_all(dest.join("a/b")).unwrap();
+                std::os::unix::fs::symlink("a/b", dest.join("s")).unwrap();
+                std::fs::write(dest.join("a/f2"), b"held").unwrap();
+            },
+            |dest| {
+                std::fs::create_dir(dest.join("s")).unwrap();
+                std::fs::write(dest.join("f2"), b"decoy").unwrap();
+            },
+        );
+        let validated = target
+            .validate_hardlink(Path::new("h"), Path::new("s/../f2"), size())
+            .unwrap();
+
+        let opened = target
+            .open_hardlink_target(&validated.link, &validated.target)
+            .unwrap();
+
+        let mut content = String::new();
+        let mut file = opened.file;
+        file.read_to_string(&mut content).unwrap();
+        assert_eq!(content, "held");
     }
 }

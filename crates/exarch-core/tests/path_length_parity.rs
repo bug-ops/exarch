@@ -417,7 +417,6 @@ mod landing {
     // absolute length is.
     #[cfg(unix)]
     #[test]
-    #[ignore = "needs handle-relative link resolution"]
     fn a_link_to_a_chain_past_the_absolute_limit_is_followed_handle_relatively() {
         let chain = name_of_len(HOST_PATH_LIMIT - 8);
         let mut builder = tar::Builder::new(Vec::new());

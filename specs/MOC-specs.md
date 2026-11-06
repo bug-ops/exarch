@@ -20,8 +20,8 @@ status: moc
 
 | ID | Feature | Phase | Status | Tasks |
 |----|---------|-------|--------|-------|
-| 001 | [[001-security-pipeline/spec\|Security Pipeline]] | tasks | current (synced through 0.9.0, #961) | [[001-security-pipeline/tasks\|none open]] |
-| 002 | [[002-format-handlers/spec\|Format Handlers]] | tasks | current (synced through 0.9.0, #961) | [[002-format-handlers/tasks\|none open]] |
+| 001 | [[001-security-pipeline/spec\|Security Pipeline]] | tasks | current (synced through 0.9.0, #961; Windows link resolution #958 added unreleased) | [[001-security-pipeline/tasks\|none open]] |
+| 002 | [[002-format-handlers/spec\|Format Handlers]] | tasks | current (synced through 0.9.0, #961; 7z header limit #674, #769, BSD and macOS spool #959 added unreleased) | [[002-format-handlers/tasks\|none open]] |
 | 003 | [[003-config-api/spec\|Configuration API]] | tasks | current (synced through 0.9.0, #961) | [[003-config-api/tasks\|none]] |
 | 004 | [[004-progress-tracking/spec\|Progress Tracking]] | tasks | current (synced through 0.9.0, #961) | [[004-progress-tracking/tasks\|none]] |
 | 005 | [[005-cli/spec\|CLI]] | tasks | current (synced through 0.9.0, #961) | [[005-cli/tasks\|none open]] |
@@ -38,6 +38,8 @@ status: moc
 | 020 | [[020-reader-sink-and-in-memory-api/spec\|Reader, Sink and In-Memory API]] | specify | implemented (0.8.0, #771, #787, #790, #808; callback and listing for extraction in 0.9.0, #842, #860, #884; request types, admitted sizes and listed config in 0.9.0, #912, #909, #901) | n/a (specify-only, retrospective) |
 | 021 | [[021-create-staging-and-output-policy/spec\|Create Staging and Output Policy]] | specify | implemented (0.9.0, #931, #915, #916; typed source errors and durability, #956, #953, #961) | n/a (specify-only) |
 | 022 | [[022-extract-entry-selection/spec\|Extract Entry Selection and Path Stripping]] | tasks | implemented (#967, #981 batch) | [[022-extract-entry-selection/tasks\|22 done]] |
+| 023 | [[023-entry-selection-glob-patterns/spec\|Glob Patterns for Entry Selection and Create Excludes]] | specify | planned (design decided, implementing under #1000; supersedes 021 FR-019 to FR-021) | n/a (specify-only) |
+| 024 | [[024-encrypted-archive-support/spec\|Encrypted Archive Support]] | specify | draft (#1001; implementation-ready only after the Ask First items in section 9 are resolved) | n/a (specify-only) |
 
 ## Completed Specs
 

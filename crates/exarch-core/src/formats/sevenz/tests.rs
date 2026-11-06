@@ -44,9 +44,7 @@ use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::support::leaf;
 #[cfg(unix)]
 use crate::formats::pinned_dir::support::pinned_at;
-#[cfg(unix)]
 use crate::formats::source_fault::ReadFamily;
-#[cfg(unix)]
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Tally;
 use crate::inspection::integrity::IntegrityPass;

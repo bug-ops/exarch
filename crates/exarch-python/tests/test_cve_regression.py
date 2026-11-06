@@ -438,7 +438,7 @@ def test_partial_extraction_atomic_rollback_omits_counters(temp_dir):
     _write_file_then_symlink_escape_tar(archive)
     output_dir = temp_dir / "output"
     config = exarch.SecurityConfig().with_allow_symlinks(True)
-    options = exarch.ExtractionOptions().with_atomic(True)
+    options = exarch.ExtractionOptions().with_staging("atomic")
 
     with pytest.raises(exarch.SymlinkEscapeError) as excinfo:
         exarch.extract_archive(archive, output_dir, config, options)

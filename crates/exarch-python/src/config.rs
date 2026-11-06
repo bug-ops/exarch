@@ -189,12 +189,9 @@ pub fn parse_existing_files(value: &str) -> PyResult<ExistingFiles> {
     parse_one(ConfigSetting::ExistingFiles, value)
 }
 
-const fn staging_of(atomic: bool) -> Staging {
-    if atomic {
-        Staging::Atomic
-    } else {
-        Staging::InPlace
-    }
+/// Parses the string form shared with `Staging::as_str`.
+pub fn parse_staging(value: &str) -> PyResult<Staging> {
+    parse_one(ConfigSetting::Staging, value)
 }
 
 /// Parses a Python integer of any size into a [`CompressionLevel`], so every
@@ -999,8 +996,11 @@ impl PyCreationConfig {
 ///   path, or that an earlier entry created: `"skip"` (default) keeps it and
 ///   counts a duplicate, `"overwrite"` replaces it where the entry kinds allow,
 ///   `"refuse"` fails with `DestinationOccupiedError` and never overwrites
-/// * `atomic` - Extract to a temp dir then rename atomically on success
-///   (default: `False`)
+/// * `staging` - Where files are written first: `"in_place"` (default) writes
+///   into the destination, `"atomic"` extracts into a temporary sibling
+///   directory and renames it onto a destination that is absent or empty,
+///   `"atomic_replace"` also swaps it over an existing directory, replacing it
+///   as a whole
 ///
 /// # Examples
 ///
@@ -1011,8 +1011,8 @@ impl PyCreationConfig {
 /// # Refuse to touch anything that already exists
 /// opts = ExtractionOptions().with_existing_files("refuse")
 ///
-/// # Enable atomic extraction
-/// opts = ExtractionOptions().with_atomic(True)
+/// # Extract atomically
+/// opts = ExtractionOptions().with_staging("atomic")
 /// ```
 #[pyclass(name = "ExtractionOptions")]
 #[derive(Clone)]
@@ -1057,33 +1057,44 @@ impl PyExtractionOptions {
         Ok(slf)
     }
 
-    /// Sets whether extraction uses a temporary directory for atomic commits.
+    /// Sets where extracted files are written first.
     ///
-    /// When `True`, files are extracted to a temp dir in the same parent as
-    /// the output directory, then atomically renamed on completion. On failure
-    /// the temp dir is removed, leaving the output directory untouched.
-    /// Default: `False`.
+    /// * `"in_place"` (default) writes into the destination, which may already
+    ///   hold files.
+    /// * `"atomic"` extracts into a temporary directory next to the destination
+    ///   and renames it into place on success; a failure or cancellation
+    ///   removes it. A destination that holds content raises
+    ///   `OutputExistsError` before anything is extracted, and one that is not
+    ///   a directory raises `InvalidConfigurationError`. A symlinked
+    ///   destination is resolved first.
+    /// * `"atomic_replace"` is `"atomic"`, and also swaps the staged tree over
+    ///   an existing destination directory, replacing it as a whole. The
+    ///   original is renamed aside only once extraction succeeded and restored
+    ///   if the swap fails. A destination that is a filesystem root, the
+    ///   archive's directory or an ancestor of it, or the working directory is
+    ///   refused with `InvalidConfigurationError`.
     ///
-    /// **Important:** atomic mode requires that the output directory is absent
-    /// or empty: an empty directory is replaced. Into a non-empty directory
-    /// the final rename fails and extraction raises ``OSError`` with
-    /// ``code == "IO_ERROR"`` (not ``OutputExistsError``, which
-    /// ``create_archive`` raises with ``overwrite=False``); the staged tree is
-    /// removed and the directory is left as it was.
-    /// Non-atomic mode extracts into an existing directory without error.
+    /// `extract_archive_to_memory` and `extract_archive_to_callback` take no
+    /// staging.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "staging"`) for any other
+    /// string.
     ///
     /// # Examples
     ///
     /// ```python
     /// from exarch import ExtractionOptions
-    /// opts = ExtractionOptions().with_atomic(True)
-    /// assert opts.atomic == True
+    /// opts = ExtractionOptions().with_staging("atomic")
+    /// assert opts.staging == "atomic"
     /// ```
-    #[pyo3(name = "with_atomic")]
-    #[pyo3(signature = (atomic=true))]
-    fn with_atomic(mut slf: PyRefMut<'_, Self>, atomic: bool) -> PyRefMut<'_, Self> {
-        slf.inner.staging = staging_of(atomic);
-        slf
+    fn with_staging<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner.staging = parse_staging(value)?;
+        Ok(slf)
     }
 
     /// Finalizes the configuration (for API consistency).
@@ -1103,21 +1114,22 @@ impl PyExtractionOptions {
     }
 
     #[getter]
-    fn get_atomic(&self) -> bool {
-        self.inner.staging == Staging::Atomic
+    fn get_staging(&self) -> &'static str {
+        self.inner.staging.as_str()
     }
 
     #[setter]
-    fn set_atomic(&mut self, value: bool) {
-        self.inner.staging = staging_of(value);
+    fn set_staging(&mut self, value: &str) -> PyResult<()> {
+        self.inner.staging = parse_staging(value)?;
+        Ok(())
     }
 
     /// Returns a debug string representation.
     fn __repr__(&self) -> String {
         format!(
-            "ExtractionOptions(existing_files={:?}, atomic={})",
+            "ExtractionOptions(existing_files={:?}, staging={:?})",
             self.inner.existing_files.as_str(),
-            self.inner.staging == Staging::Atomic
+            self.inner.staging.as_str()
         )
     }
 }

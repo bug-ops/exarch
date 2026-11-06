@@ -232,7 +232,7 @@ Extract an archive to the specified directory with security validation.
 | `archive_path` | `str \| Path` | Path to the archive file |
 | `output_dir` | `str \| Path` | Directory where files will be extracted |
 | `config` | `SecurityConfig` | Optional security configuration |
-| `options` | `ExtractionOptions` | Optional `ExtractionOptions().with_atomic(True)` / `.with_existing_files("skip" \| "overwrite" \| "refuse")` |
+| `options` | `ExtractionOptions` | Optional `ExtractionOptions().with_staging("atomic")` / `.with_existing_files("skip" \| "overwrite" \| "refuse")` |
 
 **Returns:** `ExtractionReport`
 
@@ -302,7 +302,7 @@ result = exarch.extract_archive_with_progress(
 )
 ```
 
-**If `progress` raises** (`KeyboardInterrupt` included), extraction is cancelled: it stops before the next entry and `progress` is not called again. What was written stays on disk, or is rolled back with `atomic`. `progress`'s own exception propagates unchanged, with a `progress_callback_error = True` marker attribute and `writes` plus, while the files remain on disk, `files_extracted`/`bytes_written`/`files_skipped`/`skipped`/`warnings` describing what was written (check the marker before treating the presence of `files_extracted` as a partial-extraction signal, since a genuine partial-extraction failure carries the same attribute names). If extraction failed for its own reason first, the extraction error takes priority — a raising `progress` can never mask a security error such as `SymlinkEscapeError` — and `progress`'s exception is attached as `__cause__` instead of being dropped. `create_archive_with_progress` behaves the same way, discarding the staged archive and attaching no counters.
+**If `progress` raises** (`KeyboardInterrupt` included), extraction is cancelled: it stops before the next entry and `progress` is not called again. What was written stays on disk, or is rolled back under an atomic `staging`. `progress`'s own exception propagates unchanged, with a `progress_callback_error = True` marker attribute and `writes` plus, while the files remain on disk, `files_extracted`/`bytes_written`/`files_skipped`/`skipped`/`warnings` describing what was written (check the marker before treating the presence of `files_extracted` as a partial-extraction signal, since a genuine partial-extraction failure carries the same attribute names). If extraction failed for its own reason first, the extraction error takes priority — a raising `progress` can never mask a security error such as `SymlinkEscapeError` — and `progress`'s exception is attached as `__cause__` instead of being dropped. `create_archive_with_progress` behaves the same way, discarding the staged archive and attaching no counters.
 
 ### `SecurityConfig`
 

@@ -202,7 +202,7 @@ def test_unknown_format_and_path_model_are_value_errors():
 
 
 def test_atomic_options_are_refused():
-    options = exarch.ExtractionOptions().with_atomic(True)
+    options = exarch.ExtractionOptions().with_staging("atomic")
 
     with pytest.raises(Exception):
         exarch.extract_archive_to_callback(

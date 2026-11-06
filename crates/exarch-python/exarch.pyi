@@ -43,6 +43,7 @@ _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", 
 _ZipConsistency = Literal["enforce", "ignore"]
 _Durability = Literal["synced", "unsynced"]
 _ExistingFiles = Literal["skip", "overwrite", "refuse"]
+_Staging = Literal["in_place", "atomic", "atomic_replace"]
 _IoKind = Literal[
     "NotFound",
     "PermissionDenied",
@@ -560,22 +561,28 @@ class ExtractionOptions:
         """
         ...
 
-    def with_atomic(self, atomic: bool = True) -> ExtractionOptions:
+    def with_staging(self, value: _Staging) -> ExtractionOptions:
         """
-        Sets whether extraction uses a temporary directory for atomic commits.
+        Sets where extracted files are written first.
 
-        When ``True``, files are extracted to a temp dir in the same parent as
-        the output directory, then atomically renamed on completion. On failure
-        the temp dir is removed, leaving the output directory untouched.
-        Default: ``False``.
+        ``"in_place"`` (default) writes into the destination, which may already
+        hold files. ``"atomic"`` extracts into a temporary directory next to the
+        destination and renames it into place on success; a failure or
+        cancellation removes it. A destination that holds content raises
+        ``OutputExistsError`` before anything is extracted, one that is not a
+        directory raises ``InvalidConfigurationError`` (``setting ==
+        "output_path"``), and a symlinked destination is resolved first.
+        ``"atomic_replace"`` is ``"atomic"`` and also swaps the staged tree over
+        an existing destination directory, replacing it as a whole: the original
+        is renamed aside only once extraction succeeded and restored if the swap
+        fails (see ``OSError.restore``). A destination that is a filesystem root,
+        the archive's directory or an ancestor of it, or the working directory
+        raises ``InvalidConfigurationError`` (``setting == "output_path"``).
 
-        **Important:** atomic mode requires that the output directory is absent
-        or empty: an empty directory is replaced. Into a non-empty directory the
-        final rename fails and extraction raises ``OSError`` with
-        ``code == "IO_ERROR"`` (not ``OutputExistsError``, which
-        ``create_archive`` raises with ``overwrite=False``); the staged tree is
-        removed and the directory is left as it was.
-        Non-atomic mode extracts into an existing directory without error.
+        The in-memory functions take no staging.
+
+        Raises:
+            InvalidConfigurationError: any other string (``setting == "staging"``).
         """
         ...
 
@@ -591,12 +598,12 @@ class ExtractionOptions:
     @existing_files.setter
     def existing_files(self, value: _ExistingFiles) -> None: ...
     @property
-    def atomic(self) -> bool:
-        """Whether atomic extraction is enabled (default: False)."""
+    def staging(self) -> _Staging:
+        """Where files are written first (default: ``"in_place"``)."""
         ...
 
-    @atomic.setter
-    def atomic(self, value: bool) -> None: ...
+    @staging.setter
+    def staging(self, value: _Staging) -> None: ...
 
 @final
 class CreationConfig:
@@ -1405,7 +1412,7 @@ def extract_archive(
         the specific exception (e.g. ``SymlinkEscapeError``) is raised with
         ``files_extracted``, ``bytes_written``, ``files_skipped``, and
         ``warnings`` attributes attached, plus ``writes`` (``"kept"``). With
-        ``atomic=True`` the destination is rolled back instead: the exception
+        ``staging="atomic"`` the destination is rolled back instead: the exception
         then carries ``writes == "rolled_back"`` and none of the counter
         attributes. Detect files left on disk via
         ``getattr(e, "writes", None) == "kept"``; ``hasattr(e, "writes")``
@@ -1476,7 +1483,7 @@ def extract_archive_with_progress(
         If ``progress`` itself raises (``KeyboardInterrupt`` included),
         extraction is cancelled: it stops before the next entry, and
         ``progress`` is not called again. What was written stays on disk (or is
-        rolled back with ``atomic``):
+        rolled back under an atomic ``staging``):
 
         - ``progress``'s own exception is what propagates (unchanged — the same
           type, message, and traceback), with ``writes`` and, while the files
@@ -2010,6 +2017,16 @@ class ArchiveError(Exception):
             raised as a builtin ``OSError`` (an out-of-memory failure included)
             rather than an ``ArchiveError`` subclass: its stable kind, the same
             token as ``Skip.io_kind``.
+        restore: Set only on the ``OSError`` of a failed ``"atomic_replace"``
+            swap: ``"not_needed"`` (the original destination was never moved),
+            ``"restored"`` (moved aside and back) or ``"failed"`` (it could not
+            be moved back and remains at ``backup``).
+        backup: With ``restore == "failed"``, where the original destination
+            remains, redacted like an exception message; otherwise ``None``.
+        leftover: Where a staging directory the failed swap left behind remains,
+            redacted like an exception message; otherwise ``None``.
+        filename: On the ``OSError`` of a creation that failed after reserving
+            its output, the empty reservation file left at that path (redacted).
         writes: Set only when extraction failed after recording progress:
             ``"kept"`` if the written files remain on disk, ``"rolled_back"``
             if atomic extraction discarded them, ``"discarded"`` if an

@@ -1558,6 +1558,11 @@ mod tests {
                 exarch_core::ExistingFiles::as_str,
             ),
             literal_line(
+                "_Staging",
+                exarch_core::Staging::ALL,
+                exarch_core::Staging::as_str,
+            ),
+            literal_line(
                 "_IoKind",
                 exarch_core::IoKind::ALL,
                 exarch_core::IoKind::as_str,

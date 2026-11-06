@@ -157,7 +157,7 @@ def test_raising_callback_stops_extraction_before_the_next_entry(temp_dir):
 def test_raising_callback_under_atomic_rolls_the_output_back(temp_dir):
     archive = _tar_gz_of(temp_dir, [("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c")])
     output = temp_dir / "output"
-    options = exarch.ExtractionOptions().with_atomic(True)
+    options = exarch.ExtractionOptions().with_staging("atomic")
 
     def callback(path, total, current, bytes_written):
         if current == 2:
@@ -167,8 +167,29 @@ def test_raising_callback_under_atomic_rolls_the_output_back(temp_dir):
         exarch.extract_archive_with_progress(archive, output, None, callback, options)
 
     assert info.value.progress_callback_error is True
-    assert getattr(info.value, "writes", "rolled_back") == "rolled_back"
+    assert info.value.writes == "rolled_back"
+    assert not hasattr(info.value, "files_extracted")
     assert not output.exists()
+
+
+def test_raising_callback_under_atomic_replace_keeps_the_original_destination(temp_dir):
+    archive = _tar_gz_of(temp_dir, [("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c")])
+    output = temp_dir / "output"
+    output.mkdir()
+    (output / "old.txt").write_text("old")
+    options = exarch.ExtractionOptions().with_staging("atomic_replace")
+
+    def callback(path, total, current, bytes_written):
+        if current == 2:
+            raise RuntimeError("stop")
+
+    with pytest.raises(RuntimeError, match="stop") as info:
+        exarch.extract_archive_with_progress(archive, output, None, callback, options)
+
+    assert info.value.progress_callback_error is True
+    assert info.value.writes == "rolled_back"
+    assert [p.name for p in output.iterdir()] == ["old.txt"]
+    assert (output / "old.txt").read_text() == "old"
 
 
 def test_progress_variants_do_not_hold_a_borrow_of_the_config(temp_dir):

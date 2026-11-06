@@ -58,23 +58,62 @@ def test_create_archive_doc_mentions_overwrite_and_format():
         assert "format" in doc
 
 
-def test_atomic_extraction_into_a_non_empty_directory_is_an_io_error(tmp_path):
-    archive = tmp_path / "a.tar"
-    with tarfile.open(archive, "w") as tar:
+def _one_file_tar(path):
+    with tarfile.open(path, "w") as tar:
         info = tarfile.TarInfo("f.txt")
         info.size = 1
         tar.addfile(info, io.BytesIO(b"x"))
+    return path
+
+
+def test_atomic_extraction_into_a_non_empty_directory_is_refused_before_extracting(tmp_path):
+    archive = _one_file_tar(tmp_path / "a.tar")
     out = tmp_path / "out"
     out.mkdir()
     (out / "keep").write_text("k")
-    options = exarch.ExtractionOptions().with_atomic(True)
+    options = exarch.ExtractionOptions().with_staging("atomic")
 
-    with pytest.raises(OSError) as info:
+    with pytest.raises(exarch.OutputExistsError) as info:
         exarch.extract_archive(archive, out, None, options)
 
-    assert not isinstance(info.value, exarch.OutputExistsError)
-    assert info.value.code == "IO_ERROR"
+    assert info.value.code == "OUTPUT_EXISTS"
     assert sorted(p.name for p in out.iterdir()) == ["keep"]
+
+
+def test_atomic_replace_swaps_a_non_empty_directory_as_a_whole(tmp_path):
+    archive = _one_file_tar(tmp_path / "a.tar")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "old.txt").write_text("old")
+    options = exarch.ExtractionOptions().with_staging("atomic_replace")
+
+    exarch.extract_archive(archive, out, None, options)
+
+    assert sorted(p.name for p in out.iterdir()) == ["f.txt"]
+
+
+def test_atomic_replace_refuses_the_directory_of_the_archive(tmp_path):
+    archive = _one_file_tar(tmp_path / "a.tar")
+    options = exarch.ExtractionOptions().with_staging("atomic_replace")
+
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        exarch.extract_archive(archive, tmp_path, None, options)
+
+    assert info.value.setting == "output_path"
+    assert archive.exists()
+
+
+def test_atomic_extraction_into_a_file_is_an_invalid_configuration(tmp_path):
+    archive = _one_file_tar(tmp_path / "a.tar")
+    target = tmp_path / "file"
+    target.write_text("x")
+    options = exarch.ExtractionOptions().with_staging("atomic")
+
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        exarch.extract_archive(archive, target, None, options)
+
+    assert info.value.setting == "output_path"
+    assert target.read_text() == "x"
 
 
 def test_atomic_extraction_replaces_an_empty_directory(tmp_path):
@@ -85,7 +124,7 @@ def test_atomic_extraction_replaces_an_empty_directory(tmp_path):
         tar.addfile(info, io.BytesIO(b"x"))
     out = tmp_path / "out"
     out.mkdir()
-    options = exarch.ExtractionOptions().with_atomic(True)
+    options = exarch.ExtractionOptions().with_staging("atomic")
 
     exarch.extract_archive(archive, out, None, options)
 

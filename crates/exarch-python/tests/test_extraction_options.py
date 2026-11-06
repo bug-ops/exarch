@@ -1,5 +1,8 @@
 """Integration tests for ExtractionOptions Python API."""
 
+import io
+import tarfile
+
 import pytest
 
 pytest.importorskip("exarch")
@@ -95,6 +98,26 @@ class TestExtractionOptions:
         assert info.value.code == "OUTPUT_EXISTS"
         assert info.value.conflicts
 
+    @pytest.mark.parametrize(
+        ("value", "survivor"),
+        [("skip", b"first"), ("overwrite", b"second"), ("refuse", b"first")],
+    )
+    def test_in_archive_duplicate_follows_the_policy(self, temp_dir, value, survivor):
+        archive = temp_dir / "dup.tar"
+        with tarfile.open(archive, "w") as tar:
+            for body in (b"first", b"second"):
+                info = tarfile.TarInfo("a.txt")
+                info.size = len(body)
+                tar.addfile(info, io.BytesIO(body))
+        output = temp_dir / "out"
+        output.mkdir()
+        opts = ExtractionOptions().with_existing_files(value)
+
+        report = extract_archive(archive, output, options=opts)
+
+        assert (output / "a.txt").read_bytes() == survivor
+        assert report.skipped.count("duplicate") == (0 if value == "overwrite" else 1)
+
     def test_extract_archive_options_keyword_arg(self, sample_tar_gz, temp_dir):
         """Test extract_archive accepts options as keyword argument."""
         output = temp_dir / "output"
@@ -103,12 +126,29 @@ class TestExtractionOptions:
         report = extract_archive(sample_tar_gz, output, options=opts)
         assert report.files_extracted >= 1
 
-    def test_atomic_default(self):
-        """Test that atomic defaults to False."""
-        opts = ExtractionOptions()
-        assert opts.atomic is False
+    def test_staging_default_is_in_place(self):
+        assert ExtractionOptions().staging == "in_place"
 
-    def test_atomic_round_trip(self):
-        """Test with_atomic(True) sets the flag and returns self."""
-        opts = ExtractionOptions().with_atomic(True)
-        assert opts.atomic is True
+    @pytest.mark.parametrize("value", ["in_place", "atomic", "atomic_replace"])
+    def test_with_staging_round_trip(self, value):
+        opts = ExtractionOptions()
+        assert opts.with_staging(value) is opts
+        assert opts.staging == value
+        opts.staging = "in_place"
+        opts.staging = value
+        assert opts.staging == value
+
+    @pytest.mark.parametrize("value", ["", "Atomic", "replace", "true"])
+    def test_unknown_staging_is_refused(self, value):
+        opts = ExtractionOptions()
+        with pytest.raises(InvalidConfigurationError) as info:
+            opts.with_staging(value)
+        assert info.value.setting == "staging"
+        with pytest.raises(InvalidConfigurationError):
+            opts.staging = value
+        assert opts.staging == "in_place"
+
+    def test_atomic_flag_is_gone(self):
+        opts = ExtractionOptions()
+        assert not hasattr(opts, "atomic")
+        assert not hasattr(opts, "with_atomic")

@@ -8,8 +8,10 @@ use exarch_core::FfiSourceFault;
 use exarch_core::IoKind;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting;
+use exarch_core::Restore;
 use exarch_core::SubCode;
 use exarch_core::format_entry_path_for_error;
+use exarch_core::sanitize_path_for_error;
 use pyo3::PyTypeInfo;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -178,6 +180,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
     let os_error = os_error_fields(&err);
     let conflicts = destination_conflicts(&err);
     let non_utf8_entry_path = non_utf8_entry_path(&err);
+    let io_details = IoDetails::of(&err);
     let FfiErrorMessage {
         kind,
         description,
@@ -187,7 +190,9 @@ pub fn convert_error(err: CoreError) -> PyErr {
     } = err.into_ffi_message();
     let code = kind.code();
     let py_err = if let FfiKind::Io(io_kind) = kind {
-        io_error(io_kind, description)
+        let err = io_error(io_kind, description);
+        io_details.attach(&err);
+        err
     } else {
         let err = class_for(kind.code()).unwrap_or(new_base_error)(description);
         if let Some(fault) = source_fault {
@@ -230,6 +235,52 @@ fn io_error(kind: std::io::ErrorKind, description: String) -> PyErr {
     };
     set_optional_str(&err, "io_kind", Some(IoKind::from(kind).as_str()));
     err
+}
+
+/// What a failed replace or a left-behind reservation tells beyond the I/O
+/// kind: where the original destination, the staging directory or the empty
+/// output file remain. Paths are redacted like those of an `Io` error.
+#[derive(Default)]
+struct IoDetails {
+    restore: Option<&'static str>,
+    backup: Option<String>,
+    leftover: Option<String>,
+    filename: Option<String>,
+}
+
+impl IoDetails {
+    fn of(err: &CoreError) -> Self {
+        match err {
+            CoreError::ReplaceFailed(failure) => Self {
+                restore: Some(match &failure.restore {
+                    Restore::NotNeeded => "not_needed",
+                    Restore::Restored => "restored",
+                    _ => "failed",
+                }),
+                backup: match &failure.restore {
+                    Restore::Failed { backup, .. } => Some(sanitize_path_for_error(backup)),
+                    _ => None,
+                },
+                leftover: failure
+                    .leftover
+                    .as_ref()
+                    .map(|leftover| sanitize_path_for_error(&leftover.path)),
+                filename: None,
+            },
+            CoreError::OutputReservationLeft { .. } => Self {
+                filename: err.redacted_path(),
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
+
+    fn attach(self, err: &PyErr) {
+        set_optional_str(err, "restore", self.restore);
+        set_attr(err, "backup", self.backup);
+        set_attr(err, "leftover", self.leftover);
+        set_attr(err, "filename", self.filename);
+    }
 }
 
 /// The `errno` name and redacted file name of a refusal that is also a
@@ -1357,5 +1408,47 @@ mod tests {
             attr_str(&py_err, "non_utf8_entry_path").as_deref(),
             Some("a/b.txt")
         );
+    }
+
+    #[test]
+    fn test_replace_failed_reports_restore_and_backup() {
+        use exarch_core::ReplaceFailure;
+
+        pyo3::Python::initialize();
+        let failure = ReplaceFailure::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            Restore::Failed {
+                backup: PathBuf::from("dir/.backup"),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+            None,
+        );
+        let py_err = convert_error(CoreError::ReplaceFailed(failure));
+
+        Python::attach(|py| assert!(py_err.is_instance_of::<PyOSError>(py)));
+        assert_eq!(
+            attr_str(&py_err, "io_kind").as_deref(),
+            Some("PermissionDenied")
+        );
+        assert_eq!(attr_str(&py_err, "restore").as_deref(), Some("failed"));
+        assert_eq!(
+            attr_str(&py_err, "backup"),
+            Some(sanitize_path_for_error(std::path::Path::new("dir/.backup")))
+        );
+        assert_eq!(attr_str(&py_err, "leftover"), None);
+    }
+
+    #[test]
+    fn test_output_reservation_left_names_the_file() {
+        pyo3::Python::initialize();
+        let err = CoreError::OutputReservationLeft {
+            path: PathBuf::from("out/archive.tar"),
+            error: std::io::Error::from(std::io::ErrorKind::StorageFull),
+        };
+        let expected = err.redacted_path();
+        let py_err = convert_error(err);
+
+        assert_eq!(attr_str(&py_err, "filename"), expected);
+        assert_eq!(attr_str(&py_err, "io_kind").as_deref(), Some("StorageFull"));
     }
 }

@@ -182,31 +182,22 @@ impl PyDirectoryNotSyncedWarning {
     }
 }
 
-/// The description of an extraction warning with host paths redacted.
-///
-/// Core's `Display` of `BackupCleanupFailed` embeds the backup path as is.
-// TODO(review): move the redaction into core's `Display` so the binding does
-// not restate the wording.
+/// The description of an extraction warning with host paths redacted: core's
+/// `Display` is run over a copy whose backup path is already redacted.
 fn extraction_message(warning: &ExtractionWarning) -> String {
     match warning {
         ExtractionWarning::BackupCleanupFailed {
             path,
             identity,
+            io_kind,
             message,
-            ..
-        } => {
-            let qualifier = match identity {
-                BackupIdentity::Unverified => {
-                    " (its identity could not be verified on this platform)"
-                }
-                _ => "",
-            };
-            format!(
-                "failed to remove backup of the original destination at {}{qualifier} \
-                 ({message}); it must be cleaned up manually",
-                sanitize_path_for_error(path)
-            )
+        } => ExtractionWarning::BackupCleanupFailed {
+            path: sanitize_path_for_error(path).into(),
+            identity: *identity,
+            io_kind: *io_kind,
+            message: message.clone(),
         }
+        .to_string(),
         _ => warning.to_string(),
     }
 }

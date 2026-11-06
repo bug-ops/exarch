@@ -184,7 +184,7 @@ def test_unknown_format_name_and_undetectable_bytes():
 
 
 def test_path_extraction_options_are_not_accepted():
-    options = exarch.ExtractionOptions().with_atomic(True)
+    options = exarch.ExtractionOptions().with_staging("atomic")
 
     with pytest.raises(TypeError):
         exarch.extract_archive_to_memory(_tar([_file("a", b"x")]), options=options)
@@ -228,11 +228,15 @@ def test_sink_options_existing_files_values_and_refusal():
     assert info.value.setting == "existing_files"
 
 
-def test_sink_options_refuse_fails_on_an_in_archive_duplicate():
+def test_sink_options_refuse_treats_an_in_archive_duplicate_as_a_skip():
     data = _tar([_file("a", b"1"), _file("a", b"2")])
 
-    with pytest.raises(exarch.OutputExistsError):
-        exarch.extract_archive_to_memory(data, options=exarch.SinkOptions(existing_files="refuse"))
+    result = exarch.extract_archive_to_memory(
+        data, options=exarch.SinkOptions(existing_files="refuse")
+    )
+
+    assert [(e.path, e.data) for e in result.entries] == [("a", b"1")]
+    assert result.report.skipped.count("duplicate") == 1
 
 
 def test_sink_options_decode_reuse_modes():

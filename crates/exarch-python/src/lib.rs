@@ -659,8 +659,8 @@ fn merge_progress_result<T>(
 ///
 /// If `progress` raises (`KeyboardInterrupt` included), extraction stops at the
 /// next entry and `progress` is not called again. What was written stays on
-/// disk (or is rolled back under `atomic`), exactly as for any other late
-/// failure.
+/// disk (or is rolled back under an atomic `staging`), exactly as for any other
+/// late failure.
 ///
 /// - The callback's own exception is what propagates, with a
 ///   `progress_callback_error = True` marker attribute and `writes` (and, while

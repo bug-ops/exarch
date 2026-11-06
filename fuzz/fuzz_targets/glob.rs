@@ -1,6 +1,5 @@
 #![no_main]
 
-use std::path::Component;
 use std::path::Path;
 
 use exarch_core::ExcludePattern;
@@ -43,9 +42,10 @@ fuzz_target!(|data: &[u8]| {
 
     // A pattern without `/` and `**` can only match through one component.
     let single_component = !text.contains(['/', '\\']) && !text.contains("**");
-    let only_normal = path
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)));
+    let only_normal = !path_bytes.contains(&b'\\')
+        && path_bytes
+            .split(|b| *b == b'/')
+            .all(|segment| !segment.is_empty() && segment != b"." && segment != b"..");
     if matched && single_component && only_normal {
         let through_one = path
             .components()

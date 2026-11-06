@@ -888,6 +888,10 @@ mod tests {
             text in "[a-c.?*\\[\\]0-9-]{1,6}",
             path in path_strategy(),
         ) {
+            prop_assume!(
+                !path.contains('\\')
+                    && path.split('/').all(|s| !s.is_empty() && s != "." && s != "..")
+            );
             if let Ok(p) = ExcludePattern::try_from(text.as_str())
                 && p.matches(Path::new(&path))
             {

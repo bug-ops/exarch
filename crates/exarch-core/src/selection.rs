@@ -15,6 +15,8 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::path::Component;
@@ -109,6 +111,12 @@ pub enum PathRewrite {
     Keep,
     /// The leading components are removed. An entry with no component left is
     /// skipped as [`SkipKind::StrippedAway`].
+    ///
+    /// Entries that collide after stripping follow the
+    /// [`ExistingFiles`](crate::ExistingFiles) policy. A hardlink whose target
+    /// path is the landing of several colliding entries is refused as
+    /// [`Violation::HardlinkTargetAmbiguous`], because it cannot say which one
+    /// it means; a symlink is a path and resolves to whichever entry won.
     Strip(StripComponents),
     /// Every regular file lands in the destination root under its final
     /// component. Directory entries are skipped as
@@ -482,6 +490,50 @@ impl IncludeHits {
                 patterns: unmatched,
             })
         }
+    }
+}
+
+/// The landings of the regular files a rewriting selection admitted, and which
+/// of them more than one entry maps to.
+///
+/// Stripping or flattening can make two entries land on one path, and only one
+/// of them wins. A hardlink names its target by archive path, so it cannot say
+/// which of the colliding entries it means; [`Self::require_unambiguous`]
+/// refuses it instead of copying the winner's bytes. Nothing is recorded
+/// under [`PathRewrite::Keep`], so a plain extraction pays nothing.
+#[derive(Debug, Default)]
+pub struct LandingClaims {
+    seen: RefCell<HashSet<PathBuf>>,
+    ambiguous: RefCell<HashSet<PathBuf>>,
+}
+
+impl LandingClaims {
+    /// Records that a file entry lands at `landing`.
+    pub(crate) fn claim(&self, selection: &EntrySelection, landing: &Path) {
+        if selection.rewrite == PathRewrite::Keep {
+            return;
+        }
+        let mut seen = self.seen.borrow_mut();
+        if !seen.insert(landing.to_path_buf()) {
+            self.ambiguous.borrow_mut().insert(landing.to_path_buf());
+        }
+    }
+
+    /// Fails when several entries map to `target`, the landing a hardlink
+    /// refers to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Violation::HardlinkTargetAmbiguous`].
+    pub(crate) fn require_unambiguous(&self, link: &Path, target: &Path) -> Result<()> {
+        if self.ambiguous.borrow().contains(target) {
+            return Err(Violation::HardlinkTargetAmbiguous {
+                link: crate::path_text(link).into(),
+                target: crate::path_text(target).into(),
+            }
+            .into());
+        }
+        Ok(())
     }
 }
 

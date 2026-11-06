@@ -65,6 +65,7 @@ use crate::security::validator::Gated;
 use crate::security::validator::route_validated;
 use crate::security::zipbomb::validate_entry_compression;
 use crate::selection::IncludeHits;
+use crate::selection::LandingClaims;
 use crate::selection::SelectionRun;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -125,8 +126,10 @@ fn verify_with_tree(
     let mut quota_tracker = QuotaTracker::new();
     let mut hardlink_tracker = HardlinkTracker::new();
     let include_hits = IncludeHits::of(manifest.selection());
+    let claims = LandingClaims::default();
     let routing = Routing {
         selection: manifest.selection(),
+        claims: &claims,
         hits: Some(&include_hits),
     };
 
@@ -154,6 +157,7 @@ fn verify_with_tree(
 
     let deferred_routing = Routing {
         selection: manifest.selection(),
+        claims: &claims,
         hits: None,
     };
     for index in deferred {
@@ -425,6 +429,8 @@ struct EntryOutcome {
 /// decisions `extract` takes, on the manifest's own selection.
 struct Routing<'a> {
     selection: &'a EntrySelection,
+    /// The landings of the files admitted so far.
+    claims: &'a LandingClaims,
     /// Where include matches are recorded; `None` for a second look at an
     /// entry that was already counted.
     hits: Option<&'a IncludeHits>,
@@ -497,6 +503,11 @@ fn verify_entry(
     // file count alone, as `list` does and extraction does not charge at all.
     let allowlist_skipped = matches!(entry.kind, ManifestEntryKind::File { .. })
         && matches!(&path_result, Ok(Some(path)) if !is_extension_allowed(path.as_path(), config));
+    if let (ManifestEntryKind::File { .. }, Ok(Some(landing)), false) =
+        (&entry.kind, &path_result, allowlist_skipped)
+    {
+        routing.claims.claim(routing.selection, landing.as_path());
+    }
     let reserved = if left_out || allowlist_skipped {
         quota_tracker.reserve_count(config).map(drop)
     } else {
@@ -708,6 +719,10 @@ fn verify_deferred_hardlink(
         return Ok(());
     };
     let target = routing.link_target(entry, target).map_err(issue)?;
+    routing
+        .claims
+        .require_unambiguous(&entry.path, &target)
+        .map_err(issue)?;
     hardlink_tracker
         .validate_hardlink_in(&link_path, &target, dest, config, tree)
         .map(drop)

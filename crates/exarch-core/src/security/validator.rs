@@ -31,6 +31,7 @@ use crate::security::quota::QuotaTracker;
 use crate::selection::Decision;
 use crate::selection::EntryShape;
 use crate::selection::IncludeHits;
+use crate::selection::LandingClaims;
 use crate::selection::Placement;
 use crate::selection::SelectionRun;
 use crate::types::SafePath;
@@ -216,6 +217,7 @@ pub struct ValidatorCore<'a> {
     hardlink_tracker: HardlinkTracker,
     symlink_seen: bool,
     include_hits: IncludeHits,
+    claims: LandingClaims,
 }
 
 impl<'a> ValidatorCore<'a> {
@@ -226,7 +228,19 @@ impl<'a> ValidatorCore<'a> {
             hardlink_tracker: HardlinkTracker::new(),
             symlink_seen: false,
             include_hits: IncludeHits::of(&config.selection),
+            claims: LandingClaims::default(),
         }
+    }
+
+    /// Refuses a hardlink whose target landing several entries map to.
+    ///
+    /// Called when the link is materialized, after every entry was seen.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Violation::HardlinkTargetAmbiguous`].
+    pub fn require_unambiguous_target(&self, link: &Path, target: &Path) -> Result<()> {
+        self.claims.require_unambiguous(link, target)
     }
 
     /// Settles what only the whole scan decides: an include pattern that no
@@ -292,6 +306,8 @@ impl<'a> ValidatorCore<'a> {
             return Ok(Gated::Skip(SkipKind::ExtensionNotAllowed));
         }
         check_name_limits(view, &safe_path, true, self.config)?;
+        self.claims
+            .claim(&self.config.selection, safe_path.as_path());
         Ok(Gated::Admit(PendingFile::new(safe_path, size, mode)))
     }
 

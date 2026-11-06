@@ -501,6 +501,8 @@ impl ExtractTarget for HostTarget<'_> {
         counted: EntryCount,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
+        self.core
+            .require_unambiguous_target(link.as_path(), target.as_path())?;
         let OpenedTarget {
             file: target_file,
             len: target_size,

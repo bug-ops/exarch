@@ -1109,3 +1109,72 @@ fn replacing_a_destination_is_refused_for_flatten_too() {
         }
     );
 }
+
+fn colliding_hardlink() -> Vec<Item<'static>> {
+    vec![
+        Item::File("x/f", b"one"),
+        Item::File("y/f", b"two"),
+        Item::Hardlink("z/l", "y/f"),
+    ]
+}
+
+#[test]
+fn a_hardlink_to_an_entry_that_collided_after_stripping_is_refused() {
+    let config = base().with_path_rewrite(strip(1));
+    for policy in [
+        ExistingFiles::Skip,
+        ExistingFiles::Refuse,
+        ExistingFiles::Overwrite,
+    ] {
+        let options = ExtractionOptions::default().with_existing_files(policy);
+        let run = extract_with(Format::Tar, &colliding_hardlink(), &config, options);
+        assert_matches!(
+            run.error(),
+            ArchiveError::SecurityViolation {
+                kind: Violation::HardlinkTargetAmbiguous { .. },
+                ..
+            },
+            "{policy:?}"
+        );
+        assert!(!run.dest.join("l").exists(), "{policy:?}");
+    }
+}
+
+#[test]
+fn a_hardlink_to_an_unambiguous_target_still_lands_next_to_a_collision() {
+    let config = base().with_path_rewrite(strip(1));
+    let run = extract(
+        Format::Tar,
+        &[
+            Item::File("x/f", b"one"),
+            Item::File("y/f", b"two"),
+            Item::File("x/g", b"other"),
+            Item::Hardlink("z/l", "x/g"),
+        ],
+        &config,
+    );
+    assert_eq!(std::fs::read(run.dest.join("l")).unwrap(), b"other");
+}
+
+#[test]
+fn a_memory_sink_and_verify_refuse_the_same_ambiguous_hardlink() {
+    let config = base().with_path_rewrite(strip(1));
+    let bytes = Format::Tar.build(&colliding_hardlink());
+    let mut sink = MemorySink::new(MemoryLimit::DEFAULT);
+    let error = SinkExtractRequest::new(&config)
+        .with_options(SinkOptions::default())
+        .extract(ArchiveReader::tar(Cursor::new(bytes), None), &mut sink)
+        .unwrap_err();
+    assert_matches!(
+        root(&error),
+        ArchiveError::SecurityViolation {
+            kind: Violation::HardlinkTargetAmbiguous { .. },
+            ..
+        }
+    );
+
+    let work = TempDir::new().unwrap();
+    let archive = Format::Tar.write(work.path(), &colliding_hardlink());
+    let report = verify_archive(&archive, &config).unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
+}

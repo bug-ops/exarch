@@ -944,6 +944,8 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         counted: EntryCount,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
+        self.core
+            .require_unambiguous_target(link.as_path(), target.as_path())?;
         let config = self.config;
         let link = SafePath::validate_in(link.as_path(), &self.root, config, &self.tree)?;
         let target = &HardlinkTracker::new().validate_hardlink_in(

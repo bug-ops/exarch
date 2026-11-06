@@ -359,6 +359,14 @@ pub enum Violation {
         /// The target path, as the archive names it.
         target: Box<str>,
     },
+    /// A hardlink whose target path is the landing of several entries, after
+    /// stripping or flattening made them collide.
+    HardlinkTargetAmbiguous {
+        /// The hardlink entry path.
+        link: Box<str>,
+        /// The landing several entries map to.
+        target: Box<str>,
+    },
     /// A symlink or hardlink entry under a flattening rewrite.
     LinkUnderFlatten {
         /// Which kind of link the entry is.
@@ -428,6 +436,7 @@ impl Violation {
             | Self::ConflictUnlessSkipped { .. }
             | Self::ConflictFails { .. }
             | Self::HardlinkTargetNotExtracted { .. }
+            | Self::HardlinkTargetAmbiguous { .. }
             | Self::LinkUnderFlatten { .. }
             | Self::SourceOutsideRoot { .. } => None,
         }
@@ -456,6 +465,7 @@ impl Violation {
             | Self::LinkTargetUnread(_)
             | Self::LinkTargetUnreadable(_)
             | Self::HardlinkTargetNotExtracted { .. }
+            | Self::HardlinkTargetAmbiguous { .. }
             | Self::ReparsePointTarget { .. } => C::LinkTarget,
             Self::LinksNotAllowed(_) | Self::LinkUnderFlatten { .. } => C::LinkPolicy,
             Self::SymlinkComponent { .. }
@@ -640,6 +650,10 @@ impl fmt::Display for Violation {
             Self::HardlinkTargetNotExtracted { link, target } => write!(
                 f,
                 "hardlink {link} points at {target}, which the selection does not extract"
+            ),
+            Self::HardlinkTargetAmbiguous { link, target } => write!(
+                f,
+                "hardlink {link} points at {target}, which several entries map to"
             ),
             Self::LinkUnderFlatten { kind, name } => {
                 write!(f, "flattening refuses {kind} entries: {name}")
@@ -871,6 +885,14 @@ mod tests {
                 None,
             ),
             (
+                Violation::HardlinkTargetAmbiguous {
+                    link: text("l"),
+                    target: text("t"),
+                },
+                C::LinkTarget,
+                None,
+            ),
+            (
                 Violation::LinkUnderFlatten {
                     kind: link,
                     name: text("n"),
@@ -901,7 +923,7 @@ mod tests {
     /// The text of each `one_of_each` row, in order; byte-identical to the
     /// pre-typing messages (verified by the security audit), and callers match
     /// on them, so a wording change must be a deliberate edit here.
-    const EXPECTED_TEXT: [&str; 46] = [
+    const EXPECTED_TEXT: [&str; 47] = [
         "empty path not allowed",
         "path contains null bytes: p",
         "path contains null bytes - potential security issue",
@@ -946,6 +968,7 @@ mod tests {
         "extraction can fail at r unless duplicates are skipped: c",
         "extraction fails at r: c",
         "hardlink l points at t, which the selection does not extract",
+        "hardlink l points at t, which several entries map to",
         "flattening refuses symlink entries: n",
         "path p is not under root directory: r",
     ];

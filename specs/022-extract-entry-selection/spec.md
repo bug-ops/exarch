@@ -58,7 +58,7 @@ A caller states, in one validated value, which entries to extract and how many l
 
 ### Out of Scope
 
-- A glob engine (superseded: [[023-entry-selection-glob-patterns/spec]] adds one, #1000; the text below is the shipped #981 behavior). Patterns use exactly the grammar that `create -x/--exclude` accepts today (`Exact`, `Prefix`, `Suffix`, `Path`; see [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021). `**`, `?`, character classes, braces and negation stay refused.
+- A glob engine (superseded once #1000 is merged, which lands before this text: [[023-entry-selection-glob-patterns/spec]] adds one; the text below is the shipped #981 behavior). Patterns use exactly the grammar that `create -x/--exclude` accepts today (`Exact`, `Prefix`, `Suffix`, `Path`; see [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021). `**`, `?`, character classes, braces and negation stay refused.
 - Regular expressions, and tar-style `s/old/new/` name transforms.
 - A new overwrite policy. Collisions follow the existing `ExistingFiles {Skip, Overwrite, Refuse}` rules (and `--force` mapping to `Overwrite`); this spec adds no variant and no default.
 - A caller-supplied filter callback in `exarch-core` or the bindings (see section 9, Q16: user code per entry cannot be modeled by `verify`).

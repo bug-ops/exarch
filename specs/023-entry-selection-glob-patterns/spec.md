@@ -32,7 +32,7 @@ related:
 > **Subsystem**: exarch-core / `ExcludePattern` (grammar and matcher shared by creation excludes and extraction `EntrySelection`); surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
 > **MSRV**: Rust 1.99.1
 > **Origin**: #1000 (research finding, P3, enhancement), found after PR #999. Spec 022 lists a glob engine as out of scope.
-> **Status**: planned. The design is decided (architect plan rev 3, critic rounds 1 and 2 folded in) and is being implemented under #1000; this spec states WHAT the shipped behavior must be. Section 9 lists what the plan leaves open.
+> **Status**: planned. This spec merges after the #1000 implementation PR (track S lands after T4), so from the merge on its requirements describe the shipped behavior; until then it describes the target. The design is decided (architect plan rev 3, critic rounds 1 and 2 folded in) and is being implemented under #1000; this spec states WHAT the shipped behavior must be. Section 9 lists what the plan leaves open.
 
 > [!note] Working names
 > `ExcludePattern` (alias `EntryPattern`, the type spec 022 reuses), `ExcludeRefusal`, `Shape` and `Matcher` are the identifiers of the plan; the implementation may adjust private ones.

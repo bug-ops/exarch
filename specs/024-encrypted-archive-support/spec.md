@@ -32,7 +32,7 @@ related:
 > **Subsystem**: exarch-core / `formats::{zip,sevenz}`, `config`, `request`, `security` (`QuotaTracker`, `validate_compression_ratio`), error classification; surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
 > **MSRV**: Rust 1.99.1
 > **Origin**: #1001 (competitive parity research, P4). Classification history: closed #83, #96, #171, #658.
-> **Status**: draft, implementation-ready after the Ask First items in section 9 are resolved. It is NOT ready while any of them is open: the implementation PR must not start, and this status must not change, until the user has decided the three items of section 9 (prompt dependency, `zeroize`, `max_kdf_work` on the CLI).
+> **Status**: draft (spec-only change; it describes no behavior that is in the code), implementation-ready after the Ask First items in section 9 are resolved. It is NOT ready while any of them is open: the implementation PR must not start, and this status must not change, until the user has decided the three items of section 9 (prompt dependency, `zeroize`, `max_kdf_work` on the CLI).
 > **Decision**: implement (user decision, recorded in plan rev 2), read-only, not `wontfix`. The criteria of the research draft (DC-1 to DC-5) are replaced by the go/no-go criteria of section 7 that the implementation PR must meet.
 
 ## 1. Overview
@@ -199,8 +199,8 @@ THEN the operation fails with KdfCostExceeded before the first content derivatio
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-030 | Per derivation, THE SYSTEM SHALL inherit sevenz-rust2 0.25's bound: `NumCyclesPower` above 24 (`MAX_AES_CYCLES_POWER`, `encryption/aes.rs`) is rejected upstream, at most 2^24 SHA-256 rounds, about 0.4 s. For a header-encrypted 7z the key is derived inside `Archive::read`, before exarch sees any coder, so v1 has no per-derivation knob; a test pins the upstream cap | must |
-| FR-031 | Power `0x3F` ("raw key" mode, no KDF) in a content coder SHALL be refused as `WeakEncryptionRefused`, detected from the coder properties during admission. It cannot be refused for an encrypted header (it runs inside `Archive::read`), so this policy applies to content only | must |
-| FR-032 | `SecurityConfig::max_kdf_work` (`NonZeroU64`, SHA-256 rounds; default 2^27) SHALL bound the total key-derivation work of one operation. Accounting (below) is charged at admission, before any content block is decoded; over budget is `KdfCostExceeded`. Admission SHALL refuse power `0x3F` (FR-031) and powers 25 to 62 before computing `2^power`, and SHALL sum with saturation | must |
+| FR-031 | Power `0x3F` ("raw key" mode, no KDF) in a content coder SHALL be refused as `WeakEncryptionRefused`, detected from the coder properties during admission. It cannot be refused for an encrypted header before the header is read, because the key is built inside `Archive::read`, and after the read exarch no longer sees the header coder properties, so v1 has no check there and claims none; refusing it would need an upstream change (a hook or an error for raw-key mode in `Archive::read`). Raw-key mode runs no KDF, so it adds no CPU risk; it only means the header key is the password bytes themselves. This policy applies to content only | must |
+| FR-032 | `SecurityConfig::max_kdf_work` (`NonZeroU64`, SHA-256 rounds; default 2^27) SHALL bound the total key-derivation work of one operation. Accounting (below) is charged at admission, before any content block is decoded; over budget is `KdfCostExceeded`. Admission SHALL refuse any power above 24 (power `0x3F` as `WeakEncryptionRefused` per FR-031, powers 25 to 62 as `KdfCostExceeded`) before computing `2^power`, and SHALL sum with saturating addition | must |
 | FR-033 | ZIP AES uses PBKDF2-HMAC-SHA1 at a fixed 1000 iterations per entry; its cost is bounded by `max_file_count`, stated in the docs and not charged against `max_kdf_work` | must |
 | FR-034 | WHILE a 7z has AES blocks THE SYSTEM SHALL decode those blocks sequentially (no parallel decode of encrypted blocks), so the order of derivations is the archive order the accounting assumes | must |
 
@@ -259,7 +259,7 @@ Consequences:
 | Encrypted entry with `../`, absolute path or link escape | Rejected by the standard pipeline after decryption |
 | 7z power above 24 | Rejected upstream; admission refuses powers 25 to 62 first (`KdfCostExceeded`) |
 | 7z content coder at power `0x3F` | `WeakEncryptionRefused` |
-| 7z header at power `0x3F` | Not refusable (inside `Archive::read`); content policy only |
+| 7z header at power `0x3F` | Not refusable by exarch in v1 (the key is built inside `Archive::read` and the header coder is not visible afterwards); needs an upstream change; content policy only |
 | Distinct salt per block | `KdfCostExceeded` after at most `max_kdf_work / 2^power` runs |
 | Header-encrypted 7z, no password | `PasswordRequired` for list, verify and extract |
 | Solid and encrypted 7z | Refused as solid regardless of password |

@@ -1,9 +1,12 @@
 //! Node.js bindings for `ExtractionReport`.
 
 use exarch_core::ArchiveType as CoreArchiveType;
+use exarch_core::BackupIdentity as CoreBackupIdentity;
 use exarch_core::CreatableFormat as CoreCreatableFormat;
+use exarch_core::CreationWarning as CoreCreationWarning;
 use exarch_core::Durability as CoreDurability;
 use exarch_core::ExtractionReport as CoreReport;
+use exarch_core::ExtractionWarning as CoreExtractionWarning;
 use exarch_core::inspection::CheckStatus as CoreCheckStatus;
 use exarch_core::inspection::IntegrityGaps as CoreIntegrityGaps;
 use exarch_core::inspection::IntegrityStatus as CoreIntegrityStatus;
@@ -20,7 +23,10 @@ use crate::CoreResult;
 use crate::error::Failure;
 use crate::error::IoKind;
 use crate::utils::path_text;
+use exarch_core::sanitize_path_for_error;
 use exarch_core::ArchiveError as CoreError;
+use napi::bindgen_prelude::Either;
+use napi::bindgen_prelude::Either3;
 use napi::bindgen_prelude::Either4;
 use napi::bindgen_prelude::Either5;
 
@@ -623,6 +629,206 @@ impl From<&exarch_core::Skips> for SkippedSummary {
     }
 }
 
+/// Class of an extraction warning.
+// Values must equal `exarch_core::ExtractionWarningKind::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractionWarningKind {
+    /// 7z anti-items were skipped.
+    #[napi(value = "anti_items_skipped")]
+    AntiItemsSkipped,
+    /// The backup of a replaced destination could not be removed.
+    #[napi(value = "backup_cleanup_failed")]
+    BackupCleanupFailed,
+}
+
+/// Whether the identity of a leftover backup was confirmed before its removal
+/// failed.
+// Values must equal `exarch_core::BackupIdentity::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupIdentity {
+    /// The path still names the backup that was created.
+    #[napi(value = "verified")]
+    Verified,
+    /// The platform cannot confirm that the path still names the backup.
+    #[napi(value = "unverified")]
+    Unverified,
+}
+
+/// 7z anti-items, which mark deletions in an update archive, were not applied.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AntiItemsSkippedWarning {
+    /// Always `'anti_items_skipped'`.
+    #[napi(ts_type = "'anti_items_skipped'")]
+    pub kind: ExtractionWarningKind,
+    /// The human-readable text.
+    pub message: String,
+    /// How many anti-items the archive holds, saturated at `2^53 - 1`.
+    pub count: i64,
+}
+
+/// The backup of the original destination, kept for an atomic replacement,
+/// could not be removed and must be cleaned up manually.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct BackupCleanupFailedWarning {
+    /// Always `'backup_cleanup_failed'`.
+    #[napi(ts_type = "'backup_cleanup_failed'")]
+    pub kind: ExtractionWarningKind,
+    /// The human-readable text, with the path redacted like an error message.
+    pub message: String,
+    /// Where the backup remains, redacted like an error message: the file
+    /// name only in release builds.
+    pub path: String,
+    /// Whether the backup's identity was confirmed before the removal failed.
+    pub identity: BackupIdentity,
+    /// The kind of the removal failure.
+    pub io_kind: IoKind,
+}
+
+type ExtractionWarning = Either<AntiItemsSkippedWarning, BackupCleanupFailedWarning>;
+
+fn backup_identity(identity: CoreBackupIdentity) -> Result<BackupIdentity> {
+    match identity {
+        CoreBackupIdentity::Verified => Ok(BackupIdentity::Verified),
+        CoreBackupIdentity::Unverified => Ok(BackupIdentity::Unverified),
+        other => Err(unknown_variant("backup identity", other.as_str())),
+    }
+}
+
+pub(crate) fn extraction_warning(warning: &CoreExtractionWarning) -> Result<ExtractionWarning> {
+    match warning {
+        CoreExtractionWarning::AntiItemsSkipped { count } => {
+            Ok(Either::A(AntiItemsSkippedWarning {
+                kind: ExtractionWarningKind::AntiItemsSkipped,
+                message: warning.to_string(),
+                count: saturating_i64(*count),
+            }))
+        }
+        CoreExtractionWarning::BackupCleanupFailed {
+            path,
+            identity,
+            io_kind,
+            message,
+        } => {
+            let redacted = CoreExtractionWarning::BackupCleanupFailed {
+                path: sanitize_path_for_error(path).into(),
+                identity: *identity,
+                io_kind: *io_kind,
+                message: message.clone(),
+            };
+            Ok(Either::B(BackupCleanupFailedWarning {
+                kind: ExtractionWarningKind::BackupCleanupFailed,
+                message: redacted.to_string(),
+                path: sanitize_path_for_error(path),
+                identity: backup_identity(*identity)?,
+                io_kind: IoKind::from(*io_kind),
+            }))
+        }
+        other => Err(unknown_variant("extraction warning", other.kind().as_str())),
+    }
+}
+
+/// Class of a creation warning.
+// Values must equal `exarch_core::CreationWarningKind::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreationWarningKind {
+    /// Entries of a finished ZIP archive are over the default ratio limit.
+    #[napi(value = "zip_ratio_over_default_limit")]
+    ZipRatioOverDefaultLimit,
+    /// The finished ZIP archive could not be read back for the ratio check.
+    #[napi(value = "zip_ratio_check_failed")]
+    ZipRatioCheckFailed,
+    /// The directory that holds the archive could not be synced.
+    #[napi(value = "directory_not_synced")]
+    DirectoryNotSynced,
+}
+
+/// Default extraction would refuse entries of the finished ZIP archive as a
+/// zip bomb.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ZipRatioOverDefaultLimitWarning {
+    /// Always `'zip_ratio_over_default_limit'`.
+    #[napi(ts_type = "'zip_ratio_over_default_limit'")]
+    pub kind: CreationWarningKind,
+    /// The human-readable text.
+    pub message: String,
+    /// How many entries are over the limit, saturated at `2^32 - 1`.
+    pub entries: u32,
+    /// The default extraction ratio limit.
+    pub limit: f64,
+    /// The smallest ratio limit that admits every entry.
+    pub needed_ratio: f64,
+}
+
+/// The finished ZIP archive could not be read back to check its entries.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ZipRatioCheckFailedWarning {
+    /// Always `'zip_ratio_check_failed'`.
+    #[napi(ts_type = "'zip_ratio_check_failed'")]
+    pub kind: CreationWarningKind,
+    /// The human-readable text.
+    pub message: String,
+    /// Why the archive could not be read back.
+    pub reason: String,
+}
+
+/// The archive was published, but its directory could not be synced.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct DirectoryNotSyncedWarning {
+    /// Always `'directory_not_synced'`.
+    #[napi(ts_type = "'directory_not_synced'")]
+    pub kind: CreationWarningKind,
+    /// The human-readable text.
+    pub message: String,
+    /// The kind of the sync failure.
+    pub io_kind: IoKind,
+}
+
+type CreationWarning = Either3<
+    ZipRatioOverDefaultLimitWarning,
+    ZipRatioCheckFailedWarning,
+    DirectoryNotSyncedWarning,
+>;
+
+fn creation_warning(warning: &CoreCreationWarning) -> Result<CreationWarning> {
+    let message = warning.to_string();
+    match warning {
+        CoreCreationWarning::ZipRatioOverDefaultLimit {
+            entries,
+            limit,
+            needed_ratio,
+        } => Ok(Either3::A(ZipRatioOverDefaultLimitWarning {
+            kind: CreationWarningKind::ZipRatioOverDefaultLimit,
+            message,
+            entries: saturating_u32(*entries),
+            limit: *limit,
+            needed_ratio: *needed_ratio,
+        })),
+        CoreCreationWarning::ZipRatioCheckFailed { reason } => {
+            Ok(Either3::B(ZipRatioCheckFailedWarning {
+                kind: CreationWarningKind::ZipRatioCheckFailed,
+                message,
+                reason: reason.clone(),
+            }))
+        }
+        CoreCreationWarning::DirectoryNotSynced { io_kind } => {
+            Ok(Either3::C(DirectoryNotSyncedWarning {
+                kind: CreationWarningKind::DirectoryNotSynced,
+                message,
+                io_kind: IoKind::from(*io_kind),
+            }))
+        }
+        other => Err(unknown_variant("creation warning", other.kind().as_str())),
+    }
+}
+
 /// Report of an archive extraction operation.
 ///
 /// Contains statistics and metadata about the extraction process.
@@ -643,17 +849,20 @@ pub struct ExtractionReport {
     pub files_skipped: u32,
     /// The skipped entries by reason.
     pub skipped: SkippedSummary,
-    /// Descriptions of conditions worth surfacing that are not skipped
-    /// entries.
-    pub warnings: Vec<String>,
+    /// Conditions worth surfacing that are not skipped entries; branch on
+    /// `kind`, `message` is the human-readable text.
+    #[napi(ts_type = "Array<ExtractionWarning>")]
+    pub warnings: Vec<ExtractionWarning>,
 }
 
-impl From<CoreReport> for ExtractionReport {
-    fn from(report: CoreReport) -> Self {
+impl TryFrom<CoreReport> for ExtractionReport {
+    type Error = Error;
+
+    fn try_from(report: CoreReport) -> Result<Self> {
         // Use saturating conversions to prevent silent wraparound on overflow
         // This ensures audit trails remain accurate even for very large
         // extractions
-        Self {
+        Ok(Self {
             files_extracted: saturating_u32(report.files_extracted),
             directories_created: saturating_u32(report.directories_created),
             symlinks_created: saturating_u32(report.symlinks_created),
@@ -661,8 +870,12 @@ impl From<CoreReport> for ExtractionReport {
             duration_ms: saturating_millis(report.duration),
             files_skipped: saturating_u32(report.files_skipped()),
             skipped: SkippedSummary::from(&report.skipped),
-            warnings: report.warnings.iter().map(ToString::to_string).collect(),
-        }
+            warnings: report
+                .warnings
+                .iter()
+                .map(extraction_warning)
+                .collect::<Result<_>>()?,
+        })
     }
 }
 
@@ -689,13 +902,17 @@ pub struct CreationReport {
     pub files_skipped: u32,
     /// The skipped entries by reason.
     pub skipped: SkippedSummary,
-    /// Warnings generated during creation.
-    pub warnings: Vec<String>,
+    /// Conditions worth surfacing that are not skipped entries; branch on
+    /// `kind`, `message` is the human-readable text.
+    #[napi(ts_type = "Array<CreationWarning>")]
+    pub warnings: Vec<CreationWarning>,
 }
 
-impl From<exarch_core::creation::CreationReport> for CreationReport {
-    fn from(report: exarch_core::creation::CreationReport) -> Self {
-        Self {
+impl TryFrom<exarch_core::creation::CreationReport> for CreationReport {
+    type Error = Error;
+
+    fn try_from(report: exarch_core::creation::CreationReport) -> Result<Self> {
+        Ok(Self {
             files_added: saturating_u32(report.files_added),
             directories_added: saturating_u32(report.directories_added),
             symlinks_added: saturating_u32(report.symlinks_added),
@@ -704,8 +921,12 @@ impl From<exarch_core::creation::CreationReport> for CreationReport {
             duration_ms: saturating_millis(report.duration),
             files_skipped: saturating_u32(report.files_skipped()),
             skipped: SkippedSummary::from(&report.skipped),
-            warnings: report.warnings.iter().map(ToString::to_string).collect(),
-        }
+            warnings: report
+                .warnings
+                .iter()
+                .map(creation_warning)
+                .collect::<Result<_>>()?,
+        })
     }
 }
 
@@ -1173,6 +1394,128 @@ mod tests {
         exarch_core::ExtractionWarning::AntiItemsSkipped { count }
     }
 
+    fn extraction_message(warning: &ExtractionWarning) -> &str {
+        match warning {
+            Either::A(w) => &w.message,
+            Either::B(w) => &w.message,
+        }
+    }
+
+    fn creation_message(warning: &CreationWarning) -> &str {
+        match warning {
+            Either3::A(w) => &w.message,
+            Either3::B(w) => &w.message,
+            Either3::C(w) => &w.message,
+        }
+    }
+
+    #[test]
+    fn test_anti_items_warning_is_typed() {
+        let warning = extraction_warning(&anti(3)).unwrap();
+        let Either::A(typed) = warning else {
+            panic!("expected the anti-items warning");
+        };
+        assert_eq!(typed.kind, ExtractionWarningKind::AntiItemsSkipped);
+        assert_eq!(typed.count, 3);
+        assert_eq!(typed.message, anti(3).to_string());
+    }
+
+    #[test]
+    fn test_backup_cleanup_warning_is_typed_and_redacts_the_path_like_errors() {
+        let core = exarch_core::ExtractionWarning::BackupCleanupFailed {
+            path: std::path::PathBuf::from("/srv/secret/app/.backup-123"),
+            identity: CoreBackupIdentity::Unverified,
+            io_kind: exarch_core::IoKind::PermissionDenied,
+            message: "denied".into(),
+        };
+        let Either::B(typed) = extraction_warning(&core).unwrap() else {
+            panic!("expected the backup warning");
+        };
+        assert_eq!(typed.kind, ExtractionWarningKind::BackupCleanupFailed);
+        assert_eq!(typed.identity, BackupIdentity::Unverified);
+        assert_eq!(typed.io_kind, IoKind::PermissionDenied);
+        assert_eq!(
+            typed.path,
+            exarch_core::sanitize_path_for_error(std::path::Path::new(
+                "/srv/secret/app/.backup-123"
+            ))
+        );
+        assert!(typed.path.ends_with(".backup-123"));
+        assert!(typed.message.contains(&typed.path), "{}", typed.message);
+        #[cfg(not(debug_assertions))]
+        assert!(!typed.message.contains("secret"), "{}", typed.message);
+    }
+
+    #[test]
+    fn test_creation_warnings_are_typed() {
+        use exarch_core::creation::CreationWarning as Core;
+        let over = creation_warning(&Core::ZipRatioOverDefaultLimit {
+            entries: 2,
+            limit: 100.0,
+            needed_ratio: 250.0,
+        })
+        .unwrap();
+        let Either3::A(over) = over else {
+            panic!("expected the ratio warning");
+        };
+        assert_eq!(over.kind, CreationWarningKind::ZipRatioOverDefaultLimit);
+        assert_eq!((over.entries, over.limit, over.needed_ratio), (2, 100.0, 250.0));
+
+        let failed = creation_warning(&Core::ZipRatioCheckFailed {
+            reason: "r".into(),
+        })
+        .unwrap();
+        let Either3::B(failed) = failed else {
+            panic!("expected the check-failed warning");
+        };
+        assert_eq!(failed.reason, "r");
+
+        let synced = creation_warning(&Core::DirectoryNotSynced {
+            io_kind: exarch_core::IoKind::PermissionDenied,
+        })
+        .unwrap();
+        let Either3::C(synced) = synced else {
+            panic!("expected the not-synced warning");
+        };
+        assert_eq!(synced.io_kind, IoKind::PermissionDenied);
+    }
+
+    #[test]
+    fn test_warning_kind_mirrors_match_core() {
+        let extraction: Vec<_> = [
+            ExtractionWarningKind::AntiItemsSkipped,
+            ExtractionWarningKind::BackupCleanupFailed,
+        ]
+        .into_iter()
+        .map(|kind| match kind {
+            ExtractionWarningKind::AntiItemsSkipped => "anti_items_skipped",
+            ExtractionWarningKind::BackupCleanupFailed => "backup_cleanup_failed",
+        })
+        .collect();
+        assert_eq!(extraction, exarch_core::ExtractionWarningKind::NAMES);
+
+        let creation: Vec<_> = [
+            CreationWarningKind::ZipRatioOverDefaultLimit,
+            CreationWarningKind::ZipRatioCheckFailed,
+            CreationWarningKind::DirectoryNotSynced,
+        ]
+        .into_iter()
+        .map(|kind| match kind {
+            CreationWarningKind::ZipRatioOverDefaultLimit => "zip_ratio_over_default_limit",
+            CreationWarningKind::ZipRatioCheckFailed => "zip_ratio_check_failed",
+            CreationWarningKind::DirectoryNotSynced => "directory_not_synced",
+        })
+        .collect();
+        assert_eq!(creation, exarch_core::creation::CreationWarningKind::NAMES);
+
+        let identity = [BackupIdentity::Verified, BackupIdentity::Unverified]
+            .map(|identity| match identity {
+                BackupIdentity::Verified => "verified",
+                BackupIdentity::Unverified => "unverified",
+            });
+        assert_eq!(identity, CoreBackupIdentity::NAMES);
+    }
+
     #[test]
     fn test_skipped_summary_carries_counts_sample_and_io_kind() {
         let mut skips = exarch_core::Skips::default();
@@ -1220,7 +1563,7 @@ mod tests {
         core_report.skipped = skipped(1);
         core_report.add_warning(anti(1));
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(report.files_extracted, 10);
         assert_eq!(report.directories_created, 5);
@@ -1229,13 +1572,13 @@ mod tests {
         assert_eq!(report.duration_ms, 500);
         assert_eq!(report.files_skipped, 1);
         assert_eq!(report.warnings.len(), 1);
-        assert_eq!(report.warnings[0], anti(1).to_string());
+        assert_eq!(extraction_message(&report.warnings[0]), anti(1).to_string());
     }
 
     #[test]
     fn test_extraction_report_zero_values() {
         let core_report = CoreReport::new();
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(report.files_extracted, 0);
         assert_eq!(report.directories_created, 0);
@@ -1253,7 +1596,7 @@ mod tests {
         core_report.bytes_written = 10_000_000_000; // 10 GB
         core_report.duration = Duration::from_hours(1);
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(report.files_extracted, 100_000);
         assert_eq!(report.bytes_written, 10_000_000_000);
@@ -1267,12 +1610,12 @@ mod tests {
         core_report.add_warning(anti(2));
         core_report.add_warning(anti(3));
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(report.warnings.len(), 3);
-        assert_eq!(report.warnings[0], anti(1).to_string());
-        assert_eq!(report.warnings[1], anti(2).to_string());
-        assert_eq!(report.warnings[2], anti(3).to_string());
+        assert_eq!(extraction_message(&report.warnings[0]), anti(1).to_string());
+        assert_eq!(extraction_message(&report.warnings[1]), anti(2).to_string());
+        assert_eq!(extraction_message(&report.warnings[2]), anti(3).to_string());
     }
 
     #[test]
@@ -1280,7 +1623,7 @@ mod tests {
         let mut core_report = CoreReport::new();
         core_report.duration = Duration::from_hours(2);
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(
             report.duration_ms, 7_200_000,
@@ -1293,7 +1636,7 @@ mod tests {
         let mut core_report = CoreReport::new();
         core_report.duration = Duration::from_secs(0);
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(report.duration_ms, 0, "zero duration should be 0 ms");
     }
@@ -1303,7 +1646,7 @@ mod tests {
         let mut core_report = CoreReport::new();
         core_report.duration = Duration::from_micros(1500); // 1.5 ms
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(
             report.duration_ms, 1,
@@ -1318,21 +1661,21 @@ mod tests {
         core_report.add_warning(anti(2));
         core_report.add_warning(anti(3));
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(report.warnings.len(), 3, "should have 3 warnings");
         assert_eq!(
-            report.warnings[0],
+            extraction_message(&report.warnings[0]),
             anti(1).to_string(),
             "first warning should be at index 0"
         );
         assert_eq!(
-            report.warnings[1],
+            extraction_message(&report.warnings[1]),
             anti(2).to_string(),
             "second warning should be at index 1"
         );
         assert_eq!(
-            report.warnings[2],
+            extraction_message(&report.warnings[2]),
             anti(3).to_string(),
             "third warning should be at index 2"
         );
@@ -1355,7 +1698,7 @@ mod tests {
         let expected = warning.to_string();
         core_report.add_warning(warning);
 
-        let report = CreationReport::from(core_report);
+        let report = CreationReport::try_from(core_report).unwrap();
 
         assert_eq!(report.files_added, 10);
         assert_eq!(report.directories_added, 5);
@@ -1365,7 +1708,7 @@ mod tests {
         assert_eq!(report.duration_ms, 500);
         assert_eq!(report.files_skipped, 1);
         assert_eq!(report.warnings.len(), 1);
-        assert_eq!(report.warnings[0], expected);
+        assert_eq!(creation_message(&report.warnings[0]), expected);
     }
 
     fn sized_entry(name: &str, size: u64) -> exarch_core::inspection::ArchiveEntry {
@@ -1604,7 +1947,7 @@ mod tests {
         // Set to value > u32::MAX
         core_report.files_extracted = (u32::MAX as usize) + 1000;
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(
             report.files_extracted,
@@ -1619,7 +1962,7 @@ mod tests {
         // Set to value > i64::MAX
         core_report.bytes_written = u64::MAX;
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(
             report.bytes_written,
@@ -1635,7 +1978,7 @@ mod tests {
         // i64::MAX ms is about 292 million years, so use u64::MAX seconds
         core_report.duration = Duration::from_secs(u64::MAX);
 
-        let report = ExtractionReport::from(core_report);
+        let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(
             report.duration_ms,
@@ -1649,7 +1992,7 @@ mod tests {
         let mut core_report = exarch_core::creation::CreationReport::new();
         core_report.files_added = (u32::MAX as usize) + 1000;
 
-        let report = CreationReport::from(core_report);
+        let report = CreationReport::try_from(core_report).unwrap();
 
         assert_eq!(
             report.files_added,
@@ -1663,7 +2006,7 @@ mod tests {
         let mut core_report = exarch_core::creation::CreationReport::new();
         core_report.bytes_written = u64::MAX;
 
-        let report = CreationReport::from(core_report);
+        let report = CreationReport::try_from(core_report).unwrap();
 
         assert_eq!(
             report.bytes_written,
@@ -1677,7 +2020,7 @@ mod tests {
         let mut core_report = exarch_core::creation::CreationReport::new();
         core_report.bytes_compressed = u64::MAX;
 
-        let report = CreationReport::from(core_report);
+        let report = CreationReport::try_from(core_report).unwrap();
 
         assert_eq!(
             report.bytes_compressed,
@@ -1878,6 +2221,21 @@ mod tests {
                 CoreIssueSeverity::as_str,
             ),
             union_line("CheckStatus", CoreCheckStatus::ALL, CoreCheckStatus::as_str),
+            union_line(
+                "ExtractionWarningKind",
+                exarch_core::ExtractionWarningKind::ALL,
+                exarch_core::ExtractionWarningKind::as_str,
+            ),
+            union_line(
+                "CreationWarningKind",
+                exarch_core::creation::CreationWarningKind::ALL,
+                exarch_core::creation::CreationWarningKind::as_str,
+            ),
+            union_line(
+                "BackupIdentity",
+                CoreBackupIdentity::ALL,
+                CoreBackupIdentity::as_str,
+            ),
             union_line(
                 "IntegrityStatus",
                 CoreIntegrityStatus::ALL,

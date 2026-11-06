@@ -238,7 +238,7 @@ pub fn extract_archive<'env>(
         env,
         "archive extraction",
         move || extract_core(&archive_path, &output_dir, &config_owned, &options_owned),
-        |report| Ok(ExtractionReport::from(report)),
+        |report| ExtractionReport::try_from(report),
     )
 }
 
@@ -313,7 +313,7 @@ pub fn extract_archive_sync(
     run_sync(env, "archive extraction", || {
         extract_core(&archive_path, &output_dir, config_ref, options_ref)
     })
-    .map(ExtractionReport::from)
+    .and_then(ExtractionReport::try_from)
 }
 
 /// Options of `createArchive` and its variants.
@@ -403,7 +403,7 @@ pub fn create_archive<'env>(
         env,
         "archive creation",
         move || create_core(&output_path, &sources, &config_owned, &options),
-        |report| Ok(CreationReport::from(report)),
+        |report| CreationReport::try_from(report),
     )
 }
 
@@ -471,7 +471,7 @@ pub fn create_archive_sync(
     run_sync(env, "archive creation", || {
         create_core(&output_path, &sources, config_ref, &options)
     })
-    .map(CreationReport::from)
+    .and_then(CreationReport::try_from)
 }
 
 /// JavaScript source for a factory that wraps a progress callback so any
@@ -693,7 +693,7 @@ pub fn create_archive_with_progress<'env>(
                 ProgressDispatch::Awaited,
             )
         },
-        |report| Ok(CreationReport::from(report)),
+        |report| CreationReport::try_from(report),
     )
 }
 
@@ -1102,7 +1102,7 @@ pub fn extract_archive_with_progress<'env>(
             )
             .map_err(Failure::Callback)
         },
-        |report| Ok(ExtractionReport::from(report)),
+        |report| ExtractionReport::try_from(report),
     )
 }
 

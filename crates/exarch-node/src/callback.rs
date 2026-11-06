@@ -266,7 +266,7 @@ pub fn extract_archive_to_callback<'env>(
                 }
             })
         },
-        |report| Ok(ExtractionReport::from(report)),
+        |report| ExtractionReport::try_from(report),
         move |env| detach.run(env),
     )
 }
@@ -338,5 +338,5 @@ pub fn extract_archive_to_callback_sync<'env>(
             .into())
         })
     })
-    .map(ExtractionReport::from)
+    .and_then(ExtractionReport::try_from)
 }

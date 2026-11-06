@@ -308,7 +308,7 @@ fn into_memory_extraction(
     sink: MemorySink,
 ) -> CoreResult<MemoryExtraction> {
     Ok(MemoryExtraction {
-        report: ExtractionReport::from(report),
+        report: ExtractionReport::try_from(report).map_err(Failure::Native)?,
         entries: sink
             .into_entries()
             .into_iter()
@@ -402,7 +402,7 @@ fn create_to_bytes_core(
         exarch_core::CreateRequest::new(config).to_bytes(format.into(), &sources)?;
     Ok(CreatedArchive {
         data: Uint8Array::from(bytes),
-        report: CreationReport::from(report),
+        report: CreationReport::try_from(report).map_err(Failure::Native)?,
     })
 }
 

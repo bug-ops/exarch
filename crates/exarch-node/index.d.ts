@@ -71,7 +71,7 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   bytesWritten: number
   filesSkipped: number
   skipped: SkippedSummary
-  warnings: Array<string>
+  warnings: Array<ExtractionWarning>
   filesAdded?: undefined
 }
 
@@ -293,6 +293,21 @@ export type MemoryEntry =
  * without the hardlink, which only a callback receives.
  */
 export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
+
+/**
+ * A condition of an extraction worth surfacing that is not a skipped entry.
+ * Discriminate on `kind`; `message` is the human-readable text.
+ */
+export type ExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning
+
+/**
+ * A condition of a creation worth surfacing that is not a skipped entry.
+ * Discriminate on `kind`; `message` is the human-readable text.
+ */
+export type CreationWarning =
+  | ZipRatioOverDefaultLimitWarning
+  | ZipRatioCheckFailedWarning
+  | DirectoryNotSyncedWarning
 
 /** What a `MemoryEntry` holds. */
 export type MemoryEntryKind = MemoryEntry['kind']
@@ -864,6 +879,16 @@ export declare class VerificationOptions {
   get decompressionBudget(): number | null
 }
 
+/** 7z anti-items, which mark deletions in an update archive, were not applied. */
+export interface AntiItemsSkippedWarning {
+  /** Always `'anti_items_skipped'`. */
+  kind: 'anti_items_skipped'
+  /** The human-readable text. */
+  message: string
+  /** How many anti-items the archive holds, saturated at `2^53 - 1`. */
+  count: number
+}
+
 /**
  * Complete manifest of archive contents.
  *
@@ -883,6 +908,32 @@ export interface ArchiveManifest {
 
 /** Archive format. */
 export type ArchiveType = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip' | 'SevenZ'
+
+/**
+ * The backup of the original destination, kept for an atomic replacement,
+ * could not be removed and must be cleaned up manually.
+ */
+export interface BackupCleanupFailedWarning {
+  /** Always `'backup_cleanup_failed'`. */
+  kind: 'backup_cleanup_failed'
+  /** The human-readable text, with the path redacted like an error message. */
+  message: string
+  /**
+   * Where the backup remains, redacted like an error message: the file
+   * name only in release builds.
+   */
+  path: string
+  /** Whether the backup's identity was confirmed before the removal failed. */
+  identity: BackupIdentity
+  /** The kind of the removal failure. */
+  ioKind: IoKind
+}
+
+/**
+ * Whether the identity of a leftover backup was confirmed before its removal
+ * failed.
+ */
+export type BackupIdentity = 'verified' | 'unverified'
 
 /** Status of a single check category. */
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
@@ -1158,12 +1209,28 @@ export interface CreationReport {
   filesSkipped: number
   /** The skipped entries by reason. */
   skipped: SkippedSummary
-  /** Warnings generated during creation. */
-  warnings: Array<string>
+  /**
+   * Conditions worth surfacing that are not skipped entries; branch on
+   * `kind`, `message` is the human-readable text.
+   */
+  warnings: Array<CreationWarning>
 }
+
+/** Class of a creation warning. */
+export type CreationWarningKind = 'zip_ratio_over_default_limit' | 'zip_ratio_check_failed' | 'directory_not_synced'
 
 /** The `kind` of a [`MemoryDirectoryEntry`]. */
 export type DirectoryKind = 'directory'
+
+/** The archive was published, but its directory could not be synced. */
+export interface DirectoryNotSyncedWarning {
+  /** Always `'directory_not_synced'`. */
+  kind: 'directory_not_synced'
+  /** The human-readable text. */
+  message: string
+  /** The kind of the sync failure. */
+  ioKind: IoKind
+}
 
 /**
  * Whether a created archive is flushed to stable storage before success is
@@ -1683,11 +1750,14 @@ export interface ExtractionReport {
   /** The skipped entries by reason. */
   skipped: SkippedSummary
   /**
-   * Descriptions of conditions worth surfacing that are not skipped
-   * entries.
+   * Conditions worth surfacing that are not skipped entries; branch on
+   * `kind`, `message` is the human-readable text.
    */
-  warnings: Array<string>
+  warnings: Array<ExtractionWarning>
 }
+
+/** Class of an extraction warning. */
+export type ExtractionWarningKind = 'anti_items_skipped' | 'backup_cleanup_failed'
 
 /** The `kind` of a [`MemoryFileEntry`]. */
 export type FileKind = 'file'
@@ -2462,3 +2532,30 @@ export type ZipBombSubCode = 'ENTRY' | 'SOLID_BLOCK' | 'SKIPPED_ENTRIES'
  * interpretation without structural findings.
  */
 export type ZipConsistencyPolicy = 'enforce' | 'ignore'
+
+/** The finished ZIP archive could not be read back to check its entries. */
+export interface ZipRatioCheckFailedWarning {
+  /** Always `'zip_ratio_check_failed'`. */
+  kind: 'zip_ratio_check_failed'
+  /** The human-readable text. */
+  message: string
+  /** Why the archive could not be read back. */
+  reason: string
+}
+
+/**
+ * Default extraction would refuse entries of the finished ZIP archive as a
+ * zip bomb.
+ */
+export interface ZipRatioOverDefaultLimitWarning {
+  /** Always `'zip_ratio_over_default_limit'`. */
+  kind: 'zip_ratio_over_default_limit'
+  /** The human-readable text. */
+  message: string
+  /** How many entries are over the limit, saturated at `2^32 - 1`. */
+  entries: number
+  /** The default extraction ratio limit. */
+  limit: number
+  /** The smallest ratio limit that admits every entry. */
+  neededRatio: number
+}

@@ -49,6 +49,7 @@ use napi::bindgen_prelude::ToNapiValue;
 use napi_derive::napi;
 
 use crate::report::SkippedSummary;
+use crate::report::extraction_warning;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
 
@@ -522,39 +523,6 @@ impl IoKind {
             Self::Other => "Other",
         }
     }
-
-    /// The core kind this value mirrors.
-    #[cfg(test)]
-    const fn to_core(self) -> std::io::ErrorKind {
-        use std::io::ErrorKind as K;
-        match self {
-            Self::NotFound => K::NotFound,
-            Self::PermissionDenied => K::PermissionDenied,
-            Self::AlreadyExists => K::AlreadyExists,
-            Self::NotADirectory => K::NotADirectory,
-            Self::IsADirectory => K::IsADirectory,
-            Self::DirectoryNotEmpty => K::DirectoryNotEmpty,
-            Self::ReadOnlyFilesystem => K::ReadOnlyFilesystem,
-            Self::StorageFull => K::StorageFull,
-            Self::QuotaExceeded => K::QuotaExceeded,
-            Self::FileTooLarge => K::FileTooLarge,
-            Self::InvalidInput => K::InvalidInput,
-            Self::InvalidData => K::InvalidData,
-            Self::InvalidFilename => K::InvalidFilename,
-            Self::TimedOut => K::TimedOut,
-            Self::Interrupted => K::Interrupted,
-            Self::UnexpectedEof => K::UnexpectedEof,
-            Self::WriteZero => K::WriteZero,
-            Self::Unsupported => K::Unsupported,
-            Self::CrossesDevices => K::CrossesDevices,
-            Self::TooManyLinks => K::TooManyLinks,
-            Self::ResourceBusy => K::ResourceBusy,
-            Self::BrokenPipe => K::BrokenPipe,
-            Self::OutOfMemory => K::OutOfMemory,
-            Self::WouldBlock => K::WouldBlock,
-            Self::Other => K::Other,
-        }
-    }
 }
 
 impl From<exarch_core::IoKind> for IoKind {
@@ -568,34 +536,7 @@ impl From<exarch_core::IoKind> for IoKind {
 
 impl From<std::io::ErrorKind> for IoKind {
     fn from(kind: std::io::ErrorKind) -> Self {
-        use std::io::ErrorKind as K;
-        match kind {
-            K::NotFound => Self::NotFound,
-            K::PermissionDenied => Self::PermissionDenied,
-            K::AlreadyExists => Self::AlreadyExists,
-            K::NotADirectory => Self::NotADirectory,
-            K::IsADirectory => Self::IsADirectory,
-            K::DirectoryNotEmpty => Self::DirectoryNotEmpty,
-            K::ReadOnlyFilesystem => Self::ReadOnlyFilesystem,
-            K::StorageFull => Self::StorageFull,
-            K::QuotaExceeded => Self::QuotaExceeded,
-            K::FileTooLarge => Self::FileTooLarge,
-            K::InvalidInput => Self::InvalidInput,
-            K::InvalidData => Self::InvalidData,
-            K::InvalidFilename => Self::InvalidFilename,
-            K::TimedOut => Self::TimedOut,
-            K::Interrupted => Self::Interrupted,
-            K::UnexpectedEof => Self::UnexpectedEof,
-            K::WriteZero => Self::WriteZero,
-            K::Unsupported => Self::Unsupported,
-            K::CrossesDevices => Self::CrossesDevices,
-            K::TooManyLinks => Self::TooManyLinks,
-            K::ResourceBusy => Self::ResourceBusy,
-            K::BrokenPipe => Self::BrokenPipe,
-            K::OutOfMemory => Self::OutOfMemory,
-            K::WouldBlock => Self::WouldBlock,
-            _ => Self::Other,
-        }
+        Self::from(exarch_core::IoKind::from(kind))
     }
 }
 
@@ -1094,8 +1035,8 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
                     report
                         .warnings
                         .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<String>>(),
+                        .map(extraction_warning)
+                        .collect::<napi::Result<Vec<_>>>()?,
                 )?;
             }
         }
@@ -1790,18 +1731,18 @@ mod tests {
     }
 
     #[test]
-    fn test_every_io_kind_maps_to_a_core_kind_and_back() {
-        for kind in IoKind::ALL {
-            assert_eq!(IoKind::from(kind.to_core()), kind, "{kind:?}");
+    fn test_every_core_io_kind_has_a_mirror_with_the_same_spelling() {
+        for core in exarch_core::IoKind::ALL {
+            assert_eq!(IoKind::from(*core).as_str(), core.as_str(), "{core:?}");
         }
+        let mirror: Vec<_> = IoKind::ALL.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(mirror, exarch_core::IoKind::NAMES);
     }
 
     #[test]
-    fn test_unlisted_core_kind_is_other() {
-        assert_eq!(
-            IoKind::from(std::io::ErrorKind::ConnectionReset),
-            IoKind::Other
-        );
+    fn test_unlisted_std_kind_is_other() {
+        let core = exarch_core::IoKind::from(std::io::ErrorKind::ConnectionReset);
+        assert_eq!(IoKind::from(core), IoKind::Other);
     }
 
     #[test]

@@ -71,7 +71,7 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   bytesWritten: number
   filesSkipped: number
   skipped: SkippedSummary
-  warnings: Array<string>
+  warnings: Array<ExtractionWarning>
   filesAdded?: undefined
 }
 
@@ -293,6 +293,21 @@ export type MemoryEntry =
  * without the hardlink, which only a callback receives.
  */
 export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
+
+/**
+ * A condition of an extraction worth surfacing that is not a skipped entry.
+ * Discriminate on `kind`; `message` is the human-readable text.
+ */
+export type ExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning
+
+/**
+ * A condition of a creation worth surfacing that is not a skipped entry.
+ * Discriminate on `kind`; `message` is the human-readable text.
+ */
+export type CreationWarning =
+  | ZipRatioOverDefaultLimitWarning
+  | ZipRatioCheckFailedWarning
+  | DirectoryNotSyncedWarning
 
 /** What a `MemoryEntry` holds. */
 export type MemoryEntryKind = MemoryEntry['kind']

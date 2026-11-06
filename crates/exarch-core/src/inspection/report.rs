@@ -878,9 +878,9 @@ impl Finding {
     }
 }
 
-/// Spells a path injectively ([`crate::path_text`]) and escapes combining
-/// marks and control characters too, so two canonically equivalent names do
-/// not read as the same text.
+/// Spells a path injectively ([`path_text`](fn@crate::path_text)) and escapes
+/// combining marks and control characters too, so two canonically equivalent
+/// names do not read as the same text.
 fn escaped_path(path: &Path) -> String {
     let mut out = String::new();
     for ch in crate::path_text(path).chars() {

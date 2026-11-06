@@ -9,7 +9,7 @@
 //!
 //! A ZIP archive is kept open instead: the list pass runs the structural check
 //! that decodes the deflate entries, and extraction reuses its output and the
-//! parsed archive (see [`DecodeReuse`](crate::DecodeReuse)) rather than opening
+//! parsed archive (see [`DecodeReuse`]) rather than opening
 //! and checking the file a second time.
 //!
 //! The spool is an optimisation only. Whenever it cannot be trusted to equal
@@ -300,7 +300,7 @@ impl ListedArchive {
     ///
     /// The check is advisory: the write itself decides again, so a path that
     /// appears after the check is still handled by
-    /// [`ExistingFiles`](crate::ExistingFiles).
+    /// [`ExistingFiles`].
     ///
     /// # Errors
     ///

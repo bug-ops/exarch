@@ -1,5 +1,5 @@
-//! [`Staging::AtomicReplace`]: swapping a staged tree over an existing
-//! destination directory.
+//! [`Staging::AtomicReplace`](crate::Staging::AtomicReplace): swapping a staged
+//! tree over an existing destination directory.
 //!
 //! The extraction runs into a fresh staging directory next to the destination.
 //! Only after it succeeded is the original destination renamed aside to a

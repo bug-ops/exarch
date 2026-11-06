@@ -7,7 +7,7 @@
 //! module finds them once, when the archive is opened, and records them as
 //! [`ZipInconsistency`] findings; whether a finding is fatal is decided per
 //! operation by the caller's
-//! [`ZipConsistencyPolicy`](crate::ZipConsistencyPolicy).
+//! [`ZipConsistencyPolicy`].
 //!
 //! The census runs on one parse of the central directory:
 //!

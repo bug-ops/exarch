@@ -1089,10 +1089,10 @@ impl ArchiveError {
     /// mid-archive, so callers can distinguish "nothing was written" from
     /// "extraction stopped partway through" without each handler
     /// reimplementing the same check. A report is considered worth surfacing
-    /// even when [`ExtractionReport::total_items`] is zero, since an archive
-    /// where every entry before the failure was rejected (e.g. by an
-    /// extension allowlist) still accumulates `files_skipped` and
-    /// `warnings` that the caller should see.
+    /// even when [`ExtractionReport`](crate::ExtractionReport)'s `total_items`
+    /// is zero, since an archive where every entry before the failure was
+    /// rejected (e.g. by an extension allowlist) still accumulates
+    /// `files_skipped` and `warnings` that the caller should see.
     #[must_use]
     pub(crate) fn partial_or(report: crate::ExtractionReport, err: Self) -> Self {
         if report.total_items() > 0 || report.files_skipped() > 0 || report.has_warnings() {

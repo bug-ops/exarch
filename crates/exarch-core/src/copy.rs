@@ -34,7 +34,7 @@ use crate::Violation;
 /// between memory usage and I/O performance.
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 
-/// Stack-allocated reusable buffer used internally by [`copy_with_buffer`].
+/// Stack-allocated reusable buffer used internally by [`copy_bounded`].
 #[derive(Debug)]
 pub struct CopyBuffer {
     // Stack allocation is intentional for performance (avoids heap overhead)
@@ -74,7 +74,7 @@ impl Default for CopyBuffer {
 
 /// Error for a stream that decompressed past the archive's own declared size.
 ///
-/// Shared by the streaming ceiling in [`copy_with_buffer`] and the ZIP
+/// Shared by the streaming ceiling in [`copy_bounded`] and the ZIP
 /// reader's declared-size classification so the message stays identical.
 #[must_use]
 pub fn declared_size_exceeded(declared: u64) -> ArchiveError {
@@ -116,6 +116,19 @@ impl From<CopyError> for ArchiveError {
     }
 }
 
+/// [`copy_bounded`] with its error mapped to [`ArchiveError`]; see there for
+/// the size-ceiling rules (GHSA-5j8q-wxg5-hj4r).
+#[cfg(test)]
+#[inline]
+pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut CopyBuffer,
+    expected_size: Option<u64>,
+) -> Result<u64, ArchiveError> {
+    copy_bounded(reader, writer, buffer, expected_size).map_err(ArchiveError::from)
+}
+
 /// Copies data from reader to writer using the provided reusable buffer.
 ///
 /// This is an optimized version of `std::io::copy` that:
@@ -137,45 +150,34 @@ impl From<CopyError> for ArchiveError {
 /// two ways:
 ///
 /// - **Streaming ceiling**: `total` is checked against `expected_size` after
-///   every buffer-sized read, so the copy aborts with
-///   [`ArchiveError::SecurityViolation`] the moment more bytes have been
-///   decompressed than declared, not after the fact.
+///   every buffer-sized read, so the copy aborts with [`CopyError::Overrun`]
+///   the moment more bytes have been decompressed than declared, not after the
+///   fact.
 /// - **Post-copy exact match**: once the reader reaches EOF, `total` must equal
 ///   `expected_size` exactly. A legitimate encoder never lies about this; any
 ///   mismatch (necessarily `total < expected_size`, since a larger `total`
-///   already aborted above) is rejected the same way, with
-///   [`ArchiveError::SecurityViolation`].
+///   already aborted above) is rejected with [`CopyError::Short`].
 ///
-/// Both directions use `SecurityViolation` rather than
-/// [`ArchiveError::QuotaExceeded`]: `expected_size` here is the archive's own
-/// (possibly forged) declared size, not the configured
-/// `max_file_size`/`max_total_size` limit, so a `QuotaExceeded`-shaped error
-/// would surface a "raise the configured limit" remedy hint that makes no sense
-/// for a metadata mismatch the caller cannot fix by reconfiguring anything.
+/// Both directions convert (see [`ArchiveError`]'s `From<CopyError>`) to a
+/// `SecurityViolation` rather than [`ArchiveError::QuotaExceeded`]:
+/// `expected_size` here is the archive's own (possibly forged) declared size,
+/// not the configured `max_file_size`/`max_total_size` limit, so a
+/// `QuotaExceeded`-shaped error would surface a "raise the configured limit"
+/// remedy hint that makes no sense for a metadata mismatch the caller cannot
+/// fix by reconfiguring anything.
 ///
 /// Callers that do not yet know a size (`expected_size: None`) get no
 /// additional enforcement beyond the pre-existing overflow guard.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - Reading from the source fails
-/// - Writing to the destination fails
-/// - Total bytes written would overflow u64 (quota protection)
+/// Returns a [`CopyError`] if:
+/// - Reading from the source fails ([`CopyError::Read`])
+/// - Writing to the destination fails ([`CopyError::Write`])
+/// - Total bytes written would overflow u64 ([`CopyError::Overflow`], quota
+///   protection)
 /// - `expected_size` is `Some` and the actual byte count exceeds or falls short
 ///   of it
-#[cfg(test)]
-#[inline]
-pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
-    reader: &mut R,
-    writer: &mut W,
-    buffer: &mut CopyBuffer,
-    expected_size: Option<u64>,
-) -> Result<u64, ArchiveError> {
-    copy_bounded(reader, writer, buffer, expected_size).map_err(ArchiveError::from)
-}
-
-/// Typed core of [`copy_with_buffer`]; see there for the size-ceiling rules.
 #[inline]
 pub fn copy_bounded<R: Read + ?Sized, W: Write + ?Sized>(
     reader: &mut R,

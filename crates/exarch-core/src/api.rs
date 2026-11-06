@@ -322,7 +322,7 @@ pub fn verify_archive<P: AsRef<Path>>(
     crate::inspection::verify_archive(archive_path, config)
 }
 
-/// [`extract_to_sink_with_progress`], with a ZIP archive's census output kept
+/// A sink extraction, with a ZIP archive's census output kept
 /// within `reuse` when the sink is one that shares its memory limit.
 pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
     reader: ArchiveReader<'_>,

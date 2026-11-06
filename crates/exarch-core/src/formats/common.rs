@@ -17,7 +17,7 @@
 //! - [`record_skip`]: Counts an entry left out of the extraction
 //!
 //! Every write below the destination goes through a
-//! [`VettedDir`](crate::formats::pinned_dir::VettedDir), so no path is
+//! [`VettedDir`], so no path is
 //! resolved a second time between a check and the act that follows it.
 
 use std::fs::File;
@@ -365,7 +365,7 @@ pub fn check_entry_name_limits(
 /// `expected_size` is the same declared size the caller already used for
 /// compression-ratio and quota validation — metadata read from the archive,
 /// not measured from real bytes. This function does not merely trust it a
-/// second time: it is threaded into [`copy_with_buffer`] as a hard ceiling
+/// second time: it is threaded into [`copy_bounded`] as a hard ceiling
 /// enforced on every buffered read, so a forged small `expected_size` cannot
 /// let the real decompressed stream grow unbounded, and a short stream (less
 /// than declared) is rejected once it reaches EOF. On either violation, the

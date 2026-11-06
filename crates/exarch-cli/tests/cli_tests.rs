@@ -7736,3 +7736,34 @@ fn test_verify_reports_an_unmatched_include() {
             "include pattern matched no entry: nope",
         ));
 }
+
+/// `OutputExists` names the path once, not once from the CLI and once from
+/// core (#985).
+#[test]
+fn test_output_exists_text_names_the_path_once() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let out = temp.path().join("out");
+    exarch_cmd()
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&out)
+        .assert()
+        .success();
+
+    let stderr = exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).expect("utf-8");
+    assert_eq!(stderr.matches("already exists").count(), 1, "{stderr}");
+    assert!(
+        stderr.contains("HINT: Use --force to overwrite."),
+        "{stderr}"
+    );
+}

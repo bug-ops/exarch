@@ -895,10 +895,14 @@ fn dedicated_context(
         ArchiveError::SourceNotAccessible { error, .. } => {
             source_not_accessible_context(op, error, message)
         }
-        ArchiveError::OutputExists { .. } => message.lit("Output path already exists").hint(
-            op.accepts(Flag::Force)
-                .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
-        ),
+        ArchiveError::OutputExists { path } => message
+            .restating_source()
+            .lit("Output path already exists: ")
+            .path(path)
+            .hint(
+                op.accepts(Flag::Force)
+                    .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
+            ),
         ArchiveError::DestinationOccupied {
             destination,
             conflicts,

@@ -173,6 +173,24 @@ describe('CreationConfig', () => {
       });
       assert.deepStrictEqual(config.excludePatterns, before);
     });
+
+    it('should replace the exclude patterns and clear them with an empty list', () => {
+      const config = new CreationConfig();
+      assert.ok(config.excludePatterns.includes('.git'));
+      assert.strictEqual(config.setExcludePatterns(['target', '*.log']), config);
+      assert.deepStrictEqual(config.excludePatterns, ['target', '*.log']);
+      config.setExcludePatterns([]);
+      assert.deepStrictEqual(config.excludePatterns, []);
+    });
+
+    it('should refuse a bad member as INVALID_CONFIGURATION and keep the old list', () => {
+      const config = new CreationConfig().setExcludePatterns(['target']);
+      assert.throws(() => config.setExcludePatterns(['ok', 'bad\0pattern']), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'exclude_pattern',
+      });
+      assert.deepStrictEqual(config.excludePatterns, ['target']);
+    });
   });
 
   describe('compression levels', () => {

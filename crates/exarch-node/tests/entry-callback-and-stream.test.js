@@ -195,7 +195,7 @@ describe('extractArchiveToCallback', () => {
       tar([file('a', '1')]),
       (entry) => seen.push(entry.path),
       null,
-      new SinkOptions().setSkipDuplicates(false)
+      new SinkOptions().setExistingFiles('overwrite')
     );
     assert.deepStrictEqual(seen, ['a']);
   });

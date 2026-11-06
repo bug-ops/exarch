@@ -299,6 +299,49 @@ describe('SecurityConfig', () => {
       assert.strictEqual(config.isExtensionAllowed('txt'), true);
       assert.strictEqual(config.isExtensionAllowed('exe'), true);
     });
+
+    it('should read the allowlist back as null while every extension is allowed', () => {
+      assert.strictEqual(new SecurityConfig().allowedExtensions, null);
+      assert.strictEqual(new SecurityConfig().getAllowedExtensionsCount(), 0);
+    });
+
+    it('should replace the allowlist with setAllowedExtensions', () => {
+      const config = new SecurityConfig().addAllowedExtension('txt');
+      assert.strictEqual(config.setAllowedExtensions(['.MD', 'rs']), config);
+      assert.deepStrictEqual(config.allowedExtensions, ['md', 'rs']);
+      assert.strictEqual(config.isExtensionAllowed('txt'), false);
+      assert.strictEqual(config.isExtensionAllowed('md'), true);
+    });
+
+    it('should lift the allowlist with setAllowedExtensions(null)', () => {
+      const config = new SecurityConfig().addAllowedExtension('txt');
+      config.setAllowedExtensions(null);
+      assert.strictEqual(config.allowedExtensions, null);
+      assert.strictEqual(config.isExtensionAllowed('exe'), true);
+    });
+
+    it('should refuse an empty list instead of allowing everything', () => {
+      const config = new SecurityConfig().addAllowedExtension('txt');
+      assert.throws(() => config.setAllowedExtensions([]), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'allowed_extension',
+      });
+      assert.deepStrictEqual(config.allowedExtensions, ['txt']);
+      assert.throws(() => new SecurityConfig().setAllowedExtensions([]), {
+        code: 'INVALID_CONFIGURATION',
+      });
+    });
+
+    it('should not treat undefined or a bad member as a clear and keep the old list', () => {
+      const config = new SecurityConfig().addAllowedExtension('txt');
+      assert.throws(() => config.setAllowedExtensions(undefined));
+      assert.throws(() => config.setAllowedExtensions());
+      assert.throws(() => config.setAllowedExtensions(['md', 'a/b']), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'allowed_extension',
+      });
+      assert.deepStrictEqual(config.allowedExtensions, ['txt']);
+    });
   });
 
   describe('path component banning', () => {
@@ -307,6 +350,25 @@ describe('SecurityConfig', () => {
       config.addBannedComponent('.secret');
 
       assert.ok(config.bannedPathComponents.includes('.secret'));
+    });
+
+    it('should replace the banned components and clear them with an empty list', () => {
+      const config = new SecurityConfig();
+      assert.ok(config.bannedPathComponents.includes('.git'));
+      assert.strictEqual(config.setBannedComponents(['.secret']), config);
+      assert.deepStrictEqual(config.bannedPathComponents, ['.secret']);
+      config.setBannedComponents([]);
+      assert.deepStrictEqual(config.bannedPathComponents, []);
+      assert.strictEqual(config.hasBannedPathComponent('.git'), false);
+    });
+
+    it('should refuse a bad member as INVALID_CONFIGURATION and keep the old list', () => {
+      const config = new SecurityConfig().setBannedComponents(['.secret']);
+      assert.throws(() => config.setBannedComponents(['ok', '..']), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'banned_path_component',
+      });
+      assert.deepStrictEqual(config.bannedPathComponents, ['.secret']);
     });
 
     it('should refuse components with separators or dots', () => {

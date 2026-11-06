@@ -435,6 +435,18 @@ export declare class CreationConfig {
    * name holding such a character cannot be excluded by pattern.
    */
   addExcludePattern(pattern: string): this
+  /**
+   * Replaces the exclude patterns, so the defaults can be dropped.
+   *
+   * An empty array excludes nothing. The list is validated as a whole: on
+   * an error the previous patterns stay.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
+   * pattern `addExcludePattern` refuses.
+   */
+  setExcludePatterns(patterns: Array<string>): this
   /** Finalizes the configuration (for API consistency). */
   build(): this
   /** Compression level (1-9). */
@@ -455,13 +467,13 @@ export declare class CreationConfig {
  * Options controlling extraction behavior (non-security).
  *
  * Separate from `SecurityConfig` to keep security settings focused.
- * These options control operational behavior such as duplicate handling.
+ * These options control operational behavior such as occupied-path handling.
  *
  * # Defaults
  *
  * | Setting | Default Value |
  * |---------|--------------|
- * | `skipDuplicates` | `true` |
+ * | `existingFiles` | `'skip'` |
  * | `atomic` | `false` |
  */
 export declare class ExtractionOptions {
@@ -474,12 +486,14 @@ export declare class ExtractionOptions {
    */
   static default(): ExtractionOptions
   /**
-   * Sets whether duplicate archive entries are skipped silently.
+   * Sets what happens when a destination path is already occupied.
    *
-   * When `true` (default), duplicate entries produce a warning in the
-   * report. When `false`, a duplicate entry causes an error.
+   * `'skip'` (default) keeps the occupant and counts a skip, which also
+   * covers a duplicate entry inside the archive. `'overwrite'` replaces the
+   * occupant where the kinds allow it. `'refuse'` fails with
+   * `DESTINATION_OCCUPIED` and never overwrites.
    */
-  withSkipDuplicates(skip: boolean): this
+  withExistingFiles(policy: ExistingFiles): this
   /**
    * Sets whether extraction uses a temporary directory for atomic commits.
    *
@@ -496,8 +510,15 @@ export declare class ExtractionOptions {
   withAtomic(atomic: boolean): this
   /** Finalizes the configuration (for API consistency). */
   build(): this
-  /** Whether duplicate entries are skipped silently. */
-  get skipDuplicates(): boolean
+  /**
+   * What happens when a destination path is already occupied.
+   *
+   * # Errors
+   *
+   * Returns error if this binding is older than `exarch-core` and does not
+   * know the policy.
+   */
+  get existingFiles(): ExistingFiles
   /** Whether atomic extraction is enabled. */
   get atomic(): boolean
 }
@@ -521,7 +542,7 @@ export declare class ExtractionOptions {
  * | `allow_absolute_paths` | false |
  * | `allow_world_writable` | false |
  * | `preserve_permissions` | false |
- * | `allowed_extensions` | empty (all allowed) |
+ * | `allowed_extensions` | `null` (all allowed) |
  * | `banned_path_components` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
  */
 export declare class SecurityConfig {
@@ -662,6 +683,33 @@ export declare class SecurityConfig {
    */
   addBannedComponent(component: string): this
   /**
+   * Replaces the allowed file extensions, or lifts the allowlist.
+   *
+   * An array restricts extraction to those extensions (a leading dot is
+   * accepted and removed, and values are lowercased); `null` allows every
+   * extension again. The list is validated as a whole: on an error the
+   * previous allowlist stays.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `allowed_extension`) for
+   * an empty array, which would otherwise read as "allow everything", and
+   * for any value `addAllowedExtension` refuses.
+   */
+  setAllowedExtensions(extensions: Array<string> | null): this
+  /**
+   * Replaces the banned path components, so the defaults can be dropped.
+   *
+   * An empty array bans nothing. The list is validated as a whole: on an
+   * error the previous list stays.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `banned_path_component`)
+   * for any value `addBannedComponent` refuses.
+   */
+  setBannedComponents(components: Array<string>): this
+  /**
    * Finalizes the configuration (for API consistency).
    *
    * This method is provided for builder pattern consistency but is optional.
@@ -714,14 +762,18 @@ export declare class SecurityConfig {
    */
   get maxSolidBlockMemory(): number | null
   /**
-   * List of allowed file extensions.
+   * List of allowed file extensions, or `null` when every extension is
+   * allowed.
    *
    * Note: This getter clones the underlying data. For performance-critical
    * code that only needs to count or check membership, use
    * `getAllowedExtensionsCount()` or `hasAllowedExtension()` instead.
    */
-  get allowedExtensions(): Array<string>
-  /** Returns the number of allowed extensions. */
+  get allowedExtensions(): Array<string> | null
+  /**
+   * Returns the number of allowed extensions, `0` when every extension is
+   * allowed.
+   */
   getAllowedExtensionsCount(): number
   /** Checks if a specific extension is in the allowed list. */
   hasAllowedExtension(ext: string): boolean
@@ -743,26 +795,33 @@ export declare class SecurityConfig {
  * Options for extraction into memory or into a callback.
  *
  * A sink has no directory to rename, so unlike `ExtractionOptions` there is
- * no `atomic` setting: only the duplicate policy carries over.
+ * no `atomic` setting: only the existing-files policy carries over.
  *
  * # Defaults
  *
  * | Setting | Default Value |
  * |---------|--------------|
- * | `skipDuplicates` | `true` |
+ * | `existingFiles` | `'skip'` |
  */
 export declare class SinkOptions {
   /** Creates a new `SinkOptions` with defaults. */
   constructor()
   /**
-   * Sets whether duplicate archive entries are skipped silently.
+   * Sets what happens when a delivery path is already occupied.
    *
-   * When `true` (default), a duplicate entry is skipped and counted. When
-   * `false`, a duplicate entry causes an error.
+   * `'skip'` (default) skips and counts a duplicate entry. `'overwrite'`
+   * delivers it again. `'refuse'` fails with `DESTINATION_OCCUPIED`.
    */
-  setSkipDuplicates(skip: boolean): this
-  /** Whether duplicate entries are skipped silently. */
-  get skipDuplicates(): boolean
+  setExistingFiles(policy: ExistingFiles): this
+  /**
+   * What happens when a delivery path is already occupied.
+   *
+   * # Errors
+   *
+   * Returns error if this binding is older than `exarch-core` and does not
+   * know the policy.
+   */
+  get existingFiles(): ExistingFiles
 }
 
 /**
@@ -1127,6 +1186,15 @@ export type Durability = 'synced' | 'unsynced'
 export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'CANCELLED' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR' | 'ABORT_ERR'
 
 /**
+ * What extraction does when a destination path is already occupied.
+ *
+ * `skip` (the default) keeps the occupant and counts a skip. `overwrite`
+ * replaces an occupant where the kinds allow it. `refuse` fails with
+ * `DESTINATION_OCCUPIED` instead of touching anything the run did not create.
+ */
+export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
+
+/**
  * Extract an archive to the specified directory (async).
  *
  * This function provides secure archive extraction with configurable
@@ -1208,7 +1276,7 @@ export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' 
  * const report = await extractArchive('archive.tar.gz', '/tmp/output', config);
  *
  * // Customize extraction options
- * const opts = new ExtractionOptions().withSkipDuplicates(false);
+ * const opts = new ExtractionOptions().withExistingFiles('overwrite');
  * const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
  * ```
  */
@@ -1270,7 +1338,7 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * relative to the link. A `'hardlink'` entry is delivered by reference after
  * every other entry: its `target` is the root-relative resolved path of an
  * entry already delivered, a file or an earlier hardlink (a chain is
- * delivered link by link). With `skipDuplicates` off one path can be delivered
+ * delivered link by link). With `existingFiles` set to `'overwrite'` one path can be delivered
  * more than once and a hardlink refers to the latest delivery. Implicit
  * parent directories are not delivered.
  *

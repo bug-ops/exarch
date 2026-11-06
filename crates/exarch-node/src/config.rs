@@ -7,8 +7,9 @@ use std::num::NonZeroUsize;
 use exarch_core::ArchiveError as CoreError;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
-use exarch_core::ExistingFiles;
+use exarch_core::ExistingFiles as CoreExistingFiles;
 use exarch_core::Extension;
+use exarch_core::ExtensionFilter;
 use exarch_core::Limit;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
@@ -62,14 +63,6 @@ fn bounded_bytes(limit: Limit<NonZeroU64>) -> Option<i64> {
     match limit {
         Limit::Bounded(bytes) => Some(saturating_i64(bytes.get())),
         Limit::Unbounded => None,
-    }
-}
-
-const fn existing_files_of(skip: bool) -> ExistingFiles {
-    if skip {
-        ExistingFiles::Skip
-    } else {
-        ExistingFiles::Overwrite
     }
 }
 
@@ -160,6 +153,49 @@ impl TryFrom<CorePolicy> for ZipConsistencyPolicy {
     }
 }
 
+/// What extraction does when a destination path is already occupied.
+///
+/// `skip` (the default) keeps the occupant and counts a skip. `overwrite`
+/// replaces an occupant where the kinds allow it. `refuse` fails with
+/// `DESTINATION_OCCUPIED` instead of touching anything the run did not create.
+// Values must equal `exarch_core::ExistingFiles::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExistingFiles {
+    /// Keep the occupant and count a skip.
+    #[napi(value = "skip")]
+    Skip,
+    /// Replace the occupant where the kinds allow it.
+    #[napi(value = "overwrite")]
+    Overwrite,
+    /// Fail on any occupant the run did not create.
+    #[napi(value = "refuse")]
+    Refuse,
+}
+
+impl From<ExistingFiles> for CoreExistingFiles {
+    fn from(policy: ExistingFiles) -> Self {
+        match policy {
+            ExistingFiles::Skip => Self::Skip,
+            ExistingFiles::Overwrite => Self::Overwrite,
+            ExistingFiles::Refuse => Self::Refuse,
+        }
+    }
+}
+
+impl TryFrom<CoreExistingFiles> for ExistingFiles {
+    type Error = Error;
+
+    fn try_from(policy: CoreExistingFiles) -> Result<Self> {
+        match policy {
+            CoreExistingFiles::Skip => Ok(Self::Skip),
+            CoreExistingFiles::Overwrite => Ok(Self::Overwrite),
+            CoreExistingFiles::Refuse => Ok(Self::Refuse),
+            other => Err(unknown_variant("existing-files policy", other.as_str())),
+        }
+    }
+}
+
 /// Security configuration for archive extraction.
 ///
 /// All security features default to deny (secure-by-default policy).
@@ -178,7 +214,7 @@ impl TryFrom<CorePolicy> for ZipConsistencyPolicy {
 /// | `allow_absolute_paths` | false |
 /// | `allow_world_writable` | false |
 /// | `preserve_permissions` | false |
-/// | `allowed_extensions` | empty (all allowed) |
+/// | `allowed_extensions` | `null` (all allowed) |
 /// | `banned_path_components` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
 #[napi]
 #[derive(Debug, Clone)]
@@ -415,6 +451,49 @@ impl SecurityConfig {
         Ok(self)
     }
 
+    /// Replaces the allowed file extensions, or lifts the allowlist.
+    ///
+    /// An array restricts extraction to those extensions (a leading dot is
+    /// accepted and removed, and values are lowercased); `null` allows every
+    /// extension again. The list is validated as a whole: on an error the
+    /// previous allowlist stays.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `allowed_extension`) for
+    /// an empty array, which would otherwise read as "allow everything", and
+    /// for any value `addAllowedExtension` refuses.
+    #[napi(js_name = "setAllowedExtensions")]
+    pub fn set_allowed_extensions(
+        &mut self,
+        env: Env,
+        extensions: Either<Vec<String>, Null>,
+    ) -> Result<&Self> {
+        let extensions = match extensions {
+            Either::A(list) => Some(list),
+            Either::B(_) => None,
+        };
+        self.try_set_allowed_extensions(extensions.as_deref())
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Replaces the banned path components, so the defaults can be dropped.
+    ///
+    /// An empty array bans nothing. The list is validated as a whole: on an
+    /// error the previous list stays.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `banned_path_component`)
+    /// for any value `addBannedComponent` refuses.
+    #[napi(js_name = "setBannedComponents")]
+    pub fn set_banned_components(&mut self, env: Env, components: Vec<String>) -> Result<&Self> {
+        self.try_set_banned_components(&components)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
     /// Finalizes the configuration (for API consistency).
     ///
     /// This method is provided for builder pattern consistency but is optional.
@@ -548,26 +627,25 @@ impl SecurityConfig {
             .map(|limits| saturating_i64(limits.max_block_memory.get()))
     }
 
-    /// List of allowed file extensions.
+    /// List of allowed file extensions, or `null` when every extension is
+    /// allowed.
     ///
     /// Note: This getter clones the underlying data. For performance-critical
     /// code that only needs to count or check membership, use
     /// `getAllowedExtensionsCount()` or `hasAllowedExtension()` instead.
     #[napi(getter)]
-    pub fn get_allowed_extensions(&self) -> Vec<String> {
-        self.inner
-            .allowed_extensions
-            .as_only()
-            .map_or_default(|extensions| {
-                extensions
-                    .as_slice()
-                    .iter()
-                    .map(|ext| ext.as_str().to_owned())
-                    .collect()
-            })
+    pub fn get_allowed_extensions(&self) -> Option<Vec<String>> {
+        self.inner.allowed_extensions.as_only().map(|extensions| {
+            extensions
+                .as_slice()
+                .iter()
+                .map(|ext| ext.as_str().to_owned())
+                .collect()
+        })
     }
 
-    /// Returns the number of allowed extensions.
+    /// Returns the number of allowed extensions, `0` when every extension is
+    /// allowed.
     #[napi]
     pub fn get_allowed_extensions_count(&self) -> u32 {
         self.inner
@@ -701,6 +779,34 @@ impl SecurityConfig {
     fn try_add_banned_component(&mut self, component: &str) -> std::result::Result<(), CoreError> {
         let component = PathComponentName::try_from(component)?;
         self.inner.banned_path_components.push(component);
+        Ok(())
+    }
+
+    /// Env-free core of `setAllowedExtensions`; `None` lifts the allowlist.
+    fn try_set_allowed_extensions(
+        &mut self,
+        extensions: Option<&[String]>,
+    ) -> std::result::Result<(), CoreError> {
+        self.inner.allowed_extensions = match extensions {
+            None => ExtensionFilter::Any,
+            Some(raw) => ExtensionFilter::only(
+                raw.iter()
+                    .map(|ext| Extension::try_from(ext.as_str()))
+                    .collect::<std::result::Result<_, _>>()?,
+            )?,
+        };
+        Ok(())
+    }
+
+    /// Env-free core of `setBannedComponents`.
+    fn try_set_banned_components(
+        &mut self,
+        components: &[String],
+    ) -> std::result::Result<(), CoreError> {
+        self.inner.banned_path_components = components
+            .iter()
+            .map(|component| PathComponentName::try_from(component.as_str()))
+            .collect::<std::result::Result<_, _>>()?;
         Ok(())
     }
 }
@@ -838,6 +944,22 @@ impl CreationConfig {
         Ok(self)
     }
 
+    /// Replaces the exclude patterns, so the defaults can be dropped.
+    ///
+    /// An empty array excludes nothing. The list is validated as a whole: on
+    /// an error the previous patterns stay.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
+    /// pattern `addExcludePattern` refuses.
+    #[napi(js_name = "setExcludePatterns")]
+    pub fn set_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
+        self.try_set_exclude_patterns(&patterns)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
     /// Finalizes the configuration (for API consistency).
     #[napi]
     pub fn build(&self) -> &Self {
@@ -898,6 +1020,18 @@ impl CreationConfig {
         Ok(())
     }
 
+    /// Env-free core of `setExcludePatterns`.
+    fn try_set_exclude_patterns(
+        &mut self,
+        patterns: &[String],
+    ) -> std::result::Result<(), CoreError> {
+        self.inner.exclude_patterns = patterns
+            .iter()
+            .map(|pattern| exarch_core::creation::ExcludePattern::try_from(pattern.as_str()))
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(())
+    }
+
     /// Env-free core of `setMaxFileSize`; `None` removes the limit.
     fn try_set_max_file_size(&mut self, size: Option<f64>) -> std::result::Result<(), CoreError> {
         self.inner.max_file_size = match size {
@@ -923,13 +1057,13 @@ impl CreationConfig {
 /// Options controlling extraction behavior (non-security).
 ///
 /// Separate from `SecurityConfig` to keep security settings focused.
-/// These options control operational behavior such as duplicate handling.
+/// These options control operational behavior such as occupied-path handling.
 ///
 /// # Defaults
 ///
 /// | Setting | Default Value |
 /// |---------|--------------|
-/// | `skipDuplicates` | `true` |
+/// | `existingFiles` | `'skip'` |
 /// | `atomic` | `false` |
 #[napi]
 #[derive(Debug, Clone)]
@@ -955,13 +1089,15 @@ impl ExtractionOptions {
         Self::new()
     }
 
-    /// Sets whether duplicate archive entries are skipped silently.
+    /// Sets what happens when a destination path is already occupied.
     ///
-    /// When `true` (default), duplicate entries produce a warning in the
-    /// report. When `false`, a duplicate entry causes an error.
-    #[napi(js_name = "withSkipDuplicates")]
-    pub fn with_skip_duplicates(&mut self, skip: bool) -> &Self {
-        self.inner.existing_files = existing_files_of(skip);
+    /// `'skip'` (default) keeps the occupant and counts a skip, which also
+    /// covers a duplicate entry inside the archive. `'overwrite'` replaces the
+    /// occupant where the kinds allow it. `'refuse'` fails with
+    /// `DESTINATION_OCCUPIED` and never overwrites.
+    #[napi(js_name = "withExistingFiles")]
+    pub fn with_existing_files(&mut self, policy: ExistingFiles) -> &Self {
+        self.inner.existing_files = policy.into();
         self
     }
 
@@ -988,10 +1124,15 @@ impl ExtractionOptions {
         self
     }
 
-    /// Whether duplicate entries are skipped silently.
+    /// What happens when a destination path is already occupied.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if this binding is older than `exarch-core` and does not
+    /// know the policy.
     #[napi(getter)]
-    pub fn get_skip_duplicates(&self) -> bool {
-        self.inner.existing_files == ExistingFiles::Skip
+    pub fn get_existing_files(&self) -> Result<ExistingFiles> {
+        self.inner.existing_files.try_into()
     }
 
     /// Whether atomic extraction is enabled.
@@ -1013,13 +1154,13 @@ impl ExtractionOptions {
 /// Options for extraction into memory or into a callback.
 ///
 /// A sink has no directory to rename, so unlike `ExtractionOptions` there is
-/// no `atomic` setting: only the duplicate policy carries over.
+/// no `atomic` setting: only the existing-files policy carries over.
 ///
 /// # Defaults
 ///
 /// | Setting | Default Value |
 /// |---------|--------------|
-/// | `skipDuplicates` | `true` |
+/// | `existingFiles` | `'skip'` |
 #[napi]
 #[derive(Debug, Clone)]
 pub struct SinkOptions {
@@ -1036,20 +1177,25 @@ impl SinkOptions {
         }
     }
 
-    /// Sets whether duplicate archive entries are skipped silently.
+    /// Sets what happens when a delivery path is already occupied.
     ///
-    /// When `true` (default), a duplicate entry is skipped and counted. When
-    /// `false`, a duplicate entry causes an error.
-    #[napi(js_name = "setSkipDuplicates")]
-    pub fn set_skip_duplicates(&mut self, skip: bool) -> &Self {
-        self.inner = self.inner.with_existing_files(existing_files_of(skip));
+    /// `'skip'` (default) skips and counts a duplicate entry. `'overwrite'`
+    /// delivers it again. `'refuse'` fails with `DESTINATION_OCCUPIED`.
+    #[napi(js_name = "setExistingFiles")]
+    pub fn set_existing_files(&mut self, policy: ExistingFiles) -> &Self {
+        self.inner = self.inner.with_existing_files(policy.into());
         self
     }
 
-    /// Whether duplicate entries are skipped silently.
+    /// What happens when a delivery path is already occupied.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if this binding is older than `exarch-core` and does not
+    /// know the policy.
     #[napi(getter)]
-    pub fn get_skip_duplicates(&self) -> bool {
-        self.inner.existing_files == ExistingFiles::Skip
+    pub fn get_existing_files(&self) -> Result<ExistingFiles> {
+        self.inner.existing_files.try_into()
     }
 }
 
@@ -1262,7 +1408,7 @@ mod tests {
         let mut config = SecurityConfig::new();
         let result = config.try_add_allowed_extension(".txt");
         assert!(result.is_ok());
-        assert!(config.get_allowed_extensions().contains(&"txt".to_string()));
+        assert_eq!(config.get_allowed_extensions(), Some(vec!["txt".to_owned()]));
         assert!(config.has_allowed_extension(".TXT".to_string()));
     }
 
@@ -1583,7 +1729,7 @@ mod tests {
         config.try_add_allowed_extension(".txt").unwrap();
         config.try_add_allowed_extension(".md").unwrap();
 
-        let extensions = config.get_allowed_extensions();
+        let extensions = config.get_allowed_extensions().unwrap();
         assert_eq!(extensions.len(), 2, "should have 2 allowed extensions");
         assert!(
             extensions.contains(&"txt".to_string()),
@@ -2076,6 +2222,148 @@ mod tests {
             .map(|p| format!("'{}'", p.as_str()))
             .collect();
         let expected = format!("export type ZipConsistencyPolicy = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_owned()).collect()
+    }
+
+    #[test]
+    fn test_allowed_extensions_getter_is_null_for_any() {
+        assert_eq!(SecurityConfig::new().get_allowed_extensions(), None);
+    }
+
+    #[test]
+    fn test_set_allowed_extensions_replaces_and_null_lifts() {
+        let mut config = SecurityConfig::new();
+        config.try_add_allowed_extension("txt").unwrap();
+        config
+            .try_set_allowed_extensions(Some(&strings(&[".MD", "rs"])))
+            .unwrap();
+        assert_eq!(
+            config.get_allowed_extensions(),
+            Some(strings(&["md", "rs"]))
+        );
+        config.try_set_allowed_extensions(None).unwrap();
+        assert_eq!(config.get_allowed_extensions(), None);
+    }
+
+    #[test]
+    fn test_set_allowed_extensions_refuses_empty_list_and_keeps_previous() {
+        let mut config = SecurityConfig::new();
+        config
+            .try_set_allowed_extensions(Some(&strings(&["txt"])))
+            .unwrap();
+        let err = config.try_set_allowed_extensions(Some(&[])).unwrap_err();
+        assert_matches!(
+            err,
+            CoreError::InvalidConfiguration {
+                setting: ConfigSetting::AllowedExtension,
+                problem: ConfigProblem::Empty,
+            }
+        );
+        assert_eq!(config.get_allowed_extensions(), Some(strings(&["txt"])));
+    }
+
+    #[test]
+    fn test_set_allowed_extensions_is_all_or_nothing() {
+        let mut config = SecurityConfig::new();
+        config
+            .try_set_allowed_extensions(Some(&strings(&["txt"])))
+            .unwrap();
+        assert!(
+            config
+                .try_set_allowed_extensions(Some(&strings(&["md", "a/b"])))
+                .is_err()
+        );
+        assert_eq!(config.get_allowed_extensions(), Some(strings(&["txt"])));
+    }
+
+    #[test]
+    fn test_set_banned_components_replaces_clears_and_is_all_or_nothing() {
+        let mut config = SecurityConfig::new();
+        config
+            .try_set_banned_components(&strings(&["node_modules", "tmp"]))
+            .unwrap();
+        assert_eq!(
+            config.get_banned_path_components(),
+            strings(&["node_modules", "tmp"])
+        );
+        assert!(
+            config
+                .try_set_banned_components(&strings(&["ok", ".."]))
+                .is_err()
+        );
+        assert_eq!(
+            config.get_banned_path_components(),
+            strings(&["node_modules", "tmp"])
+        );
+        config.try_set_banned_components(&[]).unwrap();
+        assert!(config.get_banned_path_components().is_empty());
+    }
+
+    #[test]
+    fn test_set_exclude_patterns_replaces_clears_and_is_all_or_nothing() {
+        let mut config = CreationConfig::new();
+        config
+            .try_set_exclude_patterns(&strings(&["target", "*.log"]))
+            .unwrap();
+        assert_eq!(config.get_exclude_patterns(), strings(&["target", "*.log"]));
+        let err = config
+            .try_set_exclude_patterns(&strings(&["ok", "bad\0pattern"]))
+            .unwrap_err();
+        assert_matches!(
+            err,
+            CoreError::InvalidConfiguration {
+                setting: ConfigSetting::ExcludePattern,
+                ..
+            }
+        );
+        assert_eq!(config.get_exclude_patterns(), strings(&["target", "*.log"]));
+        config.try_set_exclude_patterns(&[]).unwrap();
+        assert!(config.get_exclude_patterns().is_empty());
+    }
+
+    #[test]
+    fn test_existing_files_defaults_to_skip_and_round_trips() {
+        let mut options = ExtractionOptions::new();
+        assert_eq!(options.get_existing_files().unwrap(), ExistingFiles::Skip);
+        for policy in [
+            ExistingFiles::Overwrite,
+            ExistingFiles::Refuse,
+            ExistingFiles::Skip,
+        ] {
+            options.with_existing_files(policy);
+            assert_eq!(options.get_existing_files().unwrap(), policy);
+        }
+
+        let mut sink = SinkOptions::new();
+        assert_eq!(sink.get_existing_files().unwrap(), ExistingFiles::Skip);
+        sink.set_existing_files(ExistingFiles::Refuse);
+        assert_eq!(sink.get_existing_files().unwrap(), ExistingFiles::Refuse);
+        assert_eq!(sink.to_core().existing_files, CoreExistingFiles::Refuse);
+    }
+
+    #[test]
+    fn test_existing_files_covers_every_core_variant() {
+        for core in CoreExistingFiles::ALL {
+            let policy = ExistingFiles::try_from(*core).unwrap();
+            assert_eq!(CoreExistingFiles::from(policy), *core);
+        }
+    }
+
+    #[test]
+    fn test_index_d_ts_existing_files_union_matches_core() {
+        let values: Vec<_> = CoreExistingFiles::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type ExistingFiles = {}", values.join(" | "));
         let dts = include_str!("../index.d.ts");
         assert!(
             dts.lines().any(|l| l == expected),

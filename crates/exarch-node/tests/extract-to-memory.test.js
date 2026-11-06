@@ -156,11 +156,16 @@ describe('extractArchiveToMemory', () => {
     });
   });
 
-  it('accepts SinkOptions and exposes only the duplicate policy', async () => {
+  it('accepts SinkOptions and exposes only the existing-files policy', async () => {
     const options = new SinkOptions();
-    assert.strictEqual(options.skipDuplicates, true);
-    assert.strictEqual(options.setSkipDuplicates(false), options);
-    assert.strictEqual(options.skipDuplicates, false);
+    assert.strictEqual(options.existingFiles, 'skip');
+    assert.strictEqual(options.setExistingFiles('refuse'), options);
+    assert.strictEqual(options.existingFiles, 'refuse');
+    assert.strictEqual(options.setExistingFiles('overwrite'), options);
+    assert.strictEqual(options.existingFiles, 'overwrite');
+    assert.throws(() => options.setExistingFiles('replace'), { code: 'InvalidArg' });
+    assert.strictEqual(options.existingFiles, 'overwrite');
+    assert.strictEqual('skipDuplicates' in options, false);
     assert.strictEqual('atomic' in options, false);
     const result = await extractArchiveToMemory(tarGz, null, options);
     assert.strictEqual(result.report.filesExtracted, 2);

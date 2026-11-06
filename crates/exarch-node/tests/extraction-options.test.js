@@ -21,44 +21,46 @@ function createValidArchive(archivePath, tempDir) {
 
 describe('ExtractionOptions', () => {
   describe('constructor', () => {
-    it('should create options with skipDuplicates defaulting to true', () => {
+    it("should create options with existingFiles defaulting to 'skip'", () => {
       const opts = new ExtractionOptions();
-      assert.strictEqual(opts.skipDuplicates, true);
+      assert.strictEqual(opts.existingFiles, 'skip');
     });
   });
 
   describe('static default()', () => {
     it('should return options equivalent to constructor', () => {
       const opts = ExtractionOptions.default();
-      assert.strictEqual(opts.skipDuplicates, true);
+      assert.strictEqual(opts.existingFiles, 'skip');
     });
   });
 
-  describe('withSkipDuplicates()', () => {
-    it('should set skipDuplicates to false', () => {
+  describe('withExistingFiles()', () => {
+    it('should accept every policy and read it back', () => {
       const opts = new ExtractionOptions();
-      opts.withSkipDuplicates(false);
-      assert.strictEqual(opts.skipDuplicates, false);
+      for (const policy of ['overwrite', 'refuse', 'skip']) {
+        assert.strictEqual(opts.withExistingFiles(policy), opts);
+        assert.strictEqual(opts.existingFiles, policy);
+      }
     });
 
-    it('should set skipDuplicates to true', () => {
+    it('should throw on a missing, null or unknown policy and keep the previous one', () => {
       const opts = new ExtractionOptions();
-      opts.withSkipDuplicates(false);
-      opts.withSkipDuplicates(true);
-      assert.strictEqual(opts.skipDuplicates, true);
-    });
-
-    it('should throw when called with no argument, undefined, or null', () => {
-      const opts = new ExtractionOptions();
-      opts.withSkipDuplicates(false);
-      assert.throws(() => opts.withSkipDuplicates());
-      assert.throws(() => opts.withSkipDuplicates(undefined));
-      assert.throws(() => opts.withSkipDuplicates(null));
+      opts.withExistingFiles('refuse');
+      assert.throws(() => opts.withExistingFiles());
+      assert.throws(() => opts.withExistingFiles(undefined));
+      assert.throws(() => opts.withExistingFiles(null));
+      assert.throws(() => opts.withExistingFiles('replace'), { code: 'InvalidArg' });
       assert.strictEqual(
-        opts.skipDuplicates,
-        false,
-        'a rejected call must not silently flip the flag'
+        opts.existingFiles,
+        'refuse',
+        'a rejected call must not silently change the policy'
       );
+    });
+
+    it('should no longer expose the skipDuplicates boolean', () => {
+      const opts = new ExtractionOptions();
+      assert.strictEqual('skipDuplicates' in opts, false);
+      assert.strictEqual(typeof opts.withSkipDuplicates, 'undefined');
     });
   });
 
@@ -99,19 +101,6 @@ describe('ExtractionOptions', () => {
       assert.strictEqual(opts.atomic, true, 'a rejected call must not silently flip the flag');
     });
   });
-
-  describe('withSkipDuplicates() round-trip', () => {
-    it('should have skipDuplicates defaulting to true', () => {
-      const opts = new ExtractionOptions();
-      assert.strictEqual(opts.skipDuplicates, true);
-    });
-
-    it('should set skipDuplicates to false via withSkipDuplicates', () => {
-      const opts = new ExtractionOptions();
-      opts.withSkipDuplicates(false);
-      assert.strictEqual(opts.skipDuplicates, false);
-    });
-  });
 });
 
 describe('extractArchiveSync with ExtractionOptions', () => {
@@ -141,9 +130,9 @@ describe('extractArchiveSync with ExtractionOptions', () => {
     assert.ok(report.bytesWritten >= 13);
   });
 
-  it('should extract with skip_duplicates=false on non-duplicate archive', () => {
+  it("should extract with existingFiles 'overwrite' on a non-duplicate archive", () => {
     const opts = new ExtractionOptions();
-    opts.withSkipDuplicates(false);
+    opts.withExistingFiles('overwrite');
     const report = extractArchiveSync(archivePath, outputDir, null, opts);
 
     assert.strictEqual(report.filesExtracted, 1);

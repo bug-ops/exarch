@@ -128,7 +128,7 @@ describe('InvalidArchive families', () => {
       { name: 'h', type: '1', linkname: 't' }
     );
     const config = new SecurityConfig().setAllowHardlinks(true);
-    const options = new ExtractionOptions().withSkipDuplicates(false);
+    const options = new ExtractionOptions().withExistingFiles('overwrite');
     const err = await extractFailure('dup.tar', bytes, config, options);
     assert.strictEqual(err.code, 'INVALID_ARCHIVE');
     assert.strictEqual(err.subCode, 'DUPLICATE_ENTRY');

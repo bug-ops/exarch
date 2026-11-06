@@ -187,7 +187,7 @@ impl CallbackJob {
 /// relative to the link. A `'hardlink'` entry is delivered by reference after
 /// every other entry: its `target` is the root-relative resolved path of an
 /// entry already delivered, a file or an earlier hardlink (a chain is
-/// delivered link by link). With `skipDuplicates` off one path can be delivered
+/// delivered link by link). With `existingFiles` set to `'overwrite'` one path can be delivered
 /// more than once and a hardlink refers to the latest delivery. Implicit
 /// parent directories are not delivered.
 ///

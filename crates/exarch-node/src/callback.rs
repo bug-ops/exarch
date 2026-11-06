@@ -187,9 +187,9 @@ impl CallbackJob {
 /// relative to the link. A `'hardlink'` entry is delivered by reference after
 /// every other entry: its `target` is the root-relative resolved path of an
 /// entry already delivered, a file or an earlier hardlink (a chain is
-/// delivered link by link). With `existingFiles` set to `'overwrite'` one path can be delivered
-/// more than once and a hardlink refers to the latest delivery. Implicit
-/// parent directories are not delivered.
+/// delivered link by link). With `existingFiles` set to `'overwrite'` one path
+/// can be delivered more than once and a hardlink refers to the latest
+/// delivery. Implicit parent directories are not delivered.
 ///
 /// # Arguments
 ///
@@ -266,7 +266,7 @@ pub fn extract_archive_to_callback<'env>(
                 }
             })
         },
-        |report| ExtractionReport::try_from(report),
+        ExtractionReport::try_from,
         move |env| detach.run(env),
     )
 }

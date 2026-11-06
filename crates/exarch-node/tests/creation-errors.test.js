@@ -40,10 +40,25 @@ describe('creation source errors', () => {
     await assert.rejects(createArchive(out, [tree]), (err) => {
       assert.strictEqual(err.code, 'SOURCE_NOT_ACCESSIBLE');
       assert.ok(err.message.includes('unread.txt'), err.message);
+      assert.strictEqual(typeof err.errno, 'number');
+      assert.strictEqual(typeof err.strerror, 'string');
+      assert.ok(err.path.endsWith('unread.txt'), err.path);
       return true;
     });
     assert.throws(() => createArchiveSync(out, [tree]), { code: 'SOURCE_NOT_ACCESSIBLE' });
     assert.ok(!fs.existsSync(out));
+  });
+
+  it('a missing source carries no OS failure properties', () => {
+    assert.throws(
+      () => createArchiveSync(path.join(tempDir, 'o.tar'), [path.join(tempDir, 'missing')]),
+      (err) => {
+        assert.strictEqual(err.code, 'SOURCE_NOT_FOUND');
+        assert.strictEqual(err.errno, undefined);
+        assert.strictEqual(err.strerror, undefined);
+        return true;
+      }
+    );
   });
 
   it('a missing source stays SOURCE_NOT_FOUND', () => {

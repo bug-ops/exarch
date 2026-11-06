@@ -18,6 +18,9 @@
 //!   `QUOTA_EXCEEDED` and a [`ZipBombSubCode`] on every `ZIP_BOMB`.
 //! - `setting`: the [`ConfigSetting`] an `INVALID_CONFIGURATION` refused.
 //! - `ioKind`: the [`IoKind`] of an `IO_ERROR`.
+//! - `errno`, `strerror`, `path`: the OS failure behind a
+//!   `SOURCE_NOT_ACCESSIBLE` and the source it names, redacted like the
+//!   message.
 //! - `nonUtf8EntryPath`: the injectively escaped path of an `INVALID_ARCHIVE`
 //!   (`ENTRY_NAME`) refusal of an entry name that is not valid UTF-8.
 //! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`,
@@ -27,7 +30,6 @@
 //! Errors raised by the binding itself (a Rust panic, a join
 //! failure) are not core errors and keep their napi `Status` as `code`.
 
-use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 
@@ -36,6 +38,7 @@ use exarch_core::ErrorCode as CoreErrorCode;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
+use exarch_core::FfiSourceFault;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting as CorePolicySetting;
 use exarch_core::SubCode;
@@ -71,11 +74,13 @@ pub const ABORT_ERR: &str = "ABORT_ERR";
 
 /// Value of the `code` property on errors surfaced to JavaScript.
 ///
-/// Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
-/// callback that threw over a successful operation.
+/// Every core error code, plus the Node-only `PROGRESS_CALLBACK_ERROR` (a
+/// progress callback threw), `STREAM_ERROR` (an `AsyncIterable` archive
+/// failed), `ENTRY_CALLBACK_ERROR` (an `onEntry` callback threw) and
+/// `ABORT_ERR` (the `AbortSignal` fired).
 // Generates the TypeScript union only: runtime values come from core's
-// `as_str`, and a unit test keeps this list equal to core's plus
-// `PROGRESS_CALLBACK_ERROR`.
+// `as_str`, and a unit test keeps this list equal to core's plus the
+// Node-only codes.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -780,8 +785,9 @@ pub trait IntoJsError {
     fn into_js_error(self, env: Env) -> Error;
 }
 
-/// The `code` an error carries: a core code, or the Node-only
-/// `PROGRESS_CALLBACK_ERROR`.
+/// The `code` an error carries: a core code, or one of the Node-only codes
+/// `PROGRESS_CALLBACK_ERROR`, `STREAM_ERROR`, `ENTRY_CALLBACK_ERROR` and
+/// `ABORT_ERR`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JsCode {
     Core(CoreErrorCode),
@@ -814,6 +820,25 @@ enum Details {
     },
 }
 
+/// What the OS reported for an unreadable creation source, redacted like the
+/// rest of the message.
+#[derive(Debug)]
+struct SourceFault {
+    errno: Option<i32>,
+    strerror: String,
+    path: String,
+}
+
+impl From<FfiSourceFault> for SourceFault {
+    fn from(fault: FfiSourceFault) -> Self {
+        Self {
+            errno: fault.raw_os_error,
+            strerror: fault.text,
+            path: fault.name,
+        }
+    }
+}
+
 /// Everything about an error except its message, ready to be applied to a JS
 /// error object.
 #[derive(Debug)]
@@ -824,6 +849,7 @@ struct ErrorProps {
     setting: Option<exarch_core::ConfigSetting>,
     io_kind: Option<IoKind>,
     non_utf8_entry_path: Option<String>,
+    source_fault: Option<SourceFault>,
     details: Details,
     cause: Option<Error>,
 }
@@ -853,6 +879,7 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
         kind,
         description,
         partial,
+        source_fault,
         ..
     } = err.into_ffi_message();
     Described {
@@ -867,6 +894,7 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
                 _ => None,
             },
             non_utf8_entry_path,
+            source_fault: source_fault.map(SourceFault::from),
             details: partial.map_or(Details::None, Details::Extraction),
             cause,
         },
@@ -883,6 +911,7 @@ fn describe_callback_over_success(operation: &str, details: Details, source: Err
             setting: None,
             io_kind: None,
             non_utf8_entry_path: None,
+            source_fault: None,
             details,
             cause: Some(source),
         },
@@ -899,6 +928,7 @@ fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Descri
             setting: None,
             io_kind: None,
             non_utf8_entry_path: None,
+            source_fault: None,
             details: Details::None,
             cause: Some(source),
         },
@@ -945,6 +975,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     setting: None,
                     io_kind: None,
                     non_utf8_entry_path: None,
+                    source_fault: None,
                     details: Details::None,
                     cause: Some(source),
                 },
@@ -965,6 +996,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     setting: None,
                     io_kind: None,
                     non_utf8_entry_path: None,
+                    source_fault: None,
                     details: outcome.map_or(Details::None, Details::Extraction),
                     cause: Some(source),
                 },
@@ -990,6 +1022,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     setting: None,
                     io_kind: None,
                     non_utf8_entry_path: None,
+                    source_fault: None,
                     details: Details::None,
                     cause: reason,
                 },
@@ -1020,6 +1053,13 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     }
     if let Some(path) = props.non_utf8_entry_path {
         obj.set("nonUtf8EntryPath", path)?;
+    }
+    if let Some(fault) = props.source_fault {
+        if let Some(errno) = fault.errno {
+            obj.set("errno", errno)?;
+        }
+        obj.set("strerror", fault.strerror)?;
+        obj.set("path", fault.path)?;
     }
     match props.details {
         Details::None => {}
@@ -1187,41 +1227,12 @@ fn settle_then_convert<T, U>(
     }
 }
 
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Core(err) => write!(f, "{err}"),
-            Self::Callback(err) => match err.as_ref() {
-                ProgressCallbackError::Core { source, .. } => write!(f, "{source}"),
-                ProgressCallbackError::ExtractionCallback { .. }
-                | ProgressCallbackError::MemoryExtractionCallback { .. } => {
-                    f.write_str("progress callback threw after successful extraction")
-                }
-                ProgressCallbackError::CreationCallback { .. } => {
-                    f.write_str("progress callback threw after successful creation")
-                }
-                ProgressCallbackError::CreationCancelled { .. } => {
-                    f.write_str("progress callback threw, creation was cancelled")
-                }
-                ProgressCallbackError::CallbackCancelled { operation, .. } => {
-                    write!(
-                        f,
-                        "progress callback threw, {} was cancelled",
-                        operation.as_str()
-                    )
-                }
-                ProgressCallbackError::ListCallback { .. } => {
-                    f.write_str("progress callback threw after successful listing")
-                }
-                ProgressCallbackError::VerifyCallback { .. } => {
-                    f.write_str("progress callback threw after successful verification")
-                }
-                ProgressCallbackError::Stream { .. } => f.write_str("archive stream failed"),
-                ProgressCallbackError::EntryCallback { .. } => f.write_str("entry callback threw"),
-                ProgressCallbackError::Aborted { .. } => f.write_str("The operation was aborted"),
-            },
-            Self::Native(err) => write!(f, "{}", err.reason),
-        }
+/// The message JavaScript sees for `failure`, for tests that assert on it.
+#[cfg(test)]
+pub fn failure_text(failure: Failure) -> String {
+    match describe(failure) {
+        Ok(described) => described.description,
+        Err(native) => native.reason,
     }
 }
 
@@ -1287,7 +1298,7 @@ mod tests {
             },
             outcome,
             finish,
-            |failure| Error::from_reason(failure.to_string()),
+            |failure| Error::from_reason(failure_text(failure)),
         );
         (ran.get(), result)
     }
@@ -1937,7 +1948,10 @@ mod tests {
         );
         assert_eq!(d.props.code, JsCode::ProgressCallback);
         assert!(d.props.cause.is_some());
-        assert_eq!(d.description, "progress callback threw, extraction was cancelled");
+        assert_eq!(
+            d.description,
+            "progress callback threw, extraction was cancelled"
+        );
         let Details::Extraction(PartialOutcome::Kept(report)) = d.props.details else {
             panic!("expected the kept outcome");
         };
@@ -1947,7 +1961,11 @@ mod tests {
     #[test]
     fn test_merge_cancelled_by_a_throw_during_a_read_only_operation_has_no_outcome() {
         for operation in [Operation::Listing, Operation::Verification] {
-            let d = merged(operation, CoreError::Cancelled, Some(Error::from_reason("boom")));
+            let d = merged(
+                operation,
+                CoreError::Cancelled,
+                Some(Error::from_reason("boom")),
+            );
             assert_eq!(d.props.code, JsCode::ProgressCallback);
             assert_matches!(d.props.details, Details::None);
             assert!(d.description.contains(operation.as_str()), "{d:?}");
@@ -1993,6 +2011,52 @@ mod tests {
     }
 
     #[test]
+    fn test_source_not_accessible_carries_the_os_failure() {
+        let d = described(CoreError::SourceNotAccessible {
+            path: PathBuf::from("src/a.txt"),
+            error: std::io::Error::from_raw_os_error(13),
+        });
+        assert_eq!(d.props.code.as_str(), "SOURCE_NOT_ACCESSIBLE");
+        let fault = d.props.source_fault.expect("the fault is carried");
+        assert_eq!(fault.errno, Some(13));
+        assert!(fault.path.ends_with("a.txt"), "{}", fault.path);
+        assert!(!fault.strerror.is_empty());
+    }
+
+    #[test]
+    fn test_other_errors_carry_no_source_fault() {
+        let d = described(CoreError::SourceNotFound {
+            path: PathBuf::from("a.txt"),
+        });
+        assert!(d.props.source_fault.is_none());
+    }
+
+    #[test]
+    fn test_destination_occupied_is_output_exists_and_redacts_the_destination() {
+        let d = described(CoreError::DestinationOccupied {
+            destination: PathBuf::from("/srv/secret/app/out"),
+            conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
+        });
+        assert_eq!(d.props.code.as_str(), "OUTPUT_EXISTS");
+        assert!(d.description.contains("out"), "{}", d.description);
+        #[cfg(not(debug_assertions))]
+        assert!(!d.description.contains("secret"), "{}", d.description);
+    }
+
+    #[test]
+    fn test_output_reservation_left_is_an_io_error_that_redacts_the_path() {
+        let d = described(CoreError::OutputReservationLeft {
+            path: PathBuf::from("/srv/secret/app/out.tar"),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        });
+        assert_eq!(d.props.code.as_str(), "IO_ERROR");
+        assert_eq!(d.props.io_kind, Some(IoKind::PermissionDenied));
+        assert!(d.description.contains("out.tar"), "{}", d.description);
+        #[cfg(not(debug_assertions))]
+        assert!(!d.description.contains("secret"), "{}", d.description);
+    }
+
+    #[test]
     fn test_native_failure_is_not_described() {
         let native = describe(Failure::Native(Error::from_reason("negative")))
             .expect_err("native errors bypass the builder");
@@ -2005,11 +2069,10 @@ mod tests {
         let result: Result<(), Failure> = catch_panic("test operation", || {
             panic!("synthetic panic for #395 regression test")
         });
-        let err = result.expect_err("panic must be converted, not abort");
+        let text = failure_text(result.expect_err("panic must be converted, not abort"));
         assert!(
-            err.to_string()
-                .contains("Internal panic during test operation"),
-            "unexpected error message: {err}"
+            text.contains("Internal panic during test operation"),
+            "unexpected error message: {text}"
         );
     }
 }

@@ -23,8 +23,9 @@ use crate::CoreResult;
 use crate::error::Failure;
 use crate::error::IoKind;
 use crate::utils::path_text;
-use exarch_core::sanitize_path_for_error;
+use crate::utils::utf8_path;
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::sanitize_path_for_error;
 use napi::bindgen_prelude::Either;
 use napi::bindgen_prelude::Either3;
 use napi::bindgen_prelude::Either4;
@@ -698,7 +699,7 @@ fn backup_identity(identity: CoreBackupIdentity) -> Result<BackupIdentity> {
     }
 }
 
-pub(crate) fn extraction_warning(warning: &CoreExtractionWarning) -> Result<ExtractionWarning> {
+pub fn extraction_warning(warning: &CoreExtractionWarning) -> Result<ExtractionWarning> {
     match warning {
         CoreExtractionWarning::AntiItemsSkipped { count } => {
             Ok(Either::A(AntiItemsSkippedWarning {
@@ -791,11 +792,8 @@ pub struct DirectoryNotSyncedWarning {
     pub io_kind: IoKind,
 }
 
-type CreationWarning = Either3<
-    ZipRatioOverDefaultLimitWarning,
-    ZipRatioCheckFailedWarning,
-    DirectoryNotSyncedWarning,
->;
+type CreationWarning =
+    Either3<ZipRatioOverDefaultLimitWarning, ZipRatioCheckFailedWarning, DirectoryNotSyncedWarning>;
 
 fn creation_warning(warning: &CoreCreationWarning) -> Result<CreationWarning> {
     let message = warning.to_string();
@@ -1070,18 +1068,6 @@ fn link_target(target: &exarch_core::inspection::LinkTarget) -> CoreResult<LinkT
             bytes: saturating_i64(u64::try_from(*bytes).unwrap_or(u64::MAX)),
         }),
         _ => return Err(Failure::Native(unknown_variant("link target", "unknown"))),
-    })
-}
-
-/// The text of `path`, or the refusal a listing must raise: a lossy rendering
-/// could merge two distinct entries into one name.
-pub fn utf8_path(path: &std::path::Path) -> CoreResult<String> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
-        Failure::from(CoreError::from(
-            exarch_core::Malformation::EntryPathNotUtf8 {
-                path: path.to_path_buf(),
-            },
-        ))
     })
 }
 
@@ -1459,12 +1445,12 @@ mod tests {
             panic!("expected the ratio warning");
         };
         assert_eq!(over.kind, CreationWarningKind::ZipRatioOverDefaultLimit);
-        assert_eq!((over.entries, over.limit, over.needed_ratio), (2, 100.0, 250.0));
+        assert_eq!(
+            (over.entries, over.limit, over.needed_ratio),
+            (2, 100.0, 250.0)
+        );
 
-        let failed = creation_warning(&Core::ZipRatioCheckFailed {
-            reason: "r".into(),
-        })
-        .unwrap();
+        let failed = creation_warning(&Core::ZipRatioCheckFailed { reason: "r".into() }).unwrap();
         let Either3::B(failed) = failed else {
             panic!("expected the check-failed warning");
         };
@@ -1508,8 +1494,8 @@ mod tests {
         .collect();
         assert_eq!(creation, exarch_core::creation::CreationWarningKind::NAMES);
 
-        let identity = [BackupIdentity::Verified, BackupIdentity::Unverified]
-            .map(|identity| match identity {
+        let identity =
+            [BackupIdentity::Verified, BackupIdentity::Unverified].map(|identity| match identity {
                 BackupIdentity::Verified => "verified",
                 BackupIdentity::Unverified => "unverified",
             });

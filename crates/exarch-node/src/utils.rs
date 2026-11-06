@@ -1,9 +1,26 @@
 //! Utility functions for Node.js bindings.
 
+use std::path::Path;
+
 use exarch_core::ArchiveError as CoreError;
 use exarch_core::BoundaryPath;
 
 pub use exarch_core::path_text;
+
+use crate::CoreResult;
+use crate::error::Failure;
+
+/// The text of `path`, or the refusal a listing or in-memory extraction must
+/// raise: a lossy rendering could merge two distinct entries into one name.
+///
+/// # Errors
+///
+/// Returns the core `EntryPathNotUtf8` refusal when `path` is not valid UTF-8.
+pub fn utf8_path(path: &Path) -> CoreResult<String> {
+    exarch_core::utf8_entry_path(path)
+        .map(str::to_owned)
+        .map_err(|malformation| Failure::from(CoreError::from(malformation)))
+}
 
 /// Checks a path argument and returns the proof of the check.
 ///

@@ -7,6 +7,8 @@ use std::num::NonZeroUsize;
 use exarch_core::ArchiveError as CoreError;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
+use exarch_core::DecodeReuse;
+use exarch_core::DecodeReuseKind as CoreDecodeReuseKind;
 use exarch_core::ExistingFiles as CoreExistingFiles;
 use exarch_core::Extension;
 use exarch_core::ExtensionFilter;
@@ -15,6 +17,7 @@ use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
 use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
+use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::Staging;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
@@ -27,7 +30,6 @@ use napi::bindgen_prelude::Null;
 use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
-use crate::error::Failure;
 use crate::error::IntoJsError;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
@@ -72,36 +74,6 @@ const fn staging_of(atomic: bool) -> Staging {
     } else {
         Staging::InPlace
     }
-}
-
-/// Parses a JavaScript compression level: only a whole number from 1 to 9 is
-/// accepted, whatever `napi` would make of it as an integer.
-///
-/// A whole number that fits `u32` outside 1..=9 is core's
-/// `INVALID_COMPRESSION_LEVEL` and names the level exactly. Any other number
-/// (a fraction, `NaN`, an infinity, a negative or a value above `u32::MAX`)
-/// has no exact level to name, so it is a plain `InvalidArg` that reports the
-/// number as given instead of a different level.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the value is a whole number in 0..=u32::MAX here"
-)]
-fn compression_level(level: f64) -> std::result::Result<CompressionLevel, Failure> {
-    let whole =
-        level.is_finite() && level.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&level);
-    if whole {
-        return Ok(CompressionLevel::try_from(level as u32)?);
-    }
-    let given = if level.is_infinite() {
-        if level > 0.0 { "Infinity" } else { "-Infinity" }.to_owned()
-    } else {
-        level.to_string()
-    };
-    Err(Failure::Native(Error::new(
-        napi::Status::InvalidArg,
-        format!("compression level must be a whole number from 1 to 9, got {given}"),
-    )))
 }
 
 /// A count as the JavaScript number it is held in, clamped to the largest
@@ -157,7 +129,7 @@ impl TryFrom<CorePolicy> for ZipConsistencyPolicy {
 ///
 /// `skip` (the default) keeps the occupant and counts a skip. `overwrite`
 /// replaces an occupant where the kinds allow it. `refuse` fails with
-/// `DESTINATION_OCCUPIED` instead of touching anything the run did not create.
+/// `OUTPUT_EXISTS` instead of touching anything the run did not create.
 // Values must equal `exarch_core::ExistingFiles::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +164,47 @@ impl TryFrom<CoreExistingFiles> for ExistingFiles {
             CoreExistingFiles::Overwrite => Ok(Self::Overwrite),
             CoreExistingFiles::Refuse => Ok(Self::Refuse),
             other => Err(unknown_variant("existing-files policy", other.as_str())),
+        }
+    }
+}
+
+/// Where a ZIP extraction into a sink keeps decoded output between the
+/// structural check and the write, so a deflate entry is decoded once.
+///
+/// `off` (the default for sinks) keeps nothing. `memory` keeps decoded entries
+/// in memory. `temp_file` keeps them in an unnamed temporary file that holds
+/// the archive's plaintext until the extraction ends.
+// Values must equal `exarch_core::DecodeReuseKind::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeReuseKind {
+    /// Keep nothing; every entry is decoded twice.
+    #[napi(value = "off")]
+    Off,
+    /// Keep decoded entries in memory.
+    #[napi(value = "memory")]
+    Memory,
+    /// Keep decoded entries in a temporary file.
+    #[napi(value = "temp_file")]
+    TempFile,
+}
+
+impl From<DecodeReuseKind> for CoreDecodeReuseKind {
+    fn from(kind: DecodeReuseKind) -> Self {
+        match kind {
+            DecodeReuseKind::Off => Self::Off,
+            DecodeReuseKind::Memory => Self::Memory,
+            DecodeReuseKind::TempFile => Self::TempFile,
+        }
+    }
+}
+
+impl From<CoreDecodeReuseKind> for DecodeReuseKind {
+    fn from(kind: CoreDecodeReuseKind) -> Self {
+        match kind {
+            CoreDecodeReuseKind::Off => Self::Off,
+            CoreDecodeReuseKind::Memory => Self::Memory,
+            CoreDecodeReuseKind::TempFile => Self::TempFile,
         }
     }
 }
@@ -488,6 +501,10 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `banned_path_component`)
     /// for any value `addBannedComponent` refuses.
     #[napi(js_name = "setBannedComponents")]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi cannot take a JavaScript array by reference"
+    )]
     pub fn set_banned_components(&mut self, env: Env, components: Vec<String>) -> Result<&Self> {
         self.try_set_banned_components(&components)
             .map_err(|err| err.into_js_error(env))?;
@@ -954,6 +971,10 @@ impl CreationConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
     /// pattern `addExcludePattern` refuses.
     #[napi(js_name = "setExcludePatterns")]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi cannot take a JavaScript array by reference"
+    )]
     pub fn set_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
         self.try_set_exclude_patterns(&patterns)
             .map_err(|err| err.into_js_error(env))?;
@@ -1043,8 +1064,8 @@ impl CreationConfig {
 
     /// Env-free core of `setCompressionLevel`, so the validation is testable
     /// without a JS environment.
-    fn try_set_compression_level(&mut self, level: f64) -> std::result::Result<(), Failure> {
-        self.inner.compression_level = compression_level(level)?;
+    fn try_set_compression_level(&mut self, level: f64) -> std::result::Result<(), CoreError> {
+        self.inner.compression_level = CompressionLevel::from_f64(level)?;
         Ok(())
     }
 
@@ -1094,7 +1115,7 @@ impl ExtractionOptions {
     /// `'skip'` (default) keeps the occupant and counts a skip, which also
     /// covers a duplicate entry inside the archive. `'overwrite'` replaces the
     /// occupant where the kinds allow it. `'refuse'` fails with
-    /// `DESTINATION_OCCUPIED` and never overwrites.
+    /// `OUTPUT_EXISTS` and never overwrites.
     #[napi(js_name = "withExistingFiles")]
     pub fn with_existing_files(&mut self, policy: ExistingFiles) -> &Self {
         self.inner.existing_files = policy.into();
@@ -1180,9 +1201,9 @@ impl SinkOptions {
     /// Sets what happens when a delivery path is already occupied.
     ///
     /// `'skip'` (default) skips and counts a duplicate entry. `'overwrite'`
-    /// delivers it again. `'refuse'` fails with `DESTINATION_OCCUPIED`.
-    #[napi(js_name = "setExistingFiles")]
-    pub fn set_existing_files(&mut self, policy: ExistingFiles) -> &Self {
+    /// delivers it again. `'refuse'` fails with `OUTPUT_EXISTS`.
+    #[napi(js_name = "withExistingFiles")]
+    pub fn with_existing_files(&mut self, policy: ExistingFiles) -> &Self {
         self.inner = self.inner.with_existing_files(policy.into());
         self
     }
@@ -1197,9 +1218,78 @@ impl SinkOptions {
     pub fn get_existing_files(&self) -> Result<ExistingFiles> {
         self.inner.existing_files.try_into()
     }
+
+    /// Sets where a ZIP extraction keeps decoded output so a deflate entry is
+    /// decoded once: `'off'` (default), `'memory'` or `'temp_file'`.
+    ///
+    /// `limit` is the most bytes kept, at most 256 MiB (default 32 MiB); it
+    /// needs `'memory'` or `'temp_file'`.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `decode_reuse_limit`) if
+    /// `limit` is not a positive whole number up to 2^53 - 1, or is given with
+    /// `'off'`.
+    #[napi(js_name = "withDecodeReuse")]
+    pub fn with_decode_reuse(
+        &mut self,
+        env: Env,
+        mode: DecodeReuseKind,
+        limit: Option<f64>,
+    ) -> Result<&Self> {
+        self.try_set_decode_reuse(mode, limit)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Where a ZIP extraction keeps decoded output.
+    #[napi(getter)]
+    pub fn get_decode_reuse(&self) -> DecodeReuseKind {
+        self.inner.decode_reuse.kind().into()
+    }
+
+    /// The most bytes kept for reuse, or `null` while decode reuse is `'off'`.
+    #[napi(getter)]
+    pub fn get_decode_reuse_limit(&self) -> Option<i64> {
+        match self.inner.decode_reuse {
+            DecodeReuse::Memory(limit) | DecodeReuse::TempFile(limit) => {
+                Some(saturating_i64(limit.get()))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl SinkOptions {
+    /// Env-free core of `withDecodeReuse`.
+    fn try_set_decode_reuse(
+        &mut self,
+        mode: DecodeReuseKind,
+        limit: Option<f64>,
+    ) -> std::result::Result<(), CoreError> {
+        let limit = limit
+            .map(|bytes| {
+                positive_from_f64(ConfigSetting::DecodeReuseLimit, bytes).map(ReuseLimit::new)
+            })
+            .transpose()?;
+        self.inner.decode_reuse = match (mode, limit) {
+            (DecodeReuseKind::Off, None) => DecodeReuse::Off,
+            (DecodeReuseKind::Off, Some(_)) => {
+                return Err(CoreError::InvalidConfiguration {
+                    setting: ConfigSetting::DecodeReuseLimit,
+                    problem: ConfigProblem::NotSupported,
+                });
+            }
+            (DecodeReuseKind::Memory, limit) => {
+                DecodeReuse::Memory(limit.unwrap_or(ReuseLimit::DEFAULT))
+            }
+            (DecodeReuseKind::TempFile, limit) => {
+                DecodeReuse::TempFile(limit.unwrap_or(ReuseLimit::DEFAULT))
+            }
+        };
+        Ok(())
+    }
+
     /// Returns the inner `CoreSinkOptions`.
     pub fn to_core(&self) -> exarch_core::SinkOptions {
         self.inner
@@ -1408,7 +1498,10 @@ mod tests {
         let mut config = SecurityConfig::new();
         let result = config.try_add_allowed_extension(".txt");
         assert!(result.is_ok());
-        assert_eq!(config.get_allowed_extensions(), Some(vec!["txt".to_owned()]));
+        assert_eq!(
+            config.get_allowed_extensions(),
+            Some(vec!["txt".to_owned()])
+        );
         assert!(config.has_allowed_extension(".TXT".to_string()));
     }
 
@@ -2093,26 +2186,25 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_level_reports_the_value_it_was_given() {
+    fn test_compression_level_refusals_are_typed_and_keep_the_previous_level() {
+        use exarch_core::RequestedLevel as Requested;
+
         let mut config = CreationConfig::new();
         for (level, expected) in [
-            (1.5, "got 1.5"),
-            (-3.0, "got -3"),
-            (f64::NAN, "got NaN"),
-            (f64::INFINITY, "got Infinity"),
-            (4_294_967_302.0, "got 4294967302"),
+            (10.0, Requested::Integer(10)),
+            (-3.0, Requested::Integer(-3)),
+            (1.5, Requested::Fractional(1.5)),
+            (f64::NAN, Requested::NonFinite),
+            (f64::INFINITY, Requested::NonFinite),
+            (4_294_967_302.0, Requested::Integer(4_294_967_302)),
         ] {
-            let Err(Failure::Native(err)) = config.try_set_compression_level(level) else {
-                panic!("{level} must be refused as a native argument error");
+            let Err(CoreError::InvalidCompressionLevel { level: got }) =
+                config.try_set_compression_level(level)
+            else {
+                panic!("{level} must be refused as an invalid compression level");
             };
-            assert!(err.reason.ends_with(expected), "{}", err.reason);
+            assert_eq!(format!("{got:?}"), format!("{expected:?}"), "{level}");
         }
-        assert_matches!(
-            config.try_set_compression_level(10.0),
-            Err(Failure::Core(CoreError::InvalidCompressionLevel {
-                level: exarch_core::RequestedLevel::Integer(10)
-            }))
-        );
         assert_eq!(config.get_compression_level(), 6);
     }
 
@@ -2344,7 +2436,7 @@ mod tests {
 
         let mut sink = SinkOptions::new();
         assert_eq!(sink.get_existing_files().unwrap(), ExistingFiles::Skip);
-        sink.set_existing_files(ExistingFiles::Refuse);
+        sink.with_existing_files(ExistingFiles::Refuse);
         assert_eq!(sink.get_existing_files().unwrap(), ExistingFiles::Refuse);
         assert_eq!(sink.to_core().existing_files, CoreExistingFiles::Refuse);
     }
@@ -2364,6 +2456,83 @@ mod tests {
             .map(|p| format!("'{}'", p.as_str()))
             .collect();
         let expected = format!("export type ExistingFiles = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_sink_decode_reuse_defaults_to_off_and_round_trips() {
+        let mut sink = SinkOptions::new();
+        assert_eq!(sink.get_decode_reuse(), DecodeReuseKind::Off);
+        assert_eq!(sink.get_decode_reuse_limit(), None);
+
+        sink.try_set_decode_reuse(DecodeReuseKind::Memory, None)
+            .unwrap();
+        assert_eq!(sink.get_decode_reuse(), DecodeReuseKind::Memory);
+        assert_eq!(
+            sink.get_decode_reuse_limit(),
+            Some(i64::try_from(ReuseLimit::DEFAULT.get()).unwrap())
+        );
+
+        sink.try_set_decode_reuse(DecodeReuseKind::TempFile, Some(1024.0))
+            .unwrap();
+        assert_eq!(sink.get_decode_reuse(), DecodeReuseKind::TempFile);
+        assert_eq!(sink.get_decode_reuse_limit(), Some(1024));
+        assert_eq!(
+            sink.to_core().decode_reuse,
+            DecodeReuse::TempFile(ReuseLimit::new(NonZeroU64::new(1024).unwrap()))
+        );
+
+        sink.try_set_decode_reuse(DecodeReuseKind::Off, None)
+            .unwrap();
+        assert_eq!(sink.get_decode_reuse_limit(), None);
+    }
+
+    #[test]
+    fn test_sink_decode_reuse_clamps_the_limit_and_refuses_bad_ones() {
+        let mut sink = SinkOptions::new();
+        sink.try_set_decode_reuse(DecodeReuseKind::Memory, Some(MAX_SAFE))
+            .unwrap();
+        assert_eq!(
+            sink.get_decode_reuse_limit(),
+            Some(i64::try_from(ReuseLimit::MAX.get()).unwrap())
+        );
+
+        for bad in [0.0, -1.0, 1.5, f64::NAN] {
+            let err = sink
+                .try_set_decode_reuse(DecodeReuseKind::Memory, Some(bad))
+                .unwrap_err();
+            assert_matches!(
+                err,
+                CoreError::InvalidConfiguration {
+                    setting: ConfigSetting::DecodeReuseLimit,
+                    ..
+                }
+            );
+        }
+        let err = sink
+            .try_set_decode_reuse(DecodeReuseKind::Off, Some(1.0))
+            .unwrap_err();
+        assert_matches!(
+            err,
+            CoreError::InvalidConfiguration {
+                setting: ConfigSetting::DecodeReuseLimit,
+                problem: ConfigProblem::NotSupported,
+            }
+        );
+        assert_eq!(sink.get_decode_reuse(), DecodeReuseKind::Memory);
+    }
+
+    #[test]
+    fn test_index_d_ts_decode_reuse_union_matches_core() {
+        let values: Vec<_> = CoreDecodeReuseKind::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type DecodeReuseKind = {}", values.join(" | "));
         let dts = include_str!("../index.d.ts");
         assert!(
             dts.lines().any(|l| l == expected),

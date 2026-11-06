@@ -194,6 +194,7 @@ export interface ExarchIoDetail {
   subCode?: undefined
   relaxableBy?: undefined
   setting?: undefined
+  nonUtf8EntryPath?: undefined
 }
 
 /** A quota refusal; `subCode` names the quota that was exceeded. */
@@ -216,6 +217,23 @@ export interface ExarchZipBombDetail {
   nonUtf8EntryPath?: undefined
 }
 
+/**
+ * A creation source that could not be read. `errno` is the OS error number as
+ * Rust's `std::io` reports it, when the failure has one; `strerror` and `path`
+ * are redacted like the message (the file name only in release builds).
+ */
+export interface ExarchSourceNotAccessibleDetail {
+  code: 'SOURCE_NOT_ACCESSIBLE'
+  errno?: number
+  strerror: string
+  path: string
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
 /** Every other code carries no detail property. */
 export interface ExarchPlainCodeDetail {
   code: Exclude<
@@ -226,6 +244,7 @@ export interface ExarchPlainCodeDetail {
     | 'IO_ERROR'
     | 'QUOTA_EXCEEDED'
     | 'ZIP_BOMB'
+    | 'SOURCE_NOT_ACCESSIBLE'
   >
   subCode?: undefined
   relaxableBy?: undefined
@@ -242,6 +261,7 @@ export type ExarchErrorCodeDetail =
   | ExarchIoDetail
   | ExarchQuotaDetail
   | ExarchZipBombDetail
+  | ExarchSourceNotAccessibleDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -506,7 +526,7 @@ export declare class ExtractionOptions {
    * `'skip'` (default) keeps the occupant and counts a skip, which also
    * covers a duplicate entry inside the archive. `'overwrite'` replaces the
    * occupant where the kinds allow it. `'refuse'` fails with
-   * `DESTINATION_OCCUPIED` and never overwrites.
+   * `OUTPUT_EXISTS` and never overwrites.
    */
   withExistingFiles(policy: ExistingFiles): this
   /**
@@ -825,9 +845,9 @@ export declare class SinkOptions {
    * Sets what happens when a delivery path is already occupied.
    *
    * `'skip'` (default) skips and counts a duplicate entry. `'overwrite'`
-   * delivers it again. `'refuse'` fails with `DESTINATION_OCCUPIED`.
+   * delivers it again. `'refuse'` fails with `OUTPUT_EXISTS`.
    */
-  setExistingFiles(policy: ExistingFiles): this
+  withExistingFiles(policy: ExistingFiles): this
   /**
    * What happens when a delivery path is already occupied.
    *
@@ -837,6 +857,24 @@ export declare class SinkOptions {
    * know the policy.
    */
   get existingFiles(): ExistingFiles
+  /**
+   * Sets where a ZIP extraction keeps decoded output so a deflate entry is
+   * decoded once: `'off'` (default), `'memory'` or `'temp_file'`.
+   *
+   * `limit` is the most bytes kept, at most 256 MiB (default 32 MiB); it
+   * needs `'memory'` or `'temp_file'`.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `decode_reuse_limit`) if
+   * `limit` is not a positive whole number up to 2^53 - 1, or is given with
+   * `'off'`.
+   */
+  withDecodeReuse(mode: DecodeReuseKind, limit?: number | undefined | null): this
+  /** Where a ZIP extraction keeps decoded output. */
+  get decodeReuse(): DecodeReuseKind
+  /** The most bytes kept for reuse, or `null` while decode reuse is `'off'`. */
+  get decodeReuseLimit(): number | null
 }
 
 /**
@@ -970,7 +1008,7 @@ export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 
  * console.log(`Created archive with ${report.filesAdded} files`);
  *
  * // Customize configuration
- * const config = new CreationConfig().compressionLevel(9);
+ * const config = new CreationConfig().setCompressionLevel(9);
  * const report = await createArchive('output.tar.gz', ['src/'], config);
  * ```
  */
@@ -1108,17 +1146,17 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * errors occur. See `createArchive` for the full list of error codes.
  *
  * If `progress` throws, the returned promise rejects instead of crashing the
- * process (see issue #465). Creation has already run to completion (or
- * failure) by the time the rejection is observed — a throwing callback cannot
- * abort creation early, since the progress callback contract has no
- * cancellation signal. The rejection therefore reports both signals:
+ * process (see issue #465), and the creation stops at the start of the next
+ * entry. The rejection reports both signals:
  *
- * - Creation succeeded: `code` is `PROGRESS_CALLBACK_ERROR` and `filesAdded`
- *   and `bytesWritten` are set, so the caller can still see that an archive
- *   was written and needs cleaning up.
- * - Creation also failed: the core error stays primary and keeps its `code`;
- *   the callback's throw is attached as `cause`. A throwing callback can never
- *   mask a core error.
+ * - The callback's throw stopped the creation, or the last entry's callback
+ *   threw after the creation succeeded: `code` is `PROGRESS_CALLBACK_ERROR`.
+ *   After a stop nothing was published; after a success `filesAdded` and
+ *   `bytesWritten` are set, so the caller can still see that an archive was
+ *   written and needs cleaning up.
+ * - Creation also failed on its own: the core error stays primary and keeps
+ *   its `code`; the callback's throw is attached as `cause`. A throwing
+ *   callback can never mask a core error.
  *
  * In both cases the original JS exception is available as the `cause`
  * property of the rejection value. The throw's own text and stack are never
@@ -1219,6 +1257,16 @@ export interface CreationReport {
 /** Class of a creation warning. */
 export type CreationWarningKind = 'zip_ratio_over_default_limit' | 'zip_ratio_check_failed' | 'directory_not_synced'
 
+/**
+ * Where a ZIP extraction into a sink keeps decoded output between the
+ * structural check and the write, so a deflate entry is decoded once.
+ *
+ * `off` (the default for sinks) keeps nothing. `memory` keeps decoded entries
+ * in memory. `temp_file` keeps them in an unnamed temporary file that holds
+ * the archive's plaintext until the extraction ends.
+ */
+export type DecodeReuseKind = 'off' | 'memory' | 'temp_file'
+
 /** The `kind` of a [`MemoryDirectoryEntry`]. */
 export type DirectoryKind = 'directory'
 
@@ -1247,8 +1295,10 @@ export type Durability = 'synced' | 'unsynced'
 /**
  * Value of the `code` property on errors surfaced to JavaScript.
  *
- * Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
- * callback that threw over a successful operation.
+ * Every core error code, plus the Node-only `PROGRESS_CALLBACK_ERROR` (a
+ * progress callback threw), `STREAM_ERROR` (an `AsyncIterable` archive
+ * failed), `ENTRY_CALLBACK_ERROR` (an `onEntry` callback threw) and
+ * `ABORT_ERR` (the `AbortSignal` fired).
  */
 export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'CANCELLED' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR' | 'ABORT_ERR'
 
@@ -1257,7 +1307,7 @@ export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' 
  *
  * `skip` (the default) keeps the occupant and counts a skip. `overwrite`
  * replaces an occupant where the kinds allow it. `refuse` fails with
- * `DESTINATION_OCCUPIED` instead of touching anything the run did not create.
+ * `OUTPUT_EXISTS` instead of touching anything the run did not create.
  */
 export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
 
@@ -1327,7 +1377,7 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  *   setting or input, as a `snake_case` id such as `max_file_count`.
  * - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
  *   set when extraction fails after some files were already written. `writes`
- *   is `'kept'` (files remain; the counters and the `warnings` string array
+ *   is `'kept'` (files remain; the counters and the typed `warnings` array
  *   follow) or, with `atomic`, `'rolled_back'` (the destination was discarded;
  *   no counters).
  *
@@ -1640,8 +1690,8 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * function calling convention: `err` is always `null`, the entry data
  * arrives as a single array argument) where:
  * - `path` — entry path inside the archive
- * - `total` — total number of entries as `number` (0 for TAR-family formats
- *   because the entry count is unknown until the stream is fully read)
+ * - `total` — total number of entries as `number`, or `null` for TAR-family
+ *   formats because the entry count is unknown until the stream is fully read
  * - `current` — 1-based index of the current entry as `number`
  * - `bytesWritten` — always `0`. The callback only fires from the entry-start
  *   event, which resets the running per-entry byte counter immediately before
@@ -1671,17 +1721,17 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * error properties (`code`, `relaxableBy`, `writes`, ...).
  *
  * If `progress` throws, the returned promise rejects instead of crashing the
- * process (see issue #465). Extraction has already run to completion (or
- * failure) by the time the rejection is observed — a throwing callback cannot
- * abort the extraction early, since the progress callback contract has no
- * cancellation signal. The rejection therefore reports both signals:
+ * process (see issue #465), and the extraction stops before the next entry
+ * (an atomic extraction is rolled back). The rejection reports both signals:
  *
- * - Extraction succeeded: `code` is `PROGRESS_CALLBACK_ERROR`, `writes` is
- *   `'kept'` and `filesExtracted`, `bytesWritten`, `filesSkipped` and
+ * - The callback's throw stopped the extraction, or the last entry's callback
+ *   threw after it succeeded: `code` is `PROGRESS_CALLBACK_ERROR`, `writes` is
+ *   `'kept'` (or `'rolled_back'` for an atomic extraction) and, when kept,
+ *   `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped` and
  *   `warnings` are set, so the caller can still see what was written to disk.
- * - Extraction also failed: the core error stays primary and keeps its `code`;
- *   the callback's throw is attached as `cause`. A throwing callback can never
- *   mask a security error such as `SYMLINK_ESCAPE`.
+ * - Extraction also failed on its own: the core error stays primary and keeps
+ *   its `code`; the callback's throw is attached as `cause`. A throwing
+ *   callback can never mask a security error such as `SYMLINK_ESCAPE`.
  *
  * In both cases the original JS exception is available as the `cause`
  * property of the rejection value. The throw's own text and stack are never

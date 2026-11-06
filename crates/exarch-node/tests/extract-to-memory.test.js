@@ -159,16 +159,53 @@ describe('extractArchiveToMemory', () => {
   it('accepts SinkOptions and exposes only the existing-files policy', async () => {
     const options = new SinkOptions();
     assert.strictEqual(options.existingFiles, 'skip');
-    assert.strictEqual(options.setExistingFiles('refuse'), options);
+    assert.strictEqual(options.withExistingFiles('refuse'), options);
     assert.strictEqual(options.existingFiles, 'refuse');
-    assert.strictEqual(options.setExistingFiles('overwrite'), options);
+    assert.strictEqual(options.withExistingFiles('overwrite'), options);
     assert.strictEqual(options.existingFiles, 'overwrite');
-    assert.throws(() => options.setExistingFiles('replace'), { code: 'InvalidArg' });
+    assert.throws(() => options.withExistingFiles('replace'), { code: 'InvalidArg' });
     assert.strictEqual(options.existingFiles, 'overwrite');
     assert.strictEqual('skipDuplicates' in options, false);
     assert.strictEqual('atomic' in options, false);
     const result = await extractArchiveToMemory(tarGz, null, options);
     assert.strictEqual(result.report.filesExtracted, 2);
+  });
+
+  it('exposes decode reuse on SinkOptions, off by default', async () => {
+    const options = new SinkOptions();
+    assert.strictEqual(options.decodeReuse, 'off');
+    assert.strictEqual(options.decodeReuseLimit, null);
+
+    assert.strictEqual(options.withDecodeReuse('memory'), options);
+    assert.strictEqual(options.decodeReuse, 'memory');
+    assert.strictEqual(options.decodeReuseLimit, 32 * 1024 * 1024);
+
+    options.withDecodeReuse('temp_file', 1024);
+    assert.strictEqual(options.decodeReuse, 'temp_file');
+    assert.strictEqual(options.decodeReuseLimit, 1024);
+
+    options.withDecodeReuse('memory', 2 ** 40);
+    assert.strictEqual(options.decodeReuseLimit, 256 * 1024 * 1024, 'the limit is clamped');
+
+    const result = await extractArchiveToMemory(tarGz, null, options);
+    assert.strictEqual(result.report.filesExtracted, 2);
+  });
+
+  it('refuses a bad decode reuse limit or mode and keeps the previous setting', () => {
+    const options = new SinkOptions().withDecodeReuse('memory', 4096);
+    for (const bad of [0, -1, 1.5, NaN]) {
+      assert.throws(() => options.withDecodeReuse('memory', bad), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'decode_reuse_limit',
+      });
+    }
+    assert.throws(() => options.withDecodeReuse('off', 1024), {
+      code: 'INVALID_CONFIGURATION',
+      setting: 'decode_reuse_limit',
+    });
+    assert.throws(() => options.withDecodeReuse('disk'), { code: 'InvalidArg' });
+    assert.strictEqual(options.decodeReuse, 'memory');
+    assert.strictEqual(options.decodeReuseLimit, 4096);
   });
 
   it('reports discarded writes when it fails after delivering entries', async () => {

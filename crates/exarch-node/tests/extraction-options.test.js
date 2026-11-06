@@ -138,6 +138,41 @@ describe('extractArchiveSync with ExtractionOptions', () => {
     assert.strictEqual(report.filesExtracted, 1);
   });
 
+  describe('existingFiles on a populated destination', () => {
+    function extractWith(policy) {
+      const options = new ExtractionOptions().withExistingFiles(policy);
+      return extractArchiveSync(archivePath, outputDir, null, options);
+    }
+
+    beforeEach(() => {
+      extractArchiveSync(archivePath, outputDir);
+    });
+
+    it("'skip' keeps the occupant and counts a skip", () => {
+      const report = extractWith('skip');
+      assert.strictEqual(report.filesExtracted, 0);
+      assert.strictEqual(report.filesSkipped, 1);
+    });
+
+    it("'overwrite' replaces the occupant", () => {
+      const report = extractWith('overwrite');
+      assert.strictEqual(report.filesExtracted, 1);
+    });
+
+    it("'refuse' fails with OUTPUT_EXISTS and leaves the occupant untouched", () => {
+      const occupant = path.join(outputDir, 'hello.txt');
+      fs.writeFileSync(occupant, 'mine');
+      assert.throws(
+        () => extractWith('refuse'),
+        (err) => {
+          assert.strictEqual(err.code, 'OUTPUT_EXISTS');
+          return true;
+        }
+      );
+      assert.strictEqual(fs.readFileSync(occupant, 'utf8'), 'mine');
+    });
+  });
+
   it('should extract without options (null) as before', () => {
     const report = extractArchiveSync(archivePath, outputDir, null, null);
     assert.strictEqual(report.filesExtracted, 1);

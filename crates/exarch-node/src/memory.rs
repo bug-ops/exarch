@@ -43,6 +43,7 @@ use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
 use crate::stream::IntoSource;
 use crate::utils::boundary_paths;
+use crate::utils::utf8_path;
 
 /// The path semantics extraction validates names against.
 // Values must equal `exarch_core::PathModel::as_str`.
@@ -157,19 +158,8 @@ pub type StoredEntry = Either3<MemoryFileEntry, MemoryDirectoryEntry, MemorySyml
 pub type MemoryEntry =
     Either4<MemoryFileEntry, MemoryDirectoryEntry, MemorySymlinkEntry, MemoryHardlinkEntry>;
 
-/// The text of `path`, or an error: a lossy conversion could merge two
-/// distinct entries into one name.
-fn utf8(path: &Path) -> CoreResult<String> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
-        exarch_core::ArchiveError::from(exarch_core::Malformation::EntryPathNotUtf8 {
-            path: path.to_path_buf(),
-        })
-        .into()
-    })
-}
-
 fn stored_entry(path: &Path, entry: CoreMemoryEntry) -> CoreResult<StoredEntry> {
-    let path = utf8(path)?;
+    let path = utf8_path(path)?;
     Ok(match entry {
         CoreMemoryEntry::File { data, mode } => Either3::A(MemoryFileEntry {
             path,
@@ -184,7 +174,7 @@ fn stored_entry(path: &Path, entry: CoreMemoryEntry) -> CoreResult<StoredEntry> 
         CoreMemoryEntry::Symlink { target } => Either3::C(MemorySymlinkEntry {
             path,
             kind: SymlinkKind::Symlink,
-            target: utf8(&target)?,
+            target: utf8_path(&target)?,
         }),
         _ => return Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
     })
@@ -199,9 +189,9 @@ pub fn callback_entry(path: &Path, entry: CallbackEntry) -> CoreResult<MemoryEnt
             Either3::C(symlink) => Either4::C(symlink),
         }),
         CallbackEntry::Hardlink { target } => Ok(Either4::D(MemoryHardlinkEntry {
-            path: utf8(path)?,
+            path: utf8_path(path)?,
             kind: HardlinkKind::Hardlink,
-            target: utf8(target.as_path())?,
+            target: utf8_path(target.as_path())?,
         })),
         _ => Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
     }
@@ -356,8 +346,11 @@ fn into_memory_extraction(
 /// );
 /// ```
 #[napi]
-// The JS signature is positional: `extractArchiveToMemory`'s arguments plus `progress`.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "napi passes JavaScript arguments by value, and the JS signature is positional: `extractArchiveToMemory`'s arguments plus `progress`"
+)]
 pub fn extract_archive_to_memory_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -635,8 +628,11 @@ pub fn extract_archive_to_memory_sync(
 /// );
 /// ```
 #[napi]
-// The JS signature is positional: `extractArchiveToMemorySync`'s arguments plus `progress`.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "napi passes JavaScript arguments by value, and the JS signature is positional: `extractArchiveToMemorySync`'s arguments plus `progress`"
+)]
 pub fn extract_archive_to_memory_with_progress_sync(
     env: Env,
     data: Uint8Array,

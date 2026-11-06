@@ -194,6 +194,7 @@ export interface ExarchIoDetail {
   subCode?: undefined
   relaxableBy?: undefined
   setting?: undefined
+  nonUtf8EntryPath?: undefined
 }
 
 /** A quota refusal; `subCode` names the quota that was exceeded. */
@@ -216,6 +217,23 @@ export interface ExarchZipBombDetail {
   nonUtf8EntryPath?: undefined
 }
 
+/**
+ * A creation source that could not be read. `errno` is the OS error number as
+ * Rust's `std::io` reports it, when the failure has one; `strerror` and `path`
+ * are redacted like the message (the file name only in release builds).
+ */
+export interface ExarchSourceNotAccessibleDetail {
+  code: 'SOURCE_NOT_ACCESSIBLE'
+  errno?: number
+  strerror: string
+  path: string
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+}
+
 /** Every other code carries no detail property. */
 export interface ExarchPlainCodeDetail {
   code: Exclude<
@@ -226,6 +244,7 @@ export interface ExarchPlainCodeDetail {
     | 'IO_ERROR'
     | 'QUOTA_EXCEEDED'
     | 'ZIP_BOMB'
+    | 'SOURCE_NOT_ACCESSIBLE'
   >
   subCode?: undefined
   relaxableBy?: undefined
@@ -242,6 +261,7 @@ export type ExarchErrorCodeDetail =
   | ExarchIoDetail
   | ExarchQuotaDetail
   | ExarchZipBombDetail
+  | ExarchSourceNotAccessibleDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */

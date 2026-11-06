@@ -92,8 +92,6 @@ pub enum ExcludePattern {
 }
 
 impl ExcludePattern {
-    const SETTING: ConfigSetting = ConfigSetting::ExcludePattern;
-
     pub(crate) fn exact(name: &str) -> Self {
         Self::Exact { name: name.into() }
     }
@@ -125,10 +123,10 @@ fn any_component(path: &Path, matches: impl Fn(&[u8]) -> bool) -> bool {
         .any(|component| matches(component.as_os_str().as_encoded_bytes()))
 }
 
-fn refuse(text: &str, reason: ExcludeRefusal) -> ArchiveError {
+fn refuse(setting: ConfigSetting, text: &str, reason: ExcludeRefusal) -> ArchiveError {
     let end = text.floor_char_boundary(MAX_CONFIG_ENTRY_LENGTH);
     ArchiveError::InvalidConfiguration {
-        setting: ExcludePattern::SETTING,
+        setting,
         problem: ConfigProblem::ExcludePatternRefused {
             pattern: text.get(..end).unwrap_or(text).to_owned(),
             reason,
@@ -140,13 +138,17 @@ fn is_separator(c: char) -> bool {
     matches!(c, '/' | '\\')
 }
 
-impl TryFrom<&str> for ExcludePattern {
-    type Error = ArchiveError;
-
+impl ExcludePattern {
+    /// Parses `text`, naming `setting` in the refusal.
+    ///
+    /// One grammar serves every use of a pattern: pass
+    /// [`ConfigSetting::ExcludePattern`] for creation,
+    /// [`ConfigSetting::EntryInclude`] or [`ConfigSetting::EntryExclude`] for
+    /// extraction. [`TryFrom<&str>`] is the creation form.
     ///
     /// # Errors
     ///
-    /// Returns [`ArchiveError::InvalidConfiguration`] with
+    /// Returns [`ArchiveError::InvalidConfiguration`] naming `setting`, with
     /// [`ConfigProblem::ExcludePatternRefused`], which names the pattern and an
     /// [`ExcludeRefusal`], for: an empty pattern, one over
     /// [`MAX_CONFIG_ENTRY_LENGTH`] bytes or with a null byte, leading or
@@ -154,41 +156,67 @@ impl TryFrom<&str> for ExcludePattern {
     /// (they are not glob syntax here, so they would match literally and
     /// silently exclude nothing), `.` or `..` as a component, an absolute
     /// path, or a `*` shape other than `name*` and `*name`.
-    fn try_from(text: &str) -> Result<Self> {
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ConfigSetting;
+    /// use exarch_core::ExcludePattern;
+    ///
+    /// let pattern = ExcludePattern::parse_for(ConfigSetting::EntryInclude, "docs/api")?;
+    /// assert_eq!(pattern.to_string(), "docs/api");
+    /// assert!(ExcludePattern::parse_for(ConfigSetting::EntryInclude, "**/x").is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn parse_for(setting: ConfigSetting, text: &str) -> Result<Self> {
         let is_blank = |c: char| c.is_ascii_whitespace() || c.is_ascii_control();
+        let refuse = |reason| refuse(setting, text, reason);
         if text.len() > MAX_CONFIG_ENTRY_LENGTH {
-            return Err(refuse(text, ExcludeRefusal::TooLong));
+            return Err(refuse(ExcludeRefusal::TooLong));
         }
         if text.contains('\0') {
-            return Err(refuse(text, ExcludeRefusal::ContainsNul));
+            return Err(refuse(ExcludeRefusal::ContainsNul));
         }
         if text.is_empty() {
-            return Err(refuse(text, ExcludeRefusal::Empty));
+            return Err(refuse(ExcludeRefusal::Empty));
         }
         if text.starts_with(is_blank) || text.ends_with(is_blank) {
-            return Err(refuse(text, ExcludeRefusal::PaddedWithBlank));
+            return Err(refuse(ExcludeRefusal::PaddedWithBlank));
         }
         if text.contains(',') {
-            return Err(refuse(text, ExcludeRefusal::ContainsComma));
+            return Err(refuse(ExcludeRefusal::ContainsComma));
         }
         if text.contains(['?', '[', ']', '{', '}', '!']) {
-            return Err(refuse(text, ExcludeRefusal::GlobMetacharacter));
+            return Err(refuse(ExcludeRefusal::GlobMetacharacter));
         }
         let has_separator = text.contains(is_separator);
         let wildcards = text.matches('*').count();
         if has_separator && wildcards > 0 {
-            return Err(refuse(text, ExcludeRefusal::WildcardWithSeparator));
+            return Err(refuse(ExcludeRefusal::WildcardWithSeparator));
         }
         if has_separator {
-            return parse_path(text);
+            return parse_path(setting, text);
         }
-        parse_component(text, wildcards)
+        parse_component(setting, text, wildcards)
     }
 }
 
-fn parse_component(text: &str, wildcards: usize) -> Result<ExcludePattern> {
+impl TryFrom<&str> for ExcludePattern {
+    type Error = ArchiveError;
+
+    /// Parses a creation exclude pattern; see [`ExcludePattern::parse_for`].
+    ///
+    /// # Errors
+    ///
+    /// Refusals name [`ConfigSetting::ExcludePattern`].
+    fn try_from(text: &str) -> Result<Self> {
+        Self::parse_for(ConfigSetting::ExcludePattern, text)
+    }
+}
+
+fn parse_component(setting: ConfigSetting, text: &str, wildcards: usize) -> Result<ExcludePattern> {
     if text == "." || text == ".." {
-        return Err(refuse(text, ExcludeRefusal::DotEntry));
+        return Err(refuse(setting, text, ExcludeRefusal::DotEntry));
     }
     match (wildcards, text.strip_prefix('*'), text.strip_suffix('*')) {
         (0, ..) => Ok(ExcludePattern::exact(text)),
@@ -196,13 +224,13 @@ fn parse_component(text: &str, wildcards: usize) -> Result<ExcludePattern> {
         (1, _, Some(prefix)) if !prefix.is_empty() => Ok(ExcludePattern::Prefix {
             prefix: prefix.into(),
         }),
-        _ => Err(refuse(text, ExcludeRefusal::UnsupportedWildcard)),
+        _ => Err(refuse(setting, text, ExcludeRefusal::UnsupportedWildcard)),
     }
 }
 
-fn parse_path(text: &str) -> Result<ExcludePattern> {
+fn parse_path(setting: ConfigSetting, text: &str) -> Result<ExcludePattern> {
     if text.starts_with(is_separator) || Path::new(text).has_root() {
-        return Err(refuse(text, ExcludeRefusal::Absolute));
+        return Err(refuse(setting, text, ExcludeRefusal::Absolute));
     }
     let mut relative = PathBuf::new();
     for segment in text
@@ -210,7 +238,7 @@ fn parse_path(text: &str) -> Result<ExcludePattern> {
         .filter(|s| !s.is_empty() && *s != ".")
     {
         if segment == ".." {
-            return Err(refuse(text, ExcludeRefusal::DotEntry));
+            return Err(refuse(setting, text, ExcludeRefusal::DotEntry));
         }
         relative.push(segment);
     }
@@ -218,10 +246,10 @@ fn parse_path(text: &str) -> Result<ExcludePattern> {
         .components()
         .all(|component| matches!(component, Component::Normal(_)))
     {
-        return Err(refuse(text, ExcludeRefusal::Absolute));
+        return Err(refuse(setting, text, ExcludeRefusal::Absolute));
     }
     if relative.is_empty() {
-        return Err(refuse(text, ExcludeRefusal::Empty));
+        return Err(refuse(setting, text, ExcludeRefusal::Empty));
     }
     Ok(ExcludePattern::Path { relative })
 }

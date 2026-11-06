@@ -535,8 +535,7 @@ fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
     chars
         .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+        .map_or_default(|first| first.to_uppercase().chain(chars).collect())
 }
 
 /// The message for a replace of the destination that failed part-way; the
@@ -1370,7 +1369,7 @@ mod tests {
                 || panic!("{kind} took the wildcard arm"),
                 |m| {
                     let context = m.into_context();
-                    let hint = context.hint().map(|h| raw(&h)).unwrap_or_default();
+                    let hint = context.hint().map_or_default(|h| raw(&h));
                     format!("{}\nHINT: {hint}", raw(&context.parts()))
                 },
             );
@@ -1750,8 +1749,7 @@ mod tests {
                 let converted = convert_error(op, err, Path::new("a.tar"));
                 let msg = converted
                     .downcast_ref::<CliContext>()
-                    .map(|c| raw(&c.parts()))
-                    .unwrap_or_default();
+                    .map_or_default(|c| raw(&c.parts()));
                 for &flag in Flag::ALL {
                     assert!(
                         op.accepts(flag) || !msg.contains(flag.long()),

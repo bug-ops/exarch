@@ -965,6 +965,11 @@ impl SecurityConfig {
 
     /// Sets the maximum path depth allowed.
     ///
+    /// A [`StripComponents`](crate::StripComponents) already in
+    /// [`selection`](Self::selection) was checked against the depth in force
+    /// when it was built and is not re-checked here, so set the depth before
+    /// building the strip count.
+    ///
     /// # Examples
     ///
     /// ```

@@ -79,7 +79,7 @@ pub(super) fn check(
             DestinationCheck::Vacant => true,
             DestinationCheck::Replaceable => directory,
         };
-        if rel.as_os_str().is_empty() || !checked {
+        if rel.is_empty() || !checked {
             continue;
         }
         match inspect(walker, &root, &landing, directory) {
@@ -89,14 +89,12 @@ pub(super) fn check(
             Err(error) => return Err(error),
         }
     }
-    if conflicts.is_empty() {
-        Ok(())
-    } else {
-        Err(ArchiveError::DestinationOccupied {
+    conflicts
+        .is_empty()
+        .ok_or_else(|| ArchiveError::DestinationOccupied {
             destination: dest.to_path_buf(),
             conflicts: conflicts.into_boxed_slice(),
         })
-    }
 }
 
 /// Whether an I/O failure only says that the path is absent or sits below a

@@ -45,16 +45,27 @@ pub type EntryPattern = ExcludePattern;
 /// the destination's maximum path depth, so a value that could not leave
 /// anything of a valid path is refused when it is built.
 ///
+/// The bound is checked only in [`StripComponents::new`], against the depth
+/// passed then. Lowering [`SecurityConfig::max_path_depth`](crate::SecurityConfig::max_path_depth) afterwards does not
+/// re-check an existing value (a count above the new depth strips every entry
+/// away), so build the count after the depth is final.
+///
 /// # Examples
 ///
 /// ```
+/// use exarch_core::SecurityConfig;
 /// use exarch_core::StripComponents;
 /// use exarch_core::non_zero;
 ///
 /// let max_depth = non_zero!(32);
-/// let strip = StripComponents::new(exarch_core::non_zero!(1), max_depth)?;
+/// let strip = StripComponents::new(non_zero!(1), max_depth)?;
 /// assert_eq!(strip.get().get(), 1);
-/// assert!(StripComponents::new(exarch_core::non_zero!(33), max_depth).is_err());
+/// assert!(StripComponents::new(non_zero!(33), max_depth).is_err());
+///
+/// // Lowering the depth later leaves the count as it was built.
+/// let config = SecurityConfig::default().with_max_path_depth(non_zero!(2));
+/// assert_eq!(strip.get().get(), 1);
+/// assert!(StripComponents::new(non_zero!(3), config.max_path_depth).is_err());
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -255,7 +266,7 @@ impl EntrySelection {
                 Decision::rewritten(kept)
             }
             (PathRewrite::Flatten, EntryShape::File) => {
-                Decision::rewritten(original.file_name().map(PathBuf::from).unwrap_or_default())
+                Decision::rewritten(original.file_name().map_or_default(PathBuf::from))
             }
             (PathRewrite::Flatten, EntryShape::Directory) => Decision::Skip(SkipKind::StrippedAway),
             (PathRewrite::Flatten, EntryShape::Link(kind)) => {
@@ -343,10 +354,13 @@ impl EntrySelection {
                         path: target.to_path_buf(),
                     });
                 }
+                // TODO(#997): strip a root or drive prefix like an entry name,
+                // or refuse here, instead of leaving it to the tracker's
+                // HardlinkEscape.
                 Component::RootDir | Component::Prefix(_) => return Ok(TargetMapping::Unchanged),
             }
         }
-        if normalized.as_os_str().is_empty() {
+        if normalized.is_empty() {
             return Ok(TargetMapping::Unchanged);
         }
         Ok(match self.decide(&normalized, EntryShape::File, None)? {
@@ -411,7 +425,7 @@ pub enum Decision {
 impl Decision {
     /// An entry that lands at `kept`, or is stripped away when nothing is left.
     fn rewritten(kept: PathBuf) -> Self {
-        if kept.as_os_str().is_empty() {
+        if kept.is_empty() {
             Self::Skip(SkipKind::StrippedAway)
         } else {
             Self::Extract(Placement::Rewritten(Rewritten(kept)))
@@ -483,13 +497,9 @@ impl IncludeHits {
             .filter(|(_, hit)| !hit.get())
             .map(|(pattern, _)| pattern.clone())
             .collect();
-        if unmatched.is_empty() {
-            Ok(())
-        } else {
-            Err(ArchiveError::UnmatchedInclude {
-                patterns: unmatched,
-            })
-        }
+        unmatched.is_empty().ok_or(ArchiveError::UnmatchedInclude {
+            patterns: unmatched,
+        })
     }
 }
 

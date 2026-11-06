@@ -429,7 +429,7 @@ impl<'a> ValidatorCore<'a> {
         };
         let routed = route_validated(run, original, shape, root, self.config, ctx, view)?;
         Ok(routed.map(|landing| {
-            if landing.as_path().as_os_str().is_empty() {
+            if landing.as_path().is_empty() {
                 EntryPath::Root(landing)
             } else {
                 EntryPath::Child(landing)

@@ -84,7 +84,7 @@ fn protected(path: ProtectedPath) -> ArchiveError {
 fn locate(output_dir: &Path) -> Result<Option<(PathBuf, EntryName)>> {
     if let Some(name) = EntryName::of(output_dir) {
         let parent = match output_dir.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            Some(parent) if !parent.is_empty() => parent.to_path_buf(),
             _ => PathBuf::from("."),
         };
         return Ok(Some((parent, name)));
@@ -229,7 +229,7 @@ pub(super) fn is_within(
 ) -> bool {
     inner
         .ancestors()
-        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .filter(|ancestor| !ancestor.is_empty())
         .any(|ancestor| {
             identify(ancestor).map_or(true, |id| match id.check(dest_id) {
                 IdentityCheck::Same => true,

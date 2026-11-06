@@ -448,6 +448,12 @@ export type CreationWarning =
   | ZipRatioCheckFailedWarning
   | DirectoryNotSyncedWarning
 
+/**
+ * What extraction does with a listed entry, discriminated by `kind`: an
+ * `'extract'` disposition has a `landing`, a `'skip'` one a `reason`.
+ */
+export type EntryDisposition = ExtractDisposition | SkipDisposition
+
 /** What a `MemoryEntry` holds. */
 export type MemoryEntryKind = MemoryEntry['kind']
 

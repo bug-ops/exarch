@@ -15,6 +15,7 @@ const {
   extractArchiveToMemory,
   extractArchiveToCallbackSync,
   listArchiveSync,
+  listArchiveBytes,
   verifyArchiveSync,
   verifyArchiveBytesSync,
 } = require('../index.js');
@@ -302,6 +303,51 @@ describe('entry selection', () => {
       const plain = listArchiveSync(archive);
       const selected = listArchiveSync(archive, new SecurityConfig().addIncludePattern('missing'));
       assert.strictEqual(selected.totalEntries, plain.totalEntries);
+    });
+
+    it('reports what extraction does with every entry as typed dispositions', () => {
+      const config = new SecurityConfig().addIncludePattern('top/sub').setStripComponents(1);
+      const manifest = listArchiveSync(archive, config);
+      const byPath = Object.fromEntries(manifest.dispositions.map((d) => [d.path, d]));
+      assert.deepStrictEqual(byPath['top/sub/b.rs'], {
+        kind: 'extract',
+        path: 'top/sub/b.rs',
+        landing: 'sub/b.rs',
+      });
+      assert.deepStrictEqual(byPath['top/a.txt'], {
+        kind: 'skip',
+        path: 'top/a.txt',
+        reason: 'not_selected',
+      });
+      assert.strictEqual(byPath['top/'].kind, 'skip');
+    });
+
+    it('reports every entry as extracted at its own path without a selection', () => {
+      const manifest = listArchiveSync(archive);
+      assert.strictEqual(manifest.dispositions.length, manifest.totalEntries);
+      for (const disposition of manifest.dispositions) {
+        assert.strictEqual(disposition.kind, 'extract');
+        assert.strictEqual(disposition.landing, disposition.path.replace(/\/$/, ''));
+      }
+    });
+
+    it('agrees with what extraction writes', () => {
+      const config = new SecurityConfig().addExcludePattern('*.tmp').setFlatten(true);
+      const manifest = listArchiveSync(archive, config);
+      const landings = manifest.dispositions
+        .filter((d) => d.kind === 'extract')
+        .map((d) => d.landing)
+        .sort();
+      extractArchiveSync(archive, out, config);
+      assert.deepStrictEqual(landings, extractedFiles());
+    });
+
+    it('also lists dispositions for in-memory archives', async () => {
+      const config = new SecurityConfig().setFlatten(true);
+      const manifest = await listArchiveBytes(TREE, config);
+      const skipped = manifest.dispositions.filter((d) => d.kind === 'skip');
+      assert.ok(skipped.every((d) => d.reason === 'stripped_away'));
+      assert.strictEqual(manifest.dispositions.length - skipped.length, 4);
     });
 
     it('verifies a selection that extract would accept', () => {

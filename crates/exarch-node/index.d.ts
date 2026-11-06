@@ -448,6 +448,12 @@ export type CreationWarning =
   | ZipRatioCheckFailedWarning
   | DirectoryNotSyncedWarning
 
+/**
+ * What extraction does with a listed entry, discriminated by `kind`: an
+ * `'extract'` disposition has a `landing`, a `'skip'` one a `reason`.
+ */
+export type EntryDisposition = ExtractDisposition | SkipDisposition
+
 /** What a `MemoryEntry` holds. */
 export type MemoryEntryKind = MemoryEntry['kind']
 
@@ -1182,6 +1188,13 @@ export interface ArchiveManifest {
   totalSize: number
   /** Archive format. */
   format: ArchiveType
+  /**
+   * What extraction would do with each entry validation accepts: where it
+   * lands, or why it is left out. The selection is the one the listing's
+   * `SecurityConfig` carried and that config supplies the limits and
+   * policies; an entry validation refuses is not reported.
+   */
+  dispositions: Array<EntryDisposition>
 }
 
 /** Archive format. */
@@ -1519,6 +1532,9 @@ export interface DirectoryNotSyncedWarning {
   /** The kind of the sync failure. */
   ioKind: IoKind
 }
+
+/** Which way extraction goes with a listed entry. */
+export type DispositionKind = 'extract' | 'skip'
 
 /**
  * Whether a created archive is flushed to stable storage before success is
@@ -2019,6 +2035,19 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  */
 export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): Promise<ExtractionReport>
 
+/** An entry that extraction writes. */
+export interface ExtractDisposition {
+  /** Always `'extract'`. */
+  kind: 'extract'
+  /** The entry's path in the archive. */
+  path: string
+  /**
+   * Where it lands, relative to the destination, after any strip or
+   * flatten.
+   */
+  landing: string
+}
+
 /**
  * Report of an archive extraction operation.
  *
@@ -2495,6 +2524,16 @@ export interface SkipCount {
   kind: SkipKind
   /** How many entries, saturated at `2^32 - 1`. */
   count: number
+}
+
+/** An entry that is validated but not extracted. */
+export interface SkipDisposition {
+  /** Always `'skip'`. */
+  kind: 'skip'
+  /** The entry's path in the archive. */
+  path: string
+  /** Why it is left out, for example `'not_selected'` or `'stripped_away'`. */
+  reason: SkipKind
 }
 
 /** Why an entry was left out of an extraction or a creation. */

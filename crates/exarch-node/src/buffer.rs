@@ -32,7 +32,10 @@ fn list_core(
     format: Option<ArchiveType>,
 ) -> CoreResult<ArchiveManifest> {
     data.run(format, |reader| {
-        ArchiveManifest::try_from(exarch_core::ListRequest::new(config).list_reader(reader)?)
+        ArchiveManifest::from_core(
+            exarch_core::ListRequest::new(config).list_reader(reader)?,
+            config,
+        )
     })
 }
 
@@ -65,10 +68,11 @@ fn list_with_progress_core(
         data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
-                ArchiveManifest::try_from(
+                ArchiveManifest::from_core(
                     exarch_core::ListRequest::new(config)
                         .with_progress(progress)
                         .list_reader(reader)?,
+                    config,
                 )
             })
         },

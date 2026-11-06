@@ -944,15 +944,32 @@ pub struct ArchiveManifest {
     pub total_size: i64,
     /// Archive format.
     pub format: ArchiveType,
+    /// What extraction would do with each entry validation accepts: where it
+    /// lands, or why it is left out. The selection is the one the listing's
+    /// `SecurityConfig` carried and that config supplies the limits and
+    /// policies; an entry validation refuses is not reported.
+    #[napi(ts_type = "Array<EntryDisposition>")]
+    pub dispositions: Vec<EntryDisposition>,
 }
 
-impl TryFrom<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
-    type Error = Failure;
-
-    fn try_from(manifest: exarch_core::inspection::ArchiveManifest) -> CoreResult<Self> {
+impl ArchiveManifest {
+    /// Converts a core manifest listed under `config`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a conversion that cannot represent an entry, a
+    /// path that is not valid UTF-8 or a value newer than this binding.
+    pub fn from_core(
+        manifest: exarch_core::inspection::ArchiveManifest,
+        config: &exarch_core::SecurityConfig,
+    ) -> CoreResult<Self> {
         let total_entries = saturating_u32(manifest.total_entries());
         let total_size = saturating_i64(manifest.total_size());
         let format = ArchiveType::try_from(manifest.format()).map_err(Failure::Native)?;
+        let dispositions = manifest
+            .dispositions(config)
+            .map(|(entry, disposition)| entry_disposition(&entry.path, disposition))
+            .collect::<CoreResult<_>>()?;
         Ok(Self {
             entries: manifest
                 .into_entries()
@@ -962,7 +979,74 @@ impl TryFrom<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
             total_entries,
             total_size,
             format,
+            dispositions,
         })
+    }
+}
+
+/// Which way extraction goes with a listed entry.
+// Values must equal the `kind` of the matching disposition interface.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispositionKind {
+    /// The entry is written.
+    #[napi(value = "extract")]
+    Extract,
+    /// The entry is validated but not written.
+    #[napi(value = "skip")]
+    Skip,
+}
+
+/// An entry that extraction writes.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ExtractDisposition {
+    /// Always `'extract'`.
+    #[napi(ts_type = "'extract'")]
+    pub kind: DispositionKind,
+    /// The entry's path in the archive.
+    pub path: String,
+    /// Where it lands, relative to the destination, after any strip or
+    /// flatten.
+    pub landing: String,
+}
+
+/// An entry that is validated but not extracted.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct SkipDisposition {
+    /// Always `'skip'`.
+    #[napi(ts_type = "'skip'")]
+    pub kind: DispositionKind,
+    /// The entry's path in the archive.
+    pub path: String,
+    /// Why it is left out, for example `'not_selected'` or `'stripped_away'`.
+    #[napi(ts_type = "SkipKind")]
+    pub reason: String,
+}
+
+type EntryDisposition = Either<ExtractDisposition, SkipDisposition>;
+
+fn entry_disposition(
+    path: &std::path::Path,
+    disposition: exarch_core::Disposition,
+) -> CoreResult<EntryDisposition> {
+    let path = utf8_path(path)?;
+    match disposition {
+        exarch_core::Disposition::Extract(landing) => Ok(Either::A(ExtractDisposition {
+            kind: DispositionKind::Extract,
+            path,
+            landing: utf8_path(landing.as_path())?,
+        })),
+        exarch_core::Disposition::Skip(kind) => Ok(Either::B(SkipDisposition {
+            kind: DispositionKind::Skip,
+            path,
+            reason: kind.as_str().to_owned(),
+        })),
+        _ => Err(Failure::Native(unknown_variant(
+            "entry disposition",
+            "unknown",
+        ))),
     }
 }
 
@@ -1787,6 +1871,54 @@ mod tests {
 
     // ArchiveManifest tests
     #[test]
+    fn test_manifest_dispositions_follow_the_selection_and_the_config_limits() {
+        use exarch_core::EntrySelection;
+
+        let selection = EntrySelection::default()
+            .with_include(
+                exarch_core::EntryPattern::parse_for(
+                    exarch_core::ConfigSetting::EntryInclude,
+                    "keep",
+                )
+                .unwrap(),
+            )
+            .with_rewrite(exarch_core::PathRewrite::Flatten);
+        let mut core_manifest = exarch_core::inspection::ArchiveManifest::with_selection(
+            CoreArchiveType::TarGz,
+            selection,
+        );
+        core_manifest
+            .add_entry(sized_entry("keep/a/b.txt", 1))
+            .unwrap();
+        core_manifest
+            .add_entry(sized_entry("other.txt", 1))
+            .unwrap();
+
+        let manifest =
+            ArchiveManifest::from_core(core_manifest, &exarch_core::SecurityConfig::default())
+                .unwrap();
+
+        assert_eq!(manifest.total_entries, 2);
+        assert_eq!(manifest.dispositions.len(), 2);
+        let Either::A(extract) = &manifest.dispositions[0] else {
+            panic!("the selected file extracts");
+        };
+        assert_eq!(extract.kind, DispositionKind::Extract);
+        assert_eq!(
+            (extract.path.as_str(), extract.landing.as_str()),
+            ("keep/a/b.txt", "b.txt")
+        );
+        let Either::B(skip) = &manifest.dispositions[1] else {
+            panic!("the other file is left out");
+        };
+        assert_eq!(skip.kind, DispositionKind::Skip);
+        assert_eq!(
+            (skip.path.as_str(), skip.reason.as_str()),
+            ("other.txt", "not_selected")
+        );
+    }
+
+    #[test]
     fn test_archive_manifest_conversion() {
         let mut core_manifest =
             exarch_core::inspection::ArchiveManifest::new(CoreArchiveType::TarGz);
@@ -1796,7 +1928,9 @@ mod tests {
                 .unwrap();
         }
 
-        let manifest = ArchiveManifest::try_from(core_manifest).unwrap();
+        let manifest =
+            ArchiveManifest::from_core(core_manifest, &exarch_core::SecurityConfig::default())
+                .unwrap();
 
         assert_eq!(manifest.total_entries, 10);
         assert_eq!(manifest.total_size, 5000);
@@ -2035,7 +2169,9 @@ mod tests {
             .add_entry(sized_entry("big", u64::MAX))
             .unwrap();
 
-        let manifest = ArchiveManifest::try_from(core_manifest).unwrap();
+        let manifest =
+            ArchiveManifest::from_core(core_manifest, &exarch_core::SecurityConfig::default())
+                .unwrap();
 
         assert_eq!(
             manifest.total_size,

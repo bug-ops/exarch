@@ -770,7 +770,10 @@ fn list_core(
     config: &exarch_core::SecurityConfig,
 ) -> CoreResult<ArchiveManifest> {
     let archive_path = boundary_path(archive_path)?;
-    ArchiveManifest::try_from(exarch_core::ListRequest::new(config).list(&archive_path)?)
+    ArchiveManifest::from_core(
+        exarch_core::ListRequest::new(config).list(&archive_path)?,
+        config,
+    )
 }
 
 /// List archive contents without extracting (sync).

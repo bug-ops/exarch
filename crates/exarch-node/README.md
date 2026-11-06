@@ -514,8 +514,11 @@ everything.
   (`subCode` `'LINK_TARGET'` and `'LINK_POLICY'`).
 - `'atomic_replace'` staging with a non-default selection is refused
   (`INVALID_CONFIGURATION`, `setting` `'entry_selection'`).
-- `listArchive*` still lists every entry; `verifyArchive*` reports the refusals
-  extraction would raise for the same selection as issues.
+- `listArchive*` still lists every entry and adds `dispositions`: one object per
+  entry validation accepts, `{ kind: 'extract', path, landing }` or
+  `{ kind: 'skip', path, reason }`, computed with the listing's `SecurityConfig`
+  (an entry validation refuses is not reported). `verifyArchive*` reports the
+  refusals extraction would raise for the same selection as issues.
 
 ## Security Features
 

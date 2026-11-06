@@ -83,7 +83,8 @@ pub fn requested() -> bool {
 pub enum Run {
     /// `create`: stages the archive in a temporary file next to the output.
     Create,
-    /// `extract` without `--atomic`: writes straight into the destination.
+    /// `extract` without `--atomic`: writes into the destination, or, for a
+    /// TAR into a fresh destination, stages like `--atomic`.
     ExtractInPlace,
     /// `extract --atomic`: stages in a directory next to the destination.
     ExtractAtomic,
@@ -110,7 +111,9 @@ fn forced_exit_hint(output: &Path, run: Run) -> String {
              may remain in {place}: remove it"
         ),
         Run::ExtractInPlace => format!(
-            "interrupted again, stopping at once; entries already extracted into {output} remain"
+            "interrupted again, stopping at once; entries already extracted into {output} \
+             remain, or, for a destination that did not exist, an unfinished staging directory \
+             named .exarch-* may remain in {place}: remove it"
         ),
         Run::ExtractAtomic => format!(
             "interrupted again, stopping at once; an unfinished staging directory named \
@@ -245,7 +248,11 @@ mod tests {
             "{atomic}"
         );
         let in_place = forced_exit_hint(Path::new("work/out"), Run::ExtractInPlace);
-        assert!(!in_place.contains(".exarch-"), "{in_place}");
         assert!(in_place.contains("work/out"), "{in_place}");
+        assert!(
+            in_place.contains("staging directory named .exarch-*"),
+            "{in_place}"
+        );
+        assert!(!in_place.contains("backup"), "{in_place}");
     }
 }

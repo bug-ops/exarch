@@ -182,6 +182,15 @@ impl WriteMode {
         }
     }
 
+    /// What an interrupted run leaves behind, for the forced-exit hint.
+    const fn run(self) -> interrupt::Run {
+        match self {
+            Self::Safe | Self::Force => interrupt::Run::ExtractInPlace,
+            Self::Atomic => interrupt::Run::ExtractAtomic,
+            Self::AtomicReplace => interrupt::Run::ExtractReplace,
+        }
+    }
+
     const fn stages(self) -> bool {
         matches!(self, Self::Atomic | Self::AtomicReplace)
     }
@@ -309,12 +318,7 @@ pub fn execute(
         None => env::current_dir().context("failed to get current directory")?,
     };
 
-    let run = match (args.atomic, args.force) {
-        (false, _) => interrupt::Run::ExtractInPlace,
-        (true, false) => interrupt::Run::ExtractAtomic,
-        (true, true) => interrupt::Run::ExtractReplace,
-    };
-    interrupt::install(&output_dir, run);
+    interrupt::install(&output_dir, WriteMode::of(args).run());
 
     let allowed_extensions = parse_extensions(&args.allowed_extensions)?;
 
@@ -506,6 +510,13 @@ mod tests {
             CoreStaging::AtomicReplace
         );
         assert!(WriteMode::Atomic.destination_check().is_none());
+        assert_eq!(WriteMode::Safe.run(), interrupt::Run::ExtractInPlace);
+        assert_eq!(WriteMode::Force.run(), interrupt::Run::ExtractInPlace);
+        assert_eq!(WriteMode::Atomic.run(), interrupt::Run::ExtractAtomic);
+        assert_eq!(
+            WriteMode::AtomicReplace.run(),
+            interrupt::Run::ExtractReplace
+        );
     }
 
     fn extract_args() -> ExtractArgs {

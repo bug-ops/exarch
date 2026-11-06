@@ -11,6 +11,8 @@ use super::formatter::JsonSkips;
 use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use crate::error::PartialExtractionContext;
+use crate::error::chain_hints;
+use crate::error::raw;
 use crate::operation::Operation;
 use anyhow::Result;
 use exarch_core::ArchiveError;
@@ -256,16 +258,15 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .as_ref()
             .map_or(JsonKind::Generic, |kind| JsonKind::Code(kind.code()));
 
-        // The message is the exact text: archive-derived parts are escaped
-        // only when a terminal formatter renders them.
-        let mut json_error = JsonError::new(kind, format!("{error:#}"));
+        // The message and hints are the exact text: archive-derived parts are
+        // escaped only when a terminal formatter renders them.
+        let hints = chain_hints(error, raw);
+        let mut json_error = JsonError::new(kind, format!("{error:#}"))
+            .with_hint((!hints.is_empty()).then(|| hints.join("\n")));
 
-        // PartialExtraction is converted by convert_error into a
-        // PartialExtractionContext attached via `.context()`, so the partial
-        // report must be recovered with a direct top-level downcast: anyhow
-        // sees through `.context()` layers for the context type itself, but
-        // `.chain()` yields the wrapper's Display/Debug impl, never the
-        // context value, so `.chain().find_map(downcast_ref)` never matches.
+        // `convert_error` makes the `PartialExtractionContext` the outermost
+        // error, so the partial report is recovered with a top-level
+        // downcast.
         if let Some(ctx) = error.downcast_ref::<PartialExtractionContext>() {
             json_error = json_error.with_partial(JsonPartialReport {
                 counts: JsonExtractionCounts::from(&ctx.report),

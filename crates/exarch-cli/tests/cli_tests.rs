@@ -6325,8 +6325,8 @@ fn test_extract_relaxable_by_and_hint_per_setting() {
         let json = extract_json(&archive, &out);
         assert_eq!(json["error"]["kind"], "SecurityViolation", "{setting}");
         assert_eq!(json["error"]["relaxable_by"], setting);
-        let message = json["error"]["message"].as_str().expect("message");
-        assert!(message.contains(flag), "{setting}: {message}");
+        let hint = json["error"]["hint"].as_str().expect("hint");
+        assert!(hint.contains(flag), "{setting}: {hint}");
 
         exarch_cmd()
             .arg("extract")
@@ -6352,8 +6352,8 @@ fn test_extract_non_relaxable_refusals_have_no_relaxable_by() {
         let json = extract_json(&archive, &temp.path().join("out"));
         assert_eq!(json["error"]["kind"], "SecurityViolation", "{archive:?}");
         assert!(json["error"].get("relaxable_by").is_none(), "{json}");
-        let message = json["error"]["message"].as_str().expect("message");
-        assert!(message.contains("cannot be relaxed"), "{message}");
+        let hint = json["error"]["hint"].as_str().expect("hint");
+        assert!(hint.contains("cannot be relaxed"), "{hint}");
     }
 }
 
@@ -7356,4 +7356,38 @@ fn test_list_exit_status_on_closed_stdout_is_the_same_in_both_modes() {
 
         assert_eq!(status.code(), Some(0), "json: {json}");
     }
+}
+
+/// The hint closes the human message on its own line and travels in its own
+/// `--json` field, never in the middle of the chain (#985).
+#[test]
+fn test_error_hint_is_last_in_text_and_separate_in_json() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let sym = temp.path().join("sym.tar");
+    write_tar_with_link(&sym, "link", &Link::Sym("target.txt"));
+
+    let stderr = exarch_cmd()
+        .arg("extract")
+        .arg(&sym)
+        .arg(temp.path().join("out-text"))
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).expect("utf-8");
+    let (before, hint) = stderr.split_once("\nHINT: ").expect("hint line");
+    assert!(before.contains("operation denied"), "{stderr}");
+    assert!(hint.contains("--allow-symlinks"), "{stderr}");
+    assert!(!hint.contains("operation denied"), "{stderr}");
+
+    let json = extract_json(&sym, &temp.path().join("out-json"));
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(!message.contains("HINT"), "{message}");
+    assert!(
+        json["error"]["hint"]
+            .as_str()
+            .expect("hint")
+            .contains("--allow-symlinks")
+    );
 }

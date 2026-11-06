@@ -1,15 +1,16 @@
 //! Human-readable output formatter with colors and styling.
 
 use super::Verbosity;
+use super::emit_blank;
+use super::emit_line;
 use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use super::formatter::SizeUnits;
-use super::emit_blank;
-use super::emit_line;
 use super::humanize_bytes;
 use super::terminal::TerminalEntry;
 use super::terminal::TerminalPath;
 use super::terminal::TerminalText;
+use crate::error::chain_hints;
 use crate::error::cli_message;
 use crate::error::terminal;
 use crate::operation::Operation;
@@ -409,7 +410,12 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
     }
 
     fn format_error(&mut self, _operation: Operation, error: &anyhow::Error) {
-        self.emit_error_line(&escaped_chain(error));
+        let mut text = escaped_chain(error);
+        for hint in chain_hints(error, terminal) {
+            text.push_str("\nHINT: ");
+            text.push_str(&hint);
+        }
+        self.emit_error_line(&text);
     }
 
     fn format_manifest(&mut self, manifest: &ArchiveManifest, view: ManifestView) -> Result<()> {
@@ -1071,8 +1077,13 @@ mod tests {
         f.format_error(Operation::Extract, &err);
         let text = err_text(&f);
         assert!(
-            text.contains("path traversal\nHINT"),
-            "block newline kept: {text:?}"
+            text.contains(": path traversal detected: ")
+                && text
+                    .trim_end()
+                    .lines()
+                    .last()
+                    .is_some_and(|l| l.starts_with("HINT: ")),
+            "the hint comes last, on its own line: {text:?}"
         );
         assert!(text.contains(HOSTILE_ESCAPED), "{text:?}");
         assert!(

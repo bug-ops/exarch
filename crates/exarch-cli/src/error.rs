@@ -94,18 +94,38 @@ impl fmt::Display for Rendered<'_> {
 
 /// An error object whose text is a list of [`Part`]s.
 pub trait CliMessage {
+    /// The message, without its hint.
     fn parts(&self) -> Cow<'_, [Part]>;
+
+    /// The advice that follows the message, if any.
+    fn hint(&self) -> Option<Cow<'_, [Part]>>;
+}
+
+/// `link` as one of the CLI's own error objects.
+fn as_cli_message<'a>(link: &'a (dyn std::error::Error + 'static)) -> Option<&'a dyn CliMessage> {
+    link.downcast_ref::<CliContext>()
+        .map(|c| c as &dyn CliMessage)
+        .or_else(|| {
+            link.downcast_ref::<PartialExtractionContext>()
+                .map(|c| c as &dyn CliMessage)
+        })
 }
 
 /// The structured message of `link` when it is one of the CLI's own error
 /// objects.
 pub fn cli_message<'a>(link: &'a (dyn std::error::Error + 'static)) -> Option<Cow<'a, [Part]>> {
-    link.downcast_ref::<CliContext>()
-        .map(CliMessage::parts)
-        .or_else(|| {
-            link.downcast_ref::<PartialExtractionContext>()
-                .map(CliMessage::parts)
-        })
+    as_cli_message(link).map(CliMessage::parts)
+}
+
+/// The hints of every link of `error`'s chain, outermost first, each rendered
+/// by `render`.
+pub fn chain_hints(error: &anyhow::Error, render: fn(&[Part]) -> String) -> Vec<String> {
+    error
+        .chain()
+        .filter_map(as_cli_message)
+        .filter_map(CliMessage::hint)
+        .map(|hint| render(&hint))
+        .collect()
 }
 
 /// Renders `parts` with archive-derived parts escaped for a terminal.
@@ -126,48 +146,71 @@ pub fn raw(parts: &[Part]) -> String {
     .to_string()
 }
 
-/// Builder for the parts of one message.
+/// Builder for one message: its parts and, apart from them, the advice that
+/// follows it.
+///
+/// The hint is kept out of the parts so that an error chain renders as
+/// `message: cause` with the hints printed last, never in the middle.
 #[derive(Debug, Default)]
-pub struct Message(Vec<Part>);
+pub struct Message {
+    parts: Vec<Part>,
+    hint: Option<Vec<Part>>,
+}
 
 impl Message {
     /// Appends text written in the source, which may span lines.
     pub fn lit(mut self, text: &'static str) -> Self {
-        self.0.push(Part::Lit(text));
+        self.parts.push(Part::Lit(text));
         self
     }
 
     /// Appends a host path (an archive, a destination), escaped for a terminal
     /// and exact in `--json`.
     pub fn path(mut self, path: &Path) -> Self {
-        self.0.push(Part::Path(path.to_path_buf()));
+        self.parts.push(Part::Path(path.to_path_buf()));
         self
     }
 
     /// Appends the name of an archive entry, rendered injectively.
     pub fn entry(mut self, path: &Path) -> Self {
-        self.0.push(Part::Entry(path.to_path_buf()));
+        self.parts.push(Part::Entry(path.to_path_buf()));
         self
     }
 
     /// Appends single-line text that may derive from an archive, escaped for a
     /// terminal and exact in `--json`.
     pub fn text(mut self, text: impl Into<String>) -> Self {
-        self.0.push(Part::Text(text.into()));
+        self.parts.push(Part::Text(text.into()));
         self
     }
 
-    /// Appends a `HINT:` line when there is advice to give.
-    pub fn hint(self, hint: Option<String>) -> Self {
-        match hint {
-            Some(body) => self.lit("\nHINT: ").text(body),
-            None => self,
+    /// Sets the advice that follows the message, when there is any to give.
+    pub fn hint(mut self, hint: Option<String>) -> Self {
+        self.hint = hint.map(|body| vec![Part::Text(body)]);
+        self
+    }
+
+    /// Sets the advice to text written in the source.
+    pub fn hint_lit(mut self, hint: &'static str) -> Self {
+        self.hint = Some(vec![Part::Lit(hint)]);
+        self
+    }
+
+    /// The message with no cause behind it.
+    pub fn into_context(self) -> CliContext {
+        CliContext {
+            parts: self.parts,
+            hint: self.hint,
+            source: None,
         }
     }
 
-    /// The finished list of parts.
-    pub fn into_parts(self) -> Vec<Part> {
-        self.0
+    /// The message layered over `source`.
+    fn wrapping(self, source: ArchiveError) -> CliContext {
+        CliContext {
+            source: Some(source),
+            ..self.into_context()
+        }
     }
 }
 
@@ -229,34 +272,23 @@ fn dedicated_zip_bomb_hint(op: Operation, scope: ZipBombScope) -> Option<String>
 ///
 /// A distinct error type, not an anyhow `.context()` string, so the human
 /// formatter can recognise it in the error chain and escape its parts for the
-/// terminal. `Display` is the message rendered exactly; the wrapped error is
-/// exposed as the `source`, so `{:#}` renders `message: error`.
+/// terminal. `Display` is the message rendered exactly, without its hint; the
+/// wrapped error is exposed as the `source`, so `{:#}` renders
+/// `message: error`.
 #[derive(Debug)]
 pub struct CliContext {
     parts: Vec<Part>,
+    hint: Option<Vec<Part>>,
     source: Option<ArchiveError>,
-}
-
-impl CliContext {
-    /// A message that wraps no underlying error.
-    pub const fn new(message: Vec<Part>) -> Self {
-        Self {
-            parts: message,
-            source: None,
-        }
-    }
-
-    const fn wrapping(message: Vec<Part>, source: ArchiveError) -> Self {
-        Self {
-            parts: message,
-            source: Some(source),
-        }
-    }
 }
 
 impl CliMessage for CliContext {
     fn parts(&self) -> Cow<'_, [Part]> {
         Cow::Borrowed(&self.parts)
+    }
+
+    fn hint(&self) -> Option<Cow<'_, [Part]>> {
+        self.hint.as_deref().map(Cow::Borrowed)
     }
 }
 
@@ -300,7 +332,7 @@ impl PartialExtractionContext {
     /// The text for each [`PartialWrites`] state; `None` for a state added to
     /// the `#[non_exhaustive]` enum after this match was written, which
     /// `every_partial_writes_state_has_dedicated_text` rejects.
-    fn dedicated_parts(&self) -> Option<Vec<Part>> {
+    fn dedicated_message(&self) -> Option<Message> {
         let r = &self.report;
         let message = match self.writes {
             PartialWrites::Kept => {
@@ -329,7 +361,7 @@ impl PartialExtractionContext {
                         message = message.lit("\n  - ").text(warning.to_string());
                     }
                 }
-                message.lit("\nHINT: Inspect or remove the output directory before re-running.")
+                message.hint_lit("Inspect or remove the output directory before re-running.")
             }
             // The counts and warnings describe the discarded run, not the
             // destination.
@@ -342,17 +374,22 @@ impl PartialExtractionContext {
             }
             _ => return None,
         };
-        Some(message.into_parts())
+        Some(message)
+    }
+
+    fn message(&self) -> Message {
+        self.dedicated_message()
+            .unwrap_or_else(|| Message::default().lit("WARNING: Extraction was stopped."))
     }
 }
 
 impl CliMessage for PartialExtractionContext {
     fn parts(&self) -> Cow<'_, [Part]> {
-        Cow::Owned(self.dedicated_parts().unwrap_or_else(|| {
-            Message::default()
-                .lit("WARNING: Extraction was stopped.")
-                .into_parts()
-        }))
+        Cow::Owned(self.message().parts)
+    }
+
+    fn hint(&self) -> Option<Cow<'_, [Part]>> {
+        self.message().hint.map(Cow::Owned)
     }
 }
 
@@ -544,7 +581,7 @@ pub fn convert_error(op: Operation, err: ArchiveError, archive: &Path) -> anyhow
     };
 
     let context = context_message(op, &err, archive);
-    anyhow::Error::new(CliContext::wrapping(context.into_parts(), err))
+    anyhow::Error::new(context.wrapping(err))
 }
 
 fn zip_inconsistency_message(op: Operation, message: Message, archive: &Path) -> Message {
@@ -585,10 +622,8 @@ fn dedicated_context(op: Operation, err: &ArchiveError, archive: &Path) -> Optio
         ArchiveError::PathTraversal { .. } => message
             .lit("Security violation: Archive '")
             .path(archive)
-            .lit(
-                "' attempted path traversal\n\
-                 HINT: This archive may be malicious. Do not extract from untrusted sources.",
-            ),
+            .lit("' attempted path traversal")
+            .hint_lit("This archive may be malicious. Do not extract from untrusted sources."),
         ArchiveError::ZipBomb(details) => message
             .lit("Security violation: Archive '")
             .path(archive)
@@ -601,9 +636,9 @@ fn dedicated_context(op: Operation, err: &ArchiveError, archive: &Path) -> Optio
         ArchiveError::SymlinkEscape { .. } | ArchiveError::HardlinkEscape { .. } => message
             .lit("Security violation: Archive '")
             .path(archive)
-            .lit(
-                "' has a link that escapes the destination\n\
-                 HINT: a link resolves outside the destination (an archive link or an existing \
+            .lit("' has a link that escapes the destination")
+            .hint_lit(
+                "a link resolves outside the destination (an archive link or an existing \
                  destination symlink); no flag relaxes this check.",
             ),
         ArchiveError::Io(_) => message.lit("Failed to process '").path(archive).lit("'"),
@@ -621,29 +656,33 @@ fn dedicated_context(op: Operation, err: &ArchiveError, archive: &Path) -> Optio
         | ArchiveError::TarTrailer(_) => message
             .lit("Invalid archive '")
             .path(archive)
-            .lit("'\nHINT: The archive may be corrupted or malformed."),
+            .lit("'")
+            .hint_lit("The archive may be corrupted or malformed."),
         ArchiveError::InvalidConfiguration { setting, problem } => message
             .lit("Invalid configuration: ")
             .text(setting.describe(problem))
-            .lit("\nHINT: Check the flags you passed and their allowed value ranges."),
-        ArchiveError::SourceNotFound { .. } => message.lit("Source path not found").lit(match op {
-            Operation::Create => "\nHINT: Verify the source path exists and is readable.",
-            Operation::Extract | Operation::List | Operation::Verify => {
-                "\nHINT: Verify the archive path exists and is readable."
-            }
-        }),
-        ArchiveError::SourceNotAccessible { error, .. } => message
-            .lit("Source path is not accessible")
-            .lit(if error.kind() == io::ErrorKind::PermissionDenied {
-                match op {
-                    Operation::Create => "\nHINT: Check file permissions on the source.",
-                    Operation::Extract | Operation::List | Operation::Verify => {
-                        "\nHINT: Check file permissions on the archive."
-                    }
+            .hint_lit("Check the flags you passed and their allowed value ranges."),
+        ArchiveError::SourceNotFound { .. } => {
+            message.lit("Source path not found").hint_lit(match op {
+                Operation::Create => "Verify the source path exists and is readable.",
+                Operation::Extract | Operation::List | Operation::Verify => {
+                    "Verify the archive path exists and is readable."
                 }
+            })
+        }
+        ArchiveError::SourceNotAccessible { error, .. } => {
+            let message = message.lit("Source path is not accessible");
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                message.hint_lit(match op {
+                    Operation::Create => "Check file permissions on the source.",
+                    Operation::Extract | Operation::List | Operation::Verify => {
+                        "Check file permissions on the archive."
+                    }
+                })
             } else {
-                ""
-            }),
+                message
+            }
+        }
         ArchiveError::OutputExists { .. } | ArchiveError::DestinationOccupied { .. } => {
             message.lit("Output path already exists").hint(
                 op.accepts(Flag::Force)
@@ -693,15 +732,22 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
 
+    /// The message chain followed by its hints, as the terminal shows them.
+    fn full_text(error: &anyhow::Error) -> String {
+        let mut text = format!("{error:#}");
+        for hint in chain_hints(error, raw) {
+            text.push_str("\nHINT: ");
+            text.push_str(&hint);
+        }
+        text
+    }
+
     fn source_not_accessible_message(kind: io::ErrorKind) -> String {
         let err = ArchiveError::SourceNotAccessible {
             path: PathBuf::from("src/a.txt"),
             error: io::Error::from(kind),
         };
-        format!(
-            "{:?}",
-            convert_error(Operation::Create, err, Path::new("o.tar"))
-        )
+        full_text(&convert_error(Operation::Create, err, Path::new("o.tar")))
     }
 
     #[test]
@@ -721,7 +767,7 @@ mod tests {
             path: PathBuf::from("../../../etc/passwd"),
         };
         let converted = convert_error(Operation::Extract, err, Path::new("malicious.zip"));
-        let msg = format!("{converted:?}");
+        let msg = full_text(&converted);
         assert!(msg.contains("path traversal"));
         assert!(msg.contains("malicious.zip"));
         assert!(msg.contains("HINT"));
@@ -734,7 +780,7 @@ mod tests {
             Uncompressed(uncompressed),
         ));
         let converted = convert_error(Operation::Extract, err, Path::new("bomb.zip"));
-        format!("{converted:?}")
+        full_text(&converted)
     }
 
     #[test]
@@ -771,7 +817,7 @@ mod tests {
         let path = PathBuf::from("../../../etc/passwd");
         let err = ArchiveError::PathTraversal { path };
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert_eq!(
             msg.matches("../../../etc/passwd").count(),
             1,
@@ -784,7 +830,7 @@ mod tests {
         let path = PathBuf::from("link/to/escape");
         let err = ArchiveError::SymlinkEscape { path };
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert_eq!(
             msg.matches("link/to/escape").count(),
             1,
@@ -803,7 +849,7 @@ mod tests {
             },
         ] {
             let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-            let msg = format!("{converted:#}");
+            let msg = full_text(&converted);
             assert!(msg.contains("no flag relaxes this check"), "{msg}");
             assert!(!msg.contains("--allow-"), "{msg}");
         }
@@ -814,7 +860,7 @@ mod tests {
         let path = PathBuf::from("hard/link/escape");
         let err = ArchiveError::HardlinkEscape { path };
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert_eq!(
             msg.matches("hard/link/escape").count(),
             1,
@@ -827,7 +873,7 @@ mod tests {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
         let err = ArchiveError::Io(io_err);
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:?}");
+        let msg = full_text(&converted);
         assert!(msg.contains("I/O error"));
     }
 
@@ -842,7 +888,7 @@ mod tests {
         );
         let err = ArchiveError::Io(io_err);
         let converted = convert_error(Operation::Extract, err, Path::new("nonutf8.tar"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert_eq!(
             msg.matches("Illegal byte sequence (os error 92)").count(),
             1,
@@ -883,7 +929,7 @@ mod tests {
             PartialWrites::Kept,
         ));
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         let occurrences = msg.matches("hardlink_escape_path").count();
         assert_eq!(
             occurrences, 1,
@@ -899,7 +945,7 @@ mod tests {
         let path = PathBuf::from("/tmp/output");
         let err = ArchiveError::OutputExists { path };
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert!(msg.contains("/tmp/output"), "path missing: {msg}");
         assert!(msg.contains("--force"), "hint missing: {msg}");
     }
@@ -912,7 +958,7 @@ mod tests {
             mode: exarch_core::RawMode::new(0o4755),
         };
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert!(msg.contains("evil/file"), "path missing: {msg}");
         assert!(
             msg.contains("security policy"),
@@ -926,7 +972,7 @@ mod tests {
             level: exarch_core::RequestedLevel::Integer(0),
         };
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert!(msg.contains('0'), "level missing: {msg}");
         assert!(msg.contains("between 1 and 9"), "range hint missing: {msg}");
     }
@@ -937,7 +983,7 @@ mod tests {
             name: "distinctive-entry".into(),
         });
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert_eq!(
             msg.matches("distinctive-entry").count(),
             1,
@@ -953,7 +999,7 @@ mod tests {
     fn test_security_violation_forged_size_hint_omits_policy_flags() {
         let err = ArchiveError::from(Violation::DeclaredSizeExceeded { declared: 50 });
         let converted = convert_error(Operation::Extract, err, Path::new("archive.zip"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert!(
             msg.contains("cannot be relaxed via any policy flag"),
             "expected the size-mismatch-specific HINT, got: {msg}"
@@ -991,7 +1037,7 @@ mod tests {
     fn hint_for(setting: PolicySetting) -> String {
         let err = ArchiveError::from(violation_for(setting));
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        format!("{converted:#}")
+        full_text(&converted)
     }
 
     #[test]
@@ -1069,7 +1115,11 @@ mod tests {
         for &kind in QuotaKind::ALL {
             let msg = dedicated_quota_context(Operation::Extract, kind, archive).map_or_else(
                 || panic!("{kind} took the wildcard arm"),
-                |m| raw(&m.into_parts()),
+                |m| {
+                    let context = m.into_context();
+                    let hint = context.hint().map(|h| raw(&h)).unwrap_or_default();
+                    format!("{}\nHINT: {hint}", raw(&context.parts()))
+                },
             );
             let raises_a_flag = msg.contains("HINT: Use --max-files");
             let is_size_or_count = matches!(
@@ -1118,7 +1168,7 @@ mod tests {
             PartialWrites::Kept,
         ));
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         let occurrences = msg.matches("symlink_escape_path").count();
         assert_eq!(
             occurrences, 1,
@@ -1156,7 +1206,7 @@ mod tests {
             PartialWrites::Kept,
         ));
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert!(msg.contains("Files skipped: 2"), "got: {msg}");
         assert!(msg.contains("Warnings:"), "got: {msg}");
         assert!(msg.contains("skipped a broken symlink"), "got: {msg}");
@@ -1187,7 +1237,7 @@ mod tests {
             PartialWrites::Kept,
         ));
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert!(
             msg.contains("were written to disk before the error"),
             "partial-progress wording missing: {msg}"
@@ -1226,7 +1276,7 @@ mod tests {
             PartialWrites::RolledBack,
         ));
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert!(!msg.contains("written to disk"), "got: {msg}");
         assert!(!msg.contains("Inspect or remove"), "got: {msg}");
         assert!(msg.contains("destination was left unchanged"), "got: {msg}");
@@ -1256,7 +1306,7 @@ mod tests {
             PartialWrites::RolledBack,
         ));
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert!(!msg.contains("Files skipped"), "got: {msg}");
         assert!(!msg.contains("Warnings:"), "got: {msg}");
         assert!(!msg.contains("skipped 3 entries"), "got: {msg}");
@@ -1287,7 +1337,7 @@ mod tests {
             PartialWrites::Kept,
         ));
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert!(!msg.contains("Files skipped"), "got: {msg}");
         assert!(!msg.contains("Warnings:"), "got: {msg}");
     }
@@ -1340,7 +1390,7 @@ mod tests {
             detail: "distinctive-reason".into(),
         });
         let converted = convert_error(Operation::Extract, err, Path::new("a.tar"));
-        let msg = format!("{converted:#}");
+        let msg = full_text(&converted);
         assert_eq!(msg.matches("distinctive-reason").count(), 1, "got: {msg}");
     }
 
@@ -1379,7 +1429,9 @@ mod tests {
             .path(Path::new("p\x1b"))
             .lit(" ")
             .text("t\x1b")
-            .into_parts();
+            .into_context()
+            .parts()
+            .into_owned();
         assert_eq!(raw(&message), "a\nb p\x1b t\x1b");
         assert_eq!(terminal(&message), "a\nb p\\x1b t\\x1b");
     }
@@ -1393,7 +1445,7 @@ mod tests {
                 inner: anyhow::anyhow!("inner"),
             };
             assert!(
-                context.dedicated_parts().is_some(),
+                context.dedicated_message().is_some(),
                 "{writes} took the wildcard"
             );
         }

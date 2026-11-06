@@ -12,7 +12,6 @@ use crate::commands::atomic_swap::EntryName;
 use crate::commands::atomic_swap::FileIdentity;
 use crate::commands::atomic_swap::IdentityCheck;
 use crate::commands::atomic_swap::PinnedDir;
-use crate::error::CliContext;
 use crate::error::Message;
 use crate::error::add_archive_context;
 use crate::error::convert_error;
@@ -909,9 +908,7 @@ fn conflict_message(conflicts: &[PathBuf], mode: WriteMode, output_dir: &Path) -
 }
 
 fn conflict_error(conflicts: &[PathBuf], mode: WriteMode, output_dir: &Path) -> anyhow::Error {
-    anyhow::Error::new(CliContext::new(
-        conflict_message(conflicts, mode, output_dir).into_parts(),
-    ))
+    anyhow::Error::new(conflict_message(conflicts, mode, output_dir).into_context())
 }
 
 /// The ban list `--banned-component` asks for: `None` keeps the default list.
@@ -1969,8 +1966,12 @@ mod tests {
     }
 
     fn conflict_error_message(conflicts: &[PathBuf]) -> String {
+        use crate::error::CliMessage as _;
+
         crate::error::terminal(
-            &conflict_message(conflicts, WriteMode::Safe, Path::new("")).into_parts(),
+            &conflict_message(conflicts, WriteMode::Safe, Path::new(""))
+                .into_context()
+                .parts(),
         )
     }
 

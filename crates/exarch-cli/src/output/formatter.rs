@@ -155,12 +155,10 @@ impl Serialize for JsonKind {
     }
 }
 
-/// The typed discriminants of the refusal behind a verify issue: the same
-/// code, sub-code and policy setting a failed extraction reports, so a script
-/// need not parse the message.
+/// The finer discriminants an error or a refusal can carry besides its code:
+/// what a script reads instead of parsing the message.
 #[derive(Debug, Serialize)]
-pub struct JsonRefusal {
-    pub code: JsonKind,
+pub struct JsonDiscriminants {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_code: Option<JsonId<SubCode>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -169,13 +167,31 @@ pub struct JsonRefusal {
     pub setting: Option<JsonId<ConfigSetting>>,
 }
 
+impl From<&FfiKind> for JsonDiscriminants {
+    fn from(kind: &FfiKind) -> Self {
+        Self {
+            sub_code: kind.sub_code().map(JsonId),
+            relaxable_by: kind.relaxable_by().map(JsonId),
+            setting: kind.setting().map(JsonId),
+        }
+    }
+}
+
+/// The typed discriminants of the refusal behind a verify issue: the same
+/// code, sub-code and policy setting a failed extraction reports, so a script
+/// need not parse the message.
+#[derive(Debug, Serialize)]
+pub struct JsonRefusal {
+    pub code: JsonKind,
+    #[serde(flatten)]
+    pub discriminants: JsonDiscriminants,
+}
+
 impl From<&FfiKind> for JsonRefusal {
     fn from(kind: &FfiKind) -> Self {
         Self {
             code: JsonKind::Code(kind.code()),
-            sub_code: kind.sub_code().map(JsonId),
-            relaxable_by: kind.relaxable_by().map(JsonId),
-            setting: kind.setting().map(JsonId),
+            discriminants: JsonDiscriminants::from(kind),
         }
     }
 }
@@ -260,21 +276,20 @@ pub struct JsonPartialReport {
 pub struct JsonError {
     pub kind: JsonKind,
     pub message: String,
+    /// Advice for the reader, apart from the message; absent when there is
+    /// none. Several hints are joined by newlines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial_report: Option<JsonPartialReport>,
-    /// Stable id of the `SecurityConfig` setting whose current value refused
-    /// the entry; present only for a `SecurityViolation` a setting relaxes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relaxable_by: Option<JsonId<PolicySetting>>,
-    /// Stable id of the finer classification: always present for a
-    /// `SecurityViolation`, present for a TAR `InvalidArchive`, absent
-    /// otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub_code: Option<JsonId<SubCode>>,
-    /// Stable id of the configuration setting or input that was refused;
-    /// present only for an `InvalidConfiguration` that names one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub setting: Option<JsonId<ConfigSetting>>,
+    /// `relaxable_by` is the stable id of the `SecurityConfig` setting whose
+    /// current value refused the entry (only for a `SecurityViolation` a
+    /// setting relaxes); `sub_code` the finer classification (always for a
+    /// `SecurityViolation`, for a TAR `InvalidArchive`, absent otherwise);
+    /// `setting` the configuration setting or input that was refused (only
+    /// for an `InvalidConfiguration` that names one).
+    #[serde(flatten)]
+    pub discriminants: Option<JsonDiscriminants>,
 }
 
 impl JsonError {
@@ -282,11 +297,16 @@ impl JsonError {
         Self {
             kind,
             message: message.into(),
+            hint: None,
             partial_report: None,
-            relaxable_by: None,
-            sub_code: None,
-            setting: None,
+            discriminants: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_hint(mut self, hint: Option<String>) -> Self {
+        self.hint = hint;
+        self
     }
 
     #[must_use]
@@ -299,9 +319,7 @@ impl JsonError {
     /// failure.
     #[must_use]
     pub fn with_ffi_kind(mut self, kind: &FfiKind) -> Self {
-        self.relaxable_by = kind.relaxable_by().map(JsonId);
-        self.sub_code = kind.sub_code().map(JsonId);
-        self.setting = kind.setting().map(JsonId);
+        self.discriminants = Some(JsonDiscriminants::from(kind));
         self
     }
 }

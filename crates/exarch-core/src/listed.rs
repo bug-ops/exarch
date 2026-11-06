@@ -54,6 +54,7 @@ use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
 use crate::closed_enum::closed_enum;
 use crate::config::ExtractionOptions;
+use crate::formats::common::TempSpool;
 use crate::formats::common::open_archive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
@@ -81,8 +82,10 @@ use crate::reader::SeekableFormat;
 /// cap and by this limit, whichever is smaller.
 ///
 /// Decoded streams over the limit decode twice. That cost is accepted: a larger
-/// spool would be an unbounded temporary file (RAM on a tmpfs). A caller that
-/// extracts atomically can skip the list pass and decode once.
+/// spool would be an unbounded temporary file. On a tmpfs the spool occupies
+/// RAM, so there it is also held to `max_decoder_memory`, as the ZIP decode
+/// reuse spool is. A caller that extracts atomically can skip the list pass and
+/// decode once.
 const REPLAY_LIMIT: u64 = 256 * 1024 * 1024;
 
 const SPOOL_BUFFER: usize = 64 * 1024;
@@ -467,7 +470,7 @@ fn list_with_limit(
         FormatFamily::Tar(Some(codec)) if replays(codec) && fits(archive, codec, limit) => {
             let decoded = open_tar_stream(archive, Some(codec), DecoderLimits::of(config))?;
             let source = decoded.source();
-            let mut tee = SpoolTee::new(decoded.stream, limit);
+            let mut tee = SpoolTee::new(decoded.stream, limit, config.max_decoder_memory.get());
             let manifest =
                 list_tar_stream(&mut tee, source, Some(codec), format, config, &mut pass)?;
             let kept = tee
@@ -544,15 +547,26 @@ struct SpoolTee<R> {
 }
 
 impl<R: Read> SpoolTee<R> {
-    fn new(inner: R, limit: u64) -> Self {
-        // Without a temporary file the only loss is the optimisation.
-        // TODO(#960): on a tmpfs the spool (up to the replay limit) sits in RAM
-        // and is not charged to any budget.
-        let spool = crate::formats::common::open_spool()
-            .map(|spool| BufWriter::with_capacity(SPOOL_BUFFER, spool.file));
+    /// A tee into a new spool holding at most `limit` bytes, and at most
+    /// `ram_limit` where the spool lives in memory.
+    fn new(inner: R, limit: u64, ram_limit: u64) -> Self {
+        Self::over(
+            inner,
+            crate::formats::common::open_spool(),
+            limit,
+            ram_limit,
+        )
+    }
+
+    /// A tee into `spool`, or into none: without a temporary file the only
+    /// loss is the optimisation.
+    fn over(inner: R, spool: Option<TempSpool>, limit: u64, ram_limit: u64) -> Self {
+        let limit = spool
+            .as_ref()
+            .map_or(limit, |spool| spool.backing.capacity(limit, ram_limit));
         Self {
             inner,
-            spool,
+            spool: spool.map(|spool| BufWriter::with_capacity(SPOOL_BUFFER, spool.file)),
             written: 0,
             limit,
             decoding: Decoding::Reading,
@@ -630,6 +644,7 @@ mod tests {
     use crate::ErrorCode;
     use crate::ExtractRequest;
     use crate::NoopProgress;
+    use crate::formats::common::SpoolBacking;
     use crate::test_utils::create_test_tar;
     use tempfile::TempDir;
 
@@ -935,7 +950,7 @@ mod tests {
     }
 
     fn finish_scripted(script: Vec<io::Result<&'static [u8]>>, limit: u64) -> Option<Spool> {
-        let mut tee = SpoolTee::new(Scripted(script), limit);
+        let mut tee = SpoolTee::new(Scripted(script), limit, u64::MAX);
         let mut sink = [0; 8];
         while tee.read(&mut sink).is_ok_and(|n| n > 0) {}
         tee.finish_spool(&SecurityConfig::default())
@@ -1018,6 +1033,21 @@ mod tests {
         let script = vec![Ok(&b"abc"[..]), Err(io::Error::other("bad")), Ok(&b""[..])];
 
         assert!(finish_scripted(script, 100).is_none());
+    }
+
+    #[test]
+    fn a_spool_in_memory_is_held_to_the_ram_limit_and_one_on_disk_is_not() {
+        let script = || vec![Ok(&b"abcd"[..]), Ok(&b"efgh"[..])];
+        let finish = |backing| {
+            let spool = TempSpool::with_backing(backing);
+            let mut tee = SpoolTee::over(Scripted(script()), spool, 100, 7);
+            let mut sink = [0; 8];
+            while tee.read(&mut sink).is_ok_and(|n| n > 0) {}
+            tee.finish_spool(&SecurityConfig::default())
+        };
+
+        assert!(finish(SpoolBacking::Ram).is_none());
+        assert!(finish(SpoolBacking::Disk).is_some());
     }
 
     #[test]

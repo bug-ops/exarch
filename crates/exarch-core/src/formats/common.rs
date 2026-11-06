@@ -93,6 +93,16 @@ impl SpoolBacking {
         }
     }
 
+    /// The most bytes a spool on this backing may hold: `disk` in general, and
+    /// no more than `ram` where every spooled byte occupies memory.
+    pub(crate) fn capacity(self, disk: u64, ram: u64) -> u64 {
+        match self {
+            #[cfg(not(target_os = "wasi"))]
+            Self::Disk => disk,
+            Self::Ram => disk.min(ram),
+        }
+    }
+
     /// Maps a `statfs` `f_type` to a backing. The width and signedness of
     /// `f_type` vary by architecture, so only its low 32 bits are compared.
     #[cfg(any(target_os = "linux", target_os = "android", test))]

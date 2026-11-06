@@ -533,28 +533,29 @@ fn parse_parallel_decode(s: &str) -> Result<ParallelDecodeValue, String> {
     parse_byte_size(s).map(ParallelDecodeValue::Bytes)
 }
 
-/// Parse byte size with optional suffix (K, M, G, T)
-#[expect(
-    clippy::option_if_let_else,
-    reason = "if-let chain reads clearer than map_or_else here"
-)]
+/// Splits a trailing binary-unit suffix (K, M, G or T, in either case) off
+/// `s` and returns the remaining digits with the unit's multiplier.
+fn split_size_suffix(s: &str) -> (&str, u64) {
+    const UNITS: [(char, u32); 4] = [('T', 4), ('G', 3), ('M', 2), ('K', 1)];
+    s.char_indices()
+        .next_back()
+        .and_then(|(at, last)| {
+            UNITS
+                .iter()
+                .find(|(unit, _)| unit.eq_ignore_ascii_case(&last))
+                .map(|&(_, power)| (&s[..at], 1024_u64.pow(power)))
+        })
+        .unwrap_or((s, 1))
+}
+
+/// Parse byte size with optional suffix (K, M, G, T, case-insensitive)
 fn parse_byte_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("empty byte size".to_string());
     }
 
-    let (num_str, multiplier) = if let Some(stripped) = s.strip_suffix('T') {
-        (stripped, 1024_u64.pow(4))
-    } else if let Some(stripped) = s.strip_suffix('G') {
-        (stripped, 1024_u64.pow(3))
-    } else if let Some(stripped) = s.strip_suffix('M') {
-        (stripped, 1024_u64.pow(2))
-    } else if let Some(stripped) = s.strip_suffix('K') {
-        (stripped, 1024)
-    } else {
-        (s, 1)
-    };
+    let (num_str, multiplier) = split_size_suffix(s);
 
     num_str
         .parse::<u64>()
@@ -569,6 +570,14 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_size_suffixes_are_case_insensitive() {
+        assert_eq!(parse_byte_size("1k").unwrap(), 1024);
+        assert_eq!(parse_byte_size("2m").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_byte_size("3g").unwrap(), 3 * 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_size("1t").unwrap(), 1024_u64.pow(4));
+    }
 
     #[test]
     fn test_parse_byte_size() {

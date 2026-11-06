@@ -104,8 +104,10 @@ impl<W: Write> JsonFormatter<W> {
 
     fn output<T: Serialize>(&mut self, value: &T) -> Result<()> {
         let json = serde_json::to_string_pretty(value)?;
-        writeln!(self.out, "{json}")?;
-        Ok(())
+        match writeln!(self.out, "{json}") {
+            Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            written => written.map_err(Into::into),
+        }
     }
 
     fn success<T: Serialize>(&mut self, operation: Operation, data: T) -> Result<()> {
@@ -381,6 +383,34 @@ mod tests {
     use exarch_core::Uncompressed;
     use exarch_core::Violation;
     use std::path::PathBuf;
+
+    struct FailingWriter(io::ErrorKind);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(self.0.into())
+        }
+    }
+
+    #[test]
+    fn a_closed_stdout_is_not_a_failure() {
+        let mut f = JsonFormatter::with_writer(FailingWriter(io::ErrorKind::BrokenPipe));
+        f.format_manifest(&sample_manifest(), ManifestView::Short)
+            .expect("a reader that stopped reading is not an error");
+    }
+
+    #[test]
+    fn other_write_failures_still_fail() {
+        let mut f = JsonFormatter::with_writer(FailingWriter(io::ErrorKind::StorageFull));
+        assert!(
+            f.format_manifest(&sample_manifest(), ManifestView::Short)
+                .is_err()
+        );
+    }
 
     fn extraction_error_kind(err: &ArchiveError) -> String {
         JsonKind::Code(err.ffi_kind().code()).name().to_string()

@@ -7332,3 +7332,28 @@ fn test_verbose_extract_survives_closed_stderr_pipe() {
         "the extraction must still complete"
     );
 }
+
+/// A closed stdout pipe ends `list` successfully in text and `--json` mode
+/// alike (#985).
+#[cfg(unix)]
+#[test]
+fn test_list_exit_status_on_closed_stdout_is_the_same_in_both_modes() {
+    for json in [false, true] {
+        let (reader, writer) = std::io::pipe().expect("create pipe");
+        drop(reader);
+
+        let mut cmd = std::process::Command::new(exarch_cmd().get_program());
+        cmd.arg("list");
+        if json {
+            cmd.arg("--json");
+        }
+        let status = cmd
+            .arg(fixture_path("sample.tar.gz"))
+            .stdout(writer)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run exarch");
+
+        assert_eq!(status.code(), Some(0), "json: {json}");
+    }
+}

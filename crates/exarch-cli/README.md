@@ -333,21 +333,30 @@ Extraction complete
     "symlinks_created": 0,
     "bytes_written": 44396032,
     "files_skipped": 0,
+    "skipped_by_kind": {},
+    "skipped_sample": [],
     "duration_ms": 842,
     "warnings": []
   }
 }
 ```
 
-`files_skipped` and `warnings` are populated whenever entries are skipped without failing the
-extraction — e.g. `--allowed-extensions` rejecting entries by extension, or pre-existing
-duplicate destination files skipped by default (unless `--force` is passed):
+`files_skipped`, `skipped_by_kind` and `skipped_sample` are populated whenever entries are skipped
+without failing the extraction — e.g. `--allowed-extensions` rejecting entries by extension, or a
+later entry of the archive that repeats an earlier path (skipped as a duplicate by default; `--force`
+overwrites it instead). `warnings` holds other conditions. A file that was already in the destination
+before the run is not skipped: it is refused with an `OutputExists` error that lists every conflict in
+`error.conflicts` (`--force` replaces it).
 
 ```json
 {
   "files_skipped": 2,
-  "warnings": [
-    "skipped 2 entries with disallowed extensions"
+  "skipped_by_kind": {
+    "extension_not_allowed": 2
+  },
+  "skipped_sample": [
+    {"kind": "extension_not_allowed", "path": "a.bin"},
+    {"kind": "extension_not_allowed", "path": "b.bin"}
   ]
 }
 ```
@@ -362,6 +371,7 @@ A failed operation prints an error envelope. For a `SecurityViolation` that a `S
     "kind": "SecurityViolation",
     "message": "Security violation while processing 'archive.tar': operation denied by security policy: symlinks not allowed",
     "hint": "If this archive is from a trusted source, pass --allow-symlinks.",
+    "sub_code": "LINK_POLICY",
     "relaxable_by": "symlinks"
   }
 }

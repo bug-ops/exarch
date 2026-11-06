@@ -73,7 +73,7 @@ fn main() -> Result<(), exarch_core::ArchiveError> {
     println!("Extracted {} files ({} bytes, {} skipped)",
         report.files_extracted,
         report.bytes_written,
-        report.files_skipped);
+        report.files_skipped());
     Ok(())
 }
 ```
@@ -166,13 +166,16 @@ exarch verify --strict archive.tar.gz
 ### Security Configuration
 
 ```rust
-use exarch_core::{non_zero, ratio_limit, Extension, SecurityConfig};
+use exarch_core::{non_zero, ratio_limit, Extension, ExtensionFilter, SecurityConfig};
 
 let config = SecurityConfig::default()
     .with_max_file_size(non_zero!(100 * 1024 * 1024))    // 100 MB
     .with_max_total_size(non_zero!(1024 * 1024 * 1024))  // 1 GB
     .with_max_compression_ratio(ratio_limit!(50.0)) // 50x compression limit
-    .with_allowed_extensions(vec![Extension::try_from(".tar")?, Extension::try_from(".gz")?]); // optional allowlist
+    .with_allowed_extensions(ExtensionFilter::only(vec![
+        Extension::try_from(".tar")?,
+        Extension::try_from(".gz")?,
+    ])?); // optional allowlist
 ```
 
 > [!IMPORTANT]

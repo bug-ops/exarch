@@ -183,7 +183,7 @@ describe('extractArchiveToCallback', () => {
           tar([file('a', '1')]),
           () => {},
           null,
-          new ExtractionOptions().withAtomic(true)
+          new ExtractionOptions().withStaging('atomic')
         ),
       { code: 'InvalidArg' }
     );

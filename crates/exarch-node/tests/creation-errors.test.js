@@ -61,6 +61,28 @@ describe('creation source errors', () => {
     );
   });
 
+  it('two sources with one entry name are INVALID_CONFIGURATION naming both', () => {
+    const one = path.join(tempDir, 'one');
+    const two = path.join(tempDir, 'two');
+    fs.mkdirSync(one);
+    fs.mkdirSync(two);
+    fs.writeFileSync(path.join(one, 'a.txt'), '1');
+    fs.writeFileSync(path.join(two, 'a.txt'), '2');
+    const out = path.join(tempDir, 'o.tar');
+    assert.throws(
+      () => createArchiveSync(out, [path.join(one, 'a.txt'), path.join(two, 'a.txt')]),
+      (err) => {
+        assert.strictEqual(err.code, 'INVALID_CONFIGURATION');
+        assert.strictEqual(err.setting, 'source_paths');
+        assert.strictEqual(err.collision.name, 'a.txt');
+        assert.ok(err.collision.first.endsWith('a.txt'), err.collision.first);
+        assert.ok(err.collision.second.endsWith('a.txt'), err.collision.second);
+        return true;
+      }
+    );
+    assert.ok(!fs.existsSync(out));
+  });
+
   it('a missing source stays SOURCE_NOT_FOUND', () => {
     assert.throws(
       () => createArchiveSync(path.join(tempDir, 'o.tar'), [path.join(tempDir, 'missing')]),

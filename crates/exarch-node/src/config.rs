@@ -19,7 +19,7 @@ use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig as CoreConfig;
-use exarch_core::Staging;
+use exarch_core::Staging as CoreStaging;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
 use exarch_core::creation::CompressionLevel;
 use exarch_core::positive_from_f64;
@@ -65,14 +65,6 @@ fn bounded_bytes(limit: Limit<NonZeroU64>) -> Option<i64> {
     match limit {
         Limit::Bounded(bytes) => Some(saturating_i64(bytes.get())),
         Limit::Unbounded => None,
-    }
-}
-
-const fn staging_of(atomic: bool) -> Staging {
-    if atomic {
-        Staging::Atomic
-    } else {
-        Staging::InPlace
     }
 }
 
@@ -205,6 +197,50 @@ impl From<CoreDecodeReuseKind> for DecodeReuseKind {
             CoreDecodeReuseKind::Off => Self::Off,
             CoreDecodeReuseKind::Memory => Self::Memory,
             CoreDecodeReuseKind::TempFile => Self::TempFile,
+        }
+    }
+}
+
+/// How extraction stages its output before it is visible at the destination.
+///
+/// `in_place` (the default) writes directly into the destination. `atomic`
+/// extracts into a sibling directory and renames it onto a destination that
+/// does not exist or is empty. `atomic_replace` does the same and swaps the
+/// staged tree over an existing destination directory, replacing it as a whole.
+// Values must equal `exarch_core::Staging::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Staging {
+    /// Write directly into the destination.
+    #[napi(value = "in_place")]
+    InPlace,
+    /// Stage in a sibling directory and rename it onto an empty destination.
+    #[napi(value = "atomic")]
+    Atomic,
+    /// Stage in a sibling directory and swap it over an existing destination.
+    #[napi(value = "atomic_replace")]
+    AtomicReplace,
+}
+
+impl From<Staging> for CoreStaging {
+    fn from(staging: Staging) -> Self {
+        match staging {
+            Staging::InPlace => Self::InPlace,
+            Staging::Atomic => Self::Atomic,
+            Staging::AtomicReplace => Self::AtomicReplace,
+        }
+    }
+}
+
+impl TryFrom<CoreStaging> for Staging {
+    type Error = Error;
+
+    fn try_from(staging: CoreStaging) -> Result<Self> {
+        match staging {
+            CoreStaging::InPlace => Ok(Self::InPlace),
+            CoreStaging::Atomic => Ok(Self::Atomic),
+            CoreStaging::AtomicReplace => Ok(Self::AtomicReplace),
+            other => Err(unknown_variant("staging mode", other.as_str())),
         }
     }
 }
@@ -1085,7 +1121,7 @@ impl CreationConfig {
 /// | Setting | Default Value |
 /// |---------|--------------|
 /// | `existingFiles` | `'skip'` |
-/// | `atomic` | `false` |
+/// | `staging` | `'in_place'` |
 #[napi]
 #[derive(Debug, Clone)]
 pub struct ExtractionOptions {
@@ -1122,20 +1158,25 @@ impl ExtractionOptions {
         self
     }
 
-    /// Sets whether extraction uses a temporary directory for atomic commits.
+    /// Sets how extraction stages its output: `'in_place'` (default),
+    /// `'atomic'` or `'atomic_replace'`.
     ///
-    /// When `true`, files are extracted to a temp dir in the same parent as
-    /// the output directory, then atomically renamed on completion. On failure
-    /// the temp dir is removed, leaving the output directory untouched.
-    /// Default: `false`.
+    /// `'atomic'` extracts into a temporary sibling directory and renames it
+    /// onto the output directory on completion; on failure the temporary
+    /// directory is removed and the output directory is untouched. It needs an
+    /// output directory that does not exist or is empty: one that holds
+    /// content fails with `OUTPUT_EXISTS` before anything is extracted.
     ///
-    /// **Important:** atomic mode requires that the output directory does not
-    /// already exist. If it does, extraction fails with an
-    /// output-already-exists error. Non-atomic mode extracts into an
-    /// existing directory without error.
-    #[napi(js_name = "withAtomic")]
-    pub fn with_atomic(&mut self, atomic: bool) -> &Self {
-        self.inner.staging = staging_of(atomic);
+    /// `'atomic_replace'` also replaces an existing output directory as a
+    /// whole: the original is moved aside only after the extraction succeeded
+    /// and is restored if the swap fails. A destination that is a filesystem
+    /// root, the archive or a directory that contains it, or the working
+    /// directory or one that contains it, is refused with
+    /// `INVALID_CONFIGURATION` (`setting` is `output_path`, `protectedPath`
+    /// names the reason).
+    #[napi(js_name = "withStaging")]
+    pub fn with_staging(&mut self, staging: Staging) -> &Self {
+        self.inner.staging = staging.into();
         self
     }
 
@@ -1156,10 +1197,15 @@ impl ExtractionOptions {
         self.inner.existing_files.try_into()
     }
 
-    /// Whether atomic extraction is enabled.
+    /// How extraction stages its output.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if this binding is older than `exarch-core` and does not
+    /// know the mode.
     #[napi(getter)]
-    pub fn get_atomic(&self) -> bool {
-        self.inner.staging == Staging::Atomic
+    pub fn get_staging(&self) -> Result<Staging> {
+        self.inner.staging.try_into()
     }
 }
 
@@ -1175,7 +1221,7 @@ impl ExtractionOptions {
 /// Options for extraction into memory or into a callback.
 ///
 /// A sink has no directory to rename, so unlike `ExtractionOptions` there is
-/// no `atomic` setting: only the existing-files policy carries over.
+/// no `staging` setting: only the existing-files policy carries over.
 ///
 /// # Defaults
 ///
@@ -2533,6 +2579,40 @@ mod tests {
             .map(|p| format!("'{}'", p.as_str()))
             .collect();
         let expected = format!("export type DecodeReuseKind = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_staging_defaults_to_in_place_and_round_trips() {
+        let mut options = ExtractionOptions::new();
+        assert_eq!(options.get_staging().unwrap(), Staging::InPlace);
+        for staging in [Staging::AtomicReplace, Staging::Atomic, Staging::InPlace] {
+            options.with_staging(staging);
+            assert_eq!(options.get_staging().unwrap(), staging);
+        }
+        options.with_staging(Staging::AtomicReplace);
+        assert_eq!(options.as_core().staging, CoreStaging::AtomicReplace);
+    }
+
+    #[test]
+    fn test_staging_covers_every_core_variant() {
+        for core in CoreStaging::ALL {
+            let staging = Staging::try_from(*core).unwrap();
+            assert_eq!(CoreStaging::from(staging), *core);
+        }
+    }
+
+    #[test]
+    fn test_index_d_ts_staging_union_matches_core() {
+        let values: Vec<_> = CoreStaging::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type Staging = {}", values.join(" | "));
         let dts = include_str!("../index.d.ts");
         assert!(
             dts.lines().any(|l| l == expected),

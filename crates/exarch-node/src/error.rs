@@ -21,6 +21,11 @@
 //! - `errno`, `strerror`, `path`: the OS failure behind a
 //!   `SOURCE_NOT_ACCESSIBLE` and the source it names, redacted like the
 //!   message.
+//! - `restore`, `backupPath`, `leftoverPath`: what a failed `'atomic_replace'`
+//!   (or a left-behind output reservation) left on disk, redacted like paths.
+//! - `conflicts`: the entry names that stopped a `'refuse'` extraction.
+//! - `protectedPath`, `collision`: the typed reason of the matching
+//!   `INVALID_CONFIGURATION`.
 //! - `nonUtf8EntryPath`: the injectively escaped path of an `INVALID_ARCHIVE`
 //!   (`ENTRY_NAME`) refusal of an entry name that is not valid UTF-8.
 //! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`,
@@ -41,6 +46,8 @@ use exarch_core::FfiKind;
 use exarch_core::FfiSourceFault;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting as CorePolicySetting;
+use exarch_core::ProtectedPath as CoreProtectedPath;
+use exarch_core::Restore as CoreRestore;
 use exarch_core::SubCode;
 use exarch_core::creation::CreationReport as CoreCreationReport;
 use napi::Env;
@@ -820,6 +827,159 @@ enum Details {
     },
 }
 
+/// What became of the original destination after a failed replace
+/// (`restore` property of an `IO_ERROR` raised by `'atomic_replace'`).
+// Generates the TypeScript union only; runtime values come from `as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// The original destination was never moved aside.
+    #[napi(value = "not_needed")]
+    NotNeeded,
+    /// The original destination was moved aside and moved back.
+    #[napi(value = "restored")]
+    Restored,
+    /// The original destination could not be moved back; `backupPath` names
+    /// where it is now.
+    #[napi(value = "failed")]
+    Failed,
+}
+
+impl RestoreOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotNeeded => "not_needed",
+            Self::Restored => "restored",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// What makes a destination too important to replace as a whole (the
+/// `protectedPath` property of an `INVALID_CONFIGURATION`).
+// Values must equal `exarch_core::ProtectedPath::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectedPath {
+    /// The destination is a filesystem root.
+    #[napi(value = "filesystem_root")]
+    FilesystemRoot,
+    /// The destination is, or contains, the archive being extracted.
+    #[napi(value = "archive_ancestor")]
+    ArchiveAncestor,
+    /// The destination is, or contains, the process working directory.
+    #[napi(value = "working_directory")]
+    WorkingDirectory,
+}
+
+impl ProtectedPath {
+    fn from_core(path: CoreProtectedPath) -> Option<Self> {
+        Some(match path {
+            CoreProtectedPath::FilesystemRoot => Self::FilesystemRoot,
+            CoreProtectedPath::ArchiveAncestor => Self::ArchiveAncestor,
+            CoreProtectedPath::WorkingDirectory => Self::WorkingDirectory,
+            _ => return None,
+        })
+    }
+
+    #[cfg(test)]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FilesystemRoot => "filesystem_root",
+            Self::ArchiveAncestor => "archive_ancestor",
+            Self::WorkingDirectory => "working_directory",
+        }
+    }
+}
+
+/// The two creation sources that map to one archive entry name (the
+/// `collision` property of an `INVALID_CONFIGURATION` for `source_paths`).
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct NameCollision {
+    /// The entry name both sources map to.
+    pub name: String,
+    /// The first source that maps to it, redacted like an error path.
+    pub first: String,
+    /// The second source that maps to it, redacted like an error path.
+    pub second: String,
+}
+
+/// The typed extras of an error about the destination of an operation.
+#[derive(Debug, Default)]
+struct OutputDetail {
+    restore: Option<RestoreOutcome>,
+    backup_path: Option<String>,
+    leftover_path: Option<String>,
+    conflicts: Option<Vec<String>>,
+    protected_path: Option<ProtectedPath>,
+    collision: Option<NameCollision>,
+}
+
+impl OutputDetail {
+    fn of(err: &CoreError) -> Self {
+        use exarch_core::ConfigProblem;
+        use exarch_core::sanitize_path_for_error as host;
+
+        match err {
+            CoreError::ReplaceFailed(failure) => {
+                let (restore, backup_path) = match &failure.restore {
+                    CoreRestore::NotNeeded => (Some(RestoreOutcome::NotNeeded), None),
+                    CoreRestore::Restored => (Some(RestoreOutcome::Restored), None),
+                    CoreRestore::Failed { backup, .. } => {
+                        (Some(RestoreOutcome::Failed), Some(host(backup)))
+                    }
+                    _ => (None, None),
+                };
+                Self {
+                    restore,
+                    backup_path,
+                    leftover_path: failure.leftover.as_ref().map(|left| host(&left.path)),
+                    ..Self::default()
+                }
+            }
+            CoreError::OutputReservationLeft { path, .. } => Self {
+                leftover_path: Some(host(path)),
+                ..Self::default()
+            },
+            CoreError::DestinationOccupied { conflicts, .. } => Self {
+                conflicts: Some(
+                    conflicts
+                        .iter()
+                        .map(|path| crate::utils::path_text(path))
+                        .collect(),
+                ),
+                ..Self::default()
+            },
+            CoreError::InvalidConfiguration {
+                problem: ConfigProblem::ReplacesProtectedPath { path },
+                ..
+            } => Self {
+                protected_path: ProtectedPath::from_core(*path),
+                ..Self::default()
+            },
+            CoreError::InvalidConfiguration {
+                problem:
+                    ConfigProblem::EntryNameCollision {
+                        name,
+                        first,
+                        second,
+                    },
+                ..
+            } => Self {
+                collision: Some(NameCollision {
+                    name: name.clone(),
+                    first: host(first),
+                    second: host(second),
+                }),
+                ..Self::default()
+            },
+            CoreError::PartialExtraction(partial) => Self::of(partial.cause()),
+            _ => Self::default(),
+        }
+    }
+}
+
 /// What the OS reported for an unreadable creation source, redacted like the
 /// rest of the message.
 #[derive(Debug)]
@@ -850,6 +1010,7 @@ struct ErrorProps {
     io_kind: Option<IoKind>,
     non_utf8_entry_path: Option<String>,
     source_fault: Option<SourceFault>,
+    output: OutputDetail,
     details: Details,
     cause: Option<Error>,
 }
@@ -875,6 +1036,7 @@ fn non_utf8_entry_path(err: &CoreError) -> Option<String> {
 
 fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
     let non_utf8_entry_path = non_utf8_entry_path(&err);
+    let output = OutputDetail::of(&err);
     let FfiErrorMessage {
         kind,
         description,
@@ -895,6 +1057,7 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
             },
             non_utf8_entry_path,
             source_fault: source_fault.map(SourceFault::from),
+            output,
             details: partial.map_or(Details::None, Details::Extraction),
             cause,
         },
@@ -912,6 +1075,7 @@ fn describe_callback_over_success(operation: &str, details: Details, source: Err
             io_kind: None,
             non_utf8_entry_path: None,
             source_fault: None,
+            output: OutputDetail::default(),
             details,
             cause: Some(source),
         },
@@ -929,6 +1093,7 @@ fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Descri
             io_kind: None,
             non_utf8_entry_path: None,
             source_fault: None,
+            output: OutputDetail::default(),
             details: Details::None,
             cause: Some(source),
         },
@@ -976,6 +1141,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     io_kind: None,
                     non_utf8_entry_path: None,
                     source_fault: None,
+                    output: OutputDetail::default(),
                     details: Details::None,
                     cause: Some(source),
                 },
@@ -997,6 +1163,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     io_kind: None,
                     non_utf8_entry_path: None,
                     source_fault: None,
+                    output: OutputDetail::default(),
                     details: outcome.map_or(Details::None, Details::Extraction),
                     cause: Some(source),
                 },
@@ -1023,6 +1190,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     io_kind: None,
                     non_utf8_entry_path: None,
                     source_fault: None,
+                    output: OutputDetail::default(),
                     details: Details::None,
                     cause: reason,
                 },
@@ -1060,6 +1228,25 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
         }
         obj.set("strerror", fault.strerror)?;
         obj.set("path", fault.path)?;
+    }
+    let output = props.output;
+    if let Some(restore) = output.restore {
+        obj.set("restore", restore.as_str())?;
+    }
+    if let Some(path) = output.backup_path {
+        obj.set("backupPath", path)?;
+    }
+    if let Some(path) = output.leftover_path {
+        obj.set("leftoverPath", path)?;
+    }
+    if let Some(conflicts) = output.conflicts {
+        obj.set("conflicts", conflicts)?;
+    }
+    if let Some(path) = output.protected_path {
+        obj.set("protectedPath", path)?;
+    }
+    if let Some(collision) = output.collision {
+        obj.set("collision", collision)?;
     }
     match props.details {
         Details::None => {}
@@ -2054,6 +2241,143 @@ mod tests {
         assert!(d.description.contains("out.tar"), "{}", d.description);
         #[cfg(not(debug_assertions))]
         assert!(!d.description.contains("secret"), "{}", d.description);
+    }
+
+    #[test]
+    fn test_replace_failed_carries_typed_restore_state_and_redacted_paths() {
+        let failure = exarch_core::ReplaceFailure::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            CoreRestore::Failed {
+                backup: PathBuf::from("/srv/secret/app/.backup-1"),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+            None,
+        );
+        let d = described(CoreError::ReplaceFailed(failure));
+        assert_eq!(d.props.code.as_str(), "IO_ERROR");
+        assert_eq!(d.props.io_kind, Some(IoKind::PermissionDenied));
+        assert_eq!(d.props.output.restore, Some(RestoreOutcome::Failed));
+        let backup = d.props.output.backup_path.expect("the backup is named");
+        assert!(backup.ends_with(".backup-1"), "{backup}");
+        assert!(d.props.output.leftover_path.is_none());
+        #[cfg(not(debug_assertions))]
+        {
+            assert!(!backup.contains("secret"), "{backup}");
+            assert!(!d.description.contains("secret"), "{}", d.description);
+        }
+    }
+
+    #[test]
+    fn test_replace_failed_that_restored_has_no_backup_path() {
+        let failure = exarch_core::ReplaceFailure::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            CoreRestore::Restored,
+            None,
+        );
+        let d = described(CoreError::ReplaceFailed(failure));
+        assert_eq!(d.props.output.restore, Some(RestoreOutcome::Restored));
+        assert!(d.props.output.backup_path.is_none());
+    }
+
+    #[test]
+    fn test_output_reservation_left_names_the_leftover() {
+        let d = described(CoreError::OutputReservationLeft {
+            path: PathBuf::from("/srv/secret/app/out.tar"),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        });
+        let leftover = d
+            .props
+            .output
+            .leftover_path
+            .expect("the reservation is named");
+        assert!(leftover.ends_with("out.tar"), "{leftover}");
+        assert!(d.props.output.restore.is_none());
+    }
+
+    #[test]
+    fn test_destination_occupied_lists_the_conflicting_entries() {
+        let d = described(CoreError::DestinationOccupied {
+            destination: PathBuf::from("/srv/secret/app/out"),
+            conflicts: vec![PathBuf::from("a.txt"), PathBuf::from("d/b.txt")].into_boxed_slice(),
+        });
+        assert_eq!(
+            d.props.output.conflicts,
+            Some(vec!["a.txt".to_owned(), "d/b.txt".to_owned()])
+        );
+    }
+
+    #[test]
+    fn test_protected_path_refusal_names_the_reason() {
+        for (core, expected) in [
+            (CoreProtectedPath::FilesystemRoot, "filesystem_root"),
+            (CoreProtectedPath::ArchiveAncestor, "archive_ancestor"),
+            (CoreProtectedPath::WorkingDirectory, "working_directory"),
+        ] {
+            let d = described(CoreError::InvalidConfiguration {
+                setting: exarch_core::ConfigSetting::OutputPath,
+                problem: exarch_core::ConfigProblem::ReplacesProtectedPath { path: core },
+            });
+            assert_eq!(d.props.code.as_str(), "INVALID_CONFIGURATION");
+            assert_eq!(
+                d.props.setting,
+                Some(exarch_core::ConfigSetting::OutputPath)
+            );
+            assert_eq!(
+                d.props.output.protected_path.map(ProtectedPath::as_str),
+                Some(expected)
+            );
+        }
+        for core in CoreProtectedPath::ALL {
+            assert!(ProtectedPath::from_core(*core).is_some(), "{core:?}");
+        }
+    }
+
+    #[test]
+    fn test_entry_name_collision_names_both_sources() {
+        let d = described(CoreError::InvalidConfiguration {
+            setting: exarch_core::ConfigSetting::SourcePaths,
+            problem: exarch_core::ConfigProblem::EntryNameCollision {
+                name: "a.txt".to_owned(),
+                first: PathBuf::from("/srv/secret/one/a.txt"),
+                second: PathBuf::from("/srv/secret/two/a.txt"),
+            },
+        });
+        let collision = d.props.output.collision.expect("the collision is named");
+        assert_eq!(collision.name, "a.txt");
+        assert!(collision.first.ends_with("a.txt") && collision.second.ends_with("a.txt"));
+        #[cfg(not(debug_assertions))]
+        assert!(!collision.first.contains("secret"), "{}", collision.first);
+    }
+
+    #[test]
+    fn test_partial_extraction_keeps_the_typed_destination_detail() {
+        let source = CoreError::DestinationOccupied {
+            destination: PathBuf::from("out"),
+            conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
+        };
+        let partial =
+            exarch_core::Partial::new(source, CoreExtractionReport::new(), CorePartialWrites::Kept);
+        let d = described(CoreError::PartialExtraction(partial));
+        assert_eq!(d.props.output.conflicts, Some(vec!["a.txt".to_owned()]));
+    }
+
+    #[test]
+    fn test_index_d_ts_unions_for_destination_details_match() {
+        let restore: BTreeSet<String> = [
+            RestoreOutcome::NotNeeded,
+            RestoreOutcome::Restored,
+            RestoreOutcome::Failed,
+        ]
+        .iter()
+        .map(|value| value.as_str().to_owned())
+        .collect();
+        assert_eq!(dts_union("RestoreOutcome"), restore);
+
+        let protected: BTreeSet<String> = CoreProtectedPath::ALL
+            .iter()
+            .map(|path| path.as_str().to_owned())
+            .collect();
+        assert_eq!(dts_union("ProtectedPath"), protected);
     }
 
     #[test]

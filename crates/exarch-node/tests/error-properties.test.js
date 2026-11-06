@@ -142,7 +142,7 @@ describe('extraction error properties', () => {
 
   it('a rolled-back atomic extraction reports writes without counters', async () => {
     const config = new SecurityConfig().setMaxFileCount(1);
-    const options = new ExtractionOptions().withAtomic(true);
+    const options = new ExtractionOptions().withStaging('atomic');
     await assert.rejects(
       extractArchive(archivePath, path.join(tempDir, 'atomic-out'), config, options),
       (err) => {

@@ -150,7 +150,7 @@ describe('extractArchiveToMemory', () => {
   });
 
   it('does not accept path extraction options, so atomic cannot be requested', () => {
-    const options = new ExtractionOptions().withAtomic(true);
+    const options = new ExtractionOptions().withStaging('atomic');
     assert.throws(() => extractArchiveToMemory(tarGz, null, options), {
       code: 'InvalidArg',
     });
@@ -167,6 +167,7 @@ describe('extractArchiveToMemory', () => {
     assert.strictEqual(options.existingFiles, 'overwrite');
     assert.strictEqual('skipDuplicates' in options, false);
     assert.strictEqual('atomic' in options, false);
+    assert.strictEqual('staging' in options, false);
     const result = await extractArchiveToMemory(tarGz, null, options);
     assert.strictEqual(result.report.filesExtracted, 2);
   });

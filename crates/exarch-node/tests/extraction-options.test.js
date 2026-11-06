@@ -19,6 +19,26 @@ function createValidArchive(archivePath, tempDir) {
   createArchiveSync(archivePath, [sourceDir]);
 }
 
+function tarEntry(name, text) {
+  const data = Buffer.from(text);
+  const header = Buffer.alloc(512);
+  header.write(name, 0);
+  header.write('0000644\0', 100);
+  header.write('0000000\0', 108);
+  header.write('0000000\0', 116);
+  header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124, 'latin1');
+  header.write('00000000000\0', 136);
+  header.write('0', 156);
+  header.write('ustar\0', 257);
+  header.write('00', 263);
+  header.fill(0x20, 148, 156);
+  const sum = header.reduce((acc, byte) => acc + byte, 0);
+  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'latin1');
+  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
+  data.copy(padded);
+  return Buffer.concat([header, padded]);
+}
+
 describe('ExtractionOptions', () => {
   describe('constructor', () => {
     it("should create options with existingFiles defaulting to 'skip'", () => {
@@ -72,33 +92,33 @@ describe('ExtractionOptions', () => {
     });
   });
 
-  describe('withAtomic()', () => {
-    it('should have atomic defaulting to false', () => {
-      const opts = new ExtractionOptions();
-      assert.strictEqual(opts.atomic, false);
+  describe('withStaging()', () => {
+    it("should default to 'in_place'", () => {
+      assert.strictEqual(new ExtractionOptions().staging, 'in_place');
     });
 
-    it('should set atomic to true via withAtomic', () => {
+    it('should accept every mode and read it back', () => {
       const opts = new ExtractionOptions();
-      opts.withAtomic(true);
-      assert.strictEqual(opts.atomic, true);
+      for (const mode of ['atomic', 'atomic_replace', 'in_place']) {
+        assert.strictEqual(opts.withStaging(mode), opts);
+        assert.strictEqual(opts.staging, mode);
+      }
     });
 
-    it('should set atomic back to false via withAtomic', () => {
-      const opts = new ExtractionOptions();
-      opts.withAtomic(true);
-      opts.withAtomic(false);
-      assert.strictEqual(opts.atomic, false);
+    it('should throw on a missing, null or unknown mode and keep the previous one', () => {
+      const opts = new ExtractionOptions().withStaging('atomic');
+      assert.throws(() => opts.withStaging());
+      assert.throws(() => opts.withStaging(undefined));
+      assert.throws(() => opts.withStaging(null));
+      assert.throws(() => opts.withStaging(true), { code: 'StringExpected' });
+      assert.throws(() => opts.withStaging('swap'), { code: 'InvalidArg' });
+      assert.strictEqual(opts.staging, 'atomic', 'a rejected call must not change the mode');
     });
 
-    it('should throw when withAtomic is called with no argument, undefined, or null', () => {
+    it('should no longer expose the atomic boolean', () => {
       const opts = new ExtractionOptions();
-      opts.withAtomic(true);
-
-      assert.throws(() => opts.withAtomic());
-      assert.throws(() => opts.withAtomic(undefined));
-      assert.throws(() => opts.withAtomic(null));
-      assert.strictEqual(opts.atomic, true, 'a rejected call must not silently flip the flag');
+      assert.strictEqual('atomic' in opts, false);
+      assert.strictEqual(typeof opts.withAtomic, 'undefined');
     });
   });
 });
@@ -170,6 +190,78 @@ describe('extractArchiveSync with ExtractionOptions', () => {
         }
       );
       assert.strictEqual(fs.readFileSync(occupant, 'utf8'), 'mine');
+    });
+  });
+
+  describe('staging on a populated destination', () => {
+    function extractWith(mode, destination = outputDir) {
+      const options = new ExtractionOptions().withStaging(mode);
+      return extractArchiveSync(archivePath, destination, null, options);
+    }
+
+    it("'atomic' refuses a destination that holds content before extracting", () => {
+      fs.writeFileSync(path.join(outputDir, 'stale.txt'), 'old');
+      assert.throws(() => extractWith('atomic'), { code: 'OUTPUT_EXISTS' });
+      assert.deepStrictEqual(fs.readdirSync(outputDir), ['stale.txt']);
+    });
+
+    it("'atomic' extracts into a destination that does not exist", () => {
+      const fresh = path.join(tempDir, 'fresh');
+      assert.strictEqual(extractWith('atomic', fresh).filesExtracted, 1);
+      assert.ok(fs.existsSync(path.join(fresh, 'hello.txt')));
+    });
+
+    it("'atomic_replace' swaps the staged tree over an existing destination", () => {
+      const destination = path.join(tempDir, 'replace-me');
+      fs.mkdirSync(destination);
+      fs.writeFileSync(path.join(destination, 'stale.txt'), 'old');
+      const report = extractWith('atomic_replace', destination);
+      assert.strictEqual(report.filesExtracted, 1);
+      assert.deepStrictEqual(fs.readdirSync(destination), ['hello.txt']);
+    });
+
+    it("'atomic_replace' refuses a directory that contains the archive", () => {
+      assert.throws(
+        () => extractWith('atomic_replace', tempDir),
+        (err) => {
+          assert.strictEqual(err.code, 'INVALID_CONFIGURATION');
+          assert.strictEqual(err.setting, 'output_path');
+          assert.strictEqual(err.protectedPath, 'archive_ancestor');
+          return true;
+        }
+      );
+      assert.ok(fs.existsSync(archivePath), 'the archive must survive');
+    });
+  });
+
+  describe('refuse semantics', () => {
+    it('lists the conflicting entries and leaves the occupant untouched', () => {
+      extractArchiveSync(archivePath, outputDir);
+      const occupant = path.join(outputDir, 'hello.txt');
+      fs.writeFileSync(occupant, 'mine');
+      const options = new ExtractionOptions().withExistingFiles('refuse');
+      assert.throws(
+        () => extractArchiveSync(archivePath, outputDir, null, options),
+        (err) => {
+          assert.strictEqual(err.code, 'OUTPUT_EXISTS');
+          assert.deepStrictEqual(err.conflicts, ['hello.txt']);
+          return true;
+        }
+      );
+      assert.strictEqual(fs.readFileSync(occupant, 'utf8'), 'mine');
+    });
+
+    it('skips and counts an in-archive duplicate instead of refusing it', () => {
+      const duplicates = path.join(tempDir, 'dup.tar');
+      fs.writeFileSync(
+        duplicates,
+        Buffer.concat([tarEntry('a.txt', 'first'), tarEntry('a.txt', 'second'), Buffer.alloc(1024)])
+      );
+      const options = new ExtractionOptions().withExistingFiles('refuse');
+      const report = extractArchiveSync(duplicates, outputDir, null, options);
+      assert.strictEqual(report.filesExtracted, 1);
+      assert.strictEqual(report.filesSkipped, 1);
+      assert.strictEqual(fs.readFileSync(path.join(outputDir, 'a.txt'), 'utf8'), 'first');
     });
   });
 

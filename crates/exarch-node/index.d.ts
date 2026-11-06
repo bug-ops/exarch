@@ -150,6 +150,15 @@ export interface ExarchNativeError extends Error {
   skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A malformed archive; `subCode` classifies it when core can. */
@@ -165,6 +174,15 @@ export interface ExarchInvalidArchiveDetail {
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A refusal by policy; core always classifies it and may name the setting that relaxes it. */
@@ -175,6 +193,15 @@ export interface ExarchSecurityViolationDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A rejected setting or input. */
@@ -185,6 +212,17 @@ export interface ExarchInvalidConfigurationDetail {
   relaxableBy?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  /** Why a destination is too important to replace as a whole. */
+  protectedPath?: ProtectedPath
+  /** The two creation sources that map to one entry name. */
+  collision?: NameCollision
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** An I/O failure, with the kind core reported. */
@@ -195,6 +233,18 @@ export interface ExarchIoDetail {
   relaxableBy?: undefined
   setting?: undefined
   nonUtf8EntryPath?: undefined
+  /** What became of the original destination after a failed `'atomic_replace'`. */
+  restore?: RestoreOutcome
+  /** Where the original destination remains when `restore` is `'failed'`, redacted like an error path. */
+  backupPath?: string
+  /** A staging directory or empty output reservation left on disk, redacted like an error path. */
+  leftoverPath?: string
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A quota refusal; `subCode` names the quota that was exceeded. */
@@ -205,6 +255,15 @@ export interface ExarchQuotaDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A compression ratio refusal; `subCode` names what the ratio was measured over. */
@@ -215,6 +274,15 @@ export interface ExarchZipBombDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /**
@@ -232,6 +300,35 @@ export interface ExarchSourceNotAccessibleDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+}
+
+/**
+ * An output that already exists. `conflicts` is set on a `'refuse'` extraction
+ * into a destination that holds some of the paths to extract.
+ */
+export interface ExarchOutputExistsDetail {
+  code: 'OUTPUT_EXISTS'
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
+  conflicts?: Array<string>
+  protectedPath?: undefined
+  collision?: undefined
 }
 
 /** Every other code carries no detail property. */
@@ -245,12 +342,22 @@ export interface ExarchPlainCodeDetail {
     | 'QUOTA_EXCEEDED'
     | 'ZIP_BOMB'
     | 'SOURCE_NOT_ACCESSIBLE'
+    | 'OUTPUT_EXISTS'
   >
   subCode?: undefined
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** The pairing of a `code` with the properties it can carry. */
@@ -262,6 +369,7 @@ export type ExarchErrorCodeDetail =
   | ExarchQuotaDetail
   | ExarchZipBombDetail
   | ExarchSourceNotAccessibleDetail
+  | ExarchOutputExistsDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -361,6 +469,15 @@ export interface HeuristicIssueDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /**
@@ -509,7 +626,7 @@ export declare class CreationConfig {
  * | Setting | Default Value |
  * |---------|--------------|
  * | `existingFiles` | `'skip'` |
- * | `atomic` | `false` |
+ * | `staging` | `'in_place'` |
  */
 export declare class ExtractionOptions {
   /** Creates a new `ExtractionOptions` with defaults. */
@@ -530,19 +647,24 @@ export declare class ExtractionOptions {
    */
   withExistingFiles(policy: ExistingFiles): this
   /**
-   * Sets whether extraction uses a temporary directory for atomic commits.
+   * Sets how extraction stages its output: `'in_place'` (default),
+   * `'atomic'` or `'atomic_replace'`.
    *
-   * When `true`, files are extracted to a temp dir in the same parent as
-   * the output directory, then atomically renamed on completion. On failure
-   * the temp dir is removed, leaving the output directory untouched.
-   * Default: `false`.
+   * `'atomic'` extracts into a temporary sibling directory and renames it
+   * onto the output directory on completion; on failure the temporary
+   * directory is removed and the output directory is untouched. It needs an
+   * output directory that does not exist or is empty: one that holds
+   * content fails with `OUTPUT_EXISTS` before anything is extracted.
    *
-   * **Important:** atomic mode requires that the output directory does not
-   * already exist. If it does, extraction fails with an
-   * output-already-exists error. Non-atomic mode extracts into an
-   * existing directory without error.
+   * `'atomic_replace'` also replaces an existing output directory as a
+   * whole: the original is moved aside only after the extraction succeeded
+   * and is restored if the swap fails. A destination that is a filesystem
+   * root, the archive or a directory that contains it, or the working
+   * directory or one that contains it, is refused with
+   * `INVALID_CONFIGURATION` (`setting` is `output_path`, `protectedPath`
+   * names the reason).
    */
-  withAtomic(atomic: boolean): this
+  withStaging(staging: Staging): this
   /** Finalizes the configuration (for API consistency). */
   build(): this
   /**
@@ -554,8 +676,15 @@ export declare class ExtractionOptions {
    * know the policy.
    */
   get existingFiles(): ExistingFiles
-  /** Whether atomic extraction is enabled. */
-  get atomic(): boolean
+  /**
+   * How extraction stages its output.
+   *
+   * # Errors
+   *
+   * Returns error if this binding is older than `exarch-core` and does not
+   * know the mode.
+   */
+  get staging(): Staging
 }
 
 /**
@@ -830,7 +959,7 @@ export declare class SecurityConfig {
  * Options for extraction into memory or into a callback.
  *
  * A sink has no directory to rename, so unlike `ExtractionOptions` there is
- * no `atomic` setting: only the existing-files policy carries over.
+ * no `staging` setting: only the existing-files policy carries over.
  *
  * # Defaults
  *
@@ -1378,8 +1507,8 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  * - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
  *   set when extraction fails after some files were already written. `writes`
  *   is `'kept'` (files remain; the counters and the typed `warnings` array
- *   follow) or, with `atomic`, `'rolled_back'` (the destination was discarded;
- *   no counters).
+ *   follow) or, with `'atomic'` or `'atomic_replace'` staging, `'rolled_back'`
+ *   (the destination was discarded; no counters).
  *
  * # Examples
  *
@@ -2184,6 +2313,19 @@ export interface MissingLinkTarget {
   state: 'missing'
 }
 
+/**
+ * The two creation sources that map to one archive entry name (the
+ * `collision` property of an `INVALID_CONFIGURATION` for `source_paths`).
+ */
+export interface NameCollision {
+  /** The entry name both sources map to. */
+  name: string
+  /** The first source that maps to it, redacted like an error path. */
+  first: string
+  /** The second source that maps to it, redacted like an error path. */
+  second: string
+}
+
 /** A link target above the host's name limits. */
 export interface OversizedLinkTarget {
   /** Always `'oversized'`. */
@@ -2208,6 +2350,12 @@ export type PathModel = 'host' | 'portable'
 export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes'
 
 /**
+ * What makes a destination too important to replace as a whole (the
+ * `protectedPath` property of an `INVALID_CONFIGURATION`).
+ */
+export type ProtectedPath = 'filesystem_root' | 'archive_ancestor' | 'working_directory'
+
+/**
  * Value of the `subCode` property of a `QUOTA_EXCEEDED` error: the quota
  * that was exceeded.
  */
@@ -2220,6 +2368,12 @@ export interface RecordedLinkTarget {
   /** The target as the archive spells it. */
   path: string
 }
+
+/**
+ * What became of the original destination after a failed replace
+ * (`restore` property of an `IO_ERROR` raised by `'atomic_replace'`).
+ */
+export type RestoreOutcome = 'not_needed' | 'restored' | 'failed'
 
 /** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
 export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH'
@@ -2258,6 +2412,16 @@ export interface SkippedSummary {
   /** The first skipped entries in the order they were skipped, at most 64. */
   sample: Array<SkippedEntry>
 }
+
+/**
+ * How extraction stages its output before it is visible at the destination.
+ *
+ * `in_place` (the default) writes directly into the destination. `atomic`
+ * extracts into a sibling directory and renames it onto a destination that
+ * does not exist or is empty. `atomic_replace` does the same and swaps the
+ * staged tree over an existing destination directory, replacing it as a whole.
+ */
+export type Staging = 'in_place' | 'atomic' | 'atomic_replace'
 
 /** The `kind` of a [`MemorySymlinkEntry`]. */
 export type SymlinkKind = 'symlink'

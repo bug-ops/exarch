@@ -150,6 +150,15 @@ export interface ExarchNativeError extends Error {
   skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A malformed archive; `subCode` classifies it when core can. */
@@ -165,6 +174,15 @@ export interface ExarchInvalidArchiveDetail {
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A refusal by policy; core always classifies it and may name the setting that relaxes it. */
@@ -175,6 +193,15 @@ export interface ExarchSecurityViolationDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A rejected setting or input. */
@@ -185,6 +212,17 @@ export interface ExarchInvalidConfigurationDetail {
   relaxableBy?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  /** Why a destination is too important to replace as a whole. */
+  protectedPath?: ProtectedPath
+  /** The two creation sources that map to one entry name. */
+  collision?: NameCollision
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** An I/O failure, with the kind core reported. */
@@ -195,6 +233,18 @@ export interface ExarchIoDetail {
   relaxableBy?: undefined
   setting?: undefined
   nonUtf8EntryPath?: undefined
+  /** What became of the original destination after a failed `'atomic_replace'`. */
+  restore?: RestoreOutcome
+  /** Where the original destination remains when `restore` is `'failed'`, redacted like an error path. */
+  backupPath?: string
+  /** A staging directory or empty output reservation left on disk, redacted like an error path. */
+  leftoverPath?: string
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A quota refusal; `subCode` names the quota that was exceeded. */
@@ -205,6 +255,15 @@ export interface ExarchQuotaDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A compression ratio refusal; `subCode` names what the ratio was measured over. */
@@ -215,6 +274,15 @@ export interface ExarchZipBombDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /**
@@ -232,6 +300,35 @@ export interface ExarchSourceNotAccessibleDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+}
+
+/**
+ * An output that already exists. `conflicts` is set on a `'refuse'` extraction
+ * into a destination that holds some of the paths to extract.
+ */
+export interface ExarchOutputExistsDetail {
+  code: 'OUTPUT_EXISTS'
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
+  conflicts?: Array<string>
+  protectedPath?: undefined
+  collision?: undefined
 }
 
 /** Every other code carries no detail property. */
@@ -245,12 +342,22 @@ export interface ExarchPlainCodeDetail {
     | 'QUOTA_EXCEEDED'
     | 'ZIP_BOMB'
     | 'SOURCE_NOT_ACCESSIBLE'
+    | 'OUTPUT_EXISTS'
   >
   subCode?: undefined
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** The pairing of a `code` with the properties it can carry. */
@@ -262,6 +369,7 @@ export type ExarchErrorCodeDetail =
   | ExarchQuotaDetail
   | ExarchZipBombDetail
   | ExarchSourceNotAccessibleDetail
+  | ExarchOutputExistsDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -361,6 +469,15 @@ export interface HeuristicIssueDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /**

@@ -169,7 +169,7 @@ for (const entry of result.entries) {
 `MemoryEntry` is a union discriminated by `kind`: a file always has `data`, a
 symlink or hardlink always has `target`. The in-memory and callback functions
 take `SinkOptions` (`withExistingFiles`, `withDecodeReuse`) as `options`, not
-`ExtractionOptions`: a sink has no directory to rename, so `atomic` cannot be
+`ExtractionOptions`: a sink has no directory to rename, so `staging` cannot be
 requested.
 
 **Note:** `maxBytes` caps payload plus path bytes plus 256 per entry and
@@ -292,6 +292,9 @@ try {
 | `relaxableBy` | a `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit | The `PolicySetting` id, for example `'symlinks'` |
 | `subCode` | an `INVALID_ARCHIVE` with a finer classification, every core `SECURITY_VIOLATION`, every `QUOTA_EXCEEDED` and every `ZIP_BOMB` | on `INVALID_ARCHIVE`, `'TAR_AMBIGUITY'` (a TAR header read differently by different tools), `'TAR_TRAILER'` (the stream after the TAR end-of-archive marker is corrupt or truncated), `'ZIP_READER'` (a failure of the ZIP reader or of the structural check built on it), `'LINK_TARGET'`, `'DUPLICATE_ENTRY'`, `'ENTRY_NAME'`, `'DECLARED_SIZE'`, `'INTEGRITY'` (the refusal of that family), `'TAR_READER'` or `'SEVENZ_READER'` (a failure of the TAR or 7z reader); on `SECURITY_VIOLATION`, the family of the refusal, one of `'PATH_NAME'`, `'PATH_DEPTH'`, `'LINK_TARGET'`, `'LINK_POLICY'`, `'EXISTING_SYMLINK'`, `'ENTRY_TYPE'`, `'ROOT_ENTRY'`, `'ENCRYPTED'`, `'COMPRESSION_METHOD'`, `'SOLID_ARCHIVE'`, `'DECLARED_SIZE'`, `'CONCURRENT_CHANGE'`, `'TAR_METADATA'`, `'TAR_TRAILER'`, `'PLATFORM'`, `'OUTPUT_CONFLICT'`, `'SOURCE_PATH'`; on `QUOTA_EXCEEDED`, the quota (`'FILE_COUNT'`, `'TOTAL_SIZE'`, `'FILE_SIZE'`, `'INTEGER_OVERFLOW'`, `'DECODER_MEMORY'`, `'COMPRESSED_MEMBERS'`, `'TREE_NODES'`, `'SINK_CAPACITY'` or `'SOLID_BLOCK_MEMORY'`); on `ZIP_BOMB`, what the ratio was measured over (`'ENTRY'`, `'SOLID_BLOCK'` or `'SKIPPED_ENTRIES'`); typed `InvalidArchiveSubCode`, `SecurityViolationSubCode`, `QuotaSubCode` or `ZipBombSubCode` |
 | `nonUtf8EntryPath` | an `INVALID_ARCHIVE` (`'ENTRY_NAME'`) refusal of an entry name that is not valid UTF-8 | The name written injectively: a backslash is `\x5C`, each invalid byte `\xNN` |
+| `restore`, `backupPath`, `leftoverPath` | an `IO_ERROR` from a failed `'atomic_replace'` (`leftoverPath` also from a creation that left an empty output reservation) | `restore` is `'not_needed'`, `'restored'` or `'failed'`; `backupPath` names where the original remains after `'failed'`; `leftoverPath` a staging directory or reservation left on disk; paths are redacted like the message |
+| `conflicts` | an `OUTPUT_EXISTS` from a `'refuse'` extraction | The entry names that found an occupant |
+| `protectedPath`, `collision` | an `INVALID_CONFIGURATION` for a protected `'atomic_replace'` destination, or for creation sources that map to one entry name | `'filesystem_root'`, `'archive_ancestor'` or `'working_directory'`; `{ name, first, second }` |
 | `ioKind` | an `IO_ERROR` | The `IoKind` core reported, for example `'NotFound'`, `'PermissionDenied'` or `'StorageFull'`; `'Other'` for a kind with no entry in `IoKind` |
 | `writes` | an extraction failed after producing output | `'kept'`, `'rolled_back'` (atomic extraction discarded the output) or `'discarded'` (an in-memory extraction wrote nothing to disk and dropped its entries) |
 | `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`, `warnings` | `writes === 'kept'` | Counters, the skips by reason and the typed `ExtractionWarning[]` |
@@ -317,7 +320,7 @@ Extract an archive asynchronously with security validation.
 | `archivePath` | `string` | Path to the archive file |
 | `outputDir` | `string` | Directory where files will be extracted |
 | `config` | `SecurityConfig` | Optional security configuration |
-| `options` | `ExtractionOptions` | Optional `new ExtractionOptions().withAtomic(true)` / `.withExistingFiles('skip' \| 'overwrite' \| 'refuse')` |
+| `options` | `ExtractionOptions` | Optional `new ExtractionOptions().withStaging('in_place' \| 'atomic' \| 'atomic_replace')` / `.withExistingFiles('skip' \| 'overwrite' \| 'refuse')` |
 
 **Returns:** `Promise<ExtractionReport>`
 

@@ -195,8 +195,8 @@ const _: () = assert!(
 /// - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
 ///   set when extraction fails after some files were already written. `writes`
 ///   is `'kept'` (files remain; the counters and the typed `warnings` array
-///   follow) or, with `atomic`, `'rolled_back'` (the destination was discarded;
-///   no counters).
+///   follow) or, with `'atomic'` or `'atomic_replace'` staging, `'rolled_back'`
+///   (the destination was discarded; no counters).
 ///
 /// # Examples
 ///

@@ -16,9 +16,10 @@ apart from a genuine partial extraction/creation.
 """
 
 import io
+import os
+import sys
 import tarfile
 import threading
-import time
 
 import pytest
 
@@ -245,47 +246,41 @@ def test_progress_variants_do_not_hold_a_borrow_of_the_config(temp_dir):
 
 
 def test_other_threads_run_while_a_progress_extraction_decodes(temp_dir):
-    """The GIL is released between callbacks, as it is without a callback (#987)."""
-    size = 128 * 1024 * 1024
-    archive = _tar_gz_of(temp_dir, [("big.bin", bytes(size)), ("after.txt", b"x")])
+    """The GIL is released between callbacks, as it is without a callback (#987).
+
+    A thread is parked on a gate and released from the first callback. With the
+    switch interval raised, the interpreter never forces the running thread to
+    yield, so the thread can only run in the native stretch between two
+    callbacks, and only if the GIL is released there.
+    """
+    archive = _tar_gz_of(temp_dir, [("big.bin", os.urandom(16 * 1024 * 1024)), ("after.txt", b"x")])
     output = temp_dir / "output"
     output.mkdir()
-    stop = threading.Event()
-    armed = threading.Event()
-    first_run = []
-    marks = []
+    gate = threading.Event()
+    ran = threading.Event()
+    seen = []
 
-    def spin():
-        while not stop.is_set():
-            if armed.is_set() and not first_run:
-                first_run.append(time.perf_counter())
+    def parked():
+        gate.wait()
+        ran.set()
 
-    worker = threading.Thread(target=spin)
+    worker = threading.Thread(target=parked)
 
     def callback(path, total, current, bytes_written):
         if current == 1:
             worker.start()
-            marks.append(time.perf_counter())
-            armed.set()
+            gate.set()
         else:
-            marks.append(time.perf_counter())
+            seen.append(ran.is_set())
 
-    config = (
-        exarch.SecurityConfig()
-        .with_max_file_size(size * 2)
-        .with_max_total_size(size * 2)
-        .with_max_compression_ratio(1e9)
-    )
+    config = exarch.SecurityConfig().with_max_file_size(32 * 1024 * 1024)
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1000)
     try:
         exarch.extract_archive_with_progress(archive, output, config, callback)
     finally:
-        stop.set()
-        if worker.is_alive():
-            worker.join()
+        sys.setswitchinterval(interval)
+        gate.set()
+        worker.join()
 
-    window = marks[1] - marks[0]
-    assert window > 0.02, "the first entry decoded too fast to observe a second thread"
-    assert first_run, "the thread never ran"
-    assert first_run[0] - marks[0] < window / 2, (
-        "the thread had to wait for the extraction to finish: the GIL was held"
-    )
+    assert seen == [True], "the thread could not run while the first entry was decoded: GIL held"

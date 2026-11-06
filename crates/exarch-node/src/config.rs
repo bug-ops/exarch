@@ -479,10 +479,6 @@ impl SecurityConfig {
     /// Returns error if the extension is empty, exceeds maximum length, or
     /// contains a null byte, whitespace, a path separator or an inner dot.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript string by reference"
-    )]
     pub fn add_allowed_extension(&mut self, env: Env, ext: String) -> Result<&Self> {
         self.try_add_allowed_extension(&ext)
             .map_err(|err| err.into_js_error(env))?;
@@ -496,10 +492,6 @@ impl SecurityConfig {
     /// Returns error if the component is empty, exceeds maximum length, or
     /// contains a null byte, a path separator, `.` or `..`.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript string by reference"
-    )]
     pub fn add_banned_component(&mut self, env: Env, component: String) -> Result<&Self> {
         self.try_add_banned_component(&component)
             .map_err(|err| err.into_js_error(env))?;
@@ -543,10 +535,6 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `banned_path_component`)
     /// for any value `addBannedComponent` refuses.
     #[napi(js_name = "setBannedComponents")]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript array by reference"
-    )]
     pub fn set_banned_components(&mut self, env: Env, components: Vec<String>) -> Result<&Self> {
         self.try_set_banned_components(&components)
             .map_err(|err| err.into_js_error(env))?;
@@ -574,10 +562,6 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
     /// pattern shape that is refused.
     #[napi(js_name = "addIncludePattern")]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript string by reference"
-    )]
     pub fn add_include_pattern(&mut self, env: Env, pattern: String) -> Result<&Self> {
         self.try_set_include_patterns(Some(std::slice::from_ref(&pattern)), SelectionEdit::Append)
             .map_err(|err| err.into_js_error(env))?;
@@ -594,10 +578,6 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
     /// pattern shape that is refused.
     #[napi(js_name = "setIncludePatterns")]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript array by reference"
-    )]
     pub fn set_include_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
         self.try_set_include_patterns(Some(&patterns), SelectionEdit::Replace)
             .map_err(|err| err.into_js_error(env))?;
@@ -615,10 +595,6 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
     /// pattern shape that is refused.
     #[napi(js_name = "addExcludePattern")]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript string by reference"
-    )]
     pub fn add_exclude_pattern(&mut self, env: Env, pattern: String) -> Result<&Self> {
         self.try_set_exclude_patterns(std::slice::from_ref(&pattern), SelectionEdit::Append)
             .map_err(|err| err.into_js_error(env))?;
@@ -635,10 +611,6 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
     /// pattern shape that is refused.
     #[napi(js_name = "setExcludePatterns")]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript array by reference"
-    )]
     pub fn set_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
         self.try_set_exclude_patterns(&patterns, SelectionEdit::Replace)
             .map_err(|err| err.into_js_error(env))?;
@@ -697,20 +669,12 @@ impl SecurityConfig {
 
     /// Checks if a path component is allowed.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi passes JavaScript arguments by value"
-    )]
     pub fn is_path_component_allowed(&self, component: String) -> bool {
         self.inner.is_path_component_allowed(&component)
     }
 
     /// Checks if a file extension is allowed.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi passes JavaScript arguments by value"
-    )]
     pub fn is_extension_allowed(&self, extension: String) -> bool {
         self.inner.is_extension_allowed(Some(&extension))
     }
@@ -846,10 +810,6 @@ impl SecurityConfig {
 
     /// Checks if a specific extension is in the allowed list.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi passes JavaScript arguments by value"
-    )]
     pub fn has_allowed_extension(&self, ext: String) -> bool {
         Extension::try_from(ext.as_str()).is_ok_and(|ext| {
             self.inner
@@ -919,10 +879,6 @@ impl SecurityConfig {
 
     /// Checks if a specific component is in the banned list.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi passes JavaScript arguments by value"
-    )]
     pub fn has_banned_path_component(&self, component: String) -> bool {
         self.inner
             .banned_path_components
@@ -1266,10 +1222,6 @@ impl CreationConfig {
     /// `.` or `..` as a component, an absolute path or one over 255 bytes. A
     /// name holding such a character cannot be excluded by pattern.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript string by reference"
-    )]
     pub fn add_exclude_pattern(&mut self, env: Env, pattern: String) -> Result<&Self> {
         self.try_add_exclude_pattern(&pattern)
             .map_err(|err| err.into_js_error(env))?;
@@ -1286,10 +1238,6 @@ impl CreationConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
     /// pattern `addExcludePattern` refuses.
     #[napi(js_name = "setExcludePatterns")]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript array by reference"
-    )]
     pub fn set_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
         self.try_set_exclude_patterns(&patterns)
             .map_err(|err| err.into_js_error(env))?;

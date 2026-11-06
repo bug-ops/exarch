@@ -346,11 +346,7 @@ fn into_memory_extraction(
 /// );
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    reason = "napi passes JavaScript arguments by value, and the JS signature is positional: `extractArchiveToMemory`'s arguments plus `progress`"
-)]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_memory_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -425,10 +421,6 @@ fn create_to_bytes_core(
 /// const { data, report } = await createArchiveToBytes(['src/'], 'TarGz');
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn create_archive_to_bytes<'env>(
     env: &'env Env,
     sources: Vec<String>,
@@ -468,10 +460,6 @@ pub fn create_archive_to_bytes<'env>(
 /// const { data } = createArchiveToBytesSync(['src/'], 'Zip');
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn create_archive_to_bytes_sync(
     env: Env,
     sources: Vec<String>,
@@ -527,11 +515,7 @@ pub fn create_archive_to_bytes_sync(
 /// const { entries } = await extractArchiveToMemory(fs.readFileSync('a.tar.gz'));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    reason = "napi arguments are owned and the JS signature is positional, `signal` last"
-)]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_memory<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -577,10 +561,6 @@ pub fn extract_archive_to_memory<'env>(
 /// const { entries } = extractArchiveToMemorySync(fs.readFileSync('a.zip'));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn extract_archive_to_memory_sync(
     env: Env,
     data: Uint8Array,
@@ -627,11 +607,7 @@ pub fn extract_archive_to_memory_sync(
 /// );
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    reason = "napi passes JavaScript arguments by value, and the JS signature is positional: `extractArchiveToMemorySync`'s arguments plus `progress`"
-)]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_memory_with_progress_sync(
     env: Env,
     data: Uint8Array,
@@ -652,11 +628,7 @@ pub fn extract_archive_to_memory_with_progress_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn union_line<T: Copy>(name: &str, all: &[T], as_str: fn(T) -> &'static str) -> String {
-        let values: Vec<String> = all.iter().map(|v| format!("'{}'", as_str(*v))).collect();
-        format!("export type {name} = {}", values.join(" | "))
-    }
+    use crate::utils::union_line;
 
     #[test]
     fn index_d_ts_path_model_matches_core() {

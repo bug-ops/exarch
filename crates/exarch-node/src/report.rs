@@ -1447,6 +1447,7 @@ impl TryFrom<exarch_core::VerificationIssue> for VerificationIssue {
 )]
 mod tests {
     use super::*;
+    use crate::utils::union_line;
     use std::assert_matches;
 
     fn skipped(count: usize) -> exarch_core::Skips {
@@ -2289,11 +2290,6 @@ mod tests {
                 .map(|v| ManifestEntryType::from(*v))
                 .collect::<Vec<_>>(),
         );
-    }
-
-    fn union_line<T: Copy>(name: &str, all: &[T], as_str: fn(T) -> &'static str) -> String {
-        let values: Vec<String> = all.iter().map(|v| format!("'{}'", as_str(*v))).collect();
-        format!("export type {name} = {}", values.join(" | "))
     }
 
     #[test]

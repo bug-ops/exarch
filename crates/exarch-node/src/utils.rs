@@ -47,6 +47,14 @@ pub fn boundary_paths(paths: &[String]) -> Result<Vec<BoundaryPath>, CoreError> 
     paths.iter().map(|path| boundary_path(path)).collect()
 }
 
+/// The line `export type {name} = 'a' | 'b'` that the generated `index.d.ts`
+/// holds for a closed core enum, so a test can look it up.
+#[cfg(test)]
+pub fn union_line<T: Copy>(name: &str, all: &[T], as_str: fn(T) -> &'static str) -> String {
+    let values: Vec<String> = all.iter().map(|v| format!("'{}'", as_str(*v))).collect();
+    format!("export type {name} = {}", values.join(" | "))
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

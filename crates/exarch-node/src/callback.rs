@@ -232,11 +232,7 @@ impl CallbackJob {
 /// });
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    reason = "napi arguments are owned and the JS signature is positional, `signal` last"
-)]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_callback<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -300,10 +296,6 @@ pub fn extract_archive_to_callback<'env>(
 /// extractArchiveToCallbackSync(fs.readFileSync('a.zip'), (entry) => names.push(entry.path));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn extract_archive_to_callback_sync<'env>(
     env: Env,
     data: Uint8Array,

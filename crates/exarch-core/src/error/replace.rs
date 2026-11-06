@@ -102,7 +102,7 @@ impl ReplaceFailure {
             "failed to replace the destination: {}",
             sanitize_io_error_for_error(&self.error)
         );
-        match &self.restore {
+        let restore = match &self.restore {
             Restore::NotNeeded => format!("{head}; the original destination is unchanged"),
             Restore::Restored => format!("{head}; the original destination was restored"),
             Restore::Failed { backup, error } => format!(
@@ -110,6 +110,13 @@ impl ReplaceFailure {
                 sanitize_io_error_for_error(error),
                 sanitize_path_for_error(backup)
             ),
+        };
+        match &self.leftover {
+            Some(leftover) => format!(
+                "{restore}; a staging directory remains at {}",
+                sanitize_path_for_error(&leftover.path)
+            ),
+            None => restore,
         }
     }
 }
@@ -118,14 +125,21 @@ impl fmt::Display for ReplaceFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "failed to replace the destination: {}", self.error)?;
         match &self.restore {
-            Restore::NotNeeded => f.write_str("; the original destination is unchanged"),
-            Restore::Restored => f.write_str("; the original destination was restored"),
+            Restore::NotNeeded => f.write_str("; the original destination is unchanged")?,
+            Restore::Restored => f.write_str("; the original destination was restored")?,
             Restore::Failed { backup, error } => write!(
                 f,
                 "; restoring the original destination failed ({error}), it remains at {}",
                 backup.display()
-            ),
+            )?,
         }
+        self.leftover.as_ref().map_or(Ok(()), |leftover| {
+            write!(
+                f,
+                "; a staging directory remains at {}",
+                leftover.path.display()
+            )
+        })
     }
 }
 

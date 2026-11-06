@@ -254,6 +254,43 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    #[cfg(not(debug_assertions))]
+    fn host_paths_of_the_new_variants_are_redacted_in_release() {
+        use crate::ReplaceFailure;
+        use crate::Restore;
+        use crate::StagingLeftover;
+
+        let occupied = ArchiveError::DestinationOccupied {
+            destination: PathBuf::from("/srv/secret/dest"),
+            conflicts: Box::new([PathBuf::from("a/b")]),
+        };
+        assert_eq!(occupied.redacted_path().as_deref(), Some("dest"));
+        assert!(!occupied.into_ffi_message().description.contains("secret"));
+
+        let left = ArchiveError::OutputReservationLeft {
+            path: PathBuf::from("/srv/secret/out.tar"),
+            error: std::io::Error::other("x"),
+        };
+        assert!(!left.into_ffi_message().description.contains("secret"));
+
+        let mut failure = ReplaceFailure::new(
+            std::io::Error::other("x"),
+            Restore::Failed {
+                backup: PathBuf::from("/srv/secret/backup"),
+                error: std::io::Error::other("y"),
+            },
+            None,
+        );
+        failure.leftover = Some(StagingLeftover {
+            path: PathBuf::from("/srv/secret/stage"),
+        });
+        let text = ArchiveError::ReplaceFailed(failure)
+            .into_ffi_message()
+            .description;
+        assert!(!text.contains("secret"), "{text}");
+    }
+
+    #[test]
     #[cfg(debug_assertions)]
     fn test_sanitize_path_for_error_keeps_full_path_in_debug() {
         let path = PathBuf::from("/srv/secret/app/x.txt");

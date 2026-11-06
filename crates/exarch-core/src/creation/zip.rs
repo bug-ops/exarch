@@ -85,7 +85,10 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
             )?,
             EntryType::Directory => {
                 let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
-                zip.add_directory(&dir_path, options).map_err(|e| {
+                let metadata =
+                    std::fs::metadata(&entry.path).map_err(|e| source_error(&entry.path, e))?;
+                let dir_options = options_with_mode(&options, config, &metadata);
+                zip.add_directory(&dir_path, dir_options).map_err(|e| {
                     std::io::Error::other(IoContext::new(
                         "failed to add directory to zip archive",
                         e.to_string(),
@@ -217,20 +220,7 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
         return Ok(());
     }
 
-    // Configure options with permissions if needed
-    let file_options = if config.permissions.preserves() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            options.unix_permissions(metadata.permissions().mode())
-        }
-        #[cfg(not(unix))]
-        {
-            *options
-        }
-    } else {
-        *options
-    };
+    let file_options = options_with_mode(options, config, &metadata);
 
     let archive_name = normalize_zip_path(archive_path)?;
 
@@ -261,6 +251,23 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     report.bytes_written += bytes_written;
 
     Ok(())
+}
+
+/// Returns `options` carrying the source mode when `config` preserves
+/// permissions, so files and directories are stored alike.
+fn options_with_mode(
+    options: &SimpleFileOptions,
+    config: &CreationConfig,
+    metadata: &std::fs::Metadata,
+) -> SimpleFileOptions {
+    #[cfg(unix)]
+    if config.permissions.preserves() {
+        use std::os::unix::fs::PermissionsExt;
+        return options.unix_permissions(metadata.permissions().mode());
+    }
+    #[cfg(not(unix))]
+    let _ = (config, metadata);
+    *options
 }
 
 /// Normalizes a path for ZIP archive format.
@@ -529,6 +536,57 @@ mod tests {
                 assert_eq!(mode & 0o777, 0o755, "Permissions should be preserved");
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn zip_directory_modes(preserve: bool) -> Vec<(String, u32)> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("output.zip");
+        let source = TempDir::new().unwrap();
+        for (name, mode) in [("d700", 0o700), ("d750", 0o750)] {
+            let dir = source.path().join(name);
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("f"), "x").unwrap();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        let config = CreationConfig::default().with_preserve_permissions(preserve);
+        create_archive(&output, &[source.path()], &config).unwrap();
+
+        let mut archive = zip::ZipArchive::new(File::open(&output).unwrap()).unwrap();
+        let mut modes = Vec::new();
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).unwrap();
+            let name = entry.name().unwrap().into_owned();
+            if entry.is_dir()
+                && matches!(
+                    name.trim_end_matches('/').rsplit('/').next(),
+                    Some("d700" | "d750")
+                )
+            {
+                modes.push((name, entry.unix_mode().unwrap() & 0o777));
+            }
+        }
+        modes.sort();
+        modes
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_create_zip_directory_entries_carry_the_source_mode() {
+        let modes = zip_directory_modes(true);
+        let leaf_modes: Vec<u32> = modes.iter().map(|(_, mode)| *mode).collect();
+        assert_eq!(leaf_modes, [0o700, 0o750]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_create_zip_directory_entries_are_0755_without_preserve() {
+        let modes = zip_directory_modes(false);
+        assert_eq!(modes.len(), 2);
+        assert!(modes.iter().all(|(_, mode)| *mode == 0o755));
     }
 
     #[test]

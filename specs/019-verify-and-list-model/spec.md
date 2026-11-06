@@ -9,7 +9,7 @@ tags:
   - rust
   - inspection
 created: 2026-10-26
-updated: 2026-11-05
+updated: 2026-11-06
 status: implemented
 related:
   - "[[constitution]]"
@@ -164,7 +164,7 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | FR-025 | A checksum or decoder failure SHALL be a High `CorruptData` issue; everything not verified SHALL be counted per `UnverifiedReason` and reported as one archive-level Medium `IntegrityIncomplete` issue, so overall status is at least `Warning` | must |
 | FR-026 | `UnverifiedReason` SHALL be `#[non_exhaustive]` with `OverBudget`, `ResourceLimit`, `SolidPolicy`, `SizeCeiling`, `UncoveredBlockCrc`, `NotDecodable`, `NoEndMarker`, `PathTooLong`, `DescriptorTail`, each with a stable snake_case string form shared by the CLI JSON and bindings and a `description()` | must |
 | FR-027 | `IntegrityGaps` SHALL derive from one value the counts, the listed entries and the issue message: `counts()` (reason order, absent when zero), `count(reason)`, `total()`, `is_empty()`, `entries()` (`UnverifiedEntry { path, reason }`, capped at 256) and `omitted()`; `integrity_gaps()` SHALL be `None` when no check was requested and an empty value when everything was verified | must |
-| FR-028 | With integrity requested, a TAR entry whose content fails to decode or is cut short SHALL fail the call with `ArchiveError::InvalidArchive` rather than yield a partial report; corruption in a TAR trailer (a gzip CRC, an xz index) SHALL be a `Fail` report | must |
+| FR-028 | With integrity requested, a TAR entry whose content fails to decode or is cut short SHALL fail the call with `ArchiveError::InvalidArchive` rather than yield a partial report, except that a failure the source itself caused (a recorded source fault or an errno) SHALL fail it with `ArchiveError::Io`, not `Malformed`, as extraction does (`IntegrityPass::decode_with_faults`, #1006); corruption in a TAR trailer (a gzip CRC, an xz index) SHALL be a `Fail` report | must |
 | FR-029 | The CLI SHALL map the option to `verify --check-integrity` with `--decompression-budget SIZE` (requires `--check-integrity`) and `--strict` (exit status 3 on warnings, #932); exit code 0 SHALL NOT be read as integrity `OK` | must |
 
 ### 3.4 Listing options
@@ -210,7 +210,7 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | FR-061 | `verify`, `extract` and the sinks SHALL agree on the projected landing length through one projection (`VirtualTree::project_landing` with `LandingLimits::{Enforced, Exempt}` and `projected_landing_within_limits`): verify no longer judges only an entry's own name length (it reported PASS for a landing through a symlink that `extract` refused with "file name too long"); an extension-skipped regular file stays exempt; a parity test (`d -> cc` plus a long tail) pins the verdict (#945, #903) | must |
 | FR-062 | `VerificationIssue` SHALL keep the typed refusal in every front end: CLI `--json` adds `code`, `sub_code`, `relaxable_by` and `setting`, Python `VerificationIssue` the same plus `mode`, Node `code`, `subCode`, `relaxableBy`, `setting` and `ioKind` (see [[005-cli/spec]] FR-120) (#899) | must |
 | FR-063 | `ManifestEntryType`, `CheckStatus`, `IssueSeverity` and `VerificationStatus` SHALL be closed enums (`closed_enum`) with `ALL`, documented as closed by design; two entries whose names differ only in invalid bytes SHALL not be folded into one `NameCollision` under the host path model (#905, #925) | must |
-| FR-064 | `inspection::{list,verify}::*_with_progress` SHALL be crate-private, taking options by value, with the public surface being the request types (#912) | must |
+| FR-064 | `inspection::{list,verify}::*_with_progress` SHALL be crate-private, taking options by value, with the public surface being the request types (#912); since #1007 every item not re-exported from the crate root is `pub(crate)` and `unreachable_pub` is enforced at crate level, so `pub` means public API | must |
 
 ## 4. Non-Functional Requirements
 

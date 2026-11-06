@@ -75,9 +75,12 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   filesAdded?: undefined
 }
 
-/** An atomic extraction failed and its writes were discarded. */
+/**
+ * An atomic extraction failed and its writes were discarded. `code` can be
+ * `'PROGRESS_CALLBACK_ERROR'` too: a progress callback that threw stops an
+ * atomic extraction, which is then rolled back.
+ */
 export interface ExarchErrorRolledBack extends ExarchErrorBase {
-  code: CounterlessErrorCode
   writes: 'rolled_back'
   filesExtracted?: undefined
   bytesWritten?: undefined
@@ -955,7 +958,8 @@ export declare class SecurityConfig {
   setExcludePatterns(patterns: Array<string>): this
   /**
    * Drops the first `count` leading path components of every extracted
-   * entry, like `tar --strip-components`; `null` keeps every path.
+   * entry, like `tar --strip-components`; `null` removes a strip count and
+   * leaves `flatten` as it is.
    *
    * An entry with no component left is skipped and counted as
    * `'stripped_away'`. Include and exclude patterns match the path before
@@ -976,7 +980,8 @@ export declare class SecurityConfig {
    * Directory entries are skipped and counted as `'stripped_away'`; a
    * symlink or hardlink entry is refused with `SECURITY_VIOLATION`
    * (`subCode` is `LINK_POLICY`). Files that share a final name follow
-   * `existingFiles`. Setting `flatten` replaces a strip count.
+   * `existingFiles`. Setting `flatten` replaces a strip count, and
+   * `setStripComponents(null)` leaves `flatten` as it is.
    */
   setFlatten(flatten: boolean): this
   /**

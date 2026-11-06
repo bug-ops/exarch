@@ -129,6 +129,11 @@ export function storedEntries(result: MemoryExtraction): StoredMemoryEntry[] {
 // @ts-expect-error a stored entry is never a hardlink
 export const storedHardlink: StoredMemoryEntry['kind'] = 'hardlink'
 
+export function callbackStopsAnAtomicExtraction(err: ExarchErrorRolledBack): string {
+  const code: ErrorCode = err.code
+  return code === 'PROGRESS_CALLBACK_ERROR' ? 'stopped by a callback' : code
+}
+
 export function describeFailure(caught: unknown): string {
   const err = caught as ExarchError
 
@@ -166,7 +171,7 @@ export function isCoreCode(err: ExarchError, wanted: ErrorCode): boolean {
 // @ts-expect-error a plain error never carries PROGRESS_CALLBACK_ERROR
 export const plainCode: ExarchErrorPlain['code'] = 'PROGRESS_CALLBACK_ERROR'
 
-// @ts-expect-error a rolled-back error never carries PROGRESS_CALLBACK_ERROR
+// A callback that threw stops an atomic extraction, which is rolled back.
 export const rolledBackCode: ExarchErrorRolledBack['code'] = 'PROGRESS_CALLBACK_ERROR'
 
 export function readCallbackFailure(err: ExarchError): number | undefined {

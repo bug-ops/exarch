@@ -9,7 +9,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
-const { extractArchiveWithProgress, createArchiveSync, SecurityConfig } = require('../index.js');
+const {
+  extractArchiveWithProgress,
+  createArchiveSync,
+  ExtractionOptions,
+  SecurityConfig,
+} = require('../index.js');
 
 function createTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-progress-test-'));
@@ -114,6 +119,27 @@ describe('extractArchiveWithProgress', () => {
       }
     );
     assert.strictEqual(extractedFiles(outputDir).length, 1, 'the throw stops the extraction');
+  });
+
+  // A throw stops an atomic extraction, which is rolled back: the rejection is
+  // the callback's own failure and the writes were discarded.
+  it('rolls back an atomic extraction that a throwing callback stopped', async () => {
+    const destination = path.join(tempDir, 'atomic-out');
+    const options = new ExtractionOptions().withStaging('atomic');
+    await assert.rejects(
+      () =>
+        extractArchiveWithProgress(archivePath, destination, null, options, () => {
+          throw new Error('boom from progress callback');
+        }),
+      (err) => {
+        assert.strictEqual(err.code, 'PROGRESS_CALLBACK_ERROR');
+        assert.strictEqual(err.writes, 'rolled_back');
+        assert.strictEqual(err.filesExtracted, undefined);
+        assert.strictEqual(err.cause.message, 'boom from progress callback');
+        return true;
+      }
+    );
+    assert.ok(!fs.existsSync(destination), 'nothing is committed');
   });
 
   // Regression test for the #465 follow-up: a throwing progress callback must

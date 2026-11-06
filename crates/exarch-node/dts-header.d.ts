@@ -75,9 +75,12 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   filesAdded?: undefined
 }
 
-/** An atomic extraction failed and its writes were discarded. */
+/**
+ * An atomic extraction failed and its writes were discarded. `code` can be
+ * `'PROGRESS_CALLBACK_ERROR'` too: a progress callback that threw stops an
+ * atomic extraction, which is then rolled back.
+ */
 export interface ExarchErrorRolledBack extends ExarchErrorBase {
-  code: CounterlessErrorCode
   writes: 'rolled_back'
   filesExtracted?: undefined
   bytesWritten?: undefined

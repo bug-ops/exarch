@@ -90,26 +90,28 @@ impl Styler {
     }
 
     fn verification_status(self, status: VerificationStatus) -> String {
+        let word = status.to_string();
         if !self.colors {
-            return status.to_string();
+            return word;
         }
         match status {
-            VerificationStatus::Pass => style("PASSED").green().bold().to_string(),
-            VerificationStatus::Warning => style("WARNING").yellow().bold().to_string(),
-            VerificationStatus::Fail => style("FAILED").red().bold().to_string(),
+            VerificationStatus::Pass => style(word).green().bold().to_string(),
+            VerificationStatus::Warning => style(word).yellow().bold().to_string(),
+            VerificationStatus::Fail => style(word).red().bold().to_string(),
         }
     }
 
     fn severity(self, severity: IssueSeverity) -> String {
+        let word = format!("[{severity}]");
         if !self.colors {
-            return format!("[{severity}]");
+            return word;
         }
         match severity {
-            IssueSeverity::Critical => style("CRITICAL").red().bold().to_string(),
-            IssueSeverity::High => style("HIGH").red().to_string(),
-            IssueSeverity::Medium => style("MEDIUM").yellow().to_string(),
-            IssueSeverity::Low => style("LOW").blue().to_string(),
-            IssueSeverity::Info => style("INFO").cyan().to_string(),
+            IssueSeverity::Critical => style(word).red().bold().to_string(),
+            IssueSeverity::High => style(word).red().to_string(),
+            IssueSeverity::Medium => style(word).yellow().to_string(),
+            IssueSeverity::Low => style(word).blue().to_string(),
+            IssueSeverity::Info => style(word).cyan().to_string(),
         }
     }
 }
@@ -928,7 +930,7 @@ mod tests {
         assert!(text.contains("Archive verification: PASS\n"));
         assert!(
             !text.contains("PASSED"),
-            "no-colors branch must use the terse Display form, not the colored literal: {text}"
+            "the word must not change with colors: {text}"
         );
         assert!(text.contains("Total entries: 5"));
     }
@@ -938,13 +940,10 @@ mod tests {
         let mut f = formatter(Verbosity::Normal, true);
         f.format_verification_report(&sample_verification_report())
             .unwrap();
-        // See the comment in `format_extraction_result_with_colors`: the
-        // leading fg/attr escapes sit directly before "PASSED", so strip
-        // ANSI codes before asserting adjacency.
         let text = console::strip_ansi_codes(&out_text(&f)).into_owned();
         assert!(
-            text.contains("Archive verification: PASSED"),
-            "colors branch must use the longer colored literal, not the terse Display form: {text}"
+            text.contains("Archive verification: PASS\n"),
+            "colors must style the same word, not reword it: {text}"
         );
     }
 

@@ -7439,7 +7439,8 @@ fn test_extract_conflicts_are_listed_in_path_component_order() {
         .stderr
         .clone();
     let stderr = String::from_utf8(stderr).expect("utf-8");
-    let at = |name: &str| stderr.find(&format!("out/{name}")).expect(name);
+    let listing = stderr.replace('\\', "/");
+    let at = |name: &str| listing.find(&format!("out/{name}")).expect(name);
     assert!(at("a/b") < at("a-b") && at("a-b") < at("a.c"), "{stderr}");
     assert!(
         stderr.contains("HINT: Use --force to overwrite."),

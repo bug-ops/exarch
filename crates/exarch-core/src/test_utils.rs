@@ -16,7 +16,7 @@ use std::io::Write;
 /// The host's relative path limit, written out per host and independent of the
 /// production constant so a wrong value there is caught.
 #[cfg(target_os = "linux")]
-pub const HOST_PATH_LIMIT: usize = 4095;
+pub(crate) const HOST_PATH_LIMIT: usize = 4095;
 #[cfg(target_os = "windows")]
 pub(crate) const HOST_PATH_LIMIT: usize = 32767;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

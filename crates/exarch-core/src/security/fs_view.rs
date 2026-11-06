@@ -71,12 +71,12 @@ pub(crate) const MAX_SYMLINK_HOPS: usize = 33;
 /// Maximum number of symlinks followed while resolving a single path, as the
 /// host's `realpath` allows it.
 #[cfg(all(target_os = "linux", target_env = "musl"))]
-pub const MAX_SYMLINK_HOPS: usize = 39;
+pub(crate) const MAX_SYMLINK_HOPS: usize = 39;
 
 /// Maximum number of symlinks followed while resolving a single path, as the
 /// host's `realpath` allows it.
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
-pub const MAX_SYMLINK_HOPS: usize = 40;
+pub(crate) const MAX_SYMLINK_HOPS: usize = 40;
 
 /// Maximum number of symlinks followed while resolving a single path, as the
 /// host's `realpath` allows it.
@@ -95,7 +95,7 @@ pub(crate) const MAX_COMPONENT_LEN: usize = 255;
 /// Longest relative path the host accepts (`PATH_MAX` less the terminator), in
 /// bytes.
 #[cfg(target_os = "linux")]
-pub const MAX_PATH_LEN: usize = 4095;
+pub(crate) const MAX_PATH_LEN: usize = 4095;
 
 /// Longest relative path the host accepts, in UTF-16 units.
 ///

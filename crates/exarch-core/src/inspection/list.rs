@@ -45,6 +45,7 @@ use crate::formats::sevenz::read_sevenz_header;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
 use crate::formats::sevenz::walk_sevenz_links;
+use crate::formats::source_fault::ReadFaults;
 use crate::formats::source_fault::TapSource;
 use crate::formats::tar::TarNode;
 use crate::formats::tar::effective_entry_type;
@@ -388,11 +389,13 @@ pub(crate) fn list_tar_stream<R: Read>(
     config: &SecurityConfig,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
+    let faults_source = source.clone();
     let (budgeted, budget) = budgeted_reader_with(stream, config.max_tar_metadata_bytes, source);
     let archive = tar::Archive::new(budgeted);
     list_tar_entries(
         archive,
         budget,
+        &faults_source,
         format,
         config,
         listing,
@@ -409,6 +412,7 @@ pub(crate) fn list_tar_stream<R: Read>(
 fn list_tar_entries<R: std::io::Read>(
     mut archive: tar::Archive<crate::formats::tar_metadata_limit::BudgetedReader<R>>,
     budget: TarReadBudget,
+    source: &TapSource,
     format: ArchiveType,
     config: &SecurityConfig,
     listing: &mut ListPass<'_, '_>,
@@ -518,7 +522,7 @@ fn list_tar_entries<R: std::io::Read>(
             if let Some(pass) = pass_mode.integrity() {
                 let slot = pass.begin_entry(size, &archive_entry.compression);
                 if entry_type == ManifestEntryType::File && size > 0 {
-                    verify_tar_payload(pass, slot, entry, &archive_entry.path)?;
+                    verify_tar_payload(pass, slot, entry, source, &archive_entry.path)?;
                 }
             }
             in_flight.complete();
@@ -583,10 +587,12 @@ fn verify_tar_payload<R: Read>(
     pass: &mut IntegrityPass<'_>,
     slot: Slot,
     entry: &mut CheckedTarEntry<'_, '_, R>,
+    source: &TapSource,
     path: &Path,
 ) -> Result<()> {
     let declared = entry.size();
-    match pass.decode(slot, &mut **entry, declared, Charge::Free) {
+    let faults = ReadFaults::of_tar(source);
+    match pass.decode_with_faults(slot, &mut **entry, declared, Charge::Free, faults) {
         DecodeOutcome::Failed(failure) => Err(failure.into_tar_error(path)),
         outcome => pass.record(slot, path, outcome),
     }
@@ -617,7 +623,15 @@ pub(crate) fn list_tar_reader<R: Read>(
     trailer: TarTrailer,
 ) -> Result<ArchiveManifest> {
     let archive = tar::Archive::new(reader);
-    list_tar_entries(archive, budget, format, config, listing, trailer)
+    list_tar_entries(
+        archive,
+        budget,
+        &TapSource::Opaque,
+        format,
+        config,
+        listing,
+        trailer,
+    )
 }
 
 /// Lists entries from an already-opened ZIP archive.
@@ -3398,5 +3412,53 @@ mod tests {
                 target: LinkTarget::Oversized { bytes }
             } if *bytes == usize::try_from(DECLARED).unwrap()
         );
+    }
+
+    #[test]
+    fn test_verify_tar_source_fault_inside_entry_data_is_io_not_malformed() {
+        use crate::DecompressionBudget;
+        use crate::formats::source_fault::SourceRead;
+        use crate::formats::source_fault::SourceTap;
+        use std::io::Cursor;
+
+        struct FailsAfter {
+            data: Cursor<Vec<u8>>,
+            limit: u64,
+        }
+        impl Read for FailsAfter {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.data.position() >= self.limit {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "slow disk",
+                    ));
+                }
+                let room = usize::try_from(self.limit - self.data.position()).unwrap();
+                let cap = buf.len().min(room);
+                self.data.read(&mut buf[..cap])
+            }
+        }
+
+        let bytes = crate::test_utils::create_test_tar(vec![("big.bin", &[7u8; 2000])]);
+        let tap = SourceTap::default();
+        let stream = SourceRead::new(
+            FailsAfter {
+                data: Cursor::new(bytes),
+                limit: 900,
+            },
+            tap.clone(),
+        );
+        let config = SecurityConfig::default();
+        let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
+        let error = list_tar_stream(
+            stream,
+            TapSource::Tapped(tap),
+            None,
+            ArchiveType::Tar,
+            &config,
+            &mut ListPass::preflight(Some(&mut pass)),
+        )
+        .unwrap_err();
+        assert_matches!(error, ArchiveError::Io(ref e) if e.kind() == std::io::ErrorKind::TimedOut);
     }
 }

@@ -33,7 +33,7 @@ use flate2::Crc;
 
 use super::common::SpoolBacking;
 use super::common::TempSpool;
-use super::zip::ZIP_INVALID_CHECKSUM;
+use super::source_fault::ReplayChecksumMismatch;
 use crate::DecodeReuse;
 use crate::SecurityConfig;
 use crate::formats::zip::ZipMethod;
@@ -559,10 +559,7 @@ fn check_kept(bytes: &[u8], key: &RetainKey) -> io::Result<()> {
     let mut crc = Crc::new();
     crc.update(bytes);
     if crc.sum() != key.crc32 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            ZIP_INVALID_CHECKSUM,
-        ));
+        return Err(ReplayChecksumMismatch::into_io());
     }
     Ok(())
 }
@@ -599,10 +596,7 @@ impl<S: Read> Read for ReplayReader<S> {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
             if self.crc.sum() != self.key.crc32 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    ZIP_INVALID_CHECKSUM,
-                ));
+                return Err(ReplayChecksumMismatch::into_io());
             }
         }
         Ok(n)

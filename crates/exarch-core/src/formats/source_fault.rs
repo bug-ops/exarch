@@ -21,7 +21,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use super::tar_metadata_limit::budget_violation;
-use super::zip::ZIP_DECLARED_SIZE_EXCEEDED;
 use crate::ArchiveError;
 use crate::Malformation;
 use crate::copy::CopyError;
@@ -77,7 +76,7 @@ impl<'a> ReadFaults<'a> {
         }
     }
 
-    fn pending_fault(self) -> Option<io::Error> {
+    pub(crate) fn pending_fault(self) -> Option<io::Error> {
         self.tap.and_then(SourceTap::fault)
     }
 
@@ -109,57 +108,183 @@ impl<'a> ReadFaults<'a> {
     /// draining the rest of an entry.
     #[must_use]
     pub fn classify_read(self, error: io::Error) -> ArchiveError {
-        self.classify_read_with(error, |error| self.decoder_verdict(error))
+        let verdict = classify_decoder_read(error, self.pending_fault());
+        if self.family == ReadFamily::Zip && matches!(verdict, ReadVerdict::DeclaredSizeOverrun(_))
+        {
+            // The entry's caller knows the declared size and types it as a
+            // security violation.
+            return ArchiveError::Io(DeclaredSizeCeiling::into_io());
+        }
+        match verdict.into_decoder_error() {
+            Ok(error) => self.unreadable(error),
+            Err(verdict) => verdict,
+        }
     }
 
     /// Classifies the error of reading a stored symlink target: a source
     /// fault is I/O, anything else leaves the target unreadable.
     #[must_use]
     pub fn classify_symlink_read(self, error: io::Error) -> ArchiveError {
-        self.classify_read_with(error, |error| {
-            ArchiveError::from(Malformation::SymlinkTargetUnreadable {
+        match classify_decoder_read(error, self.pending_fault()).into_decoder_error() {
+            Ok(error) => ArchiveError::from(Malformation::SymlinkTargetUnreadable {
                 detail: error.to_string().into(),
-            })
-        })
+            }),
+            Err(verdict) => verdict,
+        }
     }
 
-    fn classify_read_with(
-        self,
-        error: io::Error,
-        decoder_verdict: impl FnOnce(io::Error) -> ArchiveError,
-    ) -> ArchiveError {
-        if let Some(violation) = budget_violation(&error) {
-            return violation;
-        }
-        if let Some(fault) = self.pending_fault() {
-            return ArchiveError::Io(fault);
-        }
-        // A decoder never raises an errno: one that reaches here is the disk's.
-        if error.raw_os_error().is_some() {
-            return ArchiveError::Io(error);
-        }
-        decoder_verdict(error)
-    }
-
-    fn decoder_verdict(self, error: io::Error) -> ArchiveError {
+    fn unreadable(self, error: io::Error) -> ArchiveError {
         let detail: Box<str> = error.to_string().into();
         match self.family {
             ReadFamily::Opaque => ArchiveError::Io(error),
             ReadFamily::Tar => ArchiveError::from(Malformation::TarEntryUnreadable { detail }),
-            // The `zip` crate's own size ceiling: the entry's caller knows the
-            // declared size and types it as a security violation.
-            ReadFamily::Zip
-                if error.kind() == io::ErrorKind::InvalidData
-                    && error.to_string() == ZIP_DECLARED_SIZE_EXCEEDED =>
-            {
-                ArchiveError::Io(error)
-            }
             ReadFamily::Zip => ArchiveError::from(Malformation::ZipEntryDataUnreadable { detail }),
             ReadFamily::SevenZ => {
                 ArchiveError::from(Malformation::SevenZEntryDataUnreadable { detail })
             }
         }
     }
+}
+
+/// What a failed decoder read means, decided once for extract, list and
+/// verify.
+///
+/// Every variant but [`Budget`](Self::Budget) keeps the error that was read,
+/// so a front end can quote its detail.
+#[derive(Debug)]
+pub(crate) enum ReadVerdict {
+    /// A decoder memory, member-count or compression-ratio refusal.
+    Budget(ArchiveError),
+    /// The source's own I/O failure: a recorded fault, or an errno no decoder
+    /// raises.
+    SourceFault(io::Error),
+    /// The entry's checksum did not match its bytes.
+    Checksum(io::Error),
+    /// The entry decoded past its declared size.
+    DeclaredSizeOverrun(io::Error),
+    /// The stream ended before the entry did.
+    Truncated(io::Error),
+    /// The decoder rejected the bytes it was given.
+    Malformed(io::Error),
+}
+
+impl ReadVerdict {
+    /// The error of a decoder verdict, or the finished [`ArchiveError`] of a
+    /// budget refusal or source fault.
+    fn into_decoder_error(self) -> Result<io::Error, ArchiveError> {
+        match self {
+            Self::Budget(error) => Err(error),
+            Self::SourceFault(error) => Err(ArchiveError::Io(error)),
+            Self::Checksum(error)
+            | Self::DeclaredSizeOverrun(error)
+            | Self::Truncated(error)
+            | Self::Malformed(error) => Ok(error),
+        }
+    }
+}
+
+/// Decides what the failed read `error` means: the one chain behind
+/// extraction, listing and verification.
+///
+/// A budget refusal wins, then the source's recorded `fault`, then any errno
+/// (a decoder never raises one, so it is the disk's), then the decoder's own
+/// checksum, declared-size and truncation errors.
+pub(crate) fn classify_decoder_read(error: io::Error, fault: Option<io::Error>) -> ReadVerdict {
+    if let Some(violation) = budget_violation(&error) {
+        return ReadVerdict::Budget(violation);
+    }
+    if let Some(fault) = fault {
+        return ReadVerdict::SourceFault(fault);
+    }
+    if error.raw_os_error().is_some() {
+        return ReadVerdict::SourceFault(error);
+    }
+    if is_checksum_failure(&error) {
+        return ReadVerdict::Checksum(error);
+    }
+    if zip_crate_failure(&error) == Some(ZipCrateFailure::DeclaredSizeExceeded) {
+        return ReadVerdict::DeclaredSizeOverrun(error);
+    }
+    if error.kind() == io::ErrorKind::UnexpectedEof {
+        return ReadVerdict::Truncated(error);
+    }
+    ReadVerdict::Malformed(error)
+}
+
+/// Core's own replay failure: the replayed bytes do not match the entry's
+/// CRC-32. Found by downcast, never by message.
+#[derive(Debug, thiserror::Error)]
+#[error("Invalid checksum")]
+pub(crate) struct ReplayChecksumMismatch;
+
+impl ReplayChecksumMismatch {
+    pub(crate) fn into_io() -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, Self)
+    }
+
+    /// Whether `error` was built by [`into_io`](Self::into_io).
+    pub(crate) fn is(error: &io::Error) -> bool {
+        error
+            .get_ref()
+            .is_some_and(<dyn std::error::Error + Send + Sync>::is::<Self>)
+    }
+}
+
+/// An entry decoded past its declared size, typed so the entry's caller can
+/// raise a security violation.
+#[derive(Debug, thiserror::Error)]
+#[error("entry data exceeds its declared size")]
+pub(crate) struct DeclaredSizeCeiling;
+
+impl DeclaredSizeCeiling {
+    pub(crate) fn into_io() -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, Self)
+    }
+
+    /// Whether `error` was built by [`into_io`](Self::into_io).
+    pub(crate) fn is(error: &io::Error) -> bool {
+        error
+            .get_ref()
+            .is_some_and(<dyn std::error::Error + Send + Sync>::is::<Self>)
+    }
+}
+
+/// A failure the `zip` crate reports as a plain-text `io::Error`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZipCrateFailure {
+    InvalidChecksum,
+    DeclaredSizeExceeded,
+}
+
+/// The only place core recognizes the `zip` crate's own read errors, which it
+/// raises as untyped `InvalidData` strings ("Invalid checksum" and "File is
+/// larger than its declared uncompressed size" in zip 9.4).
+///
+/// Matches keywords rather than the exact text so that a rewording within the
+/// supported range keeps its meaning; `zip_crate_contract_holds` drives the
+/// real crate and fails loudly when a release changes either error.
+fn zip_crate_failure(error: &io::Error) -> Option<ZipCrateFailure> {
+    if error.kind() != io::ErrorKind::InvalidData || error.get_ref().is_none() {
+        return None;
+    }
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("declared") && message.contains("size") {
+        Some(ZipCrateFailure::DeclaredSizeExceeded)
+    } else if message.contains("checksum") {
+        Some(ZipCrateFailure::InvalidChecksum)
+    } else {
+        None
+    }
+}
+
+fn is_checksum_failure(error: &io::Error) -> bool {
+    let sevenz = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<sevenz_rust2::Error>())
+        .is_some_and(|e| matches!(e, sevenz_rust2::Error::ChecksumVerificationFailed));
+    ReplayChecksumMismatch::is(error)
+        || sevenz
+        || zip_crate_failure(error) == Some(ZipCrateFailure::InvalidChecksum)
 }
 
 /// Reports a source `fault` as [`ArchiveError::Io`] in place of a verdict on
@@ -353,11 +478,56 @@ impl TapSource {
     }
 }
 
+/// Real `zip` crate archives and read errors, for tests that pin how the
+/// crate's own failures are classified.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) mod zip_fixtures {
+    use std::io;
+
+    pub(crate) fn stored_zip(data: &[u8]) -> Vec<u8> {
+        let mut writer = zip::write::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("a", options).unwrap();
+        io::Write::write_all(&mut writer, data).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    pub(crate) fn forged_size_zip() -> Vec<u8> {
+        let mut bytes = stored_zip(&[b'z'; 64]);
+        for (signature, offset) in [
+            ([0x50, 0x4B, 0x03, 0x04], 22),
+            ([0x50, 0x4B, 0x01, 0x02], 24),
+        ] {
+            let at = bytes.windows(4).position(|w| w == signature).unwrap();
+            bytes[at + offset..at + offset + 4].copy_from_slice(&8u32.to_le_bytes());
+        }
+        bytes
+    }
+
+    pub(crate) fn bad_crc_zip() -> Vec<u8> {
+        let mut bytes = stored_zip(b"MARKER");
+        let at = bytes.windows(6).position(|w| w == b"MARKER").unwrap();
+        bytes[at] ^= 1;
+        bytes
+    }
+
+    pub(crate) fn zip_read_error(bytes: &[u8]) -> io::Error {
+        let mut archive = zip::ZipArchive::new(io::Cursor::new(bytes.to_vec())).unwrap();
+        let mut entry = archive.by_index(0).unwrap();
+        io::copy(&mut entry, &mut io::sink()).unwrap_err()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
 
+    use super::zip_fixtures::bad_crc_zip;
+    use super::zip_fixtures::forged_size_zip;
+    use super::zip_fixtures::zip_read_error;
     use super::*;
 
     struct Scripted(Vec<io::Result<usize>>);
@@ -497,9 +667,81 @@ mod tests {
 
     #[test]
     fn the_zip_size_ceiling_is_left_for_the_entry_to_type() {
-        let ceiling = io::Error::new(io::ErrorKind::InvalidData, ZIP_DECLARED_SIZE_EXCEEDED);
+        let ceiling = io::Error::new(io::ErrorKind::InvalidData, "ceiling");
         let error = ReadFaults::new(ReadFamily::Zip, None).classify(CopyError::Read(ceiling));
-        assert_matches!(error, ArchiveError::Io(_));
+        assert_matches!(error, ArchiveError::InvalidArchive(_));
+
+        let ceiling = zip_read_error(&forged_size_zip());
+        let error = ReadFaults::new(ReadFamily::Zip, None).classify(CopyError::Read(ceiling));
+        assert_matches!(error, ArchiveError::Io(ref e) if DeclaredSizeCeiling::is(e));
+    }
+
+    #[test]
+    fn zip_crate_contract_holds() {
+        assert_eq!(
+            zip_crate_failure(&zip_read_error(&bad_crc_zip())),
+            Some(ZipCrateFailure::InvalidChecksum),
+            "the zip crate changed its checksum error; update zip_crate_failure"
+        );
+        assert_eq!(
+            zip_crate_failure(&zip_read_error(&forged_size_zip())),
+            Some(ZipCrateFailure::DeclaredSizeExceeded),
+            "the zip crate changed its declared-size error; update zip_crate_failure"
+        );
+    }
+
+    #[test]
+    fn the_verdict_chain_orders_its_causes() {
+        let exceeded =
+            io::Error::other(super::super::tar_metadata_limit::DecoderMemoryExceeded { max: 7 });
+        assert_matches!(
+            classify_decoder_read(exceeded, Some(io::Error::from_raw_os_error(5))),
+            ReadVerdict::Budget(_)
+        );
+        assert_matches!(
+            classify_decoder_read(
+                zip_read_error(&bad_crc_zip()),
+                Some(io::Error::other("eio"))
+            ),
+            ReadVerdict::SourceFault(_)
+        );
+        assert_matches!(
+            classify_decoder_read(io::Error::from_raw_os_error(28), None),
+            ReadVerdict::SourceFault(_)
+        );
+        assert_matches!(
+            classify_decoder_read(zip_read_error(&bad_crc_zip()), None),
+            ReadVerdict::Checksum(_)
+        );
+        assert_matches!(
+            classify_decoder_read(ReplayChecksumMismatch::into_io(), None),
+            ReadVerdict::Checksum(_)
+        );
+        assert_matches!(
+            classify_decoder_read(
+                io::Error::other(sevenz_rust2::Error::ChecksumVerificationFailed),
+                None
+            ),
+            ReadVerdict::Checksum(_)
+        );
+        assert_matches!(
+            classify_decoder_read(zip_read_error(&forged_size_zip()), None),
+            ReadVerdict::DeclaredSizeOverrun(_)
+        );
+        assert_matches!(
+            classify_decoder_read(io::ErrorKind::UnexpectedEof.into(), None),
+            ReadVerdict::Truncated(_)
+        );
+        assert_matches!(
+            classify_decoder_read(decoder_error(), None),
+            ReadVerdict::Malformed(_)
+        );
+    }
+
+    #[test]
+    fn a_plain_error_with_checksum_text_is_not_a_zip_failure_without_a_payload() {
+        let bare = io::Error::from(io::ErrorKind::InvalidData);
+        assert_eq!(zip_crate_failure(&bare), None);
     }
 
     #[test]

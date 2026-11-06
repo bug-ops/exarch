@@ -29,9 +29,10 @@ use crate::copy::declared_size_exceeded;
 use crate::error::TrailerCorruption;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::is_trailing_data;
-use crate::formats::tar_metadata_limit::budget_violation;
-use crate::formats::zip::ZIP_DECLARED_SIZE_EXCEEDED;
-use crate::formats::zip::ZIP_INVALID_CHECKSUM;
+use crate::formats::source_fault::ReadFamily;
+use crate::formats::source_fault::ReadFaults;
+use crate::formats::source_fault::ReadVerdict;
+use crate::formats::source_fault::classify_decoder_read;
 use crate::inspection::manifest::EntryCompression;
 use crate::inspection::report::Finding;
 use crate::inspection::report::Heuristic;
@@ -87,14 +88,24 @@ impl fmt::Display for DecodeFailure {
 impl DecodeFailure {
     /// Classifies a copy failure for an entry of `declared` bytes.
     pub fn from_copy(err: CopyError, declared: u64) -> Self {
+        Self::from_copy_with_fault(err, declared, None)
+    }
+
+    /// Classifies a copy failure the way extraction does, given the I/O
+    /// `fault` the entry's source recorded, if any: a failed read and a short
+    /// entry after a fault are that fault, not a corrupt archive.
+    pub fn from_copy_with_fault(err: CopyError, declared: u64, fault: Option<io::Error>) -> Self {
         match err {
-            CopyError::Read(e) => Self::from_read_error(e, declared),
+            CopyError::Read(e) => Self::from_read_error(e, declared, fault),
             CopyError::Write(e) => Self::Io(e),
             CopyError::Overrun { declared } => Self::DeclaredSizeOverrun { declared },
-            CopyError::Short { declared, actual } => Self::Truncated {
-                declared,
-                actual: Some(actual),
-            },
+            CopyError::Short { declared, actual } => fault.map_or(
+                Self::Truncated {
+                    declared,
+                    actual: Some(actual),
+                },
+                Self::Io,
+            ),
             CopyError::Overflow => Self::ResourceLimit(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::IntegerOverflow,
             }),
@@ -106,39 +117,24 @@ impl DecodeFailure {
         use sevenz_rust2::Error;
         match err {
             Error::ChecksumVerificationFailed => Self::Checksum,
-            Error::Io(e, _) => Self::from_read_error(e, 0),
+            Error::Io(e, _) => Self::from_read_error(e, 0, None),
             Error::Other(reason) => Self::Malformed(io::Error::other(reason.into_owned())),
             other => Self::NotDecodable(ArchiveError::from(other)),
         }
     }
 
-    fn from_read_error(e: io::Error, declared: u64) -> Self {
-        if let Some(limit) = budget_violation(&e) {
-            return Self::ResourceLimit(limit);
-        }
-        let message = e.to_string();
-        if e.kind() == io::ErrorKind::InvalidData && message == ZIP_INVALID_CHECKSUM {
-            return Self::Checksum;
-        }
-        if e.kind() == io::ErrorKind::InvalidData && message == ZIP_DECLARED_SIZE_EXCEEDED {
-            return Self::DeclaredSizeOverrun { declared };
-        }
-        if e.get_ref()
-            .and_then(|inner| inner.downcast_ref::<sevenz_rust2::Error>())
-            .is_some_and(|inner| matches!(inner, sevenz_rust2::Error::ChecksumVerificationFailed))
-        {
-            return Self::Checksum;
-        }
-        if e.raw_os_error().is_some() {
-            return Self::Io(e);
-        }
-        if e.kind() == io::ErrorKind::UnexpectedEof {
-            return Self::Truncated {
+    fn from_read_error(e: io::Error, declared: u64, fault: Option<io::Error>) -> Self {
+        match classify_decoder_read(e, fault) {
+            ReadVerdict::Budget(limit) => Self::ResourceLimit(limit),
+            ReadVerdict::SourceFault(e) => Self::Io(e),
+            ReadVerdict::Checksum(_) => Self::Checksum,
+            ReadVerdict::DeclaredSizeOverrun(_) => Self::DeclaredSizeOverrun { declared },
+            ReadVerdict::Truncated(_) => Self::Truncated {
                 declared,
                 actual: None,
-            };
+            },
+            ReadVerdict::Malformed(e) => Self::Malformed(e),
         }
-        Self::Malformed(e)
     }
 
     /// Error returned when TAR entry content fails to decode: the scan stops,
@@ -417,6 +413,26 @@ impl<'c> IntegrityPass<'c> {
         declared: u64,
         charge: Charge,
     ) -> DecodeOutcome {
+        self.decode_with_faults(
+            slot,
+            reader,
+            declared,
+            charge,
+            ReadFaults::new(ReadFamily::Opaque, None),
+        )
+    }
+
+    /// [`decode`](Self::decode) for a reader whose source records its I/O
+    /// faults: a failure the source caused is [`DecodeFailure::Io`], as in
+    /// extraction.
+    pub fn decode_with_faults<R: Read + ?Sized>(
+        &mut self,
+        slot: Slot,
+        reader: &mut R,
+        declared: u64,
+        charge: Charge,
+        faults: ReadFaults<'_>,
+    ) -> DecodeOutcome {
         if !self.is_admitted(slot) {
             return DecodeOutcome::Unverified(UnverifiedReason::ResourceLimit);
         }
@@ -425,7 +441,11 @@ impl<'c> IntegrityPass<'c> {
         }
         match copy_bounded(reader, &mut io::sink(), &mut self.buffer, Some(declared)) {
             Ok(_) => DecodeOutcome::Verified,
-            Err(e) => DecodeOutcome::Failed(DecodeFailure::from_copy(e, declared)),
+            Err(e) => DecodeOutcome::Failed(DecodeFailure::from_copy_with_fault(
+                e,
+                declared,
+                faults.pending_fault(),
+            )),
         }
     }
 
@@ -543,7 +563,7 @@ fn probe_one_byte<R: Read>(reader: &mut R) -> std::result::Result<u64, DecodeFai
         match reader.read(&mut byte) {
             Ok(n) => return Ok(n as u64),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(DecodeFailure::from_read_error(e, 0)),
+            Err(e) => return Err(DecodeFailure::from_read_error(e, 0, None)),
         }
     }
 }
@@ -569,6 +589,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::formats::source_fault::zip_fixtures::forged_size_zip;
+    use crate::formats::source_fault::zip_fixtures::zip_read_error;
     use crate::formats::tar_metadata_limit::DecoderMemoryExceeded;
     use crate::inspection::report::IssueCategory;
     use crate::inspection::report::MAX_LISTED_UNVERIFIED;
@@ -606,10 +628,56 @@ mod tests {
 
     #[test]
     fn test_classification_zip_declared_size_overrun() {
-        let e = io::Error::new(io::ErrorKind::InvalidData, ZIP_DECLARED_SIZE_EXCEEDED);
+        let e = zip_read_error(&forged_size_zip());
         assert_matches!(
             read_failure(e),
             DecodeFailure::DeclaredSizeOverrun { declared: 10 }
+        );
+    }
+
+    #[test]
+    fn test_classification_source_fault_wins_in_verify() {
+        let fault = || Some(io::Error::new(io::ErrorKind::TimedOut, "slow"));
+        assert_matches!(
+            DecodeFailure::from_copy_with_fault(
+                CopyError::Read(io::Error::new(io::ErrorKind::InvalidData, "lzma data error")),
+                10,
+                fault()
+            ),
+            DecodeFailure::Io(ref e) if e.kind() == io::ErrorKind::TimedOut
+        );
+        assert_matches!(
+            DecodeFailure::from_copy_with_fault(
+                CopyError::Short {
+                    declared: 10,
+                    actual: 4
+                },
+                10,
+                fault()
+            ),
+            DecodeFailure::Io(_)
+        );
+        assert_matches!(
+            DecodeFailure::from_copy_with_fault(
+                CopyError::Short {
+                    declared: 10,
+                    actual: 4
+                },
+                10,
+                None
+            ),
+            DecodeFailure::Truncated {
+                declared: 10,
+                actual: Some(4)
+            }
+        );
+    }
+
+    #[test]
+    fn test_classification_replay_checksum_mismatch() {
+        assert_matches!(
+            read_failure(crate::formats::source_fault::ReplayChecksumMismatch::into_io()),
+            DecodeFailure::Checksum
         );
     }
 

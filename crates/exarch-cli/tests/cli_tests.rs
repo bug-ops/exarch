@@ -7391,3 +7391,39 @@ fn test_error_hint_is_last_in_text_and_separate_in_json() {
             .contains("--allow-symlinks")
     );
 }
+
+/// Flags that name no extension or no component are typed configuration
+/// refusals in `--json`, not the generic `Error` kind (#982).
+#[test]
+fn test_extract_empty_list_flags_are_typed_configuration_refusals() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = fixture_path("sample.tar.gz");
+
+    for (flag, value, setting) in [
+        ("--allowed-extensions", ",", "allowed_extension"),
+        ("--banned-component", " , ", "banned_path_component"),
+    ] {
+        let stdout = exarch_cmd()
+            .arg("extract")
+            .arg("--json")
+            .arg(flag)
+            .arg(value)
+            .arg(&archive)
+            .arg(temp.path().join("out"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+        assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{flag}");
+        assert_eq!(json["error"]["setting"], setting, "{flag}");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains(flag),
+            "{flag}: {json}"
+        );
+    }
+}

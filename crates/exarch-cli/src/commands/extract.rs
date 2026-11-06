@@ -28,6 +28,7 @@ use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::ArchiveType;
 use exarch_core::BackupIdentity;
+use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
 use exarch_core::ExistingFiles;
@@ -844,7 +845,7 @@ fn parse_extensions(tokens: &[ListToken]) -> Result<ExtensionFilter> {
         })
         .collect::<Result<Vec<_>>>()?;
     ExtensionFilter::only(parsed)
-        .map_err(|_| anyhow::anyhow!("{} names no extension", Flag::AllowedExtensions.long()))
+        .with_context(|| format!("{} names no extension", Flag::AllowedExtensions.long()))
 }
 
 fn items(tokens: &[ListToken]) -> impl Iterator<Item = &str> {
@@ -940,7 +941,14 @@ fn banned_components(tokens: &[ListToken]) -> Result<Option<Vec<PathComponentNam
                 })
                 .collect::<Result<Vec<_>>>()?;
             if components.is_empty() {
-                anyhow::bail!("{} names no component", Flag::BannedComponent.long());
+                return Err(anyhow::Error::new(ArchiveError::InvalidConfiguration {
+                    setting: ConfigSetting::BannedPathComponent,
+                    problem: ConfigProblem::Empty,
+                })
+                .context(format!(
+                    "{} names no component",
+                    Flag::BannedComponent.long()
+                )));
             }
             Ok(Some(components))
         }

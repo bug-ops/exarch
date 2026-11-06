@@ -112,6 +112,10 @@ use super::common::EntryCompleteGuard;
 use super::common::open_archive;
 use super::compression::CompressionCodec;
 use super::source_fault::ReadFaults;
+#[cfg(test)]
+use super::source_fault::SourceRead;
+#[cfg(test)]
+use super::source_fault::SourceTap;
 use super::source_fault::TapSource;
 use super::source_fault::prefer_fault;
 use super::tar_metadata_limit::CheckedTarEntry;
@@ -162,46 +166,32 @@ impl<'r> TarArchive<Box<dyn Read + Send + 'r>> {
         let source = decoded.source();
         Self::with_source(decoded.stream, source, trailer, config)
     }
+
+    /// A handler over a plain TAR `reader`, built as the path-based APIs build
+    /// one: the input is metered and its faults recorded.
+    #[cfg(test)]
+    #[must_use]
+    pub fn new<R: Read + Send + 'r>(reader: R, config: &SecurityConfig) -> Self {
+        Self::with_trailer(reader, TarTrailer::Probe, config)
+    }
+
+    /// As [`Self::new`], checking the tail of the stream as `trailer` says.
+    #[cfg(test)]
+    pub(crate) fn with_trailer<R: Read + Send + 'r>(
+        reader: R,
+        trailer: TarTrailer,
+        config: &SecurityConfig,
+    ) -> Self {
+        let tap = SourceTap::default();
+        let stream: Box<dyn Read + Send + 'r> = Box::new(std::io::BufReader::new(SourceRead::new(
+            reader,
+            tap.clone(),
+        )));
+        Self::with_source(stream, TapSource::Tapped(tap), trailer, config)
+    }
 }
 
 impl<R: Read> TarArchive<R> {
-    /// Creates a TAR archive handler over a reader, enforcing `config`.
-    ///
-    /// The reader will be consumed during extraction. For file-based
-    /// archives, wrap in `BufReader` for optimal performance.
-    ///
-    /// The codec behind `reader` is unknown, so extraction, listing and
-    /// verification read it to its end after the end-of-archive marker. That
-    /// surfaces a decoder's trailer check (a gzip CRC mismatch) as an error,
-    /// but a reader that never ends blocks, and more than the trailer cap
-    /// (`max_tar_metadata_bytes`, at least 1 MiB) of bytes after the marker is
-    /// refused even for a plain TAR. The path-based APIs and
-    /// [`ArchiveReader`](crate::ArchiveReader) know the codec and leave a
-    /// plain TAR's tail alone.
-    ///
-    /// Core cannot see how much input a decoder behind `reader` consumed, so
-    /// entries skipped by the extension allowlist are not bounded by
-    /// `max_compression_ratio` here, as they are for the path-based APIs and
-    /// [`ArchiveReader`](crate::ArchiveReader).
-    ///
-    /// # Performance Notes
-    ///
-    /// - Input: Wrap file readers in `BufReader::new()` for 10x faster reads
-    /// - Output: File writes use `BufWriter` internally for optimal throughput
-    /// - Memory: O(1) for archive processing, O(n) for hardlink tracking
-    /// - Typical throughput: 100-500 MB/s on modern SSDs
-    #[cfg(test)]
-    #[must_use]
-    pub fn new(reader: R, config: &SecurityConfig) -> Self {
-        Self::with_trailer(reader, TarTrailer::DrainToDecoderEof, config)
-    }
-
-    /// Creates a handler that checks the tail of the stream as `trailer` says.
-    #[cfg(test)]
-    pub(crate) fn with_trailer(reader: R, trailer: TarTrailer, config: &SecurityConfig) -> Self {
-        Self::with_source(reader, TapSource::Opaque, trailer, config)
-    }
-
     /// Creates a handler over `reader`, whose raw input `source` meters.
     pub(crate) fn with_source(
         reader: R,

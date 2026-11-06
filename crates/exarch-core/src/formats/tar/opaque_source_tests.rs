@@ -21,12 +21,24 @@ use crate::PolicySetting;
 use crate::SecurityConfig;
 use crate::TarTrailerRefusal;
 use crate::VerificationOptions;
+use crate::formats::source_fault::TapSource;
 use crate::formats::traits::ArchiveFormat;
+use crate::inspection::integrity::TarTrailer;
 use crate::non_zero;
 use crate::ratio_limit;
 use crate::test_utils::create_test_tar;
 
 const MIB: usize = 1024 * 1024;
+
+/// A handler over a caller-decoded reader that core cannot meter.
+fn opaque<R: std::io::Read>(reader: R, config: &SecurityConfig) -> TarArchive<R> {
+    TarArchive::with_source(
+        reader,
+        TapSource::Opaque,
+        TarTrailer::DrainToDecoderEof,
+        config,
+    )
+}
 
 fn gzip(bytes: &[u8]) -> Vec<u8> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -55,7 +67,7 @@ fn corrupt_gzip_crc_is_refused_over_a_caller_decoder() {
     let decoder = flate2::read::GzDecoder::new(Cursor::new(gz));
     let out = TempDir::new().unwrap();
 
-    let error = TarArchive::new(decoder, &SecurityConfig::default())
+    let error = opaque(decoder, &SecurityConfig::default())
         .extract(out.path(), &ExtractionOptions::default(), &mut NoopProgress)
         .unwrap_err();
 
@@ -87,7 +99,7 @@ fn a_caller_decoded_stream_is_not_bounded_by_ratio() {
         .unwrap();
     let work = TempDir::new().unwrap();
 
-    let report = TarArchive::new(decoder, &config)
+    let report = opaque(decoder, &config)
         .extract(
             &work.path().join("out"),
             &ExtractionOptions::default(),
@@ -105,13 +117,13 @@ fn verify_over_a_plain_reader_reads_the_trailer_within_the_cap() {
     let mut tar = create_test_tar(vec![("a", b"GOOD"), ("b", b"OTHER"), ("c", b"GOOD")]);
     tar.extend(std::iter::repeat_n(0x55u8, 4096));
 
-    let report = TarArchive::new(Cursor::new(tar.clone()), &config)
+    let report = opaque(Cursor::new(tar.clone()), &config)
         .verify(integrity(1024))
         .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
 
     tar.extend(std::iter::repeat_n(0x55u8, cap));
-    let refused = TarArchive::new(Cursor::new(tar), &config)
+    let refused = opaque(Cursor::new(tar), &config)
         .verify(
             VerificationOptions::default()
                 .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),

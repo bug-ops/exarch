@@ -35,6 +35,8 @@ use crate::formats::common;
 use crate::formats::common::EntryCompleteGuard;
 use crate::formats::source_fault::ReadFamily;
 use crate::formats::source_fault::ReadFaults;
+use crate::formats::source_fault::SourceRead;
+use crate::formats::source_fault::SourceTap;
 use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
@@ -240,6 +242,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let mut pending_error: Option<ArchiveError> = None;
         let mut index = 0_usize;
         let is_solid = self.header.is_solid();
+        let tap = SourceTap::default();
+        let faults = ReadFaults::new(ReadFamily::SevenZ, Some(&tap));
 
         let mut each = |entry: &sevenz_rust2::ArchiveEntry,
                         reader: &mut dyn Read|
@@ -261,7 +265,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     options,
                     progress: guard.progress_mut(),
                 };
-                process_entry(target, entry, kind, &mut *reader, &path, &mut tally)
+                process_entry(target, entry, kind, &mut *reader, faults, &path, &mut tally)
             };
             // Entries of a solid block share one decoder stream: bytes a
             // skipped entry left unread would be served to the next entry.
@@ -269,7 +273,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 if is_solid {
                     io::copy(&mut (&mut *reader).take(entry.size), &mut io::sink())
                         .map(drop)
-                        .map_err(ArchiveError::Io)
+                        .map_err(|error| faults.classify_read(error))
                 } else {
                     Ok(())
                 }
@@ -283,8 +287,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
             }
         };
 
+        let mut source = SourceRead::new(&mut self.source, tap.clone());
         let result = decode_archive_entries(
-            &mut self.source,
+            &mut source,
             &self.header,
             config.parallel_decode,
             DecodeKnobs::production(),
@@ -308,6 +313,7 @@ pub(super) fn process_entry<T: ExtractTarget>(
     entry: &sevenz_rust2::ArchiveEntry,
     kind: SevenZKind,
     reader: &mut dyn Read,
+    faults: ReadFaults<'_>,
     path: &Path,
     tally: &mut Tally<'_>,
 ) -> Result<()> {
@@ -337,12 +343,7 @@ pub(super) fn process_entry<T: ExtractTarget>(
             };
             if let FileAdmission::Write(admitted) = target.validate_file(request, tally)? {
                 let mut reader = reader;
-                target.file(
-                    &mut reader,
-                    ReadFaults::new(ReadFamily::SevenZ, None),
-                    admitted,
-                    tally,
-                )?;
+                target.file(&mut reader, faults, admitted, tally)?;
             }
             Ok(())
         }

@@ -1071,10 +1071,12 @@ mod tests {
     use super::*;
     use crate::ArchiveError;
     use crate::ExtractionReport;
+    use crate::Malformation;
     use crate::NoopProgress;
     use crate::SecurityConfig;
     use crate::copy::CopyBuffer;
     use crate::formats::source_fault::ReadFamily;
+    use crate::formats::source_fault::SourceTap;
     use crate::security::RawMode;
     use crate::security::permissions::sanitize_permissions;
     use crate::security::quota::QuotaTracker;
@@ -1425,44 +1427,60 @@ mod tests {
     /// truncated on disk.
     #[test]
     fn test_extract_file_with_permit_undersized_stream_cleans_up() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let mut report = ExtractionReport::default();
-        let mut copy_buffer = CopyBuffer::new();
-        let dirs = test_walker();
+        for family in [ReadFamily::Zip, ReadFamily::SevenZ, ReadFamily::Tar] {
+            let temp = TempDir::new().expect("failed to create temp dir");
+            let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+            let mut report = ExtractionReport::default();
+            let mut copy_buffer = CopyBuffer::new();
+            let dirs = test_walker();
 
-        let config = SecurityConfig::default();
-        let permit = QuotaTracker::new()
-            .reserve(1000, &config)
-            .expect("reservation should succeed");
-        let safe_path = SafePath::validate(&PathBuf::from("short.txt"), &dest, &config)
-            .expect("path should be valid");
+            let config = SecurityConfig::default();
+            let permit = QuotaTracker::new()
+                .reserve(1000, &config)
+                .expect("reservation should succeed");
+            let safe_path = SafePath::validate(&PathBuf::from("short.txt"), &dest, &config)
+                .expect("path should be valid");
 
-        let mut reader = Cursor::new(b"too short");
+            let mut reader = Cursor::new(b"too short");
 
-        let result = extract_file_with_permit(
-            &mut reader,
-            ReadFaults::new(ReadFamily::Tar, None),
-            &safe_path,
-            Some(sanitized(0o644)),
-            permit,
-            &pinned(&dest),
-            &mut report,
-            &mut copy_buffer,
-            dirs,
-            SinkOptions::default(),
-            &mut NoopProgress,
-        );
+            let tap = SourceTap::default();
+            let result = extract_file_with_permit(
+                &mut reader,
+                ReadFaults::new(family, Some(&tap)),
+                &safe_path,
+                Some(sanitized(0o644)),
+                permit,
+                &pinned(&dest),
+                &mut report,
+                &mut copy_buffer,
+                dirs,
+                SinkOptions::default(),
+                &mut NoopProgress,
+            );
 
-        assert_matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. }),
-            "actual size short of declared size must be rejected, got: {result:?}"
-        );
-        assert!(
-            !temp.path().join("short.txt").exists(),
-            "rejected entry must not leave a truncated file on disk"
-        );
+            match family {
+                ReadFamily::Tar => assert_matches!(
+                    result,
+                    Err(ArchiveError::InvalidArchive(
+                        Malformation::TarEntryTruncated {
+                            declared: 1000,
+                            actual: 9
+                        }
+                    )),
+                    "a TAR entry short of its header size is a truncated archive: {result:?}"
+                ),
+                _ => assert_matches!(
+                    result,
+                    Err(ArchiveError::SecurityViolation { .. }),
+                    "{family:?}: actual size short of declared size must be rejected, got: \
+                     {result:?}"
+                ),
+            }
+            assert!(
+                !temp.path().join("short.txt").exists(),
+                "{family:?}: rejected entry must not leave a truncated file on disk"
+            );
+        }
     }
 
     /// With `ExistingFiles::Overwrite` (`--force`), an aborted forged-size

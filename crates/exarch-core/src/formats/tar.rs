@@ -156,7 +156,6 @@ use crate::types::safe_path::ParentCheck;
 use super::common::EntryCompleteGuard;
 use super::common::open_archive;
 use super::compression::CompressionCodec;
-use super::source_fault::ReadFamily;
 use super::source_fault::ReadFaults;
 use super::source_fault::TapSource;
 use super::tar_metadata_limit::CheckedTarEntry;
@@ -322,6 +321,7 @@ impl<R: Read> TarArchive<R> {
     /// Processes a single TAR entry.
     fn process_entry<ER: Read, T: ExtractTarget>(
         entry: &mut tar::Entry<'_, ER>,
+        faults: ReadFaults<'_>,
         target: &mut T,
         tally: &mut Tally<'_>,
     ) -> Result<EntryOutcome<T::Parent>> {
@@ -360,12 +360,7 @@ impl<R: Read> TarArchive<R> {
                 };
                 match target.validate_file(request, tally)? {
                     FileAdmission::Write(admitted) => {
-                        target.file(
-                            entry,
-                            ReadFaults::new(ReadFamily::Tar, None),
-                            admitted,
-                            tally,
-                        )?;
+                        target.file(entry, faults, admitted, tally)?;
                         Ok(EntryOutcome::Done)
                     }
                     FileAdmission::Skipped(_) => Ok(EntryOutcome::Skipped),
@@ -403,11 +398,12 @@ impl<R: Read> TarArchive<R> {
     /// Processes `entry`, then reads past its data when the entry was skipped.
     fn process_and_skip<ER: Read, T: ExtractTarget>(
         entry: &mut CheckedTarEntry<'_, '_, ER>,
+        faults: ReadFaults<'_>,
         target: &mut T,
         tally: &mut Tally<'_>,
         skip_limits: &SkipLimits,
     ) -> Result<EntryOutcome<T::Parent>> {
-        let outcome = Self::process_entry(entry, target, tally)?;
+        let outcome = Self::process_entry(entry, faults, target, tally)?;
         if matches!(outcome, EntryOutcome::Skipped) {
             entry.drain_skipped(skip_limits)?;
         }
@@ -431,11 +427,9 @@ impl<R: Read> TarArchive<R> {
 
         let mut started: usize = 0;
 
-        let (budgeted, budget) = budgeted_reader_with(
-            self.inner,
-            config.max_tar_metadata_bytes,
-            self.source.clone(),
-        );
+        let source = self.source;
+        let (budgeted, budget) =
+            budgeted_reader_with(self.inner, config.max_tar_metadata_bytes, source.clone());
         let mut inner_archive = Archive::new(budgeted);
         let mut entries = budgeted_tar_entries(&mut inner_archive, budget).map_err(|e| {
             ArchiveError::InvalidArchive(Malformation::TarEntriesUnreadable {
@@ -471,8 +465,15 @@ impl<R: Read> TarArchive<R> {
                 // `settle` abandons the entry on failure: no further
                 // `next_entry()` calls follow, so the guard's usual drain is
                 // pointless I/O (see `TarEntryGuard::abandon`).
-                guard
-                    .settle(|guard| Self::process_and_skip(guard, target, &mut tally, &skip_limits))
+                guard.settle(|guard| {
+                    Self::process_and_skip(
+                        guard,
+                        ReadFaults::of_tar(&source),
+                        target,
+                        &mut tally,
+                        &skip_limits,
+                    )
+                })
             };
             progress_guard.complete();
             match settled {

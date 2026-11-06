@@ -1927,6 +1927,7 @@ fn test_process_entry_rejects_traversal_independently() {
         &entry,
         SevenZKind::File,
         &mut std::io::empty(),
+        ReadFaults::new(ReadFamily::SevenZ, None),
         &entry_path,
         &mut tally,
     );
@@ -1970,6 +1971,7 @@ fn test_process_entry_duplicate_skip_fails_closed_at_max() {
             &entry,
             SevenZKind::File,
             &mut std::io::empty(),
+            ReadFaults::new(ReadFamily::SevenZ, None),
             &entry_path,
             &mut tally,
         )

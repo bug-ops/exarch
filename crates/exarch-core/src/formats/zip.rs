@@ -172,6 +172,7 @@ use super::common;
 use super::common::EntryCompleteGuard;
 use super::source_fault::ReadFamily;
 use super::source_fault::ReadFaults;
+use super::source_fault::SourceTap;
 use super::target::ExtractTarget;
 use super::target::FileAdmission;
 use super::target::FileRequest;
@@ -802,6 +803,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         ctx: &mut ZipExtractionContext<'_>,
         reuse: Option<&ReuseStore>,
         claimed: Option<(Taken, RetainKey)>,
+        source: &SourceTap,
     ) -> Result<()> {
         if zip_file.encrypted() {
             let name = zip_file
@@ -845,7 +847,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                     (Some(store), Some((taken, key))) => match store.retained(taken, &key) {
                         Ok(retained) => target.file_retained(
                             retained,
-                            ReadFaults::new(ReadFamily::Zip, None),
+                            ReadFaults::new(ReadFamily::Opaque, None),
                             admitted,
                             &mut ctx.tally,
                         ),
@@ -853,7 +855,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                     },
                     _ => target.file(
                         &mut zip_file,
-                        ReadFaults::new(ReadFamily::Zip, None),
+                        ReadFaults::new(ReadFamily::Zip, Some(source)),
                         admitted,
                         &mut ctx.tally,
                     ),
@@ -946,6 +948,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 &mut ctx,
                 self.structure.reuse(),
                 claimed,
+                self.structure.source(),
             );
 
             if let Err(e) = result {

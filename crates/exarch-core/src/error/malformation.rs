@@ -191,8 +191,26 @@ pub enum Malformation {
         /// The reader's description of the failure.
         detail: Box<str>,
     },
+    /// The data of a TAR entry ends before the size its header declares.
+    TarEntryTruncated {
+        /// The size the header declares.
+        declared: u64,
+        /// The bytes the stream held.
+        actual: u64,
+    },
     /// The TAR reader was asked for an entry after one was abandoned.
     TarReadAfterAbandonedEntry,
+    /// The decoder fails on the data of a ZIP entry, for example a checksum
+    /// mismatch.
+    ZipEntryDataUnreadable {
+        /// The decoder's description of the failure.
+        detail: Box<str>,
+    },
+    /// The decoder fails on the data of a 7z entry.
+    SevenZEntryDataUnreadable {
+        /// The decoder's description of the failure.
+        detail: Box<str>,
+    },
     /// A 7z block uses a coder exarch does not decode or malformed coder
     /// properties.
     SevenZUnsupportedCoder,
@@ -255,13 +273,16 @@ impl Malformation {
             | Self::ZipListedEntryUnreadable { .. }
             | Self::ZipCensusDisagreement
             | Self::ZipDataRangeUnrepresentable
+            | Self::ZipEntryDataUnreadable { .. }
             | Self::ZipZstdWalkIncomplete => Some(C::ZipReader),
             Self::TarPaxHeaderUnreadable { .. }
             | Self::TarEntriesUnreadable { .. }
             | Self::TarListEntriesUnreadable { .. }
             | Self::TarEntryUnreadable { .. }
+            | Self::TarEntryTruncated { .. }
             | Self::TarReadAfterAbandonedEntry => Some(C::TarReader),
             Self::SevenZUnsupportedCoder
+            | Self::SevenZEntryDataUnreadable { .. }
             | Self::SevenZPackStreamOffsetMismatch { .. }
             | Self::SevenZHeaderUnreadable { .. }
             | Self::SevenZLinkEntriesOutOfOrder
@@ -371,8 +392,18 @@ impl fmt::Display for Malformation {
                 write!(f, "failed to read TAR entries: {detail}")
             }
             Self::TarEntryUnreadable { detail } => write!(f, "failed to read TAR entry: {detail}"),
+            Self::TarEntryTruncated { declared, actual } => write!(
+                f,
+                "TAR entry is truncated: {declared} bytes declared, {actual} present"
+            ),
             Self::TarReadAfterAbandonedEntry => {
                 f.write_str("TAR read continued after an abandoned entry")
+            }
+            Self::ZipEntryDataUnreadable { detail } => {
+                write!(f, "failed to read ZIP entry data: {detail}")
+            }
+            Self::SevenZEntryDataUnreadable { detail } => {
+                write!(f, "failed to read 7z entry data: {detail}")
             }
             Self::SevenZUnsupportedCoder => {
                 f.write_str("7z block uses an unsupported coder or malformed coder properties")
@@ -612,9 +643,31 @@ mod tests {
                 Some(C::TarReader),
             ),
             (
+                Malformation::TarEntryTruncated {
+                    declared: 10,
+                    actual: 4,
+                },
+                "TAR entry is truncated: 10 bytes declared, 4 present",
+                Some(C::TarReader),
+            ),
+            (
                 Malformation::TarReadAfterAbandonedEntry,
                 "TAR read continued after an abandoned entry",
                 Some(C::TarReader),
+            ),
+            (
+                Malformation::ZipEntryDataUnreadable {
+                    detail: "bad".into(),
+                },
+                "failed to read ZIP entry data: bad",
+                Some(C::ZipReader),
+            ),
+            (
+                Malformation::SevenZEntryDataUnreadable {
+                    detail: "bad".into(),
+                },
+                "failed to read 7z entry data: bad",
+                Some(C::SevenZReader),
             ),
             (
                 Malformation::SevenZUnsupportedCoder,

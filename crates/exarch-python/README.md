@@ -151,9 +151,9 @@ strictest rules of every platform instead of this host's.
 `list_archive_bytes_with_progress`, `verify_archive_bytes_with_progress` and
 `extract_archive_to_memory_with_progress` take a `progress` callback
 `(path, total, current, bytes_written)` after `config`; `current` counts from 1
-and `total` is 0 for TAR. A raising callback does not abort the run; if the run
-succeeded its exception is raised (with `progress_callback_error = True`) and the
-result is discarded.
+and `total` is `None` for TAR. A raising callback cancels the run before the next
+entry and its exception is raised (with `progress_callback_error = True`); the
+result is discarded. The GIL is released while the archive is processed.
 
 `extract_archive_to_callback(data, on_entry)` hands each verified entry to
 `on_entry(entry)` instead of collecting them, so memory use is one file at a
@@ -163,8 +163,8 @@ unchanged. A `"symlink"` entry's `target` is spelled as the archive stores it,
 relative to the link. A `"hardlink"` entry comes last and by reference: its
 `target` is the root-relative resolved path of an entry already delivered, a
 file or an earlier hardlink (a chain is delivered link by link). With
-`skip_duplicates` off a path can be delivered more than once and a hardlink
-refers to the latest delivery; implicit parent directories are not delivered.
+`SinkOptions(existing_files="overwrite")` a path can be delivered more than once
+and a hardlink refers to the latest delivery; implicit parent directories are not delivered.
 Entries are provisional: each is delivered as soon as it is verified, so a later
 failure refuses the archive after earlier entries were already delivered. The
 gzip CRC of a `.tar.gz` is verified after the end-of-archive marker, so a
@@ -232,7 +232,7 @@ Extract an archive to the specified directory with security validation.
 | `archive_path` | `str \| Path` | Path to the archive file |
 | `output_dir` | `str \| Path` | Directory where files will be extracted |
 | `config` | `SecurityConfig` | Optional security configuration |
-| `options` | `ExtractionOptions` | Optional `ExtractionOptions().with_atomic(True)` / `.with_skip_duplicates(...)` |
+| `options` | `ExtractionOptions` | Optional `ExtractionOptions().with_atomic(True)` / `.with_existing_files("skip" \| "overwrite" \| "refuse")` |
 
 **Returns:** `ExtractionReport`
 
@@ -244,7 +244,7 @@ Extract an archive to the specified directory with security validation.
 | `bytes_written` | `int` | Total bytes written |
 | `duration_ms` | `int` | Extraction duration in milliseconds |
 | `files_skipped` | `int` | Number of files skipped (e.g. duplicates) |
-| `warnings` | `list[str]` | Warning messages generated during extraction |
+| `warnings` | `list[AnyExtractionWarning]` | Typed warnings (`AntiItemsSkippedWarning`, `BackupCleanupFailedWarning`): branch on `kind`, not on message text |
 
 **Raises:**
 
@@ -265,7 +265,7 @@ Extract an archive to the specified directory with security validation.
 
 Create an archive from files and directories. The archive is staged in a temporary file next to `output_path` (its directory must be writable) and renamed into place when complete, so a failed creation leaves the output as it was. `format` states the format when the extension does not (for example `"Zip"` for a `.whl`); `overwrite=False` refuses any existing output.
 
-**Note:** `create_archive` raises `FileNotFoundError` for missing sources, `OutputExistsError` (a `FileExistsError` subclass) when the output exists and `overwrite=False`, and `ValueError` for invalid compression levels — matching standard Python conventions.
+**Note:** `create_archive` raises `FileNotFoundError` for missing sources, `OutputExistsError` (a `FileExistsError` subclass) when the output exists and `overwrite=False`, and `ValueError` for invalid compression levels — matching standard Python conventions. `SourceNotFoundError` and `OutputExistsError` fill `errno`, `strerror` and `filename` as `open()` does, and I/O failures carry a stable `io_kind` token (for example `"PermissionDenied"`).
 
 `create_archive` and `create_archive_with_progress` take `durability="synced"`
 (the default) or `"unsynced"`. `"synced"` flushes the archive and its directory
@@ -278,7 +278,7 @@ reached the disk. Any other value raises `InvalidConfigurationError` with
 
 ### `extract_archive_with_progress(archive_path, output_dir, config, progress)`
 
-Extract an archive with a progress callback. The GIL is held when a callback is provided and released otherwise.
+Extract an archive with a progress callback. The GIL is released during extraction, with or without a callback; the callback takes it back for each call.
 
 **Parameters:**
 
@@ -302,7 +302,7 @@ result = exarch.extract_archive_with_progress(
 )
 ```
 
-**If `progress` raises:** extraction is not aborted early — the progress-callback contract has no cancellation signal, so extraction always runs to completion first, and `progress` is not called again for the remaining entries once it has raised. If extraction otherwise succeeded, `progress`'s own exception propagates unchanged, with `files_extracted`/`bytes_written` attributes describing what was written and a `progress_callback_error = True` marker attribute (check this marker before treating the presence of `files_extracted` as a partial-extraction signal, since a genuine partial-extraction failure carries the same two attribute names). If extraction also failed, the extraction error takes priority — a raising `progress` can never mask a security error such as `SymlinkEscapeError` — and `progress`'s exception is attached as `__cause__` instead of being dropped. `create_archive_with_progress` behaves the same way, using `files_added` in place of `files_extracted`.
+**If `progress` raises** (`KeyboardInterrupt` included), extraction is cancelled: it stops before the next entry and `progress` is not called again. What was written stays on disk, or is rolled back with `atomic`. `progress`'s own exception propagates unchanged, with a `progress_callback_error = True` marker attribute and `writes` plus, while the files remain on disk, `files_extracted`/`bytes_written`/`files_skipped`/`skipped`/`warnings` describing what was written (check the marker before treating the presence of `files_extracted` as a partial-extraction signal, since a genuine partial-extraction failure carries the same attribute names). If extraction failed for its own reason first, the extraction error takes priority — a raising `progress` can never mask a security error such as `SymlinkEscapeError` — and `progress`'s exception is attached as `__cause__` instead of being dropped. `create_archive_with_progress` behaves the same way, discarding the staged archive and attaching no counters.
 
 ### `SecurityConfig`
 
@@ -316,6 +316,7 @@ config = config.with_max_file_count(10_000)  # Max 10k files
 config = config.with_max_compression_ratio(50.0)  # Zip bomb threshold
 config = config.add_allowed_extension(".txt")  # Extension allowlist
 config = config.add_allowed_extension(".md")
+config.allowed_extensions = None  # allow every extension again; [] is refused
 config = config.add_banned_component("__MACOSX")  # Skip components
 config = config.with_allow_solid_archives(True)  # Allow solid 7z archives
 config = config.with_zip_consistency(

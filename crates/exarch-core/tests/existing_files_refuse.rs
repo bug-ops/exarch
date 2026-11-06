@@ -306,10 +306,11 @@ fn a_created_file_replaced_by_a_foreign_one_is_refused_not_overwritten() {
     .unwrap();
     let dest = TempDir::new().unwrap();
     let f = dest.path().join("f");
+    let aside = TempDir::new().unwrap();
     let mut progress = AfterEntry {
         trigger: "f",
         act: || {
-            std::fs::remove_file(&f).unwrap();
+            std::fs::rename(&f, aside.path().join("kept")).unwrap();
             std::fs::write(&f, KEPT).unwrap();
         },
     };

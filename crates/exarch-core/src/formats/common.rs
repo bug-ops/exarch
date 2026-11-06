@@ -2176,12 +2176,26 @@ mod refuse_probe_tests {
         std::fs::write(temp.path().join("f"), "ours").unwrap();
         root.created()
             .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
-        std::fs::remove_file(temp.path().join("f")).unwrap();
+        std::fs::rename(temp.path().join("f"), temp.path().join("kept")).unwrap();
         std::fs::write(temp.path().join("f"), "foreign").unwrap();
 
         let outcome = open(&root, "f");
 
         assert_matches!(outcome, Err(ArchiveError::DestinationOccupied { .. }));
+        assert_untouched(temp.path(), &[("f", "foreign"), ("kept", "ours")]);
+    }
+
+    #[test]
+    fn a_foreign_occupant_with_a_recorded_identity_is_skipped_never_written() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "foreign").unwrap();
+        let reused = root.dir().identity(leaf("f")).unwrap().unwrap();
+        root.created().insert_identity_for_test(reused);
+
+        let outcome = open(&root, "f");
+
+        assert_matches!(outcome, Ok(None));
         assert_untouched(temp.path(), &[("f", "foreign")]);
     }
 }

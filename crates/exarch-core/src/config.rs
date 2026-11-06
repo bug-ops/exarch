@@ -98,6 +98,9 @@ closed_enum! {
         /// landings; past that every occupant counts as not created by the run.
         /// Both limits fail closed.
         ///
+        /// A foreign file that reuses the freed identity of a file the run
+        /// created (deleted behind its back) is skipped, never overwritten.
+        ///
         /// A site that handles [`ExistingFiles`] never routes `Refuse` into an
         /// overwrite branch, whatever the record says: a file created behind the
         /// run's back can only turn a refusal into a skip or the reverse, and the

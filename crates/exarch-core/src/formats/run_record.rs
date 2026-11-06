@@ -23,6 +23,11 @@
 //! it did). A wrong answer only turns a refusal into a skip or a skip into a
 //! refusal. Neither writes: every occupant site routes `Refuse` to "refuse" or
 //! "skip" and never to an overwrite, and the creates themselves stay `O_EXCL`.
+//!
+//! Identities are reused: once a created file is deleted, the filesystem may
+//! hand its (device, inode) to the next file. A foreign file that takes over
+//! the freed identity of a created one is skipped as a duplicate, never
+//! overwritten.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -98,6 +103,11 @@ impl RunRecord {
     pub(crate) fn created_here(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> bool {
         let created = self.0.borrow();
         !created.saturated && key_of(dir, leaf, rel).is_some_and(|key| created.keys.contains(&key))
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn insert_identity_for_test(&self, key: LandingKey) {
+        self.0.borrow_mut().keys.insert(key);
     }
 
     #[cfg(all(test, unix))]

@@ -114,6 +114,14 @@ impl Format {
     }
 }
 
+/// Renders a relative path with `/` separators on every platform.
+fn slashed(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn base() -> SecurityConfig {
     SecurityConfig::default()
         .with_allow_solid_archives(true)
@@ -152,11 +160,7 @@ impl Run {
     }
 
     fn files(&self) -> Vec<String> {
-        self.tree()
-            .files
-            .keys()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect()
+        self.tree().files.keys().map(|path| slashed(path)).collect()
     }
 
     fn report(&self) -> &ExtractionReport {
@@ -780,7 +784,7 @@ fn landings_equal_what_extract_wrote() {
         let mut landed: Vec<String> = manifest
             .landing_paths(&config)
             .filter(|(entry, _)| matches!(entry.kind, exarch_core::ManifestEntryKind::File { .. }))
-            .map(|(_, landing)| landing.as_path().to_string_lossy().into_owned())
+            .map(|(_, landing)| slashed(landing.as_path()))
             .collect();
         landed.sort();
         assert_eq!(landed, run.files(), "{format:?}");
@@ -866,10 +870,7 @@ fn a_memory_sink_applies_the_same_selection() {
             .extract(reader, &mut sink)
             .unwrap();
 
-        let stored: Vec<_> = sink
-            .iter()
-            .map(|(path, _)| path.to_string_lossy().into_owned())
-            .collect();
+        let stored: Vec<_> = sink.iter().map(|(path, _)| slashed(path)).collect();
         assert_eq!(stored, ["src", "src/main.rs"], "{format:?}");
         assert_eq!(report.skipped.count(SkipKind::NotSelected), 2, "{format:?}");
     }

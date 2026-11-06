@@ -4937,7 +4937,7 @@ fn test_extract_atomic_force_rejects_junction_destination() {
         .arg(&junction_dest)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("is a symlink"));
+        .stderr(predicate::str::contains("is a symbolic link"));
 
     assert_eq!(
         std::fs::read(real_dest.join("old.txt")).expect("pre-existing file must survive"),
@@ -7439,8 +7439,10 @@ fn extracted_files(root: &std::path::Path) -> Vec<String> {
                 found.push(
                     path.strip_prefix(root)
                         .expect("under root")
-                        .to_string_lossy()
-                        .into_owned(),
+                        .components()
+                        .map(|part| part.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/"),
                 );
             }
         }

@@ -7306,3 +7306,29 @@ fn test_extract_json_reports_zip_reader_sub_code() {
     assert_eq!(json["error"]["kind"], "InvalidArchive");
     assert_eq!(json["error"]["sub_code"], "ZIP_READER");
 }
+
+/// A closed stderr pipe must neither abort the run (exit 101) nor change the
+/// documented exit status of a successful extraction (#981).
+#[cfg(unix)]
+#[test]
+fn test_verbose_extract_survives_closed_stderr_pipe() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let (reader, writer) = std::io::pipe().expect("create pipe");
+    drop(reader);
+
+    let status = std::process::Command::new(exarch_cmd().get_program())
+        .arg("--verbose")
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(writer)
+        .status()
+        .expect("run exarch");
+
+    assert_eq!(status.code(), Some(0), "closed stderr must not panic");
+    assert!(
+        std::fs::read_dir(temp.path()).unwrap().next().is_some(),
+        "the extraction must still complete"
+    );
+}

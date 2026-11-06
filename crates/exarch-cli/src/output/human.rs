@@ -4,6 +4,8 @@ use super::Verbosity;
 use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use super::formatter::SizeUnits;
+use super::emit_blank;
+use super::emit_line;
 use super::humanize_bytes;
 use super::terminal::TerminalEntry;
 use super::terminal::TerminalPath;
@@ -300,27 +302,6 @@ fn escaped_chain(error: &anyhow::Error) -> String {
         })
         .collect::<Vec<_>>()
         .join(": ")
-}
-
-/// Renders `args` to a line and issues a single [`Write::write_all`] call.
-///
-/// `write!`/`writeln!` on a multi-argument format string invoke the
-/// underlying writer once per formatted fragment; for [`Term`], each of
-/// those calls flushes independently (`console::Term`'s `Write` impl has no
-/// internal buffering), turning one logical line into several syscalls.
-/// Formatting into a `String` first and writing it in one call restores the
-/// single-write-per-line behavior of the old `Term::write_line`.
-fn emit_line<W: Write>(writer: &mut W, args: std::fmt::Arguments<'_>) {
-    use std::fmt::Write as _;
-    let mut line = String::new();
-    let _ = line.write_fmt(args);
-    line.push('\n');
-    let _ = writer.write_all(line.as_bytes());
-}
-
-/// Writes a single blank line in one call. See [`emit_line`].
-fn emit_blank<W: Write>(writer: &mut W) {
-    let _ = writer.write_all(b"\n");
 }
 
 impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {

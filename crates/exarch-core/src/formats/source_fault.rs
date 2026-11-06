@@ -86,18 +86,21 @@ impl<'a> ReadFaults<'a> {
     /// A failed write is always [`ArchiveError::Io`]: the destination is not
     /// the archive. A failed read is a budget refusal when the stream hit one,
     /// an I/O error when the source raised a fault, and otherwise a malformed
-    /// archive: the decoder rejected the bytes it was given. A short TAR entry
-    /// without a source fault is a truncated archive; every other size
-    /// mismatch and every overrun keeps the declared-size classification.
+    /// archive: the decoder rejected the bytes it was given. A short entry
+    /// after a source fault is that fault; a short TAR entry without one is a
+    /// truncated archive; every other size mismatch and every overrun keeps
+    /// the declared-size classification.
     #[must_use]
     pub fn classify(self, error: CopyError) -> ArchiveError {
         match error {
             CopyError::Read(error) => self.classify_read(error),
-            CopyError::Short { declared, actual }
-                if self.family == ReadFamily::Tar && self.pending_fault().is_none() =>
-            {
-                ArchiveError::from(Malformation::TarEntryTruncated { declared, actual })
-            }
+            CopyError::Short { declared, actual } => match self.pending_fault() {
+                Some(fault) => ArchiveError::Io(fault),
+                None if self.family == ReadFamily::Tar => {
+                    ArchiveError::from(Malformation::TarEntryTruncated { declared, actual })
+                }
+                None => ArchiveError::from(CopyError::Short { declared, actual }),
+            },
             other => ArchiveError::from(other),
         }
     }
@@ -106,6 +109,25 @@ impl<'a> ReadFaults<'a> {
     /// draining the rest of an entry.
     #[must_use]
     pub fn classify_read(self, error: io::Error) -> ArchiveError {
+        self.classify_read_with(error, |error| self.decoder_verdict(error))
+    }
+
+    /// Classifies the error of reading a stored symlink target: a source
+    /// fault is I/O, anything else leaves the target unreadable.
+    #[must_use]
+    pub fn classify_symlink_read(self, error: io::Error) -> ArchiveError {
+        self.classify_read_with(error, |error| {
+            ArchiveError::from(Malformation::SymlinkTargetUnreadable {
+                detail: error.to_string().into(),
+            })
+        })
+    }
+
+    fn classify_read_with(
+        self,
+        error: io::Error,
+        decoder_verdict: impl FnOnce(io::Error) -> ArchiveError,
+    ) -> ArchiveError {
         if let Some(violation) = budget_violation(&error) {
             return violation;
         }
@@ -116,6 +138,10 @@ impl<'a> ReadFaults<'a> {
         if error.raw_os_error().is_some() {
             return ArchiveError::Io(error);
         }
+        decoder_verdict(error)
+    }
+
+    fn decoder_verdict(self, error: io::Error) -> ArchiveError {
         let detail: Box<str> = error.to_string().into();
         match self.family {
             ReadFamily::Opaque => ArchiveError::Io(error),
@@ -133,6 +159,31 @@ impl<'a> ReadFaults<'a> {
                 ArchiveError::from(Malformation::SevenZEntryDataUnreadable { detail })
             }
         }
+    }
+}
+
+/// Reports a source `fault` as [`ArchiveError::Io`] in place of a verdict on
+/// the bytes the failing read would have delivered: a malformed archive, or a
+/// corrupt or truncated stream at the end of a TAR.
+///
+/// A budget, security or ambiguity refusal is about bytes that were read, and
+/// stays as it is.
+pub(crate) fn prefer_fault(error: ArchiveError, fault: Option<io::Error>) -> ArchiveError {
+    use crate::error::TarTrailerRefusal;
+    use crate::error::TrailerCorruption;
+    match (&error, fault) {
+        (
+            ArchiveError::InvalidArchive(_)
+            | ArchiveError::TarTrailer(
+                TarTrailerRefusal::Truncated
+                | TarTrailerRefusal::Corrupt {
+                    cause: TrailerCorruption::Decoder,
+                    ..
+                },
+            ),
+            Some(fault),
+        ) => ArchiveError::Io(fault),
+        _ => error,
     }
 }
 
@@ -474,10 +525,13 @@ mod tests {
             })
         );
         let faulty = tap_with_fault();
-        assert_matches!(
-            ReadFaults::new(ReadFamily::Tar, Some(&faulty)).classify(short()),
-            ArchiveError::SecurityViolation { .. }
-        );
+        for family in [ReadFamily::Tar, ReadFamily::Zip, ReadFamily::SevenZ] {
+            assert_matches!(
+                ReadFaults::new(family, Some(&faulty)).classify(short()),
+                ArchiveError::Io(ref e) if e.raw_os_error() == Some(5),
+                "{family:?}"
+            );
+        }
     }
 
     #[test]
@@ -518,6 +572,20 @@ mod tests {
             ReadFaults::of_tar(&TapSource::Tapped(SourceTap::default()))
                 .classify(CopyError::Read(decoder_error())),
             ArchiveError::InvalidArchive(_)
+        );
+    }
+
+    #[test]
+    fn a_symlink_target_read_is_io_after_a_source_fault_and_unreadable_otherwise() {
+        let faulty = tap_with_fault();
+        assert_matches!(
+            ReadFaults::new(ReadFamily::Zip, Some(&faulty)).classify_symlink_read(decoder_error()),
+            ArchiveError::Io(_)
+        );
+        let clean = SourceTap::default();
+        assert_matches!(
+            ReadFaults::new(ReadFamily::Zip, Some(&clean)).classify_symlink_read(decoder_error()),
+            ArchiveError::InvalidArchive(Malformation::SymlinkTargetUnreadable { .. })
         );
     }
 

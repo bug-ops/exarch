@@ -113,6 +113,7 @@ use super::common::open_archive;
 use super::compression::CompressionCodec;
 use super::source_fault::ReadFaults;
 use super::source_fault::TapSource;
+use super::source_fault::prefer_fault;
 use super::tar_metadata_limit::CheckedTarEntry;
 use super::tar_metadata_limit::SkipLimits;
 use super::tar_metadata_limit::budgeted_reader_with;
@@ -415,6 +416,7 @@ impl<R: Read> TarArchive<R> {
         let finished = finished.and_then(|()| {
             self.trailer
                 .enforce(&mut inner_archive.into_inner(), config)
+                .map_err(|e| prefer_fault(e, source.fault()))
         });
         if let Err(e) = finished.and_then(|()| target.finish_scan()) {
             return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));

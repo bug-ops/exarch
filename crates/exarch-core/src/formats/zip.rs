@@ -777,7 +777,10 @@ impl<R: Read + Seek> ZipArchive<R> {
                 target.directory(&safe_path, &mut ctx.tally)?;
             }
         } else if entry_kind == ZipEntryKind::Symlink {
-            let link_target = ZipEntryAdapter::read_symlink_target(&mut zip_file)?;
+            let link_target = ZipEntryAdapter::read_symlink_target(
+                &mut zip_file,
+                ReadFaults::new(ReadFamily::Zip, Some(source)),
+            )?;
             drop(zip_file);
             if let Admission::Admit(safe_symlink) =
                 target.validate_symlink(&path, &link_target, size, &mut ctx.tally)?
@@ -1043,7 +1046,10 @@ impl ZipEntryAdapter {
     }
 
     /// Reads symlink target from ZIP entry data (stored as file content).
-    fn read_symlink_target<R: Read>(zip_file: &mut zip::read::ZipFile<'_, R>) -> Result<PathBuf> {
+    fn read_symlink_target<R: Read>(
+        zip_file: &mut zip::read::ZipFile<'_, R>,
+        faults: ReadFaults<'_>,
+    ) -> Result<PathBuf> {
         let size = zip_file.size();
         common::check_symlink_target_size(size)?;
 
@@ -1055,11 +1061,7 @@ impl ZipEntryAdapter {
         zip_file
             .take(common::MAX_STORED_SYMLINK_TARGET)
             .read_to_end(&mut target_bytes)
-            .map_err(|e| {
-                ArchiveError::from(Malformation::SymlinkTargetUnreadable {
-                    detail: e.to_string().into(),
-                })
-            })?;
+            .map_err(|e| faults.classify_symlink_read(e))?;
 
         common::symlink_target_from_bytes(&target_bytes)
     }
@@ -1081,7 +1083,7 @@ impl ZipEntryAdapter {
 pub(crate) fn read_zip_symlink_target<R: Read>(
     zip_file: &mut zip::read::ZipFile<'_, R>,
 ) -> Result<PathBuf> {
-    ZipEntryAdapter::read_symlink_target(zip_file)
+    ZipEntryAdapter::read_symlink_target(zip_file, ReadFaults::new(ReadFamily::Zip, None))
 }
 
 /// Reads a ZIP symlink target for an integrity pass.

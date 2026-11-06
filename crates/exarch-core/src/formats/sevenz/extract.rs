@@ -309,9 +309,19 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 report,
                 pending_error
                     .take()
-                    .unwrap_or_else(|| ArchiveError::from(error)),
+                    .unwrap_or_else(|| outside_callback(error, faults)),
             )),
         }
+    }
+}
+
+/// The error `sevenz-rust2` raised outside the per-entry callback, such as
+/// while draining an entry nobody asked for: a read error is a decoder verdict
+/// unless the source faulted.
+fn outside_callback(error: sevenz_rust2::Error, faults: ReadFaults<'_>) -> ArchiveError {
+    match error {
+        sevenz_rust2::Error::Io(io_error, _) => faults.classify_read(io_error),
+        other => ArchiveError::from(other),
     }
 }
 

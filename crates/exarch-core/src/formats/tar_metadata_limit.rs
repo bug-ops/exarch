@@ -415,14 +415,11 @@ impl TarReadBudget {
     /// Reports a read fault the source raised as [`crate::ArchiveError::Io`],
     /// in place of the format verdict `error` draws from it.
     ///
-    /// Only [`crate::ArchiveError::InvalidArchive`] is replaced: a budget,
-    /// security or ambiguity refusal is about the bytes `tar` did read, and
-    /// stays as it is.
+    /// Only [`crate::ArchiveError::InvalidArchive`] and a corrupt or truncated
+    /// trailer are replaced: a budget, security or ambiguity refusal is about
+    /// the bytes `tar` did read, and stays as it is.
     pub(crate) fn prefer_fault(&self, error: crate::ArchiveError) -> crate::ArchiveError {
-        match (&error, self.0.source.fault()) {
-            (crate::ArchiveError::InvalidArchive(_), Some(fault)) => crate::ArchiveError::Io(fault),
-            _ => error,
-        }
+        super::source_fault::prefer_fault(error, self.0.source.fault())
     }
 
     /// Adds `declared` to the sum of skipped entries' declared sizes and

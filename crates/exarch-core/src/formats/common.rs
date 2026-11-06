@@ -248,14 +248,6 @@ impl Drop for EntryCompleteGuard<'_> {
 /// constructing a `PathBuf` and passing to `SafePath::validate`.
 ///
 /// This is a no-op for entry names that contain no `\`.
-///
-/// # Examples
-///
-/// ```ignore
-/// # use exarch_core::formats::common::normalize_entry_name;
-/// assert_eq!(normalize_entry_name("foo\\bar\\baz.txt"), "foo/bar/baz.txt");
-/// assert_eq!(normalize_entry_name("plain/path.txt"), "plain/path.txt");
-/// ```
 #[inline]
 #[must_use]
 pub fn normalize_entry_name(name: &str) -> String {
@@ -1129,6 +1121,12 @@ mod tests {
         let parent = pinned(&DestDir::new(path.parent().expect("parent")).expect("dest"));
         let (_, leaf) = Leaf::split(Path::new(path.file_name().expect("name"))).expect("leaf");
         parent.dir().reopen()?.create_new(leaf, mode)
+    }
+
+    #[test]
+    fn normalize_entry_name_turns_backslashes_into_slashes_only() {
+        assert_eq!(normalize_entry_name("foo\\bar\\baz.txt"), "foo/bar/baz.txt");
+        assert_eq!(normalize_entry_name("plain/path.txt"), "plain/path.txt");
     }
 
     #[test]

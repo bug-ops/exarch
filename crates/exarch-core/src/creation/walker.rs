@@ -31,23 +31,6 @@ use walkdir::WalkDir;
 /// - Symlink handling (follow or store as-is)
 /// - Size limit enforcement
 /// - Archive path computation
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::CreationConfig;
-/// use exarch_core::FilteredWalker;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let root = Path::new("./project");
-/// let walker = FilteredWalker::new(root, &config);
-///
-/// for entry in walker.walk() {
-///     let entry = entry.unwrap();
-///     println!("Would add: {}", entry.archive_path.display());
-/// }
-/// ```
 pub struct FilteredWalker<'a> {
     root: &'a Path,
     config: &'a CreationConfig,
@@ -58,17 +41,6 @@ static NOTHING_EXCLUDED: ExcludedOutput = ExcludedOutput::none();
 
 impl<'a> FilteredWalker<'a> {
     /// Creates a new filtered walker for the given root directory.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use exarch_core::CreationConfig;
-    /// use exarch_core::FilteredWalker;
-    /// use std::path::Path;
-    ///
-    /// let config = CreationConfig::default();
-    /// let walker = FilteredWalker::new(Path::new("."), &config);
-    /// ```
     #[must_use]
     pub fn new(root: &'a Path, config: &'a CreationConfig) -> Self {
         Self {
@@ -342,20 +314,6 @@ pub enum EntryType {
 /// This function performs a single directory traversal and collects all
 /// filtered entries into memory, avoiding the need to traverse the directory
 /// tree twice (once for counting, once for processing).
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::CreationConfig;
-/// use exarch_core::creation::walker::collect_entries;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let sources = [Path::new("./src")];
-/// let entries = collect_entries(&sources, &config, &ExcludedOutput::none())?;
-/// println!("Total entries: {}", entries.len());
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
 ///
 /// # Errors
 ///

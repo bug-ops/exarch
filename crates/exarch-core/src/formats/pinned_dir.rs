@@ -334,8 +334,10 @@ mod imp {
 
     use super::EntryStatus;
     use super::Leaf;
+    use super::TempLeaf;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::file_identity::IdentityKey;
+    use crate::formats::occupant::ReplacePermit;
     use crate::security::fs_view::Occupant;
     use crate::security::permissions::SanitizedMode;
 
@@ -519,18 +521,35 @@ mod imp {
             Ok(File::from(fd))
         }
 
-        /// Renames `from` over `to`, both in this directory.
-        pub(crate) fn rename_within(&self, from: Leaf<'_>, to: Leaf<'_>) -> io::Result<()> {
+        /// Renames the temp file `from` over the occupant `to`, both in this
+        /// directory; the permit proves the policy allows replacing it.
+        pub(crate) fn replace_entry(
+            &self,
+            from: &TempLeaf,
+            to: Leaf<'_>,
+            _permit: ReplacePermit,
+        ) -> io::Result<()> {
             Ok(rustix::fs::renameat(
                 &self.0,
-                from.as_os_str(),
+                from.as_leaf().as_os_str(),
                 &self.0,
                 to.as_os_str(),
             )?)
         }
 
-        /// Unlinks the non-directory `name`.
-        pub(crate) fn remove_file(&self, name: Leaf<'_>) -> io::Result<()> {
+        /// Unlinks the occupant `name`; the permit proves the policy allows
+        /// destroying it.
+        #[cfg(unix)]
+        pub(crate) fn remove_occupant(
+            &self,
+            name: Leaf<'_>,
+            _permit: ReplacePermit,
+        ) -> io::Result<()> {
+            self.unlink_own(name)
+        }
+
+        /// Unlinks a file this run created.
+        pub(super) fn unlink_own(&self, name: Leaf<'_>) -> io::Result<()> {
             Ok(rustix::fs::unlinkat(
                 &self.0,
                 name.as_os_str(),
@@ -610,11 +629,13 @@ mod imp {
 
     use super::EntryStatus;
     use super::Leaf;
+    use super::TempLeaf;
     use super::nt;
     use super::nt::Disposition;
     use super::nt::Kind;
     use super::nt::Request;
     use crate::formats::file_identity::FileIdentity;
+    use crate::formats::occupant::ReplacePermit;
     use crate::security::fs_view::Occupant;
     use crate::security::permissions::SanitizedMode;
 
@@ -770,13 +791,30 @@ mod imp {
                 .map(File::from)
         }
 
-        /// Renames `from` over `to`, both in this directory.
-        pub(crate) fn rename_within(&self, from: Leaf<'_>, to: Leaf<'_>) -> io::Result<()> {
-            nt::rename_within(self.0.as_handle(), from, to)
+        /// Renames the temp file `from` over the occupant `to`, both in this
+        /// directory; the permit proves the policy allows replacing it.
+        pub(crate) fn replace_entry(
+            &self,
+            from: &TempLeaf,
+            to: Leaf<'_>,
+            _permit: ReplacePermit,
+        ) -> io::Result<()> {
+            nt::rename_within(self.0.as_handle(), from.as_leaf(), to)
         }
 
-        /// Deletes the non-directory `name`.
-        pub(crate) fn remove_file(&self, name: Leaf<'_>) -> io::Result<()> {
+        /// Deletes the occupant `name`; the permit proves the policy allows
+        /// destroying it. Only Unix replaces a symlink, so only tests call it.
+        #[cfg(test)]
+        pub(crate) fn remove_occupant(
+            &self,
+            name: Leaf<'_>,
+            _permit: ReplacePermit,
+        ) -> io::Result<()> {
+            self.unlink_own(name)
+        }
+
+        /// Deletes a file this run created.
+        pub(super) fn unlink_own(&self, name: Leaf<'_>) -> io::Result<()> {
             nt::remove_file(self.0.as_handle(), name)
         }
     }
@@ -826,7 +864,7 @@ impl<'d> TempFileGuard<'d> {
 impl Drop for TempFileGuard<'_> {
     fn drop(&mut self) {
         if self.should_cleanup {
-            let _ = self.dir.remove_file(Leaf(&self.name));
+            let _ = self.dir.unlink_own(Leaf(&self.name));
         }
     }
 }
@@ -864,6 +902,7 @@ mod tests {
     use super::support::pinned;
     use super::support::pinned_at;
     use super::*;
+    use crate::formats::occupant::ReplacePermit;
     use crate::security::RawMode;
     use std::assert_matches;
     use std::fs;
@@ -940,7 +979,12 @@ mod tests {
         let (a, outside) = swapped(&temp);
 
         a.create_new(leaf("tmp"), None).unwrap();
-        a.rename_within(leaf("tmp"), leaf("final")).unwrap();
+        a.replace_entry(
+            &TempLeaf::named("tmp"),
+            leaf("final"),
+            ReplacePermit::for_test(),
+        )
+        .unwrap();
         a.symlink(Path::new("final"), leaf("alias")).unwrap();
 
         assert!(temp.path().join("base/a_moved/final").is_file());
@@ -1058,6 +1102,7 @@ mod windows_tests {
     use super::support::pinned;
     use super::support::pinned_at;
     use super::*;
+    use crate::formats::occupant::ReplacePermit;
     use std::fs;
     use std::io;
     use std::io::Write;
@@ -1113,13 +1158,18 @@ mod windows_tests {
         );
 
         fs::write(temp.path().join("b"), b"old").unwrap();
-        dir.rename_within(leaf("a"), leaf("b")).unwrap();
+        dir.replace_entry(&TempLeaf::named("a"), leaf("b"), ReplacePermit::for_test())
+            .unwrap();
         assert_eq!(fs::read(temp.path().join("b")).unwrap(), b"one");
         assert!(!temp.path().join("a").exists());
 
-        assert!(dir.remove_file(leaf("sub")).is_err());
+        assert!(
+            dir.remove_occupant(leaf("sub"), ReplacePermit::for_test())
+                .is_err()
+        );
         assert!(temp.path().join("sub").is_dir());
-        dir.remove_file(leaf("b")).unwrap();
+        dir.remove_occupant(leaf("b"), ReplacePermit::for_test())
+            .unwrap();
         assert_eq!(dir.probe(leaf("b")).unwrap(), None);
 
         dir.reopen().unwrap().create_new(leaf("c"), None).unwrap();
@@ -1166,7 +1216,8 @@ mod windows_tests {
                 .is_file()
         );
 
-        dir.remove_file(leaf("j")).unwrap();
+        dir.remove_occupant(leaf("j"), ReplacePermit::for_test())
+            .unwrap();
         assert!(fs::symlink_metadata(&link).is_err());
         assert_eq!(fs::read(outside.join("keep")).unwrap(), b"k");
     }
@@ -1190,7 +1241,12 @@ mod windows_tests {
         );
 
         c.create_new(leaf("tmp"), None).unwrap();
-        c.rename_within(leaf("tmp"), leaf("final")).unwrap();
+        c.replace_entry(
+            &TempLeaf::named("tmp"),
+            leaf("final"),
+            ReplacePermit::for_test(),
+        )
+        .unwrap();
         assert!(base.join("a/b/c/final").is_file());
     }
 
@@ -1274,9 +1330,13 @@ mod windows_tests {
         let [first, second, third] = &names;
 
         let created = held.create_new(leaf(first), None);
-        let renamed = created
-            .is_ok()
-            .then(|| held.rename_within(leaf(first), leaf(second)));
+        let renamed = created.is_ok().then(|| {
+            held.replace_entry(
+                &TempLeaf::named(first),
+                leaf(second),
+                ReplacePermit::for_test(),
+            )
+        });
         let made = held.make_dir(leaf(third));
         let opened = made.is_ok().then(|| held.open_dir(leaf(third)).map(drop));
 

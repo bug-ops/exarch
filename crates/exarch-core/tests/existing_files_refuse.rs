@@ -164,6 +164,52 @@ fn a_sink_skips_an_in_archive_duplicate_under_refuse() {
     );
 }
 
+fn refused_in_memory(
+    entries: &[Vec<u8>],
+) -> (exarch_core::ExtractionReport, exarch_core::MemorySink) {
+    let config = SecurityConfig::default()
+        .with_allow_symlinks(true)
+        .with_allow_hardlinks(true);
+    let request = MemoryExtractRequest::default()
+        .with_config(config)
+        .with_options(SinkOptions::default().with_existing_files(ExistingFiles::Refuse));
+    extract_reader_to_memory(
+        ArchiveReader::from_bytes(tar_archive(entries), None).unwrap(),
+        &request,
+        &mut NoopProgress,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_sink_keeps_the_first_symlink_over_a_duplicate_under_refuse() {
+    let (report, sink) = refused_in_memory(&[
+        sink_support::tar_symlink("l", "first"),
+        sink_support::tar_symlink("l", "second"),
+    ]);
+
+    assert_eq!(report.files_skipped(), 1);
+    assert_matches!(
+        sink.get(Path::new("l")),
+        Some(MemoryEntry::Symlink { target, .. }) if target == Path::new("first")
+    );
+}
+
+#[test]
+fn a_sink_keeps_the_first_file_over_a_duplicate_hardlink_under_refuse() {
+    let (report, sink) = refused_in_memory(&[
+        tar_file("a", b"first"),
+        tar_file("b", b"other"),
+        sink_support::tar_hardlink("a", "b"),
+    ]);
+
+    assert_eq!(report.files_skipped(), 1);
+    assert_matches!(
+        sink.get(Path::new("a")),
+        Some(MemoryEntry::File { data, .. }) if data == b"first"
+    );
+}
+
 /// Extracts `archive` twice, under `Skip` and under `Refuse`, into fresh
 /// destinations and returns both reports with the content of `name`.
 fn extract_both(

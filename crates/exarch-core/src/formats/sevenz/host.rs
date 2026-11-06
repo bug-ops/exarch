@@ -14,11 +14,12 @@ use super::write::lstat_dest;
 use super::write::refuse_undecoded_target_in;
 use super::write::write_file_direct;
 use super::write::write_file_with_permit;
-use crate::ExistingFiles;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::formats::common;
+use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
@@ -91,25 +92,26 @@ impl DestOccupancy {
         Ok(())
     }
 
-    /// How to write over this occupant, or the refusal when it cannot be
-    /// replaced.
-    fn write_mode(self, rel: &Path) -> Result<WriteMode> {
+    /// How to write over this occupant with the policy's `permit`, or the
+    /// refusal when it cannot be replaced.
+    fn replace_mode(self, rel: &Path, permit: ReplacePermit) -> Result<WriteMode> {
         self.refuse_symlink(rel)?;
         match self {
             Self::Vacant => Ok(WriteMode::CreateNew),
             Self::Directory => Err(common::occupant_at_dest_error(rel, Occupant::Directory).into()),
-            Self::RegularFile | Self::Symlink => Ok(WriteMode::ReplaceRegular),
+            Self::RegularFile | Self::Symlink => Ok(WriteMode::ReplaceRegular(permit)),
         }
     }
 }
 
 /// How an admitted file reaches its destination.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum WriteMode {
     /// Nothing is there: open the destination itself with `O_EXCL`.
     CreateNew,
-    /// A regular file is there: replace it through a temp file and a rename.
-    ReplaceRegular,
+    /// A regular file is there: replace it through a temp file and a rename,
+    /// as the permit allows.
+    ReplaceRegular(ReplacePermit),
 }
 
 /// A file the 7z host admitted, with the way to write it.
@@ -156,33 +158,28 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let parent = parent.into_owned()?;
 
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
-        if occupancy.is_occupied() {
-            match tally.options.existing_files {
-                ExistingFiles::Skip => {
+        let write_mode = if occupancy.is_occupied() {
+            let root = self.inner.root();
+            let action = tally.options.existing_files.on_occupant(
+                || {
+                    root.created()
+                        .created_here(&parent, leaf, safe_path.as_path())
+                },
+                || common::destination_occupied(root.dest().as_path(), safe_path.as_path()),
+            )?;
+            match action {
+                OccupantAction::Skip => {
                     return tally
                         .record_duplicate_skip(safe_path.as_path())
                         .map(Admission::Skipped);
                 }
-                ExistingFiles::Refuse => {
-                    if self
-                        .inner
-                        .root()
-                        .created()
-                        .created_here(&parent, leaf, safe_path.as_path())
-                    {
-                        return tally
-                            .record_duplicate_skip(safe_path.as_path())
-                            .map(Admission::Skipped);
-                    }
-                    return Err(common::destination_occupied(
-                        self.inner.root().dest().as_path(),
-                        safe_path.as_path(),
-                    ));
+                OccupantAction::Replace(permit) => {
+                    occupancy.replace_mode(safe_path.as_path(), permit)?
                 }
-                ExistingFiles::Overwrite => {}
             }
-        }
-        let write_mode = occupancy.write_mode(safe_path.as_path())?;
+        } else {
+            WriteMode::CreateNew
+        };
 
         // Quota is reserved before anything is removed, so a refusal never
         // destroys a destination it could not replace.
@@ -254,13 +251,14 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 self.inner.copy_buffer_mut(),
                 permit,
             )?,
-            WriteMode::ReplaceRegular => write_file_with_permit(
+            WriteMode::ReplaceRegular(replace) => write_file_with_permit(
                 reader,
                 faults,
                 &parent,
                 leaf,
                 self.inner.copy_buffer_mut(),
                 permit,
+                replace,
             )?,
         };
         self.inner.root().created().note(
@@ -319,15 +317,12 @@ impl PrePass for HostPrePass<'_> {
         let dest_path = self.dest.join(safe_path);
         let occupancy = DestOccupancy::probe_path(&dest_path)?;
         if occupancy.is_occupied() {
-            match self.options.existing_files {
-                ExistingFiles::Skip => return Ok(FilePlan::Skip),
-                ExistingFiles::Refuse => {
-                    return Err(common::destination_occupied(
-                        self.dest.as_path(),
-                        safe_path.as_path(),
-                    ));
-                }
-                ExistingFiles::Overwrite => {}
+            let action = self.options.existing_files.on_occupant(
+                || false,
+                || common::destination_occupied(self.dest.as_path(), safe_path.as_path()),
+            )?;
+            if matches!(action, OccupantAction::Skip) {
+                return Ok(FilePlan::Skip);
             }
         }
         // Fail here too, before any entry is written, so the pre-pass keeps

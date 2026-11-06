@@ -13,7 +13,6 @@ use std::path::Path;
 use super::zip_reuse::Retained;
 
 use crate::ArchiveError;
-use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::Malformation;
 use crate::ProgressCallback;
@@ -22,6 +21,7 @@ use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::SkipKind;
 use crate::copy::CopyBuffer;
+use crate::formats::occupant::OccupantAction;
 use crate::security::RawMode;
 use crate::security::admitted::EntrySize;
 use crate::security::admitted::PendingFile;
@@ -518,25 +518,19 @@ impl ExtractTarget for HostTarget<'_> {
         let link_file = match link_dir.create_new(link_leaf, link_mode) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return match tally.options.existing_files {
-                    ExistingFiles::Skip => {
-                        common::record_duplicate_skip(tally.report, link.as_path())
-                    }
-                    ExistingFiles::Refuse => {
-                        if self
-                            .root
+                let action = tally.options.existing_files.on_occupant(
+                    || {
+                        self.root
                             .created()
                             .created_here(&link_dir, link_leaf, link.as_path())
-                        {
-                            common::record_duplicate_skip(tally.report, link.as_path())
-                        } else {
-                            Err(common::destination_occupied(
-                                self.root.dest().as_path(),
-                                link.as_path(),
-                            ))
-                        }
+                    },
+                    || common::destination_occupied(self.root.dest().as_path(), link.as_path()),
+                )?;
+                return match action {
+                    OccupantAction::Skip => {
+                        common::record_duplicate_skip(tally.report, link.as_path())
                     }
-                    ExistingFiles::Overwrite => {
+                    OccupantAction::Replace(_) => {
                         Err(ArchiveError::from(Malformation::DuplicateEntry {
                             path: link.as_path().to_path_buf(),
                         }))

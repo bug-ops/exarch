@@ -8,6 +8,7 @@ use crate::SecurityConfig;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_bounded;
 use crate::formats::common;
+use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
@@ -142,6 +143,7 @@ pub(super) fn write_file_with_permit(
     leaf: Leaf<'_>,
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
+    replace: ReplacePermit,
 ) -> Result<u64> {
     write_file_with_permit_using(
         reader,
@@ -150,6 +152,7 @@ pub(super) fn write_file_with_permit(
         leaf,
         copy_buffer,
         permit,
+        replace,
         TempLeaf::next,
     )
 }
@@ -177,6 +180,10 @@ pub(super) fn write_file_with_permit(
 /// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
 /// fails, or if the actual decompressed byte count exceeds or falls short of
 /// the permit's byte count.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the permits and the temp-name generator are threaded through from the caller; a parameter struct adds indirection"
+)]
 pub(super) fn write_file_with_permit_using(
     reader: &mut dyn Read,
     faults: ReadFaults<'_>,
@@ -184,9 +191,11 @@ pub(super) fn write_file_with_permit_using(
     leaf: Leaf<'_>,
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
+    replace: ReplacePermit,
     next_candidate: impl FnMut() -> TempLeaf,
 ) -> Result<u64> {
-    let (temp, temp_file) = common::create_temp_sibling(parent, leaf, None, next_candidate)?;
+    let (temp, temp_file) =
+        common::create_temp_sibling(parent, leaf, None, &replace, next_candidate)?;
 
     // Declared before `writer` takes ownership of `temp_file` below, for the
     // same reason as write_file_direct's `guard`: reverse-declaration-order
@@ -204,7 +213,7 @@ pub(super) fn write_file_with_permit_using(
     // Explicit close before rename: renaming a still-open file is fine on
     // Unix but the handle should not outlive its purpose regardless.
     drop(writer);
-    parent.rename_within(temp.as_leaf(), leaf)?;
+    parent.replace_entry(&temp, leaf, replace)?;
     temp_guard.persist();
 
     Ok(bytes_written)

@@ -45,6 +45,8 @@ use crate::copy::CopyError;
 use crate::copy::copy_bounded;
 use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
+use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::TempFileGuard;
@@ -473,7 +475,7 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     .map_err(|error| faults.classify(error))?;
     buffered_writer.flush()?;
     drop(buffered_writer);
-    commit_output(&parent, &written_at, leaf, safe_path.as_path())?;
+    commit_output(&parent, written_at, leaf, safe_path.as_path())?;
     guard.persist();
 
     record_file_written(report, progress, bytes_written)
@@ -514,7 +516,8 @@ pub const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 ///
 /// Each attempt uses [`VettedDir::create_new`] (`O_EXCL`), so a planted entry
 /// at a predicted name is never followed or reused. `entry` names the file the
-/// temp file stands in for, for the error text only.
+/// temp file stands in for, for the error text only. The permit proves the
+/// policy allows replacing `entry`, which the temp file exists to do.
 ///
 /// # Errors
 ///
@@ -524,6 +527,7 @@ pub fn create_temp_sibling(
     dir: &VettedDir,
     entry: Leaf<'_>,
     mode: Option<SanitizedMode>,
+    _replace: &ReplacePermit,
     mut next_candidate: impl FnMut() -> TempLeaf,
 ) -> std::io::Result<(TempLeaf, File)> {
     for _ in 0..MAX_TEMP_FILE_CREATE_ATTEMPTS {
@@ -551,7 +555,7 @@ enum WrittenAt {
     /// The final name itself.
     Final,
     /// A sibling temp file that is renamed over the existing entry.
-    Temp(TempLeaf),
+    Temp(TempLeaf, ReplacePermit),
 }
 
 impl WrittenAt {
@@ -559,7 +563,7 @@ impl WrittenAt {
     fn guard<'d>(&self, dir: &'d VettedDir, final_name: Leaf<'_>) -> TempFileGuard<'d> {
         match self {
             Self::Final => TempFileGuard::new(dir, final_name),
-            Self::Temp(temp) => TempFileGuard::for_temp(dir, temp.clone()),
+            Self::Temp(temp, _) => TempFileGuard::for_temp(dir, temp.clone()),
         }
     }
 }
@@ -595,25 +599,22 @@ fn open_output_slot(
                 written_at: WrittenAt::Final,
             }))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match duplicates {
-            ExistingFiles::Skip => Ok(None),
-            ExistingFiles::Refuse => {
-                if root.created().created_here(dir, leaf, rel) {
-                    Ok(None)
-                } else {
-                    Err(destination_occupied(root.dest().as_path(), rel))
-                }
-            }
-            ExistingFiles::Overwrite => {
-                refuse_non_file_occupant(dir, leaf, rel)?;
-                let (temp, file) = create_temp_sibling(dir, leaf, mode, TempLeaf::next)
-                    .map_err(|e| replace_error(rel, &e))?;
-                Ok(Some(OutputSlot {
-                    file,
-                    written_at: WrittenAt::Temp(temp),
-                }))
-            }
-        },
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let action = duplicates.on_occupant(
+                || root.created().created_here(dir, leaf, rel),
+                || destination_occupied(root.dest().as_path(), rel),
+            )?;
+            let OccupantAction::Replace(permit) = action else {
+                return Ok(None);
+            };
+            refuse_non_file_occupant(dir, leaf, rel)?;
+            let (temp, file) = create_temp_sibling(dir, leaf, mode, &permit, TempLeaf::next)
+                .map_err(|e| replace_error(rel, &e))?;
+            Ok(Some(OutputSlot {
+                file,
+                written_at: WrittenAt::Temp(temp, permit),
+            }))
+        }
         Err(e) => Err(name_occupant_on_open_error(dir, leaf, rel, e).into()),
     }
 }
@@ -631,14 +632,9 @@ pub fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveError {
 }
 
 /// Renames the completed temp file over the entry it replaces, if any.
-fn commit_output(
-    dir: &VettedDir,
-    written_at: &WrittenAt,
-    leaf: Leaf<'_>,
-    rel: &Path,
-) -> Result<()> {
-    if let WrittenAt::Temp(temp) = written_at {
-        dir.rename_within(temp.as_leaf(), leaf)
+fn commit_output(dir: &VettedDir, written_at: WrittenAt, leaf: Leaf<'_>, rel: &Path) -> Result<()> {
+    if let WrittenAt::Temp(temp, permit) = written_at {
+        dir.replace_entry(&temp, leaf, permit)
             .map_err(|e| replace_error(rel, &e))?;
     }
     Ok(())
@@ -809,24 +805,14 @@ pub fn create_symlink<P: ParentCheck>(
         let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link())?;
 
         if let Some(existing) = parent.probe(leaf)? {
-            match duplicates {
-                ExistingFiles::Skip => {
-                    return record_duplicate_skip(report, safe_symlink.link().as_path());
-                }
-                ExistingFiles::Refuse => {
-                    if root
-                        .created()
-                        .created_here(&parent, leaf, safe_symlink.link().as_path())
-                    {
-                        return record_duplicate_skip(report, safe_symlink.link().as_path());
-                    }
-                    return Err(destination_occupied(
-                        root.dest().as_path(),
-                        safe_symlink.link().as_path(),
-                    ));
-                }
-                ExistingFiles::Overwrite => {}
-            }
+            let link_path = safe_symlink.link().as_path();
+            let action = duplicates.on_occupant(
+                || root.created().created_here(&parent, leaf, link_path),
+                || destination_occupied(root.dest().as_path(), link_path),
+            )?;
+            let OccupantAction::Replace(permit) = action else {
+                return record_duplicate_skip(report, link_path);
+            };
             if existing == Occupant::Symlink {
                 // An unchanged link re-points nothing; a different target could
                 // re-point a path that an earlier link's `..` resolved through.
@@ -835,7 +821,7 @@ pub fn create_symlink<P: ParentCheck>(
                 }
                 return Err(symlink_at_dest_error(safe_symlink.link().as_path()).into());
             }
-            parent.remove_file(leaf)?;
+            parent.remove_occupant(leaf, permit)?;
         }
 
         parent.symlink(target_path, leaf)?;
@@ -1561,10 +1547,13 @@ mod tests {
         let root = pinned(&DestDir::new(temp.path()).expect("dest"));
         let dir = root.dir();
         let leaf = Leaf::split(Path::new("d")).expect("leaf").1;
-        let written_at = WrittenAt::Temp(TempLeaf::named(".exarch-tmp-test"));
+        let written_at = WrittenAt::Temp(
+            TempLeaf::named(".exarch-tmp-test"),
+            ReplacePermit::for_test(),
+        );
 
         let guard = written_at.guard(dir, leaf);
-        let err = commit_output(dir, &written_at, leaf, Path::new("d")).unwrap_err();
+        let err = commit_output(dir, written_at, leaf, Path::new("d")).unwrap_err();
         drop(guard);
 
         assert!(

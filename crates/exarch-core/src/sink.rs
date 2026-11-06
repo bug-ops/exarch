@@ -36,6 +36,7 @@ use crate::Staging;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_bounded;
 use crate::formats::common;
+use crate::formats::occupant::OccupantAction;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
@@ -628,18 +629,18 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
         // The tree holds only what this run delivered, so under `Refuse` every
         // occupant is a duplicate of an earlier entry and is skipped, as under
         // `Skip`; an occupant this run did not create cannot exist here.
-        match (self.tree.occupant(rel), tally.options.existing_files) {
-            (Some(_), ExistingFiles::Skip | ExistingFiles::Refuse) => {
-                tally.record_duplicate_skip(rel)?;
-                return Ok(None);
+        if let Some(occupant) = self.tree.occupant(rel) {
+            match occupied_action(tally.options.existing_files, rel)? {
+                OccupantAction::Skip => {
+                    tally.record_duplicate_skip(rel)?;
+                    return Ok(None);
+                }
+                OccupantAction::Replace(_) => {
+                    if matches!(occupant, Occupant::Directory | Occupant::Symlink) {
+                        return Err(common::occupant_at_dest_error(rel, occupant).into());
+                    }
+                }
             }
-            (
-                Some(occupant @ (Occupant::Directory | Occupant::Symlink)),
-                ExistingFiles::Overwrite,
-            ) => {
-                return Err(common::occupant_at_dest_error(rel, occupant).into());
-            }
-            (Some(Occupant::File) | None, ExistingFiles::Overwrite) | (None, _) => {}
         }
 
         let path = self.place(&path, Node::File)?;
@@ -708,6 +709,15 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
             }),
         }
     }
+}
+
+/// What to do with a path the sink tree already holds.
+///
+/// The tree holds only what this run delivered, so under `Refuse` every
+/// occupant is a duplicate of an earlier entry and is skipped, as under
+/// `Skip`; an occupant this run did not create cannot exist here.
+fn occupied_action(policy: ExistingFiles, rel: &Path) -> Result<OccupantAction> {
+    policy.on_occupant(|| true, || common::destination_occupied(Path::new(""), rel))
 }
 
 fn place_error(error: PlaceError) -> ArchiveError {
@@ -889,31 +899,35 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         let link = symlink.link();
         let rel = link.as_path();
         let target = symlink.target_path();
-        let occupant = self.tree.occupant(rel);
-        match (occupant, tally.options.existing_files) {
-            (Some(_), ExistingFiles::Skip | ExistingFiles::Refuse) => {
+        if let Some(occupant) = self.tree.occupant(rel) {
+            if matches!(
+                occupied_action(tally.options.existing_files, rel)?,
+                OccupantAction::Skip
+            ) {
                 return tally.record_duplicate_skip(rel).map(drop);
             }
-            (Some(Occupant::Directory), ExistingFiles::Overwrite) => {
-                return Err(common::occupant_at_dest_error(rel, Occupant::Directory).into());
+            match occupant {
+                Occupant::Directory => {
+                    return Err(common::occupant_at_dest_error(rel, Occupant::Directory).into());
+                }
+                Occupant::Symlink => {
+                    // An unchanged link re-points nothing; any other target is
+                    // refused by the tree.
+                    let unchanged = self.tree.project_landing(
+                        link,
+                        Node::Symlink(target.to_path_buf()),
+                        LandingLimits::Enforced,
+                    );
+                    return match unchanged {
+                        Ok(_) => common::record_duplicate_skip(tally.report, rel),
+                        Err(PlaceError::Conflict(_)) => {
+                            Err(common::occupant_at_dest_error(rel, Occupant::Symlink).into())
+                        }
+                        Err(error) => Err(place_error(error)),
+                    };
+                }
+                Occupant::File => {}
             }
-            (Some(Occupant::Symlink), ExistingFiles::Overwrite) => {
-                // An unchanged link re-points nothing; any other target is
-                // refused by the tree.
-                let unchanged = self.tree.project_landing(
-                    link,
-                    Node::Symlink(target.to_path_buf()),
-                    LandingLimits::Enforced,
-                );
-                return match unchanged {
-                    Ok(_) => common::record_duplicate_skip(tally.report, rel),
-                    Err(PlaceError::Conflict(_)) => {
-                        Err(common::occupant_at_dest_error(rel, Occupant::Symlink).into())
-                    }
-                    Err(error) => Err(place_error(error)),
-                };
-            }
-            (Some(Occupant::File), ExistingFiles::Overwrite) | (None, _) => {}
         }
 
         let node = Node::Symlink(target.to_path_buf());
@@ -966,13 +980,13 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             }));
         }
         if self.tree.occupant(link.as_path()).is_some() {
-            return match tally.options.existing_files {
-                ExistingFiles::Skip | ExistingFiles::Refuse => {
-                    common::record_duplicate_skip(tally.report, link.as_path())
+            return match occupied_action(tally.options.existing_files, link.as_path())? {
+                OccupantAction::Skip => common::record_duplicate_skip(tally.report, link.as_path()),
+                OccupantAction::Replace(_) => {
+                    Err(ArchiveError::from(Malformation::DuplicateEntry {
+                        path: link.as_path().to_path_buf(),
+                    }))
                 }
-                ExistingFiles::Overwrite => Err(ArchiveError::from(Malformation::DuplicateEntry {
-                    path: link.as_path().to_path_buf(),
-                })),
             };
         }
 

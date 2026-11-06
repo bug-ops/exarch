@@ -5,13 +5,6 @@
 //! is [`ExistingFiles::on_occupant`] under
 //! [`ExistingFiles::Overwrite`]. A site that destroys an occupant takes a
 //! [`ReplacePermit`], so a missed `Refuse` arm cannot reach an overwrite.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "adopted by the occupant track; the unit tests keep it live under `cfg(test)`"
-    )
-)]
 
 use crate::ArchiveError;
 use crate::ExistingFiles;

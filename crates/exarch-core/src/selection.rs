@@ -398,9 +398,10 @@ impl EntrySelection {
     /// Maps the target of a hardlink, an archive path, as the entry names are
     /// mapped, without recording include hits.
     ///
-    /// A target the plain extraction would have to refuse itself (empty, NUL
-    /// bytes, a root or drive prefix) is returned unchanged for its own
-    /// validation to refuse with the same typed error.
+    /// A root or drive prefix is kept and only the normal components are
+    /// selected and rewritten, so the validator still applies its absolute-path
+    /// policy to the result. A target with no normal component is returned
+    /// unchanged for its own validation to refuse with the same typed error.
     ///
     /// # Errors
     ///
@@ -410,6 +411,7 @@ impl EntrySelection {
         if self.is_default() {
             return Ok(TargetMapping::Unchanged);
         }
+        let mut root = PathBuf::new();
         let mut normalized = PathBuf::new();
         for component in target.components() {
             match component {
@@ -420,10 +422,7 @@ impl EntrySelection {
                         path: target.to_path_buf(),
                     });
                 }
-                // TODO(#997): strip a root or drive prefix like an entry name,
-                // or refuse here, instead of leaving it to the tracker's
-                // HardlinkEscape.
-                Component::RootDir | Component::Prefix(_) => return Ok(TargetMapping::Unchanged),
+                Component::RootDir | Component::Prefix(_) => root.push(component.as_os_str()),
             }
         }
         if normalized.is_empty() {
@@ -431,9 +430,9 @@ impl EntrySelection {
         }
         Ok(match self.decide(&normalized, EntryShape::File, None)? {
             Decision::Skip(_) => TargetMapping::NotExtracted,
-            Decision::Extract(Placement::Unchanged) => TargetMapping::Mapped(normalized),
+            Decision::Extract(Placement::Unchanged) => TargetMapping::Mapped(root.join(normalized)),
             Decision::Extract(Placement::Rewritten(rewritten)) => {
-                TargetMapping::Mapped(rewritten.0)
+                TargetMapping::Mapped(root.join(rewritten.0))
             }
         })
     }
@@ -829,7 +828,31 @@ mod tests {
         );
         assert_matches!(
             selection.map_link_target(Path::new("/abs")).unwrap(),
+            TargetMapping::NotExtracted
+        );
+        assert_matches!(
+            selection.map_link_target(Path::new("/")).unwrap(),
             TargetMapping::Unchanged
+        );
+    }
+
+    #[test]
+    fn absolute_link_target_keeps_its_root_and_maps_the_rest() {
+        let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
+        let selection = EntrySelection::default()
+            .with_include(pattern("top"))
+            .with_rewrite(PathRewrite::Strip(strip));
+        assert_matches!(
+            selection.map_link_target(Path::new("/top/orig")).unwrap(),
+            TargetMapping::Mapped(path) if path == Path::new("/orig")
+        );
+        assert_matches!(
+            selection.map_link_target(Path::new("/other/orig")).unwrap(),
+            TargetMapping::NotExtracted
+        );
+        assert_matches!(
+            selection.map_link_target(Path::new("/top/../x")),
+            Err(ArchiveError::PathTraversal { .. })
         );
     }
 }

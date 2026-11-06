@@ -284,3 +284,31 @@ def test_other_threads_run_while_a_progress_extraction_decodes(temp_dir):
         worker.join()
 
     assert seen == [True], "the thread could not run while the first entry was decoded: GIL held"
+
+
+def test_a_callback_raising_after_a_finished_extraction_carries_the_whole_report(temp_dir):
+    """The last entry's raise cannot cancel anything: the exception describes the run."""
+    archive = temp_dir / "dup.tar"
+    with tarfile.open(archive, "w") as tar:
+        for body in (b"first", b"second"):
+            info = tarfile.TarInfo("a.txt")
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+    output = temp_dir / "output"
+    output.mkdir()
+
+    def callback(path, total, current, bytes_written):
+        if current == 2:
+            raise RuntimeError("late")
+
+    with pytest.raises(RuntimeError, match="late") as info:
+        exarch.extract_archive_with_progress(archive, output, None, callback)
+
+    err = info.value
+    assert err.progress_callback_error is True
+    assert err.writes == "kept"
+    assert err.files_extracted == 1
+    assert err.files_skipped == 1
+    assert err.skipped.count("duplicate") == 1
+    assert err.warnings == []
+    assert (output / "a.txt").read_bytes() == b"first"

@@ -2150,10 +2150,10 @@ class _IOErrorAttributes(Protocol):
         restore: On the error of a failed ``"atomic_replace"`` swap:
             ``"not_needed"`` (the original destination was never moved),
             ``"restored"`` (moved aside and back) or ``"failed"`` (it could not
-            be moved back and remains at ``backup``).
-        backup: With ``restore == "failed"``, where the original destination
+            be moved back and remains at ``backup_path``).
+        backup_path: With ``restore == "failed"``, where the original destination
             remains, redacted like an exception message.
-        leftover: Where a staging directory the failed swap left behind
+        leftover_path: Where a staging directory the failed swap left behind
             remains, redacted like an exception message.
         filename: On the error of a creation that failed after reserving its
             output, the empty reservation file left at that path (redacted).
@@ -2164,8 +2164,8 @@ class _IOErrorAttributes(Protocol):
     code: Literal["IO_ERROR"]
     io_kind: _IoKind
     restore: _Restore
-    backup: str | None
-    leftover: str | None
+    backup_path: str | None
+    leftover_path: str | None
     filename: str | None
     writes: _PartialWrites
 

@@ -3,6 +3,7 @@
 use exarch_core::ArchiveError as CoreError;
 use exarch_core::ConfigProblem;
 use exarch_core::ErrorCode;
+use exarch_core::ExtractionReport;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
 use exarch_core::FfiSourceFault;
@@ -282,8 +283,8 @@ impl IoDetails {
 
     fn attach(self, err: &PyErr) {
         set_optional_str(err, "restore", self.restore);
-        set_attr(err, "backup", self.backup);
-        set_attr(err, "leftover", self.leftover);
+        set_attr(err, "backup_path", self.backup);
+        set_attr(err, "leftover_path", self.leftover);
         set_attr(err, "filename", self.filename);
     }
 }
@@ -489,18 +490,25 @@ pub fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
         // workspace forbids unwrap/expect outside tests.
         let _ = exc_value.setattr("writes", outcome.writes().as_str());
         if let PartialOutcome::Kept(report) = outcome {
-            let _ = exc_value.setattr("files_extracted", report.files_extracted);
-            let _ = exc_value.setattr("bytes_written", report.bytes_written);
-            let _ = exc_value.setattr("files_skipped", report.files_skipped());
-            let _ = exc_value.setattr(
-                "skipped",
-                crate::report::PySkips::from(report.skipped.clone()),
-            );
-            if let Ok(warnings) = extraction_warnings(py, &report.warnings) {
-                let _ = exc_value.setattr("warnings", warnings);
-            }
+            attach_extraction_report(exc_value, &report);
         }
     });
+}
+
+/// Attaches what a finished or interrupted extraction wrote that is still on
+/// disk: `files_extracted`, `bytes_written`, `files_skipped`, `skipped` and
+/// `warnings`. Best-effort, like every attribute set on an exception.
+pub fn attach_extraction_report(exc: &Bound<'_, PyAny>, report: &ExtractionReport) {
+    let _ = exc.setattr("files_extracted", report.files_extracted);
+    let _ = exc.setattr("bytes_written", report.bytes_written);
+    let _ = exc.setattr("files_skipped", report.files_skipped());
+    let _ = exc.setattr(
+        "skipped",
+        crate::report::PySkips::from(report.skipped.clone()),
+    );
+    if let Ok(warnings) = extraction_warnings(exc.py(), &report.warnings) {
+        let _ = exc.setattr("warnings", warnings);
+    }
 }
 
 /// Registers all exception types with the Python module.
@@ -1530,10 +1538,10 @@ mod tests {
         );
         assert_eq!(attr_str(&py_err, "restore").as_deref(), Some("failed"));
         assert_eq!(
-            attr_str(&py_err, "backup"),
+            attr_str(&py_err, "backup_path"),
             Some(sanitize_path_for_error(std::path::Path::new("dir/.backup")))
         );
-        assert_eq!(attr_str(&py_err, "leftover"), None);
+        assert_eq!(attr_str(&py_err, "leftover_path"), None);
     }
 
     #[test]

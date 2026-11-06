@@ -19,6 +19,7 @@ use config::PyCreationConfig;
 use config::PyExtractionOptions;
 use config::PySecurityConfig;
 use config::PyVerificationOptions;
+use error::attach_extraction_report;
 use error::attach_partial;
 use error::convert_error;
 use error::register_exceptions;
@@ -525,22 +526,28 @@ fn create_archive_with_progress(
                 .with_progress(progress)
                 .create(&output, &source_paths)
         },
-        |exc, report| {
-            let _ = exc.setattr("files_added", report.files_added);
-            let _ = exc.setattr("bytes_written", report.bytes_written);
-        },
+        attach_creation_report,
     )?;
 
     Ok(PyCreationReport::from(report))
 }
 
+/// Attaches the counters of a finished creation to a callback exception.
+fn attach_creation_report(exc: &Bound<'_, PyAny>, report: &exarch_core::CreationReport) {
+    let _ = exc.setattr("files_added", report.files_added);
+    let _ = exc.setattr("bytes_written", report.bytes_written);
+}
+
+/// Attaches `writes = "kept"` and the report of a finished extraction to a
+/// callback exception.
+fn attach_finished_extraction(exc: &Bound<'_, PyAny>, report: &exarch_core::ExtractionReport) {
+    let _ = exc.setattr("writes", exarch_core::PartialWrites::Kept.as_str());
+    attach_extraction_report(exc, report);
+}
+
 /// Runs `run` with the Python callback `progress`, or with a no-op reporter
-/// when `progress` is absent. The GIL is released either way; the callback's
-/// adapter takes it back for each call.
-///
-/// A raising callback is merged with the result by `merge_progress_result`;
-/// `attach` adds counters to the callback's exception when the run succeeded
-/// (the successful value is discarded).
+/// when `progress` is absent, releasing the GIL either way. `attach` describes
+/// a successful run on the exception of a callback that raised after it.
 pub(crate) fn run_with_optional_progress<T: Send>(
     py: Python<'_>,
     context: &str,
@@ -560,26 +567,13 @@ pub(crate) fn run_with_optional_progress<T: Send>(
     }
 }
 
-/// Merges a creation/extraction result with an exception captured from a
-/// raising progress callback, mirroring the Node binding's
-/// `ProgressCallbackError` semantics (see issues #465/#485): a core failure
-/// always stays primary — the callback exception is chained onto it as
-/// `__cause__` rather than masking it — while a callback exception over an
-/// otherwise successful operation is raised directly.
+/// Merges a result with the exception of a raising progress callback.
 ///
-/// `attach_report_attrs` attaches counters describing what was written
-/// (`files_extracted`/`files_added` and `bytes_written`) onto the callback
-/// exception in the success case; the attribute names differ between
-/// extraction and creation, so the caller supplies them. In addition, a
-/// `progress_callback_error = True` attribute is always attached alongside
-/// them: without it, these counters are indistinguishable from the same two
-/// attribute names [`convert_error`] attaches to a genuine
-/// `PartialExtraction` (a core failure partway through), which would make a
-/// caller following that documented `hasattr(e, "files_extracted")` idiom
-/// misclassify a fully successful operation as a partial one (see #489
-/// review). Attribute attachment is best-effort (`setattr` can fail, e.g. on
-/// an exception class using `__slots__`); a failure here does not affect
-/// which exception is raised.
+/// A core failure stays primary and the callback exception becomes its
+/// `__cause__`. A callback exception over a successful run, or one that
+/// cancelled the run, is raised itself: `attach_report_attrs` describes the
+/// finished run on it, and `progress_callback_error = True` tells it apart from
+/// a genuine partial extraction, which carries the same counter attributes.
 fn merge_progress_result<T>(
     py: Python<'_>,
     result: exarch_core::Result<T>,
@@ -715,10 +709,7 @@ fn extract_archive_with_progress(
                 .with_progress(progress)
                 .extract(&archive_path, &output_dir)
         },
-        |exc, report| {
-            let _ = exc.setattr("files_extracted", report.files_extracted);
-            let _ = exc.setattr("bytes_written", report.bytes_written);
-        },
+        attach_finished_extraction,
     )?;
 
     Ok(PyExtractionReport::from(report))
@@ -1167,23 +1158,6 @@ mod tests {
         });
     }
 
-    /// Attaches `exarch_core::ExtractionReport` counters onto a callback
-    /// exception, matching the closure passed to `merge_progress_result` at
-    /// the real `extract_archive_with_progress` call site.
-    fn attach_extraction_attrs(exc: &Bound<'_, PyAny>, report: &exarch_core::ExtractionReport) {
-        let _ = exc.setattr("files_extracted", report.files_extracted);
-        let _ = exc.setattr("bytes_written", report.bytes_written);
-    }
-
-    /// Attaches `exarch_core::CreationReport` counters onto a
-    /// callback exception, matching the closure passed to
-    /// `merge_progress_result` at the real `create_archive_with_progress`
-    /// call site.
-    fn attach_creation_attrs(exc: &Bound<'_, PyAny>, report: &exarch_core::CreationReport) {
-        let _ = exc.setattr("files_added", report.files_added);
-        let _ = exc.setattr("bytes_written", report.bytes_written);
-    }
-
     /// Regression test for #489: when the core operation succeeds but the
     /// progress callback raised, the callback's exception must propagate
     /// (not be swallowed), carrying the report's counters as attributes plus
@@ -1203,7 +1177,7 @@ mod tests {
             let cb_err = PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("callback boom");
 
             let result =
-                merge_progress_result(py, Ok(report), Some(cb_err), attach_extraction_attrs);
+                merge_progress_result(py, Ok(report), Some(cb_err), attach_finished_extraction);
 
             let err = result.expect_err("callback exception must propagate");
             assert!(err.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
@@ -1225,6 +1199,10 @@ mod tests {
                 .expect("progress_callback_error not bool");
             assert_eq!(files, 3);
             assert_eq!(bytes, 42);
+            let writes: String = exc_value.getattr("writes").unwrap().extract().unwrap();
+            assert_eq!(writes, "kept");
+            assert!(exc_value.hasattr("skipped").unwrap());
+            assert!(exc_value.hasattr("warnings").unwrap());
             assert!(marker, "progress_callback_error must be True");
         });
     }
@@ -1246,7 +1224,7 @@ mod tests {
             let cb_err = PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("callback boom");
 
             let result =
-                merge_progress_result(py, Err(core_err), Some(cb_err), attach_extraction_attrs);
+                merge_progress_result(py, Err(core_err), Some(cb_err), attach_finished_extraction);
 
             let err = result.expect_err("core error must propagate");
             assert!(
@@ -1275,7 +1253,7 @@ mod tests {
                 r.files_extracted = 1;
                 r
             };
-            let result = merge_progress_result(py, Ok(report), None, attach_extraction_attrs);
+            let result = merge_progress_result(py, Ok(report), None, attach_finished_extraction);
             assert_eq!(
                 result
                     .expect("no callback error, no core error")
@@ -1303,7 +1281,8 @@ mod tests {
             };
             let cb_err = PyErr::new::<pyo3::exceptions::PyValueError, _>("callback boom");
 
-            let result = merge_progress_result(py, Ok(report), Some(cb_err), attach_creation_attrs);
+            let result =
+                merge_progress_result(py, Ok(report), Some(cb_err), attach_creation_report);
 
             let err = result.expect_err("callback exception must propagate");
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
@@ -1342,7 +1321,7 @@ mod tests {
             let cb_err = PyErr::new::<pyo3::exceptions::PyValueError, _>("callback boom");
 
             let result =
-                merge_progress_result(py, Err(core_err), Some(cb_err), attach_creation_attrs);
+                merge_progress_result(py, Err(core_err), Some(cb_err), attach_creation_report);
 
             let err = result.expect_err("core error must propagate");
             assert!(err.is_instance_of::<pyo3::exceptions::PyIOError>(py));
@@ -1363,7 +1342,7 @@ mod tests {
                 r.files_added = 1;
                 r
             };
-            let result = merge_progress_result(py, Ok(report), None, attach_creation_attrs);
+            let result = merge_progress_result(py, Ok(report), None, attach_creation_report);
             assert_eq!(
                 result
                     .expect("no callback error, no core error")
@@ -1394,7 +1373,7 @@ mod tests {
             let cb_err = PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("callback boom");
 
             let err =
-                merge_progress_result(py, Err(cancelled), Some(cb_err), attach_extraction_attrs)
+                merge_progress_result(py, Err(cancelled), Some(cb_err), attach_finished_extraction)
                     .expect_err("callback exception must propagate");
 
             assert!(err.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));

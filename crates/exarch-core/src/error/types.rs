@@ -7,6 +7,7 @@ use thiserror::Error;
 use super::config_error::ConfigProblem;
 use super::config_error::ConfigSetting;
 use super::malformation::Malformation;
+use super::replace::ReplaceFailure;
 use super::tar_ambiguity::TarAmbiguity;
 use super::tar_trailer::TarTrailerRefusal;
 use super::violation::Violation;
@@ -81,6 +82,50 @@ closed_enum! {
         WindowsReservedNames => "windows_reserved_names",
         /// `SecurityConfig::with_max_tar_metadata_bytes`.
         MaxTarMetadataBytes => "max_tar_metadata_bytes",
+    }
+}
+
+/// A compression level exactly as the caller asked for it.
+///
+/// Carries what a refused level looked like, including values a `u32` cannot
+/// hold, so a front end can echo `-3`, `1.5` or `2^40` back. The integer is an
+/// `i64`, not an `i128`, so the 16-byte alignment of the wider type does not
+/// grow every [`ArchiveError`].
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::RequestedLevel;
+///
+/// assert_eq!(RequestedLevel::Integer(-3).to_string(), "-3");
+/// assert_eq!(RequestedLevel::Fractional(1.5).to_string(), "1.5");
+/// assert_eq!(RequestedLevel::NonFinite.to_string(), "a non-finite number");
+/// assert_eq!(
+///     RequestedLevel::OutOfRange.to_string(),
+///     "an out-of-range integer"
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum RequestedLevel {
+    /// A whole number that fits an `i64`.
+    Integer(i64),
+    /// A whole number outside the `i64` range.
+    OutOfRange,
+    /// A finite number with a fractional part.
+    Fractional(f64),
+    /// NaN or an infinity.
+    NonFinite,
+}
+
+impl std::fmt::Display for RequestedLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Integer(level) => write!(f, "{level}"),
+            Self::Fractional(level) => write!(f, "{level}"),
+            Self::NonFinite => f.write_str("a non-finite number"),
+            Self::OutOfRange => f.write_str("an out-of-range integer"),
+        }
     }
 }
 
@@ -565,8 +610,8 @@ pub enum ArchiveError {
     /// Invalid compression level.
     #[error("invalid compression level {level}, must be 1-9")]
     InvalidCompressionLevel {
-        /// The invalid compression level.
-        level: u32,
+        /// The level that was asked for.
+        level: RequestedLevel,
     },
 
     /// Cannot determine archive format.
@@ -588,6 +633,54 @@ pub enum ArchiveError {
         /// Why it was refused.
         problem: ConfigProblem,
     },
+
+    /// The operation was cancelled through
+    /// [`ProgressCallback::is_cancelled`](crate::ProgressCallback::is_cancelled).
+    ///
+    /// An extraction that had already recorded progress is reported as
+    /// [`Self::PartialExtraction`] wrapping this error.
+    #[error("operation cancelled")]
+    Cancelled,
+
+    /// The destination holds paths that the occupied-path policy refuses to
+    /// touch.
+    ///
+    /// Raised for [`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse) and
+    /// by
+    /// [`ListedArchive::check_destination`](crate::ListedArchive::check_destination).
+    /// `destination` is a host path and is redacted like any other.
+    #[error("destination {} already holds {} of the paths to extract", .destination.display(), .conflicts.len())]
+    DestinationOccupied {
+        /// The extraction destination.
+        destination: PathBuf,
+        /// The archive-relative paths that are occupied.
+        conflicts: Box<[PathBuf]>,
+    },
+
+    /// An include pattern of the selection matched no entry of the archive.
+    ///
+    /// Raised after the whole archive was scanned, so an extraction that had
+    /// written entries reports it as [`Self::PartialExtraction`] wrapping this
+    /// error. Every pattern that matched nothing is named.
+    #[error("include pattern matched no entry: {}", UnmatchedPatterns(.patterns))]
+    UnmatchedInclude {
+        /// The include patterns that matched no entry.
+        patterns: Box<[crate::EntryPattern]>,
+    },
+
+    /// A staged creation published its archive, but an empty reservation file
+    /// it made at the output path is still there.
+    #[error("an empty reservation file remains at {}: {error}", .path.display())]
+    OutputReservationLeft {
+        /// The output path that holds the leftover file.
+        path: PathBuf,
+        /// The failure that left it.
+        error: std::io::Error,
+    },
+
+    /// Replacing an existing destination as a whole failed.
+    #[error("{0}")]
+    ReplaceFailed(ReplaceFailure),
 
     /// Extraction stopped mid-archive after recording progress.
     ///
@@ -821,6 +914,26 @@ impl ArchiveError {
         }
     }
 
+    /// Whether this error is a [`Self::Cancelled`], looking through
+    /// [`Self::PartialExtraction`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    ///
+    /// assert!(ArchiveError::Cancelled.is_cancelled());
+    /// assert!(!ArchiveError::UnknownFormat { path: "a".into() }.is_cancelled());
+    /// ```
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Cancelled => true,
+            Self::PartialExtraction(partial) => partial.cause().is_cancelled(),
+            _ => false,
+        }
+    }
+
     /// Returns the typed refusal of a [`Self::SecurityViolation`], looking
     /// through [`Self::PartialExtraction`].
     ///
@@ -976,10 +1089,10 @@ impl ArchiveError {
     /// mid-archive, so callers can distinguish "nothing was written" from
     /// "extraction stopped partway through" without each handler
     /// reimplementing the same check. A report is considered worth surfacing
-    /// even when [`ExtractionReport::total_items`] is zero, since an archive
-    /// where every entry before the failure was rejected (e.g. by an
-    /// extension allowlist) still accumulates `files_skipped` and
-    /// `warnings` that the caller should see.
+    /// even when [`ExtractionReport`](crate::ExtractionReport)'s `total_items`
+    /// is zero, since an archive where every entry before the failure was
+    /// rejected (e.g. by an extension allowlist) still accumulates
+    /// `files_skipped` and `warnings` that the caller should see.
     #[must_use]
     pub(crate) fn partial_or(report: crate::ExtractionReport, err: Self) -> Self {
         if report.total_items() > 0 || report.files_skipped() > 0 || report.has_warnings() {
@@ -1039,6 +1152,20 @@ impl ArchiveError {
             }
             other => other,
         }
+    }
+}
+
+/// Renders the patterns of [`ArchiveError::UnmatchedInclude`] separated by
+/// `, `.
+struct UnmatchedPatterns<'a>(&'a [crate::EntryPattern]);
+
+impl std::fmt::Display for UnmatchedPatterns<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut patterns = self.0.iter();
+        if let Some(first) = patterns.next() {
+            write!(f, "{first}")?;
+        }
+        patterns.try_for_each(|pattern| write!(f, ", {pattern}"))
     }
 }
 
@@ -1371,14 +1498,18 @@ mod tests {
 
     #[test]
     fn test_invalid_compression_level_error() {
-        let err = ArchiveError::InvalidCompressionLevel { level: 0 };
+        let err = ArchiveError::InvalidCompressionLevel {
+            level: RequestedLevel::Integer(0),
+        };
         let display = err.to_string();
         assert!(display.contains("invalid compression level"));
         assert!(display.contains('0'));
         assert!(display.contains("must be 1-9"));
         assert!(!err.is_security_violation());
 
-        let err = ArchiveError::InvalidCompressionLevel { level: 10 };
+        let err = ArchiveError::InvalidCompressionLevel {
+            level: RequestedLevel::Integer(10),
+        };
         let display = err.to_string();
         assert!(display.contains("10"));
     }

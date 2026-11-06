@@ -10,7 +10,7 @@ use crate::SecurityConfig;
 /// # Examples
 ///
 /// ```
-/// use exarch_core::security::RawMode;
+/// use exarch_core::RawMode;
 ///
 /// assert_eq!(RawMode::new(0o4755).get(), 0o4755);
 /// ```
@@ -48,9 +48,9 @@ impl RawMode {
 /// ```
 /// # #[cfg(feature = "testing")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use exarch_core::RawMode;
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::security::RawMode;
-/// use exarch_core::security::sanitize_permissions;
+/// use exarch_core::sanitize_permissions;
 ///
 /// let config = SecurityConfig::default();
 ///
@@ -97,9 +97,9 @@ impl SanitizedMode {
 /// ```
 /// # #[cfg(feature = "testing")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use exarch_core::RawMode;
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::security::RawMode;
-/// use exarch_core::security::sanitize_permissions;
+/// use exarch_core::sanitize_permissions;
 ///
 /// let config = SecurityConfig::default();
 ///

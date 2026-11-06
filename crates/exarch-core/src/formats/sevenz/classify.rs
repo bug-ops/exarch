@@ -9,7 +9,9 @@ use crate::SpecialFile;
 use crate::Violation;
 use crate::formats::common;
 use crate::inspection::manifest::ManifestEntryType;
+use crate::security::fs_view::LinkKind;
 use crate::security::validator::NodeKind;
+use crate::selection::EntryShape;
 
 /// How a 7z archive entry is treated, decided once for `extract`, `list` and
 /// `verify` so they cannot disagree.
@@ -150,12 +152,18 @@ impl SevenZClass {
 }
 
 impl SevenZKind {
+    /// What kind of entry the selection sees.
+    pub(crate) const fn shape(self) -> EntryShape {
+        match self {
+            Self::Directory => EntryShape::Directory,
+            Self::File => EntryShape::File,
+            Self::UnixSymlink | Self::ReparsePoint => EntryShape::Link(LinkKind::Symlink),
+        }
+    }
+
     /// How the root-entry rule sees this entry.
     pub(crate) const fn node_kind(self) -> NodeKind {
-        match self {
-            Self::Directory => NodeKind::Directory,
-            Self::File | Self::ReparsePoint | Self::UnixSymlink => NodeKind::NonDirectory,
-        }
+        self.shape().node_kind()
     }
 
     /// The entry type `list` and `verify` report.

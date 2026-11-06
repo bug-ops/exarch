@@ -1,6 +1,6 @@
 //! Helpers shared by the integration tests.
 
-#![allow(dead_code, clippy::expect_used)]
+#![allow(dead_code, clippy::expect_used, clippy::disallowed_methods)]
 
 /// Flips the low bit of the first byte of `marker` found in `bytes`, so stored
 /// data fails its checksum.
@@ -196,4 +196,68 @@ pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
     out.extend(data);
     out.extend(h);
     out
+}
+
+/// An archive held in memory that [`ArchiveBytes::extract`] extracts through
+/// the public request API, by writing it to a scratch file first.
+pub struct ArchiveBytes {
+    file_name: &'static str,
+    bytes: Vec<u8>,
+    config: exarch_core::SecurityConfig,
+}
+
+impl ArchiveBytes {
+    fn new(
+        file_name: &'static str,
+        mut reader: impl std::io::Read,
+        config: &exarch_core::SecurityConfig,
+    ) -> Self {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).expect("read archive bytes");
+        Self {
+            file_name,
+            bytes,
+            config: config.clone(),
+        }
+    }
+
+    /// Extracts into `output_dir` under the config the bytes were wrapped with.
+    pub fn extract(
+        self,
+        output_dir: &std::path::Path,
+        options: &exarch_core::ExtractionOptions,
+        progress: &mut dyn exarch_core::ProgressCallback,
+    ) -> exarch_core::Result<exarch_core::ExtractionReport> {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let path = scratch.path().join(self.file_name);
+        std::fs::write(&path, &self.bytes).expect("write archive");
+        exarch_core::ExtractRequest::new(&self.config)
+            .with_options(options.clone())
+            .with_progress(progress)
+            .extract(&path, output_dir)
+    }
+}
+
+/// A plain TAR stream, extracted by path as `archive.tar`.
+pub fn tar_archive(
+    reader: impl std::io::Read,
+    config: &exarch_core::SecurityConfig,
+) -> ArchiveBytes {
+    ArchiveBytes::new("archive.tar", reader, config)
+}
+
+/// A ZIP archive, extracted by path as `archive.zip`.
+pub fn zip_archive(
+    reader: impl std::io::Read,
+    config: &exarch_core::SecurityConfig,
+) -> ArchiveBytes {
+    ArchiveBytes::new("archive.zip", reader, config)
+}
+
+/// A 7z archive, extracted by path as `archive.7z`.
+pub fn sevenz_archive(
+    reader: impl std::io::Read,
+    config: &exarch_core::SecurityConfig,
+) -> ArchiveBytes {
+    ArchiveBytes::new("archive.7z", reader, config)
 }

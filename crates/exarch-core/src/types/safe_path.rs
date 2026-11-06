@@ -13,6 +13,7 @@ use crate::security::fs_view::ModelRoot as _;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
 use crate::security::fs_view::paths_start_with;
+use crate::selection::Rewritten;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::marker::PhantomData;
@@ -55,9 +56,9 @@ pub(crate) use super::parent_check::Walked;
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::DestDir;
+/// use exarch_core::SafePath;
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::SafePath;
 /// use std::path::PathBuf;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -131,9 +132,9 @@ impl SafePath {
     /// # Examples
     ///
     /// ```no_run
+    /// use exarch_core::DestDir;
+    /// use exarch_core::SafePath;
     /// use exarch_core::SecurityConfig;
-    /// use exarch_core::types::DestDir;
-    /// use exarch_core::types::SafePath;
     /// use std::path::PathBuf;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -348,7 +349,10 @@ impl<P: ParentCheck> SafePath<P> {
                         blocked_parent_error(view, root, &final_path).unwrap_or_else(|| {
                             ArchiveError::Io(std::io::Error::new(
                                 e.kind(),
-                                format!("failed to canonicalize parent: {e}"),
+                                crate::IoContext::new(
+                                    "failed to canonicalize parent",
+                                    e.to_string(),
+                                ),
                             ))
                         }),
                     );
@@ -377,7 +381,7 @@ impl<P: ParentCheck> SafePath<P> {
                         blocked_parent_error(view, root, &final_path).unwrap_or_else(|| {
                             ArchiveError::Io(std::io::Error::new(
                                 e.kind(),
-                                format!("failed to canonicalize path: {e}"),
+                                crate::IoContext::new("failed to canonicalize path", e.to_string()),
                             ))
                         }),
                     );
@@ -393,6 +397,24 @@ impl<P: ParentCheck> SafePath<P> {
         }
 
         Ok(Self::new_unchecked(final_path.into_owned()))
+    }
+
+    /// Validates a path a selection rewrite produced as a landing.
+    ///
+    /// The one way a [`Rewritten`] becomes a `SafePath`, with every check an
+    /// archive name gets.
+    ///
+    /// # Errors
+    ///
+    /// Returns the validation error of the rewritten name.
+    pub(crate) fn validate_rewritten_in<V: FsView>(
+        rewritten: &Rewritten,
+        root: &V::Root,
+        config: &SecurityConfig,
+        ctx: &ValidationContext<'_, V, P>,
+        view: &V,
+    ) -> Result<Self> {
+        Self::validate_with_context_in(rewritten.as_path(), root, config, ctx, view)
     }
 
     /// The result of this module's own validation; no other module builds a
@@ -496,8 +518,8 @@ pub(crate) fn check_component_on(
     check_windows_component(comp, config)
 }
 
-/// Spells `comp` injectively ([`crate::path_text`]) with control characters
-/// escaped, for error messages.
+/// Spells `comp` injectively ([`path_text`](fn@crate::path_text)) with control
+/// characters escaped, for error messages.
 fn escaped_component(comp: &OsStr) -> String {
     let mut out = String::new();
     for ch in crate::path_text(std::path::Path::new(comp)).chars() {
@@ -569,7 +591,7 @@ pub(crate) fn stream_separator_error(comp: &str) -> ArchiveError {
 /// # Examples
 ///
 /// ```
-/// use exarch_core::types::safe_path::is_windows_reserved_component;
+/// use exarch_core::is_windows_reserved_component;
 /// use std::ffi::OsStr;
 ///
 /// assert!(is_windows_reserved_component(OsStr::new("NUL.tar.gz")));

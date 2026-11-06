@@ -65,6 +65,8 @@ closed_enum! {
         UnknownFormat => "UNKNOWN_FORMAT",
         /// [`ArchiveError::InvalidConfiguration`].
         InvalidConfiguration => "INVALID_CONFIGURATION",
+        /// [`ArchiveError::Cancelled`].
+        Cancelled => "CANCELLED",
     }
 }
 
@@ -333,6 +335,8 @@ pub enum FfiKind {
     Io(std::io::ErrorKind),
     /// Invalid permission bits.
     InvalidPermissions,
+    /// The operation was cancelled by its progress callback.
+    Cancelled,
     /// Creation source does not exist.
     SourceNotFound,
     /// Creation source cannot be read.
@@ -368,6 +372,7 @@ impl FfiKind {
             | Self::InvalidArchive { .. }
             | Self::Io(_)
             | Self::InvalidPermissions
+            | Self::Cancelled
             | Self::SourceNotFound
             | Self::SourceNotAccessible
             | Self::OutputExists
@@ -404,6 +409,7 @@ impl FfiKind {
             | Self::ZipInconsistency
             | Self::Io(_)
             | Self::InvalidPermissions
+            | Self::Cancelled
             | Self::SourceNotFound
             | Self::SourceNotAccessible
             | Self::OutputExists
@@ -427,6 +433,7 @@ impl FfiKind {
             Self::InvalidArchive { .. } => ErrorCode::InvalidArchive,
             Self::Io(_) => ErrorCode::IoError,
             Self::InvalidPermissions => ErrorCode::InvalidPermissions,
+            Self::Cancelled => ErrorCode::Cancelled,
             Self::SourceNotFound => ErrorCode::SourceNotFound,
             Self::SourceNotAccessible => ErrorCode::SourceNotAccessible,
             Self::OutputExists => ErrorCode::OutputExists,
@@ -542,7 +549,7 @@ impl ArchiveError {
     /// Converts the error into the data every binding consumes.
     ///
     /// Path and I/O-error text is redacted per the shared policy in
-    /// [`super::redaction`] — see [`Self::redacted_path`] and
+    /// the redaction module — see [`Self::redacted_path`] and
     /// [`sanitize_io_error_for_error`]. A [`Self::PartialExtraction`] yields
     /// its source's message with [`FfiErrorMessage::partial`] set.
     ///
@@ -638,15 +645,21 @@ impl ArchiveError {
             }
             Self::Io(io_err) => FfiKind::Io(io_err.kind()),
             Self::InvalidPermissions { .. } => FfiKind::InvalidPermissions,
+            Self::Cancelled => FfiKind::Cancelled,
+            Self::OutputReservationLeft { error, .. } => FfiKind::Io(error.kind()),
+            Self::ReplaceFailed(failure) => FfiKind::Io(failure.error.kind()),
             Self::SourceNotFound { .. } => FfiKind::SourceNotFound,
             Self::SourceNotAccessible { .. } => FfiKind::SourceNotAccessible,
-            Self::OutputExists { .. } => FfiKind::OutputExists,
+            Self::DestinationOccupied { .. } | Self::OutputExists { .. } => FfiKind::OutputExists,
             Self::InvalidCompressionLevel { .. } => FfiKind::InvalidCompressionLevel,
             Self::UnknownFormat { .. } | Self::ReaderFormat(ReaderFormatError::Unrecognized) => {
                 FfiKind::UnknownFormat
             }
             Self::InvalidConfiguration { setting, .. } => FfiKind::InvalidConfiguration {
                 setting: Some(*setting),
+            },
+            Self::UnmatchedInclude { .. } => FfiKind::InvalidConfiguration {
+                setting: Some(ConfigSetting::EntryInclude),
             },
             Self::ReaderFormat(_) => FfiKind::InvalidConfiguration { setting: None },
             Self::PartialExtraction(partial) => partial.cause().ffi_kind(),
@@ -670,6 +683,7 @@ impl ArchiveError {
             | Self::ZipInconsistency(_)
             | Self::TarAmbiguity(_)
             | Self::TarTrailer(_)
+            | Self::UnmatchedInclude { .. }
             | Self::SecurityViolation { .. } => self.to_string(),
             Self::QuotaExceeded { resource } => resource.to_string(),
             Self::InvalidArchive(reason) => format!("invalid archive: {reason}"),
@@ -677,6 +691,16 @@ impl ArchiveError {
             Self::InvalidPermissions { mode, .. } => {
                 format!("invalid permissions for {path}: {:#o}", mode.get())
             }
+            Self::Cancelled => "operation cancelled".to_string(),
+            Self::OutputReservationLeft { error, .. } => format!(
+                "an empty reservation file remains at {path}: {}",
+                sanitize_io_error_for_error(error)
+            ),
+            Self::ReplaceFailed(failure) => failure.redacted_description(),
+            Self::DestinationOccupied { conflicts, .. } => format!(
+                "destination {path} already holds {} of the paths to extract",
+                conflicts.len()
+            ),
             Self::SourceNotFound { .. } => format!("source path not found: {path}"),
             Self::SourceNotAccessible { error, .. } => {
                 format!(
@@ -874,7 +898,9 @@ mod tests {
             ArchiveError::OutputExists {
                 path: PathBuf::from("test"),
             },
-            ArchiveError::InvalidCompressionLevel { level: 10 },
+            ArchiveError::InvalidCompressionLevel {
+                level: crate::RequestedLevel::Integer(10),
+            },
             ArchiveError::UnknownFormat {
                 path: PathBuf::from("test"),
             },
@@ -882,6 +908,20 @@ mod tests {
                 setting: ConfigSetting::OutputPath,
                 problem: ConfigProblem::NotSet,
             },
+            ArchiveError::Cancelled,
+            ArchiveError::DestinationOccupied {
+                destination: PathBuf::from("dest"),
+                conflicts: Box::new([PathBuf::from("a")]),
+            },
+            ArchiveError::OutputReservationLeft {
+                path: PathBuf::from("out.tar"),
+                error: std::io::Error::other("test"),
+            },
+            ArchiveError::ReplaceFailed(crate::ReplaceFailure::new(
+                std::io::Error::other("test"),
+                crate::Restore::Restored,
+                None,
+            )),
         ]
     }
 
@@ -897,12 +937,13 @@ mod tests {
     }
 
     #[test]
-    fn test_kind_code_covers_error_code_all_exactly_once() {
+    fn test_kind_code_covers_error_code_all() {
         let mut seen: Vec<ErrorCode> = one_error_per_variant()
             .into_iter()
             .map(|e| e.into_ffi_message().kind.code())
             .collect();
         seen.sort_by_key(|c| c.as_str());
+        seen.dedup();
         let mut expected = ErrorCode::ALL.to_vec();
         expected.sort_by_key(|c| c.as_str());
         assert_eq!(seen, expected);

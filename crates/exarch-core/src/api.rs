@@ -18,6 +18,7 @@ use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
+use crate::formats::common::open_archive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::CreatableFormat;
@@ -104,91 +105,6 @@ pub(crate) fn extract_validated<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 }
 
-/// Runs `extract` into `output_dir`, or into a staging directory that is
-/// renamed over `output_dir` on success when `options` ask for atomic
-/// extraction.
-pub(crate) fn extract_staged(
-    output_dir: &Path,
-    options: &ExtractionOptions,
-    extract: impl FnOnce(&Path) -> Result<ExtractionReport>,
-) -> Result<ExtractionReport> {
-    if options.atomic {
-        extract_atomic(output_dir, extract)
-    } else {
-        extract(output_dir)
-    }
-}
-
-#[expect(
-    clippy::disallowed_methods,
-    reason = "stages the whole extraction in a private sibling directory, then renames it into place"
-)]
-fn extract_atomic(
-    output_dir: &Path,
-    extract: impl FnOnce(&Path) -> Result<ExtractionReport>,
-) -> Result<ExtractionReport> {
-    // Canonicalize output_dir to resolve any symlinks in the path before
-    // computing the parent, so temp dir lands on the same filesystem.
-    // If output_dir doesn't exist yet, use its lexical parent.
-    let canonical_output = if output_dir.exists() {
-        output_dir.canonicalize().map_err(ArchiveError::Io)?
-    } else {
-        output_dir.to_path_buf()
-    };
-
-    let parent = canonical_output
-        .parent()
-        .ok_or(ArchiveError::InvalidConfiguration {
-            setting: crate::ConfigSetting::OutputPath,
-            problem: crate::ConfigProblem::NoParent,
-        })?;
-
-    std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;
-
-    let temp_dir = tempfile::Builder::new()
-        .prefix(".exarch-")
-        .tempdir_in(parent)
-        .map_err(|e| {
-            ArchiveError::Io(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "failed to create temp directory in {}: {e}",
-                    parent.display()
-                ),
-            ))
-        })?;
-
-    let result = extract(temp_dir.path());
-
-    match result {
-        Ok(report) => {
-            // Consume TempDir to prevent Drop cleanup, then rename.
-            let temp_path = temp_dir.keep();
-            std::fs::rename(&temp_path, output_dir).map_err(|e| {
-                // Rename failed: clean up temp dir
-                let _ = std::fs::remove_dir_all(&temp_path);
-                // Map AlreadyExists to OutputExists for caller clarity
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    ArchiveError::OutputExists {
-                        path: output_dir.to_path_buf(),
-                    }
-                } else {
-                    ArchiveError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("failed to rename temp dir to {}: {e}", output_dir.display()),
-                    ))
-                }
-            })?;
-
-            Ok(report)
-        }
-        Err(e) => {
-            // TempDir Drop runs here: cleans up temp dir automatically.
-            Err(e.rolled_back())
-        }
-    }
-}
-
 /// Opens `archive_path` as a TAR stream (decoded with `codec` when present)
 /// and extracts it.
 fn extract_tar(
@@ -242,9 +158,7 @@ fn extract_zip(
 ) -> Result<ExtractionReport> {
     use crate::formats::ZipArchive;
     use crate::formats::traits::ArchiveFormat;
-    use std::fs::File;
-
-    let file = File::open(archive_path)?;
+    let file = open_archive(archive_path)?;
     let archive = ZipArchive::for_extraction(file, config, options.decode_reuse)?;
     archive.extract(output_dir, options, progress)
 }
@@ -258,9 +172,7 @@ fn extract_7z(
 ) -> Result<ExtractionReport> {
     use crate::formats::SevenZArchive;
     use crate::formats::traits::ArchiveFormat;
-    use std::fs::File;
-
-    let file = File::open(archive_path)?;
+    let file = open_archive(archive_path)?;
     let archive = SevenZArchive::new(file, config)?;
     archive.extract(output_dir, options, progress)
 }
@@ -289,8 +201,8 @@ fn extract_7z(
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::CreationConfig;
 /// use exarch_core::create_archive;
-/// use exarch_core::creation::CreationConfig;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = CreationConfig::default();
@@ -410,7 +322,7 @@ pub fn verify_archive<P: AsRef<Path>>(
     crate::inspection::verify_archive(archive_path, config)
 }
 
-/// [`extract_to_sink_with_progress`], with a ZIP archive's census output kept
+/// A sink extraction, with a ZIP archive's census output kept
 /// within `reuse` when the sink is one that shares its memory limit.
 pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
     reader: ArchiveReader<'_>,
@@ -475,7 +387,7 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
             "creation for .{ext_lower} isn't supported: the format is ZIP-based but \
              requires extra structure (signing, manifests, ordering) that exarch \
              doesn't produce. Use .zip, or state the format with \
-             OutputFile::with_format(exarch_core::formats::detect::CreatableFormat::Zip) \
+             OutputFile::with_format(exarch_core::CreatableFormat::Zip) \
              to override."
         )));
     }
@@ -661,8 +573,8 @@ mod tests {
     fn test_extract_archive_with_options_and_progress_non_atomic_delegates_to_normal() {
         let dest = tempfile::TempDir::new().unwrap();
         let options = ExtractionOptions {
-            atomic: false,
-            skip_duplicates: true,
+            staging: crate::Staging::InPlace,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())
@@ -676,8 +588,8 @@ mod tests {
     fn test_extract_archive_with_options_delegates() {
         let dest = tempfile::TempDir::new().unwrap();
         let options = ExtractionOptions {
-            atomic: false,
-            skip_duplicates: true,
+            staging: crate::Staging::InPlace,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())
@@ -704,8 +616,8 @@ mod tests {
         let output_dir = parent.path().join("extracted");
 
         let options = ExtractionOptions {
-            atomic: true,
-            skip_duplicates: true,
+            staging: crate::Staging::Atomic,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())
@@ -729,8 +641,8 @@ mod tests {
         let output_dir = parent.path().join("extracted");
 
         let options = ExtractionOptions {
-            atomic: true,
-            skip_duplicates: true,
+            staging: crate::Staging::Atomic,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())
@@ -767,8 +679,8 @@ mod tests {
         create_archive(&archive_path, &[src_dir.path()], &CreationConfig::default()).unwrap();
 
         let options = ExtractionOptions {
-            atomic: true,
-            skip_duplicates: true,
+            staging: crate::Staging::Atomic,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())

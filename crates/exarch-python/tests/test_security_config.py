@@ -3,7 +3,7 @@
 import pytest
 
 pytest.importorskip("exarch")
-from exarch import SecurityConfig  # noqa: E402
+from exarch import InvalidConfigurationError, SecurityConfig  # noqa: E402
 
 
 class TestSecurityConfig:
@@ -166,6 +166,31 @@ class TestSecurityConfig:
 
         with pytest.raises(ValueError):
             config.allowed_extensions = ["ok", "tar.gz"]
+
+    def test_allowed_extensions_reads_none_for_any_and_none_is_the_only_clear(self):
+        """An empty list is refused; None allows every extension again."""
+        config = SecurityConfig()
+        assert config.allowed_extensions is None
+
+        with pytest.raises(InvalidConfigurationError) as info:
+            config.allowed_extensions = []
+        assert info.value.setting == "allowed_extension"
+        assert info.value.code == "INVALID_CONFIGURATION"
+        assert config.allowed_extensions is None
+
+        config.allowed_extensions = ["txt"]
+        with pytest.raises(InvalidConfigurationError):
+            config.allowed_extensions = []
+        assert config.allowed_extensions == ["txt"]
+
+        config.allowed_extensions = None
+        assert config.allowed_extensions is None
+        assert config.is_extension_allowed("anything")
+
+    def test_allowed_extensions_round_trips_its_own_getter(self):
+        config = SecurityConfig().add_allowed_extension("gz")
+        config.allowed_extensions = config.allowed_extensions
+        assert config.allowed_extensions == ["gz"]
 
     def test_banned_component_validation(self):
         """Test banned path component string validation."""

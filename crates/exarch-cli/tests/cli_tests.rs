@@ -1268,9 +1268,8 @@ fn test_verify_missing_archive_names_it_in_the_error() {
         .arg("does-not-exist.tar.gz")
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "Failed to process 'does-not-exist.tar.gz'",
-        ));
+        .stderr(predicates::str::contains("Source path not found"))
+        .stderr(predicates::str::contains("does-not-exist.tar.gz"));
 }
 
 #[test]
@@ -4506,12 +4505,7 @@ fn test_extract_atomic_force_rejects_non_directory_destination() {
         .arg(&dest)
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "cannot use --atomic --force: destination",
-        ))
-        .stderr(predicate::str::contains(
-            "already exists and is not a directory",
-        ));
+        .stderr(predicate::str::contains("output path is not a directory"));
 
     let contents = std::fs::read(&dest).expect("destination file must survive");
     assert_eq!(
@@ -4550,7 +4544,7 @@ fn test_extract_atomic_force_rejects_symlink_destination() {
         .arg(&symlink_dest)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("is a symlink"));
+        .stderr(predicate::str::contains("output path is a symbolic link"));
 
     assert!(
         symlink_dest
@@ -4617,7 +4611,7 @@ fn test_extract_atomic_force_rejects_symlink_destination_with_trailing_slash() {
         .arg(&symlink_dest_with_slash)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("is a symlink"));
+        .stderr(predicate::str::contains("output path is a symbolic link"));
 
     assert_eq!(
         std::fs::read(real_dest.join("old.txt")).expect("pre-existing file must survive"),
@@ -4674,7 +4668,7 @@ fn test_extract_atomic_force_rejects_dangling_symlink_destination() {
         .arg(&symlink_dest)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("is a symlink"));
+        .stderr(predicate::str::contains("output path is a symbolic link"));
 
     assert!(
         symlink_dest
@@ -4686,10 +4680,8 @@ fn test_extract_atomic_force_rejects_dangling_symlink_destination() {
     );
 }
 
-/// Regression test (S5(iii)-a): a bare relative destination (no directory
-/// prefix) exercises `output_dir.parent() == Some("")`, which
-/// `resolve_atomic_force_replace` must normalize to `"."` rather than
-/// passing the empty path to `canonicalize()`.
+/// A bare relative destination (no directory prefix) is replaced like any
+/// other.
 #[test]
 #[cfg(unix)]
 fn test_extract_atomic_force_relative_bare_destination_succeeds() {
@@ -4754,98 +4746,40 @@ fn test_extract_atomic_force_trailing_slash_destination_succeeds() {
     );
 }
 
-/// Regression test (N1): a destination of `.` must still work — before this
-/// fix, `output_dir.file_name()` is `None` for `.`, so this fell through to
-/// a hard-fail on `canonicalize()`/`file_name()` chaining. Now `.` and
-/// paths ending in it are resolved via the `canonicalize()` fallback, whose
-/// resulting name is already slash- and dot-free.
+/// `.`, `./` and `..` name the working directory or one that contains it:
+/// core refuses to replace it and leaves the destination untouched.
 #[test]
 #[cfg(unix)]
-fn test_extract_atomic_force_dot_destination_succeeds() {
-    let temp = TempDir::new().expect("failed to create temp dir");
-    let dest = temp.path().join("dest");
-    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
-    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+fn test_extract_atomic_force_refuses_the_working_directory_and_its_ancestors() {
+    for (destination, cwd_below_dest) in [(".", false), ("./", false), ("..", true)] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = temp.path().join("dest");
+        let cwd = if cwd_below_dest {
+            dest.join("subdir")
+        } else {
+            dest.clone()
+        };
+        std::fs::create_dir_all(&cwd).expect("create destination and cwd");
+        std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
 
-    exarch_cmd()
-        .current_dir(&dest)
-        .arg("extract")
-        .arg("--atomic")
-        .arg("--force")
-        .arg(fixture_path("sample.tar.gz"))
-        .arg(".")
-        .assert()
-        .success();
+        exarch_cmd()
+            .current_dir(&cwd)
+            .arg("extract")
+            .arg("--atomic")
+            .arg("--force")
+            .arg(fixture_path("sample.tar.gz"))
+            .arg(destination)
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(
+                "would replace the working directory or a directory that contains it",
+            ));
 
-    assert!(
-        dest.join("sample.txt").exists(),
-        "destination must contain the newly extracted archive content"
-    );
-    assert!(
-        !dest.join("old.txt").exists(),
-        "pre-existing destination content must be fully replaced on success"
-    );
-}
-
-/// Sibling of the `.` case above: a trailing-slash-terminated `./` must
-/// resolve identically (`Path::file_name()` is `None` for both).
-#[test]
-#[cfg(unix)]
-fn test_extract_atomic_force_dot_slash_destination_succeeds() {
-    let temp = TempDir::new().expect("failed to create temp dir");
-    let dest = temp.path().join("dest");
-    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
-    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
-
-    exarch_cmd()
-        .current_dir(&dest)
-        .arg("extract")
-        .arg("--atomic")
-        .arg("--force")
-        .arg(fixture_path("sample.tar.gz"))
-        .arg("./")
-        .assert()
-        .success();
-
-    assert!(
-        dest.join("sample.txt").exists(),
-        "destination must contain the newly extracted archive content"
-    );
-    assert!(
-        !dest.join("old.txt").exists(),
-        "pre-existing destination content must be fully replaced on success"
-    );
-}
-
-/// Sibling of the `.` case above using `..`: resolved via the same
-/// `canonicalize()` fallback (`Path::file_name()` is also `None` for `..`).
-#[test]
-#[cfg(unix)]
-fn test_extract_atomic_force_dotdot_destination_succeeds() {
-    let temp = TempDir::new().expect("failed to create temp dir");
-    let dest = temp.path().join("dest");
-    let cwd = dest.join("subdir");
-    std::fs::create_dir_all(&cwd).expect("create pre-existing destination and cwd subdir");
-    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
-
-    exarch_cmd()
-        .current_dir(&cwd)
-        .arg("extract")
-        .arg("--atomic")
-        .arg("--force")
-        .arg(fixture_path("sample.tar.gz"))
-        .arg("..")
-        .assert()
-        .success();
-
-    assert!(
-        dest.join("sample.txt").exists(),
-        "destination must contain the newly extracted archive content"
-    );
-    assert!(
-        !dest.join("old.txt").exists(),
-        "pre-existing destination content must be fully replaced on success"
-    );
+        assert!(
+            dest.join("old.txt").exists(),
+            "{destination}: a refused replace must leave the destination untouched"
+        );
+    }
 }
 
 /// Regression test (N2): a destination whose parent doesn't exist yet
@@ -4873,12 +4807,8 @@ fn test_extract_atomic_force_nested_fresh_destination_succeeds() {
     );
 }
 
-/// A symlinked *intermediate* path component must remain fully supported —
-/// only the destination's own final component is rejected when it is a
-/// symlink. `resolve_atomic_force_replace` canonicalizes the destination's
-/// parent (resolving any symlinked prefix) but takes the destination's own
-/// name lexically, so `link_mid/dest` still finds and replaces the real
-/// `real_mid/dest` directory.
+/// A symlinked *intermediate* path component stays supported: only the
+/// destination's own final component is refused when it is a symlink.
 #[test]
 #[cfg(unix)]
 fn test_extract_atomic_force_symlinked_intermediate_component_still_succeeds() {
@@ -4916,11 +4846,8 @@ fn test_extract_atomic_force_symlinked_intermediate_component_still_succeeds() {
     );
 }
 
-/// A destination that is the filesystem root has no parent to pin — this
-/// must still be rejected, unchanged from before this fix (today's
-/// `canonical_output.parent()` is already `None` there). Safe to exercise
-/// against the real `/`: `resolve_atomic_force_replace` bails at the
-/// parent-less check before any filesystem write is attempted.
+/// A destination that is a filesystem root is refused with the typed
+/// protected-path error.
 #[test]
 #[cfg(unix)]
 fn test_extract_atomic_force_rejects_filesystem_root_destination() {
@@ -4932,19 +4859,11 @@ fn test_extract_atomic_force_rejects_filesystem_root_destination() {
         .arg("/")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("destination has no parent"));
+        .stderr(predicate::str::contains("would replace a filesystem root"));
 }
 
-/// Regression pin for the G1 finding: dropping the `exists()` gate means
-/// `resolve_atomic_force_replace` now pins the destination's parent for
-/// *every* `--atomic --force` invocation, not only when something already
-/// exists there to replace. A `0311` (write+execute, no read) parent used
-/// to work for a fresh destination (`mkdir`/`realpath` succeed without read);
-/// it must now fail, since obtaining a real directory file descriptor
-/// requires read permission on the parent (see `PinnedDir::open`'s doc
-/// comment and `parent_without_read_permission_is_rejected` in
-/// `atomic_swap.rs`, which pins the same residual for a pre-existing
-/// destination).
+/// A parent without read permission (`0311`) cannot be pinned, so `--atomic
+/// --force` fails even for a destination that does not exist yet.
 #[test]
 #[cfg(unix)]
 fn test_extract_atomic_force_requires_parent_read_permission_even_for_fresh_destination() {
@@ -4975,9 +4894,9 @@ fn test_extract_atomic_force_requires_parent_read_permission_even_for_fresh_dest
         );
         return;
     }
-    assert
-        .failure()
-        .stderr(predicate::str::contains("failed to pin destination parent"));
+    assert.failure().stderr(predicate::str::contains(
+        "failed to pin the destination parent",
+    ));
 }
 
 /// Windows-only regression test (v3/v4): a junction at the destination must
@@ -5018,7 +4937,7 @@ fn test_extract_atomic_force_rejects_junction_destination() {
         .arg(&junction_dest)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("is a symlink"));
+        .stderr(predicate::str::contains("is a symbolic link"));
 
     assert_eq!(
         std::fs::read(real_dest.join("old.txt")).expect("pre-existing file must survive"),
@@ -6326,8 +6245,8 @@ fn test_extract_relaxable_by_and_hint_per_setting() {
         let json = extract_json(&archive, &out);
         assert_eq!(json["error"]["kind"], "SecurityViolation", "{setting}");
         assert_eq!(json["error"]["relaxable_by"], setting);
-        let message = json["error"]["message"].as_str().expect("message");
-        assert!(message.contains(flag), "{setting}: {message}");
+        let hint = json["error"]["hint"].as_str().expect("hint");
+        assert!(hint.contains(flag), "{setting}: {hint}");
 
         exarch_cmd()
             .arg("extract")
@@ -6353,8 +6272,8 @@ fn test_extract_non_relaxable_refusals_have_no_relaxable_by() {
         let json = extract_json(&archive, &temp.path().join("out"));
         assert_eq!(json["error"]["kind"], "SecurityViolation", "{archive:?}");
         assert!(json["error"].get("relaxable_by").is_none(), "{json}");
-        let message = json["error"]["message"].as_str().expect("message");
-        assert!(message.contains("cannot be relaxed"), "{message}");
+        let hint = json["error"]["hint"].as_str().expect("hint");
+        assert!(hint.contains("cannot be relaxed"), "{hint}");
     }
 }
 
@@ -7145,9 +7064,7 @@ fn test_extract_under_unadmittable_existing_symlink_does_not_suggest_allow_symli
         let stderr = String::from_utf8(stderr).expect("UTF-8 stderr");
         assert!(!stderr.contains("--allow-symlinks"), "{link}: {stderr}");
         assert!(
-            stderr.contains(&format!(
-                "refusing to create {link}/x under the existing symlink at {link}"
-            )),
+            stderr.contains(&format!("under the existing symlink at {link}")),
             "{link}: {stderr}"
         );
 
@@ -7306,4 +7223,500 @@ fn test_extract_json_reports_zip_reader_sub_code() {
     let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
     assert_eq!(json["error"]["kind"], "InvalidArchive");
     assert_eq!(json["error"]["sub_code"], "ZIP_READER");
+}
+
+/// A closed stderr pipe must neither abort the run (exit 101) nor change the
+/// documented exit status of a successful extraction (#981).
+#[cfg(unix)]
+#[test]
+fn test_verbose_extract_survives_closed_stderr_pipe() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let (reader, writer) = std::io::pipe().expect("create pipe");
+    drop(reader);
+
+    let status = std::process::Command::new(exarch_cmd().get_program())
+        .arg("--verbose")
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(writer)
+        .status()
+        .expect("run exarch");
+
+    assert_eq!(status.code(), Some(0), "closed stderr must not panic");
+    assert!(
+        std::fs::read_dir(temp.path()).unwrap().next().is_some(),
+        "the extraction must still complete"
+    );
+}
+
+/// A closed stdout pipe ends `list` successfully in text and `--json` mode
+/// alike (#985).
+#[cfg(unix)]
+#[test]
+fn test_list_exit_status_on_closed_stdout_is_the_same_in_both_modes() {
+    for json in [false, true] {
+        let (reader, writer) = std::io::pipe().expect("create pipe");
+        drop(reader);
+
+        let mut cmd = std::process::Command::new(exarch_cmd().get_program());
+        cmd.arg("list");
+        if json {
+            cmd.arg("--json");
+        }
+        let status = cmd
+            .arg(fixture_path("sample.tar.gz"))
+            .stdout(writer)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run exarch");
+
+        assert_eq!(status.code(), Some(0), "json: {json}");
+    }
+}
+
+/// The hint closes the human message on its own line and travels in its own
+/// `--json` field, never in the middle of the chain (#985).
+#[test]
+fn test_error_hint_is_last_in_text_and_separate_in_json() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let sym = temp.path().join("sym.tar");
+    write_tar_with_link(&sym, "link", &Link::Sym("target.txt"));
+
+    let stderr = exarch_cmd()
+        .arg("extract")
+        .arg(&sym)
+        .arg(temp.path().join("out-text"))
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).expect("utf-8");
+    let (before, hint) = stderr.split_once("\nHINT: ").expect("hint line");
+    assert!(before.contains("operation denied"), "{stderr}");
+    assert!(hint.contains("--allow-symlinks"), "{stderr}");
+    assert!(!hint.contains("operation denied"), "{stderr}");
+
+    let json = extract_json(&sym, &temp.path().join("out-json"));
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(!message.contains("HINT"), "{message}");
+    assert!(
+        json["error"]["hint"]
+            .as_str()
+            .expect("hint")
+            .contains("--allow-symlinks")
+    );
+}
+
+/// Flags that name no extension or no component are typed configuration
+/// refusals in `--json`, not the generic `Error` kind (#982).
+#[test]
+fn test_extract_empty_list_flags_are_typed_configuration_refusals() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = fixture_path("sample.tar.gz");
+
+    for (flag, value, setting) in [
+        ("--allowed-extensions", ",", "allowed_extension"),
+        ("--banned-component", " , ", "banned_path_component"),
+    ] {
+        let stdout = exarch_cmd()
+            .arg("extract")
+            .arg("--json")
+            .arg(flag)
+            .arg(value)
+            .arg(&archive)
+            .arg(temp.path().join("out"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+        assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{flag}");
+        assert_eq!(json["error"]["setting"], setting, "{flag}");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains(flag),
+            "{flag}: {json}"
+        );
+    }
+}
+
+/// A conflicting destination is an `OutputExists` refusal in `--json`, with
+/// the refused paths in `conflicts`, and the message lists them once (#982).
+#[test]
+fn test_extract_conflict_json_is_typed_with_sorted_conflicts() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let out = temp.path().join("out");
+    exarch_cmd()
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&out)
+        .assert()
+        .success();
+
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "OutputExists", "{json}");
+    let conflicts: Vec<&str> = json["error"]["conflicts"]
+        .as_array()
+        .expect("conflicts array")
+        .iter()
+        .map(|c| c.as_str().expect("path"))
+        .collect();
+    assert!(!conflicts.is_empty(), "{json}");
+    let mut sorted = conflicts.clone();
+    sorted.sort_unstable();
+    assert_eq!(conflicts, sorted);
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(!message.contains("already holds"), "{message}");
+    assert!(message.contains("use --force to overwrite"), "{message}");
+}
+
+/// The staged replace refuses a protected destination with a typed
+/// configuration error and touches nothing (#984).
+#[test]
+fn test_extract_atomic_force_protected_destination_is_a_typed_refusal() {
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg("/")
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{json}");
+    assert_eq!(json["error"]["setting"], "output_path", "{json}");
+    assert!(json["error"]["hint"].is_string(), "{json}");
+}
+
+/// A release-style TAR: everything under one `proj/` wrapper directory.
+fn write_wrapped_tar(path: &std::path::Path) {
+    let mut builder = tar::Builder::new(std::fs::File::create(path).expect("create tar"));
+    for (name, body) in [
+        ("proj/README", &b"r"[..]),
+        ("proj/src/main.rs", &b"m"[..]),
+        ("proj/src/gen.tmp", &b"t"[..]),
+        ("proj/docs/a.md", &b"d"[..]),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, name, body)
+            .expect("append entry");
+    }
+    builder.finish().expect("finish tar");
+}
+
+fn extracted_files(root: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                found.push(
+                    path.strip_prefix(root)
+                        .expect("under root")
+                        .components()
+                        .map(|part| part.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                );
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// `--strip-components`, `--include` and `--exclude` choose what lands where
+/// (#967).
+#[test]
+fn test_extract_selection_flags_choose_the_extracted_set() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+
+    let out = temp.path().join("stripped");
+    exarch_cmd()
+        .arg("extract")
+        .arg("--strip-components")
+        .arg("1")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Files extracted: 4"));
+    assert_eq!(
+        extracted_files(&out),
+        ["README", "docs/a.md", "src/gen.tmp", "src/main.rs"]
+    );
+
+    let out = temp.path().join("selected");
+    exarch_cmd()
+        .arg("extract")
+        .arg("--include")
+        .arg("proj/src")
+        .arg("--exclude")
+        .arg("*.tmp")
+        .arg("--strip-components")
+        .arg("2")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not_selected"));
+    assert_eq!(extracted_files(&out), ["main.rs"]);
+
+    let out = temp.path().join("flat");
+    exarch_cmd()
+        .arg("extract")
+        .arg("--flatten")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(
+        extracted_files(&out),
+        ["README", "a.md", "gen.tmp", "main.rs"]
+    );
+}
+
+/// An include pattern that matches nothing fails after the scan with the typed
+/// configuration error, and `--atomic` commits nothing (#967).
+#[test]
+fn test_extract_unmatched_include_is_typed_and_atomic_commits_nothing() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+    let out = temp.path().join("out");
+
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg("--atomic")
+        .arg("--include")
+        .arg("nope")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{json}");
+    assert_eq!(json["error"]["setting"], "entry_include", "{json}");
+    assert_eq!(json["error"]["partial_report"]["writes"], "rolled_back");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("nope"),
+        "{json}"
+    );
+    assert!(!out.exists(), "an atomic run commits nothing");
+}
+
+/// Core refuses the replace-the-destination mode together with a selection,
+/// and the CLI hint names the flags to drop (#967).
+#[test]
+fn test_extract_atomic_force_with_selection_is_refused() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg("--strip-components")
+        .arg("1")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("cannot be combined with"));
+}
+
+/// A strip count core cannot use is a typed refusal that names the setting;
+/// pattern syntax is refused the same way (#967).
+#[test]
+fn test_extract_selection_values_are_validated_by_core() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+
+    for (flag, value, setting) in [
+        ("--strip-components", "0", "strip_components"),
+        ("--strip-components", "-2", "strip_components"),
+        ("--strip-components", "9999", "strip_components"),
+        ("--include", "**/x", "entry_include"),
+        ("--exclude", "a/*", "entry_exclude"),
+    ] {
+        let stdout = exarch_cmd()
+            .arg("extract")
+            .arg("--json")
+            .arg(flag)
+            .arg(value)
+            .arg(&archive)
+            .arg(temp.path().join("out"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+        assert_eq!(
+            json["error"]["kind"], "InvalidConfiguration",
+            "{flag} {value}"
+        );
+        assert_eq!(json["error"]["setting"], setting, "{flag} {value}");
+    }
+    assert!(!temp.path().join("out").exists());
+}
+
+/// `--flatten` and `--strip-components` are two ways to rewrite one path.
+#[test]
+fn test_flatten_conflicts_with_strip_components() {
+    exarch_cmd()
+        .arg("extract")
+        .arg("--flatten")
+        .arg("--strip-components")
+        .arg("1")
+        .arg("a.tar")
+        .assert()
+        .code(2);
+}
+
+/// `list` shows what a selection does to each entry, in text and `--json`;
+/// without a selection nothing is added (#967).
+#[test]
+fn test_list_reports_dispositions_only_under_a_selection() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+
+    exarch_cmd()
+        .arg("list")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[").not());
+
+    exarch_cmd()
+        .arg("list")
+        .arg("--strip-components")
+        .arg("1")
+        .arg("--exclude")
+        .arg("docs")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("proj/README  [lands at README]"))
+        .stdout(predicate::str::contains(
+            "proj/docs/a.md  [skipped: not_selected]",
+        ));
+
+    let stdout = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg("--strip-components")
+        .arg("1")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    let entries = json["data"]["entries"].as_array().expect("entries");
+    let readme = entries
+        .iter()
+        .find(|e| e["path"] == "proj/README")
+        .expect("README entry");
+    assert_eq!(readme["disposition"]["action"], "extract");
+    assert_eq!(readme["disposition"]["landing"], "README");
+}
+
+/// `verify` applies the same selection and reports an unmatched include as an
+/// archive issue, so it never passes what `extract` would refuse (#967).
+#[test]
+fn test_verify_reports_an_unmatched_include() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--strip-components")
+        .arg("1")
+        .arg(&archive)
+        .assert()
+        .success();
+    exarch_cmd()
+        .arg("verify")
+        .arg("--include")
+        .arg("nope")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "include pattern matched no entry: nope",
+        ));
+}
+
+/// `OutputExists` names the path once, not once from the CLI and once from
+/// core (#985).
+#[test]
+fn test_output_exists_text_names_the_path_once() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let out = temp.path().join("out");
+    exarch_cmd()
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&out)
+        .assert()
+        .success();
+
+    let stderr = exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).expect("utf-8");
+    assert_eq!(stderr.matches("already exists").count(), 1, "{stderr}");
+    assert!(
+        stderr.contains("HINT: Use --force to overwrite."),
+        "{stderr}"
+    );
 }

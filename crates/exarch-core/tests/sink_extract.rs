@@ -16,6 +16,7 @@ use exarch_core::AdmittedSize;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
 use exarch_core::CheckedLinkTarget;
+use exarch_core::CompressionCodec;
 use exarch_core::EntrySink;
 use exarch_core::ExtractionOptions;
 use exarch_core::QuotaResource;
@@ -26,7 +27,7 @@ use exarch_core::SeekableFormat;
 use exarch_core::SinkExtractRequest;
 use exarch_core::SinkFull;
 use exarch_core::SinkOptions;
-use exarch_core::formats::compression::CompressionCodec;
+use exarch_core::Staging;
 use exarch_testkit::raw_zip::RawEntry;
 use sink_support::RecordingSink;
 use sink_support::tar_archive;
@@ -216,7 +217,7 @@ fn a_tar_source_that_cannot_seek_is_extracted() {
 
 #[test]
 fn atomic_options_cannot_become_sink_options() {
-    let atomic = ExtractionOptions::default().with_atomic(true);
+    let atomic = ExtractionOptions::default().with_staging(Staging::Atomic);
     assert_matches!(
         SinkOptions::try_from(&atomic),
         Err(ArchiveError::InvalidConfiguration { .. })

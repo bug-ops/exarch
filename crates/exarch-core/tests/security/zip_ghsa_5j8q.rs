@@ -16,8 +16,6 @@
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::formats::ArchiveFormat;
-use exarch_core::formats::ZipArchive;
 use exarch_testkit::raw_zip::RawEntry;
 use exarch_testkit::raw_zip::RawZip;
 use std::io::Cursor;
@@ -58,7 +56,7 @@ fn ghsa_5j8q_forged_small_uncompressed_size_aborts_and_cleans_up() {
     let real_payload = vec![0x41u8; 4 * 1024 * 1024];
     let data = build_forged_size_zip("bomb.txt", &real_payload, 50);
 
-    let archive = ZipArchive::new(Cursor::new(data), &config).unwrap();
+    let archive = crate::common::zip_archive(Cursor::new(data), &config);
     let result = archive.extract(
         dest.path(),
         &ExtractionOptions::default(),
@@ -104,7 +102,7 @@ fn ghsa_5j8q_forged_oversized_declared_size_rejected_after_eof() {
     let declared = real_payload.len() as u32 * 2;
     let data = build_forged_size_zip("liar.txt", &real_payload, declared);
 
-    let archive = ZipArchive::new(Cursor::new(data), &config).unwrap();
+    let archive = crate::common::zip_archive(Cursor::new(data), &config);
     let result = archive.extract(
         dest.path(),
         &ExtractionOptions::default(),
@@ -144,7 +142,7 @@ fn forged_size_zip_builder_round_trips_when_size_is_accurate() {
     let declared = real_payload.len() as u32;
     let data = build_forged_size_zip("honest.txt", &real_payload, declared);
 
-    let archive = ZipArchive::new(Cursor::new(data), &config).unwrap();
+    let archive = crate::common::zip_archive(Cursor::new(data), &config);
     let result = archive.extract(
         dest.path(),
         &ExtractionOptions::default(),

@@ -3,6 +3,7 @@
 use crate::operation::Operation;
 use crate::output::OutputMode;
 use crate::output::Verbosity;
+use crate::output::emit_line;
 use crate::output::humanize_bytes;
 use crate::output::terminal::TerminalEntry;
 use console::Term;
@@ -12,6 +13,7 @@ use exarch_core::NoopProgress;
 use exarch_core::ProgressCallback;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
+use std::io::Write;
 use std::path::Path;
 
 /// How many entries a progress bar counts to.
@@ -175,42 +177,40 @@ impl ProgressCallback for CliProgress {
     }
 }
 
-/// Per-entry verbose progress that prints one line per archive entry to stderr.
+/// Per-entry verbose progress that prints one line per archive entry to
+/// stderr.
 ///
 /// Activated when `--verbose` is set and `--quiet` is not. Prints each entry
-/// name as it starts processing. No TTY detection is required — output is
-/// always plain text.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ProgressCallback;
-/// use std::path::Path;
-///
-/// let mut p = VerboseProgress::new(Operation::Extract);
-/// p.on_entry_start(
-///     Path::new("data/file.txt"),
-///     position(1, EntryTotal::Known(10)),
-/// );
-/// p.on_entry_complete(Path::new("data/file.txt"));
-/// p.on_complete();
-/// ```
+/// name as it starts processing. A failed write (a closed stderr pipe) is
+/// ignored: progress lines are best-effort and must not abort the operation.
 #[derive(Debug)]
-pub struct VerboseProgress {
+pub struct VerboseProgress<W: Write = Term> {
     operation: Operation,
+    writer: W,
 }
 
-impl VerboseProgress {
+impl VerboseProgress<Term> {
     /// Creates a reporter that prefixes each entry line with the operation.
     #[must_use]
-    pub const fn new(operation: Operation) -> Self {
-        Self { operation }
+    pub fn new(operation: Operation) -> Self {
+        Self::with_writer(operation, Term::stderr())
     }
 }
 
-impl ProgressCallback for VerboseProgress {
+impl<W: Write> VerboseProgress<W> {
+    /// Creates a reporter that writes its lines to `writer`.
+    #[must_use]
+    pub const fn with_writer(operation: Operation, writer: W) -> Self {
+        Self { operation, writer }
+    }
+}
+
+impl<W: Write + Send> ProgressCallback for VerboseProgress<W> {
     fn on_entry_start(&mut self, path: &Path, _position: EntryPosition) {
-        eprintln!("  {}  {}", self.operation.name(), TerminalEntry::new(path));
+        emit_line(
+            &mut self.writer,
+            format_args!("  {}  {}", self.operation.name(), TerminalEntry::new(path)),
+        );
     }
 
     fn on_bytes_written(&mut self, _bytes: u64) {}
@@ -228,9 +228,21 @@ mod tests {
         EntryPosition::at_index(current - 1, total)
     }
 
+    struct BrokenPipe;
+
+    impl Write for BrokenPipe {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
     #[test]
-    fn test_verbose_progress_no_panic() {
-        let mut p = VerboseProgress::new(Operation::Extract);
+    fn verbose_progress_ignores_a_failing_writer() {
+        let mut p = VerboseProgress::with_writer(Operation::Extract, BrokenPipe);
         p.on_entry_start(
             Path::new("data/file.txt"),
             position(1, EntryTotal::Known(10)),
@@ -238,6 +250,16 @@ mod tests {
         p.on_bytes_written(512);
         p.on_entry_complete(Path::new("data/file.txt"));
         p.on_complete();
+    }
+
+    #[test]
+    fn verbose_progress_writes_one_line_per_entry() {
+        let mut p = VerboseProgress::with_writer(Operation::Extract, Vec::new());
+        p.on_entry_start(Path::new("a/b.txt"), position(1, EntryTotal::Unknown));
+        assert_eq!(
+            p.writer,
+            format!("  {}  a/b.txt\n", Operation::Extract.name()).into_bytes()
+        );
     }
 
     #[test]

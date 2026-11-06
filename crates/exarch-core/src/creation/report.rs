@@ -3,14 +3,44 @@
 use std::fmt;
 use std::time::Duration;
 
+use crate::IoKind;
 use crate::Skips;
+use crate::closed_enum::closed_enum;
+
+closed_enum! {
+    /// The class of a [`CreationWarning`], without its payload.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::IoKind;
+    /// use exarch_core::CreationWarning;
+    /// use exarch_core::CreationWarningKind;
+    ///
+    /// let warning = CreationWarning::DirectoryNotSynced {
+    ///     io_kind: IoKind::PermissionDenied,
+    /// };
+    /// assert_eq!(warning.kind(), CreationWarningKind::DirectoryNotSynced);
+    /// assert_eq!(warning.kind().as_str(), "directory_not_synced");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum CreationWarningKind {
+        /// [`CreationWarning::ZipRatioOverDefaultLimit`].
+        ZipRatioOverDefaultLimit => "zip_ratio_over_default_limit",
+        /// [`CreationWarning::ZipRatioCheckFailed`].
+        ZipRatioCheckFailed => "zip_ratio_check_failed",
+        /// [`CreationWarning::DirectoryNotSynced`].
+        DirectoryNotSynced => "directory_not_synced",
+    }
+}
 
 /// A condition of a creation worth surfacing that is not a skipped entry.
 ///
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::CreationWarning;
+/// use exarch_core::CreationWarning;
 ///
 /// let warning = CreationWarning::ZipRatioCheckFailed {
 ///     reason: "invalid Zip archive".into(),
@@ -41,6 +71,26 @@ pub enum CreationWarning {
         /// Why the archive could not be read back.
         reason: String,
     },
+
+    /// The archive was published, but the directory that holds it could not be
+    /// synced, so [`Durability::Synced`](crate::Durability::Synced) did not
+    /// reach the disk for the directory entry.
+    DirectoryNotSynced {
+        /// The kind of the failure.
+        io_kind: IoKind,
+    },
+}
+
+impl CreationWarning {
+    /// The class of this warning.
+    #[must_use]
+    pub const fn kind(&self) -> CreationWarningKind {
+        match self {
+            Self::ZipRatioOverDefaultLimit { .. } => CreationWarningKind::ZipRatioOverDefaultLimit,
+            Self::ZipRatioCheckFailed { .. } => CreationWarningKind::ZipRatioCheckFailed,
+            Self::DirectoryNotSynced { .. } => CreationWarningKind::DirectoryNotSynced,
+        }
+    }
 }
 
 impl fmt::Display for CreationWarning {
@@ -64,6 +114,11 @@ impl fmt::Display for CreationWarning {
                 "could not check the ZIP entries against the default extraction ratio limit: \
                  {reason}"
             ),
+            Self::DirectoryNotSynced { io_kind } => write!(
+                f,
+                "the directory that holds the archive could not be synced ({io_kind}); the \
+                 archive may not survive a crash"
+            ),
         }
     }
 }
@@ -75,7 +130,7 @@ impl fmt::Display for CreationWarning {
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::CreationReport;
+/// use exarch_core::CreationReport;
 ///
 /// let mut report = CreationReport::default();
 /// report.files_added = 10;
@@ -125,8 +180,8 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
-    /// use exarch_core::creation::CreationWarning;
+    /// use exarch_core::CreationReport;
+    /// use exarch_core::CreationWarning;
     ///
     /// let mut report = CreationReport::new();
     /// report.add_warning(CreationWarning::ZipRatioCheckFailed {
@@ -143,7 +198,7 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// assert_eq!(CreationReport::new().files_skipped(), 0);
     /// ```
@@ -157,16 +212,14 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// let mut report = CreationReport::new();
     /// assert!(!report.has_warnings());
     ///
-    /// report.add_warning(
-    ///     exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
-    ///         reason: "test".into(),
-    ///     },
-    /// );
+    /// report.add_warning(exarch_core::CreationWarning::ZipRatioCheckFailed {
+    ///     reason: "test".into(),
+    /// });
     /// assert!(report.has_warnings());
     /// ```
     #[must_use]
@@ -181,7 +234,7 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// let mut report = CreationReport::new();
     /// report.bytes_written = 1000;
@@ -213,7 +266,7 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// let mut report = CreationReport::new();
     /// report.bytes_written = 1000;
@@ -245,7 +298,7 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// let mut report = CreationReport::new();
     /// report.files_added = 10;

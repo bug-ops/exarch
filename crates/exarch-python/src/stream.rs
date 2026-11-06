@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 
 use exarch_core::ArchiveReader;
-use exarch_core::formats::detect::ArchiveType;
+use exarch_core::ArchiveType;
 use pyo3::exceptions::PyTypeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

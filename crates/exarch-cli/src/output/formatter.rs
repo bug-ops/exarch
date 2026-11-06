@@ -5,11 +5,13 @@ use anyhow::Result;
 use exarch_core::ArchiveManifest;
 use exarch_core::ConfigSetting;
 use exarch_core::CreationReport;
+use exarch_core::Disposition;
 use exarch_core::ErrorCode;
 use exarch_core::ExtractionReport;
 use exarch_core::FfiKind;
 use exarch_core::PartialWrites;
 use exarch_core::PolicySetting;
+use exarch_core::SecurityConfig;
 use exarch_core::SkipKind;
 use exarch_core::Skips;
 use exarch_core::SubCode;
@@ -38,6 +40,43 @@ pub enum ManifestView {
     Long(SizeUnits),
 }
 
+/// What the selection of a listing does to each entry, aligned with
+/// `manifest.entries()`; empty when the selection is the default, which
+/// leaves every entry extracted where it is named.
+#[derive(Debug, Default)]
+pub struct Dispositions(Vec<Option<Disposition>>);
+
+impl Dispositions {
+    /// No disposition for any entry.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The disposition of each entry of `manifest` under its own selection.
+    pub fn of(manifest: &ArchiveManifest, config: &SecurityConfig) -> Self {
+        if manifest.selection().is_default() {
+            return Self::none();
+        }
+        let mut judged = manifest.dispositions(config).peekable();
+        Self(
+            manifest
+                .entries()
+                .iter()
+                .map(|entry| {
+                    judged
+                        .next_if(|(candidate, _)| std::ptr::eq(*candidate, entry))
+                        .map(|(_, disposition)| disposition)
+                })
+                .collect(),
+        )
+    }
+
+    /// The disposition of the entry at `index`, when the selection judged it.
+    pub fn get(&self, index: usize) -> Option<&Disposition> {
+        self.0.get(index).and_then(Option::as_ref)
+    }
+}
+
 /// Common output formatter trait
 pub trait OutputFormatter {
     /// Format extraction result
@@ -48,7 +87,12 @@ pub trait OutputFormatter {
     -> Result<()>;
 
     /// Format an archive manifest
-    fn format_manifest(&mut self, manifest: &ArchiveManifest, view: ManifestView) -> Result<()>;
+    fn format_manifest(
+        &mut self,
+        manifest: &ArchiveManifest,
+        view: ManifestView,
+        dispositions: &Dispositions,
+    ) -> Result<()>;
 
     /// Format verification report
     fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()>;
@@ -140,6 +184,7 @@ impl JsonKind {
                 ErrorCode::InvalidCompressionLevel => "InvalidCompressionLevel",
                 ErrorCode::UnknownFormat => "UnknownFormat",
                 ErrorCode::InvalidConfiguration => "InvalidConfiguration",
+                ErrorCode::Cancelled => "Cancelled",
                 // Wildcard only for `#[non_exhaustive]`;
                 // `every_error_code_has_a_kind_name` fails if it is ever taken.
                 _ => "Error",
@@ -154,12 +199,10 @@ impl Serialize for JsonKind {
     }
 }
 
-/// The typed discriminants of the refusal behind a verify issue: the same
-/// code, sub-code and policy setting a failed extraction reports, so a script
-/// need not parse the message.
+/// The finer discriminants an error or a refusal can carry besides its code:
+/// what a script reads instead of parsing the message.
 #[derive(Debug, Serialize)]
-pub struct JsonRefusal {
-    pub code: JsonKind,
+pub struct JsonDiscriminants {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_code: Option<JsonId<SubCode>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,13 +211,31 @@ pub struct JsonRefusal {
     pub setting: Option<JsonId<ConfigSetting>>,
 }
 
+impl From<&FfiKind> for JsonDiscriminants {
+    fn from(kind: &FfiKind) -> Self {
+        Self {
+            sub_code: kind.sub_code().map(JsonId),
+            relaxable_by: kind.relaxable_by().map(JsonId),
+            setting: kind.setting().map(JsonId),
+        }
+    }
+}
+
+/// The typed discriminants of the refusal behind a verify issue: the same
+/// code, sub-code and policy setting a failed extraction reports, so a script
+/// need not parse the message.
+#[derive(Debug, Serialize)]
+pub struct JsonRefusal {
+    pub code: JsonKind,
+    #[serde(flatten)]
+    pub discriminants: JsonDiscriminants,
+}
+
 impl From<&FfiKind> for JsonRefusal {
     fn from(kind: &FfiKind) -> Self {
         Self {
             code: JsonKind::Code(kind.code()),
-            sub_code: kind.sub_code().map(JsonId),
-            relaxable_by: kind.relaxable_by().map(JsonId),
-            setting: kind.setting().map(JsonId),
+            discriminants: JsonDiscriminants::from(kind),
         }
     }
 }
@@ -212,7 +273,7 @@ impl From<&Skips> for JsonSkips {
                 .map(|skip| JsonSkip {
                     kind: skip.kind.as_str(),
                     path: path_text(&skip.path),
-                    io_kind: skip.io_kind.map(|kind| kind.to_string()),
+                    io_kind: skip.io_kind.map(|kind| kind.as_str().to_owned()),
                 })
                 .collect(),
         }
@@ -259,21 +320,24 @@ pub struct JsonPartialReport {
 pub struct JsonError {
     pub kind: JsonKind,
     pub message: String,
+    /// Advice for the reader, apart from the message; absent when there is
+    /// none. Several hints are joined by newlines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial_report: Option<JsonPartialReport>,
-    /// Stable id of the `SecurityConfig` setting whose current value refused
-    /// the entry; present only for a `SecurityViolation` a setting relaxes.
+    /// The archive-relative paths an occupied destination refused, for a
+    /// `DestinationOccupied` error.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub relaxable_by: Option<JsonId<PolicySetting>>,
-    /// Stable id of the finer classification: always present for a
-    /// `SecurityViolation`, present for a TAR `InvalidArchive`, absent
-    /// otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub_code: Option<JsonId<SubCode>>,
-    /// Stable id of the configuration setting or input that was refused;
-    /// present only for an `InvalidConfiguration` that names one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub setting: Option<JsonId<ConfigSetting>>,
+    pub conflicts: Option<Vec<String>>,
+    /// `relaxable_by` is the stable id of the `SecurityConfig` setting whose
+    /// current value refused the entry (only for a `SecurityViolation` a
+    /// setting relaxes); `sub_code` the finer classification (always for a
+    /// `SecurityViolation`, for a TAR `InvalidArchive`, absent otherwise);
+    /// `setting` the configuration setting or input that was refused (only
+    /// for an `InvalidConfiguration` that names one).
+    #[serde(flatten)]
+    pub discriminants: Option<JsonDiscriminants>,
 }
 
 impl JsonError {
@@ -281,11 +345,23 @@ impl JsonError {
         Self {
             kind,
             message: message.into(),
+            hint: None,
             partial_report: None,
-            relaxable_by: None,
-            sub_code: None,
-            setting: None,
+            conflicts: None,
+            discriminants: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_conflicts(mut self, conflicts: Vec<String>) -> Self {
+        self.conflicts = Some(conflicts);
+        self
+    }
+
+    #[must_use]
+    pub fn with_hint(mut self, hint: Option<String>) -> Self {
+        self.hint = hint;
+        self
     }
 
     #[must_use]
@@ -298,9 +374,7 @@ impl JsonError {
     /// failure.
     #[must_use]
     pub fn with_ffi_kind(mut self, kind: &FfiKind) -> Self {
-        self.relaxable_by = kind.relaxable_by().map(JsonId);
-        self.sub_code = kind.sub_code().map(JsonId);
-        self.setting = kind.setting().map(JsonId);
+        self.discriminants = Some(JsonDiscriminants::from(kind));
         self
     }
 }

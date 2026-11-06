@@ -111,6 +111,11 @@ pub struct ValidatedFile<P: ParentCheck = Resolved> {
 }
 
 impl<P: ParentCheck> ValidatedFile<P> {
+    /// The validated destination-relative path.
+    pub(crate) const fn path(&self) -> &SafePath<P> {
+        &self.path
+    }
+
     /// Splits the proof into its path, the quota permit for the file's size
     /// and the sanitized permissions, when the format records them.
     pub(crate) fn into_parts(self) -> (SafePath<P>, QuotaPermit, Option<SanitizedMode>) {
@@ -173,7 +178,8 @@ mod tests {
                 &HostFs,
                 &ctx,
             )
-            .unwrap();
+            .unwrap()
+            .into_admitted();
 
         let (path, _permit, mode) = file.into_parts();
         assert_eq!(path.as_path(), Path::new("a.txt"));
@@ -206,7 +212,8 @@ mod tests {
         let ctx = core.context::<HostFs>();
         let directory = core
             .validate_directory_in(Path::new("d"), sizes(0), &dest, &HostFs, &ctx)
-            .unwrap();
+            .unwrap()
+            .into_admitted();
         assert_eq!(directory.as_path(), Path::new("d"));
 
         let ctx = core.context::<HostFs>();
@@ -219,7 +226,8 @@ mod tests {
                 &HostFs,
                 &ctx,
             )
-            .unwrap();
+            .unwrap()
+            .into_admitted();
         assert_eq!(symlink.symlink.link().as_path(), Path::new("s"));
         assert_eq!(symlink.symlink.target_path(), Path::new("d"));
 
@@ -233,7 +241,8 @@ mod tests {
                 &HostFs,
                 &ctx,
             )
-            .unwrap();
+            .unwrap()
+            .into_admitted();
         assert_eq!(hardlink.link.as_path(), Path::new("h"));
         assert_eq!(hardlink.target.as_path(), Path::new("t"));
     }

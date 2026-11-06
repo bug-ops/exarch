@@ -6,8 +6,11 @@ use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
+#[cfg(test)]
 use crate::VerificationOptions;
+#[cfg(test)]
 use crate::inspection::ArchiveManifest;
+#[cfg(test)]
 use crate::inspection::VerificationReport;
 
 /// Supertrait that keeps [`ArchiveFormat`] implementable by this crate only.
@@ -33,44 +36,6 @@ pub(crate) mod sealed {
 /// [`TarArchive`]: crate::formats::TarArchive
 /// [`ZipArchive`]: crate::formats::ZipArchive
 /// [`SevenZArchive`]: crate::formats::SevenZArchive
-///
-/// # Examples
-///
-/// A type outside this crate cannot implement it:
-///
-/// ```compile_fail,E0277
-/// use std::path::Path;
-///
-/// use exarch_core::ArchiveManifest;
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::ExtractionReport;
-/// use exarch_core::ProgressCallback;
-/// use exarch_core::Result;
-/// use exarch_core::VerificationOptions;
-/// use exarch_core::VerificationReport;
-/// use exarch_core::formats::traits::ArchiveFormat;
-///
-/// struct Mine;
-///
-/// impl ArchiveFormat for Mine {
-///     fn extract(
-///         self,
-///         _output_dir: &Path,
-///         _options: &ExtractionOptions,
-///         _progress: &mut dyn ProgressCallback,
-///     ) -> Result<ExtractionReport> {
-///         unreachable!()
-///     }
-///
-///     fn list(self) -> Result<ArchiveManifest> {
-///         unreachable!()
-///     }
-///
-///     fn verify(self, _options: &VerificationOptions) -> Result<VerificationReport> {
-///         unreachable!()
-///     }
-/// }
-/// ```
 pub trait ArchiveFormat: sealed::Sealed {
     /// Extracts the archive to the specified directory.
     ///
@@ -95,6 +60,7 @@ pub trait ArchiveFormat: sealed::Sealed {
     ///
     /// Returns an error if the archive is corrupted, encrypted, or a quota
     /// limit is exceeded.
+    #[cfg(test)]
     fn list(self) -> Result<ArchiveManifest>;
 
     /// Verifies the archive's integrity and security without extracting.
@@ -109,7 +75,8 @@ pub trait ArchiveFormat: sealed::Sealed {
     /// failure, encryption). Individual security issues appear in the report.
     /// With integrity requested in `options`, TAR entry content that fails to
     /// decode is also an error.
-    fn verify(self, options: &VerificationOptions) -> Result<VerificationReport>;
+    #[cfg(test)]
+    fn verify(self, options: VerificationOptions) -> Result<VerificationReport>;
 }
 
 #[cfg(test)]
@@ -135,7 +102,7 @@ mod tests {
             Ok(ArchiveManifest::new(ArchiveType::Tar))
         }
 
-        fn verify(self, _options: &VerificationOptions) -> Result<VerificationReport> {
+        fn verify(self, _options: VerificationOptions) -> Result<VerificationReport> {
             let config = crate::SecurityConfig::default();
             let manifest = self.list()?;
             Ok(crate::inspection::verify::verify_manifest(
@@ -169,7 +136,7 @@ mod tests {
     fn test_trait_verify_returns_clean_report_for_empty_archive() {
         let format = TestFormat;
         let report = format
-            .verify(&crate::VerificationOptions::default())
+            .verify(crate::VerificationOptions::default())
             .unwrap();
         assert_eq!(report.total_entries(), 0);
         assert!(report.is_safe());

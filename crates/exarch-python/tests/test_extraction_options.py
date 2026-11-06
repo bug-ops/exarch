@@ -1,43 +1,56 @@
 """Integration tests for ExtractionOptions Python API."""
 
+import io
+import tarfile
+
 import pytest
 
 pytest.importorskip("exarch")
-from exarch import ExtractionOptions, extract_archive  # noqa: E402
+from exarch import (  # noqa: E402
+    ExtractionOptions,
+    InvalidConfigurationError,
+    OutputExistsError,
+    extract_archive,
+)
 
 
 class TestExtractionOptions:
     """Test ExtractionOptions Python bindings."""
 
-    def test_default_skip_duplicates_is_true(self):
-        """Test that skip_duplicates defaults to True."""
-        opts = ExtractionOptions()
-        assert opts.skip_duplicates is True
+    def test_default_existing_files_is_skip(self):
+        """Existing files are skipped unless the caller says otherwise."""
+        assert ExtractionOptions().existing_files == "skip"
 
     def test_default_static_method(self):
         """Test that ExtractionOptions.default() equals ExtractionOptions()."""
-        opts = ExtractionOptions.default()
-        assert opts.skip_duplicates is True
+        assert ExtractionOptions.default().existing_files == "skip"
 
-    def test_with_skip_duplicates_false(self):
-        """Test with_skip_duplicates(False) sets the flag and returns self."""
+    @pytest.mark.parametrize("value", ["skip", "overwrite", "refuse"])
+    def test_with_existing_files_sets_the_value_and_returns_self(self, value):
         opts = ExtractionOptions()
-        result = opts.with_skip_duplicates(False)
-        assert opts.skip_duplicates is False
+        result = opts.with_existing_files(value)
+        assert opts.existing_files == value
         assert result is opts
 
-    def test_with_skip_duplicates_true(self):
-        """Test with_skip_duplicates(True) sets the flag."""
+    def test_existing_files_property_setter(self):
         opts = ExtractionOptions()
-        opts.with_skip_duplicates(False)
-        opts.with_skip_duplicates(True)
-        assert opts.skip_duplicates is True
+        opts.existing_files = "refuse"
+        assert opts.existing_files == "refuse"
 
-    def test_skip_duplicates_property_setter(self):
-        """Test skip_duplicates property setter."""
+    @pytest.mark.parametrize("value", ["", "Skip", "replace", "true"])
+    def test_unknown_existing_files_value_is_refused(self, value):
         opts = ExtractionOptions()
-        opts.skip_duplicates = False
-        assert opts.skip_duplicates is False
+        with pytest.raises(InvalidConfigurationError) as info:
+            opts.with_existing_files(value)
+        assert info.value.setting == "existing_files"
+        with pytest.raises(InvalidConfigurationError):
+            opts.existing_files = value
+        assert opts.existing_files == "skip"
+
+    def test_skip_duplicates_is_gone(self):
+        opts = ExtractionOptions()
+        assert not hasattr(opts, "skip_duplicates")
+        assert not hasattr(opts, "with_skip_duplicates")
 
     def test_build_returns_self(self):
         """Test build() returns self for builder consistency."""
@@ -50,7 +63,7 @@ class TestExtractionOptions:
         opts = ExtractionOptions()
         repr_str = repr(opts)
         assert "ExtractionOptions" in repr_str
-        assert "skip_duplicates" in repr_str
+        assert "existing_files='skip'" in repr_str.replace('"', "'")
 
     def test_extract_archive_with_default_options(self, sample_tar_gz, temp_dir):
         """Test extract_archive with ExtractionOptions() succeeds."""
@@ -60,13 +73,50 @@ class TestExtractionOptions:
         report = extract_archive(sample_tar_gz, output, options=opts)
         assert report.files_extracted >= 1
 
-    def test_extract_archive_with_skip_duplicates_false(self, sample_tar_gz, temp_dir):
-        """Test extract_archive with skip_duplicates=False on a non-duplicate archive succeeds."""
+    @pytest.mark.parametrize("value", ["skip", "overwrite", "refuse"])
+    def test_extract_archive_into_an_empty_destination_under_every_value(
+        self, sample_tar_gz, temp_dir, value
+    ):
         output = temp_dir / "output"
         output.mkdir()
-        opts = ExtractionOptions().with_skip_duplicates(False)
+        opts = ExtractionOptions().with_existing_files(value)
         report = extract_archive(sample_tar_gz, output, options=opts)
         assert report.files_extracted >= 1
+
+    def test_refuse_never_overwrites_an_existing_file(self, sample_tar_gz, temp_dir):
+        first = temp_dir / "first"
+        first.mkdir()
+        extract_archive(sample_tar_gz, first)
+        planted = next(path for path in sorted(first.rglob("*")) if path.is_file())
+        planted.write_text("planted")
+
+        opts = ExtractionOptions().with_existing_files("refuse")
+        with pytest.raises(OutputExistsError) as info:
+            extract_archive(sample_tar_gz, first, options=opts)
+
+        assert planted.read_text() == "planted"
+        assert info.value.code == "OUTPUT_EXISTS"
+        assert info.value.conflicts
+
+    @pytest.mark.parametrize(
+        ("value", "survivor"),
+        [("skip", b"first"), ("overwrite", b"second"), ("refuse", b"first")],
+    )
+    def test_in_archive_duplicate_follows_the_policy(self, temp_dir, value, survivor):
+        archive = temp_dir / "dup.tar"
+        with tarfile.open(archive, "w") as tar:
+            for body in (b"first", b"second"):
+                info = tarfile.TarInfo("a.txt")
+                info.size = len(body)
+                tar.addfile(info, io.BytesIO(body))
+        output = temp_dir / "out"
+        output.mkdir()
+        opts = ExtractionOptions().with_existing_files(value)
+
+        report = extract_archive(archive, output, options=opts)
+
+        assert (output / "a.txt").read_bytes() == survivor
+        assert report.skipped.count("duplicate") == (0 if value == "overwrite" else 1)
 
     def test_extract_archive_options_keyword_arg(self, sample_tar_gz, temp_dir):
         """Test extract_archive accepts options as keyword argument."""
@@ -76,22 +126,29 @@ class TestExtractionOptions:
         report = extract_archive(sample_tar_gz, output, options=opts)
         assert report.files_extracted >= 1
 
-    def test_atomic_default(self):
-        """Test that atomic defaults to False."""
+    def test_staging_default_is_in_place(self):
+        assert ExtractionOptions().staging == "in_place"
+
+    @pytest.mark.parametrize("value", ["in_place", "atomic", "atomic_replace"])
+    def test_with_staging_round_trip(self, value):
         opts = ExtractionOptions()
-        assert opts.atomic is False
+        assert opts.with_staging(value) is opts
+        assert opts.staging == value
+        opts.staging = "in_place"
+        opts.staging = value
+        assert opts.staging == value
 
-    def test_atomic_round_trip(self):
-        """Test with_atomic(True) sets the flag and returns self."""
-        opts = ExtractionOptions().with_atomic(True)
-        assert opts.atomic is True
-
-    def test_skip_duplicates_default(self):
-        """Test that skip_duplicates defaults to True."""
+    @pytest.mark.parametrize("value", ["", "Atomic", "replace", "true"])
+    def test_unknown_staging_is_refused(self, value):
         opts = ExtractionOptions()
-        assert opts.skip_duplicates is True
+        with pytest.raises(InvalidConfigurationError) as info:
+            opts.with_staging(value)
+        assert info.value.setting == "staging"
+        with pytest.raises(InvalidConfigurationError):
+            opts.staging = value
+        assert opts.staging == "in_place"
 
-    def test_skip_duplicates_round_trip(self):
-        """Test with_skip_duplicates(True) sets the flag after toggling."""
-        opts = ExtractionOptions().with_skip_duplicates(True)
-        assert opts.skip_duplicates is True
+    def test_atomic_flag_is_gone(self):
+        opts = ExtractionOptions()
+        assert not hasattr(opts, "atomic")
+        assert not hasattr(opts, "with_atomic")

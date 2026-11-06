@@ -103,30 +103,6 @@
 //!
 //! # Examples
 //!
-//! Basic extraction:
-//!
-//! ```no_run
-//! use exarch_core::ExtractionOptions;
-//! use exarch_core::SecurityConfig;
-//! use exarch_core::formats::SevenZArchive;
-//! use exarch_core::formats::traits::ArchiveFormat;
-//! use std::fs::File;
-//! use std::path::Path;
-//!
-//! # fn main() -> Result<(), exarch_core::ArchiveError> {
-//! let file = File::open("archive.7z")?;
-//! let config = SecurityConfig::default();
-//! let mut archive = SevenZArchive::new(file, &config)?;
-//! let report = archive.extract(
-//!     Path::new("/output"),
-//!     &ExtractionOptions::default(),
-//!     &mut exarch_core::NoopProgress,
-//! )?;
-//! println!("Extracted {} files", report.files_extracted);
-//! # Ok(())
-//! # }
-//! ```
-//!
 //! Allow solid archives with a block limit:
 //!
 //! ```no_run
@@ -196,28 +172,6 @@ const SIGNATURE_HEADER_SIZE: u64 = 32;
 ///
 /// **Security Policy**: Solid archives are rejected by default.
 /// Use `SecurityConfig::with_allow_solid_archives` to enable with block limits.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::formats::SevenZArchive;
-/// use exarch_core::formats::traits::ArchiveFormat;
-/// use std::fs::File;
-/// use std::path::Path;
-///
-/// let file = File::open("archive.7z")?;
-/// let config = SecurityConfig::default();
-/// let mut archive = SevenZArchive::new(file, &config)?;
-/// let report = archive.extract(
-///     Path::new("/output"),
-///     &ExtractionOptions::default(),
-///     &mut exarch_core::NoopProgress,
-/// )?;
-/// println!("Extracted {} files", report.files_extracted);
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
 #[derive(Debug)]
 pub struct SevenZArchive<R: Read + Seek> {
     source: R,
@@ -246,18 +200,6 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// - Archive is encrypted
     /// - Archive header is invalid
     /// - Format is not recognized
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use exarch_core::SecurityConfig;
-    /// use exarch_core::formats::SevenZArchive;
-    /// use std::fs::File;
-    ///
-    /// let file = File::open("archive.7z")?;
-    /// let archive = SevenZArchive::new(file, &SecurityConfig::default())?;
-    /// # Ok::<(), exarch_core::ArchiveError>(())
-    /// ```
     pub fn new(mut source: R, config: &SecurityConfig) -> Result<Self> {
         let header = read_sevenz_header(&mut source)?;
 
@@ -329,11 +271,12 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         let config = Arc::clone(&self.config);
         self.admit(&config)?.extract_with(
             |config| SevenZHostTarget::create(output_dir, config),
-            SinkOptions::duplicates_of(options),
+            SinkOptions::existing_files_of(options),
             progress,
         )
     }
 
+    #[cfg(test)]
     fn list(mut self) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::ListPass;
         use crate::inspection::list::list_sevenz_parsed;
@@ -346,12 +289,13 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         )
     }
 
+    #[cfg(test)]
     fn verify(
         mut self,
-        options: &VerificationOptions,
+        options: VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
         let config = Arc::clone(&self.config);
-        self.verify_with_progress(&config, *options, &mut crate::NoopProgress)
+        self.verify_with_progress(&config, options, &mut crate::NoopProgress)
     }
 }
 
@@ -407,7 +351,7 @@ impl From<sevenz_rust2::Error> for ArchiveError {
             sevenz_rust2::Error::Io(io_err, _) => Self::Io(io_err),
             sevenz_rust2::Error::FileOpen(io_err, path) => Self::Io(std::io::Error::new(
                 io_err.kind(),
-                format!("{path}: {io_err}"),
+                crate::IoContext::new("failed to open a 7z file", format!("{path}: {io_err}")),
             )),
             other => Self::from(Malformation::SevenZLibraryError {
                 detail: other.to_string().into(),

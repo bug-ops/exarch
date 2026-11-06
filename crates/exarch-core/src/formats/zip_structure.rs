@@ -7,7 +7,7 @@
 //! module finds them once, when the archive is opened, and records them as
 //! [`ZipInconsistency`] findings; whether a finding is fatal is decided per
 //! operation by the caller's
-//! [`ZipConsistencyPolicy`](crate::ZipConsistencyPolicy).
+//! [`ZipConsistencyPolicy`].
 //!
 //! The census runs on one parse of the central directory:
 //!
@@ -112,6 +112,7 @@ use super::chunk_search::Flow;
 use super::chunk_search::search_chunks;
 use super::common;
 use super::source_fault::FaultSlot;
+use super::source_fault::SourceTap;
 use super::zip::ZipMethod;
 use super::zip::admit_zip_entry;
 use super::zip::is_password_required;
@@ -179,7 +180,7 @@ const HEADER_INCONSISTENCY_PREFIX: &str = "header inconsistency detected: ";
 ///
 /// Matched with `starts_with`, never `contains`: several messages embed
 /// attacker-controlled names.
-const FIELD_MESSAGES: [(&str, ZipHeaderField); 9] = [
+const FIELD_MESSAGES: [(&str, ZipHeaderField); 19] = [
     (
         "Local file header filename mismatch",
         ZipHeaderField::FileName,
@@ -203,6 +204,43 @@ const FIELD_MESSAGES: [(&str, ZipHeaderField); 9] = [
     (
         "uncompressed size mismatch",
         ZipHeaderField::UncompressedSize,
+    ),
+    (
+        "compression flags mismatch",
+        ZipHeaderField::CompressionFlags,
+    ),
+    (
+        "AES encryption metadata mismatch",
+        ZipHeaderField::AesMetadata,
+    ),
+    ("filename contains null byte", ZipHeaderField::FileNameNul),
+    (
+        "UnicodePath (0x7075) does not match UTF-8 file name",
+        ZipHeaderField::UnicodePathLanguageEncoding,
+    ),
+    (
+        "UnicodePath (0x7075) directory status differs",
+        ZipHeaderField::UnicodePathDirectoryStatus,
+    ),
+    (
+        "UnicodePath (0x7075) is not valid UTF-8",
+        ZipHeaderField::UnicodePathNotUtf8,
+    ),
+    (
+        "UnicodePath (0x7075) contains illegal control or homoglyph character",
+        ZipHeaderField::UnicodePathIllegalCharacter,
+    ),
+    (
+        "UnicodePath (0x7075) changes file name path components",
+        ZipHeaderField::UnicodePathComponents,
+    ),
+    (
+        "UnicodePath (0x7075) has divergent trailing dots or spaces",
+        ZipHeaderField::UnicodePathTrailingDotsOrSpaces,
+    ),
+    (
+        "UnicodePath (0x7075) file extension differs",
+        ZipHeaderField::UnicodePathExtension,
     ),
 ];
 
@@ -378,6 +416,11 @@ impl<R> Shared<R> {
         error
     }
 
+    /// The slot the reader records its I/O errors into.
+    fn fault_slot(&self) -> FaultSlot {
+        self.fault.clone()
+    }
+
     /// The first error the reader raised, if any.
     fn take_fault(&self) -> Option<std::io::Error> {
         let fault = self.fault.get();
@@ -536,6 +579,7 @@ pub struct ZipStructure {
     census_window: ZstdWindowLog,
     recheck_allowance: u64,
     reuse: Option<ReuseStore>,
+    source: SourceTap,
     #[cfg(test)]
     gap_reads: usize,
     #[cfg(test)]
@@ -554,6 +598,7 @@ impl ZipStructure {
             census_window: ZstdWindowLog::LIBZSTD_DEFAULT,
             recheck_allowance: CENSUS_DECODE_BUDGET,
             reuse: None,
+            source: SourceTap::default(),
             gap_reads: 0,
             zstd_census_decodes: 0,
         }
@@ -608,6 +653,12 @@ impl ZipStructure {
     /// The decoded output the census kept for extraction, when it kept any.
     pub(crate) const fn reuse(&self) -> Option<&ReuseStore> {
         self.reuse.as_ref()
+    }
+
+    /// The archive source's I/O faults, so a failed entry read can be told
+    /// from a malformed entry.
+    pub(crate) const fn source(&self) -> &SourceTap {
+        &self.source
     }
 
     /// Like [`Self::reuse`], to take kept output out as extraction reaches it.
@@ -813,6 +864,7 @@ fn open_chunked<R: Read + Seek>(
             census_window: chunks.census_window,
             recheck_allowance: chunks.recheck,
             reuse: census.reuse.take(),
+            source: SourceTap::over(shared.fault_slot()),
             #[cfg(test)]
             gap_reads: census.gap_reads,
             #[cfg(test)]

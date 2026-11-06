@@ -16,8 +16,6 @@
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::formats::ArchiveFormat;
-use exarch_core::formats::TarArchive;
 use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
@@ -64,7 +62,7 @@ fn extract_with_symlinks_allowed(
 ) -> exarch_core::Result<exarch_core::ExtractionReport> {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_symlinks(true);
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -77,7 +75,7 @@ fn extract_with_hardlinks_allowed(
 ) -> exarch_core::Result<exarch_core::ExtractionReport> {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_hardlinks(true);
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     archive.extract(
         temp.path(),
         &ExtractionOptions::default(),

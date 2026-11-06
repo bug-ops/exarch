@@ -8,9 +8,9 @@ use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
 use exarch_core::CreateRequest;
+use exarch_core::CreationConfig;
 use exarch_core::OutputFile;
 use exarch_core::ProgressCallback;
-use exarch_core::creation::CreationConfig;
 use tempfile::TempDir;
 
 #[derive(Debug, Default)]

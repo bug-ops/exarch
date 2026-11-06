@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::ArchiveError;
+use crate::EntrySelection;
 use crate::Malformation;
 use crate::Result;
 use crate::ZipEntryIndex;
@@ -15,6 +16,7 @@ use crate::security::RawMode;
 use crate::security::Uncompressed;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::check_link_target_length;
+use crate::selection::EntryShape;
 
 /// Complete manifest of archive contents.
 ///
@@ -44,6 +46,7 @@ pub struct ArchiveManifest {
     oversized: Vec<OversizedEntry>,
     total_size: u64,
     format: ArchiveType,
+    selection: EntrySelection,
 }
 
 /// The position of an entry in an [`ArchiveManifest`], only obtainable from
@@ -85,15 +88,35 @@ impl OversizedEntry {
 }
 
 impl ArchiveManifest {
-    /// Creates a new empty manifest.
+    /// Creates a new empty manifest that lists every entry as extracted.
     #[must_use]
     pub fn new(format: ArchiveType) -> Self {
+        Self::with_selection(format, EntrySelection::default())
+    }
+
+    /// Creates a new empty manifest for a listing made under `selection`.
+    ///
+    /// The manifest keeps the selection, so its landings and dispositions can
+    /// never disagree with the selection it was listed with.
+    #[must_use]
+    pub fn with_selection(format: ArchiveType, selection: EntrySelection) -> Self {
         Self {
             entries: Vec::new(),
             oversized: Vec::new(),
             total_size: 0,
             format,
+            selection,
         }
+    }
+
+    /// The selection this manifest was listed with.
+    ///
+    /// Every entry is listed whatever the selection is; the selection decides
+    /// which of them [`landings`](Self::landings) and
+    /// [`dispositions`](Self::dispositions) report as extracted.
+    #[must_use]
+    pub const fn selection(&self) -> &EntrySelection {
+        &self.selection
     }
 
     /// Records an entry dropped for its over-long path; its position counts
@@ -147,9 +170,9 @@ impl ArchiveManifest {
     ///
     /// use exarch_core::ArchiveEntry;
     /// use exarch_core::ArchiveManifest;
+    /// use exarch_core::ArchiveType;
     /// use exarch_core::ManifestEntryKind;
     /// use exarch_core::Uncompressed;
-    /// use exarch_core::formats::detect::ArchiveType;
     ///
     /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
     /// let kind = ManifestEntryKind::File {
@@ -280,11 +303,7 @@ impl ArchiveEntry {
     /// # Ok::<(), exarch_core::Malformation>(())
     /// ```
     pub fn utf8_path(&self) -> std::result::Result<&str, Malformation> {
-        self.path
-            .to_str()
-            .ok_or_else(|| Malformation::EntryPathNotUtf8 {
-                path: self.path.clone(),
-            })
+        crate::utf8_entry_path(&self.path)
     }
 
     /// Returns the uncompressed size in bytes: the size of a regular file, and
@@ -561,6 +580,16 @@ pub enum ManifestEntryKind {
 }
 
 impl ManifestEntryKind {
+    /// What kind of entry the selection sees.
+    pub(crate) const fn shape(&self) -> EntryShape {
+        match self {
+            Self::File { .. } => EntryShape::File,
+            Self::Directory => EntryShape::Directory,
+            Self::Symlink { .. } => EntryShape::Link(LinkKind::Symlink),
+            Self::Hardlink { .. } => EntryShape::Link(LinkKind::Hardlink),
+        }
+    }
+
     /// Returns the wire tag of this kind.
     #[must_use]
     pub const fn entry_type(&self) -> ManifestEntryType {

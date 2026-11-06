@@ -9,7 +9,7 @@
 //!
 //! A ZIP archive is kept open instead: the list pass runs the structural check
 //! that decodes the deflate entries, and extraction reuses its output and the
-//! parsed archive (see [`DecodeReuse`](crate::DecodeReuse)) rather than opening
+//! parsed archive (see [`DecodeReuse`]) rather than opening
 //! and checking the file a second time.
 //!
 //! The spool is an optimisation only. Whenever it cannot be trusted to equal
@@ -42,15 +42,19 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::DecodeReuse;
+use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::ListOptions;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::api::extract_staged;
+use crate::Staging;
 use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
+use crate::closed_enum::closed_enum;
 use crate::config::ExtractionOptions;
+use crate::formats::common::TempSpool;
+use crate::formats::common::open_archive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::FormatFamily;
@@ -67,6 +71,9 @@ use crate::inspection::list::ListPass;
 use crate::inspection::list::list_detected;
 use crate::inspection::list::list_tar_stream;
 use crate::reader::SeekableFormat;
+use crate::staging::extract_staged;
+
+mod destination;
 
 /// The most decoded TAR bytes a list pass keeps for extraction (256 MiB).
 ///
@@ -77,8 +84,10 @@ use crate::reader::SeekableFormat;
 /// cap and by this limit, whichever is smaller.
 ///
 /// Decoded streams over the limit decode twice. That cost is accepted: a larger
-/// spool would be an unbounded temporary file (RAM on a tmpfs). A caller that
-/// extracts atomically can skip the list pass and decode once.
+/// spool would be an unbounded temporary file. On a tmpfs the spool occupies
+/// RAM, so there it is also held to `max_decoder_memory`, as the ZIP decode
+/// reuse spool is. A caller that extracts atomically can skip the list pass and
+/// decode once.
 const REPLAY_LIMIT: u64 = 256 * 1024 * 1024;
 
 const SPOOL_BUFFER: usize = 64 * 1024;
@@ -137,43 +146,70 @@ struct Spool {
 /// ```
 /// use exarch_core::ListedExtractOptions;
 ///
-/// let options = ListedExtractOptions::default().with_atomic(true);
-/// assert!(options.atomic);
-/// assert!(options.skip_duplicates);
+/// use exarch_core::ExistingFiles;
+/// use exarch_core::Staging;
+///
+/// let options = ListedExtractOptions::default().with_staging(Staging::Atomic);
+/// assert_eq!(options.staging, Staging::Atomic);
+/// assert_eq!(options.existing_files, ExistingFiles::Skip);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ListedExtractOptions {
-    /// Extract atomically; see [`ExtractionOptions::atomic`].
-    pub atomic: bool,
-    /// Skip duplicate entries silently instead of aborting; see
-    /// [`ExtractionOptions::skip_duplicates`].
-    pub skip_duplicates: bool,
+    /// How the output is staged; see [`ExtractionOptions::staging`].
+    pub staging: Staging,
+    /// What to do with an occupied destination path; see
+    /// [`ExtractionOptions::existing_files`].
+    pub existing_files: ExistingFiles,
 }
 
 impl Default for ListedExtractOptions {
     fn default() -> Self {
         let options = ExtractionOptions::default();
         Self {
-            atomic: options.atomic,
-            skip_duplicates: options.skip_duplicates,
+            staging: options.staging,
+            existing_files: options.existing_files,
         }
     }
 }
 
 impl ListedExtractOptions {
-    /// Enables or disables atomic extraction.
+    /// Chooses how the output is staged.
     #[must_use]
-    pub const fn with_atomic(mut self, atomic: bool) -> Self {
-        self.atomic = atomic;
+    pub const fn with_staging(mut self, staging: Staging) -> Self {
+        self.staging = staging;
         self
     }
 
-    /// Enables or disables skipping duplicate entries silently.
+    /// Chooses what happens to an occupied destination path.
     #[must_use]
-    pub const fn with_skip_duplicates(mut self, skip: bool) -> Self {
-        self.skip_duplicates = skip;
+    pub const fn with_existing_files(mut self, existing_files: ExistingFiles) -> Self {
+        self.existing_files = existing_files;
         self
+    }
+}
+
+closed_enum! {
+    /// What [`ListedArchive::check_destination`] requires of the paths the
+    /// extraction would write.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DestinationCheck;
+    ///
+    /// assert_eq!(DestinationCheck::Vacant.as_str(), "vacant");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum DestinationCheck {
+        /// Every file or link landing must be empty and every directory landing
+        /// must be a directory (a refuse-existing run).
+        Vacant => "vacant",
+
+        /// Only landings that must be directories are checked (an overwrite
+        /// run).
+        Replaceable => "replaceable",
     }
 }
 
@@ -251,6 +287,34 @@ impl ListedArchive {
         matches!(self.kept, Kept::TarSpool(_))
     }
 
+    /// Refuses a destination that the write phase would refuse, with the same
+    /// typed error, before anything is written.
+    ///
+    /// [`DestinationCheck::Vacant`] requires every file or link landing to be
+    /// empty and every directory landing to be a directory;
+    /// [`DestinationCheck::Replaceable`] checks only the landings that must be
+    /// directories. A refusal is
+    /// [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
+    /// naming the occupied landings, or the typed symlink refusal when an
+    /// existing symlink would be followed out of `dest`.
+    ///
+    /// The check is advisory: the write itself decides again, so a path that
+    /// appears after the check is still handled by
+    /// [`ExistingFiles`].
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
+    /// for an occupied landing; the typed symlink refusal the write phase gives
+    /// for a symlink among the parents or at a landing; the I/O error of a path
+    /// that could not be inspected, which is never reported as a refusal; or
+    /// [`ConfigProblem::NotADirectory`](crate::ConfigProblem::NotADirectory)
+    /// when `dest` exists and is not a directory. A destination that does not
+    /// exist passes.
+    pub fn check_destination(&self, dest: &Path, check: DestinationCheck) -> Result<()> {
+        destination::check(&self.manifest, &self.config, dest, check)
+    }
+
     /// What the list pass found in the archive.
     #[must_use]
     pub const fn manifest(&self) -> &ArchiveManifest {
@@ -282,8 +346,8 @@ impl ListedArchive {
             ..
         } = self;
         let extraction = ExtractionOptions::default()
-            .with_atomic(options.atomic)
-            .with_skip_duplicates(options.skip_duplicates)
+            .with_staging(options.staging)
+            .with_existing_files(options.existing_files)
             .with_decode_reuse(reuse);
         debug_assert!(
             kept.serves(&config),
@@ -313,17 +377,29 @@ fn extract_kept(
     let spool = match kept {
         Kept::Zip(zip) => {
             let zip = (*zip).rebind(config);
-            return extract_staged(output_dir, options, |dir| {
-                zip.extract(dir, options, progress)
-            });
+            return extract_staged(
+                output_dir,
+                options,
+                &config.selection,
+                Some(archive),
+                progress,
+                |dir, options, progress| zip.extract(dir, options, progress),
+            );
         }
         Kept::TarSpool(spool) => Some(spool),
         Kept::Nothing => None,
     };
-    extract_staged(output_dir, options, |dir| match spool {
-        Some(spool) => replay_spool(spool.file, dir, config, options, progress),
-        None => extract_validated(archive, dir, config, options, progress),
-    })
+    extract_staged(
+        output_dir,
+        options,
+        &config.selection,
+        Some(archive),
+        progress,
+        |dir, options, progress| match spool {
+            Some(spool) => replay_spool(spool.file, dir, config, options, progress),
+            None => extract_validated(archive, dir, config, options, progress),
+        },
+    )
 }
 
 /// Extracts the decoded TAR stream `spool`, reporting a fault of the spool as
@@ -403,7 +479,7 @@ fn list_with_limit(
         FormatFamily::Tar(Some(codec)) if replays(codec) && fits(archive, codec, limit) => {
             let decoded = open_tar_stream(archive, Some(codec), DecoderLimits::of(config))?;
             let source = decoded.source();
-            let mut tee = SpoolTee::new(decoded.stream, limit);
+            let mut tee = SpoolTee::new(decoded.stream, limit, config.max_decoder_memory.get());
             let manifest =
                 list_tar_stream(&mut tee, source, Some(codec), format, config, &mut pass)?;
             let kept = tee
@@ -412,7 +488,7 @@ fn list_with_limit(
             (manifest, kept)
         }
         FormatFamily::Seekable(SeekableFormat::Zip) => {
-            let mut zip = ZipArchive::for_extraction(File::open(archive)?, config, reuse)?;
+            let mut zip = ZipArchive::for_extraction(open_archive(archive)?, config, reuse)?;
             let manifest = zip.list_with(config, &mut pass)?;
             (manifest, Kept::Zip(Box::new(zip)))
         }
@@ -480,15 +556,26 @@ struct SpoolTee<R> {
 }
 
 impl<R: Read> SpoolTee<R> {
-    fn new(inner: R, limit: u64) -> Self {
-        // Without a temporary file the only loss is the optimisation.
-        // TODO(#960): on a tmpfs the spool (up to the replay limit) sits in RAM
-        // and is not charged to any budget.
-        let spool = crate::formats::common::open_spool()
-            .map(|spool| BufWriter::with_capacity(SPOOL_BUFFER, spool.file));
+    /// A tee into a new spool holding at most `limit` bytes, and at most
+    /// `ram_limit` where the spool lives in memory.
+    fn new(inner: R, limit: u64, ram_limit: u64) -> Self {
+        Self::over(
+            inner,
+            crate::formats::common::open_spool(),
+            limit,
+            ram_limit,
+        )
+    }
+
+    /// A tee into `spool`, or into none: without a temporary file the only
+    /// loss is the optimisation.
+    fn over(inner: R, spool: Option<TempSpool>, limit: u64, ram_limit: u64) -> Self {
+        let limit = spool
+            .as_ref()
+            .map_or(limit, |spool| spool.backing.capacity(limit, ram_limit));
         Self {
             inner,
-            spool,
+            spool: spool.map(|spool| BufWriter::with_capacity(SPOOL_BUFFER, spool.file)),
             written: 0,
             limit,
             decoding: Decoding::Reading,
@@ -566,6 +653,7 @@ mod tests {
     use crate::ErrorCode;
     use crate::ExtractRequest;
     use crate::NoopProgress;
+    use crate::formats::common::SpoolBacking;
     use crate::test_utils::create_test_tar;
     use tempfile::TempDir;
 
@@ -642,7 +730,7 @@ mod tests {
         let listed = list(&archive, REPLAY_LIMIT);
         std::fs::remove_file(&archive).unwrap();
         let out = dir.path().join("out");
-        let options = ListedExtractOptions::default().with_atomic(true);
+        let options = ListedExtractOptions::default().with_staging(Staging::Atomic);
 
         listed.extract(&out, &options, &mut NoopProgress).unwrap();
 
@@ -871,7 +959,7 @@ mod tests {
     }
 
     fn finish_scripted(script: Vec<io::Result<&'static [u8]>>, limit: u64) -> Option<Spool> {
-        let mut tee = SpoolTee::new(Scripted(script), limit);
+        let mut tee = SpoolTee::new(Scripted(script), limit, u64::MAX);
         let mut sink = [0; 8];
         while tee.read(&mut sink).is_ok_and(|n| n > 0) {}
         tee.finish_spool(&SecurityConfig::default())
@@ -954,6 +1042,21 @@ mod tests {
         let script = vec![Ok(&b"abc"[..]), Err(io::Error::other("bad")), Ok(&b""[..])];
 
         assert!(finish_scripted(script, 100).is_none());
+    }
+
+    #[test]
+    fn a_spool_in_memory_is_held_to_the_ram_limit_and_one_on_disk_is_not() {
+        let script = || vec![Ok(&b"abcd"[..]), Ok(&b"efgh"[..])];
+        let finish = |backing| {
+            let spool = TempSpool::with_backing(backing);
+            let mut tee = SpoolTee::over(Scripted(script()), spool, 100, 7);
+            let mut sink = [0; 8];
+            while tee.read(&mut sink).is_ok_and(|n| n > 0) {}
+            tee.finish_spool(&SecurityConfig::default())
+        };
+
+        assert!(finish(SpoolBacking::Ram).is_none());
+        assert!(finish(SpoolBacking::Disk).is_some());
     }
 
     #[test]

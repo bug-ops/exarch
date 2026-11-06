@@ -13,6 +13,7 @@ use std::path::Path;
 use super::zip_reuse::Retained;
 
 use crate::ArchiveError;
+use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::Malformation;
 use crate::ProgressCallback;
@@ -35,9 +36,8 @@ use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
-use crate::security::validator::FileScreen;
+use crate::security::validator::Gated;
 use crate::security::validator::ValidatorCore;
-use crate::sink::DuplicatePolicy;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -51,6 +51,7 @@ use super::common;
 use super::dir_walker::DirWalker;
 use super::pinned_dir::PinnedRoot;
 use super::pinned_dir::TempFileGuard;
+use super::source_fault::ReadFaults;
 
 /// The per-run counters a target updates while it writes.
 pub struct Tally<'a> {
@@ -63,7 +64,7 @@ impl Tally<'_> {
     /// Counts one entry skipped as a pre-existing duplicate.
     ///
     /// A target that skips a file at admission returns the token as
-    /// [`FileAdmission::Skipped`]; other skip sites count through this method
+    /// [`Admission::Skipped`]; other skip sites count through this method
     /// without one.
     ///
     /// # Errors
@@ -74,14 +75,26 @@ impl Tally<'_> {
         Ok(SkipRecorded(()))
     }
 
-    /// Counts one file skipped by the extension allowlist.
+    /// Counts one entry the gate left out, for `kind`.
     ///
     /// # Errors
     ///
     /// Returns an error when the skipped-files counter would overflow.
-    pub(crate) fn record_extension_skip(&mut self, path: &Path) -> Result<SkipRecorded> {
-        common::record_skip(self.report, SkipKind::ExtensionNotAllowed, path)?;
+    pub(crate) fn record_skip(&mut self, kind: SkipKind, path: &Path) -> Result<SkipRecorded> {
+        common::record_skip(self.report, kind, path)?;
         Ok(SkipRecorded(()))
+    }
+
+    /// Turns the gate's decision into an admission, counting a skip.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the skipped-files counter would overflow.
+    pub(crate) fn admission<A>(&mut self, gated: Gated<A>, path: &Path) -> Result<Admission<A>> {
+        match gated {
+            Gated::Admit(admitted) => Ok(Admission::Admit(admitted)),
+            Gated::Skip(kind) => self.record_skip(kind, path).map(Admission::Skipped),
+        }
     }
 
     /// Counts one written file of `written` bytes.
@@ -107,13 +120,38 @@ pub struct FileRequest<'p> {
     pub(crate) mode: Option<RawMode>,
 }
 
-/// A target's decision on a requested file.
+/// A target's decision on a requested entry.
 #[derive(Debug)]
-pub enum FileAdmission<A> {
-    /// The file is admitted and is to be written with `A`.
-    Write(A),
-    /// The file was skipped (a duplicate, or a disallowed extension).
+pub enum Admission<A> {
+    /// The entry is admitted and is to be written with `A`.
+    Admit(A),
+    /// The entry was skipped (a duplicate, a disallowed extension, or left out
+    /// by the selection) and counted.
     Skipped(SkipRecorded),
+}
+
+impl<A> Admission<A> {
+    /// The admitted value; panics when the entry was skipped.
+    #[cfg(all(test, unix))]
+    pub(crate) fn into_admitted(self) -> A {
+        match self {
+            Self::Admit(admitted) => admitted,
+            Self::Skipped(_) => panic!("the entry was skipped"),
+        }
+    }
+}
+
+/// Runs `f` with a throwaway tally, for tests that drive a target directly.
+#[cfg(all(test, unix))]
+pub fn with_tally<R>(f: impl FnOnce(&mut Tally<'_>) -> R) -> R {
+    let mut report = ExtractionReport::new();
+    let mut progress = crate::NoopProgress;
+    let mut tally = Tally {
+        report: &mut report,
+        options: SinkOptions::default(),
+        progress: &mut progress,
+    };
+    f(&mut tally)
 }
 
 /// How a [`HostTarget`] has the parent directory of every path it validates
@@ -134,37 +172,43 @@ pub trait ExtractTarget {
     /// What a target needs to write a file it admitted.
     type AdmittedFile;
 
-    /// Validates a regular file's path, then skips it when its extension is
-    /// disallowed or it duplicates an existing path, or else reserves its size
-    /// against the quota.
+    /// Validates a regular file's path, then skips it when the selection leaves
+    /// it out, its extension is disallowed or it duplicates an existing path,
+    /// or else reserves its size against the quota.
     fn validate_file(
         &mut self,
         request: FileRequest<'_>,
         tally: &mut Tally<'_>,
-    ) -> Result<FileAdmission<Self::AdmittedFile>>;
+    ) -> Result<Admission<Self::AdmittedFile>>;
 
-    /// Validates a directory entry.
+    /// Validates a directory entry, or skips it when the selection leaves it
+    /// out.
     fn validate_directory(
         &mut self,
         path: &Path,
         size: EntrySize,
-    ) -> Result<SafePath<Self::Parent>>;
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafePath<Self::Parent>>>;
 
-    /// Validates a symlink entry and its target.
+    /// Validates a symlink entry and its target, or skips it when the
+    /// selection leaves it out.
     fn validate_symlink(
         &mut self,
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<SafeSymlink<Self::Parent>>;
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafeSymlink<Self::Parent>>>;
 
-    /// Validates a hardlink entry for the second pass.
+    /// Validates a hardlink entry for the second pass, or skips it when the
+    /// selection leaves it out.
     fn validate_hardlink(
         &mut self,
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<ValidatedHardlink<Self::Parent>>;
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<ValidatedHardlink<Self::Parent>>>;
 
     /// Creates a validated directory.
     fn directory(&mut self, path: &SafePath<Self::Parent>, tally: &mut Tally<'_>) -> Result<()>;
@@ -174,6 +218,7 @@ pub trait ExtractTarget {
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
+        faults: ReadFaults<'_>,
         admitted: Self::AdmittedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()>;
@@ -185,18 +230,28 @@ pub trait ExtractTarget {
     fn file_retained(
         &mut self,
         retained: Retained<'_>,
+        faults: ReadFaults<'_>,
         admitted: Self::AdmittedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         match retained {
-            Retained::Bytes(bytes) => self.file(&mut bytes.as_slice(), admitted, tally),
-            Retained::Spooled(mut reader) => self.file(&mut reader, admitted, tally),
+            Retained::Bytes(bytes) => self.file(&mut bytes.as_slice(), faults, admitted, tally),
+            Retained::Spooled(mut reader) => self.file(&mut reader, faults, admitted, tally),
         }
     }
 
     /// Creates a validated symlink.
     fn symlink(&mut self, symlink: &SafeSymlink<Self::Parent>, tally: &mut Tally<'_>)
     -> Result<()>;
+
+    /// Settles what only the whole scan decides: the selection's include
+    /// patterns that matched no entry. Called once, after the last entry and
+    /// before the hardlink pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::UnmatchedInclude`] naming every such pattern.
+    fn finish_scan(&mut self) -> Result<()>;
 
     /// Materializes a hardlink in the second pass, once every target exists.
     fn hardlink(
@@ -269,9 +324,12 @@ impl<'a> HostTarget<'a> {
         self.dirs
     }
 
-    /// Validates a file's path and applies the extension allowlist, leaving
-    /// quota to the caller.
-    pub(super) fn screen_file(&self, request: FileRequest<'_>) -> Result<FileScreen<HostParent>> {
+    /// Validates a file's path and applies the selection and the extension
+    /// allowlist, leaving quota to the caller.
+    pub(super) fn screen_file(
+        &self,
+        request: FileRequest<'_>,
+    ) -> Result<Gated<PendingFile<HostParent>>> {
         let ctx = host_context(&self.core, &self.root);
         self.core.screen_file_path_in(
             request.path,
@@ -300,24 +358,28 @@ impl ExtractTarget for HostTarget<'_> {
         &mut self,
         request: FileRequest<'_>,
         tally: &mut Tally<'_>,
-    ) -> Result<FileAdmission<ValidatedFile<HostParent>>> {
-        match self.screen_file(request)? {
-            FileScreen::DisallowedExtension => tally
-                .record_extension_skip(request.path)
-                .map(FileAdmission::Skipped),
-            FileScreen::Pending(pending) => self.admit_file(pending).map(FileAdmission::Write),
+    ) -> Result<Admission<ValidatedFile<HostParent>>> {
+        match tally.admission(self.screen_file(request)?, request.path)? {
+            Admission::Admit(pending) => self.admit_file(pending).map(Admission::Admit),
+            Admission::Skipped(skipped) => Ok(Admission::Skipped(skipped)),
         }
     }
 
-    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath<HostParent>> {
+    fn validate_directory(
+        &mut self,
+        path: &Path,
+        size: EntrySize,
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafePath<HostParent>>> {
         let ctx = host_context(&self.core, &self.root);
-        self.core.validate_directory_in(
+        let gated = self.core.validate_directory_in(
             path,
             size,
             self.root.dest(),
             &PinnedHostFs::new(&self.root),
             &ctx,
-        )
+        )?;
+        tally.admission(gated, path)
     }
 
     fn validate_symlink(
@@ -325,18 +387,18 @@ impl ExtractTarget for HostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<SafeSymlink<HostParent>> {
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafeSymlink<HostParent>>> {
         let ctx = host_context(&self.core, &self.root);
-        self.core
-            .validate_symlink_in(
-                path,
-                target,
-                size,
-                self.root.dest(),
-                &PinnedHostFs::new(&self.root),
-                &ctx,
-            )
-            .map(|validated| validated.symlink)
+        let gated = self.core.validate_symlink_in(
+            path,
+            target,
+            size,
+            self.root.dest(),
+            &PinnedHostFs::new(&self.root),
+            &ctx,
+        )?;
+        tally.admission(gated.map(|validated| validated.symlink), path)
     }
 
     fn validate_hardlink(
@@ -344,16 +406,22 @@ impl ExtractTarget for HostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<ValidatedHardlink<HostParent>> {
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<ValidatedHardlink<HostParent>>> {
         let ctx = host_context(&self.core, &self.root);
-        self.core.validate_hardlink_in(
+        let gated = self.core.validate_hardlink_in(
             path,
             target,
             size,
             self.root.dest(),
             &PinnedHostFs::new(&self.root),
             &ctx,
-        )
+        )?;
+        tally.admission(gated, path)
+    }
+
+    fn finish_scan(&mut self) -> Result<()> {
+        self.core.finish_selection()
     }
 
     fn directory(&mut self, path: &SafePath<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
@@ -363,12 +431,14 @@ impl ExtractTarget for HostTarget<'_> {
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
+        faults: ReadFaults<'_>,
         admitted: ValidatedFile<HostParent>,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         let (path, permit, mode) = admitted.into_parts();
         common::extract_file_with_permit(
             reader,
+            faults,
             &path,
             mode,
             permit,
@@ -431,6 +501,8 @@ impl ExtractTarget for HostTarget<'_> {
         counted: EntryCount,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
+        self.core
+            .require_unambiguous_target(link.as_path(), target.as_path())?;
         let OpenedTarget {
             file: target_file,
             len: target_size,
@@ -446,15 +518,39 @@ impl ExtractTarget for HostTarget<'_> {
         let link_file = match link_dir.create_new(link_leaf, link_mode) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-                    return common::record_duplicate_skip(tally.report, link.as_path());
-                }
-                return Err(ArchiveError::from(Malformation::DuplicateEntry {
-                    path: link.as_path().to_path_buf(),
-                }));
+                return match tally.options.existing_files {
+                    ExistingFiles::Skip => {
+                        common::record_duplicate_skip(tally.report, link.as_path())
+                    }
+                    ExistingFiles::Refuse => {
+                        if self
+                            .root
+                            .created()
+                            .created_here(&link_dir, link_leaf, link.as_path())
+                        {
+                            common::record_duplicate_skip(tally.report, link.as_path())
+                        } else {
+                            Err(common::destination_occupied(
+                                self.root.dest().as_path(),
+                                link.as_path(),
+                            ))
+                        }
+                    }
+                    ExistingFiles::Overwrite => {
+                        Err(ArchiveError::from(Malformation::DuplicateEntry {
+                            path: link.as_path().to_path_buf(),
+                        }))
+                    }
+                };
             }
             Err(e) => return Err(ArchiveError::Io(e)),
         };
+        self.root.created().note(
+            tally.options.existing_files,
+            &link_dir,
+            link_leaf,
+            link.as_path(),
+        );
         let cleanup_guard = TempFileGuard::new(&link_dir, link_leaf);
 
         // Every hardlink copies the target's real bytes to a new inode, so it
@@ -655,7 +751,9 @@ mod tests {
 
         let temp = tempfile::TempDir::new().unwrap();
         let mut target = replaced_destination(&temp, &config, escaping_link, |_| {});
-        let refused = target.validate_symlink(Path::new("l"), Path::new("up/x"), size());
+        let refused = with_tally(|tally| {
+            target.validate_symlink(Path::new("l"), Path::new("up/x"), size(), tally)
+        });
         assert_matches!(
             refused,
             Err(ArchiveError::SymlinkEscape { .. }),
@@ -664,7 +762,9 @@ mod tests {
 
         let temp = tempfile::TempDir::new().unwrap();
         let mut target = replaced_destination(&temp, &config, |_| {}, escaping_link);
-        let accepted = target.validate_symlink(Path::new("l"), Path::new("up/x"), size());
+        let accepted = with_tally(|tally| {
+            target.validate_symlink(Path::new("l"), Path::new("up/x"), size(), tally)
+        });
         assert_matches!(accepted, Ok(_), "{accepted:?}");
     }
 
@@ -674,7 +774,9 @@ mod tests {
 
         let temp = tempfile::TempDir::new().unwrap();
         let mut target = replaced_destination(&temp, &config, escaping_link, |_| {});
-        let refused = target.validate_hardlink(Path::new("h"), Path::new("up/x"), size());
+        let refused = with_tally(|tally| {
+            target.validate_hardlink(Path::new("h"), Path::new("up/x"), size(), tally)
+        });
         assert_matches!(
             refused,
             Err(ArchiveError::HardlinkEscape { .. }),
@@ -683,7 +785,9 @@ mod tests {
 
         let temp = tempfile::TempDir::new().unwrap();
         let mut target = replaced_destination(&temp, &config, |_| {}, escaping_link);
-        let accepted = target.validate_hardlink(Path::new("h"), Path::new("up/x"), size());
+        let accepted = with_tally(|tally| {
+            target.validate_hardlink(Path::new("h"), Path::new("up/x"), size(), tally)
+        });
         assert_matches!(accepted, Ok(_), "{accepted:?}");
     }
 
@@ -706,9 +810,11 @@ mod tests {
                 std::fs::write(dest.join("f2"), b"decoy").unwrap();
             },
         );
-        let validated = target
-            .validate_hardlink(Path::new("h"), Path::new("s/../f2"), size())
-            .unwrap();
+        let validated = with_tally(|tally| {
+            target.validate_hardlink(Path::new("h"), Path::new("s/../f2"), size(), tally)
+        })
+        .unwrap()
+        .into_admitted();
 
         let opened = target
             .open_hardlink_target(&validated.link, &validated.target)

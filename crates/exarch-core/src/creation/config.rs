@@ -2,8 +2,10 @@
 
 use crate::ArchiveError;
 use crate::Limit;
+use crate::PermissionPolicy;
 use crate::Result;
 use crate::creation::filters::ExcludePattern;
+use crate::error::RequestedLevel;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -15,7 +17,7 @@ use std::path::PathBuf;
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::CompressionLevel;
+/// use exarch_core::CompressionLevel;
 ///
 /// let level = CompressionLevel::try_from(9u8)?;
 /// assert_eq!(level.get(), 9);
@@ -53,7 +55,7 @@ impl TryFrom<u8> for CompressionLevel {
             Ok(Self(level))
         } else {
             Err(ArchiveError::InvalidCompressionLevel {
-                level: u32::from(level),
+                level: RequestedLevel::Integer(i64::from(level)),
             })
         }
     }
@@ -67,10 +69,73 @@ impl TryFrom<u32> for CompressionLevel {
     /// Returns [`ArchiveError::InvalidCompressionLevel`] if `level` is not in
     /// 1-9.
     fn try_from(level: u32) -> Result<Self> {
+        Self::from_i128(i128::from(level))
+    }
+}
+
+impl CompressionLevel {
+    /// Parses an integer of any width, as a binding receives it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidCompressionLevel`] carrying the
+    /// requested value if it is not in 1-9.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::CompressionLevel;
+    ///
+    /// assert_eq!(CompressionLevel::from_i128(9)?.get(), 9);
+    /// assert!(CompressionLevel::from_i128(-3).is_err());
+    /// assert!(CompressionLevel::from_i128(1 << 40).is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn from_i128(level: i128) -> Result<Self> {
         u8::try_from(level)
             .ok()
-            .and_then(|level| Self::try_from(level).ok())
-            .ok_or(ArchiveError::InvalidCompressionLevel { level })
+            .filter(|level| (1..=9).contains(level))
+            .map(Self)
+            .ok_or_else(|| ArchiveError::InvalidCompressionLevel {
+                level: i64::try_from(level)
+                    .map_or(RequestedLevel::OutOfRange, RequestedLevel::Integer),
+            })
+    }
+
+    /// Parses a floating-point number, as a JavaScript caller passes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidCompressionLevel`] carrying the
+    /// requested value for a non-finite number, a fractional number or a whole
+    /// number outside 1-9.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::CompressionLevel;
+    ///
+    /// assert_eq!(CompressionLevel::from_f64(6.0)?.get(), 6);
+    /// assert!(CompressionLevel::from_f64(1.5).is_err());
+    /// assert!(CompressionLevel::from_f64(f64::NAN).is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a whole number saturated by `as`; any value outside 1-9 is refused by from_i128"
+    )]
+    pub fn from_f64(level: f64) -> Result<Self> {
+        if !level.is_finite() {
+            return Err(ArchiveError::InvalidCompressionLevel {
+                level: RequestedLevel::NonFinite,
+            });
+        }
+        if level.fract() != 0.0 {
+            return Err(ArchiveError::InvalidCompressionLevel {
+                level: RequestedLevel::Fractional(level),
+            });
+        }
+        Self::from_i128(level as i128)
     }
 }
 
@@ -82,8 +147,8 @@ impl TryFrom<u32> for CompressionLevel {
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::CompressionLevel;
-/// use exarch_core::creation::CreationConfig;
+/// use exarch_core::CompressionLevel;
+/// use exarch_core::CreationConfig;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Use secure defaults
@@ -155,10 +220,10 @@ pub struct CreationConfig {
     /// Default: 6 (balanced).
     pub compression_level: CompressionLevel,
 
-    /// Preserve file permissions in the archive.
+    /// Whether file permissions are stored in the archive.
     ///
-    /// Default: `true`.
-    pub preserve_permissions: bool,
+    /// Default: [`PermissionPolicy::Preserve`].
+    pub permissions: PermissionPolicy,
 }
 
 impl Default for CreationConfig {
@@ -171,7 +236,7 @@ impl Default for CreationConfig {
     /// - `exclude_patterns`: `[".git", ".DS_Store", "*.tmp"]`
     /// - `strip_prefix`: `None`
     /// - `compression_level`: 6
-    /// - `preserve_permissions`: `true`
+    /// - `permissions`: [`PermissionPolicy::Preserve`]
     fn default() -> Self {
         Self {
             follow_symlinks: false,
@@ -184,7 +249,7 @@ impl Default for CreationConfig {
             ],
             strip_prefix: None,
             compression_level: CompressionLevel::default(),
-            preserve_permissions: true,
+            permissions: PermissionPolicy::Preserve,
         }
     }
 }
@@ -201,7 +266,7 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CreationConfig;
     ///
     /// let config = CreationConfig::default().with_follow_symlinks(true);
     /// assert!(config.follow_symlinks);
@@ -217,7 +282,7 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CreationConfig;
     ///
     /// let config = CreationConfig::default().with_include_hidden(true);
     /// assert!(config.include_hidden);
@@ -235,8 +300,8 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
+    /// use exarch_core::CreationConfig;
     /// use exarch_core::Limit;
-    /// use exarch_core::creation::CreationConfig;
     ///
     /// let config = CreationConfig::default().with_max_file_size(exarch_core::non_zero!(1024 * 1024));
     /// assert!(config.max_file_size.admits(1024 * 1024));
@@ -256,8 +321,8 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
-    /// use exarch_core::creation::ExcludePattern;
+    /// use exarch_core::CreationConfig;
+    /// use exarch_core::ExcludePattern;
     ///
     /// let log = ExcludePattern::try_from("*.log")?;
     /// let config = CreationConfig::default().with_exclude_patterns(vec![log.clone()]);
@@ -275,7 +340,7 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CreationConfig;
     /// use std::path::PathBuf;
     ///
     /// let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from("/base")));
@@ -292,8 +357,8 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CompressionLevel;
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CompressionLevel;
+    /// use exarch_core::CreationConfig;
     ///
     /// let level = CompressionLevel::try_from(9u8)?;
     /// let config = CreationConfig::default().with_compression_level(level);
@@ -311,14 +376,14 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CreationConfig;
     ///
     /// let config = CreationConfig::default().with_preserve_permissions(false);
-    /// assert!(!config.preserve_permissions);
+    /// assert!(!config.permissions.preserves());
     /// ```
     #[must_use]
     pub fn with_preserve_permissions(mut self, preserve: bool) -> Self {
-        self.preserve_permissions = preserve;
+        self.permissions = PermissionPolicy::from_preserve(preserve);
         self
     }
 }
@@ -344,7 +409,7 @@ mod tests {
         assert_eq!(shown, [".git", ".DS_Store", "*.tmp"]);
         assert_eq!(config.strip_prefix, None);
         assert_eq!(config.compression_level, CompressionLevel::default());
-        assert!(config.preserve_permissions);
+        assert!(config.permissions.preserves());
     }
 
     #[test]
@@ -371,7 +436,7 @@ mod tests {
         );
         assert_eq!(config.strip_prefix, Some(PathBuf::from("/base")));
         assert_eq!(config.compression_level, level);
-        assert!(!config.preserve_permissions);
+        assert!(!config.permissions.preserves());
     }
 
     #[test]
@@ -379,13 +444,13 @@ mod tests {
         for level in [0u8, 10, 200] {
             assert_matches!(
                 CompressionLevel::try_from(level),
-                Err(ArchiveError::InvalidCompressionLevel { level: l }) if l == u32::from(level)
+                Err(ArchiveError::InvalidCompressionLevel { level: RequestedLevel::Integer(l) }) if l == i64::from(level)
             );
         }
         for level in [0u32, 10, 256, 4_294_967_295] {
             assert_matches!(
                 CompressionLevel::try_from(level),
-                Err(ArchiveError::InvalidCompressionLevel { level: l }) if l == level
+                Err(ArchiveError::InvalidCompressionLevel { level: RequestedLevel::Integer(l) }) if l == i64::from(level)
             );
         }
     }
@@ -406,7 +471,7 @@ mod tests {
     fn test_creation_config_new() {
         let config = CreationConfig::new();
         assert_eq!(config.compression_level, CompressionLevel::default());
-        assert!(config.preserve_permissions);
+        assert!(config.permissions.preserves());
     }
 
     #[test]

@@ -240,7 +240,7 @@ fn a_cancelling_progress_callback_discards_the_staged_file_and_keeps_the_previou
             .create(&OutputFile::replace(&output), &[src.path()])
             .unwrap_err();
 
-        assert_matches!(err, ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::Interrupted);
+        assert_matches!(err, ArchiveError::Cancelled);
         assert_eq!(fs::read(&output).unwrap(), before, "{name}");
         assert_eq!(dir_names(dir.path()), [name], "{name}");
     }
@@ -293,7 +293,7 @@ mod unix {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
 
-    use exarch_core::formats::detect::CreatableFormat;
+    use exarch_core::CreatableFormat;
 
     use super::*;
 
@@ -347,5 +347,36 @@ mod unix {
 
         assert_matches!(err, ArchiveError::OutputExists { .. });
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    }
+}
+
+#[test]
+fn sources_with_the_same_entry_name_are_refused_before_anything_is_written() {
+    for name in OUTPUTS {
+        let src = TempDir::new().unwrap();
+        let (first, second) = (src.path().join("proj"), src.path().join("other"));
+        for dir in [&first, &second] {
+            fs::create_dir(dir).unwrap();
+            fs::write(dir.join("a.txt"), b"x").unwrap();
+        }
+        let out = TempDir::new().unwrap();
+        let output = out.path().join(name);
+
+        let err = create_archive(
+            &output,
+            &[first.as_path(), second.as_path()],
+            &CreationConfig::default(),
+        )
+        .unwrap_err();
+
+        assert_matches!(
+            err,
+            ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::SourcePaths,
+                problem: ConfigProblem::EntryNameCollision { .. },
+            },
+            "{name}"
+        );
+        assert!(dir_names(out.path()).is_empty(), "{name}");
     }
 }

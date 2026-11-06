@@ -1,26 +1,33 @@
 //! Human-readable output formatter with colors and styling.
 
 use super::Verbosity;
+use super::emit_blank;
+use super::emit_line;
+use super::formatter::Dispositions;
 use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use super::formatter::SizeUnits;
 use super::humanize_bytes;
+use super::skip_breakdown;
 use super::terminal::TerminalEntry;
 use super::terminal::TerminalPath;
 use super::terminal::TerminalText;
+use crate::error::chain_hints;
 use crate::error::cli_message;
+use crate::error::join_chain;
 use crate::error::terminal;
+use crate::error::visible_chain;
 use crate::operation::Operation;
 use anyhow::Result;
 use console::Term;
 use console::style;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
+use exarch_core::Disposition;
 use exarch_core::ExtractionReport;
 use exarch_core::IssueSeverity;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
-use exarch_core::SkipKind;
 use exarch_core::Skips;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
@@ -88,26 +95,28 @@ impl Styler {
     }
 
     fn verification_status(self, status: VerificationStatus) -> String {
+        let word = status.to_string();
         if !self.colors {
-            return status.to_string();
+            return word;
         }
         match status {
-            VerificationStatus::Pass => style("PASSED").green().bold().to_string(),
-            VerificationStatus::Warning => style("WARNING").yellow().bold().to_string(),
-            VerificationStatus::Fail => style("FAILED").red().bold().to_string(),
+            VerificationStatus::Pass => style(word).green().bold().to_string(),
+            VerificationStatus::Warning => style(word).yellow().bold().to_string(),
+            VerificationStatus::Fail => style(word).red().bold().to_string(),
         }
     }
 
     fn severity(self, severity: IssueSeverity) -> String {
+        let word = format!("[{severity}]");
         if !self.colors {
-            return format!("[{severity}]");
+            return word;
         }
         match severity {
-            IssueSeverity::Critical => style("CRITICAL").red().bold().to_string(),
-            IssueSeverity::High => style("HIGH").red().to_string(),
-            IssueSeverity::Medium => style("MEDIUM").yellow().to_string(),
-            IssueSeverity::Low => style("LOW").blue().to_string(),
-            IssueSeverity::Info => style("INFO").cyan().to_string(),
+            IssueSeverity::Critical => style(word).red().bold().to_string(),
+            IssueSeverity::High => style(word).red().to_string(),
+            IssueSeverity::Medium => style(word).yellow().to_string(),
+            IssueSeverity::Low => style(word).blue().to_string(),
+            IssueSeverity::Info => style(word).cyan().to_string(),
         }
     }
 }
@@ -129,6 +138,21 @@ fn dedicated_link_suffix(target: &LinkTarget) -> Option<String> {
         LinkTarget::Oversized { bytes } => format!("  (target too long: {bytes} bytes)"),
         _ => return None,
     })
+}
+
+/// What follows an entry's name when a selection is active: where it lands
+/// when that differs from its name, or why it is left out. Nothing for the
+/// default selection.
+fn disposition_suffix(disposition: Option<&Disposition>, name: &Path) -> String {
+    match disposition {
+        None => String::new(),
+        Some(Disposition::Extract(landing)) if landing.as_path() == name => String::new(),
+        Some(Disposition::Extract(landing)) => {
+            format!("  [lands at {}]", TerminalEntry::new(landing.as_path()))
+        }
+        Some(Disposition::Skip(kind)) => format!("  [skipped: {kind}]"),
+        Some(_) => "  [disposition unknown]".to_owned(),
+    }
 }
 
 fn link_suffix(kind: &ManifestEntryKind) -> String {
@@ -197,11 +221,8 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
             return;
         }
         emit_line(&mut self.out, format_args!("{label}{}", skips.total()));
-        for kind in SkipKind::ALL {
-            let count = skips.count(*kind);
-            if count > 0 {
-                emit_line(&mut self.out, format_args!("    {kind}: {count}"));
-            }
+        for (kind, count) in skip_breakdown(skips) {
+            emit_line(&mut self.out, format_args!("    {kind}: {count}"));
         }
     }
 
@@ -230,17 +251,26 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
         result.chars().rev().collect()
     }
 
-    fn write_short_manifest(&mut self, manifest: &ArchiveManifest) {
-        for entry in manifest.entries() {
+    fn write_short_manifest(&mut self, manifest: &ArchiveManifest, dispositions: &Dispositions) {
+        for (index, entry) in manifest.entries().iter().enumerate() {
             emit_line(
                 &mut self.out,
-                format_args!("{}", TerminalEntry::new(&entry.path)),
+                format_args!(
+                    "{}{}",
+                    TerminalEntry::new(&entry.path),
+                    disposition_suffix(dispositions.get(index), &entry.path)
+                ),
             );
         }
     }
 
-    fn write_long_manifest(&mut self, manifest: &ArchiveManifest, units: SizeUnits) {
-        for entry in manifest.entries() {
+    fn write_long_manifest(
+        &mut self,
+        manifest: &ArchiveManifest,
+        units: SizeUnits,
+        dispositions: &Dispositions,
+    ) {
+        for (index, entry) in manifest.entries().iter().enumerate() {
             let size_str = match units {
                 SizeUnits::Human => humanize_bytes(entry.size()),
                 SizeUnits::Bytes => entry.size().to_string(),
@@ -260,12 +290,13 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
             emit_line(
                 &mut self.out,
                 format_args!(
-                    "{}{:<6} {:>10}  {}{}",
+                    "{}{:<6} {:>10}  {}{}{}",
                     type_char,
                     mode_str,
                     size_str,
                     TerminalEntry::new(&entry.path),
-                    link_suffix(&entry.kind)
+                    link_suffix(&entry.kind),
+                    disposition_suffix(dispositions.get(index), &entry.path)
                 ),
             );
         }
@@ -290,37 +321,12 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
 /// other link of the chain, including `ArchiveError` and `io::Error` sources
 /// that carry entry paths, is rendered as a single escaped line.
 fn escaped_chain(error: &anyhow::Error) -> String {
-    error
-        .chain()
-        .map(|link| {
-            cli_message(link).map_or_else(
-                || TerminalText::new(&link.to_string()).to_string(),
-                |parts| terminal(&parts),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(": ")
-}
-
-/// Renders `args` to a line and issues a single [`Write::write_all`] call.
-///
-/// `write!`/`writeln!` on a multi-argument format string invoke the
-/// underlying writer once per formatted fragment; for [`Term`], each of
-/// those calls flushes independently (`console::Term`'s `Write` impl has no
-/// internal buffering), turning one logical line into several syscalls.
-/// Formatting into a `String` first and writing it in one call restores the
-/// single-write-per-line behavior of the old `Term::write_line`.
-fn emit_line<W: Write>(writer: &mut W, args: std::fmt::Arguments<'_>) {
-    use std::fmt::Write as _;
-    let mut line = String::new();
-    let _ = line.write_fmt(args);
-    line.push('\n');
-    let _ = writer.write_all(line.as_bytes());
-}
-
-/// Writes a single blank line in one call. See [`emit_line`].
-fn emit_blank<W: Write>(writer: &mut W) {
-    let _ = writer.write_all(b"\n");
+    join_chain(&visible_chain(error), |link| {
+        cli_message(link).map_or_else(
+            || TerminalText::new(&link.to_string()).to_string(),
+            |parts| terminal(&parts),
+        )
+    })
 }
 
 impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
@@ -426,13 +432,23 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
     }
 
     fn format_error(&mut self, _operation: Operation, error: &anyhow::Error) {
-        self.emit_error_line(&escaped_chain(error));
+        let mut text = escaped_chain(error);
+        for hint in chain_hints(error, terminal) {
+            text.push_str("\nHINT: ");
+            text.push_str(&hint);
+        }
+        self.emit_error_line(&text);
     }
 
-    fn format_manifest(&mut self, manifest: &ArchiveManifest, view: ManifestView) -> Result<()> {
+    fn format_manifest(
+        &mut self,
+        manifest: &ArchiveManifest,
+        view: ManifestView,
+        dispositions: &Dispositions,
+    ) -> Result<()> {
         self.unless_quiet(|f| match view {
-            ManifestView::Short => f.write_short_manifest(manifest),
-            ManifestView::Long(units) => f.write_long_manifest(manifest, units),
+            ManifestView::Short => f.write_short_manifest(manifest, dispositions),
+            ManifestView::Long(units) => f.write_long_manifest(manifest, units, dispositions),
         });
         Ok(())
     }
@@ -757,8 +773,8 @@ mod tests {
 
     fn sample_manifest() -> ArchiveManifest {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut file = ArchiveEntry::new(
             std::path::PathBuf::from("file.txt"),
@@ -784,8 +800,12 @@ mod tests {
     #[test]
     fn format_manifest_short_lists_paths_only() {
         let mut f = formatter(Verbosity::Normal, false);
-        f.format_manifest(&sample_manifest(), ManifestView::Short)
-            .unwrap();
+        f.format_manifest(
+            &sample_manifest(),
+            ManifestView::Short,
+            &Dispositions::none(),
+        )
+        .unwrap();
         let text = out_text(&f);
         assert!(text.contains("file.txt"));
         assert!(text.contains("link.txt"));
@@ -795,16 +815,24 @@ mod tests {
     #[test]
     fn format_manifest_short_quiet_suppresses_output() {
         let mut f = formatter(Verbosity::Quiet, false);
-        f.format_manifest(&sample_manifest(), ManifestView::Short)
-            .unwrap();
+        f.format_manifest(
+            &sample_manifest(),
+            ManifestView::Short,
+            &Dispositions::none(),
+        )
+        .unwrap();
         assert!(out_text(&f).is_empty());
     }
 
     #[test]
     fn format_manifest_long_human_readable_size() {
         let mut f = formatter(Verbosity::Normal, false);
-        f.format_manifest(&sample_manifest(), ManifestView::Long(SizeUnits::Human))
-            .unwrap();
+        f.format_manifest(
+            &sample_manifest(),
+            ManifestView::Long(SizeUnits::Human),
+            &Dispositions::none(),
+        )
+        .unwrap();
         let text = out_text(&f);
         assert!(text.contains("1.0 KB"));
         assert!(text.contains("Total: 2 files, 1.0 KB"));
@@ -813,8 +841,12 @@ mod tests {
     #[test]
     fn format_manifest_long_raw_size() {
         let mut f = formatter(Verbosity::Normal, false);
-        f.format_manifest(&sample_manifest(), ManifestView::Long(SizeUnits::Bytes))
-            .unwrap();
+        f.format_manifest(
+            &sample_manifest(),
+            ManifestView::Long(SizeUnits::Bytes),
+            &Dispositions::none(),
+        )
+        .unwrap();
         let text = out_text(&f);
         assert!(text.contains("1024"));
     }
@@ -822,8 +854,12 @@ mod tests {
     #[test]
     fn format_manifest_long_shows_symlink_target() {
         let mut f = formatter(Verbosity::Normal, false);
-        f.format_manifest(&sample_manifest(), ManifestView::Long(SizeUnits::Human))
-            .unwrap();
+        f.format_manifest(
+            &sample_manifest(),
+            ManifestView::Long(SizeUnits::Human),
+            &Dispositions::none(),
+        )
+        .unwrap();
         let text = out_text(&f);
         assert!(text.contains("link.txt -> file.txt"));
     }
@@ -831,8 +867,8 @@ mod tests {
     #[test]
     fn format_manifest_long_marks_links_without_a_target() {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
         for (path, target) in [
@@ -852,8 +888,12 @@ mod tests {
         }
 
         let mut f = formatter(Verbosity::Normal, false);
-        f.format_manifest(&manifest, ManifestView::Long(SizeUnits::Bytes))
-            .unwrap();
+        f.format_manifest(
+            &manifest,
+            ManifestView::Long(SizeUnits::Bytes),
+            &Dispositions::none(),
+        )
+        .unwrap();
         let text = out_text(&f);
         assert!(text.contains("unread  (target not read)"), "{text}");
         assert!(text.contains("unreadable  (target unreadable)"), "{text}");
@@ -891,8 +931,8 @@ mod tests {
     #[test]
     fn format_manifest_long_shows_hardlink_target() {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut hard = ArchiveEntry::new(
             std::path::PathBuf::from("hard.txt"),
@@ -905,8 +945,12 @@ mod tests {
         manifest.add_entry(hard).unwrap();
 
         let mut f = formatter(Verbosity::Normal, false);
-        f.format_manifest(&manifest, ManifestView::Long(SizeUnits::Human))
-            .unwrap();
+        f.format_manifest(
+            &manifest,
+            ManifestView::Long(SizeUnits::Human),
+            &Dispositions::none(),
+        )
+        .unwrap();
         let text = out_text(&f);
         assert!(text.contains("hard.txt -> original.txt"));
     }
@@ -914,15 +958,19 @@ mod tests {
     #[test]
     fn format_manifest_long_quiet_suppresses_output() {
         let mut f = formatter(Verbosity::Quiet, false);
-        f.format_manifest(&sample_manifest(), ManifestView::Long(SizeUnits::Human))
-            .unwrap();
+        f.format_manifest(
+            &sample_manifest(),
+            ManifestView::Long(SizeUnits::Human),
+            &Dispositions::none(),
+        )
+        .unwrap();
         assert!(out_text(&f).is_empty());
     }
 
     fn sample_verification_report() -> VerificationReport {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         for i in 0..5 {
@@ -947,7 +995,7 @@ mod tests {
         assert!(text.contains("Archive verification: PASS\n"));
         assert!(
             !text.contains("PASSED"),
-            "no-colors branch must use the terse Display form, not the colored literal: {text}"
+            "the word must not change with colors: {text}"
         );
         assert!(text.contains("Total entries: 5"));
     }
@@ -957,13 +1005,10 @@ mod tests {
         let mut f = formatter(Verbosity::Normal, true);
         f.format_verification_report(&sample_verification_report())
             .unwrap();
-        // See the comment in `format_extraction_result_with_colors`: the
-        // leading fg/attr escapes sit directly before "PASSED", so strip
-        // ANSI codes before asserting adjacency.
         let text = console::strip_ansi_codes(&out_text(&f)).into_owned();
         assert!(
-            text.contains("Archive verification: PASSED"),
-            "colors branch must use the longer colored literal, not the terse Display form: {text}"
+            text.contains("Archive verification: PASS\n"),
+            "colors must style the same word, not reword it: {text}"
         );
     }
 
@@ -980,7 +1025,7 @@ mod tests {
 
     fn hostile_manifest() -> ArchiveManifest {
         use exarch_core::ArchiveEntry;
-        use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         manifest
@@ -997,16 +1042,24 @@ mod tests {
     #[test]
     fn format_manifest_short_escapes_control_characters() {
         let mut f = formatter(Verbosity::Normal, false);
-        f.format_manifest(&hostile_manifest(), ManifestView::Short)
-            .unwrap();
+        f.format_manifest(
+            &hostile_manifest(),
+            ManifestView::Short,
+            &Dispositions::none(),
+        )
+        .unwrap();
         assert_eq!(out_text(&f), format!("{HOSTILE_ESCAPED}\n"));
     }
 
     #[test]
     fn format_manifest_long_escapes_path_and_link_target() {
         let mut f = formatter(Verbosity::Normal, false);
-        f.format_manifest(&hostile_manifest(), ManifestView::Long(SizeUnits::Bytes))
-            .unwrap();
+        f.format_manifest(
+            &hostile_manifest(),
+            ManifestView::Long(SizeUnits::Bytes),
+            &Dispositions::none(),
+        )
+        .unwrap();
         let text = out_text(&f);
         assert!(
             text.contains(&format!("{HOSTILE_ESCAPED} -> {HOSTILE_ESCAPED}")),
@@ -1091,8 +1144,13 @@ mod tests {
         f.format_error(Operation::Extract, &err);
         let text = err_text(&f);
         assert!(
-            text.contains("path traversal\nHINT"),
-            "block newline kept: {text:?}"
+            text.contains(": path traversal detected: ")
+                && text
+                    .trim_end()
+                    .lines()
+                    .last()
+                    .is_some_and(|l| l.starts_with("HINT: ")),
+            "the hint comes last, on its own line: {text:?}"
         );
         assert!(text.contains(HOSTILE_ESCAPED), "{text:?}");
         assert!(

@@ -339,12 +339,17 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Install bsdtar for the strip-components differential
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libarchive-tools
+
       - name: Build all targets
         run: cargo build --workspace --all-targets --all-features --exclude exarch-python --exclude exarch-node
 
       - name: Run tests
         env:
           EXARCH_REQUIRE_PRODUCERS: "1"
+          EXARCH_REQUIRE_BSDTAR: "1"
           EXARCH_REQUIRE_PRIVILEGED_TESTS: "1"
         run: cargo nextest run --workspace --all-features --no-fail-fast --exclude exarch-python --exclude exarch-node
 

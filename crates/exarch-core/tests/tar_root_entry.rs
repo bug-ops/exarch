@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ManifestEntryKind;
@@ -189,7 +190,7 @@ fn root_symlink_with_overwrite_is_rejected_and_leaves_the_destination_alone() {
         &tar_of(&[entry(".", tar::EntryType::Symlink, b"", Some("sub"))]),
     );
     let out = TempDir::new().unwrap();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
     std::fs::write(out.path().join("keep"), b"k").unwrap();
 
     let error = ExtractRequest::new(&link_config())

@@ -74,11 +74,11 @@ impl VerificationReport {
     ///
     /// use exarch_core::ArchiveEntry;
     /// use exarch_core::ArchiveManifest;
+    /// use exarch_core::ArchiveType;
     /// use exarch_core::ManifestEntryKind;
     /// use exarch_core::Uncompressed;
     /// use exarch_core::VerificationReport;
     /// use exarch_core::VerificationStatus;
-    /// use exarch_core::formats::detect::ArchiveType;
     ///
     /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
     /// let kind = ManifestEntryKind::File {
@@ -807,7 +807,7 @@ impl Heuristic {
     }
 
     fn message(&self, entry_path: Option<&Path>) -> String {
-        let entry = || entry_path.map(crate::path_text).unwrap_or_default();
+        let entry = || entry_path.map_or_default(crate::path_text);
         match self {
             Self::ExecutableFile { .. } => format!("Executable file: {}", entry()),
             Self::SuspiciousExtension => format!("Suspicious extension: {}", entry()),
@@ -878,9 +878,9 @@ impl Finding {
     }
 }
 
-/// Spells a path injectively ([`crate::path_text`]) and escapes combining
-/// marks and control characters too, so two canonically equivalent names do
-/// not read as the same text.
+/// Spells a path injectively ([`path_text`](fn@crate::path_text)) and escapes
+/// combining marks and control characters too, so two canonically equivalent
+/// names do not read as the same text.
 fn escaped_path(path: &Path) -> String {
     let mut out = String::new();
     for ch in crate::path_text(path).chars() {
@@ -895,6 +895,14 @@ fn escaped_path(path: &Path) -> String {
 
 fn high_invalid_archive(message: String) -> (IssueSeverity, IssueCategory, String) {
     (IssueSeverity::High, IssueCategory::InvalidArchive, message)
+}
+
+fn medium_invalid_archive(message: String) -> (IssueSeverity, IssueCategory, String) {
+    (
+        IssueSeverity::Medium,
+        IssueCategory::InvalidArchive,
+        message,
+    )
 }
 
 /// The issue of a TAR header or stream-tail refusal.
@@ -1056,11 +1064,7 @@ impl VerificationIssue {
                     mode.get()
                 ),
             ),
-            ArchiveError::Io(io_err) => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("I/O error: {io_err}"),
-            ),
+            ArchiveError::Io(io_err) => high_invalid_archive(format!("I/O error: {io_err}")),
             ArchiveError::InvalidArchive(msg) => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
@@ -1072,37 +1076,42 @@ impl VerificationIssue {
                 IssueCategory::SecurityPolicy,
                 format!("Security violation: {kind}"),
             ),
-            ArchiveError::SourceNotFound { path } => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("Source not found: {}", path.display()),
-            ),
-            ArchiveError::SourceNotAccessible { path, .. } => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("Source not accessible: {}", path.display()),
-            ),
-            ArchiveError::OutputExists { path } => (
-                IssueSeverity::Medium,
-                IssueCategory::InvalidArchive,
-                format!("Output already exists: {}", path.display()),
-            ),
-            ArchiveError::InvalidCompressionLevel { level } => (
-                IssueSeverity::Medium,
-                IssueCategory::InvalidArchive,
-                format!("Invalid compression level: {level}"),
-            ),
-            ArchiveError::UnknownFormat { path } => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("Unknown format: {}", path.display()),
-            ),
+            ArchiveError::SourceNotFound { path } => {
+                high_invalid_archive(format!("Source not found: {}", path.display()))
+            }
+            ArchiveError::SourceNotAccessible { path, .. } => {
+                high_invalid_archive(format!("Source not accessible: {}", path.display()))
+            }
+            ArchiveError::OutputExists { path } => {
+                medium_invalid_archive(format!("Output already exists: {}", path.display()))
+            }
+            ArchiveError::InvalidCompressionLevel { level } => {
+                medium_invalid_archive(format!("Invalid compression level: {level}"))
+            }
+            ArchiveError::UnknownFormat { path } => {
+                high_invalid_archive(format!("Unknown format: {}", path.display()))
+            }
             ArchiveError::InvalidConfiguration { setting, problem } => high_invalid_archive(
                 format!("Invalid configuration: {}", setting.describe(problem)),
             ),
             ArchiveError::ReaderFormat(reason) => {
                 high_invalid_archive(format!("Reader format: {reason}"))
             }
+            ArchiveError::UnmatchedInclude { .. } => high_invalid_archive(error.to_string()),
+            ArchiveError::Cancelled => medium_invalid_archive("Operation cancelled".to_owned()),
+            ArchiveError::DestinationOccupied {
+                destination,
+                conflicts,
+            } => medium_invalid_archive(format!(
+                "Destination occupied: {} holds {} of the paths to extract",
+                destination.display(),
+                conflicts.len()
+            )),
+            ArchiveError::OutputReservationLeft { path, .. } => high_invalid_archive(format!(
+                "Empty reservation file left at: {}",
+                path.display()
+            )),
+            ArchiveError::ReplaceFailed(failure) => high_invalid_archive(failure.to_string()),
             ArchiveError::PartialExtraction(partial) => {
                 return Self::from_error(partial.cause(), entry_path);
             }
@@ -2000,7 +2009,9 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_invalid_compression_level() {
-        let error = ArchiveError::InvalidCompressionLevel { level: 0 };
+        let error = ArchiveError::InvalidCompressionLevel {
+            level: crate::RequestedLevel::Integer(0),
+        };
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity(), IssueSeverity::Medium);
         assert_eq!(issue.category(), IssueCategory::InvalidArchive);

@@ -205,6 +205,22 @@ impl DirWalker {
         Ok((dir, leaf))
     }
 
+    /// Vets `dest/rel` as a directory without creating anything: every
+    /// component, the last included, must be a directory or a symlink the
+    /// walker's [`LinkPolicy`] admits.
+    ///
+    /// This is the decision [`Self::ensure_dir`] makes, minus the creation, so
+    /// a caller can learn what extraction would refuse before it writes.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::ensure_dir`]; a missing component is an I/O error of
+    /// kind `NotFound`.
+    pub(crate) fn vet_dir(self, root: &PinnedRoot, rel: &Path) -> Result<()> {
+        self.descend(root, rel, rel, Missing::Fail, Links::Policy)
+            .map(drop)
+    }
+
     /// Like [`Self::open_parent`], but any symlink on the way is refused. For
     /// a path that was resolved through symlinks and is expected to be free of
     /// them.

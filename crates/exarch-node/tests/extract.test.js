@@ -291,7 +291,7 @@ function tarWithEntry(name, typeflag) {
   header.write('ustar\0' + '00', 257);
   let sum = 0;
   for (const byte of header) sum += byte;
-  header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148);
   return Buffer.concat([header, Buffer.alloc(1024)]);
 }
 

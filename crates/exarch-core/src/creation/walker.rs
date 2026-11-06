@@ -15,6 +15,7 @@ use crate::creation::filters;
 use crate::creation::source::source_error;
 use crate::creation::source::walk_error;
 use crate::creation::staged::ExcludedOutput;
+use std::collections::HashMap;
 use std::fs::Metadata;
 use std::ops::Deref;
 use std::path::Component;
@@ -30,23 +31,6 @@ use walkdir::WalkDir;
 /// - Symlink handling (follow or store as-is)
 /// - Size limit enforcement
 /// - Archive path computation
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::walker::FilteredWalker;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let root = Path::new("./project");
-/// let walker = FilteredWalker::new(root, &config);
-///
-/// for entry in walker.walk() {
-///     let entry = entry.unwrap();
-///     println!("Would add: {}", entry.archive_path.display());
-/// }
-/// ```
 pub struct FilteredWalker<'a> {
     root: &'a Path,
     config: &'a CreationConfig,
@@ -57,17 +41,6 @@ static NOTHING_EXCLUDED: ExcludedOutput = ExcludedOutput::none();
 
 impl<'a> FilteredWalker<'a> {
     /// Creates a new filtered walker for the given root directory.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use exarch_core::creation::CreationConfig;
-    /// use exarch_core::creation::walker::FilteredWalker;
-    /// use std::path::Path;
-    ///
-    /// let config = CreationConfig::default();
-    /// let walker = FilteredWalker::new(Path::new("."), &config);
-    /// ```
     #[must_use]
     pub fn new(root: &'a Path, config: &'a CreationConfig) -> Self {
         Self {
@@ -182,11 +155,7 @@ impl<'a> FilteredWalker<'a> {
         // Check file size limit (only for regular files)
         let size = get_file_size(&metadata);
         if entry_type == EntryType::File && !self.config.max_file_size.admits(size) {
-            let shown = if relative.as_os_str().is_empty() {
-                path
-            } else {
-                relative
-            };
+            let shown = if relative.is_empty() { path } else { relative };
             return Ok(Some(WalkItem::Skipped(Skip::new(
                 SkipKind::OverMaxFileSize,
                 shown,
@@ -225,6 +194,37 @@ pub struct Collected {
 
     /// The entries the filters left out.
     pub skipped: Skips,
+}
+
+/// The entry names claimed so far and the source that claimed each.
+///
+/// Two entries with one name make a TAR that silently loses a file on extract
+/// and a ZIP that cannot be written, so the collision is refused while
+/// collecting, before anything is written.
+// ASSUMPTION: two directories with one name collide as well, since ZIP cannot
+// store both and TAR would carry two entries of the same name.
+#[derive(Debug, Default)]
+struct ClaimedNames(HashMap<PathBuf, PathBuf>);
+
+impl ClaimedNames {
+    fn claim(&mut self, entry: &FilteredEntry) -> Result<()> {
+        use std::collections::hash_map::Entry;
+
+        match self.0.entry(entry.archive_path.to_path_buf()) {
+            Entry::Vacant(slot) => {
+                slot.insert(entry.path.clone());
+                Ok(())
+            }
+            Entry::Occupied(first) => Err(ArchiveError::InvalidConfiguration {
+                setting: crate::ConfigSetting::SourcePaths,
+                problem: crate::ConfigProblem::EntryNameCollision {
+                    name: entry.archive_path.display().to_string(),
+                    first: first.get().clone(),
+                    second: entry.path.clone(),
+                },
+            }),
+        }
+    }
 }
 
 /// Name of an entry inside a created archive: relative, normalized and
@@ -315,32 +315,20 @@ pub enum EntryType {
 /// filtered entries into memory, avoiding the need to traverse the directory
 /// tree twice (once for counting, once for processing).
 ///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::walker::collect_entries;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let sources = [Path::new("./src")];
-/// let entries = collect_entries(&sources, &config, &ExcludedOutput::none())?;
-/// println!("Total entries: {}", entries.len());
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
-///
 /// # Errors
 ///
 /// Returns an error if:
 /// - Source path does not exist
 /// - Directory traversal fails
 /// - File metadata cannot be read
+/// - Two entries map to the same archive name
 pub fn collect_entries<P: AsRef<Path>>(
     sources: &[P],
     config: &CreationConfig,
     excluded: &ExcludedOutput,
 ) -> Result<Collected> {
     let mut collected = Collected::default();
+    let mut names = ClaimedNames::default();
 
     for source in sources {
         let path = source.as_ref();
@@ -369,7 +357,10 @@ pub fn collect_entries<P: AsRef<Path>>(
             let walker = FilteredWalker::new(path, config).excluding(excluded);
             for item in walker.walk() {
                 match item? {
-                    WalkItem::Entry(entry) => collected.entries.push(entry),
+                    WalkItem::Entry(entry) => {
+                        names.claim(&entry)?;
+                        collected.entries.push(entry);
+                    }
                     WalkItem::Skipped(skip) => collected.skipped.record(skip)?,
                 }
             }
@@ -411,12 +402,14 @@ pub fn collect_entries<P: AsRef<Path>>(
             if !excluded.excludes(path)
                 && let Some(archive_path) = entry_name(path, &relative, false)?
             {
-                collected.entries.push(FilteredEntry {
+                let entry = FilteredEntry {
                     path: path.to_path_buf(),
                     archive_path,
                     entry_type,
                     size,
-                });
+                };
+                names.claim(&entry)?;
+                collected.entries.push(entry);
             }
         }
     }
@@ -839,6 +832,77 @@ mod tests {
             .entries;
 
         assert_eq!(entries.len(), 0);
+    }
+
+    fn colliding_sources() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let first = temp.path().join("proj");
+        let second = temp.path().join("other");
+        for dir in [&first, &second] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join("a.txt"), "x").unwrap();
+        }
+        (temp, first.join("a.txt"), second.join("a.txt"))
+    }
+
+    #[test]
+    fn test_collect_entries_refuses_sources_with_the_same_entry_name() {
+        let (_temp, first, second) = colliding_sources();
+        let config = CreationConfig::default();
+
+        let error = collect_entries(
+            &[first.as_path(), second.as_path()],
+            &config,
+            &ExcludedOutput::none(),
+        )
+        .unwrap_err();
+
+        assert_matches!(
+            error,
+            ArchiveError::InvalidConfiguration {
+                setting: crate::ConfigSetting::SourcePaths,
+                problem: crate::ConfigProblem::EntryNameCollision { name, first: f, second: s },
+            } if name == "a.txt" && f == first && s == second
+        );
+    }
+
+    #[test]
+    fn test_collect_entries_refuses_colliding_files_inside_directories() {
+        let (temp, _, _) = colliding_sources();
+        let config = CreationConfig::default();
+        let proj = temp.path().join("proj");
+        let other = temp.path().join("other");
+
+        let error = collect_entries(
+            &[proj.as_path(), other.as_path()],
+            &config,
+            &ExcludedOutput::none(),
+        );
+
+        assert_matches!(
+            error,
+            Err(ArchiveError::InvalidConfiguration {
+                problem: crate::ConfigProblem::EntryNameCollision { .. },
+                ..
+            })
+        );
+    }
+
+    #[test]
+    fn test_collect_entries_accepts_distinct_entry_names() {
+        let (temp, first, _) = colliding_sources();
+        let config = CreationConfig::default();
+        let other = temp.path().join("other");
+        fs::rename(other.join("a.txt"), other.join("b.txt")).unwrap();
+
+        let collected = collect_entries(
+            &[first.as_path(), other.as_path()],
+            &config,
+            &ExcludedOutput::none(),
+        )
+        .unwrap();
+
+        assert_eq!(collected.entries.len(), 2);
     }
 
     #[test]

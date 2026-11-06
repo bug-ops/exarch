@@ -10,6 +10,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 use exarch_core::ArchiveReader;
+use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
 use exarch_core::CreationConfig;
 use exarch_core::ExtractRequest;
@@ -20,10 +21,10 @@ use exarch_core::MemorySink;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::SinkExtractRequest;
+use exarch_core::Staging;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
-use exarch_core::formats::detect::CreatableFormat;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use sink_support::tar_archive;
@@ -157,7 +158,7 @@ fn an_extract_request_applies_its_options_and_progress() {
         let mut progress = Count::default();
 
         let report = ExtractRequest::new(&config)
-            .with_options(ExtractionOptions::default().with_atomic(true))
+            .with_options(ExtractionOptions::default().with_staging(Staging::Atomic))
             .with_progress(&mut progress)
             .extract(&archive, &out)
             .unwrap();
@@ -170,7 +171,7 @@ fn an_extract_request_applies_its_options_and_progress() {
         // it.
         assert!(
             ExtractRequest::new(&config)
-                .with_options(ExtractionOptions::default().with_atomic(true))
+                .with_options(ExtractionOptions::default().with_staging(Staging::Atomic))
                 .extract(&archive, &out)
                 .is_err()
         );

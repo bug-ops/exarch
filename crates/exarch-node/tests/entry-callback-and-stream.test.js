@@ -183,7 +183,7 @@ describe('extractArchiveToCallback', () => {
           tar([file('a', '1')]),
           () => {},
           null,
-          new ExtractionOptions().withAtomic(true)
+          new ExtractionOptions().withStaging('atomic')
         ),
       { code: 'InvalidArg' }
     );
@@ -195,7 +195,7 @@ describe('extractArchiveToCallback', () => {
       tar([file('a', '1')]),
       (entry) => seen.push(entry.path),
       null,
-      new SinkOptions().setSkipDuplicates(false)
+      new SinkOptions().withExistingFiles('overwrite')
     );
     assert.deepStrictEqual(seen, ['a']);
   });

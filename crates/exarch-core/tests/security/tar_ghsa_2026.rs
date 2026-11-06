@@ -21,8 +21,6 @@ use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::TarAmbiguity;
 use exarch_core::TarPathKey;
-use exarch_core::formats::ArchiveFormat;
-use exarch_core::formats::TarArchive;
 use exarch_testkit::pax::record as pax_record;
 use std::assert_matches;
 use std::io::Cursor;
@@ -108,7 +106,8 @@ fn pax_header(out: &mut Vec<u8>, records: &[u8]) {
 
 fn extract(bytes: &[u8]) -> (exarch_core::Result<exarch_core::ExtractionReport>, TempDir) {
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(bytes.to_vec()), &SecurityConfig::default());
+    let archive =
+        crate::common::tar_archive(Cursor::new(bytes.to_vec()), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -122,7 +121,7 @@ fn extract_with_config(
     config: &SecurityConfig,
 ) -> (exarch_core::Result<exarch_core::ExtractionReport>, TempDir) {
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(bytes.to_vec()), config);
+    let archive = crate::common::tar_archive(Cursor::new(bytes.to_vec()), config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),

@@ -10,7 +10,7 @@ tags:
   - cli
   - rust
 created: 2026-08-04
-updated: 2026-11-04
+updated: 2026-11-06
 status: implemented
 related:
   - "[[constitution]]"
@@ -34,6 +34,9 @@ related:
 > --atomic --force`'s destination-swap hardening, a self-contained security fix large
 > enough (five follow-on PRs) to warrant its own spec rather than a subsection of
 > [[005-cli/spec]]
+
+> [!note] Batch #981 amendments
+> The swap moved from the CLI into `exarch-core` as `Staging::AtomicReplace` (FR-098 to FR-103, #984). FR-001 to FR-016 describe behavior that now lives in core; names such as `commands::atomic_swap::PinnedDir` read as the core `pinned_dir` primitives.
 
 ## 1. Overview
 
@@ -170,6 +173,12 @@ THEN the error output includes the directory's actual current path, resolved via
 | FR-014 | Names passed to `PinnedDir` methods and the destination name SHALL be an `EntryName(OsString)`: `EntryName::of(&Path)` returns `None` for `.`, `..` and anything with a separator, and `EntryName::temp(prefix)` builds the generated temp and backup names, so the `*at` calls can never be given a multi-component name (#935) | must |
 | FR-015 | A destination displaced for the swap (renamed aside to the backup) SHALL be held by a `DisplacedDestination` guard: `Drop` restores it best-effort and stores a failure in a caller-provided `Cell<Option<io::Error>>` slot that the command reports; `restore()` and `discard()` consume the guard and disarm it; an early `?` between displace and swap therefore restores the destination (#936) | must |
 | FR-016 | The write mode SHALL be decided once into `WriteMode` and planned as `ExtractPlan::{Stream { options }, Listed { listed, conflicts }, Replace { target, source }}`, deriving the extraction options per variant, so the atomic and non-atomic paths cannot disagree about what they extract with (#936) | must |
+| FR-098 | The destination swap SHALL be implemented in `exarch-core` (module `staging`: `staging/replace.rs` holds the swap, the restore, the backup warning, `ReplaceFailed` and `DestinationChanged`; `staging/parent.rs` holds `PinnedParent`) and selected by `Staging::AtomicReplace`; the CLI and both bindings SHALL map to it and add no swap logic | must |
+| FR-099 | The swap SHALL have three arms in `staging/parent.rs` (not in `pinned_dir.rs`, whose Windows `VettedDir` is NT-handle based): Unix pinned by an open directory handle (`*at` renames, `unlinkat(REMOVEDIR)`, no-follow `entry_status` with kind and dev/ino, `current_path` from `/proc` or `getpath`, else `None`); WASI the same through std open plus rustix `*at`, with dev/ino from `fstat` and `current_path` `None`; other targets (Windows) path-based with `FileIdentity::Unknown` | must |
+| FR-100 | `AtomicReplace` SHALL be refused before extraction with `InvalidConfiguration { OutputPath, ReplacesProtectedPath }` when the canonical destination is a filesystem root, equal to or an ancestor of the canonical archive path (path-based requests), or equal to or an ancestor of the process working directory (`ProtectedPath::{FilesystemRoot, ArchiveAncestor, WorkingDirectory}`); the guard compares directory identity (dev, ino) rather than path text, so a case-insensitive volume cannot spell its way around it | must |
+| FR-101 | A failed swap SHALL be `ArchiveError::ReplaceFailed(ReplaceFailure { error, restore, leftover })` with `Restore {NotNeeded, Restored, Failed { backup, error }}` and `leftover: Option<StagingLeftover>` (set only when a failed swap leaves the staging directory behind; paths redacted in binding release builds; a staging directory that survives a failed extraction is still not reported, #995); an identity re-check mismatch SHALL be `Violation::DestinationChanged` (sub-code `ConcurrentChange`); `Atomic` and `AtomicReplace` SHALL resolve the destination before extraction: a symlink to a directory is canonicalized and renamed onto (#977), a non-empty directory is `OutputExists` before extraction and at ENOTEMPTY or EEXIST (#985), a file is `NotADirectory` and a dangling symlink `IsSymlink` | must |
+| FR-102 | Cancellation SHALL be polled after extraction and before the rename and before the displace step ([[004-progress-tracking/spec]] FR-057); `Atomic` and `AtomicReplace` SHALL extract the staging directory under `Refuse`, so a file planted at a landing cannot survive and be published (residual: a same-user process can still plant a file at a path no entry lands on) | must |
+| FR-103 | `AtomicReplace` with a non-default entry selection or strip SHALL be refused in core as `InvalidConfiguration { EntrySelection, NotSupported }`, because the swap would delete everything in the destination that the subset does not contain ([[022-extract-entry-selection/spec]] FR-107) | must |
 
 ## 4. Non-Functional Requirements
 

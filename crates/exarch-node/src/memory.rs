@@ -28,6 +28,7 @@ use crate::config::CreationConfig;
 use crate::config::SecurityConfig;
 use crate::config::SinkOptions;
 use crate::error::Failure;
+use crate::error::Operation;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise;
@@ -42,6 +43,7 @@ use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
 use crate::stream::IntoSource;
 use crate::utils::boundary_paths;
+use crate::utils::utf8_path;
 
 /// The path semantics extraction validates names against.
 // Values must equal `exarch_core::PathModel::as_str`.
@@ -156,19 +158,8 @@ pub type StoredEntry = Either3<MemoryFileEntry, MemoryDirectoryEntry, MemorySyml
 pub type MemoryEntry =
     Either4<MemoryFileEntry, MemoryDirectoryEntry, MemorySymlinkEntry, MemoryHardlinkEntry>;
 
-/// The text of `path`, or an error: a lossy conversion could merge two
-/// distinct entries into one name.
-fn utf8(path: &Path) -> CoreResult<String> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
-        exarch_core::ArchiveError::from(exarch_core::Malformation::EntryPathNotUtf8 {
-            path: path.to_path_buf(),
-        })
-        .into()
-    })
-}
-
 fn stored_entry(path: &Path, entry: CoreMemoryEntry) -> CoreResult<StoredEntry> {
-    let path = utf8(path)?;
+    let path = utf8_path(path)?;
     Ok(match entry {
         CoreMemoryEntry::File { data, mode } => Either3::A(MemoryFileEntry {
             path,
@@ -183,7 +174,7 @@ fn stored_entry(path: &Path, entry: CoreMemoryEntry) -> CoreResult<StoredEntry> 
         CoreMemoryEntry::Symlink { target } => Either3::C(MemorySymlinkEntry {
             path,
             kind: SymlinkKind::Symlink,
-            target: utf8(&target)?,
+            target: utf8_path(&target)?,
         }),
         _ => return Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
     })
@@ -198,9 +189,9 @@ pub fn callback_entry(path: &Path, entry: CallbackEntry) -> CoreResult<MemoryEnt
             Either3::C(symlink) => Either4::C(symlink),
         }),
         CallbackEntry::Hardlink { target } => Ok(Either4::D(MemoryHardlinkEntry {
-            path: utf8(path)?,
+            path: utf8_path(path)?,
             kind: HardlinkKind::Hardlink,
-            target: utf8(target.as_path())?,
+            target: utf8_path(target.as_path())?,
         })),
         _ => Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
     }
@@ -260,6 +251,7 @@ impl<S: IntoSource> MemoryJob<S> {
         dispatch: ProgressDispatch,
     ) -> CoreResult<MemoryExtraction> {
         let (report, sink) = run_with_optional_progress(
+            Operation::Extraction,
             progress,
             dispatch,
             self.data.abort_handle(),
@@ -306,7 +298,7 @@ fn into_memory_extraction(
     sink: MemorySink,
 ) -> CoreResult<MemoryExtraction> {
     Ok(MemoryExtraction {
-        report: ExtractionReport::from(report),
+        report: ExtractionReport::try_from(report).map_err(Failure::Native)?,
         entries: sink
             .into_entries()
             .into_iter()
@@ -354,8 +346,7 @@ fn into_memory_extraction(
 /// );
 /// ```
 #[napi]
-// The JS signature is positional: `extractArchiveToMemory`'s arguments plus `progress`.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_memory_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -393,14 +384,14 @@ pub struct CreatedArchive {
 fn create_to_bytes_core(
     sources: &[String],
     format: CreatableFormat,
-    config: &exarch_core::creation::CreationConfig,
+    config: &exarch_core::CreationConfig,
 ) -> CoreResult<CreatedArchive> {
     let sources = boundary_paths(sources)?;
     let (bytes, report) =
         exarch_core::CreateRequest::new(config).to_bytes(format.into(), &sources)?;
     Ok(CreatedArchive {
         data: Uint8Array::from(bytes),
-        report: CreationReport::from(report),
+        report: CreationReport::try_from(report).map_err(Failure::Native)?,
     })
 }
 
@@ -430,18 +421,13 @@ fn create_to_bytes_core(
 /// const { data, report } = await createArchiveToBytes(['src/'], 'TarGz');
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn create_archive_to_bytes<'env>(
     env: &'env Env,
     sources: Vec<String>,
     format: CreatableFormat,
     config: Option<&CreationConfig>,
 ) -> Result<PromiseRaw<'env, CreatedArchive>> {
-    let config_owned: exarch_core::creation::CreationConfig =
-        config.map_or_default(|c| c.as_core().clone());
+    let config_owned: exarch_core::CreationConfig = config.map_or_default(|c| c.as_core().clone());
 
     spawn_blocking_promise(
         env,
@@ -474,17 +460,13 @@ pub fn create_archive_to_bytes<'env>(
 /// const { data } = createArchiveToBytesSync(['src/'], 'Zip');
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn create_archive_to_bytes_sync(
     env: Env,
     sources: Vec<String>,
     format: CreatableFormat,
     config: Option<&CreationConfig>,
 ) -> Result<CreatedArchive> {
-    let default_config = exarch_core::creation::CreationConfig::default();
+    let default_config = exarch_core::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
     run_sync(env, "archive creation", || {
@@ -533,11 +515,7 @@ pub fn create_archive_to_bytes_sync(
 /// const { entries } = await extractArchiveToMemory(fs.readFileSync('a.tar.gz'));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    reason = "napi arguments are owned and the JS signature is positional, `signal` last"
-)]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_memory<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -583,10 +561,6 @@ pub fn extract_archive_to_memory<'env>(
 /// const { entries } = extractArchiveToMemorySync(fs.readFileSync('a.zip'));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn extract_archive_to_memory_sync(
     env: Env,
     data: Uint8Array,
@@ -633,8 +607,7 @@ pub fn extract_archive_to_memory_sync(
 /// );
 /// ```
 #[napi]
-// The JS signature is positional: `extractArchiveToMemorySync`'s arguments plus `progress`.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_memory_with_progress_sync(
     env: Env,
     data: Uint8Array,
@@ -655,11 +628,7 @@ pub fn extract_archive_to_memory_with_progress_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn union_line<T: Copy>(name: &str, all: &[T], as_str: fn(T) -> &'static str) -> String {
-        let values: Vec<String> = all.iter().map(|v| format!("'{}'", as_str(*v))).collect();
-        format!("export type {name} = {}", values.join(" | "))
-    }
+    use crate::utils::union_line;
 
     #[test]
     fn index_d_ts_path_model_matches_core() {

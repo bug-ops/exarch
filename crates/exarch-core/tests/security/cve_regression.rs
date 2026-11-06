@@ -9,9 +9,6 @@
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::formats::ArchiveFormat;
-use exarch_core::formats::TarArchive;
-use exarch_core::formats::ZipArchive;
 use exarch_testkit::raw_zip::RawEntry;
 use exarch_testkit::raw_zip::RawZip;
 use std::assert_matches;
@@ -153,7 +150,7 @@ fn test_cve_2024_12718_dotslash_prefix_traversal() {
     let tar_data = make_raw_tar(&[(b"./../../etc/passwd", b"pwned")]);
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -173,7 +170,7 @@ fn test_cve_2024_12718_dotslash_complex_traversal() {
     let tar_data = make_raw_tar(&[(b"foo/./bar/../../../etc/passwd", b"pwned")]);
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -200,7 +197,7 @@ fn test_cve_2024_12718_multiple_traversal_variants() {
     for &path in traversal_paths {
         let tar_data = make_raw_tar(&[(path, b"x")]);
         let temp = TempDir::new().unwrap();
-        let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+        let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
         let result = archive.extract(
             temp.path(),
             &ExtractionOptions::default(),
@@ -232,7 +229,7 @@ fn test_cve_2024_12905_symlink_outside_dest_rejected_by_default() {
         .build();
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -259,7 +256,7 @@ fn test_cve_2024_12905_symlink_outside_dest_rejected_when_allowed() {
     let mut config = SecurityConfig::default();
     config.allowed.symlinks = exarch_core::Admit::Allow;
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -285,7 +282,7 @@ fn test_cve_2024_12905_deep_symlink_chain() {
     let mut config = SecurityConfig::default();
     config.allowed.symlinks = exarch_core::Admit::Allow;
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -313,7 +310,7 @@ fn test_cve_2025_48387_hardlink_outside_dest_rejected_by_default() {
         .build();
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -339,7 +336,7 @@ fn test_cve_2025_48387_hardlink_outside_dest_rejected_when_allowed() {
     let mut config = SecurityConfig::default();
     config.allowed.hardlinks = exarch_core::Admit::Allow;
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -364,7 +361,7 @@ fn test_cve_2025_48387_absolute_hardlink_rejected() {
     let mut config = SecurityConfig::default();
     config.allowed.hardlinks = exarch_core::Admit::Allow;
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -399,7 +396,7 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_default_config() {
         .build();
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -435,7 +432,7 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_symlinks_allowed() {
     let mut config = SecurityConfig::default();
     config.allowed.symlinks = exarch_core::Admit::Allow;
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -482,7 +479,7 @@ fn test_ghsa_2367_hardlink_does_not_corrupt_target() {
     let mut config = SecurityConfig::default();
     config.allowed.hardlinks = exarch_core::Admit::Allow;
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     // Extraction may succeed or fail depending on platform duplicate-file
     // handling, but legit.txt must never be corrupted.
     let _ = archive.extract(
@@ -513,7 +510,7 @@ fn test_ghsa_2367_hardlink_produces_independent_inode() {
     let mut config = SecurityConfig::default();
     config.allowed.hardlinks = exarch_core::Admit::Allow;
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     archive
         .extract(
             temp.path(),
@@ -555,7 +552,7 @@ fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_by_default() {
         .build();
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -582,7 +579,7 @@ fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_when_allowed() {
     let mut config = SecurityConfig::default();
     config.allowed.hardlinks = exarch_core::Admit::Allow;
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -614,7 +611,7 @@ fn test_cve_2026_24842_safe_deep_nested_hardlink_allowed() {
     let mut config = SecurityConfig::default();
     config.allowed.hardlinks = exarch_core::Admit::Allow;
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -698,7 +695,7 @@ fn test_cve_2025_29787_zip_slip_blocked_with_symlinks_enabled() {
     config.allowed.symlinks = exarch_core::Admit::Allow;
 
     let data = build_cve_2025_29787_zip();
-    let archive = ZipArchive::new(Cursor::new(data), &config).unwrap();
+    let archive = crate::common::zip_archive(Cursor::new(data), &config);
 
     let result = archive.extract(
         dest.path(),
@@ -746,7 +743,7 @@ fn test_cve_2025_29787_zip_slip_blocked_with_symlinks_disabled() {
     let config = SecurityConfig::default(); // symlinks = false
 
     let data = build_cve_2025_29787_zip();
-    let archive = ZipArchive::new(Cursor::new(data), &config).unwrap();
+    let archive = crate::common::zip_archive(Cursor::new(data), &config);
 
     let result = archive.extract(
         dest.path(),
@@ -779,7 +776,7 @@ fn test_windows_backslash_parent_traversal() {
     let tar_data = make_raw_tar(&[(b"subdir\\..\\evil.txt", b"escaped")]);
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -798,7 +795,7 @@ fn test_windows_backslash_deep_traversal() {
     let tar_data = make_raw_tar(&[(b"foo\\..\\..\\etc\\passwd", b"content")]);
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -821,7 +818,7 @@ fn test_windows_backslash_treated_as_filename_on_unix() {
     let tar_data = make_raw_tar(&[(b"foo\\..\\..\\etc\\passwd", b"content")]);
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -849,7 +846,7 @@ fn test_windows_absolute_path_treated_as_filename_on_unix() {
     let tar_data = make_raw_tar(&[(b"C:\\Windows\\evil.txt", b"content")]);
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(tar_data), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),

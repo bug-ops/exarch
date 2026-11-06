@@ -68,3 +68,42 @@ def test_unreadable_source_names_the_source_without_leaking_host_detail(temp_dir
         assert "Permission denied" not in message, (
             f"raw OS detail leaked in release build, got: {message!r}"
         )
+
+
+def test_source_not_found_and_output_exists_name_only_the_file_when_redacted(temp_dir):
+    missing = temp_dir / "private-dir" / "nothere.txt"
+    with pytest.raises(exarch.SourceNotFoundError) as not_found:
+        exarch.create_archive(temp_dir / "out.tar.gz", [missing])
+
+    existing = temp_dir / "private-out" / "taken.tar.gz"
+    existing.parent.mkdir()
+    existing.write_bytes(b"x")
+    source = temp_dir / "a.txt"
+    source.write_bytes(b"a")
+    with pytest.raises(exarch.OutputExistsError) as occupied:
+        exarch.create_archive(existing, [source], overwrite=False)
+
+    for err, name in ((not_found.value, "nothere.txt"), (occupied.value, "taken.tar.gz")):
+        assert os.path.basename(err.filename) == name
+        if _redaction_active(temp_dir):
+            assert err.filename == name
+            assert str(temp_dir) not in str(err), f"host path leaked in release build: {err!r}"
+
+
+def test_destination_occupied_redacts_the_destination_but_names_the_conflicts(
+    sample_tar_gz, temp_dir
+):
+    destination = temp_dir / "private-destination"
+    destination.mkdir()
+    exarch.extract_archive(sample_tar_gz, destination)
+    options = exarch.ExtractionOptions().with_existing_files("refuse")
+
+    with pytest.raises(exarch.OutputExistsError) as info:
+        exarch.extract_archive(sample_tar_gz, destination, options=options)
+
+    err = info.value
+    assert "hello.txt" in err.conflicts
+    assert os.path.basename(err.filename) == "private-destination"
+    if _redaction_active(temp_dir):
+        assert err.filename == "private-destination"
+        assert str(temp_dir) not in str(err), f"destination leaked in release build: {err!r}"

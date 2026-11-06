@@ -168,8 +168,9 @@ for (const entry of result.entries) {
 
 `MemoryEntry` is a union discriminated by `kind`: a file always has `data`, a
 symlink or hardlink always has `target`. The in-memory and callback functions
-take `SinkOptions` (`setSkipDuplicates`) as `options`, not `ExtractionOptions`:
-a sink has no directory to rename, so `atomic` cannot be requested.
+take `SinkOptions` (`withExistingFiles`, `withDecodeReuse`) as `options`, not
+`ExtractionOptions`: a sink has no directory to rename, so `staging` cannot be
+requested.
 
 **Note:** `maxBytes` caps payload plus path bytes plus 256 per entry and
 defaults to the config's `maxTotalSize`; exceeding it rejects with
@@ -179,8 +180,8 @@ rules of every platform instead of this host's.
 `listArchiveBytesWithProgress`, `verifyArchiveBytesWithProgress` and
 `extractArchiveToMemoryWithProgress` (async only) take a `progress` callback as
 their last argument, called with `(err, [path, total, current, bytesWritten])`;
-`current` counts from 1 and `total` is `null` while the entry count is unknown (a TAR stream). A throwing callback does not
-abort the run; if the run succeeded the promise rejects with
+`current` counts from 1 and `total` is `null` while the entry count is unknown (a TAR stream). A throwing callback stops the
+run before the next entry, and the promise rejects with
 `PROGRESS_CALLBACK_ERROR` and the result is discarded.
 
 The async forms of these functions (and of their `WithProgress` variants) also
@@ -232,7 +233,7 @@ wrapped in an `Error` whose `cause` is the primitive (a Symbol is stringified). 
 `'hardlink'` entry comes last and by reference: its `target` is the
 root-relative resolved path of an entry already delivered, a file or an
 earlier hardlink (a chain is delivered link by link). With
-`skipDuplicates` off a path can be delivered more than once and a hardlink
+`existingFiles` set to `'overwrite'` a path can be delivered more than once and a hardlink
 refers to the latest delivery; implicit parent directories are not delivered.
 
 ```javascript
@@ -291,14 +292,18 @@ try {
 | `relaxableBy` | a `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit | The `PolicySetting` id, for example `'symlinks'` |
 | `subCode` | an `INVALID_ARCHIVE` with a finer classification, every core `SECURITY_VIOLATION`, every `QUOTA_EXCEEDED` and every `ZIP_BOMB` | on `INVALID_ARCHIVE`, `'TAR_AMBIGUITY'` (a TAR header read differently by different tools), `'TAR_TRAILER'` (the stream after the TAR end-of-archive marker is corrupt or truncated), `'ZIP_READER'` (a failure of the ZIP reader or of the structural check built on it), `'LINK_TARGET'`, `'DUPLICATE_ENTRY'`, `'ENTRY_NAME'`, `'DECLARED_SIZE'`, `'INTEGRITY'` (the refusal of that family), `'TAR_READER'` or `'SEVENZ_READER'` (a failure of the TAR or 7z reader); on `SECURITY_VIOLATION`, the family of the refusal, one of `'PATH_NAME'`, `'PATH_DEPTH'`, `'LINK_TARGET'`, `'LINK_POLICY'`, `'EXISTING_SYMLINK'`, `'ENTRY_TYPE'`, `'ROOT_ENTRY'`, `'ENCRYPTED'`, `'COMPRESSION_METHOD'`, `'SOLID_ARCHIVE'`, `'DECLARED_SIZE'`, `'CONCURRENT_CHANGE'`, `'TAR_METADATA'`, `'TAR_TRAILER'`, `'PLATFORM'`, `'OUTPUT_CONFLICT'`, `'SOURCE_PATH'`; on `QUOTA_EXCEEDED`, the quota (`'FILE_COUNT'`, `'TOTAL_SIZE'`, `'FILE_SIZE'`, `'INTEGER_OVERFLOW'`, `'DECODER_MEMORY'`, `'COMPRESSED_MEMBERS'`, `'TREE_NODES'`, `'SINK_CAPACITY'` or `'SOLID_BLOCK_MEMORY'`); on `ZIP_BOMB`, what the ratio was measured over (`'ENTRY'`, `'SOLID_BLOCK'` or `'SKIPPED_ENTRIES'`); typed `InvalidArchiveSubCode`, `SecurityViolationSubCode`, `QuotaSubCode` or `ZipBombSubCode` |
 | `nonUtf8EntryPath` | an `INVALID_ARCHIVE` (`'ENTRY_NAME'`) refusal of an entry name that is not valid UTF-8 | The name written injectively: a backslash is `\x5C`, each invalid byte `\xNN` |
+| `restore`, `backupPath`, `leftoverPath` | an `IO_ERROR` from a failed `'atomic_replace'` (`leftoverPath` also from a creation that left an empty output reservation) | `restore` is `'not_needed'`, `'restored'` or `'failed'`; `backupPath` names where the original remains after `'failed'`; `leftoverPath` a staging directory or reservation left on disk; paths are redacted like the message |
+| `conflicts` | an `OUTPUT_EXISTS` from a `'refuse'` extraction | The entry names that found an occupant |
+| `protectedPath`, `collision`, `unmatchedPatterns` | an `INVALID_CONFIGURATION` for a protected `'atomic_replace'` destination, for creation sources that map to one entry name, or for include patterns that matched no entry | `'filesystem_root'`, `'archive_ancestor'` or `'working_directory'`; `{ name, first, second }`; the unmatched patterns |
 | `ioKind` | an `IO_ERROR` | The `IoKind` core reported, for example `'NotFound'`, `'PermissionDenied'` or `'StorageFull'`; `'Other'` for a kind with no entry in `IoKind` |
 | `writes` | an extraction failed after producing output | `'kept'`, `'rolled_back'` (atomic extraction discarded the output) or `'discarded'` (an in-memory extraction wrote nothing to disk and dropped its entries) |
-| `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` | `writes === 'kept'` | Counters and a `string[]` |
+| `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`, `warnings` | `writes === 'kept'` | Counters, the skips by reason and the typed `ExtractionWarning[]` |
+| `errno`, `strerror`, `path` | a `SOURCE_NOT_ACCESSIBLE` | The OS error number (when the failure has one), its text and the unreadable source, redacted like the message |
 | `cause` | a progress callback, an `onEntry` callback or an `AsyncIterable` archive threw | The exception it threw (a thrown primitive is wrapped in an `Error` whose `cause` is the primitive) |
 
-`code === 'ENTRY_CALLBACK_ERROR'` means an `onEntry` callback threw or rejected and `code === 'STREAM_ERROR'` that an `AsyncIterable` archive did; both carry no counters and take priority over the core error they caused. `code === 'ABORT_ERR'` (with `name === 'AbortError'` and `cause` set to the signal's `reason`) means the call's `AbortSignal` fired; it takes priority over the errors the abort caused.
+`code === 'ENTRY_CALLBACK_ERROR'` means an `onEntry` callback threw or rejected and `code === 'STREAM_ERROR'` that an `AsyncIterable` archive did; both carry no counters and take priority over the core error they caused. `code === 'ABORT_ERR'` (with `name === 'AbortError'` and `cause` set to the signal's `reason`) means the call's `AbortSignal` fired; it takes priority over the errors the abort caused. `code === 'CANCELLED'` is a cancellation that no JavaScript signal caused. A core error other than a cancellation always stays primary over a callback throw that happened in the same run.
 
-If a progress callback throws while the operation itself succeeds, the rejection has `code === 'PROGRESS_CALLBACK_ERROR'` and the counters of what was written (`filesExtracted`... for extraction, `filesAdded` and `bytesWritten` for creation). The in-memory extraction functions write nothing, so their rejection carries `writes === 'discarded'` and no counters.
+A progress callback that throws stops the operation before the next entry. The rejection has `code === 'PROGRESS_CALLBACK_ERROR'`, the throw as `cause`, and the counters of what was written (`filesExtracted`... for extraction, `filesAdded` and `bytesWritten` for creation). The in-memory extraction functions write nothing, so their rejection carries `writes === 'discarded'` and no counters.
 
 **Breaking change:** earlier versions put the code, a `[relaxableBy=<id>]` token and a `| writes=...` suffix into `message`. Read the properties instead.
 
@@ -315,7 +320,7 @@ Extract an archive asynchronously with security validation.
 | `archivePath` | `string` | Path to the archive file |
 | `outputDir` | `string` | Directory where files will be extracted |
 | `config` | `SecurityConfig` | Optional security configuration |
-| `options` | `ExtractionOptions` | Optional `new ExtractionOptions().withAtomic(true)` / `.withSkipDuplicates(true)` |
+| `options` | `ExtractionOptions` | Optional `new ExtractionOptions().withStaging('in_place' \| 'atomic' \| 'atomic_replace')` / `.withExistingFiles('skip' \| 'overwrite' \| 'refuse')` |
 
 **Returns:** `Promise<ExtractionReport>`
 
@@ -352,7 +357,7 @@ interface ExtractionReport {
   durationMs: number;         // Extraction duration in milliseconds
   filesSkipped: number;       // Entries skipped, over all reasons
   skipped: { counts: { kind: SkipKind; count: number }[]; sample: SkippedEntry[] }; // by reason
-  warnings: string[];         // Warning messages from extraction
+  warnings: ExtractionWarning[]; // Typed conditions worth surfacing; branch on `kind`, `message` is the text
 }
 ```
 
@@ -394,7 +399,8 @@ const result = await extractArchiveWithProgress(
 
 ### Exclude patterns
 
-`CreationConfig.addExcludePattern(pattern)` accepts four shapes: `name` (a path
+`CreationConfig.setExcludePatterns(patterns)` replaces the list (the defaults included)
+and `addExcludePattern(pattern)` appends one; both accept four shapes: `name` (a path
 component equal to it), `name*`, `*name` and `dir/sub` (that path and its
 subtree). Patterns match the entry's archive path, never the ancestors of a
 source directory, so for a source `src` write `build`, not `src/build`. Any
@@ -468,13 +474,51 @@ const config = new SecurityConfig()
   .setMaxFileCount(count)                    // Max number of files
   .setMaxCompressionRatio(n)                 // Max compression ratio (zip bomb detection)
   .addAllowedExtension(".txt")               // Restrict to a set of extensions (repeatable)
+  .setAllowedExtensions([".txt", ".md"])     // Replace the allowlist; null allows every extension, [] is refused
   .addBannedComponent("__MACOSX")            // Skip this path component (repeatable)
+  .setBannedComponents(["__MACOSX"])         // Replace the banned components; [] bans nothing
+  .addIncludePattern("src")                  // Extract only matching entries (repeatable, or setIncludePatterns([...]))
+  .addExcludePattern("*.tmp")                // Never extract matching entries; wins over include (or setExcludePatterns([...]))
+  .setStripComponents(1)                     // Drop leading path components, like tar --strip-components; null removes a count but keeps flatten
+  .setFlatten(true)                          // Land every file under its final component (replaces a strip count)
   .setAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
   .setZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'
   .setParallelDecodeMemory(256 * 1024 * 1024); // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread
 ```
 
-**Getters:** `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`. `parallelDecodeMemory` returns the 7z lookahead memory in bytes, or `null` when decoding runs on one thread. Each extract or verify call may start up to 16 worker threads and hold its own lookahead, so concurrent calls multiply both.
+**Getters:** `allowedExtensions` returns the allowlist, or `null` while every extension is allowed. `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`. `parallelDecodeMemory` returns the 7z lookahead memory in bytes, or `null` when decoding runs on one thread. Each extract or verify call may start up to 16 worker threads and hold its own lookahead, so concurrent calls multiply both.
+
+### Selecting and rewriting entries
+
+`includePatterns`, `excludePatterns`, `stripComponents` and `flatten` live on
+`SecurityConfig`, so `extractArchive*`, `extractArchiveToMemory`,
+`extractArchiveToCallback`, `listArchive*` and `verifyArchive*` apply the same
+selection with the same code. Order of operations: the original entry name is
+validated first (an unsafe name is refused even when it is not selected), then
+include and exclude patterns select entries, matching the path **before**
+stripping, then `stripComponents` or `flatten` rewrite the name, which is
+validated again. Patterns have four shapes (`name`, `name*`, `*name` and
+`dir/sub`, which selects that path and everything below it), compare raw
+components and are case-sensitive on every host. An empty pattern list selects
+everything.
+
+- Entries left out are counted in `skipped` as `'not_selected'`, and entries
+  with no component left after stripping, or directories under `flatten`, as
+  `'stripped_away'`. They are not charged to the size limits.
+- An include pattern that matches nothing fails the extraction after the
+  scan with `INVALID_CONFIGURATION` (`setting` `'entry_include'`) and
+  `unmatchedPatterns`; `'atomic'` rolls back. An exclude pattern that matches
+  nothing is not an error.
+- A hardlink whose target the selection leaves out, and any symlink or hardlink
+  under `flatten`, are refused with `SECURITY_VIOLATION`
+  (`subCode` `'LINK_TARGET'` and `'LINK_POLICY'`).
+- `'atomic_replace'` staging with a non-default selection is refused
+  (`INVALID_CONFIGURATION`, `setting` `'entry_selection'`).
+- `listArchive*` still lists every entry and adds `dispositions`: one object per
+  entry validation accepts, `{ kind: 'extract', path, landing }` or
+  `{ kind: 'skip', path, reason }`, computed with the listing's `SecurityConfig`
+  (an entry validation refuses is not reported). `verifyArchive*` reports the
+  refusals extraction would raise for the same selection as issues.
 
 ## Security Features
 

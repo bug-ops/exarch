@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use exarch_core::types::DestDir;
-use exarch_core::types::SafePath;
+use exarch_core::DestDir;
+use exarch_core::SafePath;
 use libfuzzer_sys::fuzz_target;
 use tempfile::TempDir;
 

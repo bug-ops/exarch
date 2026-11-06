@@ -13,6 +13,7 @@ use crate::ProgressDispatch;
 use crate::abort::AbortBinding;
 use crate::config::SecurityConfig;
 use crate::config::VerificationOptions;
+use crate::error::Operation;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise_with;
@@ -31,7 +32,10 @@ fn list_core(
     format: Option<ArchiveType>,
 ) -> CoreResult<ArchiveManifest> {
     data.run(format, |reader| {
-        ArchiveManifest::try_from(exarch_core::ListRequest::new(config).list_reader(reader)?)
+        ArchiveManifest::from_core(
+            exarch_core::ListRequest::new(config).list_reader(reader)?,
+            config,
+        )
     })
 }
 
@@ -58,15 +62,17 @@ fn list_with_progress_core(
     dispatch: ProgressDispatch,
 ) -> CoreResult<ArchiveManifest> {
     run_with_optional_progress(
+        Operation::Listing,
         progress,
         dispatch,
         data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
-                ArchiveManifest::try_from(
+                ArchiveManifest::from_core(
                     exarch_core::ListRequest::new(config)
                         .with_progress(progress)
                         .list_reader(reader)?,
+                    config,
                 )
             })
         },
@@ -83,6 +89,7 @@ fn verify_with_progress_core(
     dispatch: ProgressDispatch,
 ) -> CoreResult<VerificationReport> {
     run_with_optional_progress(
+        Operation::Verification,
         progress,
         dispatch,
         data.abort_handle(),
@@ -132,10 +139,6 @@ fn verify_with_progress_core(
 /// const manifest = await listArchiveBytes(fs.readFileSync('archive.tar.gz'));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn list_archive_bytes<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -179,10 +182,6 @@ pub fn list_archive_bytes<'env>(
 /// const manifest = listArchiveBytesSync(fs.readFileSync('archive.zip'));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn list_archive_bytes_sync(
     env: Env,
     data: Uint8Array,
@@ -221,10 +220,6 @@ pub fn list_archive_bytes_sync(
 /// const report = await verifyArchiveBytes(fs.readFileSync('archive.zip'));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn verify_archive_bytes<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -272,10 +267,6 @@ pub fn verify_archive_bytes<'env>(
 /// const report = verifyArchiveBytesSync(fs.readFileSync('archive.zip'));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn verify_archive_bytes_sync(
     env: Env,
     data: Uint8Array,
@@ -330,10 +321,6 @@ pub fn verify_archive_bytes_sync(
 /// );
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn list_archive_bytes_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -402,10 +389,6 @@ pub fn list_archive_bytes_with_progress<'env>(
 /// );
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn verify_archive_bytes_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -472,10 +455,6 @@ pub fn verify_archive_bytes_with_progress<'env>(
 /// );
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn list_archive_bytes_with_progress_sync(
     env: Env,
     data: Uint8Array,
@@ -531,10 +510,6 @@ pub fn list_archive_bytes_with_progress_sync(
 /// );
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn verify_archive_bytes_with_progress_sync(
     env: Env,
     data: Uint8Array,

@@ -462,7 +462,7 @@ impl<S: Read + Seek> Read for UnitInput<'_, S> {
         if self.buf_pos == self.buf.len() {
             let remaining = self.end - self.pos;
             if remaining == 0 {
-                return Ok(self.terminator.take().map_or(0, |byte| {
+                return Ok(self.terminator.take().map_or_default(|byte| {
                     out[0] = byte;
                     1
                 }));

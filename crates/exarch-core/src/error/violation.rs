@@ -258,6 +258,9 @@ pub enum Violation {
         /// The blocking parent.
         parent: Box<str>,
     },
+    /// The destination changed between the check that vetted it and the
+    /// replace that acts on it.
+    DestinationChanged,
     /// The entry would replace an existing symlink.
     ReplacesSymlink {
         /// The entry path.
@@ -349,6 +352,28 @@ pub enum Violation {
         /// The filesystem error, rendered.
         cause: Box<str>,
     },
+    /// A hardlink whose target entry the extraction does not write.
+    HardlinkTargetNotExtracted {
+        /// The hardlink entry path.
+        link: Box<str>,
+        /// The target path, as the archive names it.
+        target: Box<str>,
+    },
+    /// A hardlink whose target path is the landing of several entries, after
+    /// stripping or flattening made them collide.
+    HardlinkTargetAmbiguous {
+        /// The hardlink entry path.
+        link: Box<str>,
+        /// The landing several entries map to.
+        target: Box<str>,
+    },
+    /// A symlink or hardlink entry under a flattening rewrite.
+    LinkUnderFlatten {
+        /// Which kind of link the entry is.
+        kind: LinkKind,
+        /// The entry path.
+        name: Box<str>,
+    },
     /// A source path to archive lies outside the archive root.
     SourceOutsideRoot {
         /// The source path.
@@ -405,10 +430,14 @@ impl Violation {
             | Self::DeclaredSizeExceeded { .. }
             | Self::DeclaredSizeMismatch { .. }
             | Self::HardlinkTargetChanged
+            | Self::DestinationChanged
             | Self::TarSyntheticBudget { .. }
             | Self::SymlinksUnsupported
             | Self::ConflictUnlessSkipped { .. }
             | Self::ConflictFails { .. }
+            | Self::HardlinkTargetNotExtracted { .. }
+            | Self::HardlinkTargetAmbiguous { .. }
+            | Self::LinkUnderFlatten { .. }
             | Self::SourceOutsideRoot { .. } => None,
         }
     }
@@ -435,8 +464,10 @@ impl Violation {
             | Self::LinkTargetMissing(_)
             | Self::LinkTargetUnread(_)
             | Self::LinkTargetUnreadable(_)
+            | Self::HardlinkTargetNotExtracted { .. }
+            | Self::HardlinkTargetAmbiguous { .. }
             | Self::ReparsePointTarget { .. } => C::LinkTarget,
-            Self::LinksNotAllowed(_) => C::LinkPolicy,
+            Self::LinksNotAllowed(_) | Self::LinkUnderFlatten { .. } => C::LinkPolicy,
             Self::SymlinkComponent { .. }
             | Self::SymlinkParent { .. }
             | Self::ReplacesSymlink { .. } => C::ExistingSymlink,
@@ -451,7 +482,7 @@ impl Violation {
             Self::DeclaredSizeExceeded { .. } | Self::DeclaredSizeMismatch { .. } => {
                 C::DeclaredSize
             }
-            Self::HardlinkTargetChanged => C::ConcurrentChange,
+            Self::HardlinkTargetChanged | Self::DestinationChanged => C::ConcurrentChange,
             Self::TarMetadataBudget { .. } | Self::TarSyntheticBudget { .. } => C::TarMetadata,
             Self::SymlinksUnsupported => C::Platform,
             Self::ConflictUnlessSkipped { .. } | Self::ConflictFails { .. } => C::OutputConflict,
@@ -603,6 +634,9 @@ impl fmt::Display for Violation {
             Self::HardlinkTargetChanged => {
                 f.write_str("hardlink target changed while it was being copied")
             }
+            Self::DestinationChanged => {
+                f.write_str("the destination changed while it was being replaced")
+            }
             Self::TarMetadataBudget { limit } => fmt_tar_read_budget(f, *limit),
             Self::TarSyntheticBudget { limit } => fmt_tar_synthetic_budget(f, *limit),
             Self::SymlinksUnsupported => f.write_str("symlinks are not supported on this platform"),
@@ -612,6 +646,17 @@ impl fmt::Display for Violation {
             ),
             Self::ConflictFails { rel, cause } => {
                 write!(f, "extraction fails at {rel}: {cause}")
+            }
+            Self::HardlinkTargetNotExtracted { link, target } => write!(
+                f,
+                "hardlink {link} points at {target}, which the selection does not extract"
+            ),
+            Self::HardlinkTargetAmbiguous { link, target } => write!(
+                f,
+                "hardlink {link} points at {target}, which several entries map to"
+            ),
+            Self::LinkUnderFlatten { kind, name } => {
+                write!(f, "flattening refuses {kind} entries: {name}")
             }
             Self::SourceOutsideRoot { path, root } => {
                 write!(f, "path {path} is not under root directory: {root}")
@@ -803,6 +848,7 @@ mod tests {
                 None,
             ),
             (Violation::HardlinkTargetChanged, C::ConcurrentChange, None),
+            (Violation::DestinationChanged, C::ConcurrentChange, None),
             (
                 Violation::TarMetadataBudget { limit: 1 },
                 C::TarMetadata,
@@ -831,6 +877,30 @@ mod tests {
                 None,
             ),
             (
+                Violation::HardlinkTargetNotExtracted {
+                    link: text("l"),
+                    target: text("t"),
+                },
+                C::LinkTarget,
+                None,
+            ),
+            (
+                Violation::HardlinkTargetAmbiguous {
+                    link: text("l"),
+                    target: text("t"),
+                },
+                C::LinkTarget,
+                None,
+            ),
+            (
+                Violation::LinkUnderFlatten {
+                    kind: link,
+                    name: text("n"),
+                },
+                C::LinkPolicy,
+                None,
+            ),
+            (
                 Violation::SourceOutsideRoot {
                     path: text("p"),
                     root: text("r"),
@@ -853,7 +923,7 @@ mod tests {
     /// The text of each `one_of_each` row, in order; byte-identical to the
     /// pre-typing messages (verified by the security audit), and callers match
     /// on them, so a wording change must be a deliberate edit here.
-    const EXPECTED_TEXT: [&str; 43] = [
+    const EXPECTED_TEXT: [&str; 47] = [
         "empty path not allowed",
         "path contains null bytes: p",
         "path contains null bytes - potential security issue",
@@ -891,11 +961,15 @@ mod tests {
         "decompressed size exceeded the declared uncompressed size of 1 bytes",
         "decompressed size (2 bytes) does not match the declared uncompressed size (1 bytes)",
         "hardlink target changed while it was being copied",
+        "the destination changed while it was being replaced",
         "TAR metadata read budget exceeded: more than 1 bytes read while searching for the next archive entry (long-name/long-link/PAX headers, or a run of GNU sparse extension blocks)",
         "TAR cumulative synthetic-byte drain budget exceeded: more than 1 bytes of synthesized (unbacked) padding drained from unread entries across this archive",
         "symlinks are not supported on this platform",
         "extraction can fail at r unless duplicates are skipped: c",
         "extraction fails at r: c",
+        "hardlink l points at t, which the selection does not extract",
+        "hardlink l points at t, which several entries map to",
+        "flattening refuses symlink entries: n",
         "path p is not under root directory: r",
     ];
 

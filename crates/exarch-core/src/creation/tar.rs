@@ -77,7 +77,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     let mut tracker = ProgressTracker::new(progress, total_entries);
 
     for entry in &entries {
-        let mut guard = tracker.begin(&entry.archive_path);
+        let mut guard = tracker.begin(&entry.archive_path)?;
         match &entry.entry_type {
             EntryType::File => add_file_to_tar_with_progress_impl(
                 &mut builder,
@@ -110,8 +110,8 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
             }
         }
         guard.complete();
-        tracker.check_cancelled()?;
     }
+    tracker.check_cancelled()?;
 
     // Finish writing TAR
     builder.finish()?;
@@ -138,7 +138,7 @@ fn add_directory_to_tar<W: Write>(
     header.set_entry_type(tar::EntryType::Directory);
     header.set_size(0);
 
-    if config.preserve_permissions {
+    if config.permissions.preserves() {
         let metadata = std::fs::metadata(dir_path).map_err(|e| source_error(dir_path, e))?;
         set_permissions(&mut header, &metadata);
     } else {
@@ -178,7 +178,7 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
     header.set_size(size);
     header.set_cksum();
 
-    if config.preserve_permissions {
+    if config.permissions.preserves() {
         set_permissions(&mut header, &metadata);
     }
 

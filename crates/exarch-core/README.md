@@ -43,29 +43,32 @@ fn main() -> Result<(), exarch_core::ArchiveError> {
 > Since v0.6.1, `ArchiveError`, `QuotaResource`, `ArchiveType`, `CompressionCodec`, `IssueCategory`, and `EntryType` are `#[non_exhaustive]` too — an exhaustive `match` on any of them (including the `Error Handling` example below) needs a wildcard `_` arm.
 
 ```rust
-use exarch_core::{non_zero, ratio_limit, Extension, SecurityConfig};
+use exarch_core::{non_zero, ratio_limit, Extension, ExtensionFilter, SecurityConfig};
 
 let config = SecurityConfig::default()
     .with_max_file_size(non_zero!(100 * 1024 * 1024))    // 100 MB per file
     .with_max_total_size(non_zero!(1024 * 1024 * 1024))  // 1 GB total
     .with_max_file_count(non_zero!(10_000))              // Max 10k files
     .with_max_compression_ratio(ratio_limit!(50.0)) // 50x compression limit
-    .with_allowed_extensions(vec![Extension::try_from(".tar")?, Extension::try_from(".gz")?]); // optional allowlist
+    .with_allowed_extensions(ExtensionFilter::only(vec![
+        Extension::try_from(".tar")?,
+        Extension::try_from(".gz")?,
+    ])?); // optional allowlist; an empty list is refused, `ExtensionFilter::Any` is the default
 ```
 
-Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_solid_archives`, `with_solid_limits`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`, `with_decode_reuse`.
+Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_solid_archives`, `with_solid_limits`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`. On `ExtractionOptions`: `with_staging` (`Staging::{InPlace, Atomic, AtomicReplace}`), `with_existing_files` (`ExistingFiles::{Skip, Overwrite, Refuse}`), `with_decode_reuse`.
 
 ### Request Values
 
 Optional inputs (options, progress) are setters on a request value instead of more functions:
 
 ```rust
-use exarch_core::{ExtractRequest, ExtractionOptions, NoopProgress, SecurityConfig};
+use exarch_core::{ExtractRequest, ExtractionOptions, NoopProgress, SecurityConfig, Staging};
 
 let config = SecurityConfig::default();
 let mut progress = NoopProgress;
 let report = ExtractRequest::new(&config)
-    .with_options(ExtractionOptions::default().with_atomic(true))
+    .with_options(ExtractionOptions::default().with_staging(Staging::Atomic))
     .with_progress(&mut progress)
     .extract("archive.tar.gz", "/output/path")?;
 ```
@@ -113,7 +116,7 @@ println!("Created {} files", report.files_added);
 
 ```rust
 use exarch_core::{CreateRequest, CreationConfig, ExcludePattern, OutputFile};
-use exarch_core::creation::CompressionLevel;
+use exarch_core::CompressionLevel;
 
 let config = CreationConfig::default()
     .with_compression_level(CompressionLevel::try_from(9u8)?)

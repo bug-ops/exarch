@@ -1,6 +1,5 @@
 //! Archive listing implementation.
 
-use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -26,6 +25,7 @@ use crate::formats::common::check_entry_name_limits;
 use crate::formats::common::encrypted_archive_error;
 use crate::formats::common::is_extension_allowed;
 use crate::formats::common::normalize_entry_name;
+use crate::formats::common::open_archive;
 use crate::formats::common::symlink_target_too_large;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
@@ -228,14 +228,19 @@ impl Progress<'_> {
 
     /// Announces the entry at `path`; the guard closes it when completed or
     /// dropped, including on an early `?` return.
-    pub(crate) fn begin<'p>(&'p mut self, path: &'p Path) -> EntryCompleteGuard<'p> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::Cancelled`] without announcing the entry when
+    /// the callback asks to stop.
+    pub(crate) fn begin<'p>(&'p mut self, path: &'p Path) -> Result<EntryCompleteGuard<'p>> {
         let position = crate::EntryPosition::at_index(self.started, self.total);
         self.started += 1;
         let callback: &'p mut dyn ProgressCallback = match &mut self.reporter {
             Reporter::Noop(noop) => noop,
             Reporter::Callback(callback) => &mut **callback,
         };
-        EntryCompleteGuard::start(callback, path, position)
+        EntryCompleteGuard::try_start(callback, path, position)
     }
 }
 
@@ -248,6 +253,7 @@ pub(crate) struct ListPass<'a, 'c> {
 impl<'a, 'c> ListPass<'a, 'c> {
     /// A bare listing with the default [`StoredTargets`], which leaves 7z link
     /// targets unread.
+    #[cfg(test)]
     pub(crate) const fn strict() -> Self {
         Self::strict_with(StoredTargets::Skip)
     }
@@ -300,17 +306,23 @@ enum ListMode {
 /// Reserves quota for a listed entry; the pre-flight lifts only the per-file
 /// size limit.
 ///
-/// A regular file the extension allowlist excludes is skipped by extraction
-/// before it charges any bytes, so it is charged to `max_file_count` alone:
-/// the manifest stays bounded without counting bytes never written.
+/// An entry the selection leaves out, and a regular file the extension
+/// allowlist excludes, are skipped by extraction before they charge any bytes,
+/// so they are charged to `max_file_count` alone: the manifest stays bounded
+/// without counting bytes never written.
 fn reserve_entry(
     quota: &mut QuotaTracker,
     size: u64,
     config: &SecurityConfig,
     mode: ListMode,
-    file_at: Option<&Path>,
+    path: &Path,
+    kind: NodeKind,
+    is_file: bool,
 ) -> Result<Reservation> {
-    let skipped = file_at.is_some_and(|path| !is_extension_allowed(path, config));
+    let skipped = config
+        .selection
+        .lexical_landing(path, kind)
+        .is_none_or(|landing| is_file && !is_extension_allowed(&landing, config));
     match (skipped, mode) {
         (true, _) => quota.reserve_count(config).map(|_| Reservation::Skipped),
         (false, ListMode::Strict) => quota.reserve(size, config).map(|_| Reservation::Charged),
@@ -403,7 +415,7 @@ fn list_tar_entries<R: std::io::Read>(
     trailer: TarTrailer,
 ) -> Result<ArchiveManifest> {
     let list_mode = listing.mode();
-    let mut manifest = ArchiveManifest::new(format);
+    let mut manifest = ArchiveManifest::with_selection(format, config.selection.clone());
     let mut quota = QuotaTracker::new();
     let skip_limits = SkipLimits::of(config);
 
@@ -443,9 +455,18 @@ fn list_tar_entries<R: std::io::Read>(
             // A rejection anywhere in this body abandons the entry (`settle`),
             // so the guard never decodes a refused entry to its end on the way
             // out.
-            let file_at = matches!(tar_node(entry.header().entry_type()), Ok(TarNode::File))
-                .then_some(path.as_path());
-            let reservation = reserve_entry(&mut quota, size, config, list_mode, file_at)?;
+            let node = tar_node(entry.header().entry_type());
+            let is_file = matches!(node, Ok(TarNode::File));
+            let reserved_kind = NodeKind::directory_if(matches!(node, Ok(TarNode::Directory)));
+            let reservation = reserve_entry(
+                &mut quota,
+                size,
+                config,
+                list_mode,
+                &path,
+                reserved_kind,
+                is_file,
+            )?;
             // An integrity pass decodes the payload itself, below.
             if reservation == Reservation::Skipped {
                 if listing.integrity().is_none() {
@@ -469,14 +490,7 @@ fn list_tar_entries<R: std::io::Read>(
             require_non_empty_name(&path)?;
             let tar_type = effective_entry_type(entry)?;
             let kind = NodeKind::directory_if(tar_type == tar::EntryType::Directory);
-            if !admit_path(
-                &path,
-                kind,
-                file_at.is_some(),
-                config,
-                &mut manifest,
-                listing,
-            )? {
+            if !admit_path(&path, kind, is_file, config, &mut manifest, listing)? {
                 return Ok(());
             }
 
@@ -500,7 +514,7 @@ fn list_tar_entries<R: std::io::Read>(
                 mode: pass_mode,
                 progress,
             } = &mut *listing;
-            let in_flight = progress.begin(&archive_entry.path);
+            let in_flight = progress.begin(&archive_entry.path)?;
             if let Some(pass) = pass_mode.integrity() {
                 let slot = pass.begin_entry(size, &archive_entry.compression);
                 if entry_type == ManifestEntryType::File && size > 0 {
@@ -583,7 +597,7 @@ fn list_zip(
     config: &SecurityConfig,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let file = File::open(archive_path)?;
+    let file = open_archive(archive_path)?;
     ZipArchive::new(file, config)?.list_with(config, listing)
 }
 
@@ -593,6 +607,7 @@ fn list_zip(
 /// archive. `format` is passed through into `ArchiveManifest` as-is. `budget`
 /// must be the handle returned alongside `reader` from the same
 /// `budgeted_reader` call.
+#[cfg(test)]
 pub(crate) fn list_tar_reader<R: Read>(
     reader: crate::formats::tar_metadata_limit::BudgetedReader<R>,
     budget: TarReadBudget,
@@ -621,7 +636,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let list_mode = listing.mode();
-    let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
+    let mut manifest = ArchiveManifest::with_selection(ArchiveType::Zip, config.selection.clone());
     let mut quota = QuotaTracker::new();
     let reported = archive.structure().findings().to_vec();
     let archive = archive.reader_mut();
@@ -660,16 +675,17 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         };
         let kind = zip_node_kind(&path, &entry)?;
         let entry_type = convert_zip_entry_type(&entry, kind);
-        let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
-        reserve_entry(&mut quota, entry.size(), config, list_mode, file_at)?;
-        if !admit_path(
+        let is_file = entry_type == ManifestEntryType::File;
+        reserve_entry(
+            &mut quota,
+            entry.size(),
+            config,
+            list_mode,
             &path,
             kind,
-            file_at.is_some(),
-            config,
-            &mut manifest,
-            listing,
-        )? {
+            is_file,
+        )?;
+        if !admit_path(&path, kind, is_file, config, &mut manifest, listing)? {
             continue;
         }
 
@@ -691,7 +707,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             mode: pass_mode,
             progress,
         } = &mut *listing;
-        let in_flight = progress.begin(&path);
+        let in_flight = progress.begin(&path)?;
         let mut tracked = pass_mode.integrity().map(|pass| {
             let slot = pass.begin_entry(size, &compression);
             (pass, slot)
@@ -910,7 +926,8 @@ fn list_sevenz_archive(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ListedSevenZ> {
     let list_mode = listing.mode();
-    let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
+    let mut manifest =
+        ArchiveManifest::with_selection(ArchiveType::SevenZ, config.selection.clone());
     let mut quota = QuotaTracker::new();
     let compression = sevenz_entry_compression(header, source_len)?;
     // One element per archive file: the integrity slot of the manifest entry it
@@ -939,8 +956,16 @@ fn list_sevenz_archive(
         // pre-existing divergence.
         let path = PathBuf::from(normalize_entry_name(&entry.name));
         let entry_type = kind.manifest_type();
-        let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
-        reserve_entry(&mut quota, entry.size, config, list_mode, file_at)?;
+        let is_file = entry_type == ManifestEntryType::File;
+        reserve_entry(
+            &mut quota,
+            entry.size,
+            config,
+            list_mode,
+            &path,
+            kind.node_kind(),
+            is_file,
+        )?;
 
         if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });
@@ -950,7 +975,7 @@ fn list_sevenz_archive(
         if !admit_path(
             &path,
             kind.node_kind(),
-            file_at.is_some(),
+            is_file,
             config,
             &mut manifest,
             listing,
@@ -974,7 +999,7 @@ fn list_sevenz_archive(
         slots.push(slot);
         // A payload with a slot is announced from its block decode instead.
         if !is_decode_announced(header, index, slot.is_some()) {
-            progress.begin(&path).complete();
+            progress.begin(&path)?.complete();
         }
 
         let target = if kind == SevenZKind::ReparsePoint {
@@ -1021,7 +1046,7 @@ fn list_sevenz(
     config: &SecurityConfig,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let mut file = File::open(archive_path)?;
+    let mut file = open_archive(archive_path)?;
     list_sevenz_reader(&mut file, config, listing)
 }
 
@@ -1037,8 +1062,9 @@ fn list_sevenz(
 /// A root entry (`.`) whose `kind` is not a directory fails the listing in
 /// either mode, so no list handler can skip the root-entry rule.
 ///
-/// A file the extension allowlist skips is never created, so its length is
-/// not checked, as in extraction.
+/// A file the extension allowlist skips and an entry the selection leaves out
+/// are never created, so their length is not checked, as in extraction; an
+/// entry that is rewritten is checked at its landing.
 fn admit_path(
     path: &Path,
     kind: NodeKind,
@@ -1048,7 +1074,10 @@ fn admit_path(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<bool> {
     EntryPath::of(path).require_directory_root(kind)?;
-    if check_entry_name_limits(PathModel::Host, path, regular_file, config).is_ok() {
+    let Some(landing) = config.selection.lexical_landing(path, kind) else {
+        return Ok(true);
+    };
+    if check_entry_name_limits(PathModel::Host, &landing, regular_file, config).is_ok() {
         return Ok(true);
     }
     if listing.mode() == ListMode::Strict {

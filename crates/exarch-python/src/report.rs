@@ -1,26 +1,31 @@
 //! Python bindings for report types.
 
+use exarch_core::ArchiveEntry;
+use exarch_core::ArchiveManifest;
 use exarch_core::ConfigSetting;
+use exarch_core::CreationReport as CoreCreationReport;
+use exarch_core::Disposition;
 use exarch_core::ExtractionReport as CoreExtractionReport;
+use exarch_core::IntegrityGaps;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
 use exarch_core::Skip as CoreSkip;
 use exarch_core::SkipKind;
 use exarch_core::Skips as CoreSkips;
-use exarch_core::creation::CreationReport as CoreCreationReport;
-use exarch_core::inspection::IntegrityGaps;
-use exarch_core::inspection::manifest::ArchiveEntry;
-use exarch_core::inspection::manifest::ArchiveManifest;
-use exarch_core::inspection::report::VerificationIssue;
-use exarch_core::inspection::report::VerificationReport;
+use exarch_core::VerificationIssue;
+use exarch_core::VerificationReport;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::path::PathBuf;
 
 use crate::buffer::parse_one;
+use crate::config::PySecurityConfig;
+use crate::warning::creation_warnings;
+use crate::warning::extraction_warnings;
 
 /// One entry an operation left out.
 ///
@@ -30,8 +35,8 @@ use crate::buffer::parse_one;
 ///   `"excluded"`, `"hidden"`, `"over_max_file_size"`, `"symlink_unsupported"`
 ///   or `"unreadable"`)
 /// * `path` - The entry's path as the operation names it
-/// * `io_kind` - The description of the I/O failure behind an `"unreadable"`
-///   skip, else `None`
+/// * `io_kind` - The stable kind of the I/O failure behind an `"unreadable"`
+///   skip (`"PermissionDenied"`, ...), else `None`
 #[pyclass(name = "Skip", frozen)]
 pub struct PySkip {
     kind: SkipKind,
@@ -70,7 +75,7 @@ impl From<&CoreSkip> for PySkip {
         Self {
             kind: skip.kind,
             path: skip.path.clone(),
-            io_kind: skip.io_kind.map(|kind| kind.to_string()),
+            io_kind: skip.io_kind.map(|kind| kind.as_str().to_owned()),
         }
     }
 }
@@ -143,7 +148,7 @@ impl From<CoreSkips> for PySkips {
 /// * `duration_ms` - Extraction duration in milliseconds
 /// * `files_skipped` - Number of entries skipped
 /// * `skipped` - The skipped entries by kind
-/// * `warnings` - List of warning messages
+/// * `warnings` - List of typed warnings
 #[pyclass(name = "ExtractionReport")]
 #[derive(Clone)]
 pub struct PyExtractionReport {
@@ -194,19 +199,16 @@ impl PyExtractionReport {
         PySkips::from(self.inner.skipped.clone())
     }
 
-    /// Returns a copy of the warning messages list.
+    /// Returns the typed warnings (`AntiItemsSkippedWarning`,
+    /// `BackupCleanupFailedWarning`).
     ///
     /// # Performance
     ///
-    /// This method clones the entire list on each access. If you need to access
-    /// the warnings multiple times, cache the result in a local variable.
+    /// This method builds a new list on each access. If you need to access the
+    /// warnings multiple times, cache the result in a local variable.
     #[getter]
-    fn warnings(&self) -> Vec<String> {
-        self.inner
-            .warnings
-            .iter()
-            .map(ToString::to_string)
-            .collect()
+    fn warnings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        extraction_warnings(py, &self.inner.warnings)
     }
 
     /// Returns total number of items processed.
@@ -266,7 +268,7 @@ impl From<CoreExtractionReport> for PyExtractionReport {
 /// * `bytes_compressed` - Total compressed bytes
 /// * `duration_ms` - Creation duration in milliseconds
 /// * `files_skipped` - Number of files skipped
-/// * `warnings` - List of warning messages
+/// * `warnings` - List of typed warnings
 #[pyclass(name = "CreationReport")]
 #[derive(Clone)]
 pub struct PyCreationReport {
@@ -316,12 +318,8 @@ impl PyCreationReport {
     }
 
     #[getter]
-    fn warnings(&self) -> Vec<String> {
-        self.inner
-            .warnings
-            .iter()
-            .map(ToString::to_string)
-            .collect()
+    fn warnings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        creation_warnings(py, &self.inner.warnings)
     }
 
     fn total_items(&self) -> usize {
@@ -689,6 +687,28 @@ impl PyArchiveManifest {
         self.inner.format().as_str().to_owned()
     }
 
+    /// What extraction would do with each entry the validation accepts: where
+    /// it lands, or why it is left out.
+    ///
+    /// The selection is the one the manifest was listed with (the
+    /// `SecurityConfig` passed to `list_archive`); `config` supplies only the
+    /// limits and policies, `None` meaning the secure defaults. An entry the
+    /// validation refuses is not reported.
+    #[pyo3(signature = (config=None))]
+    fn dispositions(
+        &self,
+        py: Python<'_>,
+        config: Option<PyRef<'_, PySecurityConfig>>,
+    ) -> PyResult<Vec<Py<PyEntryDisposition>>> {
+        let config = PySecurityConfig::snapshot(config);
+        self.inner
+            .dispositions(&config)
+            .map(|(entry, disposition)| {
+                PyEntryDisposition::into_py(py, entry.path.clone(), disposition)
+            })
+            .collect()
+    }
+
     fn __str__(&self) -> String {
         format!(
             "ArchiveManifest(entries={}, total_size={} bytes, format={})",
@@ -706,6 +726,88 @@ impl PyArchiveManifest {
 impl From<ArchiveManifest> for PyArchiveManifest {
     fn from(inner: ArchiveManifest) -> Self {
         Self { inner }
+    }
+}
+
+/// What extraction does with one listed entry.
+///
+/// The concrete class tells which: `ExtractDisposition` (the entry lands at
+/// `landing`) or `SkipDisposition` (the entry is validated but left out, for
+/// `kind`).
+///
+/// # Attributes
+///
+/// * `path` - The entry's path in the archive
+#[pyclass(name = "EntryDisposition", subclass, frozen)]
+pub struct PyEntryDisposition {
+    path: PathBuf,
+}
+
+#[pymethods]
+impl PyEntryDisposition {
+    #[getter]
+    fn path(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
+}
+
+/// An entry that extraction writes.
+///
+/// # Attributes
+///
+/// * `landing` - Where it lands, relative to the destination, after any strip
+///   or flatten
+#[pyclass(name = "ExtractDisposition", extends = PyEntryDisposition, frozen)]
+pub struct PyExtractDisposition {
+    landing: PathBuf,
+}
+
+#[pymethods]
+impl PyExtractDisposition {
+    #[getter]
+    fn landing(&self) -> &OsStr {
+        self.landing.as_os_str()
+    }
+}
+
+/// An entry that is validated but not extracted.
+///
+/// # Attributes
+///
+/// * `kind` - Why: `"not_selected"`, `"stripped_away"`,
+///   `"extension_not_allowed"`, ...
+#[pyclass(name = "SkipDisposition", extends = PyEntryDisposition, frozen)]
+pub struct PySkipDisposition {
+    kind: SkipKind,
+}
+
+#[pymethods]
+impl PySkipDisposition {
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind.as_str()
+    }
+}
+
+impl PyEntryDisposition {
+    fn into_py(py: Python<'_>, path: PathBuf, disposition: Disposition) -> PyResult<Py<Self>> {
+        let init = PyClassInitializer::from(Self { path });
+        match disposition {
+            Disposition::Extract(landing) => Bound::new(
+                py,
+                init.add_subclass(PyExtractDisposition {
+                    landing: landing.into_path_buf(),
+                }),
+            )
+            .map(|d| d.into_super().unbind()),
+            Disposition::Skip(kind) => {
+                Bound::new(py, init.add_subclass(PySkipDisposition { kind }))
+                    .map(|d| d.into_super().unbind())
+            }
+            _ => Err(PyRuntimeError::new_err(
+                "exarch-python is older than exarch-core: unknown entry disposition",
+            )),
+        }
     }
 }
 
@@ -770,6 +872,16 @@ impl PyVerificationIssue {
             .ffi_kind()
             .and_then(exarch_core::FfiKind::setting)
             .map(exarch_core::ConfigSetting::as_str)
+    }
+
+    /// The stable kind of the I/O failure of an `IO_ERROR` refusal, else
+    /// `None`.
+    #[getter]
+    fn io_kind(&self) -> Option<&'static str> {
+        match self.inner.ffi_kind() {
+            Some(exarch_core::FfiKind::Io(kind)) => Some(exarch_core::IoKind::from(*kind).as_str()),
+            _ => None,
+        }
     }
 
     /// The permission bits the finding is about (an invalid-permissions
@@ -977,7 +1089,7 @@ mod tests {
         skips
     }
     use exarch_core::Compressed;
-    use exarch_core::inspection::manifest::ManifestEntryKind;
+    use exarch_core::ManifestEntryKind;
     use std::time::Duration;
 
     #[test]
@@ -1018,7 +1130,7 @@ mod tests {
         assert_eq!(py_report.total_items(), 17, "total_items should be 17");
         assert!(py_report.has_warnings(), "should have warnings");
         assert_eq!(
-            py_report.warnings().len(),
+            warning_count(&py_report),
             1,
             "warnings list should have 1 item"
         );
@@ -1064,7 +1176,7 @@ mod tests {
             "should not have warnings by default"
         );
         assert_eq!(
-            py_report.warnings().len(),
+            warning_count(&py_report),
             0,
             "warnings list should be empty"
         );
@@ -1123,30 +1235,47 @@ mod tests {
         );
     }
 
+    fn warning_count(report: &PyExtractionReport) -> usize {
+        pyo3::Python::initialize();
+        Python::attach(|py| report.warnings(py).expect("warnings build").len())
+    }
+
     #[test]
-    fn test_warnings_clone_behavior() {
+    fn test_warnings_are_typed_and_rebuilt_on_each_access() {
+        pyo3::Python::initialize();
         let mut core_report = CoreExtractionReport::new();
         core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 });
         core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 2 });
-
         let py_report = PyExtractionReport::from(core_report);
 
-        // Get warnings twice to verify clone behavior
-        let warnings1 = py_report.warnings();
-        let warnings2 = py_report.warnings();
-
-        assert_eq!(warnings1.len(), 2, "First call should return 2 warnings");
-        assert_eq!(
-            warnings2.len(),
-            2,
-            "Second call should also return 2 warnings"
-        );
-        assert_eq!(warnings1, warnings2, "Both calls should return equal lists");
+        Python::attach(|py| {
+            for _ in 0..2 {
+                let warnings = py_report.warnings(py).expect("warnings build");
+                assert_eq!(warnings.len(), 2);
+                let second = warnings.get_item(1).expect("second warning");
+                assert!(
+                    second
+                        .cast::<crate::warning::PyAntiItemsSkippedWarning>()
+                        .is_ok()
+                );
+                let count: u64 = second
+                    .getattr("count")
+                    .expect("count")
+                    .extract()
+                    .expect("u64");
+                let kind: String = second
+                    .getattr("kind")
+                    .expect("kind")
+                    .extract()
+                    .expect("str");
+                assert_eq!((count, kind.as_str()), (2, "anti_items_skipped"));
+            }
+        });
     }
 
     #[test]
     fn test_creation_report_properties() {
-        use exarch_core::creation::CreationReport;
+        use exarch_core::CreationReport;
 
         let mut core_report = CreationReport::new();
         core_report.files_added = 20;
@@ -1156,11 +1285,9 @@ mod tests {
         core_report.bytes_compressed = 1024;
         core_report.duration = Duration::from_millis(750);
         core_report.skipped = skipped(2);
-        core_report.add_warning(
-            exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
-                reason: "Skipped file".to_string(),
-            },
-        );
+        core_report.add_warning(exarch_core::CreationWarning::ZipRatioCheckFailed {
+            reason: "Skipped file".to_string(),
+        });
 
         let py_report = PyCreationReport::from(core_report);
 
@@ -1197,7 +1324,7 @@ mod tests {
 
     #[test]
     fn test_creation_report_str() {
-        use exarch_core::creation::CreationReport;
+        use exarch_core::CreationReport;
 
         let core_report = CreationReport::new();
         let py_report = PyCreationReport::from(core_report);
@@ -1319,7 +1446,7 @@ mod tests {
 
     #[test]
     fn test_archive_manifest_properties() {
-        use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
         for (name, size) in [("file1.txt", 100), ("file2.txt", 200)] {
@@ -1429,10 +1556,16 @@ mod tests {
 
     #[test]
     fn test_pyi_literal_aliases_match_core_enums() {
+        use exarch_core::ArchiveType;
+        use exarch_core::CheckStatus;
         use exarch_core::ConfigSetting;
+        use exarch_core::CreatableFormat;
         use exarch_core::ErrorCode;
         use exarch_core::IntegrityStatus;
         use exarch_core::InvalidArchiveSubCode;
+        use exarch_core::IssueCategory;
+        use exarch_core::IssueSeverity;
+        use exarch_core::ManifestEntryType;
         use exarch_core::MemoryEntryKind;
         use exarch_core::PartialWrites;
         use exarch_core::PathModel;
@@ -1441,14 +1574,8 @@ mod tests {
         use exarch_core::SkipKind;
         use exarch_core::SubCode;
         use exarch_core::UnverifiedReason;
+        use exarch_core::VerificationStatus;
         use exarch_core::ZipConsistencyPolicy;
-        use exarch_core::formats::detect::ArchiveType;
-        use exarch_core::formats::detect::CreatableFormat;
-        use exarch_core::inspection::CheckStatus;
-        use exarch_core::inspection::IssueCategory;
-        use exarch_core::inspection::IssueSeverity;
-        use exarch_core::inspection::VerificationStatus;
-        use exarch_core::inspection::manifest::ManifestEntryType;
 
         let pyi = include_str!("../exarch.pyi");
         let expected = [
@@ -1526,8 +1653,57 @@ mod tests {
     }
 
     #[test]
+    fn test_pyi_literal_aliases_match_core_option_and_warning_enums() {
+        let pyi = include_str!("../exarch.pyi");
+        let expected = [
+            literal_line(
+                "_ExistingFiles",
+                exarch_core::ExistingFiles::ALL,
+                exarch_core::ExistingFiles::as_str,
+            ),
+            literal_line(
+                "_ProtectedPath",
+                exarch_core::ProtectedPath::ALL,
+                exarch_core::ProtectedPath::as_str,
+            ),
+            literal_line(
+                "_Staging",
+                exarch_core::Staging::ALL,
+                exarch_core::Staging::as_str,
+            ),
+            literal_line(
+                "_IoKind",
+                exarch_core::IoKind::ALL,
+                exarch_core::IoKind::as_str,
+            ),
+            literal_line(
+                "_BackupIdentity",
+                exarch_core::BackupIdentity::ALL,
+                exarch_core::BackupIdentity::as_str,
+            ),
+            literal_line(
+                "_ExtractionWarningKind",
+                exarch_core::ExtractionWarningKind::ALL,
+                exarch_core::ExtractionWarningKind::as_str,
+            ),
+            literal_line(
+                "_CreationWarningKind",
+                exarch_core::CreationWarningKind::ALL,
+                exarch_core::CreationWarningKind::as_str,
+            ),
+        ];
+        let flat = flatten_literals(pyi);
+        for line in expected {
+            assert!(
+                flat.lines().any(|l| l == flatten_literals(&line).trim()),
+                "exarch.pyi is out of sync with exarch-core, expected alias:\n{line}"
+            );
+        }
+    }
+
+    #[test]
     fn test_pyi_has_one_class_per_manifest_entry_type_and_link_state() {
-        use exarch_core::inspection::manifest::ManifestEntryType;
+        use exarch_core::ManifestEntryType;
 
         let pyi = include_str!("../exarch.pyi");
         for kind in ManifestEntryType::ALL {

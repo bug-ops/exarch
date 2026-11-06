@@ -66,7 +66,7 @@ impl Operation {
                 matches!(self, Self::Extract | Self::List | Self::Verify)
             }
             Flag::MaxFileSize => true,
-            Flag::AllowedExtensions | Flag::Atomic | Flag::BannedComponent | Flag::MaxPathDepth => {
+            Flag::AllowedExtensions | Flag::BannedComponent | Flag::MaxPathDepth => {
                 matches!(self, Self::Extract)
             }
             Flag::Force => matches!(self, Self::Extract | Self::Create),
@@ -82,7 +82,6 @@ closed_list! {
         AllowHardlinks => "--allow-hardlinks",
         AllowSolidArchives => "--allow-solid-archives",
         AllowedExtensions => "--allowed-extensions",
-        Atomic => "--atomic",
         BannedComponent => "--banned-component",
         Force => "--force",
         MaxCompressionRatio => "--max-compression-ratio",

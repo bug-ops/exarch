@@ -60,7 +60,7 @@ typed-path = { version = "0.13", default-features = false }
 unicode-normalization = "0.1.26"
 walkdir = "2.5"
 windows-sys = "0.61"
-zip = { version = "=9.2.2", default-features = false }
+zip = { version = "~9.4", default-features = false }
 zstd = { version = "0.14", default-features = false }
 
 [workspace.lints.clippy]

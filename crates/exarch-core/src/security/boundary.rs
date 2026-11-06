@@ -7,7 +7,9 @@
 //! counts as a well-formed input string. Config list entries are parsed by
 //! [`crate::Extension`] and [`crate::PathComponentName`].
 
+use std::ffi::OsString;
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::error::Result;
 use crate::error::Violation;
@@ -28,8 +30,10 @@ pub const MAX_PATH_LENGTH: usize = 4096;
 /// destination-boundary checks — those require a `Path`, a `DestDir`, and a
 /// `SecurityConfig`, and are handled later by `validate_path`.
 ///
-/// The only constructor is [`BoundaryPath::parse`], so a binding entry point
-/// that takes a `BoundaryPath` cannot receive an unchecked string.
+/// The constructors are [`BoundaryPath::parse`] for text and
+/// [`BoundaryPath::parse_os`] for a host path that need not be UTF-8, so a
+/// binding entry point that takes a `BoundaryPath` cannot receive an unchecked
+/// path.
 ///
 /// # Check order
 ///
@@ -54,14 +58,14 @@ pub const MAX_PATH_LENGTH: usize = 4096;
 /// use exarch_core::BoundaryPath;
 ///
 /// let path = BoundaryPath::parse("archive.tar.gz".to_owned())?;
-/// assert_eq!(path.as_str(), "archive.tar.gz");
+/// assert_eq!(path.as_path(), Path::new("archive.tar.gz"));
 /// assert_eq!(AsRef::<Path>::as_ref(&path), Path::new("archive.tar.gz"));
 /// assert!(BoundaryPath::parse("bad\0path".to_owned()).is_err());
 /// assert!(BoundaryPath::parse("x".repeat(5000)).is_err());
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundaryPath(String);
+pub struct BoundaryPath(PathBuf);
 
 impl BoundaryPath {
     /// Checks a raw path string and keeps it as proof of the check.
@@ -71,37 +75,65 @@ impl BoundaryPath {
     /// Returns [`crate::ArchiveError::SecurityViolation`] if `path` contains a
     /// null byte or exceeds [`MAX_PATH_LENGTH`] bytes.
     pub fn parse(path: String) -> Result<Self> {
-        if path.len() > MAX_PATH_LENGTH {
+        Self::parse_os(OsString::from(path))
+    }
+
+    /// Checks a host path that need not be valid UTF-8 and keeps it as proof
+    /// of the check.
+    ///
+    /// The length is that of the platform encoding of the path, in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::SecurityViolation`] if `path` contains a
+    /// null byte or exceeds [`MAX_PATH_LENGTH`] bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::ffi::OsString;
+    /// use std::path::Path;
+    ///
+    /// use exarch_core::BoundaryPath;
+    ///
+    /// let path = BoundaryPath::parse_os(OsString::from("a/b.tar"))?;
+    /// assert_eq!(path.as_path(), Path::new("a/b.tar"));
+    /// assert!(BoundaryPath::parse_os(OsString::from("bad\0path")).is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn parse_os(path: OsString) -> Result<Self> {
+        let bytes = path.as_encoded_bytes();
+        if bytes.len() > MAX_PATH_LENGTH {
             return Err(Violation::PathTooLong {
-                len: path.len(),
+                len: bytes.len(),
                 max: MAX_PATH_LENGTH,
             }
             .into());
         }
 
-        if path.contains('\0') {
+        if bytes.contains(&0) {
             return Err(Violation::NulInPathArgument.into());
         }
 
-        Ok(Self(path))
+        Ok(Self(PathBuf::from(path)))
     }
 
-    /// The checked string.
+    /// The checked path.
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub fn as_path(&self) -> &Path {
         &self.0
     }
 
-    /// The checked string, by value.
+    /// The checked path, by value.
     #[must_use]
-    pub fn into_string(self) -> String {
+    pub fn into_path_buf(self) -> PathBuf {
         self.0
     }
 }
 
 impl AsRef<Path> for BoundaryPath {
     fn as_ref(&self) -> &Path {
-        Path::new(&self.0)
+        &self.0
     }
 }
 
@@ -129,9 +161,9 @@ mod tests {
     #[test]
     fn test_parse_keeps_the_checked_string() {
         let path = parse("a/b.tar").unwrap();
-        assert_eq!(path.as_str(), "a/b.tar");
+        assert_eq!(path.as_path(), Path::new("a/b.tar"));
         assert_eq!(AsRef::<Path>::as_ref(&path), Path::new("a/b.tar"));
-        assert_eq!(path.into_string(), "a/b.tar");
+        assert_eq!(path.into_path_buf(), PathBuf::from("a/b.tar"));
     }
 
     #[test]

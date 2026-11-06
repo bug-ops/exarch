@@ -44,7 +44,7 @@ use std::path::PathBuf;
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::ExcludePattern;
+/// use exarch_core::ExcludePattern;
 /// use std::path::Path;
 ///
 /// let tmp = ExcludePattern::try_from("*.tmp")?;
@@ -92,8 +92,6 @@ pub enum ExcludePattern {
 }
 
 impl ExcludePattern {
-    const SETTING: ConfigSetting = ConfigSetting::ExcludePattern;
-
     pub(crate) fn exact(name: &str) -> Self {
         Self::Exact { name: name.into() }
     }
@@ -125,10 +123,10 @@ fn any_component(path: &Path, matches: impl Fn(&[u8]) -> bool) -> bool {
         .any(|component| matches(component.as_os_str().as_encoded_bytes()))
 }
 
-fn refuse(text: &str, reason: ExcludeRefusal) -> ArchiveError {
+fn refuse(setting: ConfigSetting, text: &str, reason: ExcludeRefusal) -> ArchiveError {
     let end = text.floor_char_boundary(MAX_CONFIG_ENTRY_LENGTH);
     ArchiveError::InvalidConfiguration {
-        setting: ExcludePattern::SETTING,
+        setting,
         problem: ConfigProblem::ExcludePatternRefused {
             pattern: text.get(..end).unwrap_or(text).to_owned(),
             reason,
@@ -140,13 +138,17 @@ fn is_separator(c: char) -> bool {
     matches!(c, '/' | '\\')
 }
 
-impl TryFrom<&str> for ExcludePattern {
-    type Error = ArchiveError;
-
+impl ExcludePattern {
+    /// Parses `text`, naming `setting` in the refusal.
+    ///
+    /// One grammar serves every use of a pattern: pass
+    /// [`ConfigSetting::ExcludePattern`] for creation,
+    /// [`ConfigSetting::EntryInclude`] or [`ConfigSetting::EntryExclude`] for
+    /// extraction. [`TryFrom<&str>`] is the creation form.
     ///
     /// # Errors
     ///
-    /// Returns [`ArchiveError::InvalidConfiguration`] with
+    /// Returns [`ArchiveError::InvalidConfiguration`] naming `setting`, with
     /// [`ConfigProblem::ExcludePatternRefused`], which names the pattern and an
     /// [`ExcludeRefusal`], for: an empty pattern, one over
     /// [`MAX_CONFIG_ENTRY_LENGTH`] bytes or with a null byte, leading or
@@ -154,41 +156,67 @@ impl TryFrom<&str> for ExcludePattern {
     /// (they are not glob syntax here, so they would match literally and
     /// silently exclude nothing), `.` or `..` as a component, an absolute
     /// path, or a `*` shape other than `name*` and `*name`.
-    fn try_from(text: &str) -> Result<Self> {
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ConfigSetting;
+    /// use exarch_core::ExcludePattern;
+    ///
+    /// let pattern = ExcludePattern::parse_for(ConfigSetting::EntryInclude, "docs/api")?;
+    /// assert_eq!(pattern.to_string(), "docs/api");
+    /// assert!(ExcludePattern::parse_for(ConfigSetting::EntryInclude, "**/x").is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn parse_for(setting: ConfigSetting, text: &str) -> Result<Self> {
         let is_blank = |c: char| c.is_ascii_whitespace() || c.is_ascii_control();
+        let refuse = |reason| refuse(setting, text, reason);
         if text.len() > MAX_CONFIG_ENTRY_LENGTH {
-            return Err(refuse(text, ExcludeRefusal::TooLong));
+            return Err(refuse(ExcludeRefusal::TooLong));
         }
         if text.contains('\0') {
-            return Err(refuse(text, ExcludeRefusal::ContainsNul));
+            return Err(refuse(ExcludeRefusal::ContainsNul));
         }
         if text.is_empty() {
-            return Err(refuse(text, ExcludeRefusal::Empty));
+            return Err(refuse(ExcludeRefusal::Empty));
         }
         if text.starts_with(is_blank) || text.ends_with(is_blank) {
-            return Err(refuse(text, ExcludeRefusal::PaddedWithBlank));
+            return Err(refuse(ExcludeRefusal::PaddedWithBlank));
         }
         if text.contains(',') {
-            return Err(refuse(text, ExcludeRefusal::ContainsComma));
+            return Err(refuse(ExcludeRefusal::ContainsComma));
         }
         if text.contains(['?', '[', ']', '{', '}', '!']) {
-            return Err(refuse(text, ExcludeRefusal::GlobMetacharacter));
+            return Err(refuse(ExcludeRefusal::GlobMetacharacter));
         }
         let has_separator = text.contains(is_separator);
         let wildcards = text.matches('*').count();
         if has_separator && wildcards > 0 {
-            return Err(refuse(text, ExcludeRefusal::WildcardWithSeparator));
+            return Err(refuse(ExcludeRefusal::WildcardWithSeparator));
         }
         if has_separator {
-            return parse_path(text);
+            return parse_path(setting, text);
         }
-        parse_component(text, wildcards)
+        parse_component(setting, text, wildcards)
     }
 }
 
-fn parse_component(text: &str, wildcards: usize) -> Result<ExcludePattern> {
+impl TryFrom<&str> for ExcludePattern {
+    type Error = ArchiveError;
+
+    /// Parses a creation exclude pattern; see [`ExcludePattern::parse_for`].
+    ///
+    /// # Errors
+    ///
+    /// Refusals name [`ConfigSetting::ExcludePattern`].
+    fn try_from(text: &str) -> Result<Self> {
+        Self::parse_for(ConfigSetting::ExcludePattern, text)
+    }
+}
+
+fn parse_component(setting: ConfigSetting, text: &str, wildcards: usize) -> Result<ExcludePattern> {
     if text == "." || text == ".." {
-        return Err(refuse(text, ExcludeRefusal::DotEntry));
+        return Err(refuse(setting, text, ExcludeRefusal::DotEntry));
     }
     match (wildcards, text.strip_prefix('*'), text.strip_suffix('*')) {
         (0, ..) => Ok(ExcludePattern::exact(text)),
@@ -196,13 +224,13 @@ fn parse_component(text: &str, wildcards: usize) -> Result<ExcludePattern> {
         (1, _, Some(prefix)) if !prefix.is_empty() => Ok(ExcludePattern::Prefix {
             prefix: prefix.into(),
         }),
-        _ => Err(refuse(text, ExcludeRefusal::UnsupportedWildcard)),
+        _ => Err(refuse(setting, text, ExcludeRefusal::UnsupportedWildcard)),
     }
 }
 
-fn parse_path(text: &str) -> Result<ExcludePattern> {
+fn parse_path(setting: ConfigSetting, text: &str) -> Result<ExcludePattern> {
     if text.starts_with(is_separator) || Path::new(text).has_root() {
-        return Err(refuse(text, ExcludeRefusal::Absolute));
+        return Err(refuse(setting, text, ExcludeRefusal::Absolute));
     }
     let mut relative = PathBuf::new();
     for segment in text
@@ -210,7 +238,7 @@ fn parse_path(text: &str) -> Result<ExcludePattern> {
         .filter(|s| !s.is_empty() && *s != ".")
     {
         if segment == ".." {
-            return Err(refuse(text, ExcludeRefusal::DotEntry));
+            return Err(refuse(setting, text, ExcludeRefusal::DotEntry));
         }
         relative.push(segment);
     }
@@ -218,10 +246,10 @@ fn parse_path(text: &str) -> Result<ExcludePattern> {
         .components()
         .all(|component| matches!(component, Component::Normal(_)))
     {
-        return Err(refuse(text, ExcludeRefusal::Absolute));
+        return Err(refuse(setting, text, ExcludeRefusal::Absolute));
     }
-    if relative.as_os_str().is_empty() {
-        return Err(refuse(text, ExcludeRefusal::Empty));
+    if relative.is_empty() {
+        return Err(refuse(setting, text, ExcludeRefusal::Empty));
     }
     Ok(ExcludePattern::Path { relative })
 }
@@ -261,26 +289,6 @@ impl fmt::Display for ExcludePattern {
 /// An entry is left out when it is hidden and `include_hidden` is false, or
 /// when it matches an exclude pattern. The size limit is checked separately,
 /// where the size is known.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::SkipKind;
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::filters;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// assert_eq!(
-///     filters::skip_reason(Path::new(".gitignore"), &config),
-///     Some(SkipKind::Hidden)
-/// );
-/// assert_eq!(
-///     filters::skip_reason(Path::new("a.tmp"), &config),
-///     Some(SkipKind::Excluded)
-/// );
-/// assert_eq!(filters::skip_reason(Path::new("main.rs"), &config), None);
-/// ```
 #[must_use]
 pub fn skip_reason(archive_path: &Path, config: &CreationConfig) -> Option<SkipKind> {
     if !config.include_hidden && is_hidden(archive_path) {
@@ -297,18 +305,6 @@ pub fn skip_reason(archive_path: &Path, config: &CreationConfig) -> Option<SkipK
 ///
 /// On Unix-like systems, files starting with '.' are considered hidden.
 /// This function checks the file name component, not the full path.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::creation::filters;
-/// use std::path::Path;
-///
-/// assert!(filters::is_hidden(Path::new(".gitignore")));
-/// assert!(filters::is_hidden(Path::new("dir/.hidden")));
-/// assert!(!filters::is_hidden(Path::new("visible.txt")));
-/// assert!(!filters::is_hidden(Path::new("dir/normal.rs")));
-/// ```
 #[must_use]
 pub fn is_hidden(path: &Path) -> bool {
     path.file_name()
@@ -326,21 +322,6 @@ pub fn is_hidden(path: &Path) -> bool {
 ///
 /// A `strip_prefix` that does not match the computed relative path is
 /// ignored; the unstripped relative path is used.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::filters;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let root = Path::new("/home/user/project");
-/// let source = Path::new("/home/user/project/src/main.rs");
-///
-/// let archive_path = filters::compute_archive_path(source, root, &config).unwrap();
-/// assert_eq!(archive_path, Path::new("src/main.rs"));
-/// ```
 pub fn compute_archive_path(
     source_path: &Path,
     root: &Path,

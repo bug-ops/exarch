@@ -17,7 +17,7 @@
 //! - [`record_skip`]: Counts an entry left out of the extraction
 //!
 //! Every write below the destination goes through a
-//! [`VettedDir`](crate::formats::pinned_dir::VettedDir), so no path is
+//! [`VettedDir`], so no path is
 //! resolved a second time between a check and the act that follows it.
 
 use std::fs::File;
@@ -29,6 +29,7 @@ use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::EntryPosition;
+use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::Malformation;
 use crate::ProgressCallback;
@@ -42,7 +43,6 @@ use crate::Violation;
 use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
 use crate::copy::copy_bounded;
-use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
 use crate::formats::pinned_dir::Leaf;
@@ -50,6 +50,7 @@ use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::source_fault::ReadFaults;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
@@ -57,7 +58,6 @@ use crate::security::fs_view::blocked_parent_error;
 use crate::security::fs_view::normalized_display;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
-use crate::sink::DuplicatePolicy;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -90,6 +90,16 @@ impl SpoolBacking {
                 let _ = file;
                 Self::Disk
             }
+        }
+    }
+
+    /// The most bytes a spool on this backing may hold: `disk` in general, and
+    /// no more than `ram` where every spooled byte occupies memory.
+    pub(crate) fn capacity(self, disk: u64, ram: u64) -> u64 {
+        match self {
+            #[cfg(not(target_os = "wasi"))]
+            Self::Disk => disk,
+            Self::Ram => disk.min(ram),
         }
     }
 
@@ -139,6 +149,19 @@ impl TempSpool {
     }
 }
 
+/// Opens the archive at `path` for reading.
+///
+/// A missing archive is [`ArchiveError::SourceNotFound`] and any other failure
+/// is [`ArchiveError::SourceNotAccessible`], the classification creation
+/// already gives its sources, so every front end can point at the archive path.
+///
+/// # Errors
+///
+/// See above.
+pub fn open_archive(path: &Path) -> Result<File> {
+    File::open(path).map_err(|error| crate::creation::source::source_error(path, error))
+}
+
 /// Opens the anonymous spool, or `None` where none can be created.
 ///
 /// WASI has no temporary directory and `std::env::temp_dir` panics there, so
@@ -154,9 +177,13 @@ pub fn open_spool() -> Option<TempSpool> {
 
 /// RAII guard that calls `on_entry_complete` when dropped.
 ///
-/// The only way to build one is [`EntryCompleteGuard::start`], which fires
+/// The only way to build one is [`EntryCompleteGuard::try_start`], which fires
 /// `on_entry_start`, so `on_entry_complete` is paired with it on every path,
 /// including an early `?` return.
+///
+/// `try_start` is the single per-entry cancellation hook of extraction,
+/// listing, verification and creation: it polls
+/// [`ProgressCallback::is_cancelled`] before announcing an entry.
 pub struct EntryCompleteGuard<'a> {
     progress: &'a mut dyn ProgressCallback,
     path: &'a std::path::Path,
@@ -166,17 +193,25 @@ pub struct EntryCompleteGuard<'a> {
 impl<'a> EntryCompleteGuard<'a> {
     /// Fires `on_entry_start` and returns the guard that will fire
     /// `on_entry_complete` on drop unless [`complete`](Self::complete) ran.
-    pub fn start(
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::Cancelled`] without announcing the entry when
+    /// the callback asks to stop.
+    pub fn try_start(
         progress: &'a mut dyn ProgressCallback,
         path: &'a std::path::Path,
         position: EntryPosition,
-    ) -> Self {
+    ) -> Result<Self> {
+        if progress.is_cancelled() {
+            return Err(ArchiveError::Cancelled);
+        }
         progress.on_entry_start(path, position);
-        Self {
+        Ok(Self {
             progress,
             path,
             fired: false,
-        }
+        })
     }
 
     /// Returns a mutable reference to the underlying progress callback.
@@ -213,14 +248,6 @@ impl Drop for EntryCompleteGuard<'_> {
 /// constructing a `PathBuf` and passing to `SafePath::validate`.
 ///
 /// This is a no-op for entry names that contain no `\`.
-///
-/// # Examples
-///
-/// ```ignore
-/// # use exarch_core::formats::common::normalize_entry_name;
-/// assert_eq!(normalize_entry_name("foo\\bar\\baz.txt"), "foo/bar/baz.txt");
-/// assert_eq!(normalize_entry_name("plain/path.txt"), "plain/path.txt");
-/// ```
 #[inline]
 #[must_use]
 pub fn normalize_entry_name(name: &str) -> String {
@@ -330,7 +357,7 @@ pub fn check_entry_name_limits(
 /// `expected_size` is the same declared size the caller already used for
 /// compression-ratio and quota validation — metadata read from the archive,
 /// not measured from real bytes. This function does not merely trust it a
-/// second time: it is threaded into [`copy_with_buffer`] as a hard ceiling
+/// second time: it is threaded into [`copy_bounded`] as a hard ceiling
 /// enforced on every buffered read, so a forged small `expected_size` cannot
 /// let the real decompressed stream grow unbounded, and a short stream (less
 /// than declared) is rejected once it reaches EOF. On either violation, the
@@ -402,6 +429,7 @@ pub fn check_entry_name_limits(
 #[inline]
 pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     reader: &mut R,
+    faults: ReadFaults<'_>,
     safe_path: &SafePath<P>,
     mode: Option<SanitizedMode>,
     permit: QuotaPermit,
@@ -412,7 +440,7 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     options: SinkOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
-    let duplicates = options.duplicate_policy();
+    let duplicates = options.existing_files;
 
     let (parent, leaf) = dirs.ensure_parent(root, safe_path)?;
 
@@ -427,7 +455,7 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     let Some(OutputSlot {
         file: output_file,
         written_at,
-    }) = open_output_slot(&parent, leaf, safe_path.as_path(), mode, duplicates)?
+    }) = open_output_slot(&parent, leaf, safe_path.as_path(), mode, duplicates, root)?
     else {
         return record_duplicate_skip(report, safe_path.as_path());
     };
@@ -436,12 +464,13 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // `written_at` never holds a pre-existing entry, so nothing else is lost.
     let guard = written_at.guard(&parent, leaf);
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
-    let bytes_written = copy_with_buffer(
+    let bytes_written = copy_bounded(
         reader,
         &mut buffered_writer,
         copy_buffer,
         Some(expected_size),
-    )?;
+    )
+    .map_err(|error| faults.classify(error))?;
     buffered_writer.flush()?;
     drop(buffered_writer);
     commit_output(&parent, &written_at, leaf, safe_path.as_path())?;
@@ -507,9 +536,12 @@ pub fn create_temp_sibling(
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
-        format!(
-            "failed to create a unique temp file for {} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
-            crate::path_text(Path::new(entry.as_os_str()))
+        crate::IoContext::new(
+            "failed to create a unique temp file",
+            format!(
+                "{} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
+                crate::path_text(Path::new(entry.as_os_str()))
+            ),
         ),
     ))
 }
@@ -545,34 +577,56 @@ struct OutputSlot {
 /// exists, overwrite mode writes a fresh sibling temp file that the caller
 /// renames over the entry, so other hardlinks to the old inode keep their
 /// content. Returns `None` when the entry exists and `duplicates` is `Skip`.
+/// Under `Refuse` an entry this run created is a duplicate and gives `None`
+/// as well; any other occupant fails with `DestinationOccupied`.
 fn open_output_slot(
     dir: &VettedDir,
     leaf: Leaf<'_>,
     rel: &Path,
     mode: Option<SanitizedMode>,
-    duplicates: DuplicatePolicy,
+    duplicates: ExistingFiles,
+    root: &PinnedRoot,
 ) -> Result<Option<OutputSlot>> {
     match dir.create_new(leaf, mode) {
-        Ok(file) => Ok(Some(OutputSlot {
-            file,
-            written_at: WrittenAt::Final,
-        })),
-        Err(e)
-            if e.kind() == std::io::ErrorKind::AlreadyExists
-                && duplicates == DuplicatePolicy::Skip =>
-        {
-            Ok(None)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            refuse_non_file_occupant(dir, leaf, rel)?;
-            let (temp, file) = create_temp_sibling(dir, leaf, mode, TempLeaf::next)
-                .map_err(|e| replace_error(rel, &e))?;
+        Ok(file) => {
+            root.created().note(duplicates, dir, leaf, rel);
             Ok(Some(OutputSlot {
                 file,
-                written_at: WrittenAt::Temp(temp),
+                written_at: WrittenAt::Final,
             }))
         }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match duplicates {
+            ExistingFiles::Skip => Ok(None),
+            ExistingFiles::Refuse => {
+                if root.created().created_here(dir, leaf, rel) {
+                    Ok(None)
+                } else {
+                    Err(destination_occupied(root.dest().as_path(), rel))
+                }
+            }
+            ExistingFiles::Overwrite => {
+                refuse_non_file_occupant(dir, leaf, rel)?;
+                let (temp, file) = create_temp_sibling(dir, leaf, mode, TempLeaf::next)
+                    .map_err(|e| replace_error(rel, &e))?;
+                Ok(Some(OutputSlot {
+                    file,
+                    written_at: WrittenAt::Temp(temp),
+                }))
+            }
+        },
         Err(e) => Err(name_occupant_on_open_error(dir, leaf, rel, e).into()),
+    }
+}
+
+/// The refusal of an occupied path under [`ExistingFiles::Refuse`].
+///
+/// Every site that decides what to do with an occupant must route `Refuse` here
+/// and never into an overwrite branch: a missed arm would replace a file the
+/// caller asked to keep.
+pub fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveError {
+    ArchiveError::DestinationOccupied {
+        destination: destination.to_path_buf(),
+        conflicts: Box::new([rel.to_path_buf()]),
     }
 }
 
@@ -595,9 +649,9 @@ fn commit_output(
 fn replace_error(rel: &Path, err: &std::io::Error) -> std::io::Error {
     std::io::Error::new(
         err.kind(),
-        format!(
-            "cannot replace the existing file at {}: {err}",
-            crate::path_text(rel)
+        crate::IoContext::new(
+            "cannot replace the existing file",
+            format!("{}: {err}", crate::path_text(rel)),
         ),
     )
 }
@@ -666,7 +720,7 @@ pub fn create_directory<P: ParentCheck>(
 /// walk in [`DirWalker::ensure_dir`] enforces the same refusals again. A name
 /// the host cannot look up by path (too long, or invalid on Windows) is left to
 /// that walk, as a missing one is.
-fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Result<()> {
+pub fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Result<()> {
     let file_type = match probe.lstat() {
         Ok(metadata) => metadata.file_type(),
         Err(e)
@@ -728,7 +782,8 @@ fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Re
 /// - Platform does not support symlinks
 /// - Parent directory creation fails
 /// - Symlink creation fails (including when target path already exists)
-/// - Removing an existing path fails when `skip_duplicates` is false
+/// - Removing an existing path fails when the policy is
+///   `ExistingFiles::Overwrite`
 /// - A symlink with a different target occupies the path and `skip_duplicates`
 ///   is false (one with the same target is skipped as unchanged)
 #[allow(unused_variables)]
@@ -746,7 +801,7 @@ pub fn create_symlink<P: ParentCheck>(
     dirs: DirWalker,
     options: SinkOptions,
 ) -> Result<()> {
-    let duplicates = options.duplicate_policy();
+    let duplicates = options.existing_files;
     #[cfg(unix)]
     {
         let target_path = safe_symlink.target_path();
@@ -754,8 +809,23 @@ pub fn create_symlink<P: ParentCheck>(
         let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link())?;
 
         if let Some(existing) = parent.probe(leaf)? {
-            if duplicates == DuplicatePolicy::Skip {
-                return record_duplicate_skip(report, safe_symlink.link().as_path());
+            match duplicates {
+                ExistingFiles::Skip => {
+                    return record_duplicate_skip(report, safe_symlink.link().as_path());
+                }
+                ExistingFiles::Refuse => {
+                    if root
+                        .created()
+                        .created_here(&parent, leaf, safe_symlink.link().as_path())
+                    {
+                        return record_duplicate_skip(report, safe_symlink.link().as_path());
+                    }
+                    return Err(destination_occupied(
+                        root.dest().as_path(),
+                        safe_symlink.link().as_path(),
+                    ));
+                }
+                ExistingFiles::Overwrite => {}
             }
             if existing == Occupant::Symlink {
                 // An unchanged link re-points nothing; a different target could
@@ -769,6 +839,8 @@ pub fn create_symlink<P: ParentCheck>(
         }
 
         parent.symlink(target_path, leaf)?;
+        root.created()
+            .note(duplicates, &parent, leaf, safe_symlink.link().as_path());
 
         report.symlinks_created += 1;
 
@@ -1012,9 +1084,12 @@ mod tests {
     use super::*;
     use crate::ArchiveError;
     use crate::ExtractionReport;
+    use crate::Malformation;
     use crate::NoopProgress;
     use crate::SecurityConfig;
     use crate::copy::CopyBuffer;
+    use crate::formats::source_fault::ReadFamily;
+    use crate::formats::source_fault::SourceTap;
     use crate::security::RawMode;
     use crate::security::permissions::sanitize_permissions;
     use crate::security::quota::QuotaTracker;
@@ -1046,6 +1121,12 @@ mod tests {
         let parent = pinned(&DestDir::new(path.parent().expect("parent")).expect("dest"));
         let (_, leaf) = Leaf::split(Path::new(path.file_name().expect("name"))).expect("leaf");
         parent.dir().reopen()?.create_new(leaf, mode)
+    }
+
+    #[test]
+    fn normalize_entry_name_turns_backslashes_into_slashes_only() {
+        assert_eq!(normalize_entry_name("foo\\bar\\baz.txt"), "foo/bar/baz.txt");
+        assert_eq!(normalize_entry_name("plain/path.txt"), "plain/path.txt");
     }
 
     #[test]
@@ -1227,6 +1308,7 @@ mod tests {
 
         let result = extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized(0o644)),
             permit,
@@ -1288,6 +1370,7 @@ mod tests {
 
         let result = extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized(0o644)),
             permit,
@@ -1335,6 +1418,7 @@ mod tests {
 
         let result = extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized(0o644)),
             permit,
@@ -1362,46 +1446,63 @@ mod tests {
     /// truncated on disk.
     #[test]
     fn test_extract_file_with_permit_undersized_stream_cleans_up() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let mut report = ExtractionReport::default();
-        let mut copy_buffer = CopyBuffer::new();
-        let dirs = test_walker();
+        for family in [ReadFamily::Zip, ReadFamily::SevenZ, ReadFamily::Tar] {
+            let temp = TempDir::new().expect("failed to create temp dir");
+            let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+            let mut report = ExtractionReport::default();
+            let mut copy_buffer = CopyBuffer::new();
+            let dirs = test_walker();
 
-        let config = SecurityConfig::default();
-        let permit = QuotaTracker::new()
-            .reserve(1000, &config)
-            .expect("reservation should succeed");
-        let safe_path = SafePath::validate(&PathBuf::from("short.txt"), &dest, &config)
-            .expect("path should be valid");
+            let config = SecurityConfig::default();
+            let permit = QuotaTracker::new()
+                .reserve(1000, &config)
+                .expect("reservation should succeed");
+            let safe_path = SafePath::validate(&PathBuf::from("short.txt"), &dest, &config)
+                .expect("path should be valid");
 
-        let mut reader = Cursor::new(b"too short");
+            let mut reader = Cursor::new(b"too short");
 
-        let result = extract_file_with_permit(
-            &mut reader,
-            &safe_path,
-            Some(sanitized(0o644)),
-            permit,
-            &pinned(&dest),
-            &mut report,
-            &mut copy_buffer,
-            dirs,
-            SinkOptions::default(),
-            &mut NoopProgress,
-        );
+            let tap = SourceTap::default();
+            let result = extract_file_with_permit(
+                &mut reader,
+                ReadFaults::new(family, Some(&tap)),
+                &safe_path,
+                Some(sanitized(0o644)),
+                permit,
+                &pinned(&dest),
+                &mut report,
+                &mut copy_buffer,
+                dirs,
+                SinkOptions::default(),
+                &mut NoopProgress,
+            );
 
-        assert_matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. }),
-            "actual size short of declared size must be rejected, got: {result:?}"
-        );
-        assert!(
-            !temp.path().join("short.txt").exists(),
-            "rejected entry must not leave a truncated file on disk"
-        );
+            match family {
+                ReadFamily::Tar => assert_matches!(
+                    result,
+                    Err(ArchiveError::InvalidArchive(
+                        Malformation::TarEntryTruncated {
+                            declared: 1000,
+                            actual: 9
+                        }
+                    )),
+                    "a TAR entry short of its header size is a truncated archive: {result:?}"
+                ),
+                _ => assert_matches!(
+                    result,
+                    Err(ArchiveError::SecurityViolation { .. }),
+                    "{family:?}: actual size short of declared size must be rejected, got: \
+                     {result:?}"
+                ),
+            }
+            assert!(
+                !temp.path().join("short.txt").exists(),
+                "{family:?}: rejected entry must not leave a truncated file on disk"
+            );
+        }
     }
 
-    /// With `skip_duplicates = false` (`--force`), an aborted forged-size
+    /// With `ExistingFiles::Overwrite` (`--force`), an aborted forged-size
     /// entry must leave the pre-existing destination file untouched and no
     /// temp file behind.
     #[test]
@@ -1428,6 +1529,7 @@ mod tests {
 
         let result = extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized(0o644)),
             permit,
@@ -1435,7 +1537,7 @@ mod tests {
             &mut report,
             &mut copy_buffer,
             dirs,
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
             &mut NoopProgress,
         );
 
@@ -1465,7 +1567,11 @@ mod tests {
         let err = commit_output(dir, &written_at, leaf, Path::new("d")).unwrap_err();
         drop(guard);
 
-        assert!(err.to_string().contains("at d"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("cannot replace the existing file: d"),
+            "{err}"
+        );
         assert!(!written.exists(), "temp file must be removed");
         assert!(occupied.join("child").exists());
     }
@@ -1668,6 +1774,7 @@ mod tests {
 
         extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized_mode),
             permit,
@@ -1758,7 +1865,7 @@ mod tests {
             &pinned(&dest),
             &mut report,
             dirs,
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
         )
         .expect("first create_symlink should succeed");
         assert_eq!(report.symlinks_created, 1);
@@ -1769,7 +1876,7 @@ mod tests {
             &pinned(&dest),
             &mut report,
             dirs,
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
         )
         .expect("an identical link is an unchanged duplicate");
         assert_eq!(report.symlinks_created, unchanged);
@@ -1784,7 +1891,7 @@ mod tests {
             &pinned(&dest),
             &mut report,
             dirs,
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
         )
         .expect_err("a link with another target must not be replaced");
         assert_matches!(
@@ -1824,7 +1931,7 @@ mod tests {
             &pinned(&dest),
             &mut report,
             test_walker(),
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
         )
         .expect("a file is replaced");
         assert_eq!(report.symlinks_created, 1);
@@ -1917,11 +2024,12 @@ mod tests {
         let mut progress = Panicking(0);
         let path = PathBuf::from("f");
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            EntryCompleteGuard::start(
+            EntryCompleteGuard::try_start(
                 &mut progress,
                 &path,
                 crate::EntryPosition::at_index(0, crate::EntryTotal::Known(1)),
             )
+            .unwrap()
             .complete();
         }));
         assert!(outcome.is_err());
@@ -1972,5 +2080,122 @@ mod spool_tests {
         }
         let file = tempfile::tempfile_in(dir).unwrap();
         assert_eq!(SpoolBacking::of(&file), SpoolBacking::Ram);
+    }
+}
+
+/// `Refuse` when the occupant probe and the run record disagree, in both
+/// directions: whichever is wrong, the outcome is a refusal or a skip, never a
+/// write or a rename.
+#[cfg(all(test, unix))]
+mod refuse_probe_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::formats::pinned_dir::support::leaf;
+    use std::assert_matches;
+    use tempfile::TempDir;
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn open(root: &PinnedRoot, name: &str) -> Result<Option<()>> {
+        open_output_slot(
+            root.dir(),
+            leaf(name),
+            Path::new(name),
+            None,
+            ExistingFiles::Refuse,
+            root,
+        )
+        .map(|slot| slot.map(drop))
+    }
+
+    fn assert_untouched(dir: &Path, expected: &[(&str, &str)]) {
+        let listed: Vec<_> = expected
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+        assert_eq!(names(dir), listed, "no temp file, no rename");
+        for (name, content) in expected {
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), *content);
+        }
+    }
+
+    #[test]
+    fn a_file_the_run_made_but_the_record_lacks_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "ours").unwrap();
+
+        let outcome = open(&root, "f");
+
+        assert_matches!(outcome, Err(ArchiveError::DestinationOccupied { .. }));
+        assert_untouched(temp.path(), &[("f", "ours")]);
+    }
+
+    #[test]
+    fn a_file_the_run_made_is_refused_once_the_record_is_saturated() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "ours").unwrap();
+        root.created()
+            .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
+        root.created().saturate();
+
+        let outcome = open(&root, "f");
+
+        assert_matches!(outcome, Err(ArchiveError::DestinationOccupied { .. }));
+        assert_untouched(temp.path(), &[("f", "ours")]);
+    }
+
+    #[test]
+    fn a_foreign_occupant_the_record_vouches_for_is_skipped() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "ours").unwrap();
+        root.created()
+            .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
+        std::fs::hard_link(temp.path().join("f"), temp.path().join("g")).unwrap();
+
+        let outcome = open(&root, "g");
+
+        assert_matches!(outcome, Ok(None));
+        assert_untouched(temp.path(), &[("f", "ours"), ("g", "ours")]);
+    }
+
+    #[test]
+    fn a_foreign_occupant_the_record_does_not_know_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "ours").unwrap();
+        root.created()
+            .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
+        std::fs::rename(temp.path().join("f"), temp.path().join("kept")).unwrap();
+        std::fs::write(temp.path().join("f"), "foreign").unwrap();
+
+        let outcome = open(&root, "f");
+
+        assert_matches!(outcome, Err(ArchiveError::DestinationOccupied { .. }));
+        assert_untouched(temp.path(), &[("f", "foreign"), ("kept", "ours")]);
+    }
+
+    #[test]
+    fn a_foreign_occupant_with_a_recorded_identity_is_skipped_never_written() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "foreign").unwrap();
+        let reused = root.dir().identity(leaf("f")).unwrap().unwrap();
+        root.created().insert_identity_for_test(reused);
+
+        let outcome = open(&root, "f");
+
+        assert_matches!(outcome, Ok(None));
+        assert_untouched(temp.path(), &[("f", "foreign")]);
     }
 }

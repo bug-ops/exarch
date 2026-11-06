@@ -9,7 +9,7 @@ tags:
   - rust
   - bug
 created: 2026-08-02
-updated: 2026-08-04
+updated: 2026-11-06
 status: implemented
 related:
   - "[[constitution]]"
@@ -39,6 +39,9 @@ related:
 > **Priority**: P1
 > **Affected formats**: `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst` (all share `create_tar_internal_with_progress`)
 > **Not affected**: ZIP (`crates/exarch-core/src/creation/zip.rs` already correct)
+
+> [!note] Batch #981 amendments
+> ZIP directory entries now carry the source directory mode as TAR does (FR-008, #968).
 
 ## 1. Overview
 
@@ -159,6 +162,7 @@ AND  extracting either archive reproduces the same directory structure
 | FR-005 | THE SYSTEM SHALL apply the same fix uniformly to all four TAR variants (plain `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`) by fixing the single shared function `create_tar_internal_with_progress`, without duplicating logic per variant | must |
 | FR-006 | WHEN a TAR directory entry is written, THE SYSTEM SHALL set directory-appropriate header metadata (entry type `Directory`, permission bits only (`mode & 0o7777`, or `0o755` when `preserve_permissions` is off; extraction sanitizes them), and a trailing `/` in the archive path per TAR convention) consistent with how `tar` crate directory entries are conventionally written | should |
 | FR-007 | THE SYSTEM SHALL preserve the existing per-entry `tracker.on_entry_start` / `on_entry_complete` progress callback ordering for directory entries | must |
+| FR-008 | WHEN a ZIP directory entry is written, THE SYSTEM SHALL store the source directory's permission bits (`mode & 0o7777`) under `PermissionPolicy::Preserve` and `0o755` under `Normalize`, the same rule as the TAR directory entry in FR-006 (before #968 ZIP stored `0o755` for every directory) | must |
 
 ## 4. Non-Functional Requirements
 

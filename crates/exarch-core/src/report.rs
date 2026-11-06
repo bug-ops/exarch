@@ -2,13 +2,13 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::ArchiveError;
+use crate::IoKind;
 use crate::Result;
 use crate::closed_enum::closed_enum;
 use crate::error::QuotaResource;
@@ -34,6 +34,11 @@ closed_enum! {
         Duplicate => "duplicate",
         /// A file refused by the extension allowlist
         ExtensionNotAllowed => "extension_not_allowed",
+        /// An entry that the extraction selection leaves out
+        NotSelected => "not_selected",
+        /// An entry whose whole path was removed by stripping leading
+        /// components
+        StrippedAway => "stripped_away",
         /// An entry matched by a creation exclude pattern
         Excluded => "excluded",
         /// A hidden entry left out by a creation configuration
@@ -69,7 +74,7 @@ pub struct Skip {
     pub path: PathBuf,
 
     /// The I/O failure behind an [`SkipKind::Unreadable`] skip.
-    pub io_kind: Option<io::ErrorKind>,
+    pub io_kind: Option<IoKind>,
 }
 
 impl Skip {
@@ -85,8 +90,8 @@ impl Skip {
 
     /// Attaches the I/O failure that caused the skip.
     #[must_use]
-    pub const fn with_io_kind(mut self, io_kind: io::ErrorKind) -> Self {
-        self.io_kind = Some(io_kind);
+    pub fn with_io_kind(mut self, io_kind: impl Into<IoKind>) -> Self {
+        self.io_kind = Some(io_kind.into());
         self
     }
 }
@@ -135,11 +140,11 @@ impl Skips {
     /// Returns how many entries were skipped, over all kinds.
     #[must_use]
     pub fn total(&self) -> usize {
-        self.detail.as_ref().map_or(0, |detail| {
+        self.detail.as_ref().map_or_default(|detail| {
             detail
                 .counts
                 .values()
-                .fold(0, |sum, count| sum.saturating_add(*count))
+                .fold(0_usize, |sum, count| sum.saturating_add(*count))
         })
     }
 
@@ -211,6 +216,50 @@ impl Skips {
     }
 }
 
+closed_enum! {
+    /// Whether the identity of a leftover backup was confirmed before its
+    /// removal failed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::BackupIdentity;
+    ///
+    /// assert_eq!(BackupIdentity::Unverified.as_str(), "unverified");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum BackupIdentity {
+        /// The path still names the backup that was created.
+        Verified => "verified",
+        /// The platform cannot confirm that the path still names the backup.
+        Unverified => "unverified",
+    }
+}
+
+closed_enum! {
+    /// The class of an [`ExtractionWarning`], without its payload.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ExtractionWarning;
+    /// use exarch_core::ExtractionWarningKind;
+    ///
+    /// let warning = ExtractionWarning::AntiItemsSkipped { count: 1 };
+    /// assert_eq!(warning.kind(), ExtractionWarningKind::AntiItemsSkipped);
+    /// assert_eq!(warning.kind().as_str(), "anti_items_skipped");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum ExtractionWarningKind {
+        /// [`ExtractionWarning::AntiItemsSkipped`].
+        AntiItemsSkipped => "anti_items_skipped",
+        /// [`ExtractionWarning::BackupCleanupFailed`].
+        BackupCleanupFailed => "backup_cleanup_failed",
+    }
+}
+
 /// A condition of an extraction worth surfacing that is not a skipped entry.
 ///
 /// # Examples
@@ -239,11 +288,24 @@ pub enum ExtractionWarning {
     BackupCleanupFailed {
         /// Where the backup remains.
         path: PathBuf,
-        /// Whether the backup's identity could not be verified before removal.
-        identity_unverified: bool,
-        /// Why the removal failed.
-        error: String,
+        /// Whether the backup's identity was confirmed before removal.
+        identity: BackupIdentity,
+        /// The kind of the removal failure.
+        io_kind: IoKind,
+        /// The failure text, redacted like an I/O error message.
+        message: Box<str>,
     },
+}
+
+impl ExtractionWarning {
+    /// The class of this warning.
+    #[must_use]
+    pub const fn kind(&self) -> ExtractionWarningKind {
+        match self {
+            Self::AntiItemsSkipped { .. } => ExtractionWarningKind::AntiItemsSkipped,
+            Self::BackupCleanupFailed { .. } => ExtractionWarningKind::BackupCleanupFailed,
+        }
+    }
 }
 
 impl fmt::Display for ExtractionWarning {
@@ -251,18 +313,20 @@ impl fmt::Display for ExtractionWarning {
         match self {
             Self::BackupCleanupFailed {
                 path,
-                identity_unverified,
-                error,
+                identity,
+                message,
+                ..
             } => {
-                let qualifier = if *identity_unverified {
-                    " (its identity could not be verified on this platform)"
-                } else {
-                    ""
+                let qualifier = match identity {
+                    BackupIdentity::Verified => "",
+                    BackupIdentity::Unverified => {
+                        " (its identity could not be verified on this platform)"
+                    }
                 };
                 write!(
                     f,
                     "failed to remove backup of the original destination at {}{qualifier} \
-                     ({error}); it must be cleaned up manually",
+                     ({message}); it must be cleaned up manually",
                     path.display()
                 )
             }
@@ -502,15 +566,19 @@ pub trait ProgressCallback: Send {
     /// instead.
     fn on_complete(&mut self);
 
-    /// Whether the operation should stop, polled by archive creation between
-    /// entries and once more before the archive is published.
+    /// Whether the operation should stop, polled by every operation
+    /// (extraction, listing, verification and creation) before each entry, and
+    /// once more before an archive is published or a staged extraction is
+    /// committed.
     ///
     /// The callbacks above cannot fail, so a callback that hit an error of its
-    /// own (a raising script callback, a closed channel) reports it here:
-    /// creation then stops with an [`ArchiveError::Io`] of kind
-    /// [`Interrupted`](std::io::ErrorKind::Interrupted), the staged output is
-    /// discarded and a previous archive at the output path stays untouched.
-    /// The default never cancels.
+    /// own (a raising script callback, a closed channel) reports it here: the
+    /// operation then stops with [`ArchiveError::Cancelled`]. An extraction
+    /// that had already recorded progress reports it as
+    /// [`ArchiveError::PartialExtraction`] wrapping `Cancelled`, rolled back
+    /// under atomic staging; a creation discards its staged output and leaves a
+    /// previous archive at the output path untouched. One very large entry is
+    /// not interruptible. The default never cancels.
     fn is_cancelled(&mut self) -> bool {
         false
     }
@@ -575,7 +643,7 @@ mod tests {
                 .unwrap();
         }
         skips
-            .record(Skip::new(SkipKind::Excluded, "x").with_io_kind(io::ErrorKind::NotFound))
+            .record(Skip::new(SkipKind::Excluded, "x").with_io_kind(std::io::ErrorKind::NotFound))
             .unwrap();
         assert_eq!(skips.count(SkipKind::Duplicate), Skips::SAMPLE_CAP + 10);
         assert_eq!(skips.count(SkipKind::Excluded), 1);

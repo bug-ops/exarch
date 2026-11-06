@@ -184,7 +184,7 @@ def test_unknown_format_name_and_undetectable_bytes():
 
 
 def test_path_extraction_options_are_not_accepted():
-    options = exarch.ExtractionOptions().with_atomic(True)
+    options = exarch.ExtractionOptions().with_staging("atomic")
 
     with pytest.raises(TypeError):
         exarch.extract_archive_to_memory(_tar([_file("a", b"x")]), options=options)
@@ -203,21 +203,40 @@ def test_every_entry_class_derives_from_memory_entry():
 def test_sink_options_default_and_getters():
     options = exarch.SinkOptions()
 
-    assert options.skip_duplicates is True
+    assert options.existing_files == "skip"
     assert options.decode_reuse == "off"
     assert options.decode_reuse_limit is None
 
 
-def test_sink_options_skip_duplicates_selects_the_surviving_entry():
+def test_sink_options_existing_files_selects_the_surviving_entry():
     data = _tar([_file("a", b"1"), _file("a", b"2")])
 
     kept = exarch.extract_archive_to_memory(data, options=exarch.SinkOptions())
     assert [(e.path, e.data) for e in kept.entries] == [("a", b"1")]
 
     replaced = exarch.extract_archive_to_memory(
-        data, options=exarch.SinkOptions(skip_duplicates=False)
+        data, options=exarch.SinkOptions(existing_files="overwrite")
     )
     assert [(e.path, e.data) for e in replaced.entries] == [("a", b"2")]
+
+
+def test_sink_options_existing_files_values_and_refusal():
+    for value in ("skip", "overwrite", "refuse"):
+        assert exarch.SinkOptions(existing_files=value).existing_files == value
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        exarch.SinkOptions(existing_files="replace")
+    assert info.value.setting == "existing_files"
+
+
+def test_sink_options_refuse_treats_an_in_archive_duplicate_as_a_skip():
+    data = _tar([_file("a", b"1"), _file("a", b"2")])
+
+    result = exarch.extract_archive_to_memory(
+        data, options=exarch.SinkOptions(existing_files="refuse")
+    )
+
+    assert [(e.path, e.data) for e in result.entries] == [("a", b"1")]
+    assert result.report.skipped.count("duplicate") == 1
 
 
 def test_sink_options_decode_reuse_modes():

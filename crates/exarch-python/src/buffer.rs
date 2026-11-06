@@ -4,14 +4,17 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use exarch_core::ArchiveError;
+use exarch_core::ArchiveType;
 use exarch_core::CallbackEntry;
 use exarch_core::CallbackError;
 use exarch_core::ClosedEnum;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
+use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
 use exarch_core::DecodeReuse;
 use exarch_core::DecodeReuseKind;
+use exarch_core::ExistingFiles;
 use exarch_core::ListRequest;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
@@ -25,27 +28,26 @@ use exarch_core::SanitizedMode;
 use exarch_core::VerifyRequest;
 use exarch_core::extract_reader_to_callback;
 use exarch_core::extract_reader_to_memory;
-use exarch_core::formats::detect::ArchiveType;
-use exarch_core::formats::detect::CreatableFormat;
+use exarch_core::utf8_entry_path;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use crate::PyProgressAdapter;
 use crate::catch_panic_as_py_err;
 use crate::catch_panic_as_py_result;
 use crate::config::PyCreationConfig;
 use crate::config::PyInteger;
 use crate::config::PySecurityConfig;
 use crate::config::PyVerificationOptions;
+use crate::config::parse_existing_files;
 use crate::error::convert_error;
-use crate::merge_progress_result;
 use crate::path_to_boundary;
 use crate::report::PyArchiveManifest;
 use crate::report::PyCreationReport;
 use crate::report::PyExtractionReport;
 use crate::report::PyVerificationReport;
+use crate::run_with_optional_progress;
 use crate::stream::ArchiveInput;
 
 /// Parses the string form of a closed core enum.
@@ -252,13 +254,9 @@ impl PyMemoryEntry {
 /// The text of `path`, or an error: a lossy conversion could merge two
 /// distinct entries into one name.
 fn utf8(path: &Path) -> PyResult<String> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
-        convert_error(ArchiveError::from(
-            exarch_core::Malformation::EntryPathNotUtf8 {
-                path: path.to_path_buf(),
-            },
-        ))
-    })
+    utf8_entry_path(path)
+        .map(str::to_owned)
+        .map_err(|malformation| convert_error(ArchiveError::from(malformation)))
 }
 
 /// Where a ZIP extraction keeps decoded output, with the limit only the
@@ -324,12 +322,13 @@ impl ReuseSetting {
 /// of path-based extraction.
 ///
 /// Atomic extraction renames a directory, which an in-memory extraction does
-/// not have, so only the duplicate policy and the ZIP decode reuse remain.
+/// not have, so only the existing-files policy and the ZIP decode reuse remain.
 ///
 /// # Arguments
 ///
-/// * `skip_duplicates` - Skip an entry whose path an earlier entry already
-///   holds instead of failing (default: `True`)
+/// * `existing_files` - `"skip"` (default) skips an entry whose path an earlier
+///   entry already holds and counts a duplicate; `"overwrite"` delivers it
+///   again; `"refuse"` fails with `OutputExistsError`
 /// * `decode_reuse` - `"off"` (default), `"memory"` or `"temp_file"`: where a
 ///   ZIP extraction keeps the output of its structural check so deflate entries
 ///   are decoded once instead of twice. `"temp_file"` writes the plaintext of
@@ -339,7 +338,7 @@ impl ReuseSetting {
 #[pyclass(name = "SinkOptions", frozen)]
 #[derive(Clone)]
 pub struct PySinkOptions {
-    skip_duplicates: bool,
+    existing_files: ExistingFiles,
     reuse: ReuseSetting,
 }
 
@@ -350,23 +349,23 @@ impl PySinkOptions {
         clippy::needless_pass_by_value,
         reason = "pyo3 cannot extract `&str` under abi3-py39"
     )]
-    #[pyo3(signature = (skip_duplicates=true, decode_reuse="off".to_owned(), decode_reuse_limit=None))]
-    #[pyo3(text_signature = "(skip_duplicates=True, decode_reuse='off', decode_reuse_limit=None)")]
+    #[pyo3(signature = (existing_files="skip".to_owned(), decode_reuse="off".to_owned(), decode_reuse_limit=None))]
+    #[pyo3(text_signature = "(existing_files='skip', decode_reuse='off', decode_reuse_limit=None)")]
     fn new(
-        skip_duplicates: bool,
+        existing_files: String,
         decode_reuse: String,
         decode_reuse_limit: Option<PyInteger>,
     ) -> PyResult<Self> {
         let kind = parse_one(ConfigSetting::DecodeReuse, &decode_reuse)?;
         Ok(Self {
-            skip_duplicates,
+            existing_files: parse_existing_files(&existing_files)?,
             reuse: ReuseSetting::new(kind, decode_reuse_limit)?,
         })
     }
 
     #[getter]
-    const fn skip_duplicates(&self) -> bool {
-        self.skip_duplicates
+    const fn existing_files(&self) -> &'static str {
+        self.existing_files.as_str()
     }
 
     #[getter]
@@ -381,12 +380,8 @@ impl PySinkOptions {
 
     fn __repr__(&self) -> String {
         format!(
-            "SinkOptions(skip_duplicates={}, decode_reuse={:?}, decode_reuse_limit={:?})",
-            if self.skip_duplicates {
-                "True"
-            } else {
-                "False"
-            },
+            "SinkOptions(existing_files={:?}, decode_reuse={:?}, decode_reuse_limit={:?})",
+            self.existing_files(),
             self.decode_reuse(),
             self.decode_reuse_limit(),
         )
@@ -396,7 +391,7 @@ impl PySinkOptions {
 impl PySinkOptions {
     fn as_core(&self) -> exarch_core::SinkOptions {
         exarch_core::SinkOptions::default()
-            .with_skip_duplicates(self.skip_duplicates)
+            .with_existing_files(self.existing_files)
             .with_decode_reuse(self.reuse.as_core())
     }
 }
@@ -482,7 +477,7 @@ impl PyMemoryExtraction {
 pub fn extract_archive_to_memory(
     py: Python<'_>,
     data: ArchiveInput,
-    config: Option<&PySecurityConfig>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<&PySinkOptions>,
     max_bytes: Option<PyInteger>,
     path_model: Option<String>,
@@ -530,17 +525,16 @@ pub fn extract_archive_to_memory(
 ///
 /// # A raising `progress` propagates instead of being swallowed
 ///
-/// Extraction runs to completion; a raising `progress` cannot abort it, and is
-/// not called again once it has raised.
+/// A raising `progress` cancels the extraction at the next entry and is not
+/// called again.
 ///
-/// - If extraction succeeds, the callback's exception is raised and the
-///   extracted entries are discarded, because nothing was written to disk. A
-///   `writes = "discarded"` attribute and a `progress_callback_error = True`
-///   marker are attached to it; it carries no counters.
-/// - If extraction fails, the core error takes priority and the callback's
-///   exception is chained onto it via `__cause__`.
+/// - The callback's exception is what propagates, with a
+///   `progress_callback_error = True` marker and a `writes = "discarded"`
+///   attribute, because nothing was written to disk; it carries no counters.
+/// - If extraction fails for its own reason first, the core error takes
+///   priority and the callback's exception is chained onto it via `__cause__`.
 ///
-/// The GIL is held during extraction when `progress` is given.
+/// The GIL is released during extraction and taken once per callback.
 ///
 /// # Examples
 ///
@@ -563,7 +557,7 @@ pub fn extract_archive_to_memory(
 pub fn extract_archive_to_memory_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
-    config: Option<&PySecurityConfig>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
     progress: Option<Py<PyAny>>,
     options: Option<&PySinkOptions>,
     max_bytes: Option<PyInteger>,
@@ -592,31 +586,6 @@ pub fn extract_archive_to_memory_with_progress(
     into_py_extraction(py, report, sink)
 }
 
-/// Runs `run` with the Python callback `progress`, holding the GIL, or with the
-/// GIL released and a no-op reporter when `progress` is absent.
-///
-/// A raising callback is merged with the result by `merge_progress_result`;
-/// `attach` adds counters to the callback's exception when the run succeeded
-/// (the successful value is discarded).
-fn run_with_optional_progress<T: Send>(
-    py: Python<'_>,
-    context: &str,
-    progress: Option<Py<PyAny>>,
-    run: impl FnOnce(&mut dyn exarch_core::ProgressCallback) -> exarch_core::Result<T> + Send,
-    attach: impl FnOnce(&Bound<'_, PyAny>, &T),
-) -> PyResult<T> {
-    match progress {
-        None => catch_panic_as_py_err(context, || {
-            py.detach(|| run(&mut exarch_core::NoopProgress))
-        }),
-        Some(callback) => {
-            let mut adapter = PyProgressAdapter::new(callback);
-            let result = catch_panic_as_py_result(context, || Ok(run(&mut adapter)))?;
-            merge_progress_result(py, result, adapter.into_callback_error(), attach)
-        }
-    }
-}
-
 /// List the contents of an archive held in memory, with a progress callback.
 ///
 /// Same as `list_archive_bytes`, plus `progress`, called once per entry with
@@ -638,10 +607,10 @@ fn run_with_optional_progress<T: Send>(
 /// # Raises
 ///
 /// * The exceptions of `list_archive_bytes`
-/// * Whatever `progress` itself raises: listing runs to completion, and if it
-///   succeeded the callback's exception is raised and the manifest discarded,
-///   with a `progress_callback_error = True` marker. If listing failed, the
-///   core error is raised with the callback's exception as `__cause__`.
+/// * Whatever `progress` itself raises: it cancels the listing at the next
+///   entry, and its exception is raised with a `progress_callback_error = True`
+///   marker. If listing failed for its own reason first, the core error is
+///   raised with the callback's exception as `__cause__`.
 ///
 /// # Examples
 ///
@@ -663,13 +632,12 @@ fn run_with_optional_progress<T: Send>(
 pub fn list_archive_bytes_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
-    config: Option<&PySecurityConfig>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
     progress: Option<Py<PyAny>>,
     format: Option<String>,
 ) -> PyResult<PyArchiveManifest> {
     let format = parse_format(format.as_deref())?;
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let config = PySecurityConfig::snapshot(config);
 
     let slot = data.failure_slot();
     let result = run_with_optional_progress(
@@ -678,7 +646,7 @@ pub fn list_archive_bytes_with_progress(
         progress,
         |progress| {
             let reader = data.into_reader(format)?;
-            ListRequest::new(config_ref)
+            ListRequest::new(&config)
                 .with_progress(progress)
                 .list_reader(reader)
         },
@@ -711,11 +679,10 @@ pub fn list_archive_bytes_with_progress(
 /// # Raises
 ///
 /// * The exceptions of `verify_archive_bytes`
-/// * Whatever `progress` itself raises: if verification returned a report
-///   (including a failing one), the callback's exception is raised and the
-///   report discarded, with a `progress_callback_error = True` marker. If it
-///   errored, the core error is raised with the callback's exception as
-///   `__cause__`.
+/// * Whatever `progress` itself raises: it cancels the verification at the next
+///   entry, and its exception is raised with a `progress_callback_error = True`
+///   marker. If verification errored for its own reason first, the core error
+///   is raised with the callback's exception as `__cause__`.
 ///
 /// # Examples
 ///
@@ -737,16 +704,14 @@ pub fn list_archive_bytes_with_progress(
 pub fn verify_archive_bytes_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
-    config: Option<&PySecurityConfig>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
     progress: Option<Py<PyAny>>,
-    options: Option<&PyVerificationOptions>,
+    options: Option<PyRef<'_, PyVerificationOptions>>,
     format: Option<String>,
 ) -> PyResult<PyVerificationReport> {
     let format = parse_format(format.as_deref())?;
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let default_options = exarch_core::VerificationOptions::default();
-    let options_ref = options.map_or(&default_options, |o| o.as_core());
+    let config = PySecurityConfig::snapshot(config);
+    let options = PyVerificationOptions::snapshot(options);
 
     let slot = data.failure_slot();
     let result = run_with_optional_progress(
@@ -755,8 +720,8 @@ pub fn verify_archive_bytes_with_progress(
         progress,
         |progress| {
             let reader = data.into_reader(format)?;
-            VerifyRequest::new(config_ref)
-                .with_options(*options_ref)
+            VerifyRequest::new(&config)
+                .with_options(options)
                 .with_progress(progress)
                 .verify_reader(reader)
         },
@@ -813,7 +778,7 @@ pub fn verify_archive_bytes_with_progress(
 /// other entry: its `target` is the root-relative resolved path of an entry
 /// that was already delivered, a file or an earlier hardlink (a chain is
 /// delivered link by link), and no bytes are repeated. With
-/// `SinkOptions(skip_duplicates=False)` one path can be
+/// `SinkOptions(existing_files="overwrite")` one path can be
 /// delivered more than once and a hardlink refers to the latest delivery.
 /// Implicit parent directories are not delivered. The GIL is released during
 /// I/O and taken once per entry.
@@ -841,7 +806,7 @@ pub fn extract_archive_to_callback(
     py: Python<'_>,
     data: ArchiveInput,
     on_entry: Py<PyAny>,
-    config: Option<&PySecurityConfig>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<&PySinkOptions>,
     path_model: Option<String>,
     format: Option<String>,
@@ -896,7 +861,7 @@ struct MemoryRequest {
 
 impl MemoryRequest {
     fn parse(
-        config: Option<&PySecurityConfig>,
+        config: Option<PyRef<'_, PySecurityConfig>>,
         options: Option<&PySinkOptions>,
         max_bytes: Option<PyInteger>,
         path_model: Option<&str>,
@@ -905,9 +870,7 @@ impl MemoryRequest {
         let format = parse_format(format)?;
         let path_model = parse_path_model(path_model)?.unwrap_or_default();
         let max_bytes = parse_max_bytes(max_bytes)?;
-        let config = config.map_or_else(exarch_core::SecurityConfig::default, |c| {
-            c.as_core().clone()
-        });
+        let config = PySecurityConfig::snapshot(config);
         let options =
             options.map_or_else(exarch_core::SinkOptions::default, PySinkOptions::as_core);
         let mut request = MemoryExtractRequest::default()
@@ -1012,7 +975,7 @@ pub fn create_archive_to_bytes(
     py: Python<'_>,
     sources: &Bound<'_, PyAny>,
     format: String,
-    config: Option<&PyCreationConfig>,
+    config: Option<PyRef<'_, PyCreationConfig>>,
 ) -> PyResult<PyCreatedArchive> {
     let format = parse_creatable_format(&format)?;
     let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
@@ -1020,11 +983,10 @@ pub fn create_archive_to_bytes(
         .iter()
         .map(|source| path_to_boundary(py, source))
         .collect::<PyResult<_>>()?;
-    let default_config = exarch_core::creation::CreationConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let config = PyCreationConfig::snapshot(config);
 
     let (bytes, report) = catch_panic_as_py_err("archive creation", || {
-        py.detach(|| CreateRequest::new(config_ref).to_bytes(format, &source_paths))
+        py.detach(|| CreateRequest::new(&config).to_bytes(format, &source_paths))
     })?;
 
     Ok(PyCreatedArchive {
@@ -1070,18 +1032,17 @@ pub fn create_archive_to_bytes(
 pub fn list_archive_bytes(
     py: Python<'_>,
     data: ArchiveInput,
-    config: Option<&PySecurityConfig>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
     format: Option<String>,
 ) -> PyResult<PyArchiveManifest> {
     let format = parse_format(format.as_deref())?;
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let config = PySecurityConfig::snapshot(config);
 
     let slot = data.failure_slot();
     let result = catch_panic_as_py_err("archive listing", || {
         py.detach(|| {
             let reader = data.into_reader(format)?;
-            ListRequest::new(config_ref).list_reader(reader)
+            ListRequest::new(&config).list_reader(reader)
         })
     });
     let manifest = slot.surface(result)?;
@@ -1124,22 +1085,20 @@ pub fn list_archive_bytes(
 pub fn verify_archive_bytes(
     py: Python<'_>,
     data: ArchiveInput,
-    config: Option<&PySecurityConfig>,
-    options: Option<&PyVerificationOptions>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
+    options: Option<PyRef<'_, PyVerificationOptions>>,
     format: Option<String>,
 ) -> PyResult<PyVerificationReport> {
     let format = parse_format(format.as_deref())?;
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let default_options = exarch_core::VerificationOptions::default();
-    let options_ref = options.map_or(&default_options, |o| o.as_core());
+    let config = PySecurityConfig::snapshot(config);
+    let options = PyVerificationOptions::snapshot(options);
 
     let slot = data.failure_slot();
     let result = catch_panic_as_py_err("archive verification", || {
         py.detach(|| {
             let reader = data.into_reader(format)?;
-            VerifyRequest::new(config_ref)
-                .with_options(*options_ref)
+            VerifyRequest::new(&config)
+                .with_options(options)
                 .verify_reader(reader)
         })
     });

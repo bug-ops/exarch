@@ -3,6 +3,34 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::Malformation;
+
+/// The text of an archive entry path, or the refusal a front end must raise.
+///
+/// A lossy rendering could merge two distinct entries into one name, so a path
+/// that is not valid UTF-8 is an error rather than a `\u{FFFD}` rendering. Use
+/// [`path_text`] where the path is only shown.
+///
+/// # Errors
+///
+/// Returns [`Malformation::EntryPathNotUtf8`] when `path` is not valid UTF-8.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+///
+/// use exarch_core::utf8_entry_path;
+///
+/// assert_eq!(utf8_entry_path(Path::new("a/b.txt"))?, "a/b.txt");
+/// # Ok::<(), exarch_core::Malformation>(())
+/// ```
+pub fn utf8_entry_path(path: &Path) -> Result<&str, Malformation> {
+    path.to_str().ok_or_else(|| Malformation::EntryPathNotUtf8 {
+        path: path.to_path_buf(),
+    })
+}
+
 /// Renders a path as text so that two distinct paths never render alike.
 ///
 /// Valid text is kept as it is, except that a backslash is written `\x5C` on

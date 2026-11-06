@@ -44,6 +44,8 @@ use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::support::leaf;
 #[cfg(unix)]
 use crate::formats::pinned_dir::support::pinned_at;
+use crate::formats::source_fault::ReadFamily;
+use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Tally;
 use crate::inspection::integrity::IntegrityPass;
 use crate::security::Compressed;
@@ -465,6 +467,7 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
     let parent = pinned_at(temp.path());
     let bytes_written = write_file_with_permit_using(
         &mut reader,
+        ReadFaults::new(ReadFamily::Tar, None),
         &parent,
         leaf("real-output.txt"),
         &mut copy_buffer,
@@ -523,6 +526,7 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
     let parent = pinned_at(temp.path());
     let result = write_file_with_permit_using(
         &mut reader,
+        ReadFaults::new(ReadFamily::Tar, None),
         &parent,
         leaf("real-output.txt"),
         &mut copy_buffer,
@@ -562,6 +566,7 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
 
     let result = write_file_direct(
         &mut reader,
+        ReadFaults::new(ReadFamily::Tar, None),
         &pinned_at(temp.path()),
         leaf("bomb.bin"),
         &mut copy_buffer,
@@ -607,6 +612,7 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
 
     let result = write_file_with_permit(
         &mut reader,
+        ReadFaults::new(ReadFamily::Tar, None),
         &pinned_at(temp.path()),
         leaf("existing.bin"),
         &mut copy_buffer,
@@ -1360,7 +1366,7 @@ fn test_verify_clean_sevenz_is_safe() {
     let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let report = archive
-        .verify(&crate::VerificationOptions::default())
+        .verify(crate::VerificationOptions::default())
         .unwrap();
 
     assert!(report.is_safe());
@@ -1482,7 +1488,7 @@ fn test_duplicate_and_disallowed_extension_skips_aggregate_independently() {
         .unwrap()
         .extract(
             temp.path(),
-            &ExtractionOptions::default(), // skip_duplicates = true
+            &ExtractionOptions::default(), // ExistingFiles::Skip
             &mut crate::NoopProgress,
         )
         .unwrap();
@@ -1608,7 +1614,7 @@ pub(super) fn build_solid_sevenz_archive(entries: &[(&str, &[u8])], copy_method:
     writer.finish().unwrap().into_inner()
 }
 
-fn solid_config(allowed_extensions: Vec<Extension>) -> SecurityConfig {
+fn solid_config(allowed_extensions: crate::ExtensionFilter) -> SecurityConfig {
     SecurityConfig::default()
         .with_solid_archives(crate::SolidArchives::Allow(
             crate::SolidLimits::DEFAULT.with_max_block_memory(crate::non_zero!(100 * 1024 * 1024)),
@@ -1717,7 +1723,9 @@ fn test_solid_block_disallowed_entry_does_not_shift_next_entry() {
 
     let report = SevenZArchive::new(
         Cursor::new(data),
-        &solid_config(vec![Extension::try_from("txt").unwrap()]),
+        &solid_config(
+            crate::ExtensionFilter::only(vec![Extension::try_from("txt").unwrap()]).unwrap(),
+        ),
     )
     .unwrap()
     .extract(
@@ -1746,7 +1754,9 @@ fn test_solid_block_skipping_last_entry_extracts_earlier_entries() {
 
     let report = SevenZArchive::new(
         Cursor::new(data),
-        &solid_config(vec![Extension::try_from("txt").unwrap()]),
+        &solid_config(
+            crate::ExtensionFilter::only(vec![Extension::try_from("txt").unwrap()]).unwrap(),
+        ),
     )
     .unwrap()
     .extract(
@@ -1772,14 +1782,17 @@ fn test_solid_block_duplicate_entry_does_not_shift_next_entry() {
     let dest = TempDir::new().unwrap();
     std::fs::write(dest.path().join("a.txt"), b"already here").unwrap();
 
-    let report = SevenZArchive::new(Cursor::new(data), &solid_config(Vec::new()))
-        .unwrap()
-        .extract(
-            dest.path(),
-            &ExtractionOptions::default(),
-            &mut crate::NoopProgress,
-        )
-        .unwrap();
+    let report = SevenZArchive::new(
+        Cursor::new(data),
+        &solid_config(crate::ExtensionFilter::Any),
+    )
+    .unwrap()
+    .extract(
+        dest.path(),
+        &ExtractionOptions::default(),
+        &mut crate::NoopProgress,
+    )
+    .unwrap();
 
     assert_eq!(report.files_extracted, 1);
     assert_eq!(report.files_skipped(), 1);
@@ -1898,7 +1911,7 @@ fn test_process_entry_rejects_traversal_independently() {
     let mut progress = crate::NoopProgress;
     let mut tally = Tally {
         report: &mut report,
-        options: SinkOptions::default().with_skip_duplicates(false),
+        options: SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
         progress: &mut progress,
     };
 
@@ -1912,6 +1925,7 @@ fn test_process_entry_rejects_traversal_independently() {
         &entry,
         SevenZKind::File,
         &mut std::io::empty(),
+        ReadFaults::new(ReadFamily::SevenZ, None),
         &entry_path,
         &mut tally,
     );
@@ -1955,6 +1969,7 @@ fn test_process_entry_duplicate_skip_fails_closed_at_max() {
             &entry,
             SevenZKind::File,
             &mut std::io::empty(),
+            ReadFaults::new(ReadFamily::SevenZ, None),
             &entry_path,
             &mut tally,
         )
@@ -1973,7 +1988,7 @@ fn test_process_entry_duplicate_skip_fails_closed_at_max() {
 /// Issue #468: `Path::exists()` follows symlinks and returns `false` for
 /// a dangling symlink, so the old `dest_path.exists()` check silently
 /// missed a pre-existing dangling symlink occupying the entry's
-/// destination path. With `skip_duplicates` true, the entry must be
+/// destination path. With `ExistingFiles::Skip`, the entry must be
 /// detected as a duplicate and skipped, leaving the dangling symlink in
 /// place instead of being silently replaced.
 #[test]
@@ -1994,7 +2009,7 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
     let report = archive
         .extract(
             temp.path(),
-            &ExtractionOptions::default(), // skip_duplicates = true
+            &ExtractionOptions::default(), // ExistingFiles::Skip
             &mut crate::NoopProgress,
         )
         .unwrap();
@@ -2012,7 +2027,7 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
     );
 }
 
-/// Regression test for #477: before this fix, `skip_duplicates = false`
+/// Regression test for #477: before this fix, `ExistingFiles::Overwrite`
 /// against a dangling symlink at the destination silently replaced it —
 /// `write_file_with_permit`'s temp-file + `rename` replaces whatever
 /// sits at `dest_path`, symlink or not, without following it, and
@@ -2033,7 +2048,7 @@ fn test_duplicate_rejects_dangling_symlink_when_not_skipping() {
     std::os::unix::fs::symlink(temp.path().join("does-not-exist"), &link_path).unwrap();
 
     let options = ExtractionOptions {
-        skip_duplicates: false,
+        existing_files: crate::ExistingFiles::Overwrite,
         ..ExtractionOptions::default()
     };
     let result = archive.extract(temp.path(), &options, &mut crate::NoopProgress);
@@ -2083,7 +2098,7 @@ fn extract_forced(data: Vec<u8>, out: &std::path::Path) -> Result<ExtractionRepo
     let config = SecurityConfig::default();
     let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
     let options = ExtractionOptions {
-        skip_duplicates: false,
+        existing_files: crate::ExistingFiles::Overwrite,
         ..ExtractionOptions::default()
     };
     archive.extract(out, &options, &mut crate::NoopProgress)
@@ -2178,7 +2193,7 @@ fn test_overwrite_directory_returns_error_without_deleting_it() {
     std::fs::write(&inner_file, b"do not delete").unwrap();
 
     let options = ExtractionOptions {
-        skip_duplicates: false,
+        existing_files: crate::ExistingFiles::Overwrite,
         ..ExtractionOptions::default()
     };
 
@@ -2223,7 +2238,7 @@ fn test_symlink_to_directory_rejected_via_symlink_check_not_directory_check() {
     std::os::unix::fs::symlink(&real_dir, &link_path).unwrap();
 
     let options = ExtractionOptions {
-        skip_duplicates: false,
+        existing_files: crate::ExistingFiles::Overwrite,
         ..ExtractionOptions::default()
     };
 
@@ -2268,7 +2283,7 @@ fn test_skip_duplicates_aggregates_single_warning() {
     let report = archive
         .extract(
             temp.path(),
-            &ExtractionOptions::default(), // skip_duplicates = true
+            &ExtractionOptions::default(), // ExistingFiles::Skip
             &mut crate::NoopProgress,
         )
         .unwrap();

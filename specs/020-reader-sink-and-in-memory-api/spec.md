@@ -10,7 +10,7 @@ tags:
   - in-memory
   - bindings
 created: 2026-11-02
-updated: 2026-11-05
+updated: 2026-11-06
 status: implemented
 related:
   - "[[constitution]]"
@@ -34,6 +34,9 @@ related:
 > **MSRV**: Rust 1.99.1
 > **Origin**: v0.8.0 — #771 (reader APIs, WASI), #787 (sink, memory sink, detection, writers, bindings), #790 (progress variants, `of_type`, `create_to_bytes`), #808 (`SinkOptions`, `SinkFull`, `CreatableFormat`, typed `ExtractTarget`)
 > **Status**: implemented — documents shipped behavior; the archive-from-a-path API of [[002-format-handlers/spec]] is unchanged
+
+> [!note] Batch #981 amendments
+> Duplicate handling is `ExistingFiles {Skip, Overwrite, Refuse}`, which replaces `SinkOptions::skip_duplicates` (FR-105 to FR-107). The `formats` module is crate-private; the request API is the entry point (#978B).
 
 ## 1. Overview
 
@@ -159,9 +162,9 @@ SO THAT a web handler never writes an untrusted archive to disk
 | FR-011 | `EntrySink` SHALL provide `create_directory`, `create_file` (path, optional `SanitizedMode`, `size: AdmittedSize`) returning `Self::File: Write`, `create_file_from`, `finish_file`, `create_symlink` (target as `CheckedLinkTarget<'_>`) and `create_hardlink`; `AdmittedSize` and `CheckedLinkTarget` are built only by the validator's permit and `SafeSymlink`, so a sink cannot be handed an unadmitted size or an unchecked target (#909), and an overridable `path_model()` defaulting to `PathModel::Host` | must |
 | FR-012 | A file SHALL be delivered as `create_file`, writes, `finish_file`; a `File` dropped without `finish_file` is DISCARDED (the pipeline drops it when the entry fails), so a sink MUST NOT publish data from `Drop` or `write`; the pipeline never flushes, so `finish_file` flushes and reports a failed flush | must |
 | FR-013 | Every path delivered to a sink SHALL be relative, normalized, free of `..`, a root or a prefix, and already resolved through the symlinks of earlier entries; parent directories SHALL NOT be announced; hardlinks SHALL be delivered after every other entry | must |
-| FR-014 | Validation SHALL assume an empty namespace and count the bytes the archive produces, not what the sink stores; duplicates SHALL follow `SinkOptions::skip_duplicates` (default true) exactly as the path-based API | must |
+| FR-014 | Validation SHALL assume an empty namespace and count the bytes the archive produces, not what the sink stores; occupants SHALL follow `SinkOptions::existing_files` (default `Skip`) exactly as the path-based API; a sink holds only entries of the current run, so under `Refuse` an occupant is always an in-archive duplicate and is skipped as under `Skip` | must |
 | FR-015 | A sink error SHALL end the extraction as `ArchiveError::Io` when no entry was delivered and as `PartialExtraction` wrapping it afterwards; an `io::ErrorKind::QuotaExceeded` error carrying `SinkFull` SHALL map to `QuotaExceeded { resource: SinkCapacity { max } }` | must |
-| FR-016 | `SinkOptions` (`#[non_exhaustive]`, Copy) SHALL carry `skip_duplicates` and `decode_reuse: DecodeReuse` (default `Off`, set through `with_decode_reuse`; #890, #946); `SinkOptions::try_from(&ExtractionOptions)` SHALL carry only the duplicate policy and set `decode_reuse` to `Off`, and SHALL fail with `InvalidConfiguration` when `atomic` is set, since atomic extraction renames a directory (#794, #808) | must |
+| FR-016 | `SinkOptions` (`#[non_exhaustive]`, Copy) SHALL carry `existing_files: ExistingFiles` and `decode_reuse: DecodeReuse` (default `Off`, set through `with_decode_reuse`; #890, #946); `SinkOptions::try_from(&ExtractionOptions)` SHALL carry only `existing_files` and set `decode_reuse` to `Off`, and SHALL fail with `InvalidConfiguration` when `staging` is `Atomic` or `AtomicReplace`, since staged extraction renames a directory (#794, #808) | must |
 | FR-017 | Symlinks SHALL be delivered on every platform, including hosts where the path-based API refuses to create them; a hardlink to a directory SHALL be `InvalidArchive`; a directory or file entry through a dangling symlink, or over a file or symlink, SHALL be refused with the same entry-naming message as `extract` and `verify` (#802, #803) | must |
 | FR-018 | For a 7z source the file-table checks (admission, ratios, quotas, link policy, paths, name lengths for the sink's `PathModel`) SHALL run and refuse before any block is decoded or any entry is delivered (#772, #785) | must |
 | FR-019 | The in-memory destination model SHALL charge each distinct name against a node budget of `max_file_count * max_path_depth + 1`; exhausting it SHALL fail with `QuotaExceeded { resource: TreeNodes { max } }`; a link path that leaves the root and returns SHALL be refused as an escape | must |
@@ -240,11 +243,14 @@ SO THAT a web handler never writes an untrusted archive to disk
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-100 | `ListRequest::for_extraction(path, DecodeReuse)` (taking the extraction `SecurityConfig` and the `ListOptions`) SHALL return a `ListedArchive` whose `manifest()` is the list result and whose `extract(output_dir, &ListedExtractOptions { atomic, skip_duplicates }, progress)` extracts the listed archive under the stored extraction config (the list pass runs under `SecurityConfig::for_listing()`; `extract_under` and `list_archive_for_extraction` were removed, #901, #912), so a caller that must inspect an archive before extracting it (conflict check, progress total) does not pay a second decode (v0.8.0, #828, #884) | must |
+| FR-100 | `ListRequest::for_extraction(path, DecodeReuse)` (taking the extraction `SecurityConfig` and the `ListOptions`) SHALL return a `ListedArchive` whose `manifest()` is the list result and whose `extract(output_dir, &ListedExtractOptions { staging, existing_files }, progress)` extracts the listed archive under the stored extraction config (the list pass runs under `SecurityConfig::for_listing()`; `extract_under` and `list_archive_for_extraction` were removed, #901, #912), so a caller that must inspect an archive before extracting it (conflict check, progress total) does not pay a second decode (v0.8.0, #828, #884) | must |
 | FR-101 | For a gz, bz2 or xz TAR the list pass SHALL spool the decoder output to an unnamed temporary file up to 256 MiB, and `extract` SHALL read the spool instead of decoding again; plain TAR and zstd TAR (a codec that decodes faster than a disk round trip) SHALL keep nothing | must |
 | FR-102 | `extract` SHALL decode again, exactly as without a listing, whenever the spool cannot be trusted to equal a fresh decode: the decoder failed or did not reach its end, the decoded stream exceeds the limit or a spool write failed, or (until #901) the extraction's `max_decoder_memory` was below the one the list pass decoded under — since #901 the extraction runs under the config the `ListedArchive` stores, a mismatch is unrepresentable and `Kept::serves` is a `debug_assert!`; a fallback is chosen by size and contents, never as a security property, and extraction validates every entry again; a read error during the replay SHALL be `Io` with its errno (v0.8.0, #828, #882, #884) | must |
 | FR-103 | For a ZIP the `ListedArchive` SHALL keep the parsed archive open and reuse the deflate output of the structure check per `DecodeReuse` (see [[003-config-api/spec]]): `Off` keeps nothing, `Memory(ReuseLimit)` keeps decoded entries in memory up to the limit, `TempFile(ReuseLimit)` in an unnamed temporary file (nothing is kept on WASI or when none can be created; a spool on a Linux tmpfs or ramfs is charged like `Memory`, see [[002-format-handlers/spec]] FR-061; the TAR spool of the `ListedArchive` is still uncharged); `ReuseLimit` is at most 256 MiB, kept output is clamped to `max_decoder_memory` and `max_total_size`, and entries over `max_file_size` or `max_compression_ratio` are not kept; the library default is `Memory(32 MiB)` and the CLI `extract --decode-reuse <off\|memory\|temp-file>` defaults to memory up to 256 MiB; bzip2 and zstd output of the check are kept as well, and `extract_reader_to_memory` always reuses in memory (v0.8.0, #857, #866, #884, #894) | must |
 | FR-104 | `exarch extract` into an existing destination SHALL decode a gz, bz2 or xz TAR once, and `exarch extract --atomic` SHALL decode a TAR once, so a refusal arrives as a `rolled_back` partial report instead of a pre-write error and the progress bar has no total (v0.8.0, #828, #842) | must |
+| FR-105 | The sink occupant decisions (`stage_file`, symlink and hardlink in `sink.rs`) SHALL be exhaustive `match`es over `ExistingFiles`; `Refuse` SHALL route only to refuse or skip, never to a replace; a sink holds only this run's entries, so `Refuse` there skips an in-archive duplicate as `Skip` does | must |
+| FR-106 | Source reads and destination writes SHALL be classified apart at the sink copy: a write fault of the sink or disk stays `Io`; a read fault stays `Io` when the source tap recorded one, else it is `InvalidArchive` with the family malformation; overrun and overflow keep their meaning (GHSA-5j8q). The classifier is `ReadFaults { tap, family: ReadFamily {Tar, Zip, SevenZ, Opaque} }`, passed through `ExtractTarget::file` | must |
+| FR-107 | Concrete format handlers (`TarArchive`, `ZipArchive`, `SevenZArchive`, the `ArchiveFormat` trait, `open_tar_*`) SHALL be crate-private and the `formats` module `pub(crate)`; the root re-exports `ArchiveType`, `CreatableFormat`, `CompressionCodec` and `detect_format`; the other public modules become private after the root `pub use` block carries each public item; tests, benches, `examples/dhat_extraction.rs` and the fuzz targets use the request API (`ExtractRequest`, `ArchiveReader::of_type` with `SinkExtractRequest` or `ListRequest::list_reader`) or become in-crate unit tests; the `testing` feature stays limited to security primitives ([[002-format-handlers/spec]] FR-062) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -265,7 +271,7 @@ SO THAT a web handler never writes an untrusted archive to disk
 | `SeekableFormat` | `#[non_exhaustive]` formats needing `Seek` | `Zip`, `SevenZ`; `as_str()` |
 | `ReaderFormatError` | `#[non_exhaustive]` reader format failures | `Unrecognized`, `NeedsSeek(SeekableFormat)`, `NotAtStart(SeekableFormat)` |
 | `EntrySink` | Receiver of validated entries | `File: Write`, `path_model`, `create_directory`, `create_file`, `finish_file`, `create_symlink`, `create_hardlink` |
-| `SinkOptions` | Duplicate policy and ZIP decode reuse of a sink run | `skip_duplicates` (default true), `decode_reuse` (default `DecodeReuse::Off`) |
+| `SinkOptions` | Occupant policy and ZIP decode reuse of a sink run | `existing_files` (default `Skip`), `decode_reuse` (default `DecodeReuse::Off`) |
 | `SinkFull` | Payload of a sink's `QuotaExceeded` error | `new(max)`, `max()` |
 | `MemorySink` / `MemoryLimit` / `MemoryEntry` / `MemoryEntryKind` / `MemoryFile` | In-memory sink and its parts | see FR-030 to FR-032 |
 | `PathModel` | Path semantics of a destination | `Host`, `Portable`; `as_str()` |

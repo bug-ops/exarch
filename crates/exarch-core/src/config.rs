@@ -5,12 +5,16 @@ use std::num::NonZeroUsize;
 
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::EntryPattern;
+use crate::EntrySelection;
 use crate::Limit;
+use crate::PathRewrite;
 use crate::RatioLimit;
 use crate::closed_enum::closed_enum;
 use crate::non_zero;
 use crate::non_zero_u64;
 use crate::types::Extension;
+use crate::types::ExtensionFilter;
 use crate::types::PathComponentName;
 
 closed_enum! {
@@ -54,6 +58,164 @@ impl Admit {
     #[must_use]
     pub const fn from_allowed(allowed: bool) -> Self {
         if allowed { Self::Allow } else { Self::Refuse }
+    }
+}
+
+closed_enum! {
+    /// What extraction does with a destination path that is already occupied.
+    ///
+    /// Governs every occupant, whether an earlier entry of the same archive or
+    /// a file that existed before the run. Kind conflicts (a file landing on a
+    /// directory or the reverse) are refused under every variant.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ExistingFiles;
+    ///
+    /// assert_eq!(ExistingFiles::default(), ExistingFiles::Skip);
+    /// assert_eq!(ExistingFiles::Refuse.as_str(), "refuse");
+    /// ```
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum ExistingFiles {
+        /// Leave the occupant in place and count the skip.
+        #[default]
+        Skip => "skip",
+
+        /// Replace the occupant where the kinds allow it, else fail.
+        Overwrite => "overwrite",
+
+        /// Fail with [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
+        /// for an occupant the current run did not create.
+        ///
+        /// An occupant the run created itself (a second archive entry for the
+        /// same path) is skipped and counted, as under [`Skip`](Self::Skip),
+        /// and a directory already present at a directory landing is accepted.
+        /// The run tracks what it created by file identity, and by landing path
+        /// where the host gives no identity (Windows), so there a duplicate that
+        /// differs only in case is refused. The record is bounded at 4 Mi
+        /// landings; past that every occupant counts as not created by the run.
+        /// Both limits fail closed.
+        ///
+        /// A foreign file that reuses the freed identity of a file the run
+        /// created (deleted behind its back) is skipped, never overwritten.
+        ///
+        /// A site that handles [`ExistingFiles`] never routes `Refuse` into an
+        /// overwrite branch, whatever the record says: a file created behind the
+        /// run's back can only turn a refusal into a skip or the reverse, and the
+        /// creates themselves stay exclusive (`O_EXCL`), so `Refuse` cannot write
+        /// over a file it was asked to keep.
+        Refuse => "refuse",
+    }
+}
+
+closed_enum! {
+    /// How extraction stages its output before it is visible at the
+    /// destination.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::Staging;
+    ///
+    /// assert_eq!(Staging::default(), Staging::InPlace);
+    /// assert_eq!(Staging::AtomicReplace.as_str(), "atomic_replace");
+    /// ```
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum Staging {
+        /// Write directly into the destination.
+        #[default]
+        InPlace => "in_place",
+
+        /// Extract into a temporary sibling directory and rename it onto a
+        /// destination that does not exist or is empty; delete it on failure.
+        ///
+        /// A destination that holds content is refused with
+        /// [`ArchiveError::OutputExists`](crate::ArchiveError::OutputExists)
+        /// before anything is extracted, and one that is not a directory with
+        /// [`ConfigProblem::NotADirectory`].
+        /// A symlinked destination is resolved first, so the staging directory is
+        /// on the target's filesystem and the target is what is filled.
+        /// Cancellation is polled once more before the rename. The staging
+        /// directory is extracted under [`ExistingFiles::Refuse`] in place of
+        /// [`ExistingFiles::Skip`], so a file planted in it is refused and never
+        /// published; a duplicate entry of the archive is still skipped.
+        ///
+        /// Cleanup is best-effort if the process is terminated via SIGKILL.
+        Atomic => "atomic",
+
+        /// Like [`Atomic`](Self::Atomic), and swap the staged tree over an
+        /// existing destination directory, replacing it as a whole.
+        ///
+        /// The original is renamed aside only once extraction succeeded and
+        /// removed after the staged tree is in place; if moving the staged tree
+        /// fails the original is restored, and
+        /// [`ArchiveError::ReplaceFailed`](crate::ArchiveError::ReplaceFailed)
+        /// says whether that worked. A backup that cannot be removed is reported
+        /// as an [`ExtractionWarning::BackupCleanupFailed`](crate::ExtractionWarning::BackupCleanupFailed).
+        /// A destination that does not exist is created as under `Atomic`.
+        ///
+        /// The destination's parent is held by a directory handle, so replacing
+        /// one of its own parents with a symlink mid-swap cannot redirect the
+        /// swap, and the destination is checked to still be the directory that
+        /// was inspected right before the first rename; that recheck narrows but
+        /// does not close the window around the destination itself. Where the
+        /// platform has no inode identity (Windows) the recheck compares only
+        /// the kind, and the parent is named by path.
+        ///
+        /// A destination that is a symlink or not a directory is refused
+        /// ([`ConfigProblem::IsSymlink`],
+        /// [`ConfigProblem::NotADirectory`]),
+        /// as is one that is a filesystem root or contains the archive or the
+        /// working directory
+        /// ([`ConfigProblem::ReplacesProtectedPath`]).
+        /// Cancellation is polled once more before anything is displaced. Opening
+        /// the parent needs read permission on it.
+        AtomicReplace => "atomic_replace",
+    }
+}
+
+closed_enum! {
+    /// Whether file modes from the archive (or the source tree) are kept.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::PermissionPolicy;
+    ///
+    /// assert!(PermissionPolicy::from_preserve(true).preserves());
+    /// assert!(!PermissionPolicy::Normalize.preserves());
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum PermissionPolicy {
+        /// Use the default mode instead of the recorded one.
+        Normalize => "normalize",
+
+        /// Keep the recorded mode. Setuid and setgid bits are still stripped,
+        /// and world-writable bits unless the configuration allows them.
+        Preserve => "preserve",
+    }
+}
+
+impl PermissionPolicy {
+    /// [`Preserve`](Self::Preserve) when `preserve` is `true`, otherwise
+    /// [`Normalize`](Self::Normalize).
+    #[must_use]
+    pub const fn from_preserve(preserve: bool) -> Self {
+        if preserve {
+            Self::Preserve
+        } else {
+            Self::Normalize
+        }
+    }
+
+    /// Returns `true` for [`Preserve`](Self::Preserve).
+    #[must_use]
+    pub const fn preserves(self) -> bool {
+        matches!(self, Self::Preserve)
     }
 }
 
@@ -504,17 +666,28 @@ pub struct SecurityConfig {
     /// Use this to enable symlinks, hardlinks, absolute paths, etc.
     pub allowed: AllowedFeatures,
 
-    /// Preserve file permissions from archive.
-    pub preserve_permissions: bool,
+    /// Whether file permissions from the archive are preserved.
+    pub permissions: PermissionPolicy,
 
-    /// List of allowed file extensions (empty = allow all).
+    /// Which file extensions are extracted; [`ExtensionFilter::Any`] admits
+    /// every file.
     ///
     /// Extensions are matched case-insensitively (e.g., `txt` matches both
     /// `file.txt` and `file.TXT`); [`Extension`] normalizes a leading dot away.
     ///
-    /// When this list is non-empty, files without a file extension are treated
-    /// as not allowed and will be skipped during extraction.
-    pub allowed_extensions: Vec<Extension>,
+    /// Under [`ExtensionFilter::Only`], files without a file extension are
+    /// treated as not allowed and will be skipped during extraction.
+    pub allowed_extensions: ExtensionFilter,
+
+    /// Which entries are extracted and how their paths are rewritten.
+    ///
+    /// The default selects every entry and keeps every path. Selection is an
+    /// operational choice, not a security limit; it sits here so that
+    /// `extract`, `list`, `verify` and every sink read one value. Entries are
+    /// first validated under their archive path, then selected, then stripped,
+    /// and a stripped path is validated again, so a selection never admits a
+    /// name the plain extraction refuses. See [`EntrySelection`].
+    pub selection: EntrySelection,
 
     /// List of banned path components (e.g., ".git", ".ssh").
     pub banned_path_components: Vec<PathComponentName>,
@@ -659,8 +832,9 @@ impl Default for SecurityConfig {
     /// - `max_file_count`: 10,000
     /// - `max_path_depth`: 32
     /// - `allowed`: All features refused (deny-by-default)
-    /// - `preserve_permissions`: false
-    /// - `allowed_extensions`: empty (allow all)
+    /// - `permissions`: [`PermissionPolicy::Normalize`]
+    /// - `allowed_extensions`: [`ExtensionFilter::Any`]
+    /// - `selection`: every entry, paths kept
     /// - `banned_path_components`: `[".git", ".ssh", ".gnupg", ".aws", ".kube",
     ///   ".docker", ".env"]`
     /// - `solid_archives`: [`SolidArchives::Refuse`] (solid archives rejected)
@@ -677,8 +851,9 @@ impl Default for SecurityConfig {
             max_file_count: Limit::Bounded(non_zero!(10_000)),
             max_path_depth: non_zero!(32),
             allowed: AllowedFeatures::default(), // All false
-            preserve_permissions: false,
-            allowed_extensions: Vec::new(),
+            permissions: PermissionPolicy::Normalize,
+            allowed_extensions: ExtensionFilter::Any,
+            selection: EntrySelection::default(),
             banned_path_components: default_banned_path_components(),
             solid_archives: SolidArchives::Refuse,
             max_tar_metadata_bytes: non_zero!(4 * 1024 * 1024), // 4 MiB
@@ -708,7 +883,7 @@ impl SecurityConfig {
                 world_writable: Admit::Allow,
                 windows_reserved_names: Admit::Refuse,
             },
-            preserve_permissions: true,
+            permissions: PermissionPolicy::Preserve,
             max_compression_ratio: crate::ratio_limit!(1000.0),
             banned_path_components: Vec::new(),
             solid_archives: SolidArchives::Allow(SolidLimits::PERMISSIVE),
@@ -793,6 +968,11 @@ impl SecurityConfig {
 
     /// Sets the maximum path depth allowed.
     ///
+    /// A [`StripComponents`](crate::StripComponents) already in
+    /// [`selection`](Self::selection) was checked against the depth in force
+    /// when it was built and is not re-checked here, so set the depth before
+    /// building the strip count.
+    ///
     /// # Examples
     ///
     /// ```
@@ -813,8 +993,8 @@ impl SecurityConfig {
     /// # Examples
     ///
     /// ```
+    /// use exarch_core::AllowedFeatures;
     /// use exarch_core::SecurityConfig;
-    /// use exarch_core::config::AllowedFeatures;
     ///
     /// let features = AllowedFeatures::default();
     /// let config = SecurityConfig::default().with_allowed(features);
@@ -921,18 +1101,19 @@ impl SecurityConfig {
     /// use exarch_core::SecurityConfig;
     ///
     /// let config = SecurityConfig::default().with_preserve_permissions(true);
-    /// assert!(config.preserve_permissions);
+    /// assert!(config.permissions.preserves());
     /// ```
     #[must_use]
     #[inline]
     pub fn with_preserve_permissions(mut self, preserve: bool) -> Self {
-        self.preserve_permissions = preserve;
+        self.permissions = PermissionPolicy::from_preserve(preserve);
         self
     }
 
-    /// Sets the list of allowed file extensions.
+    /// Sets which file extensions are extracted.
     ///
-    /// An empty list allows all extensions.
+    /// Build an allowlist with [`ExtensionFilter::only`], which refuses an
+    /// empty list; [`ExtensionFilter::Any`] removes the allowlist.
     ///
     /// # Examples
     ///
@@ -948,7 +1129,7 @@ impl SecurityConfig {
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_allowed_extensions(mut self, extensions: Vec<Extension>) -> Self {
+    pub fn with_allowed_extensions(mut self, extensions: ExtensionFilter) -> Self {
         self.allowed_extensions = extensions;
         self
     }
@@ -960,9 +1141,102 @@ impl SecurityConfig {
     /// Returns [`crate::ArchiveError::InvalidConfiguration`] when `extension`
     /// is not a usable extension.
     pub fn try_add_allowed_extension(mut self, extension: &str) -> crate::Result<Self> {
-        self.allowed_extensions
-            .push(Extension::try_from(extension)?);
+        let extension = Extension::try_from(extension)?;
+        self.allowed_extensions =
+            std::mem::take(&mut self.allowed_extensions).with_added(extension);
         Ok(self)
+    }
+
+    /// Replaces the whole entry selection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::EntrySelection;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_selection(EntrySelection::default());
+    /// assert!(config.selection.is_default());
+    /// ```
+    #[must_use]
+    pub fn with_selection(mut self, selection: EntrySelection) -> Self {
+        self.selection = selection;
+        self
+    }
+
+    /// Adds an include pattern, parsed with the grammar of `create -x`.
+    ///
+    /// Only entries that match an include pattern (and no exclude pattern) are
+    /// extracted. A pattern that matches nothing in the archive fails the
+    /// extraction after the scan with
+    /// [`crate::ArchiveError::UnmatchedInclude`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::EntryInclude`] when `pattern` is refused.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().try_add_include("src/main.rs")?;
+    /// assert_eq!(config.selection.include().len(), 1);
+    /// assert!(SecurityConfig::default().try_add_include("**/x").is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn try_add_include(mut self, pattern: &str) -> crate::Result<Self> {
+        let pattern = EntryPattern::parse_for(ConfigSetting::EntryInclude, pattern)?;
+        self.selection = self.selection.with_include(pattern);
+        Ok(self)
+    }
+
+    /// Adds an exclude pattern, parsed with the grammar of `create -x`.
+    ///
+    /// An exclude pattern always wins over an include pattern. One that
+    /// matches nothing is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::EntryExclude`] when `pattern` is refused.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().try_add_exclude("*.tmp")?;
+    /// assert_eq!(config.selection.exclude().len(), 1);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn try_add_exclude(mut self, pattern: &str) -> crate::Result<Self> {
+        let pattern = EntryPattern::parse_for(ConfigSetting::EntryExclude, pattern)?;
+        self.selection = self.selection.with_exclude(pattern);
+        Ok(self)
+    }
+
+    /// Sets how selected entries are rewritten, for example by dropping
+    /// leading path components.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::PathRewrite;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::StripComponents;
+    ///
+    /// let config = SecurityConfig::default();
+    /// let strip = StripComponents::new(exarch_core::non_zero!(1), config.max_path_depth)?;
+    /// let config = config.with_path_rewrite(PathRewrite::Strip(strip));
+    /// assert_eq!(config.selection.rewrite(), PathRewrite::Strip(strip));
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    #[must_use]
+    pub fn with_path_rewrite(mut self, rewrite: PathRewrite) -> Self {
+        self.selection = self.selection.with_rewrite(rewrite);
+        self
     }
 
     /// Appends one banned path component, parsed by [`PathComponentName`].
@@ -1184,10 +1458,10 @@ impl SecurityConfig {
     /// Returns `true` if a file with the given optional extension may be
     /// extracted.
     ///
-    /// When `allowed_extensions` is empty, all files are permitted. When it is
-    /// non-empty, only listed extensions are permitted (ignoring ASCII case),
-    /// and `extension` being `None` (the file has no extension) is not
-    /// allowed.
+    /// Under [`ExtensionFilter::Any`] all files are permitted. Under
+    /// [`ExtensionFilter::Only`] only listed extensions are permitted (ignoring
+    /// ASCII case), and `extension` being `None` (the file has no extension)
+    /// is not allowed.
     ///
     /// # Examples
     ///
@@ -1198,18 +1472,17 @@ impl SecurityConfig {
     ///
     /// assert!(config.is_extension_allowed(Some("txt")));
     /// assert!(!config.is_extension_allowed(Some("exe")));
-    /// // Files without an extension are blocked when the allowlist is non-empty.
+    /// // Files without an extension are blocked by an allowlist.
     /// assert!(!config.is_extension_allowed(None));
     ///
-    /// // Empty allowlist permits everything, including extension-less files.
+    /// // Without an allowlist everything is permitted, including extension-less files.
     /// let permissive = SecurityConfig::default();
     /// assert!(permissive.is_extension_allowed(None));
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
     pub fn is_extension_allowed(&self, extension: Option<&str>) -> bool {
-        self.allowed_extensions.is_empty()
-            || extension.is_some_and(|ext| self.allowed_extensions.iter().any(|a| a.matches(ext)))
+        self.allowed_extensions.allows(extension)
     }
 
     /// The config of a list pass that precedes extraction: the same quota,
@@ -1220,7 +1493,7 @@ impl SecurityConfig {
         listing.allowed.symlinks = Admit::Refuse;
         listing.allowed.hardlinks = Admit::Refuse;
         listing.allowed.world_writable = Admit::Refuse;
-        listing.preserve_permissions = false;
+        listing.permissions = PermissionPolicy::Normalize;
         listing
     }
 }
@@ -1228,26 +1501,21 @@ impl SecurityConfig {
 /// Options controlling extraction behavior (non-security).
 ///
 /// Separate from `SecurityConfig` to keep security settings focused.
-/// These options control operational behavior like atomicity.
+/// These options control operational behavior like staging.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ExtractionOptions {
-    /// Extract atomically: use a temp dir in the same parent as the output
-    /// directory, rename on success, and delete on failure.
+    /// How the output is staged before it is visible at the destination.
     ///
-    /// When enabled, extraction is all-or-nothing: if extraction fails,
-    /// the output directory will not be created. This prevents partial
-    /// extraction artifacts from remaining on disk.
-    ///
-    /// Note: cleanup is best-effort if the process is terminated via SIGKILL.
-    pub atomic: bool,
+    /// Defaults to [`Staging::InPlace`]. Under [`Staging::Atomic`] extraction
+    /// is all-or-nothing: if it fails, the output directory is not created.
+    pub staging: Staging,
 
-    /// Skip duplicate entries silently instead of aborting.
+    /// What to do with a destination path that is already occupied.
     ///
-    /// When `true` (default), if an archive contains two entries with the same
-    /// destination path, the second entry is skipped and a warning is recorded
-    /// in `ExtractionReport`. When `false`, duplicate entries cause an error.
-    pub skip_duplicates: bool,
+    /// Defaults to [`ExistingFiles::Skip`]: the occupant stays and a skip is
+    /// recorded in the [`ExtractionReport`](crate::ExtractionReport).
+    pub existing_files: ExistingFiles,
 
     /// Where a ZIP extraction keeps the output its structural check already
     /// decoded, so deflate entries are decoded once instead of twice.
@@ -1260,48 +1528,47 @@ pub struct ExtractionOptions {
 impl Default for ExtractionOptions {
     fn default() -> Self {
         Self {
-            atomic: false,
-            skip_duplicates: true,
+            staging: Staging::InPlace,
+            existing_files: ExistingFiles::Skip,
             decode_reuse: DecodeReuse::default(),
         }
     }
 }
 
 impl ExtractionOptions {
-    /// Enables or disables atomic extraction.
-    ///
-    /// When enabled, extraction is all-or-nothing: the output directory is not
-    /// created if extraction fails.
+    /// Chooses how the output is staged.
     ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::ExtractionOptions;
+    /// use exarch_core::Staging;
     ///
-    /// let opts = ExtractionOptions::default().with_atomic(true);
-    /// assert!(opts.atomic);
+    /// let opts = ExtractionOptions::default().with_staging(Staging::Atomic);
+    /// assert_eq!(opts.staging, Staging::Atomic);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_atomic(mut self, atomic: bool) -> Self {
-        self.atomic = atomic;
+    pub const fn with_staging(mut self, staging: Staging) -> Self {
+        self.staging = staging;
         self
     }
 
-    /// Enables or disables skipping duplicate entries silently.
+    /// Chooses what happens to an occupied destination path.
     ///
     /// # Examples
     ///
     /// ```
+    /// use exarch_core::ExistingFiles;
     /// use exarch_core::ExtractionOptions;
     ///
-    /// let opts = ExtractionOptions::default().with_skip_duplicates(false);
-    /// assert!(!opts.skip_duplicates);
+    /// let opts = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
+    /// assert_eq!(opts.existing_files, ExistingFiles::Overwrite);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_skip_duplicates(mut self, skip: bool) -> Self {
-        self.skip_duplicates = skip;
+    pub const fn with_existing_files(mut self, existing_files: ExistingFiles) -> Self {
+        self.existing_files = existing_files;
         self
     }
 
@@ -1728,10 +1995,11 @@ mod tests {
     #[test]
     fn test_extension_allowed_with_list() {
         let mut config = SecurityConfig::default();
-        config.allowed_extensions = vec![
+        config.allowed_extensions = ExtensionFilter::only(vec![
             Extension::try_from("txt").unwrap(),
             Extension::try_from("pdf").unwrap(),
-        ];
+        ])
+        .unwrap();
         assert!(config.is_extension_allowed(Some("txt")));
         assert!(config.is_extension_allowed(Some("TXT")));
         assert!(!config.is_extension_allowed(Some("exe")));
@@ -1771,7 +2039,7 @@ mod tests {
             "absolute paths should be denied by default"
         );
         assert!(
-            !config.preserve_permissions,
+            !config.permissions.preserves(),
             "permissions should not be preserved by default"
         );
         assert!(
@@ -1798,7 +2066,7 @@ mod tests {
             "permissive allows absolute paths"
         );
         assert!(
-            config.preserve_permissions,
+            config.permissions.preserves(),
             "permissive preserves permissions"
         );
         assert!(
@@ -1996,7 +2264,7 @@ mod tests {
         assert_eq!(listing.allowed.symlinks, Admit::Refuse);
         assert_eq!(listing.allowed.hardlinks, Admit::Refuse);
         assert_eq!(listing.allowed.world_writable, Admit::Refuse);
-        assert!(!listing.preserve_permissions);
+        assert!(!listing.permissions.preserves());
         assert_eq!(listing.allowed.absolute_paths, Admit::Allow);
         assert_eq!(
             listing.solid_archives,

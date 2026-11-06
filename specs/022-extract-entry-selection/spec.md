@@ -11,8 +11,11 @@ tags:
   - parity
   - rust
 created: 2026-11-06
-status: draft
+status: implemented
+updated: 2026-11-06
 related:
+  - "[[plan]]"
+  - "[[tasks]]"
   - "[[constitution]]"
   - "[[MOC-specs]]"
   - "[[001-security-pipeline/spec]]"
@@ -34,10 +37,10 @@ related:
 > **Subsystem**: exarch-core / `config` (extraction options), `request` (`ExtractRequest`, `ListRequest`, `VerifyRequest`, `SinkExtractRequest`), `security` (`SafePath`, `ValidatorCore`), `inspection::landing`, `formats::{tar,zip,sevenz}`; surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
 > **MSRV**: Rust 1.99.1
 > **Origin**: #967 (competitive parity research, P2). No prior request or `wontfix` found in open or closed issues.
-> **Status**: draft, research spec. It captures WHAT and WHY; HOW belongs to a later `/sdd plan`.
+> **Status**: implemented in the #981 batch PR. The open questions are resolved in section 9; HOW is in [[plan]], the task list in [[tasks]]. Section 11 lists where the as-built behavior differs from the first plan.
 
 > [!note] Working names
-> `EntrySelection`, `PathRewrite`, `StripComponents`, `SkipKind::NotSelected` and `SkipKind::StrippedAway` are working names used to keep requirements readable. The plan decides the final identifiers.
+> `EntrySelection`, `PathRewrite`, `StripComponents`, `SkipKind::NotSelected` and `SkipKind::StrippedAway` are the shipped identifiers.
 
 ## 1. Overview
 
@@ -57,8 +60,8 @@ A caller states, in one validated value, which entries to extract and how many l
 
 - A glob engine. Patterns use exactly the grammar that `create -x/--exclude` accepts today (`Exact`, `Prefix`, `Suffix`, `Path`; see [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021). `**`, `?`, character classes, braces and negation stay refused.
 - Regular expressions, and tar-style `s/old/new/` name transforms.
-- An overwrite-policy enum (`Skip`/`Overwrite`/`Error`). Collisions follow the existing `skip_duplicates` and `--force` rules; a policy enum is a separate spec.
-- A caller-supplied filter callback in `exarch-core` or the bindings (see Open Questions: user code per entry cannot be modeled by `verify`).
+- A new overwrite policy. Collisions follow the existing `ExistingFiles {Skip, Overwrite, Refuse}` rules (and `--force` mapping to `Overwrite`); this spec adds no variant and no default.
+- A caller-supplied filter callback in `exarch-core` or the bindings (see section 9, Q16: user code per entry cannot be modeled by `verify`).
 - Rewriting link targets so that a link keeps pointing at the same archive entry after stripping.
 - Changing creation (`--strip-prefix`, `-x`) in any way.
 - Extracting entries by position or by archive index.
@@ -174,7 +177,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-001 | THE SYSTEM SHALL express entry selection as a typed, validated value (working name `EntrySelection`) holding zero or more include patterns and zero or more exclude patterns; the default selects every entry; the value SHALL be immutable after construction and built through the config builder | must |
+| FR-001 | THE SYSTEM SHALL express entry selection as a typed, validated value `EntrySelection` holding zero or more include patterns, zero or more exclude patterns and the `PathRewrite`; the default selects every entry; the value SHALL be immutable after construction, built through the config builder, and live in `SecurityConfig` so that extract, list, verify and sinks share it | must |
 | FR-002 | THE SYSTEM SHALL express path rewriting as a closed, `#[non_exhaustive]` enum (working name `PathRewrite`) with at least `Keep` (default) and `Strip(StripComponents)`; there SHALL be no `bool` flag and no `0` standing for "none" | must |
 | FR-003 | `StripComponents` SHALL be a newtype that cannot hold zero or a value above the destination's maximum path depth; runtime values (CLI, Python, Node) SHALL enter through one `limit.rs`-style boundary function that refuses `0`, negatives, non-integers and out-of-range values as `InvalidConfiguration` naming the setting | must |
 | FR-004 | Selection patterns SHALL be the same typed pattern value and the same parser as the creation exclude patterns (one grammar, one `TryFrom<&str>`, one `Display`); a refused shape SHALL be refused at construction with `InvalidConfiguration` and the pattern named; no unparsed string SHALL be stored | must |
@@ -198,7 +201,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-020 | WHEN two entries map to one landing path after rewriting, THE SYSTEM SHALL apply the existing duplicate rules unchanged: first entry wins and the later one is skipped and counted as a duplicate under `skip_duplicates = true`; an error under `skip_duplicates = false`; a later file replaces an earlier one under `--force`; and the existing refusals (file over directory, symlink over file or link, hardlink over anything) | must |
+| FR-020 | WHEN two entries map to one landing path after rewriting, THE SYSTEM SHALL apply the existing duplicate rules unchanged: under `ExistingFiles::Skip` the first entry wins and the later one is skipped and counted as a duplicate; under `Overwrite` (CLI `--force`) a later file replaces an earlier one where the kinds allow; under `Refuse` an occupant created by the same run is skipped as a duplicate and any other occupant is refused with `DestinationOccupied`; and the existing refusals (file over directory, symlink over file or link, hardlink over anything) | must |
 | FR-021 | Collision detection SHALL operate on the landing path under the destination's `PathModel` (case-insensitive component comparison for `Portable`), so `a/X` and `b/x` collide whenever the destination would treat them as one name | must |
 | FR-022 | THE SYSTEM SHALL decide collisions on the rewritten path, never on the original, in `extract`, `list`'s landing projection and `verify` alike, so all three agree on which entry "wins" | must |
 
@@ -207,18 +210,18 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-030 | THE SYSTEM SHALL NOT rewrite symlink target text; a symlink SHALL be validated at its rewritten landing with its original target, so a link whose target resolved inside the archive only because of the stripped prefix (`top/link -> ../other/x`, strip 1) is refused as `SymlinkEscape`, never silently re-pointed | must |
-| FR-031 | A hardlink target is an archive entry path; THE SYSTEM SHALL map it through the same selection and rewriting as entry names, and SHALL validate the mapped target as a `SafePath` | must |
-| FR-032 | WHEN a hardlink's target is not selected, is stripped away, or is not extracted for any other reason, THE SYSTEM SHALL refuse the hardlink with a typed error naming the link and its target; it SHALL NOT create a dangling hardlink, a copy of data it did not extract, or a link to a path outside the extraction | must |
+| FR-031 | A hardlink target is an archive entry path; THE SYSTEM SHALL map it through the same selection and rewriting as entry names, and SHALL validate the mapped target as a `SafePath`; under a non-default selection a target that holds a `..` component cannot be matched lexically and SHALL be refused as `PathTraversal`; root, prefix, empty and NUL targets keep their plain typed errors | must |
+| FR-032 | WHEN a hardlink's target is not selected, is stripped away, or is not extracted for any other reason (including a pre-existing destination file the archive does not carry, under a strip), and a hardlink whose target several entries collided on under a strip SHALL be refused with `Violation::HardlinkTargetAmbiguous` (sub-code `LinkTarget`), THE SYSTEM SHALL refuse the hardlink with `Violation::HardlinkTargetNotExtracted { link, target }` (sub-code `LinkTarget`); it SHALL NOT create a dangling hardlink, a copy of data it did not extract, or a link to a path outside the extraction | must |
 | FR-033 | In-archive link projection (`VirtualTree::project_landing`) and placement checks SHALL run on rewritten landing paths, so an entry placed beneath a symlink is judged where it would really land | must |
 
 ### Quotas, skips and reporting
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-040 | An entry skipped by selection or stripping SHALL NOT be charged to `max_total_size` or `max_file_size`, SHALL create no directory, and SHALL be counted in `files_skipped`, whatever the destination state; it SHALL be charged to `max_file_count` exactly as an allowlist-skipped entry is (see #831, #846) | must |
+| FR-040 | An entry skipped by selection or stripping SHALL NOT be charged to `max_total_size` or `max_file_size`, SHALL create no directory, and SHALL be counted in `files_skipped`, whatever the destination state; for `max_file_count` it SHALL be charged exactly as an allowlist-skipped entry is, which the audit of #831 and #846 fixed as: extraction charges no allowlist or selection skip, `list` charges the count alone, and `verify` charges the count alone (verify previously charged the full size and was aligned) | must |
 | FR-041 | `SkipKind` SHALL gain distinct kinds for "not selected" and "stripped away" (working names `NotSelected`, `StrippedAway`), so `ExtractionReport::skipped`, CLI `--json` `skipped_by_kind` and both bindings can tell them apart from `Duplicate` and `ExtensionNotAllowed` | must |
 | FR-042 | WHEN a compressed TAR is extracted, THE SYSTEM SHALL bound the decode of entries skipped by selection or stripping exactly as it bounds allowlist and duplicate skips: past `max_file_size` and `max_total_size`, skipped data SHALL NOT decode to more than `max_compression_ratio` times the compressed input read so far, else `ZipBomb` with scope `SkippedEntries` ([[002-format-handlers/spec]] FR-053, #863); an archive that extracts without a selection SHALL NOT be refused because of it | must |
-| FR-043 | WHEN an `include` pattern matches no entry in the whole archive, THE SYSTEM SHALL fail with a typed error naming every unmatched pattern; the error SHALL carry the partial outcome like other late errors | must |
+| FR-043 | WHEN an `include` pattern matches no entry in the whole archive (also an empty one), THE SYSTEM SHALL fail after the full scan and before the hardlink pass, with no pre-pass, with the top-level `ArchiveError::UnmatchedInclude { patterns }` naming every unmatched pattern (FFI kind `InvalidConfiguration`, setting `entry_include`); the error SHALL be wrapped in `Partial` when entries were written; `Atomic` staging SHALL roll back; `verify` reports it as an archive issue | must |
 | FR-044 | An exclude pattern that matches nothing SHALL NOT be an error | must |
 | FR-045 | Progress callbacks SHALL report skipped entries (selected-out or stripped) as skipped, not as processed, and the entry counts the callback sees SHALL stay consistent with `ExtractionReport` | should |
 
@@ -227,29 +230,30 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-050 | `ListRequest` and `VerifyRequest` SHALL accept the same selection and rewrite value as extraction and SHALL interpret it with the same code; there SHALL be no second implementation of matching or stripping | must |
-| FR-051 | `ArchiveManifest::landing_paths` and `landings` SHALL project through the selection and rewrite: entries not selected and entries stripped away SHALL be omitted, and every other landing SHALL be the rewritten path ([[019-verify-and-list-model/spec]] FR-060) | must |
+| FR-051 | `ArchiveManifest::landing_paths` and `landings` SHALL project through the selection and rewrite stored in the manifest (never one taken from the config argument): entries not selected and entries stripped away SHALL be omitted, and every other landing SHALL be the rewritten path ([[019-verify-and-list-model/spec]] FR-060) | must |
 | FR-052 | `verify` SHALL report as issues every refusal `extract` raises for the same selection (traversal after stripping, link escape, hardlink to a non-extracted target, collisions that fail, placement conflicts, over-long landings), so a passing `verify` with a selection never precedes a failing `extract` with it | must |
-| FR-053 | `list` SHALL let the caller tell which entries a selection would extract and where each would land (working shape: a typed per-entry disposition in the manifest or on a landing iterator; the plan decides), and SHALL still charge every scanned entry to `max_file_count` | must |
+| FR-053 | `list` SHALL let the caller tell which entries a selection would extract and where each would land: `ArchiveManifest` stores the selection it was listed with (`selection()`), and `ArchiveManifest::dispositions(&SecurityConfig)` yields each entry with `Disposition::{Extract(LandingPath), Skip(SkipKind)}`; the config supplies only limits and policies, as for `landing_paths`, never the selection; an entry whose validation refuses is not reported; `ArchiveManifest::total_size()` keeps counting every entry; every scanned entry is still charged to `max_file_count` | must |
 | FR-054 | `verify` SHALL keep validating the original path of every entry, selected or not, as `extract` does (FR-011); unselected entries SHALL NOT produce link, placement or collision findings of their own | must |
 
 ### Flatten
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-060 | `PathRewrite` SHOULD offer a `Flatten` variant that lands each regular file under the destination root by its final component only; it SHALL be mutually exclusive with `Strip` by construction (one enum, not two fields) | should |
-| FR-061 | Under `Flatten`, a collision SHALL be detected on the final component under the destination's `PathModel` (Unicode case-folded comparison, as FR-021 requires for `Portable`) and SHALL follow FR-020; the plan SHALL state how the reported skip distinguishes a flatten collision | should |
-| FR-062 | Under `Flatten`, directory entries SHALL be skipped and counted; symlink and hardlink entries SHALL NOT be created with a target that was written for the original layout (see Open Questions for skip versus refuse) | should |
+| FR-060 | `PathRewrite` SHALL offer a `Flatten` variant that lands each regular file under the destination root by its final component only; it SHALL be mutually exclusive with `Strip` by construction (one enum, not two fields) | must |
+| FR-061 | Under `Flatten`, a collision SHALL be detected on the final component under the destination's `PathModel` (Unicode case-folded comparison, as FR-021 requires for `Portable`) and SHALL follow FR-020; a flatten collision is reported as `Duplicate`, with no extra skip kind | must |
+| FR-062 | Under `Flatten`, directory entries SHALL be skipped and counted as `StrippedAway`; symlink and hardlink entries that are selected SHALL be refused with `Violation::LinkUnderFlatten { kind, name }` (sub-code `LinkPolicy`), never skipped silently and never created with a target written for the original layout | must |
 
 ### Surfaces
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-100 | THE CLI `extract`, `list` and `verify` SHALL take `--strip-components <N>`, repeatable `--include <PATTERN>` and repeatable `--exclude <PATTERN>`, parsed once after clap into the typed values; a refused pattern or value SHALL exit `1` with the JSON envelope (`setting` named) and write nothing | must |
-| FR-101 | THE CLI SHALL NOT take positional member arguments in this spec (the positional `OUTPUT_DIR` already follows the archive; see Open Questions) | must |
-| FR-102 | THE CLI `--json` output for `extract` SHALL expose the new skip kinds in `skipped_by_kind`, and its text output SHALL name the pattern or the strip that left entries out; `list` and `verify` JSON SHALL carry the disposition required by FR-053 | must |
+| FR-100 | THE CLI `extract`, `list` and `verify` SHALL take `--strip-components <N>`, repeatable `--include <PATTERN>`, repeatable `--exclude <PATTERN>` and `--flatten` (which conflicts with `--strip-components` at the clap level, exit 2), parsed once after clap into the typed values; `<N>` is an `i64` so that `0` and negatives reach the core boundary function; a refused pattern or value SHALL exit `1` with the JSON envelope (`setting` named: `entry_include`, `entry_exclude`, `strip_components`) and write nothing | must |
+| FR-101 | THE CLI SHALL NOT take positional member arguments in this spec (the positional `OUTPUT_DIR` already follows the archive; section 9, Q14) | must |
+| FR-102 | THE CLI `--json` output for `extract` SHALL expose the new skip kinds (`not_selected`, `stripped_away`) in `skipped_by_kind`, and its text output SHALL print them in the skip breakdown by kind (the formatter does not know the selection, so it names no pattern); `list` SHALL add `  [lands at <path>]` (only when it differs from the name) or `  [skipped: <kind>]` to the text and a `disposition` object (`{"action":"extract","landing":..}` or `{"action":"skip","kind":..}`) to `--json`, only when a selection flag is given; `verify` prints no per-entry rows and carries no disposition, it reports an unmatched include and a hardlink to a non-extracted target as issues | must |
 | FR-103 | `extract --atomic` SHALL apply selection and rewrite inside the temporary tree, so only selected and rewritten entries are committed; an unmatched include pattern (FR-043) SHALL roll back and commit nothing | must |
-| FR-104 | Python `extract_archive*` SHALL take `strip_components: int | None = None`, `include: Sequence[str] | None = None`, `exclude: Sequence[str] | None = None`; Node `extractArchive*` SHALL take the same in its options object (`stripComponents`, `include`, `exclude`); both SHALL only map types and parse through the core boundary functions, with errors built from the single typed `ArchiveError::into_ffi_message()` | must |
+| FR-104 | The selection SHALL live in `SecurityConfig` for the bindings too, so extract, list, verify, memory and callback extraction share it: Python `SecurityConfig.add_include_pattern`, `add_exclude_pattern`, `with_strip_components(int)`, `with_flatten(bool=True)` and the properties `include_patterns`, `exclude_patterns` (list setters; an empty list is allowed, not refused), `strip_components` (`int | None`), `flatten`; Node `addIncludePattern`, `setIncludePatterns`, `addExcludePattern`, `setExcludePatterns`, `setStripComponents(number | null)`, `setFlatten(boolean)` with the matching getters; strip and flatten are one core `PathRewrite`, so the last call wins (`setFlatten(false)` and `strip_components = None` each remove only their own choice); a refused value is `InvalidConfigurationError` / `INVALID_CONFIGURATION` naming the setting; an unmatched include carries the patterns (`patterns` in Python, `unmatchedPatterns` in Node, also through `PartialExtraction`); `ArchiveManifest` exposes dispositions (Python `dispositions(config=None)` returning `ExtractDisposition` (`path`, `landing`) or `SkipDisposition` (`path`, `kind`); Node `dispositions` computed eagerly at list time as `{ kind: 'extract', path, landing }` or `{ kind: 'skip', path, reason }`); both parse through the core boundary functions and build errors from `ArchiveError::into_ffi_message()` | must |
 | FR-105 | Python and Node SHALL document the order of operations (FR-010) and that matching is on the pre-strip path | must |
+| FR-107 | WHEN `Staging::AtomicReplace` is requested with a selection other than the default or with a rewrite other than `Keep`, THE SYSTEM SHALL refuse it in `exarch-core` as `InvalidConfiguration` with setting `EntrySelection` and problem `NotSupported`; CLI and bindings SHALL add no check of their own | must |
 | FR-106 | The `skills/exarch-cli/SKILL.md` skill SHALL be updated in the same change, verified against the running binary | must |
 
 ## 4. Non-Functional Requirements
@@ -283,18 +287,18 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | Strip 1 and an entry `top/` | Skipped, counted as stripped away; destination root untouched (FR-014) |
-| Strip 1 and a top-level file `README` | Skipped, counted as stripped away, not an error (as `tar --strip-components` does); see Open Questions on a strict mode |
+| Strip 1 and a top-level file `README` | Skipped, counted as stripped away, not an error (as `tar --strip-components` does); there is no strict mode, section 9, Q4 |
 | Strip 2 and an entry `a/b` (exactly N components) | Skipped as stripped away |
 | Strip N larger than any entry | Every entry skipped; extraction reports success with nothing extracted; a boundary value above max path depth is refused at construction |
 | `top/../x` and strip 1 | Refused as `PathTraversal` by validation of the original name, before selection and stripping (FR-010) |
-| `./top/x` and strip 1 | `./` does not count; lands at `x` (FR-013) |
+| `./top/x` and strip 1 | `./` does not count; lands at `x` (FR-013); bsdtar and GNU tar count it and give `top/x`; deliberate difference, pinned by a test |
 | ZIP entry `top\x` | Normalized to `top/x` before matching and stripping |
 | Absolute `/top/x` with `allow_absolute_paths`, strip 1 | Root prefix not counted; lands at `x` |
-| `a/x` and `b/x` with strip 1 | Both map to `x`; first wins and the second is a counted duplicate by default; `--force` replaces; `skip_duplicates = false` fails (FR-020) |
+| `a/x` and `b/x` with strip 1 | Both map to `x`; under `Skip` (the default) first wins and the second is a counted duplicate, whereas bsdtar overwrites; `Overwrite` (`--force`) replaces; under `Refuse` the second is a counted duplicate too, because this run created the first (FR-020) |
 | `a/X` and `b/x`, strip 1, `Portable` model | Collide (FR-021) |
 | Directory entry `top/` stripped away, files below it remain | Files land under the root; implicit parent directories are created as extraction does today |
 | Select `top/sub/file` only | `top/sub` is created as an implicit parent; explicit directory entries of the ancestors that are not selected are not applied, so their recorded modes are not set |
-| Symlink `top/link -> ../other/x`, strip 1 | Refused as `SymlinkEscape`; target text is never rewritten (FR-030) |
+| Symlink `top/link -> ../other/x`, strip 1 | Refused as `SymlinkEscape`; target text is never rewritten (FR-030); bsdtar creates the link, deliberate difference |
 | Symlink `top/bin/t -> ../lib/x`, strip 1 | Lands as `bin/t -> ../lib/x`, resolves to `lib/x` inside the destination; accepted if `allow_symlinks` |
 | Hardlink `top/l` to `top/orig`, only `top/l` included | Refused; target not extracted (FR-032) |
 | Hardlink `top/l` to `top/orig`, strip 1, both selected | `l` hardlinks `orig` at the destination |
@@ -305,7 +309,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 | Unselected entry with a path under an existing file or dangling symlink | Refused, not skipped (FR-011) |
 | Compressed TAR whose unselected entries inflate far past the ratio | `ZipBomb`, scope `skipped entries` (FR-042) |
 | Entry whose data is skipped in a solid 7z block | The block is still decoded as a whole (needs `allow_solid_archives`); skipped entry data is not written |
-| `--atomic --force` over an existing destination with a partial selection | The swap replaces the whole destination with the selected subset, as the swap does today for any extraction; see Open Questions |
+| `--atomic --force` (`Staging::AtomicReplace`) with a non-default selection or strip | Refused in core as `InvalidConfiguration{EntrySelection, NotSupported}` before the archive is opened (FR-107) |
 | `verify` with a selection on an archive `extract` would refuse | `verify` reports the refusal (FR-052) |
 | `list` with a selection | Every scanned entry is charged to `max_file_count`; the caller can see which entries extract (FR-053) |
 | Selection together with `--allowed-extensions` | Selection first, then the allowlist on the remaining regular files; an entry out for either reason is counted once, under the first reason that applied |
@@ -351,26 +355,49 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 - Let `verify` or `list` use a different matcher than `extract`
 - Add security logic to a binding
 
-## 9. Open Questions
+## 9. Resolved Questions
 
-- [NEEDS CLARIFICATION: Where does the value live? `allowed_extensions` sits in `SecurityConfig`, and `ListRequest`/`VerifyRequest` are built from a `SecurityConfig` only, so the simplest way for all three operations to share it is a `SecurityConfig` field. But selection is an operational choice, not a security limit, and `ExtractionOptions` is not passed to `list` or `verify`. Alternatives: a `SecurityConfig` field, or a new value passed to all three requests.]
-- [NEEDS CLARIFICATION: Matching is specified on the original (pre-strip) path, as `tar`, `bsdtar` and `node-tar`'s `filter` do. `tar --strip-components=1 -x project/README` therefore needs the unstripped name. Is that the intended default for the CLI help and the bindings, or should a separate post-strip matcher exist?]
-- [NEEDS CLARIFICATION: Should an include pattern that matches nothing be an error by default (GNU `tar` exits 2: "Not found in archive")? FR-043 says yes. In a non-atomic extraction the error arrives after earlier entries were written; is a cheap pre-pass (`ListRequest::for_extraction` already keeps the decode) wanted to fail before any write?]
-- [NEEDS CLARIFICATION: Should a regular file whose name is consumed entirely by stripping (`README` at top level with strip 1) be a counted skip (FR-014, as `tar` does) or an optional strict refusal, since silently dropping a file the caller probably wanted is a surprise?]
-- [NEEDS CLARIFICATION: Do `./` and the root count as a component? bsdtar and GNU `tar` differ for names like `./top/x`. FR-013 chooses "do not count"; confirm against the differential corpus (SC-001) and record the deliberate difference.]
-- [NEEDS CLARIFICATION: Hardlink to an unselected or stripped target: refuse (FR-032, matches GNU `tar`'s failure) or select the target implicitly (closure)? Closure is friendlier but changes what the caller asked for and what is charged to quotas.]
-- [NEEDS CLARIFICATION: `--atomic --force` swaps the whole destination, so extracting a subset replaces an existing directory with only that subset and deletes everything else in it. Refuse the combination of `--atomic --force` with a non-default selection or strip, or document it as is?]
-- [NEEDS CLARIFICATION: Flatten in this spec or its own? It brings collision detection with Unicode case folding (safe_unzip does this) and the link question below. FR-060 to FR-062 are `should`, so the plan can split it out.]
-- [NEEDS CLARIFICATION: Under `Flatten`, are symlink and hardlink entries skipped (counted) or refused? `unzip -j` and `safe_unzip` handle only files; a skip loses content silently, a refusal makes flatten unusable on archives with any link.]
-- [NEEDS CLARIFICATION: Should a flatten collision, or a stripped-name collision, be an error instead of "first wins" by default? Under strip a collision is rare; under flatten it is the normal failure and silent first-wins is data loss. Today's `skip_duplicates = true` default would apply (FR-020), but an overwrite-policy enum is out of scope.]
-- [NEEDS CLARIFICATION: Pattern case sensitivity. The create matcher compares case-sensitively while banned components compare case-insensitively. Should extraction patterns be case-sensitive on every host (current proposal) or follow the destination's `PathModel`?]
-- [NEEDS CLARIFICATION: Shape of the `list` disposition (FR-053): a new typed field on `ArchiveEntry`, a separate iterator next to `landings`, or both. This also decides whether `ArchiveManifest::total_size()` counts selected files only.]
-- [NEEDS CLARIFICATION: With `verify --check-integrity`, should the payload of unselected entries be decoded and checked (the gate then says the whole archive is intact) or skipped (cheaper, and the gate only speaks for what `extract` writes)?]
-- [NEEDS CLARIFICATION: CLI shape. Positional members (`tar` style) conflict with the existing positional `OUTPUT_DIR`; `-C` would have to be introduced. This spec uses `--include`/`--exclude`/`--strip-components`; is a `-C`-style member form wanted later?]
-- [NEEDS CLARIFICATION: Is the selection-skip charged to `max_file_count` in `extract` today the same way `list` charges it? FR-040 says "exactly as an allowlist-skipped entry"; the plan must read the current extract-side behavior and align `list`, `verify` and `extract` if they differ.]
-- [NEEDS CLARIFICATION: A filter callback for the bindings (as `tarfile`'s `filter`, `node-tar`'s `filter` and `safe_unzip` offer) cannot be modeled by `verify`, so it would break the truthful-gate property. Keep it out for good, or allow it in `extract` only with `verify` refusing to claim parity?]
+All sixteen questions from the research draft were resolved by the user's approval of the planned defaults, 2026-11-06. [[plan]] section 1 carries the consequences.
 
-## 10. See Also
+| Q | Question | Resolution |
+|---|----------|-----------|
+| Q1 | Where the value lives | `SecurityConfig::selection` (FR-001) |
+| Q2 | Match point | Normalized original path, before stripping (FR-005) |
+| Q3 | Include matching nothing | Typed error after the full scan, no pre-pass (FR-043) |
+| Q4 | Entry fully consumed by stripping | Counted skip `StrippedAway`; no strict mode (FR-014) |
+| Q5 | `./` and root as components | Not counted (FR-013); the differential corpus records any bsdtar or GNU difference |
+| Q6 | Hardlink to unselected or stripped target | Refused (FR-032); no closure |
+| Q7 | `Staging::AtomicReplace` with a subset | Refused in core (FR-107) |
+| Q8 | Flatten in this spec | Yes; FR-060 to FR-062 are `must`, implemented last |
+| Q9 | Links under Flatten | Refused with a typed error (FR-062) |
+| Q10 | Collision default | Existing `ExistingFiles` rules; no new default (FR-020) |
+| Q11 | Pattern case sensitivity | Case-sensitive on every host, as the create matcher |
+| Q12 | Shape of the `list` disposition | `ArchiveManifest::dispositions(&SecurityConfig)` (the config supplies limits and policies only); the manifest stores its selection; `total_size()` counts all entries (FR-051, FR-053) |
+| Q13 | `verify --check-integrity` on unselected entries | Decoded and checked too |
+| Q14 | CLI member form | `--include`, `--exclude`, `--strip-components` only; no positional members, no `-C` (FR-101) |
+| Q15 | `max_file_count` charge | Selection skips are charged as allowlist skips; the plan aligns extract, list and verify first (FR-040) |
+| Q16 | Filter callback | Excluded for good: `verify` cannot model user code per entry |
+
+## 10. As-built Notes
+
+| Topic | As built |
+|-------|----------|
+| Differential corpus (SC-001) | Run against bsdtar 3.x for strip 0 to 3 (unix, skipped when bsdtar is missing); GNU tar, node-tar and cpython `tarfile` were not run. The test compares under `ExistingFiles::Overwrite` because bsdtar overwrites |
+| `max_path_depth` | A strip count is validated against `max_path_depth` when it is set; lowering the depth afterwards does not revalidate it |
+| Strip count validation | A strip count is validated against `max_path_depth` when it is built, so the call order of `max_path_depth` and the strip setter matters; the docs say so. Node `setStripComponents(null)` removes a strip and keeps a flatten, as Python `strip_components = None` does |
+| Known gaps | An absolute hardlink target under a strip is not mapped (#997); the binding selection helpers are duplicated between Python and Node (#998) |
+| Per-run state | `finish_scan` on `ExtractTarget` runs the unmatched-include check for TAR, ZIP and 7z, host and sinks, also on empty archives |
+| Selection and the extension allowlist | One gate (`ValidatorCore::route_entry_in`) validates the original `SafePath`, decides selection and rewrite, and revalidates a rewritten name only through `SafePath::validate_rewritten_in(&Rewritten)`; `land` and `verify` use the same step (`route_validated`) |
+
+## 11. Differences from the first plan
+
+- `ArchiveManifest::dispositions` takes `&SecurityConfig` (limits and policies), not nothing; the selection still comes only from the manifest.
+- No `ConfigProblem` was added; `UnmatchedInclude` is a top-level `ArchiveError` variant, `HardlinkTargetNotExtracted` and `LinkUnderFlatten` are `Violation` variants.
+- Bindings take the selection on `SecurityConfig`, not as per-call keyword arguments or an options object.
+- The CLI text output names the skip kind only.
+- A hardlink target containing `..` is refused as `PathTraversal` under a non-default selection.
+
+## 12. See Also
 
 - [[constitution]] — project principles (typed validation pipeline, bindings map types only, quota permits)
 - [[MOC-specs]] — all specifications

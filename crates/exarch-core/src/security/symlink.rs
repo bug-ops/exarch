@@ -32,9 +32,9 @@ use crate::types::SafeSymlink;
 ///
 /// ```ignore
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::security::validate_symlink;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::SafePath;
+/// use exarch_core::validate_symlink;
+/// use exarch_core::DestDir;
+/// use exarch_core::SafePath;
 /// use std::path::Path;
 /// use std::path::PathBuf;
 ///

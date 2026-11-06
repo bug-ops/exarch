@@ -8,7 +8,7 @@ tags:
   - archive
   - rust
 created: 2026-05-20
-updated: 2026-11-05
+updated: 2026-11-06
 status: draft
 related:
   - "[[constitution]]"
@@ -32,8 +32,11 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-core / formats
 > **MSRV**: Rust 1.99.1
-> **Codec and container dependencies (v0.8.0)**: `zip` 9.x (`Cargo.toml` `9.2`, locked 9.2.2; floor 9.0.5), `liblzma` 0.4.9 static for xz (bundles xz 5.8; replaces `xz2`, #763, #771), `sevenz-rust2` 0.24.2 (minimum), `lzma-rust2` 0.24
+> **Codec and container dependencies (v0.8.0)**: `zip` 9.x (`Cargo.toml` `~9.4`, locked 9.4.1; floor 9.0.5), `liblzma` 0.4.9 static for xz (bundles xz 5.8; replaces `xz2`, #763, #771), `sevenz-rust2` 0.24.2 (minimum), `lzma-rust2` 0.24
 > **Source**: extracted from [[001-exarch-system/spec]]
+
+> [!note] Batch #981 amendments
+> Read and write faults are classified at the copy (FR-063); zip 9.4 header refusals map to typed findings (FR-064); `formats` is crate-private (FR-062, #978B).
 
 ## 1. Overview
 
@@ -205,7 +208,12 @@ THEN magic bytes take precedence over the extension
 | FR-058 | WHEN TAR extraction reports progress, THE SYSTEM SHALL route every entry through `EntryCompleteGuard` and report `EntryTotal::Unknown` (a TAR stream has no entry count up front); list and verify passes report `Unknown` until `set_total` (#904) | must |
 | FR-059 | WHEN a TAR or 7z reader fails, THE SYSTEM SHALL classify it as `InvalidArchive` with sub-code `TAR_READER` (five kinds, seven sites) or `SEVENZ_READER` (five kinds, five sites), messages unchanged (#930) | must |
 | FR-060 | WHEN a ZIP read-back needs the same decode again, THE SYSTEM SHALL keep the spooled plaintext according to `DecodeReuse`; the TAR spool is replayed unconditionally by `ListedArchive::extract` and `Kept::serves` is a `debug_assert!`; the `DecodeReuse::TempFile` rustdoc records the measured floor of the design (macOS, release CLI, deflate ZIPs of 10 MiB members: 1.15x the wall time of the build before decode reuse for 100 MiB decoded and 1.18x for 300 MiB; `Memory` 1.07x on the 100 MiB archive; Linux ext4 and tmpfs not measured, and the Linux detection was first built by CI, not run on a Linux host; writing decoder chunks straight to the file measured no faster, and the in-memory arena and `fadvise` ideas of #929 were not adopted) (#929) | should |
-| FR-061 | WHEN the `DecodeReuse::TempFile` spool lives on RAM-backed storage (`SpoolBacking::Ram`, detected with `fstatfs` for `TMPFS_MAGIC` or `RAMFS_MAGIC` on Linux and Android; every other host and every failed probe is `SpoolBacking::Disk`), THE SYSTEM SHALL charge the spool like `Memory` against the reuse limit, `max_decoder_memory` and `max_total_size`, with the used amount equal to the spool file length, and SHALL evict by truncating the spool tail; truncation SHALL NOT cut below the end of the entry just taken (`held_end`), and a taken entry's prefix stays charged until extraction ends; an open spool is a `TempSpool { file, backing }`; deferred follow-ups: Linux timings and non-Linux RAM-disk detection (#959, marker `TODO(#959)` in `open_spool`), and charging the TAR `ListedArchive` spool on a tmpfs (#960, marker `TODO(#960)` in `listed.rs`) | should |
+| FR-061 | WHEN the `DecodeReuse::TempFile` spool lives on RAM-backed storage (`SpoolBacking::Ram`, detected with `fstatfs` for `TMPFS_MAGIC` or `RAMFS_MAGIC` on Linux and Android; every other host and every failed probe is `SpoolBacking::Disk`), THE SYSTEM SHALL charge the spool like `Memory` against the reuse limit, `max_decoder_memory` and `max_total_size`, with the used amount equal to the spool file length, and SHALL evict by truncating the spool tail; truncation SHALL NOT cut below the end of the entry just taken (`held_end`), and a taken entry's prefix stays charged until extraction ends; an open spool is a `TempSpool { file, backing }`; the TAR `ListedArchive` spool on a tmpfs is capped the same way (FR-066, #960, done); the remaining deferred follow-up is Linux timings and non-Linux RAM-disk detection (#959, marker `TODO(#959)` in `open_spool`) | should |
+| FR-062 | The `formats` module and the concrete handlers (`TarArchive`, `ZipArchive`, `SevenZArchive`, the `ArchiveFormat` trait, `open_tar_*`) SHALL be crate-private (`pub(crate)`); callers use the request API and the root re-exports (`ArchiveType`, `CreatableFormat`, `CompressionCodec`, `detect_format`, which the CLI needs); `ZIP_FAMILY_ALIASES` stays private; the other public modules (`api`, `config`, `creation`, `error`, `inspection`, `reader`, `report`, `security`, `sink`, `types`, `writer`) become private once the root `pub use` block carries every public item they held (for example `CreationReport` and the `inspection::manifest` items); items behind the `testing` feature keep that gate and `formats` is not added to it; tests, benches, examples and fuzz targets use the request API or live as in-crate unit tests, and every migrated security test keeps asserting the same typed error (#978) | must |
+| FR-063 | Every entry-data copy (host target, 7z writers, sink) SHALL use `copy_bounded` and classify through `ReadFaults::classify`: `Write` is always `Io`; `Read` is the budget violation if any, else `Io(fault)` when the source tap recorded a fault, else `Io` for any errno or an `Opaque` source, else `InvalidArchive` with the family malformation; `Short` is `Malformation::TarEntryTruncated` for `Tar` with no source fault, every other `Short` and every `Overrun` keep the declared-size verdict (`DeclaredSizeMismatch`, `DeclaredSizeExceeded`; GHSA-5j8q). New malformations: `TarEntryTruncated`, `ZipEntryDataUnreadable`, `SevenZEntryDataUnreadable` (sub-codes `TarReader`, `ZipReader`, `SevenZReader`). ZIP reads go through the shared fault slot of `ZipStructure`, 7z through `SourceRead` (now `Seek`) around the decode and the solid skip-drain; a 7z header parse that records a source fault is `Io`, not `SevenZHeaderUnreadable`. The classification sweep also covers errno-free source faults and the TAR trailer. A destination write fault stays `Io` for TAR, ZIP, 7z and sinks. `TarReadBudget::classify` (header reads) is not switched to this helper because header reads keep `InvalidArchive` for opaque sources (#964, #965) | must |
+| FR-064 | `ZipHeaderField` SHALL gain ten typed variants for the zip 9.4 refusals the census catches (`FIELD_MESSAGES` in `zip_structure`): `CompressionFlags`, `AesMetadata`, `FileNameNul`, and `UnicodePath` with `LanguageEncoding`, `DirectoryStatus`, `NotUtf8`, `IllegalCharacter`, `Components`, `TrailingDotsOrSpaces`, `Extension`; list, verify and extract agree on each, proven by 11 RawZip fixtures (`zip_structure/tests/unicode_path.rs`; the not-UTF-8 field is ignored by the zip reader, so that fixture asserts acceptance and the mapping is covered by a message-level test) and the `xl_type` expectation follows the typed finding. The requirement is `zip = "~9.4"` (locked 9.4.1, also in `fuzz/Cargo.lock`), so a release that changes a message cannot enter silently, and `.github/workflows/zip-drift.yml` (weekly, SHA-pinned) relaxes it to `9`, runs `cargo update -p zip` and the core nextest run, and fails on drift; no second copy of zip's rules exists (#971) | must |
+| FR-065 | `ZIP` directory entries SHALL carry the source directory mode as TAR does, subject to `PermissionPolicy` ([[008-tar-empty-directory-preservation/spec]], #968) | must |
+| FR-066 | A listed or spooled TAR (`open_spool`) on a tmpfs SHALL be held to `max_decoder_memory`, as the ZIP reuse spool is (`SpoolBacking::capacity`); a disk spool is unchanged; a damaged spool or replay is `Io` (`ReadFamily::Opaque`), never `InvalidArchive` (#960) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -318,7 +326,7 @@ Creation has no trait: `CreateRequest::create(&OutputFile, sources)`, `write(Arc
 
 > [!note] zip dependency
 > Upgraded from 8.6.0 to 9.0.0-pre2 in v0.4.0, to 9.1.0 in v0.7.0 and to the 9.x line in
-> v0.8.0 (`Cargo.toml` `9.2`, locked 9.2.2; floor 9.0.5, which
+> v0.8.0 (`Cargo.toml` `~9.4` since #971, locked 9.4.1; floor 9.0.5, which
 > excludes versions with unpatched read-path vulnerabilities; 9.1.0 also reuses one DEFLATE
 > compressor across entries on creation). `ZipFile::name()` returns
 > `Result<Cow<str>, ZipError>` instead of `&str`; all call sites propagate the

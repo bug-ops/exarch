@@ -10,6 +10,7 @@ use std::path::Path;
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::SkipKind;
 use crate::Violation;
 use crate::formats::common::check_entry_name_limits;
 use crate::formats::common::is_extension_allowed;
@@ -20,16 +21,22 @@ use crate::security::admitted::ValidatedHardlink;
 use crate::security::admitted::ValidatedSymlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::FsView;
+use crate::security::fs_view::LinkKind;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::require_hardlinks_allowed;
 use crate::security::permissions::RawMode;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
+use crate::selection::Decision;
+use crate::selection::EntryShape;
+use crate::selection::IncludeHits;
+use crate::selection::LandingClaims;
+use crate::selection::Placement;
+use crate::selection::SelectionRun;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::ParentCheck;
-use crate::types::safe_path::Resolved;
 use crate::types::safe_symlink::require_symlinks_allowed;
 
 /// Refuses an entry name `view`'s path model cannot hold, so `extract` agrees
@@ -134,13 +141,68 @@ pub fn require_non_empty_name(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// What path validation and the extension allowlist decide about a file, before
-/// any quota is charged.
-pub enum FileScreen<P: ParentCheck = Resolved> {
-    /// The file is to be extracted once its quota is reserved.
-    Pending(PendingFile<P>),
-    /// The extension allowlist excludes the file; extraction skips it.
-    DisallowedExtension,
+/// What the entry gate decides about an entry before any quota is charged:
+/// extract it, or leave it out for a stated reason.
+///
+/// The reason is [`SkipKind::NotSelected`] or [`SkipKind::StrippedAway`] from
+/// the selection, or [`SkipKind::ExtensionNotAllowed`] from the allowlist.
+#[derive(Debug)]
+pub enum Gated<T> {
+    /// The entry is extracted; `T` is what its validation produced.
+    Admit(T),
+    /// The entry is skipped and counted under this kind.
+    Skip(SkipKind),
+}
+
+impl<T> Gated<T> {
+    /// The admitted value; panics when the entry was skipped.
+    #[cfg(test)]
+    pub(crate) fn into_admitted(self) -> T {
+        match self {
+            Self::Admit(value) => value,
+            Self::Skip(kind) => panic!("the entry was skipped: {kind:?}"),
+        }
+    }
+
+    /// Applies `f` to an admitted entry.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Gated<U> {
+        match self {
+            Self::Admit(value) => Gated::Admit(f(value)),
+            Self::Skip(kind) => Gated::Skip(kind),
+        }
+    }
+}
+
+/// Applies the entry selection to a name that passed path validation: patterns
+/// first, then the rewrite, and validates a rewritten name again as a landing.
+///
+/// This is the one place a rewritten name becomes a [`SafePath`]; `extract`,
+/// `list`, `verify` and every sink reach it, so they agree on every landing.
+/// `hits` records which include patterns matched, for the end-of-scan check.
+///
+/// # Errors
+///
+/// Returns the validation error of the rewritten name, or the refusal a
+/// rewrite raises.
+pub fn route_validated<V: FsView, P: ParentCheck>(
+    run: SelectionRun<'_>,
+    original: SafePath<P>,
+    shape: EntryShape,
+    root: &V::Root,
+    config: &SecurityConfig,
+    ctx: &ValidationContext<'_, V, P>,
+    view: &V,
+) -> Result<Gated<SafePath<P>>> {
+    if run.selection.is_default() {
+        return Ok(Gated::Admit(original));
+    }
+    match run.decide(original.as_path(), shape)? {
+        Decision::Skip(kind) => Ok(Gated::Skip(kind)),
+        Decision::Extract(Placement::Unchanged) => Ok(Gated::Admit(original)),
+        Decision::Extract(Placement::Rewritten(rewritten)) => {
+            SafePath::validate_rewritten_in(&rewritten, root, config, ctx, view).map(Gated::Admit)
+        }
+    }
 }
 
 /// The validation state and rules shared by every extraction target: quota,
@@ -154,6 +216,8 @@ pub struct ValidatorCore<'a> {
     quota_tracker: QuotaTracker,
     hardlink_tracker: HardlinkTracker,
     symlink_seen: bool,
+    include_hits: IncludeHits,
+    claims: LandingClaims,
 }
 
 impl<'a> ValidatorCore<'a> {
@@ -163,7 +227,32 @@ impl<'a> ValidatorCore<'a> {
             quota_tracker: QuotaTracker::new(),
             hardlink_tracker: HardlinkTracker::new(),
             symlink_seen: false,
+            include_hits: IncludeHits::of(&config.selection),
+            claims: LandingClaims::default(),
         }
+    }
+
+    /// Refuses a hardlink whose target landing several entries map to.
+    ///
+    /// Called when the link is materialized, after every entry was seen.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Violation::HardlinkTargetAmbiguous`].
+    pub fn require_unambiguous_target(&self, link: &Path, target: &Path) -> Result<()> {
+        self.claims.require_unambiguous(link, target)
+    }
+
+    /// Settles what only the whole scan decides: an include pattern that no
+    /// entry matched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::UnmatchedInclude`] naming every unmatched
+    /// pattern.
+    pub fn finish_selection(&self) -> Result<()> {
+        self.include_hits
+            .require_all_matched(&self.config.selection)
     }
 
     /// A context reflecting the symlinks seen so far; build a fresh one for
@@ -176,7 +265,8 @@ impl<'a> ValidatorCore<'a> {
         ctx
     }
 
-    /// Validates a regular file: path, quota reservation, ratio and mode.
+    /// Validates a regular file: path, selection, quota reservation, ratio and
+    /// mode.
     #[cfg(test)]
     pub fn validate_file_in<V: FsView, P: ParentCheck>(
         &mut self,
@@ -186,18 +276,19 @@ impl<'a> ValidatorCore<'a> {
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
-    ) -> Result<ValidatedFile<P>> {
-        let pending = self.pending_file_in(path, size, mode, root, view, ctx)?;
-        check_name_limits(view, pending.path(), true, self.config)?;
-        self.admit_file(pending)
+    ) -> Result<Gated<ValidatedFile<P>>> {
+        match self.screen_file_path_in(path, size, mode, root, view, ctx)? {
+            Gated::Admit(pending) => self.admit_file(pending).map(Gated::Admit),
+            Gated::Skip(kind) => Ok(Gated::Skip(kind)),
+        }
     }
 
-    /// Validates a file's path, then applies the extension allowlist, ahead of
-    /// any quota.
+    /// Validates a file's path, applies the selection and rewrite, then the
+    /// extension allowlist, ahead of any quota.
     ///
-    /// The path comes first, so a disallowed entry named `../x.bin` is
-    /// refused rather than skipped. This is the one place the allowlist rule
-    /// is applied to extraction.
+    /// The original path comes first, so an unselected or disallowed entry
+    /// named `../x.bin` is refused rather than skipped. This is the one place
+    /// the allowlist rule is applied to extraction.
     pub fn screen_file_path_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
@@ -206,14 +297,18 @@ impl<'a> ValidatorCore<'a> {
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
-    ) -> Result<FileScreen<P>> {
-        let pending = self.pending_file_in(path, size, mode, root, view, ctx)?;
-        if is_extension_allowed(path, self.config) {
-            check_name_limits(view, pending.path(), true, self.config)?;
-            Ok(FileScreen::Pending(pending))
-        } else {
-            Ok(FileScreen::DisallowedExtension)
+    ) -> Result<Gated<PendingFile<P>>> {
+        let safe_path = match self.route_entry_in(path, EntryShape::File, root, view, ctx)? {
+            Gated::Admit(entry) => entry.into_inner(),
+            Gated::Skip(kind) => return Ok(Gated::Skip(kind)),
+        };
+        if !is_extension_allowed(safe_path.as_path(), self.config) {
+            return Ok(Gated::Skip(SkipKind::ExtensionNotAllowed));
         }
+        check_name_limits(view, &safe_path, true, self.config)?;
+        self.claims
+            .claim(&self.config.selection, safe_path.as_path());
+        Ok(Gated::Admit(PendingFile::new(safe_path, size, mode)))
     }
 
     /// Reserves the quota of a screened file, checks its ratio and sanitizes
@@ -225,22 +320,7 @@ impl<'a> ValidatorCore<'a> {
         pending.admit(&mut self.quota_tracker, self.config)
     }
 
-    fn pending_file_in<V: FsView, P: ParentCheck>(
-        &self,
-        path: &Path,
-        size: EntrySize,
-        mode: Option<RawMode>,
-        root: &V::Root,
-        view: &V,
-        ctx: &ValidationContext<'_, V, P>,
-    ) -> Result<PendingFile<P>> {
-        let safe_path = self
-            .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
-            .into_inner();
-        Ok(PendingFile::new(safe_path, size, mode))
-    }
-
-    /// Validates a directory entry: path and ratio.
+    /// Validates a directory entry: path, selection and ratio.
     pub fn validate_directory_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
@@ -248,16 +328,21 @@ impl<'a> ValidatorCore<'a> {
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
-    ) -> Result<SafePath<P>> {
-        let safe_path = self
-            .validate_entry_path_in(path, NodeKind::Directory, root, view, ctx)?
-            .into_inner();
+    ) -> Result<Gated<SafePath<P>>> {
+        let safe_path = match self.route_entry_in(path, EntryShape::Directory, root, view, ctx)? {
+            Gated::Admit(entry) => entry.into_inner(),
+            Gated::Skip(kind) => return Ok(Gated::Skip(kind)),
+        };
         check_name_limits(view, &safe_path, false, self.config)?;
         size.check_ratio(self.config)?;
-        Ok(safe_path)
+        Ok(Gated::Admit(safe_path))
     }
 
-    /// Validates a symlink entry: path, ratio, policy, quota and target.
+    /// Validates a symlink entry: path, selection, ratio, policy, quota and
+    /// target.
+    ///
+    /// The target text is never rewritten: it is validated at the rewritten
+    /// landing as the archive recorded it.
     pub fn validate_symlink_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
@@ -266,20 +351,27 @@ impl<'a> ValidatorCore<'a> {
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
-    ) -> Result<ValidatedSymlink<P>> {
-        let safe_path = self
-            .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
-            .into_inner();
+    ) -> Result<Gated<ValidatedSymlink<P>>> {
+        let shape = EntryShape::Link(LinkKind::Symlink);
+        let safe_path = match self.route_entry_in(path, shape, root, view, ctx)? {
+            Gated::Admit(entry) => entry.into_inner(),
+            Gated::Skip(kind) => return Ok(Gated::Skip(kind)),
+        };
         check_name_limits(view, &safe_path, false, self.config)?;
         size.check_ratio(self.config)?;
         require_symlinks_allowed(self.config)?;
         self.reserve_symlink(size.uncompressed().0)?;
         let symlink = SafeSymlink::validate_in(&safe_path, target, root, self.config, view)?;
         self.symlink_seen = true;
-        Ok(ValidatedSymlink { symlink })
+        Ok(Gated::Admit(ValidatedSymlink { symlink }))
     }
 
-    /// Validates a hardlink entry: path, ratio, policy, count and target.
+    /// Validates a hardlink entry: path, selection, ratio, policy, count and
+    /// target.
+    ///
+    /// The target is an archive path, so it goes through the selection and
+    /// rewrite as entry names do; a target the extraction does not write
+    /// refuses the link.
     pub fn validate_hardlink_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
@@ -288,28 +380,61 @@ impl<'a> ValidatorCore<'a> {
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
-    ) -> Result<ValidatedHardlink<P>> {
-        let safe_path = self
-            .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
-            .into_inner();
+    ) -> Result<Gated<ValidatedHardlink<P>>> {
+        let shape = EntryShape::Link(LinkKind::Hardlink);
+        let safe_path = match self.route_entry_in(path, shape, root, view, ctx)? {
+            Gated::Admit(entry) => entry.into_inner(),
+            Gated::Skip(kind) => return Ok(Gated::Skip(kind)),
+        };
         check_name_limits(view, &safe_path, false, self.config)?;
         size.check_ratio(self.config)?;
         require_hardlinks_allowed(self.config)?;
+        let target = self.config.selection.mapped_link_target(path, target)?;
         let counted = self.quota_tracker.reserve_count(self.config)?;
 
         let target = self.hardlink_tracker.validate_hardlink_in(
             &safe_path,
-            target,
+            &target,
             root,
             self.config,
             view,
         )?;
 
-        Ok(ValidatedHardlink {
+        Ok(Gated::Admit(ValidatedHardlink {
             link: safe_path,
             target,
             counted,
-        })
+        }))
+    }
+
+    /// Validates an entry's path as the archive names it, then applies the
+    /// selection: the entry is skipped, or admitted at its landing.
+    ///
+    /// The landing is the validated path itself, or, when the selection
+    /// rewrites paths, the rewritten path validated again.
+    pub fn route_entry_in<V: FsView, P: ParentCheck>(
+        &self,
+        path: &Path,
+        shape: EntryShape,
+        root: &V::Root,
+        view: &V,
+        ctx: &ValidationContext<'_, V, P>,
+    ) -> Result<Gated<EntryPath<SafePath<P>>>> {
+        let original = self
+            .validate_entry_path_in(path, shape.node_kind(), root, view, ctx)?
+            .into_inner();
+        let run = SelectionRun {
+            selection: &self.config.selection,
+            hits: Some(&self.include_hits),
+        };
+        let routed = route_validated(run, original, shape, root, self.config, ctx, view)?;
+        Ok(routed.map(|landing| {
+            if landing.as_path().is_empty() {
+                EntryPath::Root(landing)
+            } else {
+                EntryPath::Child(landing)
+            }
+        }))
     }
 
     /// Validates an entry's path, which must be a directory if it names the
@@ -360,6 +485,16 @@ mod tests {
     use std::assert_matches;
     use tempfile::TempDir;
 
+    trait Admitted<T> {
+        fn admitted(self) -> Result<T>;
+    }
+
+    impl<T> Admitted<T> for Result<Gated<T>> {
+        fn admitted(self) -> Result<T> {
+            self.map(Gated::into_admitted)
+        }
+    }
+
     /// A core with a real destination, answering one call per entry kind.
     struct Harness<'a> {
         core: ValidatorCore<'a>,
@@ -385,14 +520,16 @@ mod tests {
             mode: Option<u32>,
         ) -> Result<ValidatedFile> {
             let ctx = self.core.context::<HostFs>();
-            self.core.validate_file_in(
-                Path::new(path),
-                size,
-                mode.map(RawMode::new),
-                &self.dest,
-                &HostFs,
-                &ctx,
-            )
+            self.core
+                .validate_file_in(
+                    Path::new(path),
+                    size,
+                    mode.map(RawMode::new),
+                    &self.dest,
+                    &HostFs,
+                    &ctx,
+                )
+                .admitted()
         }
 
         fn plain_file(&mut self, path: &str, bytes: u64) -> Result<ValidatedFile> {
@@ -403,30 +540,35 @@ mod tests {
             let ctx = self.core.context::<HostFs>();
             self.core
                 .validate_directory_in(Path::new(path), sizes(0), &self.dest, &HostFs, &ctx)
+                .admitted()
         }
 
         fn symlink(&mut self, path: &str) -> Result<ValidatedSymlink> {
             let ctx = self.core.context::<HostFs>();
-            self.core.validate_symlink_in(
-                Path::new(path),
-                Path::new("target.txt"),
-                sizes(0),
-                &self.dest,
-                &HostFs,
-                &ctx,
-            )
+            self.core
+                .validate_symlink_in(
+                    Path::new(path),
+                    Path::new("target.txt"),
+                    sizes(0),
+                    &self.dest,
+                    &HostFs,
+                    &ctx,
+                )
+                .admitted()
         }
 
         fn hardlink(&mut self, path: &str) -> Result<ValidatedHardlink> {
             let ctx = self.core.context::<HostFs>();
-            self.core.validate_hardlink_in(
-                Path::new(path),
-                Path::new("target.txt"),
-                sizes(0),
-                &self.dest,
-                &HostFs,
-                &ctx,
-            )
+            self.core
+                .validate_hardlink_in(
+                    Path::new(path),
+                    Path::new("target.txt"),
+                    sizes(0),
+                    &self.dest,
+                    &HostFs,
+                    &ctx,
+                )
+                .admitted()
         }
     }
 

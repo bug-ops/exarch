@@ -19,8 +19,6 @@
 use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
-use exarch_core::formats::ArchiveFormat;
-use exarch_core::formats::TarArchive;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -109,7 +107,7 @@ fn extract_via_budgeted_pipeline(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
         .with_max_file_count(exarch_core::non_zero!(10_000))
         .with_max_total_size(exarch_core::Limit::Unbounded)
         .with_max_file_size(exarch_core::Limit::Unbounded);
-    let archive = TarArchive::new(Cursor::new(bytes.to_vec()), &config);
+    let archive = crate::common::tar_archive(Cursor::new(bytes.to_vec()), &config);
     archive
         .extract(
             temp.path(),

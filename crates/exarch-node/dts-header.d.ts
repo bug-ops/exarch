@@ -71,13 +71,16 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   bytesWritten: number
   filesSkipped: number
   skipped: SkippedSummary
-  warnings: Array<string>
+  warnings: Array<ExtractionWarning>
   filesAdded?: undefined
 }
 
-/** An atomic extraction failed and its writes were discarded. */
+/**
+ * An atomic extraction failed and its writes were discarded. `code` can be
+ * `'PROGRESS_CALLBACK_ERROR'` too: a progress callback that threw stops an
+ * atomic extraction, which is then rolled back.
+ */
 export interface ExarchErrorRolledBack extends ExarchErrorBase {
-  code: CounterlessErrorCode
   writes: 'rolled_back'
   filesExtracted?: undefined
   bytesWritten?: undefined
@@ -150,6 +153,16 @@ export interface ExarchNativeError extends Error {
   skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A malformed archive; `subCode` classifies it when core can. */
@@ -165,6 +178,16 @@ export interface ExarchInvalidArchiveDetail {
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A refusal by policy; core always classifies it and may name the setting that relaxes it. */
@@ -175,6 +198,16 @@ export interface ExarchSecurityViolationDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A rejected setting or input. */
@@ -185,6 +218,19 @@ export interface ExarchInvalidConfigurationDetail {
   relaxableBy?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  /** Why a destination is too important to replace as a whole. */
+  protectedPath?: ProtectedPath
+  /** The two creation sources that map to one entry name. */
+  collision?: NameCollision
+  /** The include patterns that matched no entry of the archive. */
+  unmatchedPatterns?: Array<string>
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** An I/O failure, with the kind core reported. */
@@ -194,6 +240,20 @@ export interface ExarchIoDetail {
   subCode?: undefined
   relaxableBy?: undefined
   setting?: undefined
+  nonUtf8EntryPath?: undefined
+  /** What became of the original destination after a failed `'atomic_replace'`. */
+  restore?: RestoreOutcome
+  /** Where the original destination remains when `restore` is `'failed'`, redacted like an error path. */
+  backupPath?: string
+  /** A staging directory or empty output reservation left on disk, redacted like an error path. */
+  leftoverPath?: string
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A quota refusal; `subCode` names the quota that was exceeded. */
@@ -204,6 +264,16 @@ export interface ExarchQuotaDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A compression ratio refusal; `subCode` names what the ratio was measured over. */
@@ -214,6 +284,64 @@ export interface ExarchZipBombDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
+}
+
+/**
+ * A creation source that could not be read. `errno` is the OS error number as
+ * Rust's `std::io` reports it, when the failure has one; `strerror` and `path`
+ * are redacted like the message (the file name only in release builds).
+ */
+export interface ExarchSourceNotAccessibleDetail {
+  code: 'SOURCE_NOT_ACCESSIBLE'
+  errno?: number
+  strerror: string
+  path: string
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+}
+
+/**
+ * An output that already exists. `conflicts` is set on a `'refuse'` extraction
+ * into a destination that holds some of the paths to extract.
+ */
+export interface ExarchOutputExistsDetail {
+  code: 'OUTPUT_EXISTS'
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
+  conflicts?: Array<string>
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
 }
 
 /** Every other code carries no detail property. */
@@ -226,12 +354,24 @@ export interface ExarchPlainCodeDetail {
     | 'IO_ERROR'
     | 'QUOTA_EXCEEDED'
     | 'ZIP_BOMB'
+    | 'SOURCE_NOT_ACCESSIBLE'
+    | 'OUTPUT_EXISTS'
   >
   subCode?: undefined
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** The pairing of a `code` with the properties it can carry. */
@@ -242,6 +382,8 @@ export type ExarchErrorCodeDetail =
   | ExarchIoDetail
   | ExarchQuotaDetail
   | ExarchZipBombDetail
+  | ExarchSourceNotAccessibleDetail
+  | ExarchOutputExistsDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -294,6 +436,27 @@ export type MemoryEntry =
  */
 export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
 
+/**
+ * A condition of an extraction worth surfacing that is not a skipped entry.
+ * Discriminate on `kind`; `message` is the human-readable text.
+ */
+export type ExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning
+
+/**
+ * A condition of a creation worth surfacing that is not a skipped entry.
+ * Discriminate on `kind`; `message` is the human-readable text.
+ */
+export type CreationWarning =
+  | ZipRatioOverDefaultLimitWarning
+  | ZipRatioCheckFailedWarning
+  | DirectoryNotSyncedWarning
+
+/**
+ * What extraction does with a listed entry, discriminated by `kind`: an
+ * `'extract'` disposition has a `landing`, a `'skip'` one a `reason`.
+ */
+export type EntryDisposition = ExtractDisposition | SkipDisposition
+
 /** What a `MemoryEntry` holds. */
 export type MemoryEntryKind = MemoryEntry['kind']
 
@@ -326,6 +489,16 @@ export interface HeuristicIssueDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /**

@@ -12,6 +12,7 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ProgressCallback;
@@ -171,7 +172,7 @@ impl Sandbox {
 }
 
 fn force() -> ExtractionOptions {
-    ExtractionOptions::default().with_skip_duplicates(false)
+    ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite)
 }
 
 fn refuse_and_leave_outside_empty(

@@ -32,37 +32,6 @@ use std::path::Path;
 /// - `on_entry_complete`: Called when the guard from `begin` completes or
 ///   drops, so it follows every start even if the entry fails
 /// - `on_complete`: Called once when the entire operation finishes
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::EntryPosition;
-/// use exarch_core::ProgressCallback;
-/// use exarch_core::creation::progress::ProgressTracker;
-/// use std::path::Path;
-///
-/// struct SimpleProgress;
-///
-/// impl ProgressCallback for SimpleProgress {
-///     fn on_entry_start(&mut self, path: &Path, position: EntryPosition) {
-///         println!("[{}] Processing: {}", position.current, path.display());
-///     }
-///
-///     fn on_bytes_written(&mut self, bytes: u64) {}
-///
-///     fn on_entry_complete(&mut self, path: &Path) {}
-///
-///     fn on_complete(&mut self) {}
-/// }
-///
-/// let mut progress = SimpleProgress;
-/// let total_entries = 10;
-/// let mut tracker = ProgressTracker::new(&mut progress, total_entries);
-///
-/// let mut entry = tracker.begin(Path::new("file1.txt"));
-/// // ... process entry, passing `entry.progress_mut()` to helpers ...
-/// entry.complete();
-/// ```
 pub struct ProgressTracker<'a> {
     /// Reference to the progress callback implementation
     progress: &'a mut dyn ProgressCallback,
@@ -79,25 +48,6 @@ impl<'a> ProgressTracker<'a> {
     ///
     /// - `progress`: Mutable reference to the progress callback
     /// - `total_entries`: Total number of entries that will be processed
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use exarch_core::EntryPosition;
-    /// use exarch_core::ProgressCallback;
-    /// use exarch_core::creation::progress::ProgressTracker;
-    /// use std::path::Path;
-    ///
-    /// # struct DummyProgress;
-    /// # impl ProgressCallback for DummyProgress {
-    /// #     fn on_entry_start(&mut self, _: &Path, _: EntryPosition) {}
-    /// #     fn on_bytes_written(&mut self, _: u64) {}
-    /// #     fn on_entry_complete(&mut self, _: &Path) {}
-    /// #     fn on_complete(&mut self) {}
-    /// # }
-    /// let mut progress = DummyProgress;
-    /// let tracker = ProgressTracker::new(&mut progress, 100);
-    /// ```
     #[must_use]
     pub fn new(progress: &'a mut dyn ProgressCallback, total_entries: usize) -> Self {
         Self {
@@ -111,11 +61,16 @@ impl<'a> ProgressTracker<'a> {
     /// completion when completed or dropped, including on an early `?` return.
     ///
     /// Automatically increments the current entry counter.
-    pub fn begin<'p>(&'p mut self, path: &'p Path) -> EntryCompleteGuard<'p> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::Cancelled`](crate::ArchiveError::Cancelled)
+    /// without announcing the entry when the callback asks to stop.
+    pub fn begin<'p>(&'p mut self, path: &'p Path) -> crate::Result<EntryCompleteGuard<'p>> {
         let position =
             EntryPosition::at_index(self.current_entry, EntryTotal::Known(self.total_entries));
         self.current_entry += 1;
-        EntryCompleteGuard::start(&mut *self.progress, path, position)
+        EntryCompleteGuard::try_start(&mut *self.progress, path, position)
     }
 
     /// Reports that the entire operation completed.
@@ -131,7 +86,8 @@ impl<'a> ProgressTracker<'a> {
     ///
     /// # Errors
     ///
-    /// Returns an [`ArchiveError::Io`] of kind `Interrupted` when cancelled.
+    /// Returns [`ArchiveError::Cancelled`](crate::ArchiveError::Cancelled) when
+    /// cancelled.
     pub fn check_cancelled(&mut self) -> crate::Result<()> {
         check_cancelled(&mut *self.progress)
     }
@@ -153,37 +109,6 @@ impl<'a> ProgressTracker<'a> {
 ///
 /// This reduces callback overhead for large files while still providing
 /// responsive progress updates.
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::ProgressCallback;
-/// use exarch_core::creation::progress::ProgressReader;
-/// use std::fs::File;
-/// use std::io::Read;
-/// use std::path::Path;
-///
-/// # struct DummyProgress;
-/// # impl ProgressCallback for DummyProgress {
-/// #     fn on_entry_start(&mut self, _: &Path, _position: crate::EntryPosition) {}
-/// #     fn on_bytes_written(&mut self, _: u64) {}
-/// #     fn on_entry_complete(&mut self, _: &Path) {}
-/// #     fn on_complete(&mut self) {}
-/// # }
-/// let file = File::open("large_file.bin")?;
-/// let mut progress = DummyProgress;
-/// let mut reader = ProgressReader::new(file, &mut progress);
-///
-/// let mut buffer = vec![0u8; 8192];
-/// loop {
-///     let bytes_read = reader.read(&mut buffer)?;
-///     if bytes_read == 0 {
-///         break;
-///     }
-///     // Progress is automatically reported
-/// }
-/// # Ok::<(), std::io::Error>(())
-/// ```
 pub struct ProgressReader<'a, R> {
     /// Inner reader being wrapped
     inner: R,
@@ -204,27 +129,6 @@ impl<'a, R> ProgressReader<'a, R> {
     ///
     /// - `inner`: The reader to wrap
     /// - `progress`: Mutable reference to the progress callback
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use exarch_core::ProgressCallback;
-    /// use exarch_core::creation::progress::ProgressReader;
-    /// use std::fs::File;
-    /// use std::path::Path;
-    ///
-    /// # struct DummyProgress;
-    /// # impl ProgressCallback for DummyProgress {
-    /// #     fn on_entry_start(&mut self, _: &Path, _: EntryPosition) {}
-    /// #     fn on_bytes_written(&mut self, _: u64) {}
-    /// #     fn on_entry_complete(&mut self, _: &Path) {}
-    /// #     fn on_complete(&mut self) {}
-    /// # }
-    /// let file = File::open("data.bin")?;
-    /// let mut progress = DummyProgress;
-    /// let reader = ProgressReader::new(file, &mut progress);
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
     #[must_use]
     pub fn new(inner: R, progress: &'a mut dyn ProgressCallback) -> Self {
         Self {
@@ -242,28 +146,6 @@ impl<'a, R> ProgressReader<'a, R> {
     /// - `inner`: The reader to wrap
     /// - `progress`: Mutable reference to the progress callback
     /// - `batch_threshold`: Number of bytes to accumulate before reporting
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use exarch_core::ProgressCallback;
-    /// use exarch_core::creation::progress::ProgressReader;
-    /// use std::fs::File;
-    /// use std::path::Path;
-    ///
-    /// # struct DummyProgress;
-    /// # impl ProgressCallback for DummyProgress {
-    /// #     fn on_entry_start(&mut self, _: &Path, _: EntryPosition) {}
-    /// #     fn on_bytes_written(&mut self, _: u64) {}
-    /// #     fn on_entry_complete(&mut self, _: &Path) {}
-    /// #     fn on_complete(&mut self) {}
-    /// # }
-    /// let file = File::open("data.bin")?;
-    /// let mut progress = DummyProgress;
-    /// // Report progress every 64 KB
-    /// let reader = ProgressReader::with_batch_threshold(file, &mut progress, 64 * 1024);
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
     #[must_use]
     #[allow(dead_code)]
     pub fn with_batch_threshold(
@@ -311,17 +193,15 @@ impl<R> Drop for ProgressReader<'_, R> {
     }
 }
 
-/// The error of a creation a progress callback cancelled.
+/// Polls `progress` for a cancellation.
 ///
 /// # Errors
 ///
-/// Returns it when `progress` is cancelled.
+/// Returns [`ArchiveError::Cancelled`](crate::ArchiveError::Cancelled) when
+/// `progress` is cancelled.
 pub fn check_cancelled(progress: &mut dyn ProgressCallback) -> crate::Result<()> {
     if progress.is_cancelled() {
-        return Err(crate::ArchiveError::Io(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "creation cancelled by the progress callback",
-        )));
+        return Err(crate::ArchiveError::Cancelled);
     }
     Ok(())
 }
@@ -365,8 +245,8 @@ mod tests {
         let mut progress = TestProgress::default();
         let mut tracker = ProgressTracker::new(&mut progress, 3);
 
-        tracker.begin(Path::new("file1.txt")).complete();
-        drop(tracker.begin(Path::new("file2.txt")));
+        tracker.begin(Path::new("file1.txt")).unwrap().complete();
+        drop(tracker.begin(Path::new("file2.txt")).unwrap());
 
         tracker.on_complete();
 

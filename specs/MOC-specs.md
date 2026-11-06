@@ -37,7 +37,7 @@ status: moc
 | 019 | [[019-verify-and-list-model/spec\|Verify and List Reporting Model]] | specify | implemented (0.7.0, retrospective; updated for 0.8.0 and 0.9.0) | n/a (specify-only, retrospective) |
 | 020 | [[020-reader-sink-and-in-memory-api/spec\|Reader, Sink and In-Memory API]] | specify | implemented (0.8.0, #771, #787, #790, #808; callback and listing for extraction in 0.9.0, #842, #860, #884; request types, admitted sizes and listed config in 0.9.0, #912, #909, #901) | n/a (specify-only, retrospective) |
 | 021 | [[021-create-staging-and-output-policy/spec\|Create Staging and Output Policy]] | specify | implemented (0.9.0, #931, #915, #916; typed source errors and durability, #956, #953, #961) | n/a (specify-only) |
-| 022 | [[022-extract-entry-selection/spec\|Extract Entry Selection and Path Stripping]] | specify | draft (research, P2, #967) | n/a (specify-only) |
+| 022 | [[022-extract-entry-selection/spec\|Extract Entry Selection and Path Stripping]] | tasks | implemented (#967, #981 batch) | [[022-extract-entry-selection/tasks\|22 done]] |
 
 ## Completed Specs
 

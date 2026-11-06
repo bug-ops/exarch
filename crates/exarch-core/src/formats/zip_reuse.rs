@@ -417,17 +417,36 @@ impl ReuseStore {
         self.used
     }
 
-    /// Flips a bit in the first kept entry, so a test can see the replay refuse
-    /// it.
+    /// Flips a bit in the first kept entry, in memory or in the spool, so a
+    /// test can see the replay refuse it.
     #[cfg(test)]
-    pub(crate) fn corrupt(&mut self) {
+    pub(crate) fn corrupt(&mut self) -> io::Result<()> {
         for slot in self.index.values_mut() {
-            if let Kept::Memory(bytes) = &mut slot.kept {
-                bytes[0] ^= 1;
-                return;
+            match (&mut slot.kept, &mut self.backend) {
+                (Kept::Memory(bytes), _) => {
+                    bytes[0] ^= 1;
+                    return Ok(());
+                }
+                (Kept::Spooled { offset, .. }, Backend::Spool(spool)) => {
+                    return flip_spooled_bit(spool, *offset);
+                }
+                (Kept::Spooled { .. }, Backend::Memory | Backend::Dead) => {}
             }
         }
+        Ok(())
     }
+}
+
+#[cfg(test)]
+fn flip_spooled_bit(spool: &mut SpoolFile, offset: u64) -> io::Result<()> {
+    spool.writer.flush()?;
+    let mut file = spool.writer.get_ref();
+    let mut byte = [0u8; 1];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut byte)?;
+    byte[0] ^= 1;
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(&byte)
 }
 
 /// The census output of one entry while it is being decoded.

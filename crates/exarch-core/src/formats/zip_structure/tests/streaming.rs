@@ -126,7 +126,7 @@ fn stray_end_record_is_fatal_under_enforce_and_reported_by_verify() {
         ))
     );
     let report = open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(report.issues().iter().any(|i| {
@@ -314,7 +314,7 @@ fn descriptor_overrun_is_fatal_under_enforce_and_reported_by_verify() {
         ))
     );
     let report = open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(report.issues().iter().any(|i| {

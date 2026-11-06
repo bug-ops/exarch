@@ -23,6 +23,7 @@ use exarch_core::ArchiveManifest;
 use exarch_core::CheckStatus;
 use exarch_core::DecompressionBudget;
 use exarch_core::ErrorCode;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 #[cfg(unix)]
 use exarch_core::ExtractionOptions;
@@ -720,16 +721,16 @@ fn existing_destination_symlink_is_not_replaced() {
     let dir = TempDir::new().unwrap();
     let path = archive_of(&dir, &[Item::Link("a", b"x/.."), Item::Link("x", b".")]);
 
-    for skip_duplicates in [true, false] {
+    for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
         let out = TempDir::new().unwrap();
         std::fs::create_dir_all(out.path().join("p/q")).unwrap();
         symlink("p/q", out.path().join("x")).unwrap();
-        let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
+        let options = ExtractionOptions::default().with_existing_files(existing_files);
         let result = ExtractRequest::new(&allow_symlinks())
             .with_options(options.clone())
             .extract(&path, out.path());
 
-        if skip_duplicates {
+        if existing_files == ExistingFiles::Skip {
             result.unwrap();
         } else {
             assert_symlink_refused(result.unwrap_err());
@@ -737,7 +738,7 @@ fn existing_destination_symlink_is_not_replaced() {
         assert_eq!(
             std::fs::read_link(out.path().join("x")).unwrap(),
             Path::new("p/q"),
-            "skip_duplicates={skip_duplicates}"
+            "existing_files={existing_files}"
         );
         // `a -> x/..` resolves to `p` and is created before `x` is reached.
         assert_eq!(
@@ -775,16 +776,16 @@ fn dangling_link_at_the_link_path_is_skipped_or_refused_by_policy() {
     let dir = TempDir::new().unwrap();
     let path = archive_of(&dir, &[Item::Link("l", b"other")]);
 
-    for skip_duplicates in [true, false] {
+    for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
         let out = TempDir::new().unwrap();
         symlink("gone", out.path().join("l")).unwrap();
-        let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
+        let options = ExtractionOptions::default().with_existing_files(existing_files);
 
         let result = ExtractRequest::new(&allow_symlinks())
             .with_options(options.clone())
             .extract(&path, out.path());
 
-        if skip_duplicates {
+        if existing_files == ExistingFiles::Skip {
             result.unwrap();
         } else {
             assert_symlink_refused(result.unwrap_err());
@@ -1265,9 +1266,13 @@ fn tree_of(root: &Path) -> Vec<String> {
 /// How `extract` ended: extracted, refused as invalid before any write, or
 /// failed part-way.
 #[cfg(unix)]
-fn extract_class(path: &Path, config: &SecurityConfig, skip_duplicates: bool) -> &'static str {
+fn extract_class(
+    path: &Path,
+    config: &SecurityConfig,
+    existing_files: ExistingFiles,
+) -> &'static str {
     let out = TempDir::new().unwrap();
-    let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
+    let options = ExtractionOptions::default().with_existing_files(existing_files);
     match ExtractRequest::new(config)
         .with_options(options)
         .extract(path, out.path())
@@ -1328,7 +1333,7 @@ fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
         Item::Link("d", b"sub"),
         Item::File("d/f", b"x"),
     );
-    // (order, items, layout, stream map, extract with skip_duplicates,
+    // (order, items, layout, stream map, extract skipping duplicates,
     // extract without it, verify)
     #[rustfmt::skip]
     let table = [
@@ -1363,14 +1368,14 @@ fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
         let archive = Archive::read(&mut Cursor::new(bytes), &Password::empty()).unwrap();
         assert_eq!(archive.stream_map.file_block_index, map, "{label} map");
         assert_eq!(
-            extract_class(&path, &config, true),
+            extract_class(&path, &config, ExistingFiles::Skip),
             skipping,
             "{label} extract"
         );
         assert_eq!(
-            extract_class(&path, &config, false),
+            extract_class(&path, &config, ExistingFiles::Overwrite),
             keeping,
-            "{label} extract without skip_duplicates"
+            "{label} extract with overwrite"
         );
         assert_eq!(verify_class(&path, &config), verify, "{label} verify");
 

@@ -8,6 +8,7 @@ pub(crate) mod dir_walker;
 #[cfg(any(unix, target_os = "wasi"))]
 pub(crate) mod handle_resolution;
 pub(crate) mod pinned_dir;
+pub(crate) mod run_record;
 pub mod sevenz;
 pub(crate) mod source_fault;
 pub mod tar;
@@ -25,9 +26,4 @@ pub(crate) mod zstd_window;
 pub use compression::CompressionCodec;
 pub use sevenz::SevenZArchive;
 pub use tar::TarArchive;
-pub use tar::open_tar_bz2;
-pub use tar::open_tar_gz;
-pub use tar::open_tar_xz;
-pub use tar::open_tar_zst;
-pub use traits::ArchiveFormat;
 pub use zip::ZipArchive;

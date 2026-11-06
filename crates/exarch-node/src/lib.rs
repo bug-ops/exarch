@@ -40,6 +40,11 @@
 //!
 //! MIT OR Apache-2.0
 
+#![allow(
+    clippy::needless_pass_by_value,
+    reason = "napi passes JavaScript arguments by value and cannot take them by reference"
+)]
+
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
@@ -101,6 +106,7 @@ use config::ExtractionOptions;
 use config::SecurityConfig;
 use config::VerificationOptions;
 use error::Failure;
+use error::Operation;
 use error::ProgressCallbackError;
 use error::run_sync;
 use error::spawn_blocking_promise;
@@ -193,9 +199,9 @@ const _: () = assert!(
 ///   setting or input, as a `snake_case` id such as `max_file_count`.
 /// - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
 ///   set when extraction fails after some files were already written. `writes`
-///   is `'kept'` (files remain; the counters and the `warnings` string array
-///   follow) or, with `atomic`, `'rolled_back'` (the destination was discarded;
-///   no counters).
+///   is `'kept'` (files remain; the counters and the typed `warnings` array
+///   follow) or, with `'atomic'` or `'atomic_replace'` staging, `'rolled_back'`
+///   (the destination was discarded; no counters).
 ///
 /// # Examples
 ///
@@ -209,14 +215,10 @@ const _: () = assert!(
 /// const report = await extractArchive('archive.tar.gz', '/tmp/output', config);
 ///
 /// // Customize extraction options
-/// const opts = new ExtractionOptions().withSkipDuplicates(false);
+/// const opts = new ExtractionOptions().withExistingFiles('overwrite');
 /// const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn extract_archive<'env>(
     env: &'env Env,
     archive_path: String,
@@ -237,7 +239,7 @@ pub fn extract_archive<'env>(
         env,
         "archive extraction",
         move || extract_core(&archive_path, &output_dir, &config_owned, &options_owned),
-        |report| Ok(ExtractionReport::from(report)),
+        ExtractionReport::try_from,
     )
 }
 
@@ -291,10 +293,6 @@ fn extract_core(
 /// const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn extract_archive_sync(
     env: Env,
     archive_path: String,
@@ -312,7 +310,7 @@ pub fn extract_archive_sync(
     run_sync(env, "archive extraction", || {
         extract_core(&archive_path, &output_dir, config_ref, options_ref)
     })
-    .map(ExtractionReport::from)
+    .and_then(ExtractionReport::try_from)
 }
 
 /// Options of `createArchive` and its variants.
@@ -339,9 +337,9 @@ pub struct CreateOptions {
 /// The output of a creation as the core request takes it.
 fn output_file(output_path: &BoundaryPath, options: &CreateOptions) -> exarch_core::OutputFile {
     let file = if options.overwrite.unwrap_or(true) {
-        exarch_core::OutputFile::replace(output_path.as_str())
+        exarch_core::OutputFile::replace(output_path.as_path())
     } else {
-        exarch_core::OutputFile::create_new(output_path.as_str())
+        exarch_core::OutputFile::create_new(output_path.as_path())
     };
     let file = match options.format {
         Some(format) => file.with_format(format.into()),
@@ -379,14 +377,10 @@ fn output_file(output_path: &BoundaryPath, options: &CreateOptions) -> exarch_co
 /// console.log(`Created archive with ${report.filesAdded} files`);
 ///
 /// // Customize configuration
-/// const config = new CreationConfig().compressionLevel(9);
+/// const config = new CreationConfig().setCompressionLevel(9);
 /// const report = await createArchive('output.tar.gz', ['src/'], config);
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn create_archive<'env>(
     env: &'env Env,
     output_path: String,
@@ -394,15 +388,14 @@ pub fn create_archive<'env>(
     config: Option<&CreationConfig>,
     options: Option<CreateOptions>,
 ) -> Result<PromiseRaw<'env, CreationReport>> {
-    let config_owned: exarch_core::creation::CreationConfig =
-        config.map_or_default(|c| c.as_core().clone());
+    let config_owned: exarch_core::CreationConfig = config.map_or_default(|c| c.as_core().clone());
     let options = options.unwrap_or_default();
 
     spawn_blocking_promise(
         env,
         "archive creation",
         move || create_core(&output_path, &sources, &config_owned, &options),
-        |report| Ok(CreationReport::from(report)),
+        CreationReport::try_from,
     )
 }
 
@@ -416,9 +409,9 @@ fn boundary_create_paths(
 fn create_core(
     output_path: &str,
     sources: &[String],
-    config: &exarch_core::creation::CreationConfig,
+    config: &exarch_core::CreationConfig,
     options: &CreateOptions,
-) -> CoreResult<exarch_core::creation::CreationReport> {
+) -> CoreResult<exarch_core::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
     let output = output_file(&output_path, options);
     Ok(exarch_core::CreateRequest::new(config).create(&output, &sources)?)
@@ -452,10 +445,6 @@ fn create_core(
 /// console.log(`Created archive with ${report.filesAdded} files`);
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn create_archive_sync(
     env: Env,
     output_path: String,
@@ -463,14 +452,14 @@ pub fn create_archive_sync(
     config: Option<&CreationConfig>,
     options: Option<CreateOptions>,
 ) -> Result<CreationReport> {
-    let default_config = exarch_core::creation::CreationConfig::default();
+    let default_config = exarch_core::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let options = options.unwrap_or_default();
 
     run_sync(env, "archive creation", || {
         create_core(&output_path, &sources, config_ref, &options)
     })
-    .map(CreationReport::from)
+    .and_then(CreationReport::try_from)
 }
 
 /// JavaScript source for a factory that wraps a progress callback so any
@@ -620,17 +609,17 @@ impl FromNapiValue for ProgressCallback {
 /// errors occur. See `createArchive` for the full list of error codes.
 ///
 /// If `progress` throws, the returned promise rejects instead of crashing the
-/// process (see issue #465). Creation has already run to completion (or
-/// failure) by the time the rejection is observed — a throwing callback cannot
-/// abort creation early, since the progress callback contract has no
-/// cancellation signal. The rejection therefore reports both signals:
+/// process (see issue #465), and the creation stops at the start of the next
+/// entry. The rejection reports both signals:
 ///
-/// - Creation succeeded: `code` is `PROGRESS_CALLBACK_ERROR` and `filesAdded`
-///   and `bytesWritten` are set, so the caller can still see that an archive
-///   was written and needs cleaning up.
-/// - Creation also failed: the core error stays primary and keeps its `code`;
-///   the callback's throw is attached as `cause`. A throwing callback can never
-///   mask a core error.
+/// - The callback's throw stopped the creation, or the last entry's callback
+///   threw after the creation succeeded: `code` is `PROGRESS_CALLBACK_ERROR`.
+///   After a stop nothing was published; after a success `filesAdded` and
+///   `bytesWritten` are set, so the caller can still see that an archive was
+///   written and needs cleaning up.
+/// - Creation also failed on its own: the core error stays primary and keeps
+///   its `code`; the callback's throw is attached as `cause`. A throwing
+///   callback can never mask a core error.
 ///
 /// In both cases the original JS exception is available as the `cause`
 /// property of the rejection value. The throw's own text and stack are never
@@ -661,10 +650,6 @@ impl FromNapiValue for ProgressCallback {
 /// console.log(`Created archive with ${report.filesAdded} files`);
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn create_archive_with_progress<'env>(
     env: &'env Env,
     output_path: String,
@@ -674,8 +659,7 @@ pub fn create_archive_with_progress<'env>(
     progress: Option<ProgressCallback>,
     options: Option<CreateOptions>,
 ) -> Result<PromiseRaw<'env, CreationReport>> {
-    let config_owned: exarch_core::creation::CreationConfig =
-        config.map_or_default(|c| c.as_core().clone());
+    let config_owned: exarch_core::CreationConfig = config.map_or_default(|c| c.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
     let options = options.unwrap_or_default();
 
@@ -692,75 +676,31 @@ pub fn create_archive_with_progress<'env>(
                 ProgressDispatch::Awaited,
             )
         },
-        |report| Ok(CreationReport::from(report)),
+        CreationReport::try_from,
     )
 }
 
 fn create_with_progress_core(
     output_path: &str,
     sources: &[String],
-    config: &exarch_core::creation::CreationConfig,
+    config: &exarch_core::CreationConfig,
     options: &CreateOptions,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
-) -> CoreResult<exarch_core::creation::CreationReport> {
+) -> CoreResult<exarch_core::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
     let output = output_file(&output_path, options);
-    run_create_with_optional_progress(&output, &sources, config, progress, dispatch)
-        .map_err(Failure::Callback)
-}
-
-/// Runs `create_archive_with_progress` routing to the JS callback when
-/// present or to [`exarch_core::NoopProgress`] when absent.
-///
-/// A core creation failure and a JS callback throw can occur in the same run;
-/// both are carried out of here so neither is silently dropped, mirroring
-/// [`run_extract_with_optional_progress`].
-fn run_create_with_optional_progress(
-    output: &exarch_core::OutputFile,
-    sources: &[BoundaryPath],
-    config: &exarch_core::creation::CreationConfig,
-    progress: Option<ThreadsafeFunction<ProgressArgs>>,
-    dispatch: ProgressDispatch,
-) -> std::result::Result<exarch_core::creation::CreationReport, Box<ProgressCallbackError>> {
-    progress.map_or_else(
-        || {
-            let mut noop = exarch_core::NoopProgress;
-            exarch_core::CreateRequest::new(config)
-                .with_progress(&mut noop)
-                .create(output, sources)
-                .map_err(|source| {
-                    Box::new(ProgressCallbackError::Core {
-                        source,
-                        callback: None,
-                    })
-                })
+    run_with_optional_progress(
+        Operation::Creation,
+        progress,
+        dispatch,
+        AbortHandle::NONE,
+        |progress| {
+            Ok(exarch_core::CreateRequest::new(config)
+                .with_progress(progress)
+                .create(&output, &sources)?)
         },
-        |tsfn| {
-            let mut callback = NodeProgressAdapter::new(tsfn, dispatch, AbortHandle::NONE);
-            let result = exarch_core::CreateRequest::new(config)
-                .with_progress(&mut callback)
-                .create(output, sources);
-            match (result, callback.into_callback_error()) {
-                (Ok(report), None) => Ok(report),
-                (Ok(report), Some(source)) => {
-                    Err(Box::new(ProgressCallbackError::CreationCallback {
-                        source,
-                        report,
-                    }))
-                }
-                (Err(exarch_core::ArchiveError::Io(io)), Some(source))
-                    if io.kind() == std::io::ErrorKind::Interrupted =>
-                {
-                    Err(Box::new(ProgressCallbackError::CreationCancelled {
-                        source,
-                    }))
-                }
-                (Err(source), callback) => {
-                    Err(Box::new(ProgressCallbackError::Core { source, callback }))
-                }
-            }
-        },
+        |source, report| ProgressCallbackError::CreationCallback { source, report },
     )
 }
 
@@ -789,10 +729,6 @@ fn run_create_with_optional_progress(
 /// }
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn list_archive<'env>(
     env: &'env Env,
     archive_path: String,
@@ -813,7 +749,10 @@ fn list_core(
     config: &exarch_core::SecurityConfig,
 ) -> CoreResult<ArchiveManifest> {
     let archive_path = boundary_path(archive_path)?;
-    ArchiveManifest::try_from(exarch_core::ListRequest::new(config).list(&archive_path)?)
+    ArchiveManifest::from_core(
+        exarch_core::ListRequest::new(config).list(&archive_path)?,
+        config,
+    )
 }
 
 /// List archive contents without extracting (sync).
@@ -844,10 +783,6 @@ fn list_core(
 /// }
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn list_archive_sync(
     env: Env,
     archive_path: String,
@@ -895,10 +830,6 @@ pub fn list_archive_sync(
 /// }
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn verify_archive<'env>(
     env: &'env Env,
     archive_path: String,
@@ -958,10 +889,6 @@ fn verify_core(
 /// }
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn verify_archive_sync(
     env: Env,
     archive_path: String,
@@ -986,8 +913,8 @@ pub fn verify_archive_sync(
 /// function calling convention: `err` is always `null`, the entry data
 /// arrives as a single array argument) where:
 /// - `path` — entry path inside the archive
-/// - `total` — total number of entries as `number` (0 for TAR-family formats
-///   because the entry count is unknown until the stream is fully read)
+/// - `total` — total number of entries as `number`, or `null` for TAR-family
+///   formats because the entry count is unknown until the stream is fully read
 /// - `current` — 1-based index of the current entry as `number`
 /// - `bytesWritten` — always `0`. The callback only fires from the entry-start
 ///   event, which resets the running per-entry byte counter immediately before
@@ -1017,17 +944,17 @@ pub fn verify_archive_sync(
 /// error properties (`code`, `relaxableBy`, `writes`, ...).
 ///
 /// If `progress` throws, the returned promise rejects instead of crashing the
-/// process (see issue #465). Extraction has already run to completion (or
-/// failure) by the time the rejection is observed — a throwing callback cannot
-/// abort the extraction early, since the progress callback contract has no
-/// cancellation signal. The rejection therefore reports both signals:
+/// process (see issue #465), and the extraction stops before the next entry
+/// (an atomic extraction is rolled back). The rejection reports both signals:
 ///
-/// - Extraction succeeded: `code` is `PROGRESS_CALLBACK_ERROR`, `writes` is
-///   `'kept'` and `filesExtracted`, `bytesWritten`, `filesSkipped` and
-///   `warnings` are set, so the caller can still see what was written to disk.
-/// - Extraction also failed: the core error stays primary and keeps its `code`;
-///   the callback's throw is attached as `cause`. A throwing callback can never
-///   mask a security error such as `SYMLINK_ESCAPE`.
+/// - The callback's throw stopped the extraction, or the last entry's callback
+///   threw after it succeeded: `code` is `PROGRESS_CALLBACK_ERROR`, `writes` is
+///   `'kept'` (or `'rolled_back'` for an atomic extraction) and, when kept,
+///   `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped` and `warnings`
+///   are set, so the caller can still see what was written to disk.
+/// - Extraction also failed on its own: the core error stays primary and keeps
+///   its `code`; the callback's throw is attached as `cause`. A throwing
+///   callback can never mask a security error such as `SYMLINK_ESCAPE`.
 ///
 /// In both cases the original JS exception is available as the `cause`
 /// property of the rejection value. The throw's own text and stack are never
@@ -1073,10 +1000,6 @@ pub fn verify_archive_sync(
 /// console.log(`Extracted ${report.filesExtracted} files`);
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn extract_archive_with_progress<'env>(
     env: &'env Env,
     archive_path: String,
@@ -1097,66 +1020,21 @@ pub fn extract_archive_with_progress<'env>(
         move || {
             let archive_path = boundary_path(&archive_path)?;
             let output_dir = boundary_path(&output_dir)?;
-            run_extract_with_optional_progress(
-                &archive_path,
-                &output_dir,
-                &config_owned,
-                &options_owned,
+            run_with_optional_progress(
+                Operation::Extraction,
                 progress,
+                ProgressDispatch::Awaited,
+                AbortHandle::NONE,
+                |progress| {
+                    Ok(exarch_core::ExtractRequest::new(&config_owned)
+                        .with_options(options_owned.clone())
+                        .with_progress(progress)
+                        .extract(&archive_path, &output_dir)?)
+                },
+                |source, report| ProgressCallbackError::ExtractionCallback { source, report },
             )
-            .map_err(Failure::Callback)
         },
-        |report| Ok(ExtractionReport::from(report)),
-    )
-}
-
-/// Runs `extract_archive_with_options_and_progress` routing to the JS callback
-/// when present or to [`exarch_core::NoopProgress`] when absent.
-///
-/// A core extraction failure and a JS callback throw can occur in the same
-/// run; both are carried out of here so neither is silently dropped (see the
-/// `From<ProgressCallbackError>` impl for how they merge into one rejection).
-fn run_extract_with_optional_progress(
-    archive_path: &BoundaryPath,
-    output_dir: &BoundaryPath,
-    config: &exarch_core::SecurityConfig,
-    options: &exarch_core::ExtractionOptions,
-    progress: Option<ThreadsafeFunction<ProgressArgs>>,
-) -> std::result::Result<exarch_core::ExtractionReport, Box<ProgressCallbackError>> {
-    progress.map_or_else(
-        || {
-            let mut noop = exarch_core::NoopProgress;
-            exarch_core::ExtractRequest::new(config)
-                .with_options(options.clone())
-                .with_progress(&mut noop)
-                .extract(archive_path, output_dir)
-                .map_err(|source| {
-                    Box::new(ProgressCallbackError::Core {
-                        source,
-                        callback: None,
-                    })
-                })
-        },
-        |tsfn| {
-            let mut callback =
-                NodeProgressAdapter::new(tsfn, ProgressDispatch::Awaited, AbortHandle::NONE);
-            let result = exarch_core::ExtractRequest::new(config)
-                .with_options(options.clone())
-                .with_progress(&mut callback)
-                .extract(archive_path, output_dir);
-            match (result, callback.into_callback_error()) {
-                (Ok(report), None) => Ok(report),
-                (Ok(report), Some(source)) => {
-                    Err(Box::new(ProgressCallbackError::ExtractionCallback {
-                        source,
-                        report,
-                    }))
-                }
-                (Err(source), callback) => {
-                    Err(Box::new(ProgressCallbackError::Core { source, callback }))
-                }
-            }
-        },
+        ExtractionReport::try_from,
     )
 }
 
@@ -1177,10 +1055,10 @@ pub(crate) type ProgressArgs = (String, Option<i64>, i64, i64);
 /// If the JavaScript callback throws, the exception is captured into
 /// `callback_error` instead of being routed through `napi_fatal_exception`
 /// (which would otherwise crash the host process uncatchably, see issue
-/// #465). Once a throw has been captured, further dispatches are skipped:
-/// the [`exarch_core::ProgressCallback`] contract has no cancellation signal,
-/// so extraction/creation keeps running, but there is no value in repeatedly
-/// invoking a callback already known to be broken.
+/// #465). Once a throw has been captured, further dispatches are skipped and
+/// [`exarch_core::ProgressCallback::is_cancelled`] answers `true`, so the
+/// operation stops at its next poll. A fired `AbortSignal` cancels the same
+/// way.
 struct NodeProgressAdapter {
     tsfn: ThreadsafeFunction<ProgressArgs>,
     dispatch: ProgressDispatch,
@@ -1197,6 +1075,7 @@ struct NodeProgressAdapter {
 /// which receives the successful value so it can keep its counters; the value
 /// itself is discarded.
 fn run_with_optional_progress<T>(
+    operation: Operation,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
     abort: AbortHandle,
@@ -1211,12 +1090,9 @@ fn run_with_optional_progress<T>(
     match (result, adapter.into_callback_error()) {
         (Ok(value), None) => Ok(value),
         (Ok(value), Some(source)) => Err(Failure::Callback(Box::new(over_success(source, value)))),
-        (Err(Failure::Core(source)), callback) => {
-            Err(Failure::Callback(Box::new(ProgressCallbackError::Core {
-                source,
-                callback,
-            })))
-        }
+        (Err(Failure::Core(source)), callback) => Err(Failure::Callback(Box::new(
+            ProgressCallbackError::merge(operation, source, callback),
+        ))),
         (Err(other), _) => Err(other),
     }
 }
@@ -1302,7 +1178,7 @@ impl exarch_core::ProgressCallback for NodeProgressAdapter {
     fn on_complete(&mut self) {}
 
     fn is_cancelled(&mut self) -> bool {
-        self.callback_error.is_some()
+        self.callback_error.is_some() || self.abort.check().is_err()
     }
 }
 
@@ -1331,7 +1207,7 @@ mod tests {
     /// pass boundary validation, and core handles the rest.
     fn assert_not_boundary_error<T>(result: CoreResult<T>) {
         if let Err(err) = result {
-            let msg = err.to_string();
+            let msg = error::failure_text(err);
             assert!(
                 !msg.contains("null bytes") && !msg.contains("maximum length"),
                 "should not fail on boundary path validation, got: {msg}"
@@ -1347,8 +1223,8 @@ mod tests {
         exarch_core::ExtractionOptions::default()
     }
 
-    fn creation() -> exarch_core::creation::CreationConfig {
-        exarch_core::creation::CreationConfig::default()
+    fn creation() -> exarch_core::CreationConfig {
+        exarch_core::CreationConfig::default()
     }
 
     #[test]

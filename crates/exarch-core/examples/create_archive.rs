@@ -3,11 +3,11 @@
 //! Run with: `cargo run --example create_archive`
 #![allow(clippy::disallowed_methods)]
 
+use exarch_core::CompressionLevel;
 use exarch_core::CreateRequest;
 use exarch_core::CreationConfig;
 use exarch_core::OutputFile;
 use exarch_core::create_archive;
-use exarch_core::creation::CompressionLevel;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Example 1: Simple creation with default config

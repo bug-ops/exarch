@@ -21,8 +21,9 @@ use crate::security::fs_view::NodeBudget;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
 use crate::security::validator::EntryPath;
-use crate::security::validator::NodeKind;
+use crate::security::validator::Gated;
 use crate::security::validator::ValidatorCore;
+use crate::selection::EntryShape;
 use crate::sink::EntrySink;
 use crate::sink::SinkTarget;
 use crate::types::SafePath;
@@ -50,28 +51,27 @@ impl SinkPrePass<'_> {
 }
 
 impl PrePass for SinkPrePass<'_> {
-    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>> {
+    fn validate_path(
+        &mut self,
+        path: &Path,
+        shape: EntryShape,
+    ) -> Result<Gated<EntryPath<SafePath>>> {
         let ctx = self.core.context::<VirtualTree>();
         self.core
-            .validate_entry_path_in(path, kind, self.root, self.tree, &ctx)
+            .route_entry_in(path, shape, self.root, self.tree, &ctx)
     }
 
-    fn directory(&mut self, path: &Path) -> Result<()> {
-        self.check_name_lengths(path)
+    fn directory(&mut self, landing: &SafePath) -> Result<()> {
+        self.check_name_lengths(landing.as_path())
     }
 
-    fn symlink(
-        &mut self,
-        link: &SafePath,
-        path: &Path,
-        file: &sevenz_rust2::ArchiveEntry,
-    ) -> Result<()> {
-        self.check_name_lengths(path)?;
+    fn symlink(&mut self, link: &SafePath, file: &sevenz_rust2::ArchiveEntry) -> Result<()> {
+        self.check_name_lengths(link.as_path())?;
         refuse_undecoded_target_in(link, file, self.root, self.config, self.tree)
     }
 
-    fn file(&mut self, _safe_path: &SafePath, path: &Path) -> Result<FilePlan> {
-        self.check_name_lengths(path)?;
+    fn file(&mut self, safe_path: &SafePath) -> Result<FilePlan> {
+        self.check_name_lengths(safe_path.as_path())?;
         Ok(FilePlan::Reserve)
     }
 

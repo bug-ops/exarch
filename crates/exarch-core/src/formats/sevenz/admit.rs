@@ -202,11 +202,12 @@ impl Refused {
 ///
 /// A solid archive needs [`SolidArchives::Allow`], and the declared decoded
 /// size of every one of its blocks, single-file blocks included, must fit
-/// [`SolidLimits::max_block_memory`]. The limit bounds decoded volume per
-/// block, not resident memory: decoding streams, and the memory of parallel
-/// decoding is bounded by `parallel_decode`. While `max_total_size` is
-/// [`Limit::Unbounded`] the archive-wide sum of the blocks is also held to the
-/// same limit, so an unbounded total never removes the cap on a solid archive.
+/// [`SolidLimits::max_block_memory`](crate::SolidLimits::max_block_memory). The
+/// limit bounds decoded volume per block, not resident memory: decoding
+/// streams, and the memory of parallel decoding is bounded by
+/// `parallel_decode`. While `max_total_size` is [`Limit::Unbounded`] the
+/// archive-wide sum of the blocks is also held to the same limit, so an
+/// unbounded total never removes the cap on a solid archive.
 ///
 /// # Errors
 ///

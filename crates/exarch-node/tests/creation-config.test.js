@@ -173,6 +173,24 @@ describe('CreationConfig', () => {
       });
       assert.deepStrictEqual(config.excludePatterns, before);
     });
+
+    it('should replace the exclude patterns and clear them with an empty list', () => {
+      const config = new CreationConfig();
+      assert.ok(config.excludePatterns.includes('.git'));
+      assert.strictEqual(config.setExcludePatterns(['target', '*.log']), config);
+      assert.deepStrictEqual(config.excludePatterns, ['target', '*.log']);
+      config.setExcludePatterns([]);
+      assert.deepStrictEqual(config.excludePatterns, []);
+    });
+
+    it('should refuse a bad member as INVALID_CONFIGURATION and keep the old list', () => {
+      const config = new CreationConfig().setExcludePatterns(['target']);
+      assert.throws(() => config.setExcludePatterns(['ok', 'bad\0pattern']), {
+        code: 'INVALID_CONFIGURATION',
+        setting: 'exclude_pattern',
+      });
+      assert.deepStrictEqual(config.excludePatterns, ['target']);
+    });
   });
 
   describe('compression levels', () => {
@@ -196,25 +214,23 @@ describe('CreationConfig', () => {
       }, /1.*9|invalid/i);
     });
 
-    it('names a whole out-of-range level exactly as INVALID_COMPRESSION_LEVEL', () => {
-      for (const bad of [0, 10, 4294967295]) {
+    it('refuses every unusable number as INVALID_COMPRESSION_LEVEL and keeps the level', () => {
+      for (const bad of [0, 10, 4294967295, 1.5, -3, NaN, Infinity, 4294967302, 2 ** 40]) {
         const config = new CreationConfig();
-        assert.throws(() => config.setCompressionLevel(bad), {
-          code: 'INVALID_COMPRESSION_LEVEL',
-          message: new RegExp(`level ${bad}\\b`),
-        });
+        assert.throws(
+          () => config.setCompressionLevel(bad),
+          { code: 'INVALID_COMPRESSION_LEVEL' },
+          String(bad)
+        );
         assert.strictEqual(config.compressionLevel, 6);
       }
     });
 
-    it('refuses other numbers without naming a different level', () => {
-      for (const bad of [1.5, -3, NaN, Infinity, 4294967302, 2 ** 40]) {
-        const config = new CreationConfig();
-        assert.throws(() => config.setCompressionLevel(bad), {
-          code: 'InvalidArg',
-          message: new RegExp(`got ${String(bad).replace('+', '\\+')}$`),
+    it('names a whole refused level in the message', () => {
+      for (const bad of [0, 10, -3]) {
+        assert.throws(() => new CreationConfig().setCompressionLevel(bad), {
+          message: new RegExp(`level ${bad}\\b`),
         });
-        assert.strictEqual(config.compressionLevel, 6);
       }
     });
   });

@@ -12,8 +12,10 @@ entries never share a listed name. This differs from the CLI and the Node
 binding, which show an escaped text form; use ``os.fsencode`` to get the raw
 bytes back. The in-memory functions refuse such names instead.
 
-The aliases ``AnyMemoryEntry``, ``AnyArchiveEntry``, ``AnyLinkTarget`` and
-``ProgressCallbackFn`` are importable at runtime as typing objects.
+The aliases ``AnyMemoryEntry``, ``AnyArchiveEntry``, ``AnyLinkTarget``,
+``AnyExtractionWarning``, ``AnyCreationWarning``, ``AnyEntryDisposition`` and
+``ProgressCallbackFn`` are
+importable at runtime as typing objects.
 """
 
 from collections.abc import Callable
@@ -41,6 +43,40 @@ _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
 _Durability = Literal["synced", "unsynced"]
+_ExistingFiles = Literal["skip", "overwrite", "refuse"]
+_Staging = Literal["in_place", "atomic", "atomic_replace"]
+_Restore = Literal["not_needed", "restored", "failed"]
+_ProtectedPath = Literal["filesystem_root", "archive_ancestor", "working_directory"]
+_IoKind = Literal[
+    "NotFound",
+    "PermissionDenied",
+    "AlreadyExists",
+    "NotADirectory",
+    "IsADirectory",
+    "DirectoryNotEmpty",
+    "ReadOnlyFilesystem",
+    "StorageFull",
+    "QuotaExceeded",
+    "FileTooLarge",
+    "InvalidInput",
+    "InvalidData",
+    "InvalidFilename",
+    "TimedOut",
+    "Interrupted",
+    "UnexpectedEof",
+    "WriteZero",
+    "Unsupported",
+    "CrossesDevices",
+    "TooManyLinks",
+    "ResourceBusy",
+    "BrokenPipe",
+    "OutOfMemory",
+    "WouldBlock",
+    "Other",
+]
+_BackupIdentity = Literal["verified", "unverified"]
+_ExtractionWarningKind = Literal["anti_items_skipped", "backup_cleanup_failed"]
+_CreationWarningKind = Literal["zip_ratio_over_default_limit", "zip_ratio_check_failed", "directory_not_synced"]  # noqa: E501  # fmt: skip
 _InvalidArchiveSubCode = Literal[
     "TAR_AMBIGUITY",
     "TAR_TRAILER",
@@ -74,6 +110,8 @@ _LinkState = Literal["recorded", "missing", "unread", "unreadable", "oversized"]
 _SkipKind = Literal[
     "duplicate",
     "extension_not_allowed",
+    "not_selected",
+    "stripped_away",
     "excluded",
     "hidden",
     "over_max_file_size",
@@ -97,6 +135,7 @@ _ErrorCode = Literal[
     "INVALID_COMPRESSION_LEVEL",
     "UNKNOWN_FORMAT",
     "INVALID_CONFIGURATION",
+    "CANCELLED",
 ]
 _ConfigSetting = Literal[
     "max_file_size",
@@ -127,6 +166,12 @@ _ConfigSetting = Literal[
     "decode_reuse_limit",
     "skip_kind",
     "durability",
+    "existing_files",
+    "staging",
+    "entry_selection",
+    "entry_include",
+    "entry_exclude",
+    "strip_components",
 ]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 
@@ -303,6 +348,58 @@ class SecurityConfig:
         """
         ...
 
+    def add_include_pattern(self, pattern: str) -> SecurityConfig:
+        """
+        Adds an include pattern: only entries that match an include pattern (and
+        no exclude pattern) are extracted. Patterns use the grammar of
+        ``CreationConfig`` exclude patterns and match the normalized archive
+        path before any stripping. An include pattern that matches nothing fails
+        the extraction after the scan with ``InvalidConfigurationError``
+        (``setting == "entry_include"``, the unmatched ``patterns``); the files
+        already written stay (or are rolled back under an atomic ``staging``).
+
+        Order of operations: the name is validated, matched on its original
+        path, stripped or flattened, and the new name is validated again. The
+        selection applies alike to ``extract_archive*``, ``list_archive*``
+        (see ``ArchiveManifest.dispositions``) and ``verify_archive*``.
+
+        Raises:
+            InvalidConfigurationError: a refused pattern
+                (``setting == "entry_include"``).
+        """
+        ...
+
+    def add_exclude_pattern(self, pattern: str) -> SecurityConfig:
+        """
+        Adds an exclude pattern: a matching entry is not extracted, whatever the
+        include patterns say. A pattern that matches nothing is not an error.
+
+        Raises:
+            InvalidConfigurationError: a refused pattern
+                (``setting == "entry_exclude"``).
+        """
+        ...
+
+    def with_strip_components(self, count: int) -> SecurityConfig:
+        """
+        Drops ``count`` leading path components from every selected entry. An
+        entry the strip consumes entirely is skipped (``"stripped_away"``).
+        Replaces ``with_flatten``.
+
+        Raises:
+            InvalidConfigurationError: zero, a negative or non-integer value, or
+                one above ``max_path_depth`` (``setting == "strip_components"``).
+        """
+        ...
+
+    def with_flatten(self, flatten: bool = True) -> SecurityConfig:
+        """
+        Lands every regular file under the destination root by its final path
+        component only. Directories are skipped; a symlink or hardlink entry is
+        refused. Replaces ``with_strip_components``.
+        """
+        ...
+
     def build(self) -> SecurityConfig:
         """Finalizes the configuration."""
         ...
@@ -415,16 +512,18 @@ class SecurityConfig:
         ...
 
     @property
-    def allowed_extensions(self) -> list[str]:
-        """List of allowed file extensions, normalized (empty = allow all).
+    def allowed_extensions(self) -> list[str] | None:
+        """The allowed file extensions, normalized, or ``None`` when every extension is allowed.
 
-        Assigning raises ``ValueError`` for an entry ``add_allowed_extension``
-        would refuse.
+        Assigning raises ``InvalidConfigurationError`` (``setting ==
+        "allowed_extension"``) for an empty list or an entry
+        ``add_allowed_extension`` would refuse. Assigning ``None`` is the only
+        way to clear the list.
         """
         ...
 
     @allowed_extensions.setter
-    def allowed_extensions(self, value: list[str]) -> None: ...
+    def allowed_extensions(self, value: list[str] | None) -> None: ...
     @property
     def banned_path_components(self) -> list[str]:
         """List of banned path components.
@@ -436,6 +535,40 @@ class SecurityConfig:
 
     @banned_path_components.setter
     def banned_path_components(self, value: list[str]) -> None: ...
+    @property
+    def include_patterns(self) -> list[str]:
+        """The include patterns, in the order added; empty means every entry is a candidate."""
+        ...
+
+    @include_patterns.setter
+    def include_patterns(self, value: list[str]) -> None: ...
+    @property
+    def exclude_patterns(self) -> list[str]:
+        """The exclude patterns, in the order added."""
+        ...
+
+    @exclude_patterns.setter
+    def exclude_patterns(self, value: list[str]) -> None: ...
+    @property
+    def strip_components(self) -> int | None:
+        """The number of leading components dropped, or ``None`` when no strip is set.
+
+        Assigning ``None`` removes a strip (a flatten stays).
+        """
+        ...
+
+    @strip_components.setter
+    def strip_components(self, value: int | None) -> None: ...
+    @property
+    def flatten(self) -> bool:
+        """Whether files land by their final component only.
+
+        Assigning ``True`` replaces a strip; ``False`` removes a flatten.
+        """
+        ...
+
+    @flatten.setter
+    def flatten(self, value: bool) -> None: ...
 
 @final
 class VerificationOptions:
@@ -488,7 +621,8 @@ class ExtractionOptions:
     Options controlling extraction behavior (non-security).
 
     Separate from SecurityConfig to keep security settings focused.
-    These options control operational behavior such as duplicate handling.
+    These options control operational behavior such as how existing files are
+    treated.
     """
 
     def __init__(self) -> None:
@@ -500,31 +634,44 @@ class ExtractionOptions:
         """Creates an ExtractionOptions with defaults."""
         ...
 
-    def with_skip_duplicates(self, skip: bool = True) -> ExtractionOptions:
+    def with_existing_files(self, value: _ExistingFiles) -> ExtractionOptions:
         """
-        Sets whether duplicate archive entries are skipped silently.
+        Sets how an existing file at a landing path is treated.
 
-        When ``True`` (default), duplicate entries produce a warning in the
-        report. When ``False``, a duplicate entry causes an error.
+        ``"skip"`` (default) keeps the existing file and counts the entry as a
+        duplicate skip. ``"overwrite"`` replaces it where the entry kinds allow.
+        ``"refuse"`` raises ``OutputExistsError`` (code ``OUTPUT_EXISTS``, with
+        ``conflicts``) for any occupant and never overwrites. A kind conflict is
+        refused under every value.
+
+        Raises:
+            InvalidConfigurationError: any other string
+                (``setting == "existing_files"``).
         """
         ...
 
-    def with_atomic(self, atomic: bool = True) -> ExtractionOptions:
+    def with_staging(self, value: _Staging) -> ExtractionOptions:
         """
-        Sets whether extraction uses a temporary directory for atomic commits.
+        Sets where extracted files are written first.
 
-        When ``True``, files are extracted to a temp dir in the same parent as
-        the output directory, then atomically renamed on completion. On failure
-        the temp dir is removed, leaving the output directory untouched.
-        Default: ``False``.
+        ``"in_place"`` (default) writes into the destination, which may already
+        hold files. ``"atomic"`` extracts into a temporary directory next to the
+        destination and renames it into place on success; a failure or
+        cancellation removes it. A destination that holds content raises
+        ``OutputExistsError`` before anything is extracted, one that is not a
+        directory raises ``InvalidConfigurationError`` (``setting ==
+        "output_path"``), and a symlinked destination is resolved first.
+        ``"atomic_replace"`` is ``"atomic"`` and also swaps the staged tree over
+        an existing destination directory, replacing it as a whole: the original
+        is renamed aside only once extraction succeeded and restored if the swap
+        fails (see ``OSError.restore``). A destination that is a filesystem root,
+        the archive's directory or an ancestor of it, or the working directory
+        raises ``InvalidConfigurationError`` (``setting == "output_path"``).
 
-        **Important:** atomic mode requires that the output directory is absent
-        or empty: an empty directory is replaced. Into a non-empty directory the
-        final rename fails and extraction raises ``OSError`` with
-        ``code == "IO_ERROR"`` (not ``OutputExistsError``, which
-        ``create_archive`` raises with ``overwrite=False``); the staged tree is
-        removed and the directory is left as it was.
-        Non-atomic mode extracts into an existing directory without error.
+        The in-memory functions take no staging.
+
+        Raises:
+            InvalidConfigurationError: any other string (``setting == "staging"``).
         """
         ...
 
@@ -533,19 +680,19 @@ class ExtractionOptions:
         ...
 
     @property
-    def skip_duplicates(self) -> bool:
-        """Whether to skip duplicate entries silently (default: True)."""
+    def existing_files(self) -> _ExistingFiles:
+        """How an existing file is treated (default: ``"skip"``)."""
         ...
 
-    @skip_duplicates.setter
-    def skip_duplicates(self, value: bool) -> None: ...
+    @existing_files.setter
+    def existing_files(self, value: _ExistingFiles) -> None: ...
     @property
-    def atomic(self) -> bool:
-        """Whether atomic extraction is enabled (default: False)."""
+    def staging(self) -> _Staging:
+        """Where files are written first (default: ``"in_place"``)."""
         ...
 
-    @atomic.setter
-    def atomic(self, value: bool) -> None: ...
+    @staging.setter
+    def staging(self, value: _Staging) -> None: ...
 
 @final
 class CreationConfig:
@@ -672,8 +819,8 @@ class Skip:
         ...
 
     @property
-    def io_kind(self) -> str | None:
-        """The description of the I/O failure behind an "unreadable" skip."""
+    def io_kind(self) -> _IoKind | None:
+        """The stable kind of the I/O failure behind an "unreadable" skip."""
         ...
 
 @final
@@ -703,6 +850,140 @@ class Skipped:
         ...
 
     def __len__(self) -> int: ...
+
+class ExtractionWarning:
+    """
+    A condition of an extraction worth surfacing that is not a skipped entry.
+
+    The concrete class tells which condition it is (see ``AnyExtractionWarning``)
+    and carries its fields; ``str(warning)`` is ``message``.
+    """
+
+    @property
+    def kind(self) -> _ExtractionWarningKind:
+        """The condition: ``"anti_items_skipped"`` or ``"backup_cleanup_failed"``."""
+        ...
+
+    @property
+    def message(self) -> str:
+        """Human-readable description; host paths are redacted like an exception message."""
+        ...
+
+@final
+class AntiItemsSkippedWarning(ExtractionWarning):
+    """7z anti-items, which mark deletions in an update archive, were not applied."""
+
+    @property
+    def kind(self) -> Literal["anti_items_skipped"]: ...
+    @property
+    def count(self) -> int:
+        """How many anti-items the archive holds."""
+        ...
+
+@final
+class BackupCleanupFailedWarning(ExtractionWarning):
+    """
+    The backup of the original destination, kept for an atomic replacement,
+    could not be removed and must be cleaned up manually.
+    """
+
+    @property
+    def kind(self) -> Literal["backup_cleanup_failed"]: ...
+    @property
+    def path(self) -> str:
+        """Where the backup remains, redacted like an exception message."""
+        ...
+
+    @property
+    def identity(self) -> _BackupIdentity:
+        """Whether the backup's identity was confirmed before its removal failed."""
+        ...
+
+    @property
+    def io_kind(self) -> _IoKind:
+        """The stable kind of the removal failure."""
+        ...
+
+    @property
+    def reason(self) -> str:
+        """The failure text, redacted like an I/O error message."""
+        ...
+
+AnyExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning
+
+class CreationWarning:
+    """
+    A condition of a creation worth surfacing that is not a skipped entry.
+
+    The concrete class tells which condition it is (see ``AnyCreationWarning``)
+    and carries its fields; ``str(warning)`` is ``message``.
+    """
+
+    @property
+    def kind(self) -> _CreationWarningKind:
+        """The condition."""
+        ...
+
+    @property
+    def message(self) -> str:
+        """Human-readable description."""
+        ...
+
+@final
+class ZipRatioOverDefaultLimitWarning(CreationWarning):
+    """
+    Default extraction would refuse entries of the finished ZIP archive as a zip
+    bomb, because their compression ratio is over the default limit.
+    """
+
+    @property
+    def kind(self) -> Literal["zip_ratio_over_default_limit"]: ...
+    @property
+    def entries(self) -> int:
+        """How many entries are over the limit."""
+        ...
+
+    @property
+    def limit(self) -> float:
+        """The default extraction ratio limit."""
+        ...
+
+    @property
+    def needed_ratio(self) -> float:
+        """The smallest ratio limit that admits every entry."""
+        ...
+
+@final
+class ZipRatioCheckFailedWarning(CreationWarning):
+    """
+    The finished ZIP archive could not be read back to check its entries against
+    the default extraction ratio limit.
+    """
+
+    @property
+    def kind(self) -> Literal["zip_ratio_check_failed"]: ...
+    @property
+    def reason(self) -> str:
+        """Why the archive could not be read back."""
+        ...
+
+@final
+class DirectoryNotSyncedWarning(CreationWarning):
+    """
+    The archive was published, but the directory that holds it could not be
+    synced, so the directory entry may not survive a crash.
+    """
+
+    @property
+    def kind(self) -> Literal["directory_not_synced"]: ...
+    @property
+    def io_kind(self) -> _IoKind:
+        """The stable kind of the failure."""
+        ...
+
+AnyCreationWarning = (
+    ZipRatioOverDefaultLimitWarning | ZipRatioCheckFailedWarning | DirectoryNotSyncedWarning
+)
 
 @final
 class ExtractionReport:
@@ -748,8 +1029,8 @@ class ExtractionReport:
         ...
 
     @property
-    def warnings(self) -> list[str]:
-        """List of warning messages."""
+    def warnings(self) -> list[AnyExtractionWarning]:
+        """The typed warnings of the extraction."""
         ...
 
     def total_items(self) -> int:
@@ -809,8 +1090,8 @@ class CreationReport:
         ...
 
     @property
-    def warnings(self) -> list[str]:
-        """List of warning messages."""
+    def warnings(self) -> list[AnyCreationWarning]:
+        """The typed warnings of the creation."""
         ...
 
     def total_items(self) -> int:
@@ -999,6 +1280,43 @@ class ArchiveManifest:
         """Archive format."""
         ...
 
+    def dispositions(self, config: SecurityConfig | None = None) -> list[AnyEntryDisposition]:
+        """
+        What extraction would do with each entry the validation accepts: where it
+        lands, or why it is left out. The selection is the one the manifest was
+        listed with; ``config`` supplies only limits and policies (default: the
+        secure defaults). An entry the validation refuses is not reported.
+        """
+        ...
+
+class EntryDisposition:
+    """What extraction does with one listed entry (see ``AnyEntryDisposition``)."""
+
+    @property
+    def path(self) -> str:
+        """The entry's path in the archive."""
+        ...
+
+@final
+class ExtractDisposition(EntryDisposition):
+    """An entry that extraction writes."""
+
+    @property
+    def landing(self) -> str:
+        """Where it lands, relative to the destination, after any strip or flatten."""
+        ...
+
+@final
+class SkipDisposition(EntryDisposition):
+    """An entry that is validated but not extracted."""
+
+    @property
+    def kind(self) -> _SkipKind:
+        """Why it is left out."""
+        ...
+
+AnyEntryDisposition = ExtractDisposition | SkipDisposition
+
 @final
 class VerificationIssue:
     """Verification issue."""
@@ -1044,6 +1362,11 @@ class VerificationIssue:
     @property
     def setting(self) -> _ConfigSetting | None:
         """The configuration setting the refusal concerns, if any."""
+        ...
+
+    @property
+    def io_kind(self) -> _IoKind | None:
+        """The stable kind of the I/O failure of an ``IO_ERROR`` refusal, else None."""
         ...
 
     @property
@@ -1215,19 +1538,18 @@ def extract_archive(
         the specific exception (e.g. ``SymlinkEscapeError``) is raised with
         ``files_extracted``, ``bytes_written``, ``files_skipped``, and
         ``warnings`` attributes attached, plus ``writes`` (``"kept"``). With
-        ``atomic=True`` the destination is rolled back instead: the exception
+        ``staging="atomic"`` the destination is rolled back instead: the exception
         then carries ``writes == "rolled_back"`` and none of the counter
         attributes. Detect files left on disk via
         ``getattr(e, "writes", None) == "kept"``; ``hasattr(e, "writes")``
         is also true after a rollback. The ``*_to_memory`` functions write
         nothing to disk: their failures carry ``writes == "discarded"`` and none
         of the counter attributes. A symlink entry over an existing symlink
-        with a different target, with overwrite enabled (``skip_duplicates``
-        off), raises the builtin ``OSError`` (``ELOOP``), not
+        with a different target, with overwrite enabled
+        (``existing_files == "overwrite"``), raises the builtin ``OSError`` (``ELOOP``), not
         ``SymlinkEscapeError``. See
         ``extract_archive_with_progress`` below: a raising ``progress`` callback
-        over an otherwise-successful extraction attaches ``files_extracted`` and
-        ``bytes_written`` (not ``files_skipped``/``warnings``), distinguished by
+        carries ``writes`` and the counters of what was written, distinguished by
         a ``progress_callback_error`` marker attribute this function's own
         exceptions never carry.
     """
@@ -1266,9 +1588,8 @@ def extract_archive_with_progress(
         IOError: I/O operation failed
 
     Note:
-        When a progress callback is provided, the GIL is held during extraction
-        so that the callback can safely call into Python. Without a callback,
-        the GIL is released for performance.
+        The GIL is released during extraction whether or not a callback is
+        provided; the callback takes it back for each call.
 
         Progress callback limitations:
 
@@ -1285,19 +1606,21 @@ def extract_archive_with_progress(
         ``files_extracted``, ``bytes_written``, ``files_skipped``, and
         ``warnings`` attributes attached.
 
-        If ``progress`` itself raises, extraction is **not** aborted early — the
-        underlying progress-callback contract has no cancellation signal, so
-        extraction always runs to completion first, and ``progress`` is not
-        called again for the remaining entries once it has raised:
+        If ``progress`` itself raises (``KeyboardInterrupt`` included),
+        extraction is cancelled: it stops before the next entry, and
+        ``progress`` is not called again. What was written stays on disk (or is
+        rolled back under an atomic ``staging``):
 
-        - If extraction otherwise succeeds, ``progress``'s own exception is what
-          propagates (unchanged — the same type, message, and traceback), with
-          ``files_extracted`` and ``bytes_written`` attributes attached
-          describing what was written, plus a ``progress_callback_error = True``
-          marker attribute. Check ``progress_callback_error`` before treating the
-          presence of ``files_extracted`` as a partial-extraction signal — see
-          the note on ``extract_archive`` above.
-        - If extraction also fails, the extraction error takes priority (a
+        - ``progress``'s own exception is what propagates (unchanged — the same
+          type, message, and traceback), with ``writes`` and, while the files
+          remain on disk, ``files_extracted``, ``bytes_written``,
+          ``files_skipped``, ``skipped`` and ``warnings`` attributes attached,
+          plus a ``progress_callback_error = True`` marker attribute. Check
+          ``progress_callback_error`` before treating the presence of
+          ``files_extracted`` as a partial-extraction signal — see the note on
+          ``extract_archive`` above.
+        - If extraction fails for its own reason first, the extraction error
+          takes priority (a
           raising ``progress`` can never mask a security error such as
           ``SymlinkEscapeError``) and ``progress``'s exception is attached as
           ``__cause__`` rather than being dropped.
@@ -1565,11 +1888,12 @@ class SinkOptions:
     of path-based extraction.
 
     Atomic extraction renames a directory, which an in-memory extraction does
-    not have, so only the duplicate policy and the ZIP decode reuse remain.
+    not have, so only the existing-files policy and the ZIP decode reuse remain.
 
     Args:
-        skip_duplicates: Skip an entry whose path an earlier entry already holds
-            instead of replacing it (default: True).
+        existing_files: ``"skip"`` (default) skips an entry whose path an
+            earlier entry already holds and counts a duplicate; ``"overwrite"``
+            delivers it again; ``"refuse"`` raises ``OutputExistsError``.
         decode_reuse: Where a ZIP extraction keeps the output of its structural
             check so deflate entries are decoded once instead of twice:
             ``"off"`` (default), ``"memory"`` or ``"temp_file"``.
@@ -1585,12 +1909,12 @@ class SinkOptions:
 
     def __new__(
         cls,
-        skip_duplicates: bool = True,
+        existing_files: _ExistingFiles = "skip",
         decode_reuse: _DecodeReuse = "off",
         decode_reuse_limit: int | None = None,
     ) -> SinkOptions: ...
     @property
-    def skip_duplicates(self) -> bool: ...
+    def existing_files(self) -> _ExistingFiles: ...
     @property
     def decode_reuse(self) -> _DecodeReuse: ...
     @property
@@ -1677,7 +2001,7 @@ def extract_archive_to_callback(
     to the link. A "hardlink" entry is delivered by reference after every other
     entry: its target is the root-relative resolved path of an entry already
     delivered, a file or an earlier hardlink (a chain is delivered link by
-    link). With skip_duplicates False one path can be delivered more than
+    link). With existing_files="overwrite" one path can be delivered more than
     once and a hardlink refers to the latest delivery. Implicit parent
     directories are not delivered.
 
@@ -1711,15 +2035,16 @@ def extract_archive_to_memory_with_progress(
     Extract an archive held in memory into memory, reporting progress.
 
     Same as extract_archive_to_memory, plus a callback invoked once per entry
-    with (path, total, current, bytes_written). The GIL is held during
-    extraction when progress is given.
+    with (path, total, current, bytes_written). The GIL is released during
+    extraction and taken once per callback.
 
     Raises:
-        Whatever progress itself raises. If extraction succeeded, the
-        extracted entries are discarded and the exception carries
-        writes == "discarded" (no counters) and progress_callback_error = True.
-        If extraction failed, the core error is raised with the callback's
-        exception chained as __cause__.
+        Whatever progress itself raises: it cancels the extraction before the
+        next entry, the collected entries are discarded and the exception
+        carries writes == "discarded" (no counters) and
+        progress_callback_error = True. If extraction failed for its own reason
+        first, the core error is raised with the callback's exception chained
+        as __cause__.
     """
     ...
 
@@ -1737,10 +2062,10 @@ def list_archive_bytes_with_progress(
     bytes_written is always 0.
 
     Raises:
-        Whatever progress itself raises. If listing succeeded, the manifest
-        is discarded and the exception carries progress_callback_error = True.
-        If listing failed, the core error is raised with the callback's
-        exception chained as __cause__.
+        Whatever progress itself raises: it cancels the listing before the next
+        entry and the exception carries progress_callback_error = True. If
+        listing failed for its own reason first, the core error is raised with
+        the callback's exception chained as __cause__.
     """
     ...
 
@@ -1759,10 +2084,10 @@ def verify_archive_bytes_with_progress(
     bytes_written is always 0.
 
     Raises:
-        Whatever progress itself raises. If verification returned a report
-        (even a failing one), the report is discarded and the exception
-        carries progress_callback_error = True. If it errored, the core error
-        is raised with the callback's exception chained as __cause__.
+        Whatever progress itself raises: it cancels the verification before the
+        next entry and the exception carries progress_callback_error = True. If
+        verification errored for its own reason first, the core error is raised
+        with the callback's exception chained as __cause__.
     """
     ...
 
@@ -1806,6 +2131,44 @@ def create_archive_to_bytes(
     """
     ...
 
+class _IOErrorAttributes(Protocol):
+    """
+    Attributes exarch sets on the builtin ``OSError`` it raises for an I/O
+    failure (``code == "IO_ERROR"``).
+
+    These errors are plain builtin ``OSError`` subclasses (``PermissionError``,
+    ``FileNotFoundError``, ... and a bare ``OSError`` for kinds Python has no
+    class for; an out-of-memory failure included), not ``ArchiveError``
+    subclasses, so type checkers see only ``OSError``. Read the attributes with
+    ``getattr``; only ``code`` and ``io_kind`` are always set, the others only
+    for the failure they describe.
+
+    Attributes:
+        code: Always ``"IO_ERROR"``.
+        io_kind: The stable kind of the failure, the same token as
+            ``Skip.io_kind``.
+        restore: On the error of a failed ``"atomic_replace"`` swap:
+            ``"not_needed"`` (the original destination was never moved),
+            ``"restored"`` (moved aside and back) or ``"failed"`` (it could not
+            be moved back and remains at ``backup_path``).
+        backup_path: With ``restore == "failed"``, where the original destination
+            remains, redacted like an exception message.
+        leftover_path: Where a staging directory the failed swap left behind
+            remains, redacted like an exception message.
+        filename: On the error of a creation that failed after reserving its
+            output, the empty reservation file left at that path (redacted).
+        writes: As on ``ArchiveError``, when extraction failed after recording
+            progress.
+    """
+
+    code: Literal["IO_ERROR"]
+    io_kind: _IoKind
+    restore: _Restore
+    backup_path: str | None
+    leftover_path: str | None
+    filename: str | None
+    writes: _PartialWrites
+
 class ArchiveError(Exception):
     """
     Base exception for all extraction errors.
@@ -1826,12 +2189,28 @@ class ArchiveError(Exception):
     writes: _PartialWrites
 
 class OutputExistsError(ArchiveError, FileExistsError):
-    """The output path already exists (``code == "OUTPUT_EXISTS"``)."""
+    """
+    The output path already exists, or an extraction refused to touch an
+    existing path (``code == "OUTPUT_EXISTS"``).
 
-    ...
+    ``errno`` is ``EEXIST`` and ``filename`` the output or destination path,
+    redacted like an exception message, as ``open()`` fills them.
+
+    Attributes:
+        conflicts: The archive-relative paths an extraction with
+            ``existing_files == "refuse"`` found occupied; ``None`` for a
+            creation output that exists.
+    """
+
+    conflicts: list[str] | None
 
 class SourceNotFoundError(ArchiveError, FileNotFoundError):
-    """A source path does not exist (``code == "SOURCE_NOT_FOUND"``)."""
+    """
+    A source path or archive does not exist (``code == "SOURCE_NOT_FOUND"``).
+
+    ``errno`` is ``ENOENT``, ``strerror`` its text and ``filename`` the path,
+    redacted like an exception message, as ``open()`` fills them.
+    """
 
     ...
 
@@ -1839,7 +2218,7 @@ class SourceNotAccessibleError(ArchiveError, OSError):
     """
     A source path exists but cannot be read (``code == "SOURCE_NOT_ACCESSIBLE"``).
 
-    ``errno`` and ``strerror`` carry the OS error when there is one.
+    ``errno``, ``strerror`` and ``filename`` carry the OS error when there is one.
     """
 
     ...
@@ -1850,9 +2229,40 @@ class InvalidConfigurationError(ArchiveError, ValueError):
 
     Attributes:
         setting: The refused setting, or ``None`` when the refusal names none.
+        patterns: With ``setting == "entry_include"`` after an extraction, the
+            include patterns that matched no entry; ``None`` otherwise.
+        protected_path: With ``setting == "output_path"`` when an
+            ``"atomic_replace"`` destination was refused, what it is:
+            ``"filesystem_root"``, ``"archive_ancestor"`` (the archive's own
+            directory or an ancestor of it) or ``"working_directory"``;
+            ``None`` otherwise.
+        collision: With ``setting == "source_paths"`` when two creation sources
+            map to one entry name, the colliding pair; ``None`` otherwise.
     """
 
     setting: _ConfigSetting | None
+    patterns: list[str] | None
+    protected_path: _ProtectedPath | None
+    collision: NameCollision | None
+
+@final
+class NameCollision:
+    """Two creation sources that map to one entry name."""
+
+    @property
+    def name(self) -> str:
+        """The entry name both sources map to."""
+        ...
+
+    @property
+    def first(self) -> str:
+        """The first source, redacted like an exception message."""
+        ...
+
+    @property
+    def second(self) -> str:
+        """The second source, redacted like an exception message."""
+        ...
 
 class InvalidCompressionLevelError(ArchiveError, ValueError):
     """A compression level is out of range (``code == "INVALID_COMPRESSION_LEVEL"``)."""
@@ -1870,14 +2280,14 @@ class PathTraversalError(ArchiveError):
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
-        warnings: Warning messages generated before the error.
+        warnings: Typed warnings generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
     skipped: Skipped
-    warnings: list[str]
+    warnings: list[AnyExtractionWarning]
 
 class SymlinkEscapeError(ArchiveError):
     """
@@ -1890,14 +2300,14 @@ class SymlinkEscapeError(ArchiveError):
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
-        warnings: Warning messages generated before the error.
+        warnings: Typed warnings generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
     skipped: Skipped
-    warnings: list[str]
+    warnings: list[AnyExtractionWarning]
 
 class HardlinkEscapeError(ArchiveError):
     """
@@ -1910,14 +2320,14 @@ class HardlinkEscapeError(ArchiveError):
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
-        warnings: Warning messages generated before the error.
+        warnings: Typed warnings generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
     skipped: Skipped
-    warnings: list[str]
+    warnings: list[AnyExtractionWarning]
 
 class ZipBombError(ArchiveError):
     """
@@ -1930,7 +2340,7 @@ class ZipBombError(ArchiveError):
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
-        warnings: Warning messages generated before the error.
+        warnings: Typed warnings generated before the error.
         sub_code: What the ratio was measured over: one entry, a solid block or the skipped entries.
     """
 
@@ -1939,7 +2349,7 @@ class ZipBombError(ArchiveError):
     files_skipped: int
     skipped: Skipped
     sub_code: _ZipBombSubCode
-    warnings: list[str]
+    warnings: list[AnyExtractionWarning]
 
 class InvalidPermissionsError(ArchiveError):
     """
@@ -1952,14 +2362,14 @@ class InvalidPermissionsError(ArchiveError):
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
-        warnings: Warning messages generated before the error.
+        warnings: Typed warnings generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
     skipped: Skipped
-    warnings: list[str]
+    warnings: list[AnyExtractionWarning]
 
 class QuotaExceededError(ArchiveError):
     """
@@ -1972,7 +2382,7 @@ class QuotaExceededError(ArchiveError):
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
-        warnings: Warning messages generated before the error.
+        warnings: Typed warnings generated before the error.
         sub_code: Which quota was exceeded.
     """
 
@@ -1981,7 +2391,7 @@ class QuotaExceededError(ArchiveError):
     files_skipped: int
     skipped: Skipped
     sub_code: _QuotaSubCode
-    warnings: list[str]
+    warnings: list[AnyExtractionWarning]
 
 class ZipInconsistencyError(SecurityViolationError):
     """
@@ -1995,14 +2405,14 @@ class ZipInconsistencyError(SecurityViolationError):
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
-        warnings: Warning messages generated before the error.
+        warnings: Typed warnings generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
     skipped: Skipped
-    warnings: list[str]
+    warnings: list[AnyExtractionWarning]
 
 class SecurityViolationError(ArchiveError):
     """
@@ -2015,7 +2425,7 @@ class SecurityViolationError(ArchiveError):
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
-        warnings: Warning messages generated before the error.
+        warnings: Typed warnings generated before the error.
         relaxable_by: The ``SecurityConfig`` setting whose current value refused
             the entry, or ``None`` when no setting relaxes this refusal. Changing
             that setting removes this refusal only; the entry can still fail a
@@ -2031,7 +2441,7 @@ class SecurityViolationError(ArchiveError):
     bytes_written: int
     files_skipped: int
     skipped: Skipped
-    warnings: list[str]
+    warnings: list[AnyExtractionWarning]
     relaxable_by: _PolicySetting | None
     sub_code: _SecurityViolationSubCode | None
 
@@ -2065,6 +2475,11 @@ class InvalidArchiveError(ArchiveError):
             of the structural check built on it), ``"TAR_READER"`` or
             ``"SEVENZ_READER"`` (a failure of the TAR or 7z reader) for the
             refusal of that family; ``None`` otherwise.
+        non_utf8_entry_path: The injectively escaped entry path (a backslash is
+            ``\\x5C``, each invalid byte ``\\xNN``) when a listing or in-memory
+            extraction refused an entry name that is not valid UTF-8; ``None``
+            otherwise.
     """
 
     sub_code: _InvalidArchiveSubCode | None
+    non_utf8_entry_path: str | None

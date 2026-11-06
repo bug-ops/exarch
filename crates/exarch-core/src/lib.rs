@@ -22,28 +22,45 @@
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
-pub mod api;
+// NOTE: `pub(crate)` marks intent inside the private modules below;
+// `redundant_pub_crate` contradicts `unreachable_pub` (408 sites) and would
+// flatten it to `pub`.
+#[allow(clippy::redundant_pub_crate)]
+mod api;
 pub(crate) mod closed_enum;
-pub mod config;
+#[allow(clippy::redundant_pub_crate)]
+mod config;
 pub(crate) mod copy;
-pub mod creation;
-pub mod error;
-pub mod formats;
-pub mod inspection;
+#[allow(clippy::redundant_pub_crate)]
+mod creation;
+#[allow(clippy::redundant_pub_crate)]
+mod error;
+#[allow(clippy::redundant_pub_crate)]
+mod formats;
+#[allow(clippy::redundant_pub_crate)]
+mod inspection;
 mod limit;
 mod listed;
 mod path_text;
-#[cfg(test)]
-use exarch_testkit::raw_zip;
-pub mod reader;
-pub mod report;
+#[allow(clippy::redundant_pub_crate)]
+mod reader;
+mod report;
 mod request;
-pub mod security;
-pub mod sink;
+#[allow(clippy::redundant_pub_crate)]
+mod security;
+mod selection;
+#[allow(clippy::redundant_pub_crate)]
+mod sink;
+mod staging;
 #[cfg(test)]
 pub(crate) mod test_utils;
-pub mod types;
-pub mod writer;
+#[allow(clippy::redundant_pub_crate)]
+mod types;
+#[allow(clippy::redundant_pub_crate)]
+mod writer;
+
+#[cfg(test)]
+use exarch_testkit::raw_zip;
 
 // Re-export main API types
 pub use api::create_archive;
@@ -52,17 +69,21 @@ pub use api::list_archive;
 pub use api::verify_archive;
 pub use closed_enum::ClosedEnum;
 pub use config::Admit;
+pub use config::AllowedFeatures;
 pub use config::DecodeReuse;
 pub use config::DecodeReuseKind;
 pub use config::DecompressionBudget;
+pub use config::ExistingFiles;
 pub use config::ExtractionOptions;
 pub use config::IntegrityCheck;
 pub use config::ListOptions;
 pub use config::ParallelDecode;
+pub use config::PermissionPolicy;
 pub use config::ReuseLimit;
 pub use config::SecurityConfig;
 pub use config::SolidArchives;
 pub use config::SolidLimits;
+pub use config::Staging;
 pub use config::StoredTargets;
 pub use config::VerificationOptions;
 pub use config::ZipConsistencyPolicy;
@@ -80,6 +101,7 @@ pub use error::FfiSourceFault;
 pub use error::HiddenRegion;
 pub use error::InvalidArchiveSubCode;
 pub use error::IoContext;
+pub use error::IoKind;
 pub use error::KindSource;
 pub use error::Malformation;
 pub use error::NativeKind;
@@ -88,13 +110,18 @@ pub use error::PartialOutcome;
 pub use error::PartialWrites;
 pub use error::PolicySetting;
 pub use error::PortableHazard;
+pub use error::ProtectedPath;
 pub use error::QuotaKind;
 pub use error::QuotaResource;
 pub use error::ReaderFormatError;
+pub use error::ReplaceFailure;
+pub use error::RequestedLevel;
+pub use error::Restore;
 pub use error::Result;
 pub use error::SecurityViolationSubCode;
 pub use error::SolidMemoryScope;
 pub use error::SpecialFile;
+pub use error::StagingLeftover;
 pub use error::SubCode;
 pub use error::TarAmbiguity;
 pub use error::TarExtensionKind;
@@ -122,6 +149,11 @@ pub use error::redaction::sanitize_io_error_for_error;
 /// Redacts a host-derived filesystem path for an FFI error message in
 /// release builds. Shared by `exarch-python` and `exarch-node`.
 pub use error::redaction::sanitize_path_for_error;
+pub use formats::CompressionCodec;
+pub use formats::detect::ArchiveType;
+pub use formats::detect::CreatableFormat;
+pub use formats::detect::ExtractOnlyFormat;
+pub use formats::detect::detect_format;
 pub use limit::Limit;
 pub use limit::RatioLimit;
 pub use limit::non_zero_u64;
@@ -130,10 +162,12 @@ pub use limit::positive_from_f64;
 pub use limit::positive_from_i128;
 pub use reader::ArchiveReader;
 pub use reader::SeekableFormat;
+pub use report::BackupIdentity;
 pub use report::EntryPosition;
 pub use report::EntryTotal;
 pub use report::ExtractionReport;
 pub use report::ExtractionWarning;
+pub use report::ExtractionWarningKind;
 pub use report::NoopProgress;
 pub use report::ProgressCallback;
 pub use report::Skip;
@@ -148,11 +182,17 @@ pub use request::OutputFormat;
 pub use request::OutputPolicy;
 pub use request::SinkExtractRequest;
 pub use request::VerifyRequest;
+pub use selection::EntryPattern;
+pub use selection::EntrySelection;
+pub use selection::PathRewrite;
+pub use selection::StripComponents;
 
 // Re-export creation types
+pub use creation::CompressionLevel;
 pub use creation::CreationConfig;
 pub use creation::CreationReport;
 pub use creation::CreationWarning;
+pub use creation::CreationWarningKind;
 pub use creation::ExcludePattern;
 pub use writer::ArchiveWriter;
 
@@ -160,6 +200,7 @@ pub use writer::ArchiveWriter;
 pub use inspection::ArchiveEntry;
 pub use inspection::ArchiveManifest;
 pub use inspection::CheckStatus;
+pub use inspection::Disposition;
 pub use inspection::EntryCompression;
 pub use inspection::Finding;
 pub use inspection::Heuristic;
@@ -184,15 +225,19 @@ pub use inspection::VerificationReport;
 pub use inspection::VerificationStatus;
 pub use path_text::bytes_text;
 pub use path_text::path_text;
+pub use path_text::utf8_entry_path;
 pub use security::fs_view::LinkKind;
 
 // Re-export security types
+pub use listed::DestinationCheck;
 pub use listed::ListedArchive;
 pub use listed::ListedExtractOptions;
 pub use security::AdmittedSize;
 pub use security::Compressed;
+pub use security::EntryCount;
 pub use security::EntrySize;
 pub use security::HardlinkTarget;
+pub use security::QuotaPermit;
 pub use security::RawMode;
 pub use security::SanitizedMode;
 pub use security::Uncompressed;
@@ -222,6 +267,8 @@ pub use sink::SinkOptions;
 pub use sink::extract_reader_to_callback;
 pub use sink::extract_reader_to_memory;
 pub use types::Extension;
+pub use types::ExtensionFilter;
+pub use types::Extensions;
 pub use types::PathComponentName;
 
 // Re-export types module for easier access
@@ -229,3 +276,31 @@ pub use types::CheckedLinkTarget;
 pub use types::DestDir;
 pub use types::SafePath;
 pub use types::SafeSymlink;
+
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub use formats::detect::ZIP_FAMILY_ALIASES;
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub use security::HardlinkTracker;
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub use security::QuotaTracker;
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub use security::sanitize_permissions;
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub use security::validate_compression_ratio;
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub use security::validate_path;
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub use security::validate_symlink;
+#[cfg(all(feature = "testing", any(unix, target_os = "wasi")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub use types::Walked;
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub use types::safe_path::is_windows_reserved_component;

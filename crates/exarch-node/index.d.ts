@@ -71,13 +71,16 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   bytesWritten: number
   filesSkipped: number
   skipped: SkippedSummary
-  warnings: Array<string>
+  warnings: Array<ExtractionWarning>
   filesAdded?: undefined
 }
 
-/** An atomic extraction failed and its writes were discarded. */
+/**
+ * An atomic extraction failed and its writes were discarded. `code` can be
+ * `'PROGRESS_CALLBACK_ERROR'` too: a progress callback that threw stops an
+ * atomic extraction, which is then rolled back.
+ */
 export interface ExarchErrorRolledBack extends ExarchErrorBase {
-  code: CounterlessErrorCode
   writes: 'rolled_back'
   filesExtracted?: undefined
   bytesWritten?: undefined
@@ -150,6 +153,16 @@ export interface ExarchNativeError extends Error {
   skipped?: undefined
   warnings?: undefined
   filesAdded?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A malformed archive; `subCode` classifies it when core can. */
@@ -165,6 +178,16 @@ export interface ExarchInvalidArchiveDetail {
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A refusal by policy; core always classifies it and may name the setting that relaxes it. */
@@ -175,6 +198,16 @@ export interface ExarchSecurityViolationDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A rejected setting or input. */
@@ -185,6 +218,19 @@ export interface ExarchInvalidConfigurationDetail {
   relaxableBy?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  /** Why a destination is too important to replace as a whole. */
+  protectedPath?: ProtectedPath
+  /** The two creation sources that map to one entry name. */
+  collision?: NameCollision
+  /** The include patterns that matched no entry of the archive. */
+  unmatchedPatterns?: Array<string>
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** An I/O failure, with the kind core reported. */
@@ -194,6 +240,20 @@ export interface ExarchIoDetail {
   subCode?: undefined
   relaxableBy?: undefined
   setting?: undefined
+  nonUtf8EntryPath?: undefined
+  /** What became of the original destination after a failed `'atomic_replace'`. */
+  restore?: RestoreOutcome
+  /** Where the original destination remains when `restore` is `'failed'`, redacted like an error path. */
+  backupPath?: string
+  /** A staging directory or empty output reservation left on disk, redacted like an error path. */
+  leftoverPath?: string
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A quota refusal; `subCode` names the quota that was exceeded. */
@@ -204,6 +264,16 @@ export interface ExarchQuotaDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** A compression ratio refusal; `subCode` names what the ratio was measured over. */
@@ -214,6 +284,64 @@ export interface ExarchZipBombDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
+}
+
+/**
+ * A creation source that could not be read. `errno` is the OS error number as
+ * Rust's `std::io` reports it, when the failure has one; `strerror` and `path`
+ * are redacted like the message (the file name only in release builds).
+ */
+export interface ExarchSourceNotAccessibleDetail {
+  code: 'SOURCE_NOT_ACCESSIBLE'
+  errno?: number
+  strerror: string
+  path: string
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+}
+
+/**
+ * An output that already exists. `conflicts` is set on a `'refuse'` extraction
+ * into a destination that holds some of the paths to extract.
+ */
+export interface ExarchOutputExistsDetail {
+  code: 'OUTPUT_EXISTS'
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
+  conflicts?: Array<string>
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
 }
 
 /** Every other code carries no detail property. */
@@ -226,12 +354,24 @@ export interface ExarchPlainCodeDetail {
     | 'IO_ERROR'
     | 'QUOTA_EXCEEDED'
     | 'ZIP_BOMB'
+    | 'SOURCE_NOT_ACCESSIBLE'
+    | 'OUTPUT_EXISTS'
   >
   subCode?: undefined
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /** The pairing of a `code` with the properties it can carry. */
@@ -242,6 +382,8 @@ export type ExarchErrorCodeDetail =
   | ExarchIoDetail
   | ExarchQuotaDetail
   | ExarchZipBombDetail
+  | ExarchSourceNotAccessibleDetail
+  | ExarchOutputExistsDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -294,6 +436,27 @@ export type MemoryEntry =
  */
 export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
 
+/**
+ * A condition of an extraction worth surfacing that is not a skipped entry.
+ * Discriminate on `kind`; `message` is the human-readable text.
+ */
+export type ExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning
+
+/**
+ * A condition of a creation worth surfacing that is not a skipped entry.
+ * Discriminate on `kind`; `message` is the human-readable text.
+ */
+export type CreationWarning =
+  | ZipRatioOverDefaultLimitWarning
+  | ZipRatioCheckFailedWarning
+  | DirectoryNotSyncedWarning
+
+/**
+ * What extraction does with a listed entry, discriminated by `kind`: an
+ * `'extract'` disposition has a `landing`, a `'skip'` one a `reason`.
+ */
+export type EntryDisposition = ExtractDisposition | SkipDisposition
+
 /** What a `MemoryEntry` holds. */
 export type MemoryEntryKind = MemoryEntry['kind']
 
@@ -326,6 +489,16 @@ export interface HeuristicIssueDetail {
   setting?: undefined
   ioKind?: undefined
   nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  leftoverPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+  path?: undefined
 }
 
 /**
@@ -435,6 +608,18 @@ export declare class CreationConfig {
    * name holding such a character cannot be excluded by pattern.
    */
   addExcludePattern(pattern: string): this
+  /**
+   * Replaces the exclude patterns, so the defaults can be dropped.
+   *
+   * An empty array excludes nothing. The list is validated as a whole: on
+   * an error the previous patterns stay.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
+   * pattern `addExcludePattern` refuses.
+   */
+  setExcludePatterns(patterns: Array<string>): this
   /** Finalizes the configuration (for API consistency). */
   build(): this
   /** Compression level (1-9). */
@@ -455,14 +640,14 @@ export declare class CreationConfig {
  * Options controlling extraction behavior (non-security).
  *
  * Separate from `SecurityConfig` to keep security settings focused.
- * These options control operational behavior such as duplicate handling.
+ * These options control operational behavior such as occupied-path handling.
  *
  * # Defaults
  *
  * | Setting | Default Value |
  * |---------|--------------|
- * | `skipDuplicates` | `true` |
- * | `atomic` | `false` |
+ * | `existingFiles` | `'skip'` |
+ * | `staging` | `'in_place'` |
  */
 export declare class ExtractionOptions {
   /** Creates a new `ExtractionOptions` with defaults. */
@@ -474,32 +659,53 @@ export declare class ExtractionOptions {
    */
   static default(): ExtractionOptions
   /**
-   * Sets whether duplicate archive entries are skipped silently.
+   * Sets what happens when a destination path is already occupied.
    *
-   * When `true` (default), duplicate entries produce a warning in the
-   * report. When `false`, a duplicate entry causes an error.
+   * `'skip'` (default) keeps the occupant and counts a skip, which also
+   * covers a duplicate entry inside the archive. `'overwrite'` replaces the
+   * occupant where the kinds allow it. `'refuse'` fails with
+   * `OUTPUT_EXISTS` and never overwrites.
    */
-  withSkipDuplicates(skip: boolean): this
+  withExistingFiles(policy: ExistingFiles): this
   /**
-   * Sets whether extraction uses a temporary directory for atomic commits.
+   * Sets how extraction stages its output: `'in_place'` (default),
+   * `'atomic'` or `'atomic_replace'`.
    *
-   * When `true`, files are extracted to a temp dir in the same parent as
-   * the output directory, then atomically renamed on completion. On failure
-   * the temp dir is removed, leaving the output directory untouched.
-   * Default: `false`.
+   * `'atomic'` extracts into a temporary sibling directory and renames it
+   * onto the output directory on completion; on failure the temporary
+   * directory is removed and the output directory is untouched. It needs an
+   * output directory that does not exist or is empty: one that holds
+   * content fails with `OUTPUT_EXISTS` before anything is extracted.
    *
-   * **Important:** atomic mode requires that the output directory does not
-   * already exist. If it does, extraction fails with an
-   * output-already-exists error. Non-atomic mode extracts into an
-   * existing directory without error.
+   * `'atomic_replace'` also replaces an existing output directory as a
+   * whole: the original is moved aside only after the extraction succeeded
+   * and is restored if the swap fails. A destination that is a filesystem
+   * root, the archive or a directory that contains it, or the working
+   * directory or one that contains it, is refused with
+   * `INVALID_CONFIGURATION` (`setting` is `output_path`, `protectedPath`
+   * names the reason).
    */
-  withAtomic(atomic: boolean): this
+  withStaging(staging: Staging): this
   /** Finalizes the configuration (for API consistency). */
   build(): this
-  /** Whether duplicate entries are skipped silently. */
-  get skipDuplicates(): boolean
-  /** Whether atomic extraction is enabled. */
-  get atomic(): boolean
+  /**
+   * What happens when a destination path is already occupied.
+   *
+   * # Errors
+   *
+   * Returns error if this binding is older than `exarch-core` and does not
+   * know the policy.
+   */
+  get existingFiles(): ExistingFiles
+  /**
+   * How extraction stages its output.
+   *
+   * # Errors
+   *
+   * Returns error if this binding is older than `exarch-core` and does not
+   * know the mode.
+   */
+  get staging(): Staging
 }
 
 /**
@@ -521,8 +727,10 @@ export declare class ExtractionOptions {
  * | `allow_absolute_paths` | false |
  * | `allow_world_writable` | false |
  * | `preserve_permissions` | false |
- * | `allowed_extensions` | empty (all allowed) |
+ * | `allowed_extensions` | `null` (all allowed) |
  * | `banned_path_components` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
+ * | `include` / `exclude` | none (every entry is selected) |
+ * | `stripComponents` / `flatten` | off (every path is kept) |
  */
 export declare class SecurityConfig {
   /** Creates a new `SecurityConfig` with secure defaults. */
@@ -662,6 +870,121 @@ export declare class SecurityConfig {
    */
   addBannedComponent(component: string): this
   /**
+   * Replaces the allowed file extensions, or lifts the allowlist.
+   *
+   * An array restricts extraction to those extensions (a leading dot is
+   * accepted and removed, and values are lowercased); `null` allows every
+   * extension again. The list is validated as a whole: on an error the
+   * previous allowlist stays.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `allowed_extension`) for
+   * an empty array, which would otherwise read as "allow everything", and
+   * for any value `addAllowedExtension` refuses.
+   */
+  setAllowedExtensions(extensions: Array<string> | null): this
+  /**
+   * Replaces the banned path components, so the defaults can be dropped.
+   *
+   * An empty array bans nothing. The list is validated as a whole: on an
+   * error the previous list stays.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `banned_path_component`)
+   * for any value `addBannedComponent` refuses.
+   */
+  setBannedComponents(components: Array<string>): this
+  /**
+   * Adds an include pattern: only entries that match an include pattern (and
+   * no exclude pattern) are extracted, listed as extracted or verified as
+   * extracted.
+   *
+   * Four shapes exist, as for `CreationConfig.addExcludePattern`: `name`
+   * (a path component equal to it), `name*`, `*name` and `dir/sub` (that
+   * path and everything below it). A pattern is matched against the entry's
+   * archive path before any stripping, and is case-sensitive on every host.
+   * An include pattern that matches no entry fails the extraction after the
+   * scan with `INVALID_CONFIGURATION` (`setting` is `entry_include`) and
+   * `unmatchedPatterns`.
+   *
+   * Operations apply, in order: path validation of the original name,
+   * selection, then `stripComponents` or `flatten`, then validation of the
+   * rewritten name.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
+   * pattern shape that is refused.
+   */
+  addIncludePattern(pattern: string): this
+  /**
+   * Replaces the include patterns; an empty array selects every entry.
+   *
+   * The list is validated as a whole: on an error the previous patterns
+   * stay. See `addIncludePattern` for the pattern shapes.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
+   * pattern shape that is refused.
+   */
+  setIncludePatterns(patterns: Array<string>): this
+  /**
+   * Adds an exclude pattern: an entry that matches one is never extracted,
+   * whatever the include patterns say. A pattern that matches nothing is not
+   * an error.
+   *
+   * The shapes and matching rules are those of `addIncludePattern`.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
+   * pattern shape that is refused.
+   */
+  addExcludePattern(pattern: string): this
+  /**
+   * Replaces the exclude patterns; an empty array excludes nothing.
+   *
+   * The list is validated as a whole: on an error the previous patterns
+   * stay.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
+   * pattern shape that is refused.
+   */
+  setExcludePatterns(patterns: Array<string>): this
+  /**
+   * Drops the first `count` leading path components of every extracted
+   * entry, like `tar --strip-components`; `null` removes a strip count and
+   * leaves `flatten` as it is.
+   *
+   * An entry with no component left is skipped and counted as
+   * `'stripped_away'`. Include and exclude patterns match the path before
+   * stripping. Setting a strip count replaces `flatten`, and the maximum
+   * is the current `maxPathDepth`, so set that first.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `strip_components`) if
+   * `count` is not a positive whole number up to 2^53 - 1 or exceeds
+   * `maxPathDepth`.
+   */
+  setStripComponents(count: number | null): this
+  /**
+   * Lands every regular file in the destination root under its final path
+   * component; `false` keeps every path.
+   *
+   * Directory entries are skipped and counted as `'stripped_away'`; a
+   * symlink or hardlink entry is refused with `SECURITY_VIOLATION`
+   * (`subCode` is `LINK_POLICY`). Files that share a final name follow
+   * `existingFiles`. Setting `flatten` replaces a strip count, and
+   * `setStripComponents(null)` leaves `flatten` as it is.
+   */
+  setFlatten(flatten: boolean): this
+  /**
    * Finalizes the configuration (for API consistency).
    *
    * This method is provided for builder pattern consistency but is optional.
@@ -714,17 +1037,32 @@ export declare class SecurityConfig {
    */
   get maxSolidBlockMemory(): number | null
   /**
-   * List of allowed file extensions.
+   * List of allowed file extensions, or `null` when every extension is
+   * allowed.
    *
    * Note: This getter clones the underlying data. For performance-critical
    * code that only needs to count or check membership, use
    * `getAllowedExtensionsCount()` or `hasAllowedExtension()` instead.
    */
-  get allowedExtensions(): Array<string>
-  /** Returns the number of allowed extensions. */
+  get allowedExtensions(): Array<string> | null
+  /**
+   * Returns the number of allowed extensions, `0` when every extension is
+   * allowed.
+   */
   getAllowedExtensionsCount(): number
   /** Checks if a specific extension is in the allowed list. */
   hasAllowedExtension(ext: string): boolean
+  /** The include patterns, as they were given. */
+  get includePatterns(): Array<string>
+  /** The exclude patterns, as they were given. */
+  get excludePatterns(): Array<string>
+  /**
+   * The number of leading path components dropped, or `null` while paths
+   * are kept or flattened.
+   */
+  get stripComponents(): number | null
+  /** Whether every regular file lands under its final path component. */
+  get flatten(): boolean
   /**
    * List of banned path components.
    *
@@ -743,26 +1081,51 @@ export declare class SecurityConfig {
  * Options for extraction into memory or into a callback.
  *
  * A sink has no directory to rename, so unlike `ExtractionOptions` there is
- * no `atomic` setting: only the duplicate policy carries over.
+ * no `staging` setting: only the existing-files policy carries over.
  *
  * # Defaults
  *
  * | Setting | Default Value |
  * |---------|--------------|
- * | `skipDuplicates` | `true` |
+ * | `existingFiles` | `'skip'` |
  */
 export declare class SinkOptions {
   /** Creates a new `SinkOptions` with defaults. */
   constructor()
   /**
-   * Sets whether duplicate archive entries are skipped silently.
+   * Sets what happens when a delivery path is already occupied.
    *
-   * When `true` (default), a duplicate entry is skipped and counted. When
-   * `false`, a duplicate entry causes an error.
+   * `'skip'` (default) skips and counts a duplicate entry. `'overwrite'`
+   * delivers it again. `'refuse'` fails with `OUTPUT_EXISTS`.
    */
-  setSkipDuplicates(skip: boolean): this
-  /** Whether duplicate entries are skipped silently. */
-  get skipDuplicates(): boolean
+  withExistingFiles(policy: ExistingFiles): this
+  /**
+   * What happens when a delivery path is already occupied.
+   *
+   * # Errors
+   *
+   * Returns error if this binding is older than `exarch-core` and does not
+   * know the policy.
+   */
+  get existingFiles(): ExistingFiles
+  /**
+   * Sets where a ZIP extraction keeps decoded output so a deflate entry is
+   * decoded once: `'off'` (default), `'memory'` or `'temp_file'`.
+   *
+   * `limit` is the most bytes kept, at most 256 MiB (default 32 MiB); it
+   * needs `'memory'` or `'temp_file'`.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `decode_reuse_limit`) if
+   * `limit` is not a positive whole number up to 2^53 - 1, or is given with
+   * `'off'`.
+   */
+  withDecodeReuse(mode: DecodeReuseKind, limit?: number | undefined | null): this
+  /** Where a ZIP extraction keeps decoded output. */
+  get decodeReuse(): DecodeReuseKind
+  /** The most bytes kept for reuse, or `null` while decode reuse is `'off'`. */
+  get decodeReuseLimit(): number | null
 }
 
 /**
@@ -805,6 +1168,16 @@ export declare class VerificationOptions {
   get decompressionBudget(): number | null
 }
 
+/** 7z anti-items, which mark deletions in an update archive, were not applied. */
+export interface AntiItemsSkippedWarning {
+  /** Always `'anti_items_skipped'`. */
+  kind: 'anti_items_skipped'
+  /** The human-readable text. */
+  message: string
+  /** How many anti-items the archive holds, saturated at `2^53 - 1`. */
+  count: number
+}
+
 /**
  * Complete manifest of archive contents.
  *
@@ -820,16 +1193,49 @@ export interface ArchiveManifest {
   totalSize: number
   /** Archive format. */
   format: ArchiveType
+  /**
+   * What extraction would do with each entry validation accepts: where it
+   * lands, or why it is left out. The selection is the one the listing's
+   * `SecurityConfig` carried and that config supplies the limits and
+   * policies; an entry validation refuses is not reported.
+   */
+  dispositions: Array<EntryDisposition>
 }
 
 /** Archive format. */
 export type ArchiveType = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip' | 'SevenZ'
 
+/**
+ * The backup of the original destination, kept for an atomic replacement,
+ * could not be removed and must be cleaned up manually.
+ */
+export interface BackupCleanupFailedWarning {
+  /** Always `'backup_cleanup_failed'`. */
+  kind: 'backup_cleanup_failed'
+  /** The human-readable text, with the path redacted like an error message. */
+  message: string
+  /**
+   * Where the backup remains, redacted like an error message: the file
+   * name only in release builds.
+   */
+  path: string
+  /** Whether the backup's identity was confirmed before the removal failed. */
+  identity: BackupIdentity
+  /** The kind of the removal failure. */
+  ioKind: IoKind
+}
+
+/**
+ * Whether the identity of a leftover backup was confirmed before its removal
+ * failed.
+ */
+export type BackupIdentity = 'verified' | 'unverified'
+
 /** Status of a single check category. */
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components'
 
 /** Archive format that can be created: `ArchiveType` without `'SevenZ'`. */
 export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip'
@@ -860,7 +1266,7 @@ export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 
  * console.log(`Created archive with ${report.filesAdded} files`);
  *
  * // Customize configuration
- * const config = new CreationConfig().compressionLevel(9);
+ * const config = new CreationConfig().setCompressionLevel(9);
  * const report = await createArchive('output.tar.gz', ['src/'], config);
  * ```
  */
@@ -998,17 +1404,17 @@ export declare function createArchiveToBytesSync(sources: Array<string>, format:
  * errors occur. See `createArchive` for the full list of error codes.
  *
  * If `progress` throws, the returned promise rejects instead of crashing the
- * process (see issue #465). Creation has already run to completion (or
- * failure) by the time the rejection is observed — a throwing callback cannot
- * abort creation early, since the progress callback contract has no
- * cancellation signal. The rejection therefore reports both signals:
+ * process (see issue #465), and the creation stops at the start of the next
+ * entry. The rejection reports both signals:
  *
- * - Creation succeeded: `code` is `PROGRESS_CALLBACK_ERROR` and `filesAdded`
- *   and `bytesWritten` are set, so the caller can still see that an archive
- *   was written and needs cleaning up.
- * - Creation also failed: the core error stays primary and keeps its `code`;
- *   the callback's throw is attached as `cause`. A throwing callback can never
- *   mask a core error.
+ * - The callback's throw stopped the creation, or the last entry's callback
+ *   threw after the creation succeeded: `code` is `PROGRESS_CALLBACK_ERROR`.
+ *   After a stop nothing was published; after a success `filesAdded` and
+ *   `bytesWritten` are set, so the caller can still see that an archive was
+ *   written and needs cleaning up.
+ * - Creation also failed on its own: the core error stays primary and keeps
+ *   its `code`; the callback's throw is attached as `cause`. A throwing
+ *   callback can never mask a core error.
  *
  * In both cases the original JS exception is available as the `cause`
  * property of the rejection value. The throw's own text and stack are never
@@ -1099,12 +1505,41 @@ export interface CreationReport {
   filesSkipped: number
   /** The skipped entries by reason. */
   skipped: SkippedSummary
-  /** Warnings generated during creation. */
-  warnings: Array<string>
+  /**
+   * Conditions worth surfacing that are not skipped entries; branch on
+   * `kind`, `message` is the human-readable text.
+   */
+  warnings: Array<CreationWarning>
 }
+
+/** Class of a creation warning. */
+export type CreationWarningKind = 'zip_ratio_over_default_limit' | 'zip_ratio_check_failed' | 'directory_not_synced'
+
+/**
+ * Where a ZIP extraction into a sink keeps decoded output between the
+ * structural check and the write, so a deflate entry is decoded once.
+ *
+ * `off` (the default for sinks) keeps nothing. `memory` keeps decoded entries
+ * in memory. `temp_file` keeps them in an unnamed temporary file that holds
+ * the archive's plaintext until the extraction ends.
+ */
+export type DecodeReuseKind = 'off' | 'memory' | 'temp_file'
 
 /** The `kind` of a [`MemoryDirectoryEntry`]. */
 export type DirectoryKind = 'directory'
+
+/** The archive was published, but its directory could not be synced. */
+export interface DirectoryNotSyncedWarning {
+  /** Always `'directory_not_synced'`. */
+  kind: 'directory_not_synced'
+  /** The human-readable text. */
+  message: string
+  /** The kind of the sync failure. */
+  ioKind: IoKind
+}
+
+/** Which way extraction goes with a listed entry. */
+export type DispositionKind = 'extract' | 'skip'
 
 /**
  * Whether a created archive is flushed to stable storage before success is
@@ -1121,10 +1556,21 @@ export type Durability = 'synced' | 'unsynced'
 /**
  * Value of the `code` property on errors surfaced to JavaScript.
  *
- * Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
- * callback that threw over a successful operation.
+ * Every core error code, plus the Node-only `PROGRESS_CALLBACK_ERROR` (a
+ * progress callback threw), `STREAM_ERROR` (an `AsyncIterable` archive
+ * failed), `ENTRY_CALLBACK_ERROR` (an `onEntry` callback threw) and
+ * `ABORT_ERR` (the `AbortSignal` fired).
  */
-export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR' | 'ABORT_ERR'
+export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'CANCELLED' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR' | 'ABORT_ERR'
+
+/**
+ * What extraction does when a destination path is already occupied.
+ *
+ * `skip` (the default) keeps the occupant and counts a skip. `overwrite`
+ * replaces an occupant where the kinds allow it. `refuse` fails with
+ * `OUTPUT_EXISTS` instead of touching anything the run did not create.
+ */
+export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
 
 /**
  * Extract an archive to the specified directory (async).
@@ -1192,9 +1638,9 @@ export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' 
  *   setting or input, as a `snake_case` id such as `max_file_count`.
  * - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
  *   set when extraction fails after some files were already written. `writes`
- *   is `'kept'` (files remain; the counters and the `warnings` string array
- *   follow) or, with `atomic`, `'rolled_back'` (the destination was discarded;
- *   no counters).
+ *   is `'kept'` (files remain; the counters and the typed `warnings` array
+ *   follow) or, with `'atomic'` or `'atomic_replace'` staging, `'rolled_back'`
+ *   (the destination was discarded; no counters).
  *
  * # Examples
  *
@@ -1208,7 +1654,7 @@ export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' 
  * const report = await extractArchive('archive.tar.gz', '/tmp/output', config);
  *
  * // Customize extraction options
- * const opts = new ExtractionOptions().withSkipDuplicates(false);
+ * const opts = new ExtractionOptions().withExistingFiles('overwrite');
  * const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
  * ```
  */
@@ -1270,9 +1716,9 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * relative to the link. A `'hardlink'` entry is delivered by reference after
  * every other entry: its `target` is the root-relative resolved path of an
  * entry already delivered, a file or an earlier hardlink (a chain is
- * delivered link by link). With `skipDuplicates` off one path can be delivered
- * more than once and a hardlink refers to the latest delivery. Implicit
- * parent directories are not delivered.
+ * delivered link by link). With `existingFiles` set to `'overwrite'` one path
+ * can be delivered more than once and a hardlink refers to the latest
+ * delivery. Implicit parent directories are not delivered.
  *
  * # Arguments
  *
@@ -1505,8 +1951,8 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * function calling convention: `err` is always `null`, the entry data
  * arrives as a single array argument) where:
  * - `path` — entry path inside the archive
- * - `total` — total number of entries as `number` (0 for TAR-family formats
- *   because the entry count is unknown until the stream is fully read)
+ * - `total` — total number of entries as `number`, or `null` for TAR-family
+ *   formats because the entry count is unknown until the stream is fully read
  * - `current` — 1-based index of the current entry as `number`
  * - `bytesWritten` — always `0`. The callback only fires from the entry-start
  *   event, which resets the running per-entry byte counter immediately before
@@ -1536,17 +1982,17 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * error properties (`code`, `relaxableBy`, `writes`, ...).
  *
  * If `progress` throws, the returned promise rejects instead of crashing the
- * process (see issue #465). Extraction has already run to completion (or
- * failure) by the time the rejection is observed — a throwing callback cannot
- * abort the extraction early, since the progress callback contract has no
- * cancellation signal. The rejection therefore reports both signals:
+ * process (see issue #465), and the extraction stops before the next entry
+ * (an atomic extraction is rolled back). The rejection reports both signals:
  *
- * - Extraction succeeded: `code` is `PROGRESS_CALLBACK_ERROR`, `writes` is
- *   `'kept'` and `filesExtracted`, `bytesWritten`, `filesSkipped` and
- *   `warnings` are set, so the caller can still see what was written to disk.
- * - Extraction also failed: the core error stays primary and keeps its `code`;
- *   the callback's throw is attached as `cause`. A throwing callback can never
- *   mask a security error such as `SYMLINK_ESCAPE`.
+ * - The callback's throw stopped the extraction, or the last entry's callback
+ *   threw after it succeeded: `code` is `PROGRESS_CALLBACK_ERROR`, `writes` is
+ *   `'kept'` (or `'rolled_back'` for an atomic extraction) and, when kept,
+ *   `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped` and `warnings`
+ *   are set, so the caller can still see what was written to disk.
+ * - Extraction also failed on its own: the core error stays primary and keeps
+ *   its `code`; the callback's throw is attached as `cause`. A throwing
+ *   callback can never mask a security error such as `SYMLINK_ESCAPE`.
  *
  * In both cases the original JS exception is available as the `cause`
  * property of the rejection value. The throw's own text and stack are never
@@ -1594,6 +2040,19 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  */
 export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): Promise<ExtractionReport>
 
+/** An entry that extraction writes. */
+export interface ExtractDisposition {
+  /** Always `'extract'`. */
+  kind: 'extract'
+  /** The entry's path in the archive. */
+  path: string
+  /**
+   * Where it lands, relative to the destination, after any strip or
+   * flatten.
+   */
+  landing: string
+}
+
 /**
  * Report of an archive extraction operation.
  *
@@ -1615,11 +2074,14 @@ export interface ExtractionReport {
   /** The skipped entries by reason. */
   skipped: SkippedSummary
   /**
-   * Descriptions of conditions worth surfacing that are not skipped
-   * entries.
+   * Conditions worth surfacing that are not skipped entries; branch on
+   * `kind`, `message` is the human-readable text.
    */
-  warnings: Array<string>
+  warnings: Array<ExtractionWarning>
 }
+
+/** Class of an extraction warning. */
+export type ExtractionWarningKind = 'anti_items_skipped' | 'backup_cleanup_failed'
 
 /** The `kind` of a [`MemoryFileEntry`]. */
 export type FileKind = 'file'
@@ -1996,6 +2458,19 @@ export interface MissingLinkTarget {
   state: 'missing'
 }
 
+/**
+ * The two creation sources that map to one archive entry name (the
+ * `collision` property of an `INVALID_CONFIGURATION` for `source_paths`).
+ */
+export interface NameCollision {
+  /** The entry name both sources map to. */
+  name: string
+  /** The first source that maps to it, redacted like an error path. */
+  first: string
+  /** The second source that maps to it, redacted like an error path. */
+  second: string
+}
+
 /** A link target above the host's name limits. */
 export interface OversizedLinkTarget {
   /** Always `'oversized'`. */
@@ -2020,6 +2495,12 @@ export type PathModel = 'host' | 'portable'
 export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes'
 
 /**
+ * What makes a destination too important to replace as a whole (the
+ * `protectedPath` property of an `INVALID_CONFIGURATION`).
+ */
+export type ProtectedPath = 'filesystem_root' | 'archive_ancestor' | 'working_directory'
+
+/**
  * Value of the `subCode` property of a `QUOTA_EXCEEDED` error: the quota
  * that was exceeded.
  */
@@ -2033,6 +2514,12 @@ export interface RecordedLinkTarget {
   path: string
 }
 
+/**
+ * What became of the original destination after a failed replace
+ * (`restore` property of an `IO_ERROR` raised by `'atomic_replace'`).
+ */
+export type RestoreOutcome = 'not_needed' | 'restored' | 'failed'
+
 /** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
 export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH'
 
@@ -2044,8 +2531,18 @@ export interface SkipCount {
   count: number
 }
 
+/** An entry that is validated but not extracted. */
+export interface SkipDisposition {
+  /** Always `'skip'`. */
+  kind: 'skip'
+  /** The entry's path in the archive. */
+  path: string
+  /** Why it is left out, for example `'not_selected'` or `'stripped_away'`. */
+  reason: SkipKind
+}
+
 /** Why an entry was left out of an extraction or a creation. */
-export type SkipKind = 'duplicate' | 'extension_not_allowed' | 'excluded' | 'hidden' | 'over_max_file_size' | 'symlink_unsupported' | 'unreadable'
+export type SkipKind = 'duplicate' | 'extension_not_allowed' | 'not_selected' | 'stripped_away' | 'excluded' | 'hidden' | 'over_max_file_size' | 'symlink_unsupported' | 'unreadable'
 
 /** One skipped entry. */
 export interface SkippedEntry {
@@ -2070,6 +2567,16 @@ export interface SkippedSummary {
   /** The first skipped entries in the order they were skipped, at most 64. */
   sample: Array<SkippedEntry>
 }
+
+/**
+ * How extraction stages its output before it is visible at the destination.
+ *
+ * `in_place` (the default) writes directly into the destination. `atomic`
+ * extracts into a sibling directory and renames it onto a destination that
+ * does not exist or is empty. `atomic_replace` does the same and swaps the
+ * staged tree over an existing destination directory, replacing it as a whole.
+ */
+export type Staging = 'in_place' | 'atomic' | 'atomic_replace'
 
 /** The `kind` of a [`MemorySymlinkEntry`]. */
 export type SymlinkKind = 'symlink'
@@ -2394,3 +2901,30 @@ export type ZipBombSubCode = 'ENTRY' | 'SOLID_BLOCK' | 'SKIPPED_ENTRIES'
  * interpretation without structural findings.
  */
 export type ZipConsistencyPolicy = 'enforce' | 'ignore'
+
+/** The finished ZIP archive could not be read back to check its entries. */
+export interface ZipRatioCheckFailedWarning {
+  /** Always `'zip_ratio_check_failed'`. */
+  kind: 'zip_ratio_check_failed'
+  /** The human-readable text. */
+  message: string
+  /** Why the archive could not be read back. */
+  reason: string
+}
+
+/**
+ * Default extraction would refuse entries of the finished ZIP archive as a
+ * zip bomb.
+ */
+export interface ZipRatioOverDefaultLimitWarning {
+  /** Always `'zip_ratio_over_default_limit'`. */
+  kind: 'zip_ratio_over_default_limit'
+  /** The human-readable text. */
+  message: string
+  /** How many entries are over the limit, saturated at `2^32 - 1`. */
+  entries: number
+  /** The default extraction ratio limit. */
+  limit: number
+  /** The smallest ratio limit that admits every entry. */
+  neededRatio: number
+}

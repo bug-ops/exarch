@@ -99,6 +99,41 @@ closed_enum! {
 
         /// Uncompressed size
         UncompressedSize => "uncompressed size",
+
+        /// General purpose compression flags
+        CompressionFlags => "compression flags",
+
+        /// AES encryption metadata
+        AesMetadata => "aes encryption metadata",
+
+        /// File name that holds a NUL byte, or whose Unicode Path does
+        FileNameNul => "file name (nul byte)",
+
+        /// Unicode Path that differs from a file name the language-encoding
+        /// flag declares UTF-8
+        UnicodePathLanguageEncoding => "unicode path (language-encoding flag)",
+
+        /// Unicode Path that is a directory where the file name is not, or the
+        /// reverse
+        UnicodePathDirectoryStatus => "unicode path (directory status)",
+
+        /// Unicode Path that is not valid UTF-8
+        UnicodePathNotUtf8 => "unicode path (not UTF-8)",
+
+        /// Unicode Path with a control, bidirectional-override or homoglyph
+        /// character
+        UnicodePathIllegalCharacter => "unicode path (illegal character)",
+
+        /// Unicode Path whose path components differ from those of the file
+        /// name
+        UnicodePathComponents => "unicode path (path components)",
+
+        /// Unicode Path that differs from the file name in trailing dots or
+        /// spaces
+        UnicodePathTrailingDotsOrSpaces => "unicode path (trailing dots or spaces)",
+
+        /// Unicode Path whose file extension differs from that of the file name
+        UnicodePathExtension => "unicode path (file extension)",
     }
 }
 

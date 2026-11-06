@@ -12,14 +12,13 @@
 )]
 
 use exarch_core::ArchiveError;
+use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
+use exarch_core::CreationConfig;
 use exarch_core::OutputFile;
 use exarch_core::SecurityConfig;
 use exarch_core::create_archive;
-use exarch_core::creation::CreationConfig;
 use exarch_core::extract_archive;
-use exarch_core::formats::detect::CreatableFormat;
-use exarch_core::formats::detect::ZIP_FAMILY_ALIASES;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use exarch_testkit::raw_zip::RawEntry;
@@ -147,11 +146,12 @@ fn verify_works_for_every_fixture() {
     }
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn inferred_creation_is_rejected_for_zip_family() {
     let dest = TempDir::new().unwrap();
     let config = CreationConfig::default();
-    for ext in ZIP_FAMILY_ALIASES {
+    for ext in exarch_core::ZIP_FAMILY_ALIASES {
         let output = dest.path().join(format!("out.{ext}"));
         let result = create_archive(&output, &[] as &[&str], &config);
         match result {

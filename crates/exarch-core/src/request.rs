@@ -27,7 +27,6 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::VerificationOptions;
-use crate::api::extract_staged;
 use crate::api::extract_to_sink_reusing;
 use crate::api::extract_validated;
 use crate::api::resolve_output_format;
@@ -45,6 +44,7 @@ use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
 use crate::inspection::list::ListPass;
 use crate::listed::ListedArchive;
+use crate::staging::extract_staged;
 
 /// The optional progress callback of a request; a missing one is a no-op.
 struct OptionalProgress<'a>(Option<&'a mut dyn ProgressCallback>);
@@ -61,6 +61,45 @@ impl OptionalProgress<'_> {
             Some(progress) => operation(progress),
             None => operation(&mut NoopProgress),
         }
+    }
+}
+
+/// The configuration, options and optional progress callback that every
+/// request carries; the public request types wrap it with their own setters and
+/// terminal methods.
+#[derive(Debug)]
+struct Carrier<'a, C, O> {
+    config: &'a C,
+    options: O,
+    progress: OptionalProgress<'a>,
+}
+
+impl<'a, C, O> Carrier<'a, C, O> {
+    const fn new(config: &'a C, options: O) -> Self {
+        Self {
+            config,
+            options,
+            progress: OptionalProgress(None),
+        }
+    }
+
+    fn with_options(mut self, options: O) -> Self {
+        self.options = options;
+        self
+    }
+
+    fn with_progress(mut self, progress: &'a mut dyn ProgressCallback) -> Self {
+        self.progress = OptionalProgress(Some(progress));
+        self
+    }
+
+    fn run<R>(self, operation: impl FnOnce(&'a C, O, &mut dyn ProgressCallback) -> R) -> R {
+        let Self {
+            config,
+            options,
+            progress,
+        } = self;
+        progress.run(|progress| operation(config, options, progress))
     }
 }
 
@@ -86,12 +125,13 @@ impl OptionalProgress<'_> {
 /// use exarch_core::ExtractionOptions;
 /// use exarch_core::NoopProgress;
 /// use exarch_core::SecurityConfig;
+/// use exarch_core::Staging;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = SecurityConfig::default();
 /// let mut progress = NoopProgress;
 /// let report = ExtractRequest::new(&config)
-///     .with_options(ExtractionOptions::default().with_atomic(true))
+///     .with_options(ExtractionOptions::default().with_staging(Staging::Atomic))
 ///     .with_progress(&mut progress)
 ///     .extract("archive.tar.gz", "/tmp/output")?;
 /// println!("Extracted {} files", report.files_extracted);
@@ -99,36 +139,26 @@ impl OptionalProgress<'_> {
 /// # }
 /// ```
 #[derive(Debug)]
-pub struct ExtractRequest<'a> {
-    config: &'a SecurityConfig,
-    options: ExtractionOptions,
-    progress: OptionalProgress<'a>,
-}
+pub struct ExtractRequest<'a>(Carrier<'a, SecurityConfig, ExtractionOptions>);
 
 impl<'a> ExtractRequest<'a> {
     /// An extraction under `config` with default options and no progress
     /// callback.
     #[must_use]
     pub fn new(config: &'a SecurityConfig) -> Self {
-        Self {
-            config,
-            options: ExtractionOptions::default(),
-            progress: OptionalProgress(None),
-        }
+        Self(Carrier::new(config, ExtractionOptions::default()))
     }
 
     /// Sets the extraction options.
     #[must_use]
-    pub fn with_options(mut self, options: ExtractionOptions) -> Self {
-        self.options = options;
-        self
+    pub fn with_options(self, options: ExtractionOptions) -> Self {
+        Self(self.0.with_options(options))
     }
 
     /// Reports progress to `progress`.
     #[must_use]
-    pub fn with_progress(mut self, progress: &'a mut dyn ProgressCallback) -> Self {
-        self.progress = OptionalProgress(Some(progress));
-        self
+    pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
+        Self(self.0.with_progress(progress))
     }
 
     /// Extracts `archive` into `output_dir`; the format is detected.
@@ -141,15 +171,18 @@ impl<'a> ExtractRequest<'a> {
         archive: impl AsRef<Path>,
         output_dir: impl AsRef<Path>,
     ) -> Result<ExtractionReport> {
-        let Self {
-            config,
-            options,
-            progress,
-        } = self;
-        progress.run(|progress| {
-            extract_staged(output_dir.as_ref(), &options, |dir| {
-                extract_validated(archive.as_ref(), dir, config, &options, progress)
-            })
+        let Self(request) = self;
+        request.run(|config, options, progress| {
+            extract_staged(
+                output_dir.as_ref(),
+                &options,
+                &config.selection,
+                Some(archive.as_ref()),
+                progress,
+                |dir, options, progress| {
+                    extract_validated(archive.as_ref(), dir, config, options, progress)
+                },
+            )
         })
     }
 }
@@ -188,35 +221,25 @@ impl<'a> ExtractRequest<'a> {
 /// # }
 /// ```
 #[derive(Debug)]
-pub struct ListRequest<'a> {
-    config: &'a SecurityConfig,
-    options: ListOptions,
-    progress: OptionalProgress<'a>,
-}
+pub struct ListRequest<'a>(Carrier<'a, SecurityConfig, ListOptions>);
 
 impl<'a> ListRequest<'a> {
     /// A listing under `config` with default options and no progress callback.
     #[must_use]
     pub fn new(config: &'a SecurityConfig) -> Self {
-        Self {
-            config,
-            options: ListOptions::default(),
-            progress: OptionalProgress(None),
-        }
+        Self(Carrier::new(config, ListOptions::default()))
     }
 
     /// Sets the listing options.
     #[must_use]
-    pub const fn with_options(mut self, options: ListOptions) -> Self {
-        self.options = options;
-        self
+    pub fn with_options(self, options: ListOptions) -> Self {
+        Self(self.0.with_options(options))
     }
 
     /// Reports progress to `progress`.
     #[must_use]
-    pub fn with_progress(mut self, progress: &'a mut dyn ProgressCallback) -> Self {
-        self.progress = OptionalProgress(Some(progress));
-        self
+    pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
+        Self(self.0.with_progress(progress))
     }
 
     /// Lists the archive file at `archive`.
@@ -225,12 +248,8 @@ impl<'a> ListRequest<'a> {
     ///
     /// See [`ListRequest`].
     pub fn list(self, archive: impl AsRef<Path>) -> Result<ArchiveManifest> {
-        let Self {
-            config,
-            options,
-            progress,
-        } = self;
-        progress.run(|progress| {
+        let Self(request) = self;
+        request.run(|config, options, progress| {
             crate::inspection::list_archive_with_progress(archive, config, options, progress)
         })
     }
@@ -241,12 +260,8 @@ impl<'a> ListRequest<'a> {
     ///
     /// See [`ListRequest`].
     pub fn list_reader(self, reader: ArchiveReader<'_>) -> Result<ArchiveManifest> {
-        let Self {
-            config,
-            options,
-            progress,
-        } = self;
-        progress.run(|progress| {
+        let Self(request) = self;
+        request.run(|config, options, progress| {
             let manifest = reader.list(
                 config,
                 &mut ListPass::strict_with(options.stored_targets).with_progress(progress),
@@ -304,12 +319,8 @@ impl<'a> ListRequest<'a> {
         archive: impl AsRef<Path>,
         reuse: DecodeReuse,
     ) -> Result<ListedArchive> {
-        let Self {
-            config,
-            options,
-            progress,
-        } = self;
-        progress.run(|progress| {
+        let Self(request) = self;
+        request.run(|config, options, progress| {
             ListedArchive::list(archive.as_ref(), config, options, reuse, Some(progress))
         })
     }
@@ -353,36 +364,26 @@ impl<'a> ListRequest<'a> {
 /// # }
 /// ```
 #[derive(Debug)]
-pub struct VerifyRequest<'a> {
-    config: &'a SecurityConfig,
-    options: VerificationOptions,
-    progress: OptionalProgress<'a>,
-}
+pub struct VerifyRequest<'a>(Carrier<'a, SecurityConfig, VerificationOptions>);
 
 impl<'a> VerifyRequest<'a> {
     /// A verification under `config` with default options and no progress
     /// callback.
     #[must_use]
     pub fn new(config: &'a SecurityConfig) -> Self {
-        Self {
-            config,
-            options: VerificationOptions::default(),
-            progress: OptionalProgress(None),
-        }
+        Self(Carrier::new(config, VerificationOptions::default()))
     }
 
     /// Sets the verification options.
     #[must_use]
-    pub const fn with_options(mut self, options: VerificationOptions) -> Self {
-        self.options = options;
-        self
+    pub fn with_options(self, options: VerificationOptions) -> Self {
+        Self(self.0.with_options(options))
     }
 
     /// Reports progress to `progress`.
     #[must_use]
-    pub fn with_progress(mut self, progress: &'a mut dyn ProgressCallback) -> Self {
-        self.progress = OptionalProgress(Some(progress));
-        self
+    pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
+        Self(self.0.with_progress(progress))
     }
 
     /// Verifies the archive file at `archive`.
@@ -391,12 +392,8 @@ impl<'a> VerifyRequest<'a> {
     ///
     /// See [`VerifyRequest`].
     pub fn verify(self, archive: impl AsRef<Path>) -> Result<VerificationReport> {
-        let Self {
-            config,
-            options,
-            progress,
-        } = self;
-        progress.run(|progress| {
+        let Self(request) = self;
+        request.run(|config, options, progress| {
             crate::inspection::verify_archive_with_progress(archive, config, options, progress)
         })
     }
@@ -408,12 +405,8 @@ impl<'a> VerifyRequest<'a> {
     ///
     /// See [`VerifyRequest`].
     pub fn verify_reader(self, reader: ArchiveReader<'_>) -> Result<VerificationReport> {
-        let Self {
-            config,
-            options,
-            progress,
-        } = self;
-        progress.run(|progress| {
+        let Self(request) = self;
+        request.run(|config, options, progress| {
             let report = reader.verify(config, options, progress)?;
             progress.on_complete();
             Ok(report)
@@ -425,9 +418,8 @@ impl<'a> VerifyRequest<'a> {
 ///
 /// Every entry passes the validation pipeline of [`ExtractRequest`] and is then
 /// delivered to the sink instead of being written under a directory. See the
-/// [`sink`](crate::sink) module for what the sink may rely on and what it must
-/// do. The optional [`ProgressCallback`] sees the events of a directory
-/// extraction.
+/// [`EntrySink`] for what the sink may rely on and what it must do. The
+/// optional [`ProgressCallback`] sees the events of a directory extraction.
 ///
 /// A 7z source is read in two phases: everything the file table can refuse
 /// (admission, ratios, quotas, link policy, paths, name lengths) is refused
@@ -472,36 +464,26 @@ impl<'a> VerifyRequest<'a> {
 /// # }
 /// ```
 #[derive(Debug)]
-pub struct SinkExtractRequest<'a> {
-    config: &'a SecurityConfig,
-    options: SinkOptions,
-    progress: OptionalProgress<'a>,
-}
+pub struct SinkExtractRequest<'a>(Carrier<'a, SecurityConfig, SinkOptions>);
 
 impl<'a> SinkExtractRequest<'a> {
     /// An extraction into a sink under `config` with default options and no
     /// progress callback.
     #[must_use]
     pub fn new(config: &'a SecurityConfig) -> Self {
-        Self {
-            config,
-            options: SinkOptions::default(),
-            progress: OptionalProgress(None),
-        }
+        Self(Carrier::new(config, SinkOptions::default()))
     }
 
     /// Sets the sink extraction options.
     #[must_use]
-    pub const fn with_options(mut self, options: SinkOptions) -> Self {
-        self.options = options;
-        self
+    pub fn with_options(self, options: SinkOptions) -> Self {
+        Self(self.0.with_options(options))
     }
 
     /// Reports progress to `progress`.
     #[must_use]
-    pub fn with_progress(mut self, progress: &'a mut dyn ProgressCallback) -> Self {
-        self.progress = OptionalProgress(Some(progress));
-        self
+    pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
+        Self(self.0.with_progress(progress))
     }
 
     /// Extracts `reader` into `sink`.
@@ -514,13 +496,10 @@ impl<'a> SinkExtractRequest<'a> {
         reader: ArchiveReader<'_>,
         sink: &mut S,
     ) -> Result<ExtractionReport> {
-        let Self {
-            config,
-            options,
-            progress,
-        } = self;
-        progress
-            .run(|progress| extract_to_sink_reusing(reader, sink, config, options, progress, None))
+        let Self(request) = self;
+        request.run(|config, options, progress| {
+            extract_to_sink_reusing(reader, sink, config, options, progress, None)
+        })
     }
 }
 
@@ -543,9 +522,14 @@ closed_enum! {
     /// Whether a created archive is flushed to stable storage before it is
     /// reported as written.
     ///
-    /// `Synced` (the default) flushes the archive file and then its parent
-    /// directory entry, so a published archive survives a crash or power
-    /// loss.
+    /// `Synced` (the default) flushes the archive file and then, on Unix, its
+    /// parent directory entry, so a published archive survives a crash or
+    /// power loss. A directory that cannot be synced does not fail the
+    /// creation, since the archive is already published: it adds a
+    /// [`CreationWarning::DirectoryNotSynced`](crate::CreationWarning::DirectoryNotSynced)
+    /// to the report. On Windows and
+    /// WASI the directory entry is not flushed and no warning is raised; only
+    /// the file is.
     ///
     /// `Unsynced` skips both flushes and is faster, with these hazards:
     ///
@@ -625,10 +609,10 @@ pub enum OutputFormat {
 /// # Examples
 ///
 /// ```
+/// use exarch_core::CreatableFormat;
 /// use exarch_core::OutputFile;
 /// use exarch_core::OutputFormat;
 /// use exarch_core::OutputPolicy;
-/// use exarch_core::formats::detect::CreatableFormat;
 ///
 /// let out = OutputFile::replace("backup.tar.gz");
 /// assert_eq!(out.policy(), OutputPolicy::Replace);
@@ -759,26 +743,19 @@ impl OutputFile {
 /// # }
 /// ```
 #[derive(Debug)]
-pub struct CreateRequest<'a> {
-    config: &'a CreationConfig,
-    progress: OptionalProgress<'a>,
-}
+pub struct CreateRequest<'a>(Carrier<'a, CreationConfig, ()>);
 
 impl<'a> CreateRequest<'a> {
     /// A creation under `config` with no progress callback.
     #[must_use]
     pub const fn new(config: &'a CreationConfig) -> Self {
-        Self {
-            config,
-            progress: OptionalProgress(None),
-        }
+        Self(Carrier::new(config, ()))
     }
 
     /// Reports progress to `progress`.
     #[must_use]
-    pub fn with_progress(mut self, progress: &'a mut dyn ProgressCallback) -> Self {
-        self.progress = OptionalProgress(Some(progress));
-        self
+    pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
+        Self(self.0.with_progress(progress))
     }
 
     /// Creates the archive at `output` from `sources`.
@@ -793,15 +770,18 @@ impl<'a> CreateRequest<'a> {
         output: &OutputFile,
         sources: &[P],
     ) -> Result<CreationReport> {
-        let Self { config, progress } = self;
         let format = resolve_output_format(output)?;
         let mut staged = StagedOutput::begin(output.path(), output.policy())?;
-        let report = progress.run(|progress| -> Result<CreationReport> {
-            let report = write_staged(&mut staged, format, sources, config, progress)?;
-            check_cancelled(progress)?;
-            Ok(report)
-        })?;
-        staged.commit(output.durability())?;
+        let mut report = self
+            .0
+            .run(|config, (), progress| -> Result<CreationReport> {
+                let report = write_staged(&mut staged, format, sources, config, progress)?;
+                check_cancelled(progress)?;
+                Ok(report)
+            })?;
+        if let Some(warning) = staged.commit(output.durability())? {
+            report.add_warning(warning);
+        }
         Ok(report)
     }
 
@@ -818,9 +798,9 @@ impl<'a> CreateRequest<'a> {
     ///
     /// ```
     /// use exarch_core::ArchiveWriter;
+    /// use exarch_core::CompressionCodec;
     /// use exarch_core::CreateRequest;
     /// use exarch_core::CreationConfig;
-    /// use exarch_core::formats::CompressionCodec;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let src = tempfile::tempdir()?;
@@ -841,8 +821,8 @@ impl<'a> CreateRequest<'a> {
         writer: ArchiveWriter<'_>,
         sources: &[P],
     ) -> Result<CreationReport> {
-        let Self { config, progress } = self;
-        progress.run(|progress| writer.write(sources, config, progress))
+        self.0
+            .run(|config, (), progress| writer.write(sources, config, progress))
     }
 
     /// Creates an archive of `format` from `sources` and returns its bytes.
@@ -859,9 +839,9 @@ impl<'a> CreateRequest<'a> {
     /// # Examples
     ///
     /// ```
+    /// use exarch_core::CreatableFormat;
     /// use exarch_core::CreateRequest;
     /// use exarch_core::CreationConfig;
-    /// use exarch_core::formats::detect::CreatableFormat;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let src = tempfile::tempdir()?;

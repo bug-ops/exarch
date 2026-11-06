@@ -294,13 +294,15 @@ impl BudgetState {
             .extend_from_slice(bytes);
     }
 
-    /// Raw archive bytes consumed so far; under an [`TapSource::Opaque`] or
+    /// Raw archive bytes consumed so far; under an `Opaque` or
     /// [`TapSource::Replay`] source this is the decoded byte count, so a
     /// decoded/consumed ratio is about one and never exceeds any ratio limit.
     fn source_consumed(&self) -> u64 {
         match &self.source {
             TapSource::Tapped(tap) => tap.consumed(),
-            TapSource::Opaque | TapSource::Replay(_) => self.total_read.load(Ordering::Relaxed),
+            TapSource::Replay(_) => self.total_read.load(Ordering::Relaxed),
+            #[cfg(test)]
+            TapSource::Opaque => self.total_read.load(Ordering::Relaxed),
         }
     }
 
@@ -413,14 +415,11 @@ impl TarReadBudget {
     /// Reports a read fault the source raised as [`crate::ArchiveError::Io`],
     /// in place of the format verdict `error` draws from it.
     ///
-    /// Only [`crate::ArchiveError::InvalidArchive`] is replaced: a budget,
-    /// security or ambiguity refusal is about the bytes `tar` did read, and
-    /// stays as it is.
+    /// Only [`crate::ArchiveError::InvalidArchive`] and a corrupt or truncated
+    /// trailer are replaced: a budget, security or ambiguity refusal is about
+    /// the bytes `tar` did read, and stays as it is.
     pub(crate) fn prefer_fault(&self, error: crate::ArchiveError) -> crate::ArchiveError {
-        match (&error, self.0.source.fault()) {
-            (crate::ArchiveError::InvalidArchive(_), Some(fault)) => crate::ArchiveError::Io(fault),
-            _ => error,
-        }
+        super::source_fault::prefer_fault(error, self.0.source.fault())
     }
 
     /// Adds `declared` to the sum of skipped entries' declared sizes and

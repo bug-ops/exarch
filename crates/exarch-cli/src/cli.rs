@@ -8,11 +8,14 @@ use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
 use exarch_core::Limit;
 use exarch_core::ParallelDecode;
+use exarch_core::PathRewrite;
 use exarch_core::RatioLimit;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
+use exarch_core::StripComponents;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::non_zero_u64;
+use exarch_core::positive_from_i128;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -83,6 +86,72 @@ impl LinkPolicyArgs {
         config
             .with_allow_symlinks(self.allow_symlinks)
             .with_allow_hardlinks(self.allow_hardlinks)
+    }
+}
+
+/// Which entries `extract`, `list` and `verify` act on and where they land.
+///
+/// clap checks syntax only; [`apply`](Self::apply) hands the values to core,
+/// which refuses a pattern or count it cannot use as `InvalidConfiguration`
+/// naming the setting. Patterns match the entry's normalized path before any
+/// component is stripped.
+#[derive(clap::Args, Clone, Default)]
+pub struct SelectionArgs {
+    /// Act only on entries matching PATTERN (repeatable); a pattern that
+    /// matches no entry is an error. Same pattern grammar as `create
+    /// --exclude`: a component (`docs`), a prefix (`tmp*`), a suffix (`*.rs`)
+    /// or a relative path (`src/lib`) that also selects everything below it.
+    #[arg(long = "include", value_name = "PATTERN")]
+    pub include: Vec<String>,
+
+    /// Leave out entries matching PATTERN (repeatable); applied after
+    /// `--include`, and a pattern that matches nothing is not an error.
+    #[arg(long = "exclude", value_name = "PATTERN")]
+    pub exclude: Vec<String>,
+
+    /// Drop the first N path components of every entry; entries with N or
+    /// fewer components are skipped, as `tar --strip-components` does
+    #[arg(
+        long,
+        value_name = "N",
+        allow_negative_numbers = true,
+        conflicts_with = "flatten"
+    )]
+    pub strip_components: Option<i64>,
+
+    /// Land every file directly in the destination under its final name;
+    /// directories are skipped and a link entry is refused
+    #[arg(long)]
+    pub flatten: bool,
+}
+
+impl SelectionArgs {
+    /// Applies the flags that were given to `config`.
+    ///
+    /// Call it after the path-depth limit is set: a strip count above that
+    /// depth is refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidConfiguration` naming `entry_include`,
+    /// `entry_exclude` or `strip_components` for a value core refuses.
+    pub fn apply(&self, config: SecurityConfig) -> Result<SecurityConfig, ArchiveError> {
+        let mut config = config;
+        for pattern in &self.include {
+            config = config.try_add_include(pattern)?;
+        }
+        for pattern in &self.exclude {
+            config = config.try_add_exclude(pattern)?;
+        }
+        let rewrite = match (self.strip_components, self.flatten) {
+            (Some(count), _) => {
+                let count = positive_from_i128(ConfigSetting::StripComponents, i128::from(count))?;
+                PathRewrite::Strip(StripComponents::new(count, config.max_path_depth)?)
+            }
+            (None, true) => PathRewrite::Flatten,
+            (None, false) => PathRewrite::Keep,
+        };
+        Ok(config.with_path_rewrite(rewrite))
     }
 }
 
@@ -277,6 +346,9 @@ pub struct ExtractArgs {
     pub limits: LimitArgs,
 
     #[command(flatten)]
+    pub selection: SelectionArgs,
+
+    #[command(flatten)]
     pub links: LinkPolicyArgs,
 
     #[command(flatten)]
@@ -422,6 +494,9 @@ pub struct ListArgs {
     #[command(flatten)]
     pub limits: LimitArgs,
 
+    #[command(flatten)]
+    pub selection: SelectionArgs,
+
     /// Read 7z symlink targets, which decodes the blocks that hold them
     #[arg(long)]
     pub read_link_targets: bool,
@@ -438,6 +513,9 @@ pub struct VerifyArgs {
 
     #[command(flatten)]
     pub limits: LimitArgs,
+
+    #[command(flatten)]
+    pub selection: SelectionArgs,
 
     #[command(flatten)]
     pub links: LinkPolicyArgs,
@@ -533,28 +611,29 @@ fn parse_parallel_decode(s: &str) -> Result<ParallelDecodeValue, String> {
     parse_byte_size(s).map(ParallelDecodeValue::Bytes)
 }
 
-/// Parse byte size with optional suffix (K, M, G, T)
-#[expect(
-    clippy::option_if_let_else,
-    reason = "if-let chain reads clearer than map_or_else here"
-)]
+/// Splits a trailing binary-unit suffix (K, M, G or T, in either case) off
+/// `s` and returns the remaining digits with the unit's multiplier.
+fn split_size_suffix(s: &str) -> (&str, u64) {
+    const UNITS: [(char, u32); 4] = [('T', 4), ('G', 3), ('M', 2), ('K', 1)];
+    s.char_indices()
+        .next_back()
+        .and_then(|(at, last)| {
+            UNITS
+                .iter()
+                .find(|(unit, _)| unit.eq_ignore_ascii_case(&last))
+                .map(|&(_, power)| (&s[..at], 1024_u64.pow(power)))
+        })
+        .unwrap_or((s, 1))
+}
+
+/// Parse byte size with optional suffix (K, M, G, T, case-insensitive)
 fn parse_byte_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("empty byte size".to_string());
     }
 
-    let (num_str, multiplier) = if let Some(stripped) = s.strip_suffix('T') {
-        (stripped, 1024_u64.pow(4))
-    } else if let Some(stripped) = s.strip_suffix('G') {
-        (stripped, 1024_u64.pow(3))
-    } else if let Some(stripped) = s.strip_suffix('M') {
-        (stripped, 1024_u64.pow(2))
-    } else if let Some(stripped) = s.strip_suffix('K') {
-        (stripped, 1024)
-    } else {
-        (s, 1)
-    };
+    let (num_str, multiplier) = split_size_suffix(s);
 
     num_str
         .parse::<u64>()
@@ -569,6 +648,14 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_size_suffixes_are_case_insensitive() {
+        assert_eq!(parse_byte_size("1k").unwrap(), 1024);
+        assert_eq!(parse_byte_size("2m").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_byte_size("3g").unwrap(), 3 * 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_size("1t").unwrap(), 1024_u64.pow(4));
+    }
 
     #[test]
     fn test_parse_byte_size() {

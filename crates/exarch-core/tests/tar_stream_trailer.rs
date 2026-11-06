@@ -30,8 +30,6 @@ use exarch_core::VerificationOptions;
 use exarch_core::VerifyRequest;
 use exarch_core::extract_archive;
 use exarch_core::extract_reader_to_memory;
-use exarch_core::formats::TarArchive;
-use exarch_core::formats::traits::ArchiveFormat;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use tempfile::TempDir;
@@ -233,20 +231,6 @@ fn corrupt_gzip_crc_is_refused_by_the_in_memory_api() {
         extract_reader_to_memory(reader, &MemoryExtractRequest::default(), &mut NoopProgress)
             .err()
             .unwrap();
-
-    assert_trailer_failure(&error);
-}
-
-#[test]
-fn corrupt_gzip_crc_is_refused_by_tar_archive_over_a_decoder() {
-    let bytes = flip_crc(gzip(&tar_bytes()));
-    let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
-    let config = SecurityConfig::default();
-    let out = TempDir::new().unwrap();
-
-    let error = TarArchive::new(decoder, &config)
-        .extract(out.path(), &ExtractionOptions::default(), &mut NoopProgress)
-        .unwrap_err();
 
     assert_trailer_failure(&error);
 }

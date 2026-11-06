@@ -34,8 +34,8 @@ use crate::types::SafePath;
 ///
 /// ```ignore
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::security::validate_path;
-/// use exarch_core::types::DestDir;
+/// use exarch_core::validate_path;
+/// use exarch_core::DestDir;
 /// use std::path::Path;
 /// use std::path::PathBuf;
 ///

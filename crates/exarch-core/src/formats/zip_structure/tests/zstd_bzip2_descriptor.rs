@@ -67,7 +67,7 @@ fn skippable_frame(body: &[u8]) -> Vec<u8> {
 
 fn plain_verify_status(bytes: Vec<u8>) -> VerificationStatus {
     open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap()
         .status()
 }
@@ -212,7 +212,7 @@ fn a_zstd_window_log_of_27_is_accepted_and_28_refused_with_a_typed_error_everywh
                 let extracted = extract_to_temp(built.bytes.clone(), policy);
                 let listed = open_bytes(built.bytes.clone(), &config(policy)).list();
                 let verified = open_bytes(built.bytes.clone(), &config(policy))
-                    .verify(&VerificationOptions::default());
+                    .verify(VerificationOptions::default());
                 if accepted {
                     extracted.unwrap();
                     listed.unwrap();
@@ -330,7 +330,7 @@ fn the_census_does_not_decode_a_zstd_window_above_the_limit_it_runs_under() {
     assert!(archive.structure().findings().is_empty());
     assert_decoder_memory_refusal(&extract_with(archive), "extract");
     assert_decoder_memory_refusal(&open().list(), "list");
-    assert_decoder_memory_refusal(&open().verify(&VerificationOptions::default()), "verify");
+    assert_decoder_memory_refusal(&open().verify(VerificationOptions::default()), "verify");
 }
 
 #[test]
@@ -375,5 +375,43 @@ fn the_windows_are_judged_at_the_power_of_two_boundary_of_the_limit() {
                 }
             }
         }
+    }
+}
+
+fn assert_refused_at<T: std::fmt::Debug>(result: crate::Result<T>, max: u64, label: &str) {
+    let error = match result {
+        Err(ArchiveError::PartialExtraction(partial)) => partial.into_parts().0,
+        other => other.unwrap_err(),
+    };
+    assert_matches!(
+        error,
+        ArchiveError::QuotaExceeded {
+            resource: QuotaResource::DecoderMemory { max: reported }
+        } if reported == max,
+        "{label}"
+    );
+}
+
+#[test]
+fn zip_handles_apply_the_limit_of_the_config_they_are_opened_under() {
+    let at = 1u64 << 16;
+    let bytes = zstd_entry_with_window(16).bytes;
+    for policy in [ZipConsistencyPolicy::Ignore, ZipConsistencyPolicy::Enforce] {
+        let strict = config_with_memory(policy, at - 1);
+        let loose = config_with_memory(policy, at);
+        let open =
+            |config: &SecurityConfig| ZipArchive::new(Cursor::new(bytes.clone()), config).unwrap();
+
+        assert_refused_at(extract_with(open(&strict)), at - 1, "extract");
+        assert_refused_at(open(&strict).list(), at - 1, "list");
+        assert_refused_at(
+            open(&strict).verify(VerificationOptions::default()),
+            at - 1,
+            "verify",
+        );
+
+        open(&loose).list().unwrap();
+        open(&loose).verify(VerificationOptions::default()).unwrap();
+        extract_with(open(&loose)).unwrap();
     }
 }

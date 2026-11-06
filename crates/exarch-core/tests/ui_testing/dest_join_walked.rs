@@ -1,6 +1,6 @@
-use exarch_core::types::DestDir;
-use exarch_core::types::SafePath;
-use exarch_core::types::Walked;
+use exarch_core::DestDir;
+use exarch_core::SafePath;
+use exarch_core::Walked;
 use std::path::PathBuf;
 
 fn join_walked(dest: &DestDir, path: &SafePath<Walked>) -> PathBuf {

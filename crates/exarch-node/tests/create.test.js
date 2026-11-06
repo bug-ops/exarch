@@ -85,6 +85,10 @@ describe('createArchive (async)', () => {
     const report = await createArchive(outputPath, [sourceDir]);
 
     assert.ok(Array.isArray(report.warnings));
+    for (const warning of report.warnings) {
+      assert.strictEqual(typeof warning.kind, 'string');
+      assert.strictEqual(typeof warning.message, 'string');
+    }
   });
 });
 

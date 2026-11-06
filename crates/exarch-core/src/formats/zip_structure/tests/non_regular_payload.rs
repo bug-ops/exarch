@@ -133,7 +133,7 @@ fn a_directory_entry_with_data_is_fatal_under_enforce_and_reported_by_verify() {
         ))
     );
     let report = open_bytes(built.bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(
@@ -181,7 +181,7 @@ fn a_stored_regular_entry_holding_a_record_is_found_whatever_its_descriptor_stat
 fn a_stored_regular_entry_holding_a_record_is_fatal_under_enforce_with_plain_verify() {
     let built = RawZip::new(vec![enclosing("a.txt", 0o100_644 << 16, 0x031e)]).build();
     let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_eq!(hidden_issues(&report).len(), 1);

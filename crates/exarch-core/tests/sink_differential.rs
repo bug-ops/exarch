@@ -12,7 +12,9 @@ use std::io::Cursor;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::ExistingFiles;
 use exarch_core::Extension;
+use exarch_core::ExtensionFilter;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
@@ -167,7 +169,7 @@ fn links_config() -> SecurityConfig {
 }
 
 fn overwrite() -> ExtractionOptions {
-    ExtractionOptions::default().with_skip_duplicates(false)
+    ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite)
 }
 
 fn accepted(kind: Kind, bytes: Vec<u8>, config: &SecurityConfig) {
@@ -491,7 +493,8 @@ fn tar_parent_that_is_a_file_is_rejected() {
 #[test]
 fn tar_extension_filter_skips_alike() {
     let mut config = default_config();
-    config.allowed_extensions = vec![Extension::try_from("txt").unwrap()];
+    config.allowed_extensions =
+        ExtensionFilter::only(vec![Extension::try_from("txt").unwrap()]).unwrap();
     accepted(
         Kind::Tar,
         tar_archive(&[tar_file("a.txt", b"1"), tar_file("b.bin", b"2")]),
@@ -649,7 +652,8 @@ fn zip_duplicates_and_extension_filter() {
     for options in [ExtractionOptions::default(), overwrite()] {
         let _ = assert_parity(Kind::Zip, bytes.clone(), &config, &options);
     }
-    config.allowed_extensions = vec![Extension::try_from("txt").unwrap()];
+    config.allowed_extensions =
+        ExtensionFilter::only(vec![Extension::try_from("txt").unwrap()]).unwrap();
     let _ = assert_parity(Kind::Zip, bytes, &config, &ExtractionOptions::default());
 }
 

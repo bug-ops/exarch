@@ -85,28 +85,6 @@
 //!
 //! # Examples
 //!
-//! Basic extraction:
-//!
-//! ```no_run
-//! use exarch_core::ExtractionOptions;
-//! use exarch_core::SecurityConfig;
-//! use exarch_core::formats::ZipArchive;
-//! use exarch_core::formats::traits::ArchiveFormat;
-//! use std::fs::File;
-//! use std::path::Path;
-//!
-//! let file = File::open("archive.zip")?;
-//! let config = SecurityConfig::default();
-//! let mut archive = ZipArchive::new(file, &config)?;
-//! let report = archive.extract(
-//!     Path::new("/output"),
-//!     &ExtractionOptions::default(),
-//!     &mut exarch_core::NoopProgress,
-//! )?;
-//! println!("Extracted {} files", report.files_extracted);
-//! # Ok::<(), exarch_core::ArchiveError>(())
-//! ```
-//!
 //! Custom security configuration:
 //!
 //! ```no_run
@@ -170,8 +148,11 @@ use crate::types::safe_path::stream_separator_error;
 
 use super::common;
 use super::common::EntryCompleteGuard;
+use super::source_fault::ReadFamily;
+use super::source_fault::ReadFaults;
+use super::source_fault::SourceTap;
+use super::target::Admission;
 use super::target::ExtractTarget;
-use super::target::FileAdmission;
 use super::target::FileRequest;
 use super::target::HostTarget;
 use super::target::Tally;
@@ -498,28 +479,6 @@ impl<'a, R: Read + Seek> CheckedZip<'a, R> {
 /// - Selective decompression (only extract needed files)
 /// - Parallel decompression (future optimization)
 /// - Better compression ratio detection for zip bombs
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::formats::ZipArchive;
-/// use exarch_core::formats::traits::ArchiveFormat;
-/// use std::fs::File;
-/// use std::path::Path;
-///
-/// let file = File::open("archive.zip")?;
-/// let config = SecurityConfig::default();
-/// let mut archive = ZipArchive::new(file, &config)?;
-/// let report = archive.extract(
-///     Path::new("/output"),
-///     &ExtractionOptions::default(),
-///     &mut exarch_core::NoopProgress,
-/// )?;
-/// println!("Extracted {} files", report.files_extracted);
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
 pub struct ZipArchive<R: Read + Seek> {
     inner: ZipReader<Shared<R>>,
     structure: ZipStructure,
@@ -552,18 +511,6 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// - File is not a valid ZIP archive
     /// - Central directory is corrupted, or changes while it is being read
     /// - Archive is password-protected (rejected for security)
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use exarch_core::SecurityConfig;
-    /// use exarch_core::formats::ZipArchive;
-    /// use std::fs::File;
-    ///
-    /// let file = File::open("archive.zip")?;
-    /// let archive = ZipArchive::new(file, &SecurityConfig::default())?;
-    /// # Ok::<(), exarch_core::ArchiveError>(())
-    /// ```
     pub fn new(reader: R, config: &SecurityConfig) -> Result<Self> {
         Self::open_for(reader, config, DecodeReuse::Off)
     }
@@ -800,6 +747,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         ctx: &mut ZipExtractionContext<'_>,
         reuse: Option<&ReuseStore>,
         claimed: Option<(Taken, RetainKey)>,
+        source: &SourceTap,
     ) -> Result<()> {
         if zip_file.encrypted() {
             let name = zip_file
@@ -823,13 +771,22 @@ impl<R: Read + Seek> ZipArchive<R> {
         let entry_kind = zip_entry_kind(zip_file.is_dir(), mode);
         if entry_kind == ZipEntryKind::Directory {
             drop(zip_file);
-            let safe_path = target.validate_directory(&path, size)?;
-            target.directory(&safe_path, &mut ctx.tally)?;
+            if let Admission::Admit(safe_path) =
+                target.validate_directory(&path, size, &mut ctx.tally)?
+            {
+                target.directory(&safe_path, &mut ctx.tally)?;
+            }
         } else if entry_kind == ZipEntryKind::Symlink {
-            let link_target = ZipEntryAdapter::read_symlink_target(&mut zip_file)?;
+            let link_target = ZipEntryAdapter::read_symlink_target(
+                &mut zip_file,
+                ReadFaults::new(ReadFamily::Zip, Some(source)),
+            )?;
             drop(zip_file);
-            let safe_symlink = target.validate_symlink(&path, &link_target, size)?;
-            target.symlink(&safe_symlink, &mut ctx.tally)?;
+            if let Admission::Admit(safe_symlink) =
+                target.validate_symlink(&path, &link_target, size, &mut ctx.tally)?
+            {
+                target.symlink(&safe_symlink, &mut ctx.tally)?;
+            }
         } else {
             // File: validate BEFORE writing (security invariant preserved),
             // then extract with the same zip_file (stream still at position 0)
@@ -838,13 +795,23 @@ impl<R: Read + Seek> ZipArchive<R> {
                 size,
                 mode: mode.map(RawMode::new),
             };
-            if let FileAdmission::Write(admitted) = target.validate_file(request, &mut ctx.tally)? {
+            if let Admission::Admit(admitted) = target.validate_file(request, &mut ctx.tally)? {
                 let written = match (reuse, claimed) {
                     (Some(store), Some((taken, key))) => match store.retained(taken, &key) {
-                        Ok(retained) => target.file_retained(retained, admitted, &mut ctx.tally),
+                        Ok(retained) => target.file_retained(
+                            retained,
+                            ReadFaults::new(ReadFamily::Opaque, None),
+                            admitted,
+                            &mut ctx.tally,
+                        ),
                         Err(e) => Err(ArchiveError::Io(e)),
                     },
-                    _ => target.file(&mut zip_file, admitted, &mut ctx.tally),
+                    _ => target.file(
+                        &mut zip_file,
+                        ReadFaults::new(ReadFamily::Zip, Some(source)),
+                        admitted,
+                        &mut ctx.tally,
+                    ),
                 };
                 written
                     .map_err(|e| Self::classify_declared_size_overrun(e, uncompressed_size.0))?;
@@ -912,7 +879,10 @@ impl<R: Read + Seek> ZipArchive<R> {
                 }
             };
             let position = EntryPosition::at_index(i, EntryTotal::Known(entry_count));
-            let mut guard = EntryCompleteGuard::start(progress, &entry_path, position);
+            let mut guard = match EntryCompleteGuard::try_start(progress, &entry_path, position) {
+                Ok(guard) => guard,
+                Err(e) => return Err(ArchiveError::partial_or(std::mem::take(&mut report), e)),
+            };
 
             let mut ctx = ZipExtractionContext {
                 tally: Tally {
@@ -931,6 +901,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 &mut ctx,
                 self.structure.reuse(),
                 claimed,
+                self.structure.source(),
             );
 
             if let Err(e) = result {
@@ -938,6 +909,10 @@ impl<R: Read + Seek> ZipArchive<R> {
                 return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
             }
             guard.complete();
+        }
+
+        if let Err(e) = target.finish_scan() {
+            return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
         }
 
         progress.on_complete();
@@ -963,7 +938,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     ) -> Result<ExtractionReport> {
         self.check_structure(config)?.extract_with(
             |config| HostTarget::create(output_dir, config),
-            SinkOptions::duplicates_of(options),
+            SinkOptions::existing_files_of(options),
             progress,
         )
     }
@@ -982,18 +957,20 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         self.extract_in_place(output_dir, &config, options, progress)
     }
 
+    #[cfg(test)]
     fn list(mut self) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::ListPass;
         let config = Arc::clone(&self.config);
         self.list_with(&config, &mut ListPass::strict())
     }
 
+    #[cfg(test)]
     fn verify(
         mut self,
-        options: &VerificationOptions,
+        options: VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
         let config = Arc::clone(&self.config);
-        self.verify_with_progress(&config, *options, &mut crate::NoopProgress)
+        self.verify_with_progress(&config, options, &mut crate::NoopProgress)
     }
 }
 
@@ -1069,7 +1046,10 @@ impl ZipEntryAdapter {
     }
 
     /// Reads symlink target from ZIP entry data (stored as file content).
-    fn read_symlink_target<R: Read>(zip_file: &mut zip::read::ZipFile<'_, R>) -> Result<PathBuf> {
+    fn read_symlink_target<R: Read>(
+        zip_file: &mut zip::read::ZipFile<'_, R>,
+        faults: ReadFaults<'_>,
+    ) -> Result<PathBuf> {
         let size = zip_file.size();
         common::check_symlink_target_size(size)?;
 
@@ -1081,11 +1061,7 @@ impl ZipEntryAdapter {
         zip_file
             .take(common::MAX_STORED_SYMLINK_TARGET)
             .read_to_end(&mut target_bytes)
-            .map_err(|e| {
-                ArchiveError::from(Malformation::SymlinkTargetUnreadable {
-                    detail: e.to_string().into(),
-                })
-            })?;
+            .map_err(|e| faults.classify_symlink_read(e))?;
 
         common::symlink_target_from_bytes(&target_bytes)
     }
@@ -1107,7 +1083,7 @@ impl ZipEntryAdapter {
 pub(crate) fn read_zip_symlink_target<R: Read>(
     zip_file: &mut zip::read::ZipFile<'_, R>,
 ) -> Result<PathBuf> {
-    ZipEntryAdapter::read_symlink_target(zip_file)
+    ZipEntryAdapter::read_symlink_target(zip_file, ReadFaults::new(ReadFamily::Zip, None))
 }
 
 /// Reads a ZIP symlink target for an integrity pass.
@@ -2453,7 +2429,7 @@ mod tests {
         let archive = ZipArchive::new(Cursor::new(zip_data.clone()), &enforcing).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let options = ExtractionOptions::default(); // skip_duplicates = true
+        let options = ExtractionOptions::default(); // ExistingFiles::Skip
 
         let rejected = archive
             .extract(temp.path(), &options, &mut crate::NoopProgress)
@@ -2504,7 +2480,7 @@ mod tests {
         let report = archive
             .extract(
                 temp.path(),
-                &ExtractionOptions::default(), // skip_duplicates = true
+                &ExtractionOptions::default(), // ExistingFiles::Skip
                 &mut crate::NoopProgress,
             )
             .unwrap();
@@ -2627,7 +2603,7 @@ mod tests {
         let archive = ZipArchive::new(Cursor::new(zip_data), &config).unwrap();
 
         let report = archive
-            .verify(&crate::VerificationOptions::default())
+            .verify(crate::VerificationOptions::default())
             .unwrap();
 
         assert!(report.is_safe());
@@ -2735,7 +2711,7 @@ mod tests {
             .unwrap()
             .extract(
                 temp.path(),
-                &ExtractionOptions::default(), // skip_duplicates = true
+                &ExtractionOptions::default(), // ExistingFiles::Skip
                 &mut NoopProgress,
             )
             .unwrap();

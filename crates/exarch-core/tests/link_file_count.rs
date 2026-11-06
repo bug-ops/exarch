@@ -15,6 +15,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::QuotaResource;
@@ -273,7 +274,7 @@ fn tar_hardlinks_over_the_limit_are_refused_before_any_copy() {
 fn skipped_duplicate_hardlink_keeps_its_count_slot() {
     let dir = TempDir::new().unwrap();
     let archive = write_archive(&dir, "a.tar", &tar_with_file_and_hardlinks(1));
-    let options = ExtractionOptions::default().with_skip_duplicates(true);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Skip);
 
     let out = TempDir::new().unwrap();
     std::fs::write(out.path().join("h0"), b"old").unwrap();
@@ -309,7 +310,7 @@ fn a_file_a_symlink_and_a_hardlink_count_together() {
 #[test]
 fn a_skipped_duplicate_symlink_keeps_its_count_slot() {
     let dir = TempDir::new().unwrap();
-    let options = ExtractionOptions::default().with_skip_duplicates(true);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Skip);
     let zip = write_archive(&dir, "a.zip", &zip_with_symlinks(2));
     let sevenz = write_archive(&dir, "a.7z", &sevenz_with_symlinks(2, false));
 

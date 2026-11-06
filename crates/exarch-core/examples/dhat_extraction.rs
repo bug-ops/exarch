@@ -11,16 +11,13 @@
 //! cargo run --example dhat_extraction --release -- tar
 //! ```
 
-#![allow(unsafe_code, clippy::unwrap_used)]
+#![allow(unsafe_code, clippy::unwrap_used, clippy::disallowed_methods)]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-use exarch_core::ExtractionOptions;
+use exarch_core::ExtractRequest;
 use exarch_core::SecurityConfig;
-use exarch_core::formats::TarArchive;
-use exarch_core::formats::ZipArchive;
-use exarch_core::formats::traits::ArchiveFormat;
 use std::io::Cursor;
 use std::io::Write;
 use zip::write::SimpleFileOptions;
@@ -60,40 +57,26 @@ fn create_tar_in_memory(file_count: usize, file_size: usize) -> Vec<u8> {
     builder.into_inner().unwrap()
 }
 
-fn profile_zip_extraction(file_count: usize, file_size: usize) {
-    let zip_data = create_zip_in_memory(file_count, file_size);
+fn profile_extraction(file_name: &str, data: &[u8]) {
     let config = SecurityConfig::default();
-    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let archive = work.path().join(file_name);
+    std::fs::write(&archive, data).unwrap();
+    let dest = tempfile::tempdir().unwrap();
 
     let _profiler = dhat::Profiler::new_heap();
 
-    let cursor = Cursor::new(zip_data);
-    let archive = ZipArchive::new(cursor, &config).unwrap();
-    archive
-        .extract(
-            temp.path(),
-            &ExtractionOptions::default(),
-            &mut exarch_core::NoopProgress,
-        )
+    ExtractRequest::new(&config)
+        .extract(&archive, dest.path())
         .unwrap();
 }
 
+fn profile_zip_extraction(file_count: usize, file_size: usize) {
+    profile_extraction("archive.zip", &create_zip_in_memory(file_count, file_size));
+}
+
 fn profile_tar_extraction(file_count: usize, file_size: usize) {
-    let tar_data = create_tar_in_memory(file_count, file_size);
-    let config = SecurityConfig::default();
-    let temp = tempfile::tempdir().unwrap();
-
-    let _profiler = dhat::Profiler::new_heap();
-
-    let cursor = Cursor::new(tar_data);
-    let archive = TarArchive::new(cursor, &config);
-    archive
-        .extract(
-            temp.path(),
-            &ExtractionOptions::default(),
-            &mut exarch_core::NoopProgress,
-        )
-        .unwrap();
+    profile_extraction("archive.tar", &create_tar_in_memory(file_count, file_size));
 }
 
 fn main() {

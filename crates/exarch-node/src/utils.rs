@@ -1,9 +1,26 @@
 //! Utility functions for Node.js bindings.
 
+use std::path::Path;
+
 use exarch_core::ArchiveError as CoreError;
 use exarch_core::BoundaryPath;
 
 pub use exarch_core::path_text;
+
+use crate::CoreResult;
+use crate::error::Failure;
+
+/// The text of `path`, or the refusal a listing or in-memory extraction must
+/// raise: a lossy rendering could merge two distinct entries into one name.
+///
+/// # Errors
+///
+/// Returns the core `EntryPathNotUtf8` refusal when `path` is not valid UTF-8.
+pub fn utf8_path(path: &Path) -> CoreResult<String> {
+    exarch_core::utf8_entry_path(path)
+        .map(str::to_owned)
+        .map_err(|malformation| Failure::from(CoreError::from(malformation)))
+}
 
 /// Checks a path argument and returns the proof of the check.
 ///
@@ -28,6 +45,14 @@ pub fn boundary_path(path: &str) -> Result<BoundaryPath, CoreError> {
 /// Returns the error of the first path that is refused.
 pub fn boundary_paths(paths: &[String]) -> Result<Vec<BoundaryPath>, CoreError> {
     paths.iter().map(|path| boundary_path(path)).collect()
+}
+
+/// The line `export type {name} = 'a' | 'b'` that the generated `index.d.ts`
+/// holds for a closed core enum, so a test can look it up.
+#[cfg(test)]
+pub fn union_line<T: Copy>(name: &str, all: &[T], as_str: fn(T) -> &'static str) -> String {
+    let values: Vec<String> = all.iter().map(|v| format!("'{}'", as_str(*v))).collect();
+    format!("export type {name} = {}", values.join(" | "))
 }
 
 #[cfg(test)]

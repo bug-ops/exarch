@@ -18,6 +18,14 @@
 //!   `QUOTA_EXCEEDED` and a [`ZipBombSubCode`] on every `ZIP_BOMB`.
 //! - `setting`: the [`ConfigSetting`] an `INVALID_CONFIGURATION` refused.
 //! - `ioKind`: the [`IoKind`] of an `IO_ERROR`.
+//! - `errno`, `strerror`, `path`: the OS failure behind a
+//!   `SOURCE_NOT_ACCESSIBLE` and the source it names, redacted like the
+//!   message.
+//! - `restore`, `backupPath`, `leftoverPath`: what a failed `'atomic_replace'`
+//!   (or a left-behind output reservation) left on disk, redacted like paths.
+//! - `conflicts`: the entry names that stopped a `'refuse'` extraction.
+//! - `protectedPath`, `collision`, `unmatchedPatterns`: the typed reason of the
+//!   matching `INVALID_CONFIGURATION`.
 //! - `nonUtf8EntryPath`: the injectively escaped path of an `INVALID_ARCHIVE`
 //!   (`ENTRY_NAME`) refusal of an entry name that is not valid UTF-8.
 //! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`,
@@ -27,19 +35,21 @@
 //! Errors raised by the binding itself (a Rust panic, a join
 //! failure) are not core errors and keep their napi `Status` as `code`.
 
-use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::CreationReport as CoreCreationReport;
 use exarch_core::ErrorCode as CoreErrorCode;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
+use exarch_core::FfiSourceFault;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting as CorePolicySetting;
+use exarch_core::ProtectedPath as CoreProtectedPath;
+use exarch_core::Restore as CoreRestore;
 use exarch_core::SubCode;
-use exarch_core::creation::CreationReport as CoreCreationReport;
 use napi::Env;
 use napi::Error;
 use napi::Status;
@@ -49,6 +59,7 @@ use napi::bindgen_prelude::ToNapiValue;
 use napi_derive::napi;
 
 use crate::report::SkippedSummary;
+use crate::report::extraction_warning;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
 
@@ -70,11 +81,13 @@ pub const ABORT_ERR: &str = "ABORT_ERR";
 
 /// Value of the `code` property on errors surfaced to JavaScript.
 ///
-/// Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
-/// callback that threw over a successful operation.
+/// Every core error code, plus the Node-only `PROGRESS_CALLBACK_ERROR` (a
+/// progress callback threw), `STREAM_ERROR` (an `AsyncIterable` archive
+/// failed), `ENTRY_CALLBACK_ERROR` (an `onEntry` callback threw) and
+/// `ABORT_ERR` (the `AbortSignal` fired).
 // Generates the TypeScript union only: runtime values come from core's
-// `as_str`, and a unit test keeps this list equal to core's plus
-// `PROGRESS_CALLBACK_ERROR`.
+// `as_str`, and a unit test keeps this list equal to core's plus the
+// Node-only codes.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -126,6 +139,9 @@ pub enum ErrorCode {
     /// Configuration value rejected.
     #[napi(value = "INVALID_CONFIGURATION")]
     InvalidConfiguration,
+    /// The operation was cancelled by its progress callback.
+    #[napi(value = "CANCELLED")]
+    Cancelled,
     /// A JS progress callback threw while the operation itself succeeded.
     #[napi(value = "PROGRESS_CALLBACK_ERROR")]
     ProgressCallbackError,
@@ -352,6 +368,24 @@ pub enum ConfigSetting {
     /// `durability`.
     #[napi(value = "durability")]
     Durability,
+    /// `existing_files`.
+    #[napi(value = "existing_files")]
+    ExistingFiles,
+    /// `staging`.
+    #[napi(value = "staging")]
+    Staging,
+    /// `entry_selection`.
+    #[napi(value = "entry_selection")]
+    EntrySelection,
+    /// `entry_include`.
+    #[napi(value = "entry_include")]
+    EntryInclude,
+    /// `entry_exclude`.
+    #[napi(value = "entry_exclude")]
+    EntryExclude,
+    /// `strip_components`.
+    #[napi(value = "strip_components")]
+    StripComponents,
 }
 
 /// Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
@@ -501,71 +535,20 @@ impl IoKind {
             Self::Other => "Other",
         }
     }
+}
 
-    /// The core kind this value mirrors.
-    #[cfg(test)]
-    const fn to_core(self) -> std::io::ErrorKind {
-        use std::io::ErrorKind as K;
-        match self {
-            Self::NotFound => K::NotFound,
-            Self::PermissionDenied => K::PermissionDenied,
-            Self::AlreadyExists => K::AlreadyExists,
-            Self::NotADirectory => K::NotADirectory,
-            Self::IsADirectory => K::IsADirectory,
-            Self::DirectoryNotEmpty => K::DirectoryNotEmpty,
-            Self::ReadOnlyFilesystem => K::ReadOnlyFilesystem,
-            Self::StorageFull => K::StorageFull,
-            Self::QuotaExceeded => K::QuotaExceeded,
-            Self::FileTooLarge => K::FileTooLarge,
-            Self::InvalidInput => K::InvalidInput,
-            Self::InvalidData => K::InvalidData,
-            Self::InvalidFilename => K::InvalidFilename,
-            Self::TimedOut => K::TimedOut,
-            Self::Interrupted => K::Interrupted,
-            Self::UnexpectedEof => K::UnexpectedEof,
-            Self::WriteZero => K::WriteZero,
-            Self::Unsupported => K::Unsupported,
-            Self::CrossesDevices => K::CrossesDevices,
-            Self::TooManyLinks => K::TooManyLinks,
-            Self::ResourceBusy => K::ResourceBusy,
-            Self::BrokenPipe => K::BrokenPipe,
-            Self::OutOfMemory => K::OutOfMemory,
-            Self::WouldBlock => K::WouldBlock,
-            Self::Other => K::Other,
-        }
+impl From<exarch_core::IoKind> for IoKind {
+    fn from(kind: exarch_core::IoKind) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == kind.as_str())
+            .unwrap_or(Self::Other)
     }
 }
 
 impl From<std::io::ErrorKind> for IoKind {
     fn from(kind: std::io::ErrorKind) -> Self {
-        use std::io::ErrorKind as K;
-        match kind {
-            K::NotFound => Self::NotFound,
-            K::PermissionDenied => Self::PermissionDenied,
-            K::AlreadyExists => Self::AlreadyExists,
-            K::NotADirectory => Self::NotADirectory,
-            K::IsADirectory => Self::IsADirectory,
-            K::DirectoryNotEmpty => Self::DirectoryNotEmpty,
-            K::ReadOnlyFilesystem => Self::ReadOnlyFilesystem,
-            K::StorageFull => Self::StorageFull,
-            K::QuotaExceeded => Self::QuotaExceeded,
-            K::FileTooLarge => Self::FileTooLarge,
-            K::InvalidInput => Self::InvalidInput,
-            K::InvalidData => Self::InvalidData,
-            K::InvalidFilename => Self::InvalidFilename,
-            K::TimedOut => Self::TimedOut,
-            K::Interrupted => Self::Interrupted,
-            K::UnexpectedEof => Self::UnexpectedEof,
-            K::WriteZero => Self::WriteZero,
-            K::Unsupported => Self::Unsupported,
-            K::CrossesDevices => Self::CrossesDevices,
-            K::TooManyLinks => Self::TooManyLinks,
-            K::ResourceBusy => Self::ResourceBusy,
-            K::BrokenPipe => Self::BrokenPipe,
-            K::OutOfMemory => Self::OutOfMemory,
-            K::WouldBlock => Self::WouldBlock,
-            _ => Self::Other,
-        }
+        Self::from(exarch_core::IoKind::from(kind))
     }
 }
 
@@ -709,6 +692,18 @@ pub enum ProgressCallbackError {
         /// The JS throw, attached as `cause`.
         source: Error,
     },
+    /// The JS progress callback threw during an extraction, listing or
+    /// verification, which core stopped at its next poll. A throw is the
+    /// callback's own failure, so it stays primary over the `Cancelled` it
+    /// caused.
+    CallbackCancelled {
+        /// The operation that was stopped.
+        operation: Operation,
+        /// The JS throw, attached as `cause`.
+        source: Error,
+        /// What the stop left behind, when the operation writes.
+        outcome: Option<PartialOutcome>,
+    },
     /// The JS progress callback threw while a listing itself succeeded; the
     /// manifest is discarded.
     ListCallback {
@@ -741,6 +736,53 @@ pub enum ProgressCallbackError {
     },
 }
 
+/// The operation a JS progress callback ran under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    /// Extraction to disk or into a sink.
+    Extraction,
+    /// Archive creation.
+    Creation,
+    /// Listing.
+    Listing,
+    /// Verification.
+    Verification,
+}
+
+impl Operation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Extraction => "extraction",
+            Self::Creation => "creation",
+            Self::Listing => "listing",
+            Self::Verification => "verification",
+        }
+    }
+}
+
+impl ProgressCallbackError {
+    /// Merges a core failure with the JS throw seen in the same run.
+    ///
+    /// A core failure other than `Cancelled` stays primary so a throwing
+    /// callback never masks it. A `Cancelled` that a throw caused (core polls
+    /// `is_cancelled` between entries) becomes the callback's own failure.
+    pub fn merge(operation: Operation, source: CoreError, callback: Option<Error>) -> Self {
+        match callback {
+            Some(thrown) if source.is_cancelled() => match operation {
+                Operation::Creation => Self::CreationCancelled { source: thrown },
+                Operation::Extraction | Operation::Listing | Operation::Verification => {
+                    Self::CallbackCancelled {
+                        operation,
+                        source: thrown,
+                        outcome: source.into_ffi_message().partial,
+                    }
+                }
+            },
+            callback => Self::Core { source, callback },
+        }
+    }
+}
+
 /// Builds the JS `Error` for a failure on the JS thread.
 pub trait IntoJsError {
     /// Converts `self` into a napi error carrying the typed properties.
@@ -750,8 +792,9 @@ pub trait IntoJsError {
     fn into_js_error(self, env: Env) -> Error;
 }
 
-/// The `code` an error carries: a core code, or the Node-only
-/// `PROGRESS_CALLBACK_ERROR`.
+/// The `code` an error carries: a core code, or one of the Node-only codes
+/// `PROGRESS_CALLBACK_ERROR`, `STREAM_ERROR`, `ENTRY_CALLBACK_ERROR` and
+/// `ABORT_ERR`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JsCode {
     Core(CoreErrorCode),
@@ -784,6 +827,183 @@ enum Details {
     },
 }
 
+/// What became of the original destination after a failed replace
+/// (`restore` property of an `IO_ERROR` raised by `'atomic_replace'`).
+// Generates the TypeScript union only; runtime values come from `as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// The original destination was never moved aside.
+    #[napi(value = "not_needed")]
+    NotNeeded,
+    /// The original destination was moved aside and moved back.
+    #[napi(value = "restored")]
+    Restored,
+    /// The original destination could not be moved back; `backupPath` names
+    /// where it is now.
+    #[napi(value = "failed")]
+    Failed,
+}
+
+impl RestoreOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotNeeded => "not_needed",
+            Self::Restored => "restored",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// What makes a destination too important to replace as a whole (the
+/// `protectedPath` property of an `INVALID_CONFIGURATION`).
+// Values must equal `exarch_core::ProtectedPath::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectedPath {
+    /// The destination is a filesystem root.
+    #[napi(value = "filesystem_root")]
+    FilesystemRoot,
+    /// The destination is, or contains, the archive being extracted.
+    #[napi(value = "archive_ancestor")]
+    ArchiveAncestor,
+    /// The destination is, or contains, the process working directory.
+    #[napi(value = "working_directory")]
+    WorkingDirectory,
+}
+
+impl ProtectedPath {
+    fn from_core(path: CoreProtectedPath) -> Option<Self> {
+        Some(match path {
+            CoreProtectedPath::FilesystemRoot => Self::FilesystemRoot,
+            CoreProtectedPath::ArchiveAncestor => Self::ArchiveAncestor,
+            CoreProtectedPath::WorkingDirectory => Self::WorkingDirectory,
+            _ => return None,
+        })
+    }
+
+    #[cfg(test)]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FilesystemRoot => "filesystem_root",
+            Self::ArchiveAncestor => "archive_ancestor",
+            Self::WorkingDirectory => "working_directory",
+        }
+    }
+}
+
+/// The two creation sources that map to one archive entry name (the
+/// `collision` property of an `INVALID_CONFIGURATION` for `source_paths`).
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct NameCollision {
+    /// The entry name both sources map to.
+    pub name: String,
+    /// The first source that maps to it, redacted like an error path.
+    pub first: String,
+    /// The second source that maps to it, redacted like an error path.
+    pub second: String,
+}
+
+/// The typed extras of an error about the destination of an operation.
+#[derive(Debug, Default)]
+struct OutputDetail {
+    restore: Option<RestoreOutcome>,
+    backup_path: Option<String>,
+    leftover_path: Option<String>,
+    conflicts: Option<Vec<String>>,
+    protected_path: Option<ProtectedPath>,
+    collision: Option<NameCollision>,
+    unmatched_patterns: Option<Vec<String>>,
+}
+
+impl OutputDetail {
+    fn of(err: &CoreError) -> Self {
+        use exarch_core::ConfigProblem;
+        use exarch_core::sanitize_path_for_error as host;
+
+        match err {
+            CoreError::ReplaceFailed(failure) => {
+                let (restore, backup_path) = match &failure.restore {
+                    CoreRestore::NotNeeded => (Some(RestoreOutcome::NotNeeded), None),
+                    CoreRestore::Restored => (Some(RestoreOutcome::Restored), None),
+                    CoreRestore::Failed { backup, .. } => {
+                        (Some(RestoreOutcome::Failed), Some(host(backup)))
+                    }
+                    _ => (None, None),
+                };
+                Self {
+                    restore,
+                    backup_path,
+                    leftover_path: failure.leftover.as_ref().map(|left| host(&left.path)),
+                    ..Self::default()
+                }
+            }
+            CoreError::OutputReservationLeft { path, .. } => Self {
+                leftover_path: Some(host(path)),
+                ..Self::default()
+            },
+            CoreError::DestinationOccupied { conflicts, .. } => Self {
+                conflicts: Some(
+                    conflicts
+                        .iter()
+                        .map(|path| crate::utils::path_text(path))
+                        .collect(),
+                ),
+                ..Self::default()
+            },
+            CoreError::InvalidConfiguration {
+                problem: ConfigProblem::ReplacesProtectedPath { path },
+                ..
+            } => Self {
+                protected_path: ProtectedPath::from_core(*path),
+                ..Self::default()
+            },
+            CoreError::InvalidConfiguration {
+                problem:
+                    ConfigProblem::EntryNameCollision {
+                        name,
+                        first,
+                        second,
+                    },
+                ..
+            } => Self {
+                collision: Some(NameCollision {
+                    name: name.clone(),
+                    first: host(first),
+                    second: host(second),
+                }),
+                ..Self::default()
+            },
+            CoreError::UnmatchedInclude { patterns } => Self {
+                unmatched_patterns: Some(patterns.iter().map(ToString::to_string).collect()),
+                ..Self::default()
+            },
+            CoreError::PartialExtraction(partial) => Self::of(partial.cause()),
+            _ => Self::default(),
+        }
+    }
+}
+
+/// What the OS reported for an unreadable creation source, redacted like the
+/// rest of the message.
+#[derive(Debug)]
+struct SourceFault {
+    errno: Option<i32>,
+    strerror: String,
+    path: String,
+}
+
+impl From<FfiSourceFault> for SourceFault {
+    fn from(fault: FfiSourceFault) -> Self {
+        Self {
+            errno: fault.raw_os_error,
+            strerror: fault.text,
+            path: fault.name,
+        }
+    }
+}
+
 /// Everything about an error except its message, ready to be applied to a JS
 /// error object.
 #[derive(Debug)]
@@ -794,6 +1014,8 @@ struct ErrorProps {
     setting: Option<exarch_core::ConfigSetting>,
     io_kind: Option<IoKind>,
     non_utf8_entry_path: Option<String>,
+    source_fault: Option<SourceFault>,
+    output: OutputDetail,
     details: Details,
     cause: Option<Error>,
 }
@@ -819,10 +1041,12 @@ fn non_utf8_entry_path(err: &CoreError) -> Option<String> {
 
 fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
     let non_utf8_entry_path = non_utf8_entry_path(&err);
+    let output = OutputDetail::of(&err);
     let FfiErrorMessage {
         kind,
         description,
         partial,
+        source_fault,
         ..
     } = err.into_ffi_message();
     Described {
@@ -837,6 +1061,8 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
                 _ => None,
             },
             non_utf8_entry_path,
+            source_fault: source_fault.map(SourceFault::from),
+            output,
             details: partial.map_or(Details::None, Details::Extraction),
             cause,
         },
@@ -853,6 +1079,8 @@ fn describe_callback_over_success(operation: &str, details: Details, source: Err
             setting: None,
             io_kind: None,
             non_utf8_entry_path: None,
+            source_fault: None,
+            output: OutputDetail::default(),
             details,
             cause: Some(source),
         },
@@ -869,6 +1097,8 @@ fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Descri
             setting: None,
             io_kind: None,
             non_utf8_entry_path: None,
+            source_fault: None,
+            output: OutputDetail::default(),
             details: Details::None,
             cause: Some(source),
         },
@@ -915,7 +1145,31 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     setting: None,
                     io_kind: None,
                     non_utf8_entry_path: None,
+                    source_fault: None,
+                    output: OutputDetail::default(),
                     details: Details::None,
+                    cause: Some(source),
+                },
+            },
+            ProgressCallbackError::CallbackCancelled {
+                operation,
+                source,
+                outcome,
+            } => Described {
+                description: format!(
+                    "progress callback threw, {} was cancelled",
+                    operation.as_str()
+                ),
+                props: ErrorProps {
+                    code: JsCode::ProgressCallback,
+                    relaxable_by: None,
+                    sub_code: None,
+                    setting: None,
+                    io_kind: None,
+                    non_utf8_entry_path: None,
+                    source_fault: None,
+                    output: OutputDetail::default(),
+                    details: outcome.map_or(Details::None, Details::Extraction),
                     cause: Some(source),
                 },
             },
@@ -940,6 +1194,8 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     setting: None,
                     io_kind: None,
                     non_utf8_entry_path: None,
+                    source_fault: None,
+                    output: OutputDetail::default(),
                     details: Details::None,
                     cause: reason,
                 },
@@ -971,6 +1227,35 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     if let Some(path) = props.non_utf8_entry_path {
         obj.set("nonUtf8EntryPath", path)?;
     }
+    if let Some(fault) = props.source_fault {
+        if let Some(errno) = fault.errno {
+            obj.set("errno", errno)?;
+        }
+        obj.set("strerror", fault.strerror)?;
+        obj.set("path", fault.path)?;
+    }
+    let output = props.output;
+    if let Some(restore) = output.restore {
+        obj.set("restore", restore.as_str())?;
+    }
+    if let Some(path) = output.backup_path {
+        obj.set("backupPath", path)?;
+    }
+    if let Some(path) = output.leftover_path {
+        obj.set("leftoverPath", path)?;
+    }
+    if let Some(conflicts) = output.conflicts {
+        obj.set("conflicts", conflicts)?;
+    }
+    if let Some(path) = output.protected_path {
+        obj.set("protectedPath", path)?;
+    }
+    if let Some(collision) = output.collision {
+        obj.set("collision", collision)?;
+    }
+    if let Some(patterns) = output.unmatched_patterns {
+        obj.set("unmatchedPatterns", patterns)?;
+    }
     match props.details {
         Details::None => {}
         Details::Extraction(outcome) => {
@@ -985,8 +1270,8 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
                     report
                         .warnings
                         .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<String>>(),
+                        .map(extraction_warning)
+                        .collect::<napi::Result<Vec<_>>>()?,
                 )?;
             }
         }
@@ -1137,34 +1422,12 @@ fn settle_then_convert<T, U>(
     }
 }
 
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Core(err) => write!(f, "{err}"),
-            Self::Callback(err) => match err.as_ref() {
-                ProgressCallbackError::Core { source, .. } => write!(f, "{source}"),
-                ProgressCallbackError::ExtractionCallback { .. }
-                | ProgressCallbackError::MemoryExtractionCallback { .. } => {
-                    f.write_str("progress callback threw after successful extraction")
-                }
-                ProgressCallbackError::CreationCallback { .. } => {
-                    f.write_str("progress callback threw after successful creation")
-                }
-                ProgressCallbackError::CreationCancelled { .. } => {
-                    f.write_str("progress callback threw, creation was cancelled")
-                }
-                ProgressCallbackError::ListCallback { .. } => {
-                    f.write_str("progress callback threw after successful listing")
-                }
-                ProgressCallbackError::VerifyCallback { .. } => {
-                    f.write_str("progress callback threw after successful verification")
-                }
-                ProgressCallbackError::Stream { .. } => f.write_str("archive stream failed"),
-                ProgressCallbackError::EntryCallback { .. } => f.write_str("entry callback threw"),
-                ProgressCallbackError::Aborted { .. } => f.write_str("The operation was aborted"),
-            },
-            Self::Native(err) => write!(f, "{}", err.reason),
-        }
+/// The message JavaScript sees for `failure`, for tests that assert on it.
+#[cfg(test)]
+pub fn failure_text(failure: Failure) -> String {
+    match describe(failure) {
+        Ok(described) => described.description,
+        Err(native) => native.reason,
     }
 }
 
@@ -1230,7 +1493,7 @@ mod tests {
             },
             outcome,
             finish,
-            |failure| Error::from_reason(failure.to_string()),
+            |failure| Error::from_reason(failure_text(failure)),
         );
         (ran.get(), result)
     }
@@ -1375,6 +1638,8 @@ mod tests {
         [
             Duplicate,
             ExtensionNotAllowed,
+            NotSelected,
+            StrippedAway,
             Excluded,
             Hidden,
             OverMaxFileSize,
@@ -1542,7 +1807,13 @@ mod tests {
             DecodeReuse,
             DecodeReuseLimit,
             SkipKind,
-            Durability
+            Durability,
+            ExistingFiles,
+            Staging,
+            EntrySelection,
+            EntryInclude,
+            EntryExclude,
+            StripComponents
         ]
     );
 
@@ -1666,18 +1937,18 @@ mod tests {
     }
 
     #[test]
-    fn test_every_io_kind_maps_to_a_core_kind_and_back() {
-        for kind in IoKind::ALL {
-            assert_eq!(IoKind::from(kind.to_core()), kind, "{kind:?}");
+    fn test_every_core_io_kind_has_a_mirror_with_the_same_spelling() {
+        for core in exarch_core::IoKind::ALL {
+            assert_eq!(IoKind::from(*core).as_str(), core.as_str(), "{core:?}");
         }
+        let mirror: Vec<_> = IoKind::ALL.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(mirror, exarch_core::IoKind::NAMES);
     }
 
     #[test]
-    fn test_unlisted_core_kind_is_other() {
-        assert_eq!(
-            IoKind::from(std::io::ErrorKind::ConnectionReset),
-            IoKind::Other
-        );
+    fn test_unlisted_std_kind_is_other() {
+        let core = exarch_core::IoKind::from(std::io::ErrorKind::ConnectionReset);
+        assert_eq!(IoKind::from(core), IoKind::Other);
     }
 
     #[test]
@@ -1709,10 +1980,10 @@ mod tests {
     #[test]
     fn test_source_not_found_strips_directory_in_release() {
         let d = described(CoreError::SourceNotFound {
-            path: PathBuf::from("/srv/secret/app/x.txt"),
+            path: PathBuf::from("/srv/internal/app/x.txt"),
         });
         assert!(d.description.contains("x.txt"), "{d:?}");
-        assert!(!d.description.contains("/srv/secret"), "{d:?}");
+        assert!(!d.description.contains("/srv/internal"), "{d:?}");
     }
 
     /// Regression test for #453 follow-up: `Io` messages can embed a host path
@@ -1722,9 +1993,9 @@ mod tests {
     fn test_io_error_redacts_message_in_release() {
         let d = described(CoreError::Io(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "directory is not writable: /srv/secret/app/private-output",
+            "directory is not writable: /srv/internal/app/private-output",
         )));
-        assert!(!d.description.contains("/srv/secret/app"), "{d:?}");
+        assert!(!d.description.contains("/srv/internal/app"), "{d:?}");
         assert!(d.description.contains("permission denied"), "{d:?}");
     }
 
@@ -1846,6 +2117,331 @@ mod tests {
         assert!(d.props.cause.is_some());
     }
 
+    fn cancelled_partial(writes: CorePartialWrites) -> CoreError {
+        let mut report = CoreExtractionReport::new();
+        report.files_extracted = 1;
+        CoreError::PartialExtraction(exarch_core::Partial::new(
+            CoreError::Cancelled,
+            report,
+            writes,
+        ))
+    }
+
+    fn merged(operation: Operation, source: CoreError, callback: Option<Error>) -> Described {
+        describe(Failure::from(ProgressCallbackError::merge(
+            operation, source, callback,
+        )))
+        .expect("callback errors are described")
+    }
+
+    #[test]
+    fn test_merge_cancelled_by_a_throw_is_the_callbacks_own_failure_with_the_partial_outcome() {
+        let d = merged(
+            Operation::Extraction,
+            cancelled_partial(CorePartialWrites::Kept),
+            Some(Error::from_reason("boom")),
+        );
+        assert_eq!(d.props.code, JsCode::ProgressCallback);
+        assert!(d.props.cause.is_some());
+        assert_eq!(
+            d.description,
+            "progress callback threw, extraction was cancelled"
+        );
+        let Details::Extraction(PartialOutcome::Kept(report)) = d.props.details else {
+            panic!("expected the kept outcome");
+        };
+        assert_eq!(report.files_extracted, 1);
+    }
+
+    #[test]
+    fn test_merge_cancelled_by_a_throw_during_a_read_only_operation_has_no_outcome() {
+        for operation in [Operation::Listing, Operation::Verification] {
+            let d = merged(
+                operation,
+                CoreError::Cancelled,
+                Some(Error::from_reason("boom")),
+            );
+            assert_eq!(d.props.code, JsCode::ProgressCallback);
+            assert_matches!(d.props.details, Details::None);
+            assert!(d.description.contains(operation.as_str()), "{d:?}");
+        }
+    }
+
+    #[test]
+    fn test_merge_cancelled_creation_keeps_the_nothing_written_message() {
+        let d = merged(
+            Operation::Creation,
+            CoreError::Cancelled,
+            Some(Error::from_reason("boom")),
+        );
+        assert_eq!(d.props.code, JsCode::ProgressCallback);
+        assert!(d.description.contains("nothing was written"), "{d:?}");
+    }
+
+    #[test]
+    fn test_merge_cancelled_without_a_throw_is_core_cancelled() {
+        for operation in [
+            Operation::Extraction,
+            Operation::Creation,
+            Operation::Listing,
+            Operation::Verification,
+        ] {
+            let d = merged(operation, CoreError::Cancelled, None);
+            assert_eq!(d.props.code.as_str(), "CANCELLED", "{operation:?}");
+            assert!(d.props.cause.is_none());
+        }
+    }
+
+    #[test]
+    fn test_merge_never_masks_a_non_cancel_core_error_with_a_throw() {
+        let d = merged(
+            Operation::Extraction,
+            CoreError::SymlinkEscape {
+                path: PathBuf::from("ln"),
+            },
+            Some(Error::from_reason("boom")),
+        );
+        assert_eq!(d.props.code.as_str(), "SYMLINK_ESCAPE");
+        assert!(d.props.cause.is_some());
+    }
+
+    #[test]
+    fn test_source_not_accessible_carries_the_os_failure() {
+        let d = described(CoreError::SourceNotAccessible {
+            path: PathBuf::from("src/a.txt"),
+            error: std::io::Error::from_raw_os_error(13),
+        });
+        assert_eq!(d.props.code.as_str(), "SOURCE_NOT_ACCESSIBLE");
+        let fault = d.props.source_fault.expect("the fault is carried");
+        assert_eq!(fault.errno, Some(13));
+        assert!(fault.path.ends_with("a.txt"), "{}", fault.path);
+        assert!(!fault.strerror.is_empty());
+    }
+
+    #[test]
+    fn test_other_errors_carry_no_source_fault() {
+        let d = described(CoreError::SourceNotFound {
+            path: PathBuf::from("a.txt"),
+        });
+        assert!(d.props.source_fault.is_none());
+    }
+
+    #[test]
+    fn test_destination_occupied_is_output_exists_and_redacts_the_destination() {
+        let d = described(CoreError::DestinationOccupied {
+            destination: PathBuf::from("/srv/internal/app/out"),
+            conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
+        });
+        assert_eq!(d.props.code.as_str(), "OUTPUT_EXISTS");
+        assert!(d.description.contains("out"), "{}", d.description);
+        #[cfg(not(debug_assertions))]
+        assert!(!d.description.contains("internal"), "{}", d.description);
+    }
+
+    #[test]
+    fn test_output_reservation_left_is_an_io_error_that_redacts_the_path() {
+        let d = described(CoreError::OutputReservationLeft {
+            path: PathBuf::from("/srv/internal/app/out.tar"),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        });
+        assert_eq!(d.props.code.as_str(), "IO_ERROR");
+        assert_eq!(d.props.io_kind, Some(IoKind::PermissionDenied));
+        assert!(d.description.contains("out.tar"), "{}", d.description);
+        #[cfg(not(debug_assertions))]
+        assert!(!d.description.contains("internal"), "{}", d.description);
+    }
+
+    #[test]
+    fn test_replace_failed_carries_typed_restore_state_and_redacted_paths() {
+        let failure = exarch_core::ReplaceFailure::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            CoreRestore::Failed {
+                backup: PathBuf::from("/srv/internal/app/.backup-1"),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+            None,
+        );
+        let d = described(CoreError::ReplaceFailed(failure));
+        assert_eq!(d.props.code.as_str(), "IO_ERROR");
+        assert_eq!(d.props.io_kind, Some(IoKind::PermissionDenied));
+        assert_eq!(d.props.output.restore, Some(RestoreOutcome::Failed));
+        let backup = d.props.output.backup_path.expect("the backup is named");
+        assert!(backup.ends_with(".backup-1"), "{backup}");
+        assert!(d.props.output.leftover_path.is_none());
+        #[cfg(not(debug_assertions))]
+        {
+            assert!(!backup.contains("internal"), "{backup}");
+            assert!(!d.description.contains("internal"), "{}", d.description);
+        }
+    }
+
+    #[test]
+    fn test_replace_failed_that_restored_has_no_backup_path() {
+        let failure = exarch_core::ReplaceFailure::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            CoreRestore::Restored,
+            None,
+        );
+        let d = described(CoreError::ReplaceFailed(failure));
+        assert_eq!(d.props.output.restore, Some(RestoreOutcome::Restored));
+        assert!(d.props.output.backup_path.is_none());
+    }
+
+    #[test]
+    fn test_output_reservation_left_names_the_leftover() {
+        let d = described(CoreError::OutputReservationLeft {
+            path: PathBuf::from("/srv/internal/app/out.tar"),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        });
+        let leftover = d
+            .props
+            .output
+            .leftover_path
+            .expect("the reservation is named");
+        assert!(leftover.ends_with("out.tar"), "{leftover}");
+        assert!(d.props.output.restore.is_none());
+    }
+
+    #[test]
+    fn test_destination_occupied_lists_the_conflicting_entries() {
+        let d = described(CoreError::DestinationOccupied {
+            destination: PathBuf::from("/srv/internal/app/out"),
+            conflicts: vec![PathBuf::from("a.txt"), PathBuf::from("d/b.txt")].into_boxed_slice(),
+        });
+        assert_eq!(
+            d.props.output.conflicts,
+            Some(vec!["a.txt".to_owned(), "d/b.txt".to_owned()])
+        );
+    }
+
+    #[test]
+    fn test_protected_path_refusal_names_the_reason() {
+        for (core, expected) in [
+            (CoreProtectedPath::FilesystemRoot, "filesystem_root"),
+            (CoreProtectedPath::ArchiveAncestor, "archive_ancestor"),
+            (CoreProtectedPath::WorkingDirectory, "working_directory"),
+        ] {
+            let d = described(CoreError::InvalidConfiguration {
+                setting: exarch_core::ConfigSetting::OutputPath,
+                problem: exarch_core::ConfigProblem::ReplacesProtectedPath { path: core },
+            });
+            assert_eq!(d.props.code.as_str(), "INVALID_CONFIGURATION");
+            assert_eq!(
+                d.props.setting,
+                Some(exarch_core::ConfigSetting::OutputPath)
+            );
+            assert_eq!(
+                d.props.output.protected_path.map(ProtectedPath::as_str),
+                Some(expected)
+            );
+        }
+        for core in CoreProtectedPath::ALL {
+            assert!(ProtectedPath::from_core(*core).is_some(), "{core:?}");
+        }
+    }
+
+    #[test]
+    fn test_entry_name_collision_names_both_sources() {
+        let d = described(CoreError::InvalidConfiguration {
+            setting: exarch_core::ConfigSetting::SourcePaths,
+            problem: exarch_core::ConfigProblem::EntryNameCollision {
+                name: "a.txt".to_owned(),
+                first: PathBuf::from("/srv/internal/one/a.txt"),
+                second: PathBuf::from("/srv/internal/two/a.txt"),
+            },
+        });
+        let collision = d.props.output.collision.expect("the collision is named");
+        assert_eq!(collision.name, "a.txt");
+        assert!(collision.first.ends_with("a.txt") && collision.second.ends_with("a.txt"));
+        #[cfg(not(debug_assertions))]
+        assert!(!collision.first.contains("internal"), "{}", collision.first);
+    }
+
+    #[test]
+    fn test_partial_extraction_keeps_the_typed_destination_detail() {
+        let source = CoreError::DestinationOccupied {
+            destination: PathBuf::from("out"),
+            conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
+        };
+        let partial =
+            exarch_core::Partial::new(source, CoreExtractionReport::new(), CorePartialWrites::Kept);
+        let d = described(CoreError::PartialExtraction(partial));
+        assert_eq!(d.props.output.conflicts, Some(vec!["a.txt".to_owned()]));
+    }
+
+    #[test]
+    fn test_index_d_ts_unions_for_destination_details_match() {
+        let restore: BTreeSet<String> = [
+            RestoreOutcome::NotNeeded,
+            RestoreOutcome::Restored,
+            RestoreOutcome::Failed,
+        ]
+        .iter()
+        .map(|value| value.as_str().to_owned())
+        .collect();
+        assert_eq!(dts_union("RestoreOutcome"), restore);
+
+        let protected: BTreeSet<String> = CoreProtectedPath::ALL
+            .iter()
+            .map(|path| path.as_str().to_owned())
+            .collect();
+        assert_eq!(dts_union("ProtectedPath"), protected);
+    }
+
+    #[test]
+    fn test_unmatched_include_names_every_pattern_through_a_partial() {
+        let patterns = ["a/b", "*.rs"]
+            .map(|text| {
+                exarch_core::EntryPattern::parse_for(exarch_core::ConfigSetting::EntryInclude, text)
+                    .unwrap()
+            })
+            .into();
+        let source = CoreError::UnmatchedInclude { patterns };
+        let d = described(source);
+        assert_eq!(d.props.code.as_str(), "INVALID_CONFIGURATION");
+        assert_eq!(
+            d.props.setting,
+            Some(exarch_core::ConfigSetting::EntryInclude)
+        );
+        assert_eq!(
+            d.props.output.unmatched_patterns,
+            Some(vec!["a/b".to_owned(), "*.rs".to_owned()])
+        );
+        assert!(d.description.contains("a/b"), "{}", d.description);
+    }
+
+    #[test]
+    fn test_new_selection_violations_keep_their_sub_codes() {
+        let target = CoreError::from(CoreViolation::HardlinkTargetNotExtracted {
+            link: "h".into(),
+            target: "t".into(),
+        });
+        let d = described(target);
+        assert_eq!(d.props.code.as_str(), "SECURITY_VIOLATION");
+        assert_eq!(
+            d.props.sub_code.map(exarch_core::SubCode::as_str),
+            Some("LINK_TARGET")
+        );
+        assert!(
+            d.description.contains('h') && d.description.contains('t'),
+            "{}",
+            d.description
+        );
+    }
+
+    #[test]
+    fn test_ambiguous_hardlink_target_is_a_link_target_violation() {
+        let d = described(CoreError::from(CoreViolation::HardlinkTargetAmbiguous {
+            link: "h".into(),
+            target: "a.txt".into(),
+        }));
+        assert_eq!(d.props.code.as_str(), "SECURITY_VIOLATION");
+        assert_eq!(
+            d.props.sub_code.map(exarch_core::SubCode::as_str),
+            Some("LINK_TARGET")
+        );
+    }
+
     #[test]
     fn test_native_failure_is_not_described() {
         let native = describe(Failure::Native(Error::from_reason("negative")))
@@ -1859,11 +2455,10 @@ mod tests {
         let result: Result<(), Failure> = catch_panic("test operation", || {
             panic!("synthetic panic for #395 regression test")
         });
-        let err = result.expect_err("panic must be converted, not abort");
+        let text = failure_text(result.expect_err("panic must be converted, not abort"));
         assert!(
-            err.to_string()
-                .contains("Internal panic during test operation"),
-            "unexpected error message: {err}"
+            text.contains("Internal panic during test operation"),
+            "unexpected error message: {text}"
         );
     }
 }

@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use super::*;
+use crate::ArchiveError;
 use crate::ExtractionOptions;
 use crate::NoopProgress;
 use crate::ReuseLimit;
@@ -370,21 +371,36 @@ fn extraction_replays_every_deflate_entry_and_writes_the_same_files() {
 }
 
 #[test]
-fn extraction_refuses_damaged_kept_output_without_decoding_again() {
+fn extraction_refuses_damaged_kept_output_as_io_without_decoding_again() {
     let bytes = deflated_zip(3);
-    let dir = tempfile::tempdir().unwrap();
-    let mut opened = open(&bytes, DecodeReuse::Memory(ReuseLimit::DEFAULT));
-    opened
-        .archive
-        .structure_mut()
-        .reuse_mut()
-        .unwrap()
-        .corrupt();
-    let error = extract(&mut opened, dir.path()).unwrap_err();
-    assert!(
-        format!("{error:?}").contains(ZIP_INVALID_CHECKSUM),
-        "{error:?}"
-    );
+    for mode in [
+        DecodeReuse::Memory(ReuseLimit::DEFAULT),
+        DecodeReuse::TempFile(ReuseLimit::DEFAULT),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opened = open(&bytes, mode);
+        opened
+            .archive
+            .structure_mut()
+            .reuse_mut()
+            .unwrap()
+            .corrupt()
+            .unwrap();
+        let error = extract(&mut opened, dir.path()).unwrap_err();
+        assert!(
+            format!("{error:?}").contains(ZIP_INVALID_CHECKSUM),
+            "{mode:?}: {error:?}"
+        );
+        let cause = match &error {
+            ArchiveError::PartialExtraction(partial) => partial.cause(),
+            other => other,
+        };
+        assert_matches!(
+            cause,
+            ArchiveError::Io(_),
+            "{mode:?}: damaged kept output is a fault of the spool, not a malformed archive"
+        );
+    }
 }
 
 #[test]

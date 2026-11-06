@@ -514,7 +514,7 @@ impl MemorySink {
     fn held_at(&self, path: &Path) -> u64 {
         self.entries
             .get(path)
-            .map_or(0, |entry| Self::charge_of(path, entry.payload_bytes()))
+            .map_or_default(|entry| Self::charge_of(path, entry.payload_bytes()))
     }
 
     /// The total charge after replacing the entry at `path` by one with

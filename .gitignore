@@ -44,6 +44,15 @@ index.js
 *~
 .DS_Store
 
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Working documents
 .local/
 *.tmp

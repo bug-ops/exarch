@@ -8,10 +8,10 @@
 use std::fs;
 use std::path::Path;
 
+use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
 use exarch_core::CreationConfig;
 use exarch_core::OutputFile;
-use exarch_core::formats::detect::CreatableFormat;
 use tempfile::TempDir;
 
 /// The leading bytes (at an offset) that identify the container of `format`.

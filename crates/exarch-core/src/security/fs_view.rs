@@ -276,7 +276,7 @@ impl PathModel {
 /// `base` extended by `tail`; an empty `tail` adds no trailing separator, which
 /// would count one byte against the host path limit.
 pub fn joined(base: &Path, tail: &Path) -> PathBuf {
-    if tail.as_os_str().is_empty() {
+    if tail.is_empty() {
         base.to_path_buf()
     } else {
         base.join(tail)
@@ -711,7 +711,8 @@ impl Occupant {
 }
 
 /// Spells `path` with its components re-joined, so `./a//b` reads `a/b`, and
-/// injectively ([`crate::path_text`]), so two names never read alike.
+/// injectively ([`path_text`](fn@crate::path_text)), so two names never read
+/// alike.
 pub fn normalized_display(path: &Path) -> String {
     crate::path_text(&path.components().collect::<PathBuf>())
 }

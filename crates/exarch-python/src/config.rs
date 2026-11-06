@@ -2,21 +2,30 @@
 //! `ExtractionOptions`, and `VerificationOptions`.
 
 use exarch_core::ArchiveError;
+use exarch_core::CompressionLevel;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
+use exarch_core::CreationConfig as CoreCreationConfig;
 use exarch_core::DecompressionBudget;
+use exarch_core::EntryPattern;
+use exarch_core::EntrySelection;
+use exarch_core::ExistingFiles;
 use exarch_core::Extension;
+use exarch_core::ExtensionFilter;
 use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::Limit;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
+use exarch_core::PathRewrite;
+use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
+use exarch_core::RequestedLevel;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
+use exarch_core::Staging;
+use exarch_core::StripComponents;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
-use exarch_core::creation::CompressionLevel;
-use exarch_core::creation::CreationConfig as CoreCreationConfig;
 use exarch_core::positive_from_i128;
 use pyo3::exceptions::PyOverflowError;
 use pyo3::exceptions::PyTypeError;
@@ -27,7 +36,6 @@ use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
 use crate::buffer::parse_one;
-use crate::error::compression_level_error;
 use crate::error::convert_error;
 
 /// A Python `int` as a setter receives it: `bool` is refused, and an integer
@@ -180,19 +188,27 @@ fn parse_exclude_patterns(patterns: &[String]) -> PyResult<Vec<exarch_core::Excl
         .collect()
 }
 
+/// Parses the string form shared with `ExistingFiles::as_str`.
+pub fn parse_existing_files(value: &str) -> PyResult<ExistingFiles> {
+    parse_one(ConfigSetting::ExistingFiles, value)
+}
+
+/// Parses the string form shared with `Staging::as_str`.
+pub fn parse_staging(value: &str) -> PyResult<Staging> {
+    parse_one(ConfigSetting::Staging, value)
+}
+
 /// Parses a Python integer of any size into a [`CompressionLevel`], so every
 /// out-of-range value is an `InvalidCompressionLevelError` rather than an
 /// `OverflowError`.
 fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
-    let out_of_range = |shown: String| {
-        compression_level_error(format!("invalid compression level {shown}, must be 1-9"))
-    };
     match level {
-        PyInteger::Fits(level) => u32::try_from(level)
-            .map_err(|_| out_of_range(level.to_string()))
-            .and_then(|level| CompressionLevel::try_from(level).map_err(convert_error)),
-        PyInteger::Beyond { .. } => Err(out_of_range("(out of range)".to_owned())),
+        PyInteger::Fits(level) => CompressionLevel::from_i128(level),
+        PyInteger::Beyond { .. } => Err(ArchiveError::InvalidCompressionLevel {
+            level: RequestedLevel::OutOfRange,
+        }),
     }
+    .map_err(convert_error)
 }
 
 /// Security configuration for archive extraction.
@@ -212,7 +228,9 @@ fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
 /// * `max_path_depth` - Maximum path depth allowed (default: 32)
 /// * `preserve_permissions` - Preserve file permissions from archive (default:
 ///   False)
-/// * `allowed_extensions` - List of allowed file extensions (empty = allow all)
+/// * `allowed_extensions` - List of allowed file extensions, or `None` to allow
+///   every extension (the default); an empty list is refused, and assigning
+///   `None` is the only way to clear the list
 /// * `banned_path_components` - List of banned path components
 ///
 /// # Examples
@@ -423,7 +441,7 @@ impl PySecurityConfig {
         mut slf: PyRefMut<'_, Self>,
         preserve: bool,
     ) -> PyRefMut<'_, Self> {
-        slf.inner.preserve_permissions = preserve;
+        slf.inner.permissions = PermissionPolicy::from_preserve(preserve);
         slf
     }
 
@@ -439,7 +457,8 @@ impl PySecurityConfig {
         ext: &str,
     ) -> PyResult<PyRefMut<'a, Self>> {
         let ext = Extension::try_from(ext).map_err(convert_error)?;
-        slf.inner.allowed_extensions.push(ext);
+        slf.inner.allowed_extensions =
+            std::mem::take(&mut slf.inner.allowed_extensions).with_added(ext);
         Ok(slf)
     }
 
@@ -456,6 +475,79 @@ impl PySecurityConfig {
         let component = PathComponentName::try_from(component).map_err(convert_error)?;
         slf.inner.banned_path_components.push(component);
         Ok(slf)
+    }
+
+    /// Adds an include pattern: only entries that match an include pattern (and
+    /// no exclude pattern) are extracted, listed as extracted and verified as
+    /// extracted.
+    ///
+    /// Patterns use the grammar of `CreationConfig` exclude patterns and are
+    /// matched against the normalized archive path before any stripping. An
+    /// include pattern that matches nothing fails the extraction after the scan
+    /// with `InvalidConfigurationError` (`setting == "entry_include"`, with the
+    /// unmatched `patterns`).
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "entry_include"`) for a refused
+    /// pattern.
+    fn add_include_pattern<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        pattern: &str,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner = slf
+            .inner
+            .clone()
+            .try_add_include(pattern)
+            .map_err(convert_error)?;
+        Ok(slf)
+    }
+
+    /// Adds an exclude pattern: a matching entry is not extracted, whatever the
+    /// include patterns say. A pattern that matches nothing is not an error.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "entry_exclude"`) for a refused
+    /// pattern.
+    fn add_exclude_pattern<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        pattern: &str,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner = slf
+            .inner
+            .clone()
+            .try_add_exclude(pattern)
+            .map_err(convert_error)?;
+        Ok(slf)
+    }
+
+    /// Drops this many leading path components from every selected entry.
+    ///
+    /// Order of operations: the entry name is validated, matched against the
+    /// include and exclude patterns on its original path, stripped, and the
+    /// stripped name is validated again. An entry the strip consumes entirely
+    /// is skipped (`"stripped_away"`). Replaces `with_flatten`.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "strip_components"`) for zero,
+    /// a negative or non-integer value, or one above `max_path_depth`.
+    fn with_strip_components(
+        mut slf: PyRefMut<'_, Self>,
+        count: PyInteger,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.try_set_strip_components(Some(count))?;
+        Ok(slf)
+    }
+
+    /// Lands every regular file under the destination root by its final path
+    /// component only. Directories are skipped; a symlink or hardlink entry is
+    /// refused. Replaces `with_strip_components`.
+    #[pyo3(signature = (flatten=true))]
+    fn with_flatten(mut slf: PyRefMut<'_, Self>, flatten: bool) -> PyRefMut<'_, Self> {
+        slf.set_flatten(flatten);
+        slf
     }
 
     /// Finalizes the configuration (for API consistency).
@@ -537,12 +629,12 @@ impl PySecurityConfig {
 
     #[getter]
     fn get_preserve_permissions(&self) -> bool {
-        self.inner.preserve_permissions
+        self.inner.permissions.preserves()
     }
 
     #[setter]
     fn set_preserve_permissions(&mut self, value: bool) {
-        self.inner.preserve_permissions = value;
+        self.inner.permissions = PermissionPolicy::from_preserve(value);
     }
 
     /// Returns whether symlinks are allowed.
@@ -616,32 +708,43 @@ impl PySecurityConfig {
         self.try_set_max_solid_block_memory(value)
     }
 
-    /// Returns a copy of the allowed extensions list.
+    /// Returns a copy of the allowed extensions list, or `None` when every
+    /// extension is allowed.
     ///
     /// # Performance
     ///
     /// This method clones the entire list on each access. If you need to access
     /// the extensions multiple times, cache the result in a local variable.
     #[getter]
-    fn get_allowed_extensions(&self) -> Vec<String> {
-        self.inner
-            .allowed_extensions
-            .iter()
-            .map(|ext| ext.as_str().to_owned())
-            .collect()
+    fn get_allowed_extensions(&self) -> Option<Vec<String>> {
+        self.inner.allowed_extensions.as_only().map(|extensions| {
+            extensions
+                .as_slice()
+                .iter()
+                .map(|ext| ext.as_str().to_owned())
+                .collect()
+        })
     }
 
+    /// Replaces the allowed extensions; `None` allows every extension.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "allowed_extension"`) for an
+    /// empty list or a malformed extension.
     #[setter]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "PyO3 setters receive the extracted list by value"
-    )]
-    fn set_allowed_extensions(&mut self, value: Vec<String>) -> PyResult<()> {
-        self.inner.allowed_extensions = value
-            .iter()
-            .map(|ext| Extension::try_from(ext.as_str()))
-            .collect::<Result<_, _>>()
-            .map_err(convert_error)?;
+    fn set_allowed_extensions(&mut self, value: Option<Vec<String>>) -> PyResult<()> {
+        self.inner.allowed_extensions = match value {
+            None => ExtensionFilter::Any,
+            Some(values) => ExtensionFilter::only(
+                values
+                    .iter()
+                    .map(|ext| Extension::try_from(ext.as_str()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(convert_error)?,
+            )
+            .map_err(convert_error)?,
+        };
         Ok(())
     }
 
@@ -661,7 +764,7 @@ impl PySecurityConfig {
     }
 
     #[setter]
-    #[allow(
+    #[expect(
         clippy::needless_pass_by_value,
         reason = "PyO3 setters receive the extracted list by value"
     )]
@@ -672,6 +775,83 @@ impl PySecurityConfig {
             .collect::<Result<_, _>>()
             .map_err(convert_error)?;
         Ok(())
+    }
+
+    /// The include patterns, in the order they were added. Empty means every
+    /// entry is a candidate.
+    #[getter]
+    fn get_include_patterns(&self) -> Vec<String> {
+        self.inner
+            .selection
+            .include()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Replaces the include patterns; an empty list removes them.
+    #[setter]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 setters receive the extracted list by value"
+    )]
+    fn set_include_patterns(&mut self, value: Vec<String>) -> PyResult<()> {
+        let include = parse_entry_patterns(ConfigSetting::EntryInclude, &value)?;
+        let exclude = self.inner.selection.exclude().to_vec();
+        self.inner.selection = rebuilt_selection(&self.inner.selection, include, exclude);
+        Ok(())
+    }
+
+    /// The exclude patterns, in the order they were added.
+    #[getter]
+    fn get_exclude_patterns(&self) -> Vec<String> {
+        self.inner
+            .selection
+            .exclude()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Replaces the exclude patterns; an empty list removes them.
+    #[setter]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 setters receive the extracted list by value"
+    )]
+    fn set_exclude_patterns(&mut self, value: Vec<String>) -> PyResult<()> {
+        let exclude = parse_entry_patterns(ConfigSetting::EntryExclude, &value)?;
+        let include = self.inner.selection.include().to_vec();
+        self.inner.selection = rebuilt_selection(&self.inner.selection, include, exclude);
+        Ok(())
+    }
+
+    /// How many leading components are dropped, or `None` when no strip is set.
+    #[getter]
+    fn get_strip_components(&self) -> Option<usize> {
+        match self.inner.selection.rewrite() {
+            PathRewrite::Strip(strip) => Some(strip.get().get()),
+            _ => None,
+        }
+    }
+
+    /// Sets the strip count; `None` removes a strip (a flatten stays).
+    #[setter]
+    fn set_strip_components(&mut self, value: Option<PyInteger>) -> PyResult<()> {
+        self.try_set_strip_components(value)
+    }
+
+    /// Whether files land by their final component only.
+    #[getter]
+    fn get_flatten(&self) -> bool {
+        self.inner.selection.rewrite() == PathRewrite::Flatten
+    }
+
+    /// `True` flattens (replacing a strip); `False` removes a flatten (a strip
+    /// stays).
+    #[setter(flatten)]
+    fn set_flatten_property(&mut self, value: bool) {
+        self.set_flatten(value);
     }
 
     /// Returns a debug string representation.
@@ -690,6 +870,32 @@ impl PySecurityConfig {
             self.inner.max_path_depth
         )
     }
+}
+
+/// Parses entry patterns, each refused one naming `setting`.
+fn parse_entry_patterns(
+    setting: ConfigSetting,
+    patterns: &[String],
+) -> PyResult<Vec<EntryPattern>> {
+    patterns
+        .iter()
+        .map(|pattern| EntryPattern::parse_for(setting, pattern).map_err(convert_error))
+        .collect()
+}
+
+/// A selection with the rewrite of `current` and the given patterns.
+fn rebuilt_selection(
+    current: &EntrySelection,
+    include: Vec<EntryPattern>,
+    exclude: Vec<EntryPattern>,
+) -> EntrySelection {
+    let selection = EntrySelection::default().with_rewrite(current.rewrite());
+    let selection = include
+        .into_iter()
+        .fold(selection, EntrySelection::with_include);
+    exclude
+        .into_iter()
+        .fold(selection, EntrySelection::with_exclude)
 }
 
 /// Maps the Python value of `parallel_decode_memory` (`None` or a positive
@@ -713,6 +919,43 @@ impl PySecurityConfig {
     /// API.
     pub fn as_core(&self) -> &CoreSecurityConfig {
         &self.inner
+    }
+
+    /// A copy of the inner `CoreSecurityConfig`, or the secure default.
+    ///
+    /// Taken as an owned value so no borrow of the Python object is held while
+    /// the GIL is released: a concurrent setter would otherwise raise
+    /// `RuntimeError: Already borrowed`.
+    pub fn snapshot(config: Option<PyRef<'_, Self>>) -> CoreSecurityConfig {
+        config.map_or_else(CoreSecurityConfig::default, |c| c.inner.clone())
+    }
+
+    /// Shared by the builder and the property setter of `strip_components`.
+    /// `None` removes a strip; a flatten is left alone.
+    fn try_set_strip_components(&mut self, count: Option<PyInteger>) -> PyResult<()> {
+        let rewrite = match count {
+            Some(count) => {
+                let count = count.positive(ConfigSetting::StripComponents)?;
+                PathRewrite::Strip(
+                    StripComponents::new(count, self.inner.max_path_depth)
+                        .map_err(convert_error)?,
+                )
+            }
+            None if self.inner.selection.rewrite() == PathRewrite::Flatten => PathRewrite::Flatten,
+            None => PathRewrite::Keep,
+        };
+        self.inner.selection = self.inner.selection.clone().with_rewrite(rewrite);
+        Ok(())
+    }
+
+    /// Shared by the builder and the property setter of `flatten`.
+    fn set_flatten(&mut self, flatten: bool) {
+        let rewrite = match (flatten, self.inner.selection.rewrite()) {
+            (true, _) => PathRewrite::Flatten,
+            (false, PathRewrite::Flatten) => PathRewrite::Keep,
+            (false, other) => other,
+        };
+        self.inner.selection = self.inner.selection.clone().with_rewrite(rewrite);
     }
 
     /// Shared by the builder and the property setter of
@@ -793,7 +1036,7 @@ impl PyCreationConfig {
         mut slf: PyRefMut<'_, Self>,
         preserve: bool,
     ) -> PyRefMut<'_, Self> {
-        slf.inner.preserve_permissions = preserve;
+        slf.inner.permissions = PermissionPolicy::from_preserve(preserve);
         slf
     }
 
@@ -822,7 +1065,10 @@ impl PyCreationConfig {
     /// `InvalidConfigurationError` (`setting == "exclude_pattern"`) for any
     /// other shape, including glob look-alikes (`?`, `[`, `]`, `{`, `}`, `!`),
     /// commas and edge whitespace.
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pyo3 passes the extracted list by value"
+    )]
     fn with_exclude_patterns(
         mut slf: PyRefMut<'_, Self>,
         patterns: Vec<String>,
@@ -868,12 +1114,12 @@ impl PyCreationConfig {
 
     #[getter]
     fn get_preserve_permissions(&self) -> bool {
-        self.inner.preserve_permissions
+        self.inner.permissions.preserves()
     }
 
     #[setter]
     fn set_preserve_permissions(&mut self, value: bool) {
-        self.inner.preserve_permissions = value;
+        self.inner.permissions = PermissionPolicy::from_preserve(value);
     }
 
     #[getter]
@@ -906,7 +1152,10 @@ impl PyCreationConfig {
     }
 
     #[setter]
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 setters receive the extracted list by value"
+    )]
     fn set_exclude_patterns(&mut self, value: Vec<String>) -> PyResult<()> {
         self.inner.exclude_patterns = parse_exclude_patterns(&value)?;
         Ok(())
@@ -928,7 +1177,7 @@ impl PyCreationConfig {
         format!(
             "CreationConfig(compression_level={:?}, preserve_permissions={}, follow_symlinks={}, include_hidden={})",
             self.inner.compression_level,
-            self.inner.preserve_permissions,
+            self.inner.permissions.preserves(),
             self.inner.follow_symlinks,
             self.inner.include_hidden
         )
@@ -936,23 +1185,30 @@ impl PyCreationConfig {
 }
 
 impl PyCreationConfig {
-    /// Returns a reference to the inner `CoreCreationConfig`.
-    pub fn as_core(&self) -> &CoreCreationConfig {
-        &self.inner
+    /// A copy of the inner `CoreCreationConfig`, or the default; see
+    /// [`PySecurityConfig::snapshot`] for why it is owned.
+    pub fn snapshot(config: Option<PyRef<'_, Self>>) -> CoreCreationConfig {
+        config.map_or_else(CoreCreationConfig::default, |c| c.inner.clone())
     }
 }
 
 /// Options controlling extraction behavior (non-security).
 ///
 /// Separate from `SecurityConfig` to keep security settings focused.
-/// These options control operational behavior such as duplicate handling.
+/// These options control operational behavior such as how existing files are
+/// treated.
 ///
 /// # Attributes
 ///
-/// * `skip_duplicates` - Skip duplicate entries silently instead of aborting
-///   (default: `True`)
-/// * `atomic` - Extract to a temp dir then rename atomically on success
-///   (default: `False`)
+/// * `existing_files` - What to do with a file that already exists at a landing
+///   path, or that an earlier entry created: `"skip"` (default) keeps it and
+///   counts a duplicate, `"overwrite"` replaces it where the entry kinds allow,
+///   `"refuse"` fails with `OutputExistsError` and never overwrites
+/// * `staging` - Where files are written first: `"in_place"` (default) writes
+///   into the destination, `"atomic"` extracts into a temporary sibling
+///   directory and renames it onto a destination that is absent or empty,
+///   `"atomic_replace"` also swaps it over an existing directory, replacing it
+///   as a whole
 ///
 /// # Examples
 ///
@@ -960,11 +1216,11 @@ impl PyCreationConfig {
 /// # Use defaults
 /// opts = ExtractionOptions()
 ///
-/// # Disable duplicate skipping
-/// opts = ExtractionOptions().with_skip_duplicates(False)
+/// # Refuse to touch anything that already exists
+/// opts = ExtractionOptions().with_existing_files("refuse")
 ///
-/// # Enable atomic extraction
-/// opts = ExtractionOptions().with_atomic(True)
+/// # Extract atomically
+/// opts = ExtractionOptions().with_staging("atomic")
 /// ```
 #[pyclass(name = "ExtractionOptions")]
 #[derive(Clone)]
@@ -990,43 +1246,63 @@ impl PyExtractionOptions {
         Self::new()
     }
 
-    /// Sets whether duplicate archive entries are skipped silently.
+    /// Sets how an existing file at a landing path is treated.
     ///
-    /// When `True` (default), duplicate entries produce a warning in the
-    /// report. When `False`, a duplicate entry causes an error.
-    #[pyo3(signature = (skip=true))]
-    fn with_skip_duplicates(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
-        slf.inner.skip_duplicates = skip;
-        slf
+    /// `"skip"` (default) keeps the existing file and counts the entry as a
+    /// duplicate skip; `"overwrite"` replaces it where the entry kinds allow;
+    /// `"refuse"` raises `OutputExistsError` for any occupant and never
+    /// overwrites. A kind conflict is refused under every value.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "existing_files"`) for any
+    /// other string.
+    fn with_existing_files<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner.existing_files = parse_existing_files(value)?;
+        Ok(slf)
     }
 
-    /// Sets whether extraction uses a temporary directory for atomic commits.
+    /// Sets where extracted files are written first.
     ///
-    /// When `True`, files are extracted to a temp dir in the same parent as
-    /// the output directory, then atomically renamed on completion. On failure
-    /// the temp dir is removed, leaving the output directory untouched.
-    /// Default: `False`.
+    /// * `"in_place"` (default) writes into the destination, which may already
+    ///   hold files.
+    /// * `"atomic"` extracts into a temporary directory next to the destination
+    ///   and renames it into place on success; a failure or cancellation
+    ///   removes it. A destination that holds content raises
+    ///   `OutputExistsError` before anything is extracted, and one that is not
+    ///   a directory raises `InvalidConfigurationError`. A symlinked
+    ///   destination is resolved first.
+    /// * `"atomic_replace"` is `"atomic"`, and also swaps the staged tree over
+    ///   an existing destination directory, replacing it as a whole. The
+    ///   original is renamed aside only once extraction succeeded and restored
+    ///   if the swap fails. A destination that is a filesystem root, the
+    ///   archive's directory or an ancestor of it, or the working directory is
+    ///   refused with `InvalidConfigurationError`.
     ///
-    /// **Important:** atomic mode requires that the output directory is absent
-    /// or empty: an empty directory is replaced. Into a non-empty directory
-    /// the final rename fails and extraction raises ``OSError`` with
-    /// ``code == "IO_ERROR"`` (not ``OutputExistsError``, which
-    /// ``create_archive`` raises with ``overwrite=False``); the staged tree is
-    /// removed and the directory is left as it was.
-    /// Non-atomic mode extracts into an existing directory without error.
+    /// `extract_archive_to_memory` and `extract_archive_to_callback` take no
+    /// staging.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "staging"`) for any other
+    /// string.
     ///
     /// # Examples
     ///
     /// ```python
     /// from exarch import ExtractionOptions
-    /// opts = ExtractionOptions().with_atomic(True)
-    /// assert opts.atomic == True
+    /// opts = ExtractionOptions().with_staging("atomic")
+    /// assert opts.staging == "atomic"
     /// ```
-    #[pyo3(name = "with_atomic")]
-    #[pyo3(signature = (atomic=true))]
-    fn with_atomic(mut slf: PyRefMut<'_, Self>, atomic: bool) -> PyRefMut<'_, Self> {
-        slf.inner.atomic = atomic;
-        slf
+    fn with_staging<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner.staging = parse_staging(value)?;
+        Ok(slf)
     }
 
     /// Finalizes the configuration (for API consistency).
@@ -1035,38 +1311,42 @@ impl PyExtractionOptions {
     }
 
     #[getter]
-    fn get_skip_duplicates(&self) -> bool {
-        self.inner.skip_duplicates
+    fn get_existing_files(&self) -> &'static str {
+        self.inner.existing_files.as_str()
     }
 
     #[setter]
-    fn set_skip_duplicates(&mut self, value: bool) {
-        self.inner.skip_duplicates = value;
+    fn set_existing_files(&mut self, value: &str) -> PyResult<()> {
+        self.inner.existing_files = parse_existing_files(value)?;
+        Ok(())
     }
 
     #[getter]
-    fn get_atomic(&self) -> bool {
-        self.inner.atomic
+    fn get_staging(&self) -> &'static str {
+        self.inner.staging.as_str()
     }
 
     #[setter]
-    fn set_atomic(&mut self, value: bool) {
-        self.inner.atomic = value;
+    fn set_staging(&mut self, value: &str) -> PyResult<()> {
+        self.inner.staging = parse_staging(value)?;
+        Ok(())
     }
 
     /// Returns a debug string representation.
     fn __repr__(&self) -> String {
         format!(
-            "ExtractionOptions(skip_duplicates={}, atomic={})",
-            self.inner.skip_duplicates, self.inner.atomic
+            "ExtractionOptions(existing_files={:?}, staging={:?})",
+            self.inner.existing_files.as_str(),
+            self.inner.staging.as_str()
         )
     }
 }
 
 impl PyExtractionOptions {
-    /// Returns a reference to the inner `CoreExtractionOptions`.
-    pub fn as_core(&self) -> &CoreExtractionOptions {
-        &self.inner
+    /// A copy of the inner `CoreExtractionOptions`, taken so no borrow of the
+    /// Python object outlives the call that reads it.
+    pub fn snapshot(options: Option<PyRef<'_, Self>>) -> CoreExtractionOptions {
+        options.map_or_else(CoreExtractionOptions::default, |o| o.inner.clone())
     }
 }
 
@@ -1167,9 +1447,10 @@ impl PyVerificationOptions {
 }
 
 impl PyVerificationOptions {
-    /// Returns a reference to the inner `CoreVerificationOptions`.
-    pub fn as_core(&self) -> &CoreVerificationOptions {
-        &self.inner
+    /// A copy of the inner `CoreVerificationOptions`, or the default; see
+    /// [`PySecurityConfig::snapshot`] for why it is owned.
+    pub fn snapshot(options: Option<PyRef<'_, Self>>) -> CoreVerificationOptions {
+        options.map_or_else(CoreVerificationOptions::default, |o| o.inner)
     }
 }
 
@@ -1442,7 +1723,7 @@ mod tests {
 
             let extensions = py_config.borrow(py).get_allowed_extensions();
             assert!(
-                extensions.contains(&"txt".to_string()),
+                extensions.is_some_and(|list| list.contains(&"txt".to_string())),
                 "Extension should be added to list"
             );
         });
@@ -1601,12 +1882,37 @@ mod tests {
     }
 
     #[test]
-    fn test_is_extension_allowed_empty_list() {
+    fn test_is_extension_allowed_without_a_list() {
         let config = PySecurityConfig::new();
         assert!(
             config.is_extension_allowed("txt"),
-            "Empty allowed_extensions list should allow all extensions"
+            "no allowlist should allow all extensions"
         );
+        assert_eq!(config.get_allowed_extensions(), None);
+    }
+
+    #[test]
+    fn test_empty_allowed_extensions_is_refused_and_none_clears() {
+        pyo3::Python::initialize();
+        let mut config = PySecurityConfig::new();
+        assert!(config.set_allowed_extensions(Some(vec![])).is_err());
+        assert_eq!(config.get_allowed_extensions(), None);
+
+        config
+            .set_allowed_extensions(Some(vec!["txt".to_owned()]))
+            .expect("one extension");
+        assert_eq!(
+            config.get_allowed_extensions(),
+            Some(vec!["txt".to_owned()])
+        );
+        assert!(config.set_allowed_extensions(Some(vec![])).is_err());
+        assert_eq!(
+            config.get_allowed_extensions(),
+            Some(vec!["txt".to_owned()])
+        );
+
+        config.set_allowed_extensions(None).expect("None clears");
+        assert_eq!(config.get_allowed_extensions(), None);
     }
 
     #[test]

@@ -40,9 +40,46 @@ describe('creation source errors', () => {
     await assert.rejects(createArchive(out, [tree]), (err) => {
       assert.strictEqual(err.code, 'SOURCE_NOT_ACCESSIBLE');
       assert.ok(err.message.includes('unread.txt'), err.message);
+      assert.strictEqual(typeof err.errno, 'number');
+      assert.strictEqual(typeof err.strerror, 'string');
+      assert.ok(err.path.endsWith('unread.txt'), err.path);
       return true;
     });
     assert.throws(() => createArchiveSync(out, [tree]), { code: 'SOURCE_NOT_ACCESSIBLE' });
+    assert.ok(!fs.existsSync(out));
+  });
+
+  it('a missing source carries no OS failure properties', () => {
+    assert.throws(
+      () => createArchiveSync(path.join(tempDir, 'o.tar'), [path.join(tempDir, 'missing')]),
+      (err) => {
+        assert.strictEqual(err.code, 'SOURCE_NOT_FOUND');
+        assert.strictEqual(err.errno, undefined);
+        assert.strictEqual(err.strerror, undefined);
+        return true;
+      }
+    );
+  });
+
+  it('two sources with one entry name are INVALID_CONFIGURATION naming both', () => {
+    const one = path.join(tempDir, 'one');
+    const two = path.join(tempDir, 'two');
+    fs.mkdirSync(one);
+    fs.mkdirSync(two);
+    fs.writeFileSync(path.join(one, 'a.txt'), '1');
+    fs.writeFileSync(path.join(two, 'a.txt'), '2');
+    const out = path.join(tempDir, 'o.tar');
+    assert.throws(
+      () => createArchiveSync(out, [path.join(one, 'a.txt'), path.join(two, 'a.txt')]),
+      (err) => {
+        assert.strictEqual(err.code, 'INVALID_CONFIGURATION');
+        assert.strictEqual(err.setting, 'source_paths');
+        assert.strictEqual(err.collision.name, 'a.txt');
+        assert.ok(err.collision.first.endsWith('a.txt'), err.collision.first);
+        assert.ok(err.collision.second.endsWith('a.txt'), err.collision.second);
+        return true;
+      }
+    );
     assert.ok(!fs.existsSync(out));
   });
 

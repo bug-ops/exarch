@@ -187,9 +187,9 @@ impl CallbackJob {
 /// relative to the link. A `'hardlink'` entry is delivered by reference after
 /// every other entry: its `target` is the root-relative resolved path of an
 /// entry already delivered, a file or an earlier hardlink (a chain is
-/// delivered link by link). With `skipDuplicates` off one path can be delivered
-/// more than once and a hardlink refers to the latest delivery. Implicit
-/// parent directories are not delivered.
+/// delivered link by link). With `existingFiles` set to `'overwrite'` one path
+/// can be delivered more than once and a hardlink refers to the latest
+/// delivery. Implicit parent directories are not delivered.
 ///
 /// # Arguments
 ///
@@ -232,11 +232,7 @@ impl CallbackJob {
 /// });
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    reason = "napi arguments are owned and the JS signature is positional, `signal` last"
-)]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_callback<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -266,7 +262,7 @@ pub fn extract_archive_to_callback<'env>(
                 }
             })
         },
-        |report| Ok(ExtractionReport::from(report)),
+        ExtractionReport::try_from,
         move |env| detach.run(env),
     )
 }
@@ -300,10 +296,6 @@ pub fn extract_archive_to_callback<'env>(
 /// extractArchiveToCallbackSync(fs.readFileSync('a.zip'), (entry) => names.push(entry.path));
 /// ```
 #[napi]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi passes JavaScript arguments by value"
-)]
 pub fn extract_archive_to_callback_sync<'env>(
     env: Env,
     data: Uint8Array,
@@ -338,5 +330,5 @@ pub fn extract_archive_to_callback_sync<'env>(
             .into())
         })
     })
-    .map(ExtractionReport::from)
+    .and_then(ExtractionReport::try_from)
 }

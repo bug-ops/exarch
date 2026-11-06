@@ -17,6 +17,7 @@ use exarch_core::CallbackEntry;
 use exarch_core::CallbackError;
 use exarch_core::CallbackSink;
 use exarch_core::DecodeReuse;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractionOptions;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
@@ -150,7 +151,7 @@ fn under_overwrite_a_path_is_delivered_again() {
     let (result, delivered) = collect(
         &entries,
         &SecurityConfig::default(),
-        SinkOptions::default().with_skip_duplicates(false),
+        SinkOptions::default().with_existing_files(ExistingFiles::Overwrite),
     );
 
     result.unwrap();
@@ -281,7 +282,7 @@ fn an_archive_refusal_is_not_a_callback_error() {
 #[test]
 fn the_request_options_are_applied() {
     let request = MemoryExtractRequest::default()
-        .with_options(SinkOptions::default().with_skip_duplicates(false));
+        .with_options(SinkOptions::default().with_existing_files(ExistingFiles::Overwrite));
     let mut names = Vec::new();
 
     extract_reader_to_callback(

@@ -1,6 +1,5 @@
 //! Command implementations.
 
-mod atomic_swap;
 pub mod completion;
 pub mod create;
 pub mod extract;

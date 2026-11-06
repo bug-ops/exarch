@@ -12,6 +12,8 @@ use crate::ArchiveError;
 use crate::Malformation;
 use crate::Result;
 use crate::formats::common;
+use crate::formats::source_fault::SourceRead;
+use crate::formats::source_fault::SourceTap;
 use sevenz_rust2::Archive;
 use sevenz_rust2::Block;
 use sevenz_rust2::Password;
@@ -165,14 +167,36 @@ impl SevenZHeader {
 /// Returns [`ArchiveError::InvalidArchive`] for a header that does not parse
 /// or that lists pack streams without a stream-map offset for each.
 pub fn read_sevenz_header<R: Read + Seek>(source: &mut R) -> Result<SevenZHeader> {
-    match Archive::read(&mut *source, &Password::empty()) {
+    let tap = SourceTap::default();
+    let parsed = Archive::read(
+        &mut SourceRead::new(&mut *source, tap.clone()),
+        &Password::empty(),
+    );
+    match parsed {
         Ok(archive) => SevenZHeader::check(archive),
-        Err(e) if super::is_password_error(&e) => Err(common::encrypted_archive_error()),
-        Err(e) if is_empty_sevenz_archive(&e, source) => Ok(SevenZHeader::empty()),
-        Err(e) => Err(ArchiveError::from(Malformation::SevenZHeaderUnreadable {
-            detail: e.to_string().into(),
-        })),
+        Err(error) => header_failure(&error, &tap, source),
     }
+}
+
+/// The result of a header parse that failed with `error`: a fault the source
+/// raised is I/O, never a verdict on the header.
+fn header_failure<R: Read + Seek>(
+    error: &sevenz_rust2::Error,
+    tap: &SourceTap,
+    source: &mut R,
+) -> Result<SevenZHeader> {
+    if let Some(fault) = tap.fault() {
+        return Err(ArchiveError::Io(fault));
+    }
+    if super::is_password_error(error) {
+        return Err(common::encrypted_archive_error());
+    }
+    if is_empty_sevenz_archive(error, source) {
+        return Ok(SevenZHeader::empty());
+    }
+    Err(ArchiveError::from(Malformation::SevenZHeaderUnreadable {
+        detail: error.to_string().into(),
+    }))
 }
 
 /// Whether a `sevenz-rust2` parse failure is a valid empty 7z archive: an

@@ -14,14 +14,16 @@ use super::write::lstat_dest;
 use super::write::refuse_undecoded_target_in;
 use super::write::write_file_direct;
 use super::write::write_file_with_permit;
+use crate::ExistingFiles;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::formats::common;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::source_fault::ReadFaults;
+use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
-use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
 use crate::formats::target::HostParent;
 use crate::formats::target::HostTarget;
@@ -34,10 +36,9 @@ use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::hardlink::HardlinkTarget;
 use crate::security::validator::EntryPath;
-use crate::security::validator::FileScreen;
-use crate::security::validator::NodeKind;
+use crate::security::validator::Gated;
 use crate::security::validator::ValidatorCore;
-use crate::sink::DuplicatePolicy;
+use crate::selection::EntryShape;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -141,14 +142,10 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         &mut self,
         request: FileRequest<'_>,
         tally: &mut Tally<'_>,
-    ) -> Result<FileAdmission<SevenZAdmittedFile>> {
-        let pending = match self.inner.screen_file(request)? {
-            FileScreen::DisallowedExtension => {
-                return tally
-                    .record_extension_skip(request.path)
-                    .map(FileAdmission::Skipped);
-            }
-            FileScreen::Pending(pending) => pending,
+    ) -> Result<Admission<SevenZAdmittedFile>> {
+        let pending = match tally.admission(self.inner.screen_file(request)?, request.path)? {
+            Admission::Admit(pending) => pending,
+            Admission::Skipped(skipped) => return Ok(Admission::Skipped(skipped)),
         };
         let safe_path = pending.path().clone();
         let (parent, leaf) = self
@@ -159,25 +156,51 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let parent = parent.into_owned()?;
 
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
-        if occupancy.is_occupied() && tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-            return tally
-                .record_duplicate_skip(safe_path.as_path())
-                .map(FileAdmission::Skipped);
+        if occupancy.is_occupied() {
+            match tally.options.existing_files {
+                ExistingFiles::Skip => {
+                    return tally
+                        .record_duplicate_skip(safe_path.as_path())
+                        .map(Admission::Skipped);
+                }
+                ExistingFiles::Refuse => {
+                    if self
+                        .inner
+                        .root()
+                        .created()
+                        .created_here(&parent, leaf, safe_path.as_path())
+                    {
+                        return tally
+                            .record_duplicate_skip(safe_path.as_path())
+                            .map(Admission::Skipped);
+                    }
+                    return Err(common::destination_occupied(
+                        self.inner.root().dest().as_path(),
+                        safe_path.as_path(),
+                    ));
+                }
+                ExistingFiles::Overwrite => {}
+            }
         }
         let write_mode = occupancy.write_mode(safe_path.as_path())?;
 
         // Quota is reserved before anything is removed, so a refusal never
         // destroys a destination it could not replace.
         let file = self.inner.admit_file(pending)?;
-        Ok(FileAdmission::Write(SevenZAdmittedFile {
+        Ok(Admission::Admit(SevenZAdmittedFile {
             file,
             write_mode,
             parent,
         }))
     }
 
-    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath<HostParent>> {
-        self.inner.validate_directory(path, size)
+    fn validate_directory(
+        &mut self,
+        path: &Path,
+        size: EntrySize,
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafePath<HostParent>>> {
+        self.inner.validate_directory(path, size, tally)
     }
 
     fn validate_symlink(
@@ -185,8 +208,9 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<SafeSymlink<HostParent>> {
-        self.inner.validate_symlink(path, target, size)
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafeSymlink<HostParent>>> {
+        self.inner.validate_symlink(path, target, size, tally)
     }
 
     fn validate_hardlink(
@@ -194,8 +218,13 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<ValidatedHardlink<HostParent>> {
-        self.inner.validate_hardlink(path, target, size)
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<ValidatedHardlink<HostParent>>> {
+        self.inner.validate_hardlink(path, target, size, tally)
+    }
+
+    fn finish_scan(&mut self) -> Result<()> {
+        self.inner.finish_scan()
     }
 
     fn directory(&mut self, path: &SafePath<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
@@ -205,6 +234,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
+        faults: ReadFaults<'_>,
         admitted: SevenZAdmittedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
@@ -216,13 +246,29 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let (path, permit, _mode) = file.into_parts();
         let (_, leaf) = Leaf::split(path.as_path())?;
         let written = match write_mode {
-            WriteMode::CreateNew => {
-                write_file_direct(reader, &parent, leaf, self.inner.copy_buffer_mut(), permit)?
-            }
-            WriteMode::ReplaceRegular => {
-                write_file_with_permit(reader, &parent, leaf, self.inner.copy_buffer_mut(), permit)?
-            }
+            WriteMode::CreateNew => write_file_direct(
+                reader,
+                faults,
+                &parent,
+                leaf,
+                self.inner.copy_buffer_mut(),
+                permit,
+            )?,
+            WriteMode::ReplaceRegular => write_file_with_permit(
+                reader,
+                faults,
+                &parent,
+                leaf,
+                self.inner.copy_buffer_mut(),
+                permit,
+            )?,
         };
+        self.inner.root().created().note(
+            tally.options.existing_files,
+            &parent,
+            leaf,
+            path.as_path(),
+        );
         tally.record_file(written)
     }
 
@@ -250,31 +296,39 @@ struct HostPrePass<'a> {
 }
 
 impl PrePass for HostPrePass<'_> {
-    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>> {
+    fn validate_path(
+        &mut self,
+        path: &Path,
+        shape: EntryShape,
+    ) -> Result<Gated<EntryPath<SafePath>>> {
         let ctx: ValidationContext<HostFs> = self.core.context();
         self.core
-            .validate_entry_path_in(path, kind, self.dest, &HostFs, &ctx)
+            .route_entry_in(path, shape, self.dest, &HostFs, &ctx)
     }
 
-    fn directory(&mut self, _path: &Path) -> Result<()> {
+    fn directory(&mut self, _landing: &SafePath) -> Result<()> {
         Ok(())
     }
 
-    fn symlink(
-        &mut self,
-        link: &SafePath,
-        _path: &Path,
-        file: &sevenz_rust2::ArchiveEntry,
-    ) -> Result<()> {
+    fn symlink(&mut self, link: &SafePath, file: &sevenz_rust2::ArchiveEntry) -> Result<()> {
         common::require_symlink_creation()?;
         refuse_undecoded_target_in(link, file, self.dest, self.config, &HostFs)
     }
 
-    fn file(&mut self, safe_path: &SafePath, _path: &Path) -> Result<FilePlan> {
+    fn file(&mut self, safe_path: &SafePath) -> Result<FilePlan> {
         let dest_path = self.dest.join(safe_path);
         let occupancy = DestOccupancy::probe_path(&dest_path)?;
-        if occupancy.is_occupied() && self.options.duplicate_policy() == DuplicatePolicy::Skip {
-            return Ok(FilePlan::Skip);
+        if occupancy.is_occupied() {
+            match self.options.existing_files {
+                ExistingFiles::Skip => return Ok(FilePlan::Skip),
+                ExistingFiles::Refuse => {
+                    return Err(common::destination_occupied(
+                        self.dest.as_path(),
+                        safe_path.as_path(),
+                    ));
+                }
+                ExistingFiles::Overwrite => {}
+            }
         }
         // Fail here too, before any entry is written, so the pre-pass keeps
         // its no-partial-extraction guarantee for this refusal.

@@ -19,12 +19,13 @@ use criterion::Criterion;
 use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
-use exarch_core::create_archive;
-use exarch_core::creation::CompressionLevel;
-use exarch_core::creation::CreationConfig;
-use exarch_core::creation::ExcludePattern;
-use exarch_core::creation::filters;
-use exarch_core::formats::detect::CreatableFormat;
+use exarch_core::CompressionLevel;
+use exarch_core::CreatableFormat;
+use exarch_core::CreateRequest;
+use exarch_core::CreationConfig;
+use exarch_core::Durability;
+use exarch_core::ExcludePattern;
+use exarch_core::OutputFile;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
@@ -135,6 +136,38 @@ fn create_filtered_directory(temp: &TempDir) -> std::path::PathBuf {
     dir
 }
 
+/// Creates the archive without the fsyncs of the default durability, so the
+/// benches measure the creation pipeline, and fails loudly when creation fails.
+fn create_unsynced<P: AsRef<Path>>(output: &Path, sources: &[P], config: &CreationConfig) {
+    CreateRequest::new(config)
+        .create(
+            &OutputFile::create_new(output).with_durability(Durability::Unsynced),
+            sources,
+        )
+        .unwrap();
+}
+
+fn benchmark_staged_create_synced(c: &mut Criterion) {
+    let temp = TempDir::new().unwrap();
+    let source_dir = create_test_directory(&temp, 10);
+    let config = CreationConfig::default();
+
+    let mut group = c.benchmark_group("staged_create");
+    group.bench_function("synced", |b| {
+        b.iter(|| {
+            let output = temp.path().join("output.tar");
+            CreateRequest::new(&config)
+                .create(
+                    &OutputFile::create_new(black_box(&output)),
+                    black_box(&[&source_dir]),
+                )
+                .unwrap();
+            fs::remove_file(&output).unwrap();
+        });
+    });
+    group.finish();
+}
+
 fn benchmark_create_tar_formats(c: &mut Criterion) {
     let mut group = c.benchmark_group("tar_formats");
     let temp = TempDir::new().unwrap();
@@ -153,12 +186,12 @@ fn benchmark_create_tar_formats(c: &mut Criterion) {
             b.iter(|| {
                 let output = temp.path().join(format!("output.{}", name));
                 let config = CreationConfig::default();
-                let _ = create_archive(
+                create_unsynced(
                     black_box(&output),
                     black_box(&[&source_dir]),
                     black_box(&config),
                 );
-                fs::remove_file(&output).ok();
+                fs::remove_file(&output).unwrap();
             });
         });
     }
@@ -174,12 +207,12 @@ fn benchmark_create_zip(c: &mut Criterion) {
     c.bench_function("create_zip_100_files", |b| {
         b.iter(|| {
             let output = temp.path().join("output.zip");
-            let _ = create_archive(
+            create_unsynced(
                 black_box(&output),
                 black_box(&[&source_dir]),
                 black_box(&config),
             );
-            fs::remove_file(&output).ok();
+            fs::remove_file(&output).unwrap();
         });
     });
 }
@@ -198,12 +231,12 @@ fn benchmark_compression_levels(c: &mut Criterion) {
                     let output = temp.path().join("output.tar.gz");
                     let config = CreationConfig::default()
                         .with_compression_level(CompressionLevel::try_from(*level).unwrap());
-                    let _ = create_archive(
+                    create_unsynced(
                         black_box(&output),
                         black_box(&[&source_dir]),
                         black_box(&config),
                     );
-                    fs::remove_file(&output).ok();
+                    fs::remove_file(&output).unwrap();
                 });
             },
         );
@@ -225,12 +258,12 @@ fn benchmark_file_counts(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("tar", file_count), &file_count, |b, _| {
             b.iter(|| {
                 let output = temp.path().join("output.tar");
-                let _ = create_archive(
+                create_unsynced(
                     black_box(&output),
                     black_box(&[&source_dir]),
                     black_box(&config),
                 );
-                fs::remove_file(&output).ok();
+                fs::remove_file(&output).unwrap();
             });
         });
     }
@@ -249,12 +282,12 @@ fn benchmark_nested_directories(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("depth", depth), &depth, |b, _| {
             b.iter(|| {
                 let output = temp.path().join("output.tar");
-                let _ = create_archive(
+                create_unsynced(
                     black_box(&output),
                     black_box(&[&source_dir]),
                     black_box(&config),
                 );
-                fs::remove_file(&output).ok();
+                fs::remove_file(&output).unwrap();
             });
         });
     }
@@ -276,24 +309,24 @@ fn benchmark_mixed_file_sizes(c: &mut Criterion) {
     group.bench_function("tar", |b| {
         b.iter(|| {
             let output = temp.path().join("output.tar");
-            let _ = create_archive(
+            create_unsynced(
                 black_box(&output),
                 black_box(&[&source_dir]),
                 black_box(&config),
             );
-            fs::remove_file(&output).ok();
+            fs::remove_file(&output).unwrap();
         });
     });
 
     group.bench_function("tar.gz", |b| {
         b.iter(|| {
             let output = temp.path().join("output.tar.gz");
-            let _ = create_archive(
+            create_unsynced(
                 black_box(&output),
                 black_box(&[&source_dir]),
                 black_box(&config),
             );
-            fs::remove_file(&output).ok();
+            fs::remove_file(&output).unwrap();
         });
     });
 
@@ -313,12 +346,12 @@ fn benchmark_directory_walker(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("walk", file_count), &file_count, |b, _| {
             b.iter(|| {
                 let output = temp.path().join("bench_walk.tar");
-                let _ = create_archive(
+                create_unsynced(
                     black_box(&output),
                     black_box(&[source_dir.as_path()]),
                     black_box(&config),
                 );
-                fs::remove_file(&output).ok();
+                fs::remove_file(&output).unwrap();
             });
         });
     }
@@ -329,18 +362,8 @@ fn benchmark_directory_walker(c: &mut Criterion) {
 fn benchmark_path_filtering(c: &mut Criterion) {
     let mut group = c.benchmark_group("path_filtering");
 
-    let visible_path = Path::new("src/main.rs");
     let hidden_path = Path::new(".gitignore");
     let temp_path = Path::new("file.tmp");
-
-    // Benchmark is_hidden
-    group.bench_function("is_hidden_visible", |b| {
-        b.iter(|| filters::is_hidden(black_box(visible_path)));
-    });
-
-    group.bench_function("is_hidden_hidden", |b| {
-        b.iter(|| filters::is_hidden(black_box(hidden_path)));
-    });
 
     // Benchmark ExcludePattern::matches
     let exact = ExcludePattern::try_from(".gitignore").unwrap();
@@ -358,21 +381,6 @@ fn benchmark_path_filtering(c: &mut Criterion) {
         b.iter(|| prefix.matches(black_box(temp_path)));
     });
 
-    // Benchmark skip_reason
-    let config = CreationConfig::default();
-
-    group.bench_function("skip_reason_visible", |b| {
-        b.iter(|| filters::skip_reason(black_box(visible_path), black_box(&config)));
-    });
-
-    group.bench_function("skip_reason_hidden", |b| {
-        b.iter(|| filters::skip_reason(black_box(hidden_path), black_box(&config)));
-    });
-
-    group.bench_function("skip_reason_excluded", |b| {
-        b.iter(|| filters::skip_reason(black_box(temp_path), black_box(&config)));
-    });
-
     group.finish();
 }
 
@@ -387,12 +395,12 @@ fn benchmark_filtered_walking(c: &mut Criterion) {
     group.bench_function("default_filters", |b| {
         b.iter(|| {
             let output = temp.path().join("bench_filtered_default.tar");
-            let _ = create_archive(
+            create_unsynced(
                 black_box(&output),
                 black_box(&[source_dir.as_path()]),
                 black_box(&default_config),
             );
-            fs::remove_file(&output).ok();
+            fs::remove_file(&output).unwrap();
         });
     });
 
@@ -401,12 +409,12 @@ fn benchmark_filtered_walking(c: &mut Criterion) {
     group.bench_function("include_hidden", |b| {
         b.iter(|| {
             let output = temp.path().join("bench_filtered_hidden.tar");
-            let _ = create_archive(
+            create_unsynced(
                 black_box(&output),
                 black_box(&[source_dir.as_path()]),
                 black_box(&include_hidden_config),
             );
-            fs::remove_file(&output).ok();
+            fs::remove_file(&output).unwrap();
         });
     });
 
@@ -417,12 +425,12 @@ fn benchmark_filtered_walking(c: &mut Criterion) {
     group.bench_function("no_filters", |b| {
         b.iter(|| {
             let output = temp.path().join("bench_filtered_none.tar");
-            let _ = create_archive(
+            create_unsynced(
                 black_box(&output),
                 black_box(&[source_dir.as_path()]),
                 black_box(&no_filter_config),
             );
-            fs::remove_file(&output).ok();
+            fs::remove_file(&output).unwrap();
         });
     });
 
@@ -445,8 +453,8 @@ fn benchmark_multiple_sources(c: &mut Criterion) {
         b.iter(|| {
             let output = temp.path().join("output.tar");
             let sources = [source1.as_path(), source2.as_path()];
-            let _ = create_archive(black_box(&output), black_box(&sources), black_box(&config));
-            fs::remove_file(&output).ok();
+            create_unsynced(black_box(&output), black_box(&sources), black_box(&config));
+            fs::remove_file(&output).unwrap();
         });
     });
 }
@@ -468,12 +476,12 @@ fn benchmark_strip_prefix(c: &mut Criterion) {
     group.bench_function("no_strip", |b| {
         b.iter(|| {
             let output = temp.path().join("output.tar");
-            let _ = create_archive(
+            create_unsynced(
                 black_box(&output),
                 black_box(&[&root]),
                 black_box(&config_no_strip),
             );
-            fs::remove_file(&output).ok();
+            fs::remove_file(&output).unwrap();
         });
     });
 
@@ -483,12 +491,12 @@ fn benchmark_strip_prefix(c: &mut Criterion) {
     group.bench_function("with_strip", |b| {
         b.iter(|| {
             let output = temp.path().join("output.tar");
-            let _ = create_archive(
+            create_unsynced(
                 black_box(&output),
                 black_box(&[&root]),
                 black_box(&config_strip),
             );
-            fs::remove_file(&output).ok();
+            fs::remove_file(&output).unwrap();
         });
     });
 
@@ -498,6 +506,7 @@ fn benchmark_strip_prefix(c: &mut Criterion) {
 criterion_group!(
     benches,
     benchmark_create_tar_formats,
+    benchmark_staged_create_synced,
     benchmark_create_zip,
     benchmark_compression_levels,
     benchmark_file_counts,

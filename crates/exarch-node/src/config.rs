@@ -5,16 +5,27 @@ use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::CompressionLevel;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
+use exarch_core::DecodeReuse;
+use exarch_core::DecodeReuseKind as CoreDecodeReuseKind;
+use exarch_core::EntryPattern;
+use exarch_core::EntrySelection;
+use exarch_core::ExistingFiles as CoreExistingFiles;
 use exarch_core::Extension;
+use exarch_core::ExtensionFilter;
 use exarch_core::Limit;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
+use exarch_core::PathRewrite;
+use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
+use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig as CoreConfig;
+use exarch_core::Staging as CoreStaging;
+use exarch_core::StripComponents;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
-use exarch_core::creation::CompressionLevel;
 use exarch_core::positive_from_f64;
 use napi::Env;
 use napi::bindgen_prelude::Either;
@@ -23,7 +34,6 @@ use napi::bindgen_prelude::Null;
 use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
-use crate::error::Failure;
 use crate::error::IntoJsError;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
@@ -60,36 +70,6 @@ fn bounded_bytes(limit: Limit<NonZeroU64>) -> Option<i64> {
         Limit::Bounded(bytes) => Some(saturating_i64(bytes.get())),
         Limit::Unbounded => None,
     }
-}
-
-/// Parses a JavaScript compression level: only a whole number from 1 to 9 is
-/// accepted, whatever `napi` would make of it as an integer.
-///
-/// A whole number that fits `u32` outside 1..=9 is core's
-/// `INVALID_COMPRESSION_LEVEL` and names the level exactly. Any other number
-/// (a fraction, `NaN`, an infinity, a negative or a value above `u32::MAX`)
-/// has no exact level to name, so it is a plain `InvalidArg` that reports the
-/// number as given instead of a different level.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the value is a whole number in 0..=u32::MAX here"
-)]
-fn compression_level(level: f64) -> std::result::Result<CompressionLevel, Failure> {
-    let whole =
-        level.is_finite() && level.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&level);
-    if whole {
-        return Ok(CompressionLevel::try_from(level as u32)?);
-    }
-    let given = if level.is_infinite() {
-        if level > 0.0 { "Infinity" } else { "-Infinity" }.to_owned()
-    } else {
-        level.to_string()
-    };
-    Err(Failure::Native(Error::new(
-        napi::Status::InvalidArg,
-        format!("compression level must be a whole number from 1 to 9, got {given}"),
-    )))
 }
 
 /// A count as the JavaScript number it is held in, clamped to the largest
@@ -141,6 +121,134 @@ impl TryFrom<CorePolicy> for ZipConsistencyPolicy {
     }
 }
 
+/// What extraction does when a destination path is already occupied.
+///
+/// `skip` (the default) keeps the occupant and counts a skip. `overwrite`
+/// replaces an occupant where the kinds allow it. `refuse` fails with
+/// `OUTPUT_EXISTS` instead of touching anything the run did not create.
+// Values must equal `exarch_core::ExistingFiles::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExistingFiles {
+    /// Keep the occupant and count a skip.
+    #[napi(value = "skip")]
+    Skip,
+    /// Replace the occupant where the kinds allow it.
+    #[napi(value = "overwrite")]
+    Overwrite,
+    /// Fail on any occupant the run did not create.
+    #[napi(value = "refuse")]
+    Refuse,
+}
+
+impl From<ExistingFiles> for CoreExistingFiles {
+    fn from(policy: ExistingFiles) -> Self {
+        match policy {
+            ExistingFiles::Skip => Self::Skip,
+            ExistingFiles::Overwrite => Self::Overwrite,
+            ExistingFiles::Refuse => Self::Refuse,
+        }
+    }
+}
+
+impl TryFrom<CoreExistingFiles> for ExistingFiles {
+    type Error = Error;
+
+    fn try_from(policy: CoreExistingFiles) -> Result<Self> {
+        match policy {
+            CoreExistingFiles::Skip => Ok(Self::Skip),
+            CoreExistingFiles::Overwrite => Ok(Self::Overwrite),
+            CoreExistingFiles::Refuse => Ok(Self::Refuse),
+            other => Err(unknown_variant("existing-files policy", other.as_str())),
+        }
+    }
+}
+
+/// Where a ZIP extraction into a sink keeps decoded output between the
+/// structural check and the write, so a deflate entry is decoded once.
+///
+/// `off` (the default for sinks) keeps nothing. `memory` keeps decoded entries
+/// in memory. `temp_file` keeps them in an unnamed temporary file that holds
+/// the archive's plaintext until the extraction ends.
+// Values must equal `exarch_core::DecodeReuseKind::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeReuseKind {
+    /// Keep nothing; every entry is decoded twice.
+    #[napi(value = "off")]
+    Off,
+    /// Keep decoded entries in memory.
+    #[napi(value = "memory")]
+    Memory,
+    /// Keep decoded entries in a temporary file.
+    #[napi(value = "temp_file")]
+    TempFile,
+}
+
+impl From<DecodeReuseKind> for CoreDecodeReuseKind {
+    fn from(kind: DecodeReuseKind) -> Self {
+        match kind {
+            DecodeReuseKind::Off => Self::Off,
+            DecodeReuseKind::Memory => Self::Memory,
+            DecodeReuseKind::TempFile => Self::TempFile,
+        }
+    }
+}
+
+impl From<CoreDecodeReuseKind> for DecodeReuseKind {
+    fn from(kind: CoreDecodeReuseKind) -> Self {
+        match kind {
+            CoreDecodeReuseKind::Off => Self::Off,
+            CoreDecodeReuseKind::Memory => Self::Memory,
+            CoreDecodeReuseKind::TempFile => Self::TempFile,
+        }
+    }
+}
+
+/// How extraction stages its output before it is visible at the destination.
+///
+/// `in_place` (the default) writes directly into the destination. `atomic`
+/// extracts into a sibling directory and renames it onto a destination that
+/// does not exist or is empty. `atomic_replace` does the same and swaps the
+/// staged tree over an existing destination directory, replacing it as a whole.
+// Values must equal `exarch_core::Staging::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Staging {
+    /// Write directly into the destination.
+    #[napi(value = "in_place")]
+    InPlace,
+    /// Stage in a sibling directory and rename it onto an empty destination.
+    #[napi(value = "atomic")]
+    Atomic,
+    /// Stage in a sibling directory and swap it over an existing destination.
+    #[napi(value = "atomic_replace")]
+    AtomicReplace,
+}
+
+impl From<Staging> for CoreStaging {
+    fn from(staging: Staging) -> Self {
+        match staging {
+            Staging::InPlace => Self::InPlace,
+            Staging::Atomic => Self::Atomic,
+            Staging::AtomicReplace => Self::AtomicReplace,
+        }
+    }
+}
+
+impl TryFrom<CoreStaging> for Staging {
+    type Error = Error;
+
+    fn try_from(staging: CoreStaging) -> Result<Self> {
+        match staging {
+            CoreStaging::InPlace => Ok(Self::InPlace),
+            CoreStaging::Atomic => Ok(Self::Atomic),
+            CoreStaging::AtomicReplace => Ok(Self::AtomicReplace),
+            other => Err(unknown_variant("staging mode", other.as_str())),
+        }
+    }
+}
+
 /// Security configuration for archive extraction.
 ///
 /// All security features default to deny (secure-by-default policy).
@@ -159,8 +267,10 @@ impl TryFrom<CorePolicy> for ZipConsistencyPolicy {
 /// | `allow_absolute_paths` | false |
 /// | `allow_world_writable` | false |
 /// | `preserve_permissions` | false |
-/// | `allowed_extensions` | empty (all allowed) |
+/// | `allowed_extensions` | `null` (all allowed) |
 /// | `banned_path_components` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
+/// | `include` / `exclude` | none (every entry is selected) |
+/// | `stripComponents` / `flatten` | off (every path is kept) |
 #[napi]
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
@@ -356,7 +466,7 @@ impl SecurityConfig {
     /// Sets whether to preserve permissions from archive.
     #[napi(js_name = "setPreservePermissions")]
     pub fn set_preserve_permissions(&mut self, preserve: bool) -> &Self {
-        self.inner.preserve_permissions = preserve;
+        self.inner.permissions = PermissionPolicy::from_preserve(preserve);
         self
     }
 
@@ -369,10 +479,6 @@ impl SecurityConfig {
     /// Returns error if the extension is empty, exceeds maximum length, or
     /// contains a null byte, whitespace, a path separator or an inner dot.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript string by reference"
-    )]
     pub fn add_allowed_extension(&mut self, env: Env, ext: String) -> Result<&Self> {
         self.try_add_allowed_extension(&ext)
             .map_err(|err| err.into_js_error(env))?;
@@ -386,14 +492,168 @@ impl SecurityConfig {
     /// Returns error if the component is empty, exceeds maximum length, or
     /// contains a null byte, a path separator, `.` or `..`.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript string by reference"
-    )]
     pub fn add_banned_component(&mut self, env: Env, component: String) -> Result<&Self> {
         self.try_add_banned_component(&component)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
+    }
+
+    /// Replaces the allowed file extensions, or lifts the allowlist.
+    ///
+    /// An array restricts extraction to those extensions (a leading dot is
+    /// accepted and removed, and values are lowercased); `null` allows every
+    /// extension again. The list is validated as a whole: on an error the
+    /// previous allowlist stays.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `allowed_extension`) for
+    /// an empty array, which would otherwise read as "allow everything", and
+    /// for any value `addAllowedExtension` refuses.
+    #[napi(js_name = "setAllowedExtensions")]
+    pub fn set_allowed_extensions(
+        &mut self,
+        env: Env,
+        extensions: Either<Vec<String>, Null>,
+    ) -> Result<&Self> {
+        let extensions = match extensions {
+            Either::A(list) => Some(list),
+            Either::B(_) => None,
+        };
+        self.try_set_allowed_extensions(extensions.as_deref())
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Replaces the banned path components, so the defaults can be dropped.
+    ///
+    /// An empty array bans nothing. The list is validated as a whole: on an
+    /// error the previous list stays.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `banned_path_component`)
+    /// for any value `addBannedComponent` refuses.
+    #[napi(js_name = "setBannedComponents")]
+    pub fn set_banned_components(&mut self, env: Env, components: Vec<String>) -> Result<&Self> {
+        self.try_set_banned_components(&components)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Adds an include pattern: only entries that match an include pattern (and
+    /// no exclude pattern) are extracted, listed as extracted or verified as
+    /// extracted.
+    ///
+    /// Four shapes exist, as for `CreationConfig.addExcludePattern`: `name`
+    /// (a path component equal to it), `name*`, `*name` and `dir/sub` (that
+    /// path and everything below it). A pattern is matched against the entry's
+    /// archive path before any stripping, and is case-sensitive on every host.
+    /// An include pattern that matches no entry fails the extraction after the
+    /// scan with `INVALID_CONFIGURATION` (`setting` is `entry_include`) and
+    /// `unmatchedPatterns`.
+    ///
+    /// Operations apply, in order: path validation of the original name,
+    /// selection, then `stripComponents` or `flatten`, then validation of the
+    /// rewritten name.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
+    /// pattern shape that is refused.
+    #[napi(js_name = "addIncludePattern")]
+    pub fn add_include_pattern(&mut self, env: Env, pattern: String) -> Result<&Self> {
+        self.try_set_include_patterns(Some(std::slice::from_ref(&pattern)), SelectionEdit::Append)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Replaces the include patterns; an empty array selects every entry.
+    ///
+    /// The list is validated as a whole: on an error the previous patterns
+    /// stay. See `addIncludePattern` for the pattern shapes.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
+    /// pattern shape that is refused.
+    #[napi(js_name = "setIncludePatterns")]
+    pub fn set_include_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
+        self.try_set_include_patterns(Some(&patterns), SelectionEdit::Replace)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Adds an exclude pattern: an entry that matches one is never extracted,
+    /// whatever the include patterns say. A pattern that matches nothing is not
+    /// an error.
+    ///
+    /// The shapes and matching rules are those of `addIncludePattern`.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
+    /// pattern shape that is refused.
+    #[napi(js_name = "addExcludePattern")]
+    pub fn add_exclude_pattern(&mut self, env: Env, pattern: String) -> Result<&Self> {
+        self.try_set_exclude_patterns(std::slice::from_ref(&pattern), SelectionEdit::Append)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Replaces the exclude patterns; an empty array excludes nothing.
+    ///
+    /// The list is validated as a whole: on an error the previous patterns
+    /// stay.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
+    /// pattern shape that is refused.
+    #[napi(js_name = "setExcludePatterns")]
+    pub fn set_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
+        self.try_set_exclude_patterns(&patterns, SelectionEdit::Replace)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Drops the first `count` leading path components of every extracted
+    /// entry, like `tar --strip-components`; `null` removes a strip count and
+    /// leaves `flatten` as it is.
+    ///
+    /// An entry with no component left is skipped and counted as
+    /// `'stripped_away'`. Include and exclude patterns match the path before
+    /// stripping. Setting a strip count replaces `flatten`, and the maximum
+    /// is the current `maxPathDepth`, so set that first.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `strip_components`) if
+    /// `count` is not a positive whole number up to 2^53 - 1 or exceeds
+    /// `maxPathDepth`.
+    #[napi(js_name = "setStripComponents")]
+    pub fn set_strip_components(&mut self, env: Env, count: Either<f64, Null>) -> Result<&Self> {
+        let count = match count {
+            Either::A(count) => Some(count),
+            Either::B(_) => None,
+        };
+        self.try_set_strip_components(count)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Lands every regular file in the destination root under its final path
+    /// component; `false` keeps every path.
+    ///
+    /// Directory entries are skipped and counted as `'stripped_away'`; a
+    /// symlink or hardlink entry is refused with `SECURITY_VIOLATION`
+    /// (`subCode` is `LINK_POLICY`). Files that share a final name follow
+    /// `existingFiles`. Setting `flatten` replaces a strip count, and
+    /// `setStripComponents(null)` leaves `flatten` as it is.
+    #[napi(js_name = "setFlatten")]
+    pub fn set_flatten(&mut self, flatten: bool) -> &Self {
+        self.try_set_flatten(flatten);
+        self
     }
 
     /// Finalizes the configuration (for API consistency).
@@ -409,20 +669,12 @@ impl SecurityConfig {
 
     /// Checks if a path component is allowed.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi passes JavaScript arguments by value"
-    )]
     pub fn is_path_component_allowed(&self, component: String) -> bool {
         self.inner.is_path_component_allowed(&component)
     }
 
     /// Checks if a file extension is allowed.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi passes JavaScript arguments by value"
-    )]
     pub fn is_extension_allowed(&self, extension: String) -> bool {
         self.inner.is_extension_allowed(Some(&extension))
     }
@@ -465,7 +717,7 @@ impl SecurityConfig {
     /// Whether to preserve permissions from archive.
     #[napi(getter)]
     pub fn get_preserve_permissions(&self) -> bool {
-        self.inner.preserve_permissions
+        self.inner.permissions.preserves()
     }
 
     /// Whether symlinks are allowed.
@@ -529,35 +781,80 @@ impl SecurityConfig {
             .map(|limits| saturating_i64(limits.max_block_memory.get()))
     }
 
-    /// List of allowed file extensions.
+    /// List of allowed file extensions, or `null` when every extension is
+    /// allowed.
     ///
     /// Note: This getter clones the underlying data. For performance-critical
     /// code that only needs to count or check membership, use
     /// `getAllowedExtensionsCount()` or `hasAllowedExtension()` instead.
     #[napi(getter)]
-    pub fn get_allowed_extensions(&self) -> Vec<String> {
-        self.inner
-            .allowed_extensions
-            .iter()
-            .map(|ext| ext.as_str().to_owned())
-            .collect()
+    pub fn get_allowed_extensions(&self) -> Option<Vec<String>> {
+        self.inner.allowed_extensions.as_only().map(|extensions| {
+            extensions
+                .as_slice()
+                .iter()
+                .map(|ext| ext.as_str().to_owned())
+                .collect()
+        })
     }
 
-    /// Returns the number of allowed extensions.
+    /// Returns the number of allowed extensions, `0` when every extension is
+    /// allowed.
     #[napi]
     pub fn get_allowed_extensions_count(&self) -> u32 {
-        saturating_u32(self.inner.allowed_extensions.len())
+        self.inner
+            .allowed_extensions
+            .as_only()
+            .map_or_default(|extensions| saturating_u32(extensions.as_slice().len()))
     }
 
     /// Checks if a specific extension is in the allowed list.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi passes JavaScript arguments by value"
-    )]
     pub fn has_allowed_extension(&self, ext: String) -> bool {
-        Extension::try_from(ext.as_str())
-            .is_ok_and(|ext| self.inner.allowed_extensions.contains(&ext))
+        Extension::try_from(ext.as_str()).is_ok_and(|ext| {
+            self.inner
+                .allowed_extensions
+                .as_only()
+                .is_some_and(|extensions| extensions.as_slice().contains(&ext))
+        })
+    }
+
+    /// The include patterns, as they were given.
+    #[napi(getter)]
+    pub fn get_include_patterns(&self) -> Vec<String> {
+        self.inner
+            .selection
+            .include()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// The exclude patterns, as they were given.
+    #[napi(getter)]
+    pub fn get_exclude_patterns(&self) -> Vec<String> {
+        self.inner
+            .selection
+            .exclude()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// The number of leading path components dropped, or `null` while paths
+    /// are kept or flattened.
+    #[napi(getter)]
+    pub fn get_strip_components(&self) -> Option<f64> {
+        match self.inner.selection.rewrite() {
+            PathRewrite::Strip(count) => Some(exact_f64(count.get().get())),
+            _ => None,
+        }
+    }
+
+    /// Whether every regular file lands under its final path component.
+    #[napi(getter)]
+    pub fn get_flatten(&self) -> bool {
+        self.inner.selection.rewrite() == PathRewrite::Flatten
     }
 
     /// List of banned path components.
@@ -582,10 +879,6 @@ impl SecurityConfig {
 
     /// Checks if a specific component is in the banned list.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi passes JavaScript arguments by value"
-    )]
     pub fn has_banned_path_component(&self, component: String) -> bool {
         self.inner
             .banned_path_components
@@ -661,7 +954,8 @@ impl SecurityConfig {
     /// without a JS environment.
     fn try_add_allowed_extension(&mut self, ext: &str) -> std::result::Result<(), CoreError> {
         let ext = Extension::try_from(ext)?;
-        self.inner.allowed_extensions.push(ext);
+        self.inner.allowed_extensions =
+            std::mem::take(&mut self.inner.allowed_extensions).with_added(ext);
         Ok(())
     }
 
@@ -671,6 +965,138 @@ impl SecurityConfig {
         self.inner.banned_path_components.push(component);
         Ok(())
     }
+
+    /// Env-free core of `setAllowedExtensions`; `None` lifts the allowlist.
+    fn try_set_allowed_extensions(
+        &mut self,
+        extensions: Option<&[String]>,
+    ) -> std::result::Result<(), CoreError> {
+        self.inner.allowed_extensions = match extensions {
+            None => ExtensionFilter::Any,
+            Some(raw) => ExtensionFilter::only(
+                raw.iter()
+                    .map(|ext| Extension::try_from(ext.as_str()))
+                    .collect::<std::result::Result<_, _>>()?,
+            )?,
+        };
+        Ok(())
+    }
+
+    /// Env-free core of `setBannedComponents`.
+    fn try_set_banned_components(
+        &mut self,
+        components: &[String],
+    ) -> std::result::Result<(), CoreError> {
+        self.inner.banned_path_components = components
+            .iter()
+            .map(|component| PathComponentName::try_from(component.as_str()))
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(())
+    }
+
+    /// Env-free core of `addIncludePattern` and `setIncludePatterns`.
+    fn try_set_include_patterns(
+        &mut self,
+        patterns: Option<&[String]>,
+        edit: SelectionEdit,
+    ) -> std::result::Result<(), CoreError> {
+        let parsed = parse_patterns(ConfigSetting::EntryInclude, patterns.unwrap_or_default())?;
+        let selection = &self.inner.selection;
+        let kept = match edit {
+            SelectionEdit::Append => selection.include().to_vec(),
+            SelectionEdit::Replace => Vec::new(),
+        };
+        self.inner.selection = rebuilt(
+            selection,
+            [kept, parsed].concat(),
+            selection.exclude().to_vec(),
+        );
+        Ok(())
+    }
+
+    /// Env-free core of `addExcludePattern` and `setExcludePatterns`.
+    fn try_set_exclude_patterns(
+        &mut self,
+        patterns: &[String],
+        edit: SelectionEdit,
+    ) -> std::result::Result<(), CoreError> {
+        let parsed = parse_patterns(ConfigSetting::EntryExclude, patterns)?;
+        let selection = &self.inner.selection;
+        let kept = match edit {
+            SelectionEdit::Append => selection.exclude().to_vec(),
+            SelectionEdit::Replace => Vec::new(),
+        };
+        self.inner.selection = rebuilt(
+            selection,
+            selection.include().to_vec(),
+            [kept, parsed].concat(),
+        );
+        Ok(())
+    }
+
+    /// Env-free core of `setStripComponents`; `None` drops a strip count and
+    /// leaves `flatten` as it is.
+    fn try_set_strip_components(
+        &mut self,
+        count: Option<f64>,
+    ) -> std::result::Result<(), CoreError> {
+        let rewrite = match count {
+            Some(count) => {
+                let count = positive_from_f64(ConfigSetting::StripComponents, count)?;
+                PathRewrite::Strip(StripComponents::new(count, self.inner.max_path_depth)?)
+            }
+            None => match self.inner.selection.rewrite() {
+                PathRewrite::Flatten => PathRewrite::Flatten,
+                _ => PathRewrite::Keep,
+            },
+        };
+        self.inner.selection = std::mem::take(&mut self.inner.selection).with_rewrite(rewrite);
+        Ok(())
+    }
+
+    /// Env-free core of `setFlatten`.
+    fn try_set_flatten(&mut self, flatten: bool) {
+        let current = self.inner.selection.rewrite();
+        let rewrite = match (flatten, current) {
+            (true, _) => PathRewrite::Flatten,
+            (false, PathRewrite::Flatten) => PathRewrite::Keep,
+            (false, other) => other,
+        };
+        self.inner.selection = std::mem::take(&mut self.inner.selection).with_rewrite(rewrite);
+    }
+}
+
+/// Whether a pattern list edit adds to the current patterns or replaces them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionEdit {
+    Append,
+    Replace,
+}
+
+/// Parses every pattern before any is kept, so one refusal changes nothing.
+fn parse_patterns(
+    setting: ConfigSetting,
+    patterns: &[String],
+) -> std::result::Result<Vec<EntryPattern>, CoreError> {
+    patterns
+        .iter()
+        .map(|pattern| EntryPattern::parse_for(setting, pattern))
+        .collect()
+}
+
+/// `selection` with its pattern lists replaced and its rewrite kept.
+fn rebuilt(
+    selection: &EntrySelection,
+    include: Vec<EntryPattern>,
+    exclude: Vec<EntryPattern>,
+) -> EntrySelection {
+    let with_include = include
+        .into_iter()
+        .fold(EntrySelection::default(), EntrySelection::with_include);
+    exclude
+        .into_iter()
+        .fold(with_include, EntrySelection::with_exclude)
+        .with_rewrite(selection.rewrite())
 }
 
 /// Configuration for archive creation operations.
@@ -691,7 +1117,7 @@ impl SecurityConfig {
 #[napi]
 #[derive(Debug, Clone)]
 pub struct CreationConfig {
-    inner: exarch_core::creation::CreationConfig,
+    inner: exarch_core::CreationConfig,
 }
 
 #[napi]
@@ -700,7 +1126,7 @@ impl CreationConfig {
     #[napi(constructor)]
     pub fn new() -> Self {
         Self {
-            inner: exarch_core::creation::CreationConfig::default(),
+            inner: exarch_core::CreationConfig::default(),
         }
     }
 
@@ -734,7 +1160,7 @@ impl CreationConfig {
     /// Default: true.
     #[napi(js_name = "setPreservePermissions")]
     pub fn set_preserve_permissions(&mut self, preserve: bool) -> &Self {
-        self.inner.preserve_permissions = preserve;
+        self.inner.permissions = PermissionPolicy::from_preserve(preserve);
         self
     }
 
@@ -796,12 +1222,24 @@ impl CreationConfig {
     /// `.` or `..` as a component, an absolute path or one over 255 bytes. A
     /// name holding such a character cannot be excluded by pattern.
     #[napi]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "napi cannot take a JavaScript string by reference"
-    )]
     pub fn add_exclude_pattern(&mut self, env: Env, pattern: String) -> Result<&Self> {
         self.try_add_exclude_pattern(&pattern)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Replaces the exclude patterns, so the defaults can be dropped.
+    ///
+    /// An empty array excludes nothing. The list is validated as a whole: on
+    /// an error the previous patterns stay.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
+    /// pattern `addExcludePattern` refuses.
+    #[napi(js_name = "setExcludePatterns")]
+    pub fn set_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
+        self.try_set_exclude_patterns(&patterns)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
@@ -823,7 +1261,7 @@ impl CreationConfig {
     /// Whether to preserve permissions.
     #[napi(getter)]
     pub fn get_preserve_permissions(&self) -> bool {
-        self.inner.preserve_permissions
+        self.inner.permissions.preserves()
     }
 
     /// Whether to follow symlinks.
@@ -861,8 +1299,20 @@ impl CreationConfig {
 impl CreationConfig {
     /// Env-free core of `addExcludePattern`.
     fn try_add_exclude_pattern(&mut self, pattern: &str) -> std::result::Result<(), CoreError> {
-        let pattern = exarch_core::creation::ExcludePattern::try_from(pattern)?;
+        let pattern = exarch_core::ExcludePattern::try_from(pattern)?;
         self.inner.exclude_patterns.push(pattern);
+        Ok(())
+    }
+
+    /// Env-free core of `setExcludePatterns`.
+    fn try_set_exclude_patterns(
+        &mut self,
+        patterns: &[String],
+    ) -> std::result::Result<(), CoreError> {
+        self.inner.exclude_patterns = patterns
+            .iter()
+            .map(|pattern| exarch_core::ExcludePattern::try_from(pattern.as_str()))
+            .collect::<std::result::Result<_, _>>()?;
         Ok(())
     }
 
@@ -877,13 +1327,13 @@ impl CreationConfig {
 
     /// Env-free core of `setCompressionLevel`, so the validation is testable
     /// without a JS environment.
-    fn try_set_compression_level(&mut self, level: f64) -> std::result::Result<(), Failure> {
-        self.inner.compression_level = compression_level(level)?;
+    fn try_set_compression_level(&mut self, level: f64) -> std::result::Result<(), CoreError> {
+        self.inner.compression_level = CompressionLevel::from_f64(level)?;
         Ok(())
     }
 
     /// Returns a reference to the inner `CoreCreationConfig`.
-    pub fn as_core(&self) -> &exarch_core::creation::CreationConfig {
+    pub fn as_core(&self) -> &exarch_core::CreationConfig {
         &self.inner
     }
 }
@@ -891,14 +1341,14 @@ impl CreationConfig {
 /// Options controlling extraction behavior (non-security).
 ///
 /// Separate from `SecurityConfig` to keep security settings focused.
-/// These options control operational behavior such as duplicate handling.
+/// These options control operational behavior such as occupied-path handling.
 ///
 /// # Defaults
 ///
 /// | Setting | Default Value |
 /// |---------|--------------|
-/// | `skipDuplicates` | `true` |
-/// | `atomic` | `false` |
+/// | `existingFiles` | `'skip'` |
+/// | `staging` | `'in_place'` |
 #[napi]
 #[derive(Debug, Clone)]
 pub struct ExtractionOptions {
@@ -923,30 +1373,37 @@ impl ExtractionOptions {
         Self::new()
     }
 
-    /// Sets whether duplicate archive entries are skipped silently.
+    /// Sets what happens when a destination path is already occupied.
     ///
-    /// When `true` (default), duplicate entries produce a warning in the
-    /// report. When `false`, a duplicate entry causes an error.
-    #[napi(js_name = "withSkipDuplicates")]
-    pub fn with_skip_duplicates(&mut self, skip: bool) -> &Self {
-        self.inner.skip_duplicates = skip;
+    /// `'skip'` (default) keeps the occupant and counts a skip, which also
+    /// covers a duplicate entry inside the archive. `'overwrite'` replaces the
+    /// occupant where the kinds allow it. `'refuse'` fails with
+    /// `OUTPUT_EXISTS` and never overwrites.
+    #[napi(js_name = "withExistingFiles")]
+    pub fn with_existing_files(&mut self, policy: ExistingFiles) -> &Self {
+        self.inner.existing_files = policy.into();
         self
     }
 
-    /// Sets whether extraction uses a temporary directory for atomic commits.
+    /// Sets how extraction stages its output: `'in_place'` (default),
+    /// `'atomic'` or `'atomic_replace'`.
     ///
-    /// When `true`, files are extracted to a temp dir in the same parent as
-    /// the output directory, then atomically renamed on completion. On failure
-    /// the temp dir is removed, leaving the output directory untouched.
-    /// Default: `false`.
+    /// `'atomic'` extracts into a temporary sibling directory and renames it
+    /// onto the output directory on completion; on failure the temporary
+    /// directory is removed and the output directory is untouched. It needs an
+    /// output directory that does not exist or is empty: one that holds
+    /// content fails with `OUTPUT_EXISTS` before anything is extracted.
     ///
-    /// **Important:** atomic mode requires that the output directory does not
-    /// already exist. If it does, extraction fails with an
-    /// output-already-exists error. Non-atomic mode extracts into an
-    /// existing directory without error.
-    #[napi(js_name = "withAtomic")]
-    pub fn with_atomic(&mut self, atomic: bool) -> &Self {
-        self.inner.atomic = atomic;
+    /// `'atomic_replace'` also replaces an existing output directory as a
+    /// whole: the original is moved aside only after the extraction succeeded
+    /// and is restored if the swap fails. A destination that is a filesystem
+    /// root, the archive or a directory that contains it, or the working
+    /// directory or one that contains it, is refused with
+    /// `INVALID_CONFIGURATION` (`setting` is `output_path`, `protectedPath`
+    /// names the reason).
+    #[napi(js_name = "withStaging")]
+    pub fn with_staging(&mut self, staging: Staging) -> &Self {
+        self.inner.staging = staging.into();
         self
     }
 
@@ -956,16 +1413,26 @@ impl ExtractionOptions {
         self
     }
 
-    /// Whether duplicate entries are skipped silently.
+    /// What happens when a destination path is already occupied.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if this binding is older than `exarch-core` and does not
+    /// know the policy.
     #[napi(getter)]
-    pub fn get_skip_duplicates(&self) -> bool {
-        self.inner.skip_duplicates
+    pub fn get_existing_files(&self) -> Result<ExistingFiles> {
+        self.inner.existing_files.try_into()
     }
 
-    /// Whether atomic extraction is enabled.
+    /// How extraction stages its output.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if this binding is older than `exarch-core` and does not
+    /// know the mode.
     #[napi(getter)]
-    pub fn get_atomic(&self) -> bool {
-        self.inner.atomic
+    pub fn get_staging(&self) -> Result<Staging> {
+        self.inner.staging.try_into()
     }
 }
 
@@ -981,13 +1448,13 @@ impl ExtractionOptions {
 /// Options for extraction into memory or into a callback.
 ///
 /// A sink has no directory to rename, so unlike `ExtractionOptions` there is
-/// no `atomic` setting: only the duplicate policy carries over.
+/// no `staging` setting: only the existing-files policy carries over.
 ///
 /// # Defaults
 ///
 /// | Setting | Default Value |
 /// |---------|--------------|
-/// | `skipDuplicates` | `true` |
+/// | `existingFiles` | `'skip'` |
 #[napi]
 #[derive(Debug, Clone)]
 pub struct SinkOptions {
@@ -1004,24 +1471,98 @@ impl SinkOptions {
         }
     }
 
-    /// Sets whether duplicate archive entries are skipped silently.
+    /// Sets what happens when a delivery path is already occupied.
     ///
-    /// When `true` (default), a duplicate entry is skipped and counted. When
-    /// `false`, a duplicate entry causes an error.
-    #[napi(js_name = "setSkipDuplicates")]
-    pub fn set_skip_duplicates(&mut self, skip: bool) -> &Self {
-        self.inner = self.inner.with_skip_duplicates(skip);
+    /// `'skip'` (default) skips and counts a duplicate entry. `'overwrite'`
+    /// delivers it again. `'refuse'` fails with `OUTPUT_EXISTS`.
+    #[napi(js_name = "withExistingFiles")]
+    pub fn with_existing_files(&mut self, policy: ExistingFiles) -> &Self {
+        self.inner = self.inner.with_existing_files(policy.into());
         self
     }
 
-    /// Whether duplicate entries are skipped silently.
+    /// What happens when a delivery path is already occupied.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if this binding is older than `exarch-core` and does not
+    /// know the policy.
     #[napi(getter)]
-    pub fn get_skip_duplicates(&self) -> bool {
-        self.inner.skip_duplicates
+    pub fn get_existing_files(&self) -> Result<ExistingFiles> {
+        self.inner.existing_files.try_into()
+    }
+
+    /// Sets where a ZIP extraction keeps decoded output so a deflate entry is
+    /// decoded once: `'off'` (default), `'memory'` or `'temp_file'`.
+    ///
+    /// `limit` is the most bytes kept, at most 256 MiB (default 32 MiB); it
+    /// needs `'memory'` or `'temp_file'`.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `decode_reuse_limit`) if
+    /// `limit` is not a positive whole number up to 2^53 - 1, or is given with
+    /// `'off'`.
+    #[napi(js_name = "withDecodeReuse")]
+    pub fn with_decode_reuse(
+        &mut self,
+        env: Env,
+        mode: DecodeReuseKind,
+        limit: Option<f64>,
+    ) -> Result<&Self> {
+        self.try_set_decode_reuse(mode, limit)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Where a ZIP extraction keeps decoded output.
+    #[napi(getter)]
+    pub fn get_decode_reuse(&self) -> DecodeReuseKind {
+        self.inner.decode_reuse.kind().into()
+    }
+
+    /// The most bytes kept for reuse, or `null` while decode reuse is `'off'`.
+    #[napi(getter)]
+    pub fn get_decode_reuse_limit(&self) -> Option<i64> {
+        match self.inner.decode_reuse {
+            DecodeReuse::Memory(limit) | DecodeReuse::TempFile(limit) => {
+                Some(saturating_i64(limit.get()))
+            }
+            _ => None,
+        }
     }
 }
 
 impl SinkOptions {
+    /// Env-free core of `withDecodeReuse`.
+    fn try_set_decode_reuse(
+        &mut self,
+        mode: DecodeReuseKind,
+        limit: Option<f64>,
+    ) -> std::result::Result<(), CoreError> {
+        let limit = limit
+            .map(|bytes| {
+                positive_from_f64(ConfigSetting::DecodeReuseLimit, bytes).map(ReuseLimit::new)
+            })
+            .transpose()?;
+        self.inner.decode_reuse = match (mode, limit) {
+            (DecodeReuseKind::Off, None) => DecodeReuse::Off,
+            (DecodeReuseKind::Off, Some(_)) => {
+                return Err(CoreError::InvalidConfiguration {
+                    setting: ConfigSetting::DecodeReuseLimit,
+                    problem: ConfigProblem::NotSupported,
+                });
+            }
+            (DecodeReuseKind::Memory, limit) => {
+                DecodeReuse::Memory(limit.unwrap_or(ReuseLimit::DEFAULT))
+            }
+            (DecodeReuseKind::TempFile, limit) => {
+                DecodeReuse::TempFile(limit.unwrap_or(ReuseLimit::DEFAULT))
+            }
+        };
+        Ok(())
+    }
+
     /// Returns the inner `CoreSinkOptions`.
     pub fn to_core(&self) -> exarch_core::SinkOptions {
         self.inner
@@ -1230,7 +1771,10 @@ mod tests {
         let mut config = SecurityConfig::new();
         let result = config.try_add_allowed_extension(".txt");
         assert!(result.is_ok());
-        assert!(config.get_allowed_extensions().contains(&"txt".to_string()));
+        assert_eq!(
+            config.get_allowed_extensions(),
+            Some(vec!["txt".to_owned()])
+        );
         assert!(config.has_allowed_extension(".TXT".to_string()));
     }
 
@@ -1551,7 +2095,7 @@ mod tests {
         config.try_add_allowed_extension(".txt").unwrap();
         config.try_add_allowed_extension(".md").unwrap();
 
-        let extensions = config.get_allowed_extensions();
+        let extensions = config.get_allowed_extensions().unwrap();
         assert_eq!(extensions.len(), 2, "should have 2 allowed extensions");
         assert!(
             extensions.contains(&"txt".to_string()),
@@ -1915,26 +2459,25 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_level_reports_the_value_it_was_given() {
+    fn test_compression_level_refusals_are_typed_and_keep_the_previous_level() {
+        use exarch_core::RequestedLevel as Requested;
+
         let mut config = CreationConfig::new();
         for (level, expected) in [
-            (1.5, "got 1.5"),
-            (-3.0, "got -3"),
-            (f64::NAN, "got NaN"),
-            (f64::INFINITY, "got Infinity"),
-            (4_294_967_302.0, "got 4294967302"),
+            (10.0, Requested::Integer(10)),
+            (-3.0, Requested::Integer(-3)),
+            (1.5, Requested::Fractional(1.5)),
+            (f64::NAN, Requested::NonFinite),
+            (f64::INFINITY, Requested::NonFinite),
+            (4_294_967_302.0, Requested::Integer(4_294_967_302)),
         ] {
-            let Err(Failure::Native(err)) = config.try_set_compression_level(level) else {
-                panic!("{level} must be refused as a native argument error");
+            let Err(CoreError::InvalidCompressionLevel { level: got }) =
+                config.try_set_compression_level(level)
+            else {
+                panic!("{level} must be refused as an invalid compression level");
             };
-            assert!(err.reason.ends_with(expected), "{}", err.reason);
+            assert_eq!(format!("{got:?}"), format!("{expected:?}"), "{level}");
         }
-        assert_matches!(
-            config.try_set_compression_level(10.0),
-            Err(Failure::Core(CoreError::InvalidCompressionLevel {
-                level: 10
-            }))
-        );
         assert_eq!(config.get_compression_level(), 6);
     }
 
@@ -2049,5 +2592,389 @@ mod tests {
             dts.lines().any(|l| l == expected),
             "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
         );
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_owned()).collect()
+    }
+
+    #[test]
+    fn test_allowed_extensions_getter_is_null_for_any() {
+        assert_eq!(SecurityConfig::new().get_allowed_extensions(), None);
+    }
+
+    #[test]
+    fn test_set_allowed_extensions_replaces_and_null_lifts() {
+        let mut config = SecurityConfig::new();
+        config.try_add_allowed_extension("txt").unwrap();
+        config
+            .try_set_allowed_extensions(Some(&strings(&[".MD", "rs"])))
+            .unwrap();
+        assert_eq!(
+            config.get_allowed_extensions(),
+            Some(strings(&["md", "rs"]))
+        );
+        config.try_set_allowed_extensions(None).unwrap();
+        assert_eq!(config.get_allowed_extensions(), None);
+    }
+
+    #[test]
+    fn test_set_allowed_extensions_refuses_empty_list_and_keeps_previous() {
+        let mut config = SecurityConfig::new();
+        config
+            .try_set_allowed_extensions(Some(&strings(&["txt"])))
+            .unwrap();
+        let err = config.try_set_allowed_extensions(Some(&[])).unwrap_err();
+        assert_matches!(
+            err,
+            CoreError::InvalidConfiguration {
+                setting: ConfigSetting::AllowedExtension,
+                problem: ConfigProblem::Empty,
+            }
+        );
+        assert_eq!(config.get_allowed_extensions(), Some(strings(&["txt"])));
+    }
+
+    #[test]
+    fn test_set_allowed_extensions_is_all_or_nothing() {
+        let mut config = SecurityConfig::new();
+        config
+            .try_set_allowed_extensions(Some(&strings(&["txt"])))
+            .unwrap();
+        assert!(
+            config
+                .try_set_allowed_extensions(Some(&strings(&["md", "a/b"])))
+                .is_err()
+        );
+        assert_eq!(config.get_allowed_extensions(), Some(strings(&["txt"])));
+    }
+
+    #[test]
+    fn test_set_banned_components_replaces_clears_and_is_all_or_nothing() {
+        let mut config = SecurityConfig::new();
+        config
+            .try_set_banned_components(&strings(&["node_modules", "tmp"]))
+            .unwrap();
+        assert_eq!(
+            config.get_banned_path_components(),
+            strings(&["node_modules", "tmp"])
+        );
+        assert!(
+            config
+                .try_set_banned_components(&strings(&["ok", ".."]))
+                .is_err()
+        );
+        assert_eq!(
+            config.get_banned_path_components(),
+            strings(&["node_modules", "tmp"])
+        );
+        config.try_set_banned_components(&[]).unwrap();
+        assert!(config.get_banned_path_components().is_empty());
+    }
+
+    #[test]
+    fn test_set_exclude_patterns_replaces_clears_and_is_all_or_nothing() {
+        let mut config = CreationConfig::new();
+        config
+            .try_set_exclude_patterns(&strings(&["target", "*.log"]))
+            .unwrap();
+        assert_eq!(config.get_exclude_patterns(), strings(&["target", "*.log"]));
+        let err = config
+            .try_set_exclude_patterns(&strings(&["ok", "bad\0pattern"]))
+            .unwrap_err();
+        assert_matches!(
+            err,
+            CoreError::InvalidConfiguration {
+                setting: ConfigSetting::ExcludePattern,
+                ..
+            }
+        );
+        assert_eq!(config.get_exclude_patterns(), strings(&["target", "*.log"]));
+        config.try_set_exclude_patterns(&[]).unwrap();
+        assert!(config.get_exclude_patterns().is_empty());
+    }
+
+    #[test]
+    fn test_existing_files_defaults_to_skip_and_round_trips() {
+        let mut options = ExtractionOptions::new();
+        assert_eq!(options.get_existing_files().unwrap(), ExistingFiles::Skip);
+        for policy in [
+            ExistingFiles::Overwrite,
+            ExistingFiles::Refuse,
+            ExistingFiles::Skip,
+        ] {
+            options.with_existing_files(policy);
+            assert_eq!(options.get_existing_files().unwrap(), policy);
+        }
+
+        let mut sink = SinkOptions::new();
+        assert_eq!(sink.get_existing_files().unwrap(), ExistingFiles::Skip);
+        sink.with_existing_files(ExistingFiles::Refuse);
+        assert_eq!(sink.get_existing_files().unwrap(), ExistingFiles::Refuse);
+        assert_eq!(sink.to_core().existing_files, CoreExistingFiles::Refuse);
+    }
+
+    #[test]
+    fn test_existing_files_covers_every_core_variant() {
+        for core in CoreExistingFiles::ALL {
+            let policy = ExistingFiles::try_from(*core).unwrap();
+            assert_eq!(CoreExistingFiles::from(policy), *core);
+        }
+    }
+
+    #[test]
+    fn test_index_d_ts_existing_files_union_matches_core() {
+        let values: Vec<_> = CoreExistingFiles::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type ExistingFiles = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_sink_decode_reuse_defaults_to_off_and_round_trips() {
+        let mut sink = SinkOptions::new();
+        assert_eq!(sink.get_decode_reuse(), DecodeReuseKind::Off);
+        assert_eq!(sink.get_decode_reuse_limit(), None);
+
+        sink.try_set_decode_reuse(DecodeReuseKind::Memory, None)
+            .unwrap();
+        assert_eq!(sink.get_decode_reuse(), DecodeReuseKind::Memory);
+        assert_eq!(
+            sink.get_decode_reuse_limit(),
+            Some(i64::try_from(ReuseLimit::DEFAULT.get()).unwrap())
+        );
+
+        sink.try_set_decode_reuse(DecodeReuseKind::TempFile, Some(1024.0))
+            .unwrap();
+        assert_eq!(sink.get_decode_reuse(), DecodeReuseKind::TempFile);
+        assert_eq!(sink.get_decode_reuse_limit(), Some(1024));
+        assert_eq!(
+            sink.to_core().decode_reuse,
+            DecodeReuse::TempFile(ReuseLimit::new(NonZeroU64::new(1024).unwrap()))
+        );
+
+        sink.try_set_decode_reuse(DecodeReuseKind::Off, None)
+            .unwrap();
+        assert_eq!(sink.get_decode_reuse_limit(), None);
+    }
+
+    #[test]
+    fn test_sink_decode_reuse_clamps_the_limit_and_refuses_bad_ones() {
+        let mut sink = SinkOptions::new();
+        sink.try_set_decode_reuse(DecodeReuseKind::Memory, Some(MAX_SAFE))
+            .unwrap();
+        assert_eq!(
+            sink.get_decode_reuse_limit(),
+            Some(i64::try_from(ReuseLimit::MAX.get()).unwrap())
+        );
+
+        for bad in [0.0, -1.0, 1.5, f64::NAN] {
+            let err = sink
+                .try_set_decode_reuse(DecodeReuseKind::Memory, Some(bad))
+                .unwrap_err();
+            assert_matches!(
+                err,
+                CoreError::InvalidConfiguration {
+                    setting: ConfigSetting::DecodeReuseLimit,
+                    ..
+                }
+            );
+        }
+        let err = sink
+            .try_set_decode_reuse(DecodeReuseKind::Off, Some(1.0))
+            .unwrap_err();
+        assert_matches!(
+            err,
+            CoreError::InvalidConfiguration {
+                setting: ConfigSetting::DecodeReuseLimit,
+                problem: ConfigProblem::NotSupported,
+            }
+        );
+        assert_eq!(sink.get_decode_reuse(), DecodeReuseKind::Memory);
+    }
+
+    #[test]
+    fn test_index_d_ts_decode_reuse_union_matches_core() {
+        let values: Vec<_> = CoreDecodeReuseKind::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type DecodeReuseKind = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_staging_defaults_to_in_place_and_round_trips() {
+        let mut options = ExtractionOptions::new();
+        assert_eq!(options.get_staging().unwrap(), Staging::InPlace);
+        for staging in [Staging::AtomicReplace, Staging::Atomic, Staging::InPlace] {
+            options.with_staging(staging);
+            assert_eq!(options.get_staging().unwrap(), staging);
+        }
+        options.with_staging(Staging::AtomicReplace);
+        assert_eq!(options.as_core().staging, CoreStaging::AtomicReplace);
+    }
+
+    #[test]
+    fn test_staging_covers_every_core_variant() {
+        for core in CoreStaging::ALL {
+            let staging = Staging::try_from(*core).unwrap();
+            assert_eq!(CoreStaging::from(staging), *core);
+        }
+    }
+
+    #[test]
+    fn test_index_d_ts_staging_union_matches_core() {
+        let values: Vec<_> = CoreStaging::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type Staging = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_selection_defaults_to_every_entry_and_keeps_paths() {
+        let config = SecurityConfig::new();
+        assert!(config.get_include_patterns().is_empty());
+        assert!(config.get_exclude_patterns().is_empty());
+        assert_eq!(config.get_strip_components(), None);
+        assert!(!config.get_flatten());
+        assert!(config.as_core().selection.is_default());
+    }
+
+    #[test]
+    fn test_include_and_exclude_patterns_append_replace_and_clear() {
+        let mut config = SecurityConfig::new();
+        config
+            .try_set_include_patterns(Some(&strings(&["src"])), SelectionEdit::Append)
+            .unwrap();
+        config
+            .try_set_include_patterns(Some(&strings(&["docs/api"])), SelectionEdit::Append)
+            .unwrap();
+        config
+            .try_set_exclude_patterns(&strings(&["*.tmp"]), SelectionEdit::Append)
+            .unwrap();
+        assert_eq!(config.get_include_patterns(), strings(&["src", "docs/api"]));
+        assert_eq!(config.get_exclude_patterns(), strings(&["*.tmp"]));
+
+        config
+            .try_set_include_patterns(Some(&strings(&["lib"])), SelectionEdit::Replace)
+            .unwrap();
+        assert_eq!(config.get_include_patterns(), strings(&["lib"]));
+        assert_eq!(config.get_exclude_patterns(), strings(&["*.tmp"]));
+
+        config
+            .try_set_include_patterns(Some(&[]), SelectionEdit::Replace)
+            .unwrap();
+        config
+            .try_set_exclude_patterns(&[], SelectionEdit::Replace)
+            .unwrap();
+        assert!(config.as_core().selection.is_default());
+    }
+
+    #[test]
+    fn test_selection_patterns_are_validated_as_a_whole_with_their_own_setting() {
+        let mut config = SecurityConfig::new();
+        config
+            .try_set_include_patterns(Some(&strings(&["src"])), SelectionEdit::Replace)
+            .unwrap();
+        let err = config
+            .try_set_include_patterns(Some(&strings(&["ok", "**/x"])), SelectionEdit::Replace)
+            .unwrap_err();
+        assert_matches!(
+            err,
+            CoreError::InvalidConfiguration {
+                setting: ConfigSetting::EntryInclude,
+                ..
+            }
+        );
+        assert_eq!(config.get_include_patterns(), strings(&["src"]));
+
+        let err = config
+            .try_set_exclude_patterns(&strings(&["a,b"]), SelectionEdit::Append)
+            .unwrap_err();
+        assert_matches!(
+            err,
+            CoreError::InvalidConfiguration {
+                setting: ConfigSetting::EntryExclude,
+                ..
+            }
+        );
+        assert!(config.get_exclude_patterns().is_empty());
+    }
+
+    #[test]
+    fn test_strip_components_flatten_and_the_include_lists_are_independent() {
+        let mut config = SecurityConfig::new();
+        config
+            .try_set_include_patterns(Some(&strings(&["src"])), SelectionEdit::Append)
+            .unwrap();
+        config.try_set_strip_components(Some(2.0)).unwrap();
+        assert_eq!(config.get_strip_components(), Some(2.0));
+        assert!(!config.get_flatten());
+        assert_eq!(config.get_include_patterns(), strings(&["src"]));
+
+        config.try_set_flatten(true);
+        assert!(config.get_flatten());
+        assert_eq!(
+            config.get_strip_components(),
+            None,
+            "flatten replaces strip"
+        );
+
+        config.try_set_strip_components(Some(1.0)).unwrap();
+        assert!(!config.get_flatten(), "strip replaces flatten");
+
+        config.try_set_flatten(false);
+        assert_eq!(
+            config.get_strip_components(),
+            Some(1.0),
+            "false keeps a strip count"
+        );
+        config.try_set_strip_components(None).unwrap();
+        assert_eq!(config.as_core().selection.rewrite(), PathRewrite::Keep);
+
+        config.try_set_flatten(true);
+        config.try_set_strip_components(None).unwrap();
+        assert!(
+            config.get_flatten(),
+            "clearing the strip count keeps flatten"
+        );
+        config.try_set_flatten(false);
+        assert_eq!(config.as_core().selection.rewrite(), PathRewrite::Keep);
+    }
+
+    #[test]
+    fn test_strip_components_refusals_name_the_setting_and_keep_the_previous_value() {
+        let mut config = SecurityConfig::new();
+        config.try_set_strip_components(Some(1.0)).unwrap();
+        let too_deep =
+            f64::from(u32::try_from(config.as_core().max_path_depth.get()).unwrap()) + 1.0;
+        for bad in [0.0, -1.0, 1.5, f64::NAN, f64::INFINITY, too_deep, MAX_SAFE] {
+            let err = config.try_set_strip_components(Some(bad)).unwrap_err();
+            assert_matches!(
+                err,
+                CoreError::InvalidConfiguration {
+                    setting: ConfigSetting::StripComponents,
+                    ..
+                }
+            );
+            assert_eq!(config.get_strip_components(), Some(1.0), "{bad}");
+        }
     }
 }

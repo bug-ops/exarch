@@ -19,7 +19,7 @@ fn has_overrun(found: &[ZipInconsistency], entry: usize) -> bool {
 
 fn plain_verify(bytes: Vec<u8>) -> crate::VerificationReport {
     open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap()
 }
 

@@ -1,5 +1,6 @@
 //! JSON output formatter for machine-readable results.
 
+use super::formatter::Dispositions;
 use super::formatter::Envelope;
 use super::formatter::JsonError;
 use super::formatter::JsonExtractionCounts;
@@ -11,11 +12,15 @@ use super::formatter::JsonSkips;
 use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use crate::error::PartialExtractionContext;
+use crate::error::chain_hints;
+use crate::error::chain_text;
+use crate::error::raw;
 use crate::operation::Operation;
 use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
+use exarch_core::Disposition;
 use exarch_core::ExtractionReport;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
@@ -104,8 +109,10 @@ impl<W: Write> JsonFormatter<W> {
 
     fn output<T: Serialize>(&mut self, value: &T) -> Result<()> {
         let json = serde_json::to_string_pretty(value)?;
-        writeln!(self.out, "{json}")?;
-        Ok(())
+        match writeln!(self.out, "{json}") {
+            Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            written => written.map_err(Into::into),
+        }
     }
 
     fn success<T: Serialize>(&mut self, operation: Operation, data: T) -> Result<()> {
@@ -113,10 +120,44 @@ impl<W: Write> JsonFormatter<W> {
     }
 }
 
-fn short_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
+/// What a selection does to a listed entry, as `--json` reports it.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum JsonDisposition {
+    Extract {
+        landing: String,
+    },
+    Skip {
+        kind: &'static str,
+    },
+    /// A disposition added to the `#[non_exhaustive]` core enum after this
+    /// match was written.
+    Unknown,
+}
+
+impl From<&Disposition> for JsonDisposition {
+    fn from(disposition: &Disposition) -> Self {
+        match disposition {
+            Disposition::Extract(landing) => Self::Extract {
+                landing: path_text(landing.as_path()),
+            },
+            Disposition::Skip(kind) => Self::Skip {
+                kind: kind.as_str(),
+            },
+            _ => Self::Unknown,
+        }
+    }
+}
+
+fn short_manifest(
+    manifest: &ArchiveManifest,
+    dispositions: &Dispositions,
+) -> impl Serialize + use<> {
     #[derive(Serialize)]
     struct ManifestEntry {
         path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disposition: Option<JsonDisposition>,
     }
 
     #[derive(Serialize)]
@@ -132,14 +173,19 @@ fn short_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
         entries: manifest
             .entries()
             .iter()
-            .map(|e| ManifestEntry {
+            .enumerate()
+            .map(|(index, e)| ManifestEntry {
                 path: path_text(&e.path),
+                disposition: dispositions.get(index).map(JsonDisposition::from),
             })
             .collect(),
     }
 }
 
-fn long_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
+fn long_manifest(
+    manifest: &ArchiveManifest,
+    dispositions: &Dispositions,
+) -> impl Serialize + use<> {
     #[derive(Serialize)]
     struct ManifestEntry {
         path: String,
@@ -153,6 +199,8 @@ fn long_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
         modified: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         link_target: Option<JsonLinkTarget>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disposition: Option<JsonDisposition>,
     }
 
     #[derive(Serialize)]
@@ -170,7 +218,8 @@ fn long_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
         entries: manifest
             .entries()
             .iter()
-            .map(|e| ManifestEntry {
+            .enumerate()
+            .map(|(index, e)| ManifestEntry {
                 path: path_text(&e.path),
                 entry_type: e.kind.entry_type().as_str(),
                 size: e.size(),
@@ -182,6 +231,7 @@ fn long_manifest(manifest: &ArchiveManifest) -> impl Serialize + use<> {
                         .map(|d| d.as_secs())
                 }),
                 link_target: link_target_of(&e.kind),
+                disposition: dispositions.get(index).map(JsonDisposition::from),
             })
             .collect(),
     }
@@ -254,20 +304,26 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .as_ref()
             .map_or(JsonKind::Generic, |kind| JsonKind::Code(kind.code()));
 
-        // The message is the exact text: archive-derived parts are escaped
-        // only when a terminal formatter renders them.
-        let mut json_error = JsonError::new(kind, format!("{error:#}"));
+        // The message and hints are the exact text: archive-derived parts are
+        // escaped only when a terminal formatter renders them.
+        let hints = chain_hints(error, raw);
+        let mut json_error = JsonError::new(kind, chain_text(error))
+            .with_hint((!hints.is_empty()).then(|| hints.join("\n")));
 
-        // PartialExtraction is converted by convert_error into a
-        // PartialExtractionContext attached via `.context()`, so the partial
-        // report must be recovered with a direct top-level downcast: anyhow
-        // sees through `.context()` layers for the context type itself, but
-        // `.chain()` yields the wrapper's Display/Debug impl, never the
-        // context value, so `.chain().find_map(downcast_ref)` never matches.
+        // `convert_error` makes the `PartialExtractionContext` the outermost
+        // error, so the partial report is recovered with a top-level
+        // downcast.
         if let Some(ctx) = error.downcast_ref::<PartialExtractionContext>() {
             json_error = json_error.with_partial(JsonPartialReport {
                 counts: JsonExtractionCounts::from(&ctx.report),
                 writes: JsonId(ctx.writes),
+            });
+        }
+        if let Some(ArchiveError::DestinationOccupied { conflicts, .. }) = extraction_err {
+            json_error = json_error.with_conflicts({
+                let mut names: Vec<_> = conflicts.iter().map(|c| path_text(c)).collect();
+                names.sort();
+                names
             });
         }
         if let Some(kind) = &ffi_kind {
@@ -279,10 +335,19 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         });
     }
 
-    fn format_manifest(&mut self, manifest: &ArchiveManifest, view: ManifestView) -> Result<()> {
+    fn format_manifest(
+        &mut self,
+        manifest: &ArchiveManifest,
+        view: ManifestView,
+        dispositions: &Dispositions,
+    ) -> Result<()> {
         match view {
-            ManifestView::Short => self.success(Operation::List, short_manifest(manifest)),
-            ManifestView::Long(_) => self.success(Operation::List, long_manifest(manifest)),
+            ManifestView::Short => {
+                self.success(Operation::List, short_manifest(manifest, dispositions))
+            }
+            ManifestView::Long(_) => {
+                self.success(Operation::List, long_manifest(manifest, dispositions))
+            }
         }
     }
 
@@ -381,6 +446,45 @@ mod tests {
     use exarch_core::Uncompressed;
     use exarch_core::Violation;
     use std::path::PathBuf;
+
+    struct FailingWriter(io::ErrorKind);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(self.0.into())
+        }
+    }
+
+    #[test]
+    fn a_closed_stdout_is_not_a_failure() {
+        let mut f = JsonFormatter::with_writer(FailingWriter(io::ErrorKind::BrokenPipe));
+        assert!(
+            f.format_manifest(
+                &sample_manifest(),
+                ManifestView::Short,
+                &Dispositions::none()
+            )
+            .is_ok(),
+            "a reader that stopped reading is not an error"
+        );
+    }
+
+    #[test]
+    fn other_write_failures_still_fail() {
+        let mut f = JsonFormatter::with_writer(FailingWriter(io::ErrorKind::StorageFull));
+        assert!(
+            f.format_manifest(
+                &sample_manifest(),
+                ManifestView::Short,
+                &Dispositions::none()
+            )
+            .is_err()
+        );
+    }
 
     fn extraction_error_kind(err: &ArchiveError) -> String {
         JsonKind::Code(err.ffi_kind().code()).name().to_string()
@@ -802,8 +906,8 @@ mod tests {
 
     fn sample_manifest() -> ArchiveManifest {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut entry = ArchiveEntry::new(
             PathBuf::from("file.txt"),
@@ -820,8 +924,12 @@ mod tests {
     #[test]
     fn format_manifest_short_writes_paths_only() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        f.format_manifest(&sample_manifest(), ManifestView::Short)
-            .unwrap();
+        f.format_manifest(
+            &sample_manifest(),
+            ManifestView::Short,
+            &Dispositions::none(),
+        )
+        .unwrap();
         let v = parsed(&f);
         assert_eq!(v["operation"], "list");
         assert_eq!(v["data"]["entries"][0]["path"], "file.txt");
@@ -831,8 +939,12 @@ mod tests {
     #[test]
     fn format_manifest_long_writes_full_detail() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        f.format_manifest(&sample_manifest(), ManifestView::Long(SizeUnits::Human))
-            .unwrap();
+        f.format_manifest(
+            &sample_manifest(),
+            ManifestView::Long(SizeUnits::Human),
+            &Dispositions::none(),
+        )
+        .unwrap();
         let v = parsed(&f);
         assert_eq!(v["data"]["entries"][0]["size"], 1024);
         assert_eq!(v["data"]["entries"][0]["entry_type"], "File");
@@ -842,8 +954,8 @@ mod tests {
     #[test]
     fn format_verification_report_writes_full_report() {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut f = JsonFormatter::with_writer(Vec::new());
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
@@ -920,7 +1032,7 @@ mod tests {
     #[test]
     fn long_listing_reports_every_link_state_and_none_for_other_entries() {
         use exarch_core::ArchiveEntry;
-        use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
         let kinds = [
@@ -955,8 +1067,12 @@ mod tests {
                 .unwrap();
         }
         let mut f = JsonFormatter::with_writer(Vec::new());
-        f.format_manifest(&manifest, ManifestView::Long(SizeUnits::Bytes))
-            .unwrap();
+        f.format_manifest(
+            &manifest,
+            ManifestView::Long(SizeUnits::Bytes),
+            &Dispositions::none(),
+        )
+        .unwrap();
         let v = parsed(&f);
         let entries = &v["data"]["entries"];
         assert!(entries[0].get("link_target").is_none());

@@ -1,4 +1,8 @@
-//! Turns SIGINT and SIGTERM into a cancelled run.
+//! Turns SIGINT into a cancelled run.
+//!
+//! Only SIGINT is handled: SIGTERM and SIGHUP keep their default action, so a
+//! `nohup`-ed run still ignores SIGHUP and `kill` still ends the process at
+//! once.
 //!
 //! Only `extract` and `create` install the handler: they stage their output,
 //! and core removes the staging entry when [`ProgressCallback::is_cancelled`]
@@ -14,6 +18,8 @@
 
 use exarch_core::EntryPosition;
 use exarch_core::ProgressCallback;
+#[cfg(not(target_os = "wasi"))]
+use std::io::Write as _;
 use std::path::Path;
 #[cfg(not(target_os = "wasi"))]
 use std::path::PathBuf;
@@ -95,13 +101,14 @@ fn forced_exit_hint(output: &Path) -> String {
 fn on_signal() {
     if INTERRUPT.request() == Signal::Repeated {
         if let Some(output) = OUTPUT.get() {
-            eprintln!("{}", forced_exit_hint(output));
+            // A closed stderr must not stop the exit below.
+            let _ = writeln!(std::io::stderr(), "{}", forced_exit_hint(output));
         }
         std::process::exit(i32::from(FORCED_EXIT_CODE));
     }
 }
 
-/// Starts turning SIGINT and SIGTERM into a cancelled run of the command that
+/// Starts turning SIGINT into a cancelled run of the command that
 /// writes `output`. A handler that cannot be installed is reported and the
 /// default signal action stays.
 #[cfg(not(target_os = "wasi"))]
@@ -158,6 +165,7 @@ impl ProgressCallback for Interruptible {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "wasi"))]
     use exarch_core::NoopProgress;
 
     #[cfg(not(target_os = "wasi"))]
@@ -170,6 +178,7 @@ mod tests {
         assert_eq!(interrupt.request(), Signal::Repeated);
     }
 
+    #[cfg(not(target_os = "wasi"))]
     #[test]
     fn a_requested_stop_cancels_the_wrapped_reporter() {
         static WATCHED: Interrupt = Interrupt::new();

@@ -941,6 +941,37 @@ mod adoption {
     }
 
     #[test]
+    fn a_cautious_adoption_never_takes_a_foreign_uid_nor_its_write_bits() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = staging_in(temp.path());
+        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let own = std::fs::metadata(&parent).unwrap();
+        let foreign_uid = own.uid().wrapping_add(1);
+
+        staging
+            .adopt(Adoption::cautious_for_test(0o2777, foreign_uid, own.gid()))
+            .unwrap();
+
+        let applied = std::fs::metadata(staging.path()).unwrap();
+        assert_eq!(applied.uid(), own.uid());
+        assert_eq!(applied.mode() & 0o7777, 0o755);
+    }
+
+    #[test]
+    fn a_cautious_adoption_of_an_own_destination_keeps_its_mode() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = staging_in(temp.path());
+        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let own = std::fs::metadata(&parent).unwrap();
+
+        staging
+            .adopt(Adoption::cautious_for_test(0o775, own.uid(), own.gid()))
+            .unwrap();
+
+        assert_eq!(mode_of(staging.path()) & 0o777, 0o775);
+    }
+
+    #[test]
     fn a_read_only_adopted_directory_can_still_be_discarded() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());

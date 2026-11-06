@@ -256,7 +256,11 @@ fn publish(
         .status(destination.name.as_leaf())
         .map_err(ArchiveError::Io)?
         .filter(|status| status.occupant == Occupant::Directory);
-    if let Some(adoption) = existing.as_ref().map(Adoption::of).or(fresh_mode) {
+    if let Some(adoption) = existing
+        .as_ref()
+        .map(Adoption::of_empty_destination)
+        .or(fresh_mode)
+    {
         staging.adopt(adoption).map_err(|e| {
             ArchiveError::Io(io_context(
                 &e,

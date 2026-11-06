@@ -400,10 +400,27 @@ pub(in crate::formats) fn file_id(handle: BorrowedHandle<'_>) -> Option<(u64, u1
             length_u32(size_of::<FILE_ID_INFO>()).ok()?,
         )
     };
-    (ok != 0).then(|| {
-        (
-            info.VolumeSerialNumber,
-            u128::from_le_bytes(info.FileId.Identifier),
-        )
-    })
+    if ok == 0 {
+        return None;
+    }
+    nonzero_file_id(info.FileId.Identifier).map(|id| (info.VolumeSerialNumber, id))
+}
+
+/// The file id, or `None` for the all-zero id some redirectors report for
+/// every file: it names nothing, so it must not compare equal to itself.
+fn nonzero_file_id(identifier: [u8; 16]) -> Option<u128> {
+    Some(u128::from_le_bytes(identifier)).filter(|&id| id != 0)
+}
+
+#[cfg(test)]
+mod file_id_tests {
+    use super::nonzero_file_id;
+
+    #[test]
+    fn an_all_zero_file_id_is_unknown() {
+        assert_eq!(nonzero_file_id([0; 16]), None);
+        let mut id = [0; 16];
+        id[0] = 7;
+        assert_eq!(nonzero_file_id(id), Some(7));
+    }
 }

@@ -143,6 +143,20 @@ closed_enum! {
         /// [`ExistingFiles::Skip`], so a file planted in it is refused and never
         /// published; a duplicate entry of the archive is still skipped.
         ///
+        /// The staging directory is private (`0700`) for the whole run. On Unix
+        /// the published root then takes the mode of the empty destination it
+        /// fills (the mode a new directory gets under the umask when there is
+        /// none); setuid is never adopted. The owner is not: the root keeps the
+        /// caller's uid, and takes the destination's group only when the caller
+        /// owns that destination, so an empty directory someone else made does
+        /// not hand them the extracted tree. A destination the caller does not
+        /// own also loses its group and world write bits and its setgid bit.
+        /// Windows has no Unix modes; the staging directory inherits the ACL of
+        /// the destination's parent, so staged content is as readable as that
+        /// parent while the run lasts. On Windows an existing empty destination
+        /// is refused with `OutputExists`, because the rename cannot replace
+        /// an existing directory there.
+        ///
         /// Cleanup is best-effort if the process is terminated via SIGKILL.
         Atomic => "atomic",
 
@@ -161,9 +175,10 @@ closed_enum! {
         /// one of its own parents with a symlink mid-swap cannot redirect the
         /// swap, and the destination is checked to still be the directory that
         /// was inspected right before the first rename; that recheck narrows but
-        /// does not close the window around the destination itself. Where the
-        /// platform has no inode identity (Windows) the recheck compares only
-        /// the kind, and the parent is named by path.
+        /// does not close the window around the destination itself. The
+        /// recheck compares file identity (the inode, or the volume serial
+        /// number and file id on Windows); where a volume reports none (FAT,
+        /// some network shares) it compares only the kind.
         ///
         /// A destination that is a symlink or not a directory is refused
         /// ([`ConfigProblem::IsSymlink`],
@@ -171,8 +186,20 @@ closed_enum! {
         /// as is one that is a filesystem root or contains the archive or the
         /// working directory
         /// ([`ConfigProblem::ReplacesProtectedPath`]).
-        /// Cancellation is polled once more before anything is displaced. Opening
-        /// the parent needs read permission on it.
+        /// Cancellation is polled once more before anything is displaced. On
+        /// Unix, opening the parent needs search (execute) permission on it,
+        /// not read permission.
+        ///
+        /// The staging directory is private (`0700`) for the whole run. Just
+        /// before the swap the staged root takes the permissions of the
+        /// destination it replaces, read before that destination is moved
+        /// aside: its mode (sticky and setgid kept, setuid never) and, as far
+        /// as the caller may, its owner. Only root can give a directory away,
+        /// and a member can only take one of its own groups; a root that cannot
+        /// be put in the destination's group loses its group permission bits
+        /// and setgid instead of exposing them to another group. Windows has no
+        /// Unix modes: the staging directory inherits the ACL of the
+        /// destination's parent, not that of the destination.
         AtomicReplace => "atomic_replace",
     }
 }

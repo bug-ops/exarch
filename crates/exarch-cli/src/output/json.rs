@@ -1208,6 +1208,8 @@ mod tests {
             assert_eq!(json["message"], warning.to_string());
             assert!(json.as_object().unwrap().len() > 2, "{json}");
         }
+        let leftover = serde_json::to_value(JsonWarning::from(&warnings[1])).unwrap();
+        assert_eq!(leftover["reason"], "gone");
     }
 
     #[test]

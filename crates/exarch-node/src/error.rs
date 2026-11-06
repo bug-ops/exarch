@@ -881,6 +881,8 @@ pub enum ProgressCallbackError {
     CreationCancelled {
         /// The JS throw, attached as `cause`.
         source: Error,
+        /// The staging entry a failed cleanup left behind, redacted.
+        leftover_path: Option<String>,
     },
     /// The JS progress callback threw during an extraction, listing or
     /// verification, which core stopped at its next poll. A throw is the
@@ -893,6 +895,8 @@ pub enum ProgressCallbackError {
         source: Error,
         /// What the stop left behind, when the operation writes.
         outcome: Option<PartialOutcome>,
+        /// The staging entry a failed cleanup left behind, redacted.
+        leftover_path: Option<String>,
     },
     /// The JS progress callback threw while a listing itself succeeded; the
     /// manifest is discarded.
@@ -958,16 +962,27 @@ impl ProgressCallbackError {
     /// `is_cancelled` between entries) becomes the callback's own failure.
     pub fn merge(operation: Operation, source: CoreError, callback: Option<Error>) -> Self {
         match callback {
-            Some(thrown) if source.is_cancelled() => match operation {
-                Operation::Creation => Self::CreationCancelled { source: thrown },
-                Operation::Extraction | Operation::Listing | Operation::Verification => {
-                    Self::CallbackCancelled {
-                        operation,
+            Some(thrown) if source.is_cancelled() => {
+                let FfiErrorMessage {
+                    partial,
+                    leftover_path,
+                    ..
+                } = source.into_ffi_message();
+                match operation {
+                    Operation::Creation => Self::CreationCancelled {
                         source: thrown,
-                        outcome: source.into_ffi_message().partial,
+                        leftover_path,
+                    },
+                    Operation::Extraction | Operation::Listing | Operation::Verification => {
+                        Self::CallbackCancelled {
+                            operation,
+                            source: thrown,
+                            outcome: partial,
+                            leftover_path,
+                        }
                     }
                 }
-            },
+            }
             callback => Self::Core { source, callback },
         }
     }
@@ -1201,26 +1216,36 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     source,
                 )
             }
-            ProgressCallbackError::CreationCancelled { source } => Described {
+            ProgressCallbackError::CreationCancelled {
+                source,
+                leftover_path,
+            } => Described {
                 description:
                     "progress callback threw, creation was cancelled and nothing was written"
                         .to_owned(),
-                props: ErrorProps::js(JsCode::ProgressCallback, Details::None, Some(source)),
+                props: ErrorProps {
+                    leftover_path,
+                    ..ErrorProps::js(JsCode::ProgressCallback, Details::None, Some(source))
+                },
             },
             ProgressCallbackError::CallbackCancelled {
                 operation,
                 source,
                 outcome,
+                leftover_path,
             } => Described {
                 description: format!(
                     "progress callback threw, {} was cancelled",
                     operation.as_str()
                 ),
-                props: ErrorProps::js(
-                    JsCode::ProgressCallback,
-                    outcome.map_or(Details::None, Details::Extraction),
-                    Some(source),
-                ),
+                props: ErrorProps {
+                    leftover_path,
+                    ..ErrorProps::js(
+                        JsCode::ProgressCallback,
+                        outcome.map_or(Details::None, Details::Extraction),
+                        Some(source),
+                    )
+                },
             },
             ProgressCallbackError::ListCallback { source } => {
                 describe_callback_over_success("listing", Details::None, source)
@@ -2256,6 +2281,19 @@ mod tests {
             panic!("expected the kept outcome");
         };
         assert_eq!(report.files_extracted, 1);
+    }
+
+    #[test]
+    fn test_merge_cancelled_by_a_throw_keeps_the_staging_leftover() {
+        for operation in [Operation::Extraction, Operation::Creation] {
+            let cancelled = CoreError::Cancelled.rolled_back_with(Some(
+                exarch_core::StagingLeftover::new(PathBuf::from("/srv/out/.exarch-left")),
+            ));
+            let d = merged(operation, cancelled, Some(Error::from_reason("boom")));
+            assert_eq!(d.props.code, JsCode::ProgressCallback);
+            let leftover = d.props.leftover_path.expect("the leftover is named");
+            assert!(leftover.ends_with(".exarch-left"), "{leftover}");
+        }
     }
 
     #[test]

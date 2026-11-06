@@ -4905,8 +4905,8 @@ fn test_extract_atomic_force_requires_parent_read_permission_even_for_fresh_dest
 
 /// Windows-only regression test (v3/v4): a junction at the destination must
 /// be rejected the same way a Unix symlink is. `entry_status` classifies
-/// `FILE_ATTRIBUTE_REPARSE_POINT` tag-agnostically as
-/// `DestEntryKind::Symlink`, so this covers junctions — the practical
+/// `FILE_ATTRIBUTE_REPARSE_POINT` tag-agnostically as a symlink, so this
+/// covers junctions — the practical
 /// Windows redirect primitive, which (unlike a true symlink) needs no
 /// elevation to create — without depending on which specific reparse tag an
 /// attacker used. `mklink /J` requires no elevation either, so this fixture
@@ -7921,6 +7921,79 @@ mod interrupt {
 
         assert_eq!(status.code(), Some(130), "{status:?}");
         assert!(!out.exists(), "the destination must not be published");
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn atomic_extract_stops_with_130_and_publishes_nothing() {
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+
+        let mut command = exarch();
+        command
+            .args(["--verbose", "extract", "--atomic"])
+            .arg(&tar)
+            .arg(&out);
+        let mut child = running(command);
+        sigint(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert!(!out.exists(), "the destination must not be published");
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn atomic_force_extract_stops_with_130_and_leaves_the_destination_untouched() {
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("create destination");
+        std::fs::write(out.join("keep"), "original").expect("write marker");
+
+        let mut command = exarch();
+        command
+            .args(["--verbose", "extract", "--atomic", "--force"])
+            .arg(&tar)
+            .arg(&out);
+        let mut child = running(command);
+        sigint(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(130), "{status:?}");
+        let names: Vec<_> = std::fs::read_dir(&out)
+            .expect("read destination")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("keep")]);
+        assert_eq!(
+            std::fs::read_to_string(out.join("keep")).expect("read marker"),
+            "original"
+        );
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn create_zip_stops_with_130_and_leaves_no_staging_entry() {
+        let temp = TempDir::new().expect("temp dir");
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        for i in 0..20_000 {
+            std::fs::write(src.join(format!("f{i}")), "x").expect("write source file");
+        }
+        let output = temp.path().join("o.zip");
+
+        let mut command = exarch();
+        command.args(["--verbose", "create"]).arg(&output).arg(&src);
+        let mut child = running(command);
+        sigint(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert!(!output.exists(), "no archive may be published");
         assert_eq!(leftovers(temp.path()), Vec::<String>::new());
     }
 

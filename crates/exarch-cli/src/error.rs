@@ -577,11 +577,11 @@ fn replace_failed_context(message: Message, failure: &ReplaceFailure) -> Message
 }
 
 /// The advice for a refused configuration, by what was wrong with it.
-fn configuration_hint(setting: ConfigSetting, problem: &ConfigProblem) -> String {
+fn configuration_hint(setting: ConfigSetting, problem: &ConfigProblem) -> Option<String> {
     match (setting, problem) {
         (ConfigSetting::EntrySelection, ConfigProblem::NotSupported) => {
             let force = Flag::Force.long();
-            format!(
+            Some(format!(
                 "{} {force} replaces the whole destination, so it cannot be combined with {}; \
                  drop {force} or those flags.",
                 Flag::Atomic.long(),
@@ -591,22 +591,20 @@ fn configuration_hint(setting: ConfigSetting, problem: &ConfigProblem) -> String
                     Flag::StripComponents.long(),
                     Flag::Flatten.long(),
                 ]),
-            )
+            ))
         }
-        (_, problem) => problem_hint(problem).to_owned(),
+        (_, problem) => problem_hint(problem).map(str::to_owned),
     }
 }
 
 /// The advice for a refused value, by what was wrong with it.
 ///
-/// Every known [`ConfigProblem`] is named; the final wildcard serves only a
-/// variant added to the `#[non_exhaustive]` enum after this match was written.
-#[expect(
-    clippy::match_same_arms,
-    reason = "the wildcard serves only variants added after the explicit list was written"
-)]
-fn problem_hint(problem: &ConfigProblem) -> &'static str {
-    match problem {
+/// Every [`ConfigProblem`] known today is named; a variant added to the
+/// `#[non_exhaustive]` enum later gets no advice rather than a misleading
+/// generic line, which `every_known_config_problem_has_advice` makes visible
+/// once its fixture is added there.
+fn problem_hint(problem: &ConfigProblem) -> Option<&'static str> {
+    let hint = match problem {
         ConfigProblem::EntryNameCollision { .. } => {
             "Rename or exclude one of the colliding sources, or strip a different prefix."
         }
@@ -639,8 +637,9 @@ fn problem_hint(problem: &ConfigProblem) -> &'static str {
         | ConfigProblem::ExcludePatternRefused { .. } => {
             "Check the flags you passed and their allowed value ranges."
         }
-        _ => "Check the flags you passed and their allowed value ranges.",
-    }
+        _ => return None,
+    };
+    Some(hint)
 }
 
 /// The hint for a `SecurityViolation` that `relaxable_by` names.
@@ -1002,7 +1001,7 @@ fn dedicated_context(
             .hint_lit("The archive may be corrupted or malformed."),
         ArchiveError::InvalidConfiguration { setting, problem } => message
             .text(format!("Cannot {} with these settings", op.name()))
-            .hint(Some(configuration_hint(*setting, problem))),
+            .hint(configuration_hint(*setting, problem)),
         ArchiveError::SourceNotFound { path } => source_not_found_context(op, path, message),
         ArchiveError::SourceNotAccessible { path, error } => {
             source_not_accessible_context(op, path, error, message)
@@ -1090,6 +1089,57 @@ mod tests {
     use exarch_core::Violation;
     use std::io;
     use std::path::PathBuf;
+
+    #[test]
+    fn every_known_config_problem_has_advice() {
+        use exarch_core::ExcludeRefusal;
+        use exarch_core::ExtractOnlyFormat;
+        use exarch_core::ProtectedPath;
+
+        let problems = [
+            ConfigProblem::Zero,
+            ConfigProblem::Negative,
+            ConfigProblem::NotFinite,
+            ConfigProblem::NotWholeNumber,
+            ConfigProblem::TooLarge { max: 1 },
+            ConfigProblem::NotSet,
+            ConfigProblem::NoneProvided,
+            ConfigProblem::NoParent,
+            ConfigProblem::NotSupported,
+            ConfigProblem::CannotTargetSink,
+            ConfigProblem::RemovesWholeName { path: "a".into() },
+            ConfigProblem::NotAtStart,
+            ConfigProblem::Empty,
+            ConfigProblem::BlankOrControl,
+            ConfigProblem::PaddedWithBlank,
+            ConfigProblem::ContainsSeparator,
+            ConfigProblem::InnerDot,
+            ConfigProblem::DotEntry,
+            ConfigProblem::NotOneOf { allowed: &["a"] },
+            ConfigProblem::NotCreatable {
+                format: ExtractOnlyFormat::SevenZ,
+            },
+            ConfigProblem::TooLong { max: 1, got: 2 },
+            ConfigProblem::ContainsNul,
+            ConfigProblem::ExcludePatternRefused {
+                pattern: "p".into(),
+                reason: ExcludeRefusal::Empty,
+            },
+            ConfigProblem::NotADirectory,
+            ConfigProblem::IsSymlink,
+            ConfigProblem::EntryNameCollision {
+                name: "n".into(),
+                first: "a".into(),
+                second: "b".into(),
+            },
+            ConfigProblem::ReplacesProtectedPath {
+                path: ProtectedPath::WorkingDirectory,
+            },
+        ];
+        for problem in &problems {
+            assert!(problem_hint(problem).is_some(), "{problem:?} has no advice");
+        }
+    }
 
     /// The message chain followed by its hints, as the terminal shows them.
     fn full_text(error: &anyhow::Error) -> String {

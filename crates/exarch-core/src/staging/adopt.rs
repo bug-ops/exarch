@@ -22,6 +22,7 @@ mod imp {
     const PROBE_ATTEMPTS: usize = 16;
     const GROUP_ACCESS_AND_SETGID: u32 = 0o2070;
     const PRIVATE: u32 = 0o700;
+    const FOREIGN_WRITE_AND_SETGID: u32 = 0o2022;
 
     /// The permission bits and owner the published root takes.
     #[derive(Debug, Clone, Copy)]
@@ -34,17 +35,42 @@ mod imp {
     struct Owner {
         uid: u32,
         gid: u32,
+        claim: Claim,
+    }
+
+    /// How far the published root takes over the destination's owner.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Claim {
+        /// The uid and the gid, as for a destination being replaced.
+        Full,
+        /// Never the uid; the gid only when the caller owns the destination;
+        /// and a destination the caller does not own gives up its group and
+        /// world write bits and its setgid bit. An empty directory someone else
+        /// made must not hand them the tree.
+        Cautious,
     }
 
     impl Adoption {
         /// The mode and owner of an existing destination directory (sticky
         /// and setgid bits included, setuid never).
         pub(in crate::staging) fn of(status: &EntryStatus) -> Self {
+            Self::claiming(status, Claim::Full)
+        }
+
+        /// Like [`of`](Self::of) for an existing but empty destination that
+        /// is filled rather than replaced: its owner is not adopted, see
+        /// [`Claim::Cautious`].
+        pub(in crate::staging) fn of_empty_destination(status: &EntryStatus) -> Self {
+            Self::claiming(status, Claim::Cautious)
+        }
+
+        fn claiming(status: &EntryStatus, claim: Claim) -> Self {
             Self {
                 mode: status.mode.bits & 0o3777,
                 owner: Some(Owner {
                     uid: status.mode.uid,
                     gid: status.mode.gid,
+                    claim,
                 }),
             }
         }
@@ -53,7 +79,23 @@ mod imp {
         pub(in crate::staging) const fn for_test(mode: u32, uid: u32, gid: u32) -> Self {
             Self {
                 mode,
-                owner: Some(Owner { uid, gid }),
+                owner: Some(Owner {
+                    uid,
+                    gid,
+                    claim: Claim::Full,
+                }),
+            }
+        }
+
+        #[cfg(test)]
+        pub(in crate::staging) const fn cautious_for_test(mode: u32, uid: u32, gid: u32) -> Self {
+            Self {
+                mode,
+                owner: Some(Owner {
+                    uid,
+                    gid,
+                    claim: Claim::Cautious,
+                }),
             }
         }
     }
@@ -90,6 +132,8 @@ mod imp {
 
         /// Applies `adoption` to the staging directory through a descriptor.
         ///
+        /// A [`Claim::Cautious`] adoption never changes the uid.
+        ///
         /// The group is applied alone and first, so a uid the caller may not
         /// give away cannot take a group it may keep down with it. When the
         /// directory still is not in the destination's group, the group
@@ -107,12 +151,21 @@ mod imp {
             }
             let mut mode = adoption.mode;
             if let Some(owner) = adoption.owner {
+                let ours = dir.metadata()?.uid();
+                let own_destination = owner.uid == ours;
                 // Best effort: only root may chown to a foreign uid, and a
                 // group member to any of its groups. The outcome is read back.
-                let _ = fchown(&dir, None, Some(owner.gid));
-                let _ = fchown(&dir, Some(owner.uid), None);
+                if owner.claim == Claim::Full || own_destination {
+                    let _ = fchown(&dir, None, Some(owner.gid));
+                }
+                if owner.claim == Claim::Full {
+                    let _ = fchown(&dir, Some(owner.uid), None);
+                }
                 if dir.metadata()?.gid() != owner.gid {
                     mode &= !GROUP_ACCESS_AND_SETGID;
+                }
+                if owner.claim == Claim::Cautious && !own_destination {
+                    mode &= !FOREIGN_WRITE_AND_SETGID;
                 }
             }
             let applied = dir.set_permissions(std::fs::Permissions::from_mode(mode));
@@ -144,6 +197,10 @@ mod imp {
 
     impl Adoption {
         pub(in crate::staging) const fn of(_status: &EntryStatus) -> Self {
+            Self
+        }
+
+        pub(in crate::staging) const fn of_empty_destination(_status: &EntryStatus) -> Self {
             Self
         }
     }

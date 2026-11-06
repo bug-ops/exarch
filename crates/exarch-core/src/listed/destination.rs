@@ -91,6 +91,7 @@ pub(super) fn check(
         }
     }
     conflicts.sort();
+    conflicts.dedup();
     conflicts
         .is_empty()
         .ok_or_else(|| ArchiveError::DestinationOccupied {

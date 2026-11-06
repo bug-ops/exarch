@@ -76,6 +76,22 @@ fn a_vacant_check_names_an_occupied_file_landing() {
 }
 
 #[test]
+fn a_duplicate_archive_entry_names_its_occupied_landing_once() {
+    let (_dir, _, listed) = listed(
+        &[tar_file("f", b"x"), tar_file("f", b"y")],
+        &SecurityConfig::default(),
+    );
+    let dest = TempDir::new().unwrap();
+    std::fs::write(dest.path().join("f"), b"keep").unwrap();
+
+    let error = listed
+        .check_destination(dest.path(), DestinationCheck::Vacant)
+        .unwrap_err();
+
+    assert_eq!(conflicts(&error), [Path::new("f")]);
+}
+
+#[test]
 fn a_replaceable_check_ignores_occupied_file_landings() {
     let (_dir, _, listed) = listed(&[tar_file("f", b"x")], &SecurityConfig::default());
     let dest = TempDir::new().unwrap();

@@ -1254,6 +1254,15 @@ impl PyExtractionOptions {
     ///   archive's directory or an ancestor of it, or the working directory is
     ///   refused with `InvalidConfigurationError`.
     ///
+    /// The staging directory is private (`0700`) while the archive extracts.
+    /// On Unix the published root then takes the mode of the destination it
+    /// replaces (or fills), never setuid; with `"atomic_replace"` also its
+    /// owner as far as the caller may, and with `"atomic"` never the uid and
+    /// the group only when the caller owns the destination. On Windows the
+    /// staging directory inherits the ACL of the destination's parent, and
+    /// `"atomic"` onto an existing empty directory raises
+    /// `OutputExistsError`.
+    ///
     /// `extract_archive_to_memory` and `extract_archive_to_callback` take no
     /// staging.
     ///

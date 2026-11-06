@@ -314,6 +314,7 @@ enum JsonWarningFields {
         path: String,
         identity: &'static str,
         io_kind: JsonId<IoKind>,
+        reason: String,
     },
     ZipRatio {
         entries: usize,
@@ -338,11 +339,12 @@ impl From<&ExtractionWarning> for JsonWarning {
                 path,
                 identity,
                 io_kind,
-                ..
+                message,
             } => Some(JsonWarningFields::LeftoverBackup {
                 path: path_text(path),
                 identity: identity.as_str(),
                 io_kind: JsonId(*io_kind),
+                reason: message.to_string(),
             }),
             _ => None,
         };

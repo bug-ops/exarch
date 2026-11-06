@@ -33,8 +33,6 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs::File;
-use std::hash::BuildHasherDefault;
-use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -44,11 +42,11 @@ use super::pinned_dir::Leaf;
 use super::pinned_dir::VettedDir;
 use crate::ExistingFiles;
 
-/// The most landings a run records (4 Mi, 64 MiB of identity keys).
+/// The most landings a run records (4 Mi keys).
 const RECORD_CAP: usize = 4 * 1024 * 1024;
 
 /// How a landing is recorded: by identity, or by path where the volume gives
-/// none (FAT, exFAT, and Windows until its identity is wired up).
+/// none (FAT, exFAT, and Windows volumes without `FileIdInfo`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum LandingKey {
     Identity(IdentityKey),
@@ -68,42 +66,9 @@ fn key_of(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Option<LandingKey> {
     Some(key_for(identity, rel))
 }
 
-/// A multiply-rotate hasher for the record's keys, which are filesystem
-/// identities and paths already in the run's hands rather than adversarial
-/// hash inputs a peer could aim at the table; `SipHash` costs more per created
-/// file than the record is worth.
-#[derive(Default)]
-struct KeyHasher(u64);
-
-impl KeyHasher {
-    const SEED: u64 = 0x517c_c1b7_2722_0a95;
-
-    fn mix(&mut self, word: u64) {
-        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
-    }
-}
-
-impl Hasher for KeyHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for chunk in bytes.chunks(8) {
-            let mut word = [0; 8];
-            word[..chunk.len()].copy_from_slice(chunk);
-            self.mix(u64::from_le_bytes(word));
-        }
-    }
-
-    fn write_u64(&mut self, word: u64) {
-        self.mix(word);
-    }
-}
-
 #[derive(Debug, Default)]
 struct Created {
-    keys: HashSet<LandingKey, BuildHasherDefault<KeyHasher>>,
+    keys: HashSet<LandingKey>,
     saturated: bool,
 }
 
@@ -179,6 +144,34 @@ impl RunRecord {
     #[cfg(all(test, unix))]
     pub(crate) fn saturate(&self) {
         self.0.borrow_mut().saturated = true;
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::LandingKey;
+    use super::RunRecord;
+    use super::key_for;
+    use crate::formats::file_identity::FileIdentity;
+
+    #[test]
+    fn an_unknown_identity_is_keyed_by_the_path_as_spelled() {
+        let record = RunRecord::default();
+        record.insert(Some(key_for(FileIdentity::Unknown, "dir/a".as_ref())));
+
+        let created = |rel: &str| {
+            record
+                .0
+                .borrow()
+                .keys
+                .contains(&key_for(FileIdentity::Unknown, rel.as_ref()))
+        };
+        assert!(created("dir/a"));
+        assert!(!created("dir/A"));
+        assert!(matches!(
+            key_for(FileIdentity::Unknown, "x".as_ref()),
+            LandingKey::Path(_)
+        ));
     }
 }
 

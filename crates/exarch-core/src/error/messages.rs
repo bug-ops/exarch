@@ -911,7 +911,7 @@ impl ArchiveError {
             }
             Self::InvalidConfiguration { setting, problem } => format!(
                 "invalid configuration: {}",
-                super::config_error::message(*setting, problem)
+                super::config_error::message(*setting, &redacted_problem(problem))
             ),
             Self::ReaderFormat(reason) => reason.to_string(),
             Self::PartialExtraction(partial) => partial.cause().ffi_description(),
@@ -936,6 +936,27 @@ impl ArchiveError {
     #[must_use]
     pub fn error_code(&self) -> ErrorCode {
         self.ffi_kind().code()
+    }
+}
+
+/// Replaces the host paths a [`ConfigProblem`] carries with their redacted
+/// spelling, so a release-build message leaks no directory layout.
+fn redacted_problem(problem: &ConfigProblem) -> std::borrow::Cow<'_, ConfigProblem> {
+    use std::borrow::Cow;
+    match problem {
+        ConfigProblem::RemovesWholeName { path } => Cow::Owned(ConfigProblem::RemovesWholeName {
+            path: sanitize_path_for_error(path).into(),
+        }),
+        ConfigProblem::EntryNameCollision {
+            name,
+            first,
+            second,
+        } => Cow::Owned(ConfigProblem::EntryNameCollision {
+            name: name.clone(),
+            first: sanitize_path_for_error(first).into(),
+            second: sanitize_path_for_error(second).into(),
+        }),
+        other => Cow::Borrowed(other),
     }
 }
 
@@ -1371,6 +1392,36 @@ mod tests {
             non_utf8.detail,
             FfiDetail::NonUtf8EntryPath { path: "bad".into() }
         );
+    }
+
+    #[test]
+    fn host_paths_in_a_config_problem_are_redacted_in_the_message() {
+        let collision = ArchiveError::InvalidConfiguration {
+            setting: ConfigSetting::OutputPath,
+            problem: ConfigProblem::EntryNameCollision {
+                name: "a.txt".into(),
+                first: PathBuf::from("/srv/secret/one/a.txt"),
+                second: PathBuf::from("/srv/secret/two/a.txt"),
+            },
+        }
+        .into_ffi_message();
+        let removes = ArchiveError::InvalidConfiguration {
+            setting: ConfigSetting::OutputPath,
+            problem: ConfigProblem::RemovesWholeName {
+                path: PathBuf::from("/srv/secret/one"),
+            },
+        }
+        .into_ffi_message();
+
+        for message in [&collision.description, &removes.description] {
+            assert_eq!(
+                message.contains("/srv/secret"),
+                cfg!(debug_assertions),
+                "{message}"
+            );
+        }
+        assert!(collision.description.contains("a.txt"));
+        assert!(removes.description.contains("one"));
     }
 
     #[test]

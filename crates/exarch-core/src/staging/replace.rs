@@ -367,6 +367,7 @@ struct Displaced<'a> {
     backup_name: LeafBuf,
     backup_path: PathBuf,
     backup: Option<EntryStatus>,
+    permissions: Option<Adoption>,
     armed: bool,
 }
 
@@ -381,6 +382,15 @@ impl<'a> Displaced<'a> {
         let backup_path = dest.parent.join(&backup_name);
 
         verify_unchanged(pin, dest.name, dest.id).map_err(Refusal::Error)?;
+        // Read before the move: a failure here still leaves the destination in
+        // place, where the alternative is a root published private (`0700`).
+        let permissions = pin
+            .status(dest.name.as_leaf())
+            .map_err(|e| {
+                Refusal::failed(e, "failed to read the destination's permissions", dest.path)
+            })?
+            .as_ref()
+            .map(Adoption::of);
 
         pin.rename_dir_within(dest.name.as_leaf(), backup_name.as_leaf())
             .map_err(|e| {
@@ -392,7 +402,7 @@ impl<'a> Displaced<'a> {
             })?;
         // Best effort: the destination is already moved, so a failure to
         // inspect the backup must not abort the swap. Without a status the
-        // cleanup warning and the permission adoption are skipped.
+        // cleanup warning is skipped.
         let backup = pin.status(backup_name.as_leaf()).ok().flatten();
         Ok(Self {
             pin,
@@ -400,6 +410,7 @@ impl<'a> Displaced<'a> {
             backup_name,
             backup_path,
             backup,
+            permissions,
             armed: true,
         })
     }
@@ -414,10 +425,9 @@ impl<'a> Displaced<'a> {
         Err(io::Error::from(io::ErrorKind::AlreadyExists))
     }
 
-    /// The permissions of the destination that was displaced, when they could
-    /// be read.
-    fn original_permissions(&self) -> Option<Adoption> {
-        self.backup.as_ref().map(Adoption::of)
+    /// The permissions the destination had before it was displaced.
+    const fn original_permissions(&self) -> Option<Adoption> {
+        self.permissions
     }
 
     /// Moves the backup back and disarms the guard.
@@ -538,4 +548,87 @@ fn roll_back(
         restore,
         staging.discard(),
     ))
+}
+
+#[cfg(all(test, windows))]
+#[allow(clippy::unwrap_used)]
+mod windows_tests {
+    use std::os::windows::process::CommandExt;
+    use std::path::Path;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::protected_path;
+    use crate::ProtectedPath;
+    use crate::formats::file_identity::FileIdentity;
+    use crate::formats::file_identity::IdentityCheck;
+    use crate::formats::file_identity::identity_of;
+
+    /// The 8.3 spelling of `path`, or `None` when the volume has no short
+    /// names (they can be disabled per volume).
+    fn short_spelling(path: &Path) -> Option<PathBuf> {
+        let output = Command::new("cmd")
+            .raw_arg(format!(
+                "/C for %I in (\"{}\") do @echo %~sI",
+                path.display()
+            ))
+            .output()
+            .ok()?;
+        let short = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
+        (short.exists() && short != path).then_some(short)
+    }
+
+    fn long_named_dir(temp: &TempDir) -> PathBuf {
+        let dir = temp.path().join("exarchlongdirectoryname");
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_short_name_is_the_same_directory_by_identity() {
+        let temp = TempDir::new().unwrap();
+        let long = long_named_dir(&temp);
+        let Some(short) = short_spelling(&long) else {
+            eprintln!("skipping: the volume has no 8.3 names");
+            return;
+        };
+        let (long_id, short_id) = (identity_of(&long).unwrap(), identity_of(&short).unwrap());
+        if matches!(long_id, FileIdentity::Unknown) {
+            eprintln!("skipping: the volume reports no file id");
+            return;
+        }
+
+        assert_eq!(short_id.check(long_id), IdentityCheck::Same);
+        let other = temp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        assert_eq!(
+            identity_of(&other).unwrap().check(long_id),
+            IdentityCheck::Different
+        );
+    }
+
+    #[test]
+    fn a_destination_spelled_with_its_short_name_still_protects_the_archive() {
+        let temp = TempDir::new().unwrap();
+        let long = long_named_dir(&temp);
+        let archive = long.join("a.tar");
+        std::fs::write(&archive, b"x").unwrap();
+        let Some(short) = short_spelling(&long) else {
+            eprintln!("skipping: the volume has no 8.3 names");
+            return;
+        };
+        let dest_id = identity_of(&short).unwrap();
+
+        assert_eq!(
+            protected_path(&short, dest_id, Some(&archive)),
+            Some(ProtectedPath::ArchiveAncestor)
+        );
+        assert_eq!(
+            protected_path(&short, FileIdentity::Unknown, Some(&archive)),
+            Some(ProtectedPath::ArchiveAncestor),
+            "an unknown identity falls back to the canonical paths"
+        );
+    }
 }

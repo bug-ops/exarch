@@ -66,7 +66,6 @@ mod tests {
     use std::cell::Cell;
 
     use super::OccupantAction;
-    use super::ReplacePermit;
     use crate::ArchiveError;
     use crate::ExistingFiles;
 
@@ -97,12 +96,5 @@ mod tests {
 
         assert_matches!(duplicate, Ok(OccupantAction::Skip));
         assert_matches!(foreign, Err(ArchiveError::Cancelled));
-    }
-
-    #[test]
-    fn the_test_permit_is_a_replace_permit() {
-        let permit = ReplacePermit::for_test();
-
-        assert_matches!(OccupantAction::Replace(permit), OccupantAction::Replace(_));
     }
 }

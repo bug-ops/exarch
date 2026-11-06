@@ -473,9 +473,9 @@ pub struct ExtractArgs {
     /// only then is the old destination removed, so a failure at any point
     /// leaves either the old or the new content under the destination name.
     /// --atomic --force refuses --include, --exclude, --strip-components and
-    /// --flatten. On Unix, --force also needs read permission on the
-    /// destination's parent directory; the destination itself need not be
-    /// readable.
+    /// --flatten. On Unix, --force also needs search (execute) permission
+    /// on the destination's parent directory; the destination itself need not
+    /// be readable.
     #[arg(long)]
     pub atomic: bool,
 

@@ -1373,6 +1373,14 @@ impl ExtractionOptions {
     /// directory or one that contains it, is refused with
     /// `INVALID_CONFIGURATION` (`setting` is `output_path`, `protectedPath`
     /// names the reason).
+    ///
+    /// The staging directory is private (`0700`) while the archive extracts. On
+    /// Unix the published root then takes the mode of the destination it
+    /// replaces (or fills), never setuid; with `'atomic_replace'` also its
+    /// owner as far as the caller may, and with `'atomic'` never the uid and
+    /// the group only when the caller owns the destination. On Windows the
+    /// staging directory inherits the ACL of the destination's parent, and
+    /// `'atomic'` onto an existing empty directory fails with `OUTPUT_EXISTS`.
     #[napi(js_name = "withStaging")]
     pub fn with_staging(&mut self, staging: Staging) -> &Self {
         self.inner.staging = staging.into();

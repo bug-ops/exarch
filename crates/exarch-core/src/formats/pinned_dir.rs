@@ -1103,6 +1103,7 @@ mod windows_tests {
     use super::support::pinned;
     use super::support::pinned_at;
     use super::*;
+    use crate::formats::file_identity::IdentityCheck;
     use crate::formats::occupant::ReplacePermit;
     use std::fs;
     use std::io;
@@ -1133,6 +1134,57 @@ mod windows_tests {
 
     fn entries(dir: &Path) -> usize {
         fs::read_dir(dir).unwrap().count()
+    }
+
+    #[test]
+    fn a_handle_relative_status_carries_the_file_identity_of_the_path() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        dir.make_dir(leaf("sub")).unwrap();
+        fs::write(temp.path().join("other"), b"x").unwrap();
+
+        let sub = dir.status(leaf("sub")).unwrap().unwrap();
+        let other = dir.status(leaf("other")).unwrap().unwrap();
+        let by_path = crate::formats::file_identity::identity_of(&temp.path().join("sub")).unwrap();
+        if matches!(
+            sub.identity,
+            crate::formats::file_identity::FileIdentity::Unknown
+        ) {
+            eprintln!("skipping: the volume reports no file id");
+            return;
+        }
+
+        assert_eq!(sub.identity.check(by_path), IdentityCheck::Same);
+        assert_eq!(sub.identity.check(other.identity), IdentityCheck::Different);
+        assert!(!sub.reparse);
+    }
+
+    #[test]
+    fn a_junction_is_reported_as_a_reparse_point() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        fs::create_dir(temp.path().join("target")).unwrap();
+        if !junction(&temp.path().join("link"), &temp.path().join("target")) {
+            eprintln!("skipping: cannot create a junction");
+            return;
+        }
+
+        let status = dir.status(leaf("link")).unwrap().unwrap();
+
+        assert!(status.reparse);
+    }
+
+    #[test]
+    fn renaming_a_directory_onto_an_existing_name_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        dir.make_dir(leaf("from")).unwrap();
+        dir.make_dir(leaf("taken")).unwrap();
+
+        assert!(dir.rename_dir_within(leaf("from"), leaf("taken")).is_err());
+        assert_eq!(entries(temp.path()), 2);
+        dir.rename_dir_within(leaf("from"), leaf("free")).unwrap();
+        assert_eq!(dir.probe(leaf("free")).unwrap(), Some(Occupant::Directory));
     }
 
     #[test]

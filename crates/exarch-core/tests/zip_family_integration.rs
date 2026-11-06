@@ -11,8 +11,6 @@
     clippy::cast_possible_truncation
 )]
 
-mod common;
-
 use exarch_core::ArchiveError;
 use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
@@ -148,11 +146,12 @@ fn verify_works_for_every_fixture() {
     }
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn inferred_creation_is_rejected_for_zip_family() {
     let dest = TempDir::new().unwrap();
     let config = CreationConfig::default();
-    for ext in common::ZIP_FAMILY_EXTENSIONS {
+    for ext in exarch_core::ZIP_FAMILY_ALIASES {
         let output = dest.path().join(format!("out.{ext}"));
         let result = create_archive(&output, &[] as &[&str], &config);
         match result {

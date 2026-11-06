@@ -2,14 +2,6 @@
 
 #![allow(dead_code, clippy::expect_used, clippy::disallowed_methods)]
 
-/// Extensions that name a ZIP container with extra structure; detection reads
-/// them as ZIP and creation refuses them. Mirrors the crate's private alias
-/// list, whose own unit tests drive detection from it.
-pub const ZIP_FAMILY_EXTENSIONS: &[&str] = &[
-    "jar", "war", "ear", "nar", "nbm", "apk", "aab", "ipa", "appx", "msix", "whl", "vsix", "xpi",
-    "epub",
-];
-
 /// Flips the low bit of the first byte of `marker` found in `bytes`, so stored
 /// data fails its checksum.
 pub fn flip_first(bytes: &mut [u8], marker: &[u8]) {

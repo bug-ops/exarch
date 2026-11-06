@@ -21,32 +21,44 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
-// `pub(crate)` states intent inside the private modules; the lint would flatten it to `pub`.
-#![allow(clippy::redundant_pub_crate)]
 
+// NOTE: `pub(crate)` marks intent inside the private modules below;
+// `redundant_pub_crate` contradicts `unreachable_pub` (408 sites) and would
+// flatten it to `pub`.
+#[allow(clippy::redundant_pub_crate)]
 mod api;
 pub(crate) mod closed_enum;
+#[allow(clippy::redundant_pub_crate)]
 mod config;
 pub(crate) mod copy;
+#[allow(clippy::redundant_pub_crate)]
 mod creation;
+#[allow(clippy::redundant_pub_crate)]
 mod error;
+#[allow(clippy::redundant_pub_crate)]
 mod formats;
+#[allow(clippy::redundant_pub_crate)]
 mod inspection;
 mod limit;
 mod listed;
 mod path_text;
 #[cfg(test)]
 use exarch_testkit::raw_zip;
+#[allow(clippy::redundant_pub_crate)]
 mod reader;
 mod report;
 mod request;
+#[allow(clippy::redundant_pub_crate)]
 mod security;
 mod selection;
+#[allow(clippy::redundant_pub_crate)]
 mod sink;
 mod staging;
 #[cfg(test)]
 pub(crate) mod test_utils;
+#[allow(clippy::redundant_pub_crate)]
 mod types;
+#[allow(clippy::redundant_pub_crate)]
 mod writer;
 
 // Re-export main API types
@@ -264,6 +276,8 @@ pub use types::DestDir;
 pub use types::SafePath;
 pub use types::SafeSymlink;
 
+#[cfg(feature = "testing")]
+pub use formats::detect::ZIP_FAMILY_ALIASES;
 #[cfg(feature = "testing")]
 pub use security::HardlinkTracker;
 #[cfg(feature = "testing")]

@@ -28,7 +28,7 @@ pub mod config;
 pub(crate) mod copy;
 pub mod creation;
 pub mod error;
-pub mod formats;
+pub(crate) mod formats;
 pub mod inspection;
 mod limit;
 mod listed;

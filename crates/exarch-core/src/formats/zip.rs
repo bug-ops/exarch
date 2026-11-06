@@ -85,28 +85,6 @@
 //!
 //! # Examples
 //!
-//! Basic extraction:
-//!
-//! ```no_run
-//! use exarch_core::ExtractionOptions;
-//! use exarch_core::SecurityConfig;
-//! use exarch_core::formats::ZipArchive;
-//! use exarch_core::formats::traits::ArchiveFormat;
-//! use std::fs::File;
-//! use std::path::Path;
-//!
-//! let file = File::open("archive.zip")?;
-//! let config = SecurityConfig::default();
-//! let mut archive = ZipArchive::new(file, &config)?;
-//! let report = archive.extract(
-//!     Path::new("/output"),
-//!     &ExtractionOptions::default(),
-//!     &mut exarch_core::NoopProgress,
-//! )?;
-//! println!("Extracted {} files", report.files_extracted);
-//! # Ok::<(), exarch_core::ArchiveError>(())
-//! ```
-//!
 //! Custom security configuration:
 //!
 //! ```no_run
@@ -501,28 +479,6 @@ impl<'a, R: Read + Seek> CheckedZip<'a, R> {
 /// - Selective decompression (only extract needed files)
 /// - Parallel decompression (future optimization)
 /// - Better compression ratio detection for zip bombs
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::formats::ZipArchive;
-/// use exarch_core::formats::traits::ArchiveFormat;
-/// use std::fs::File;
-/// use std::path::Path;
-///
-/// let file = File::open("archive.zip")?;
-/// let config = SecurityConfig::default();
-/// let mut archive = ZipArchive::new(file, &config)?;
-/// let report = archive.extract(
-///     Path::new("/output"),
-///     &ExtractionOptions::default(),
-///     &mut exarch_core::NoopProgress,
-/// )?;
-/// println!("Extracted {} files", report.files_extracted);
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
 pub struct ZipArchive<R: Read + Seek> {
     inner: ZipReader<Shared<R>>,
     structure: ZipStructure,
@@ -555,18 +511,6 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// - File is not a valid ZIP archive
     /// - Central directory is corrupted, or changes while it is being read
     /// - Archive is password-protected (rejected for security)
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use exarch_core::SecurityConfig;
-    /// use exarch_core::formats::ZipArchive;
-    /// use std::fs::File;
-    ///
-    /// let file = File::open("archive.zip")?;
-    /// let archive = ZipArchive::new(file, &SecurityConfig::default())?;
-    /// # Ok::<(), exarch_core::ArchiveError>(())
-    /// ```
     pub fn new(reader: R, config: &SecurityConfig) -> Result<Self> {
         Self::open_for(reader, config, DecodeReuse::Off)
     }
@@ -1010,12 +954,14 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         self.extract_in_place(output_dir, &config, options, progress)
     }
 
+    #[cfg(test)]
     fn list(mut self) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::ListPass;
         let config = Arc::clone(&self.config);
         self.list_with(&config, &mut ListPass::strict())
     }
 
+    #[cfg(test)]
     fn verify(
         mut self,
         options: &VerificationOptions,

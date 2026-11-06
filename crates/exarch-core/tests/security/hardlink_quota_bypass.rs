@@ -21,8 +21,6 @@ use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
-use exarch_core::formats::ArchiveFormat;
-use exarch_core::formats::TarArchive;
 use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
@@ -114,7 +112,7 @@ fn test_hardlink_bomb_exceeds_total_size() {
         .with_max_total_size(exarch_core::non_zero!(20_000)) // room for target + 3 links, not 4
         .with_max_file_count(exarch_core::non_zero!(1_000));
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -163,7 +161,7 @@ fn test_hardlink_bomb_exceeds_file_count() {
         .with_max_total_size(exarch_core::non_zero!(1_000_000))
         .with_max_file_count(exarch_core::non_zero!(3)); // target.txt + 2 hardlinks allowed, 3rd rejected
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -206,7 +204,7 @@ fn test_legitimate_hardlinks_within_quota_succeed() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_hardlinks(true);
 
-    let archive = TarArchive::new(Cursor::new(tar_data), &config);
+    let archive = crate::common::tar_archive(Cursor::new(tar_data), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),

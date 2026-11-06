@@ -377,3 +377,43 @@ fn the_windows_are_judged_at_the_power_of_two_boundary_of_the_limit() {
         }
     }
 }
+
+fn assert_refused_at<T: std::fmt::Debug>(result: crate::Result<T>, max: u64, label: &str) {
+    let error = match result {
+        Err(ArchiveError::PartialExtraction(partial)) => partial.into_parts().0,
+        other => other.unwrap_err(),
+    };
+    assert_matches!(
+        error,
+        ArchiveError::QuotaExceeded {
+            resource: QuotaResource::DecoderMemory { max: reported }
+        } if reported == max,
+        "{label}"
+    );
+}
+
+#[test]
+fn zip_handles_apply_the_limit_of_the_config_they_are_opened_under() {
+    let at = 1u64 << 16;
+    let bytes = zstd_entry_with_window(16).bytes;
+    for policy in [ZipConsistencyPolicy::Ignore, ZipConsistencyPolicy::Enforce] {
+        let strict = config_with_memory(policy, at - 1);
+        let loose = config_with_memory(policy, at);
+        let open =
+            |config: &SecurityConfig| ZipArchive::new(Cursor::new(bytes.clone()), config).unwrap();
+
+        assert_refused_at(extract_with(open(&strict)), at - 1, "extract");
+        assert_refused_at(open(&strict).list(), at - 1, "list");
+        assert_refused_at(
+            open(&strict).verify(&VerificationOptions::default()),
+            at - 1,
+            "verify",
+        );
+
+        open(&loose).list().unwrap();
+        open(&loose)
+            .verify(&VerificationOptions::default())
+            .unwrap();
+        extract_with(open(&loose)).unwrap();
+    }
+}

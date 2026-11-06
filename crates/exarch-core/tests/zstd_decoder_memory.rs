@@ -8,21 +8,15 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::assert_matches;
-use std::io::Cursor;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
-use exarch_core::ExtractionOptions;
-use exarch_core::NoopProgress;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
-use exarch_core::VerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::extract_archive;
-use exarch_core::formats::ZipArchive;
-use exarch_core::formats::traits::ArchiveFormat;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use exarch_testkit::raw_zip::RawEntry;
@@ -188,43 +182,6 @@ fn zip_window_27_is_accepted_by_default_and_28_refused() {
     let max = default.max_decoder_memory.get();
     assert_path_operations(&write_zip(dir.path(), 27, 0), &default, None, "2^27");
     assert_path_operations(&write_zip(dir.path(), 28, 0), &default, Some(max), "2^28");
-}
-
-#[test]
-fn zip_archive_handles_apply_the_limit_of_the_config_they_are_opened_under() {
-    let at = 1u64 << 16;
-    for policy in POLICIES {
-        let strict = config(at - 1, policy);
-        let loose = config(at, policy);
-        let open = |config: &SecurityConfig| {
-            ZipArchive::new(Cursor::new(zip_bytes(16, 0)), config).unwrap()
-        };
-        let out = TempDir::new().unwrap();
-
-        assert_decoder_memory(
-            open(&strict)
-                .extract(out.path(), &ExtractionOptions::default(), &mut NoopProgress)
-                .unwrap_err(),
-            at - 1,
-            "extract",
-        );
-        assert_decoder_memory(open(&strict).list().unwrap_err(), at - 1, "list");
-        assert_decoder_memory(
-            open(&strict)
-                .verify(&VerificationOptions::default())
-                .unwrap_err(),
-            at - 1,
-            "verify",
-        );
-
-        open(&loose).list().unwrap();
-        open(&loose)
-            .verify(&VerificationOptions::default())
-            .unwrap();
-        open(&loose)
-            .extract(out.path(), &ExtractionOptions::default(), &mut NoopProgress)
-            .unwrap();
-    }
 }
 
 fn shared_local_header_zip(window_log: u32) -> Vec<u8> {

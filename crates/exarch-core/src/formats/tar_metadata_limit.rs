@@ -294,13 +294,15 @@ impl BudgetState {
             .extend_from_slice(bytes);
     }
 
-    /// Raw archive bytes consumed so far; under an [`TapSource::Opaque`] or
+    /// Raw archive bytes consumed so far; under an `Opaque` or
     /// [`TapSource::Replay`] source this is the decoded byte count, so a
     /// decoded/consumed ratio is about one and never exceeds any ratio limit.
     fn source_consumed(&self) -> u64 {
         match &self.source {
             TapSource::Tapped(tap) => tap.consumed(),
-            TapSource::Opaque | TapSource::Replay(_) => self.total_read.load(Ordering::Relaxed),
+            TapSource::Replay(_) => self.total_read.load(Ordering::Relaxed),
+            #[cfg(test)]
+            TapSource::Opaque => self.total_read.load(Ordering::Relaxed),
         }
     }
 

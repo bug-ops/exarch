@@ -25,8 +25,6 @@ use exarch_core::VerificationOptions;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
-use exarch_core::formats::TarArchive;
-use exarch_core::formats::traits::ArchiveFormat;
 use exarch_core::verify_archive;
 use sevenz_rust2::EncoderConfiguration;
 use sevenz_rust2::EncoderMethod;
@@ -737,26 +735,6 @@ fn tar_gnu_sparse_entry_is_refused() {
 
     let error = verify_err(&path, integrity(2_000_000));
     assert_matches!(error, ArchiveError::TarAmbiguity(TarAmbiguity::SparseEntry));
-}
-
-#[test]
-fn tar_archive_trait_verify_reads_the_trailer_within_the_cap() {
-    let config = SecurityConfig::default();
-    let cap = usize::try_from(config.max_tar_metadata_bytes.get()).unwrap();
-    let mut tar = three_entries();
-    tar.extend(std::iter::repeat_n(0x55u8, 4096));
-
-    let archive = TarArchive::new(Cursor::new(tar.clone()), &config);
-    let report = archive.verify(&integrity(1024)).unwrap();
-    assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
-
-    tar.extend(std::iter::repeat_n(0x55u8, cap));
-    let archive = TarArchive::new(Cursor::new(tar), &config);
-    let refused = archive.verify(&default_integrity()).unwrap_err();
-    assert_eq!(
-        refused.relaxable_by(),
-        Some(exarch_core::PolicySetting::MaxTarMetadataBytes)
-    );
 }
 
 #[test]

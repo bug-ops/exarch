@@ -67,53 +67,6 @@
 //!   archive
 //! - **Memory usage**: O(1) for archive processing, O(n) for hardlink tracking
 //! - **Two-pass extraction**: Files/directories first, hardlinks second
-//!
-//! # Examples
-//!
-//! Basic extraction:
-//!
-//! ```no_run
-//! use exarch_core::ExtractionOptions;
-//! use exarch_core::SecurityConfig;
-//! use exarch_core::formats::TarArchive;
-//! use exarch_core::formats::traits::ArchiveFormat;
-//! use std::fs::File;
-//! use std::path::Path;
-//!
-//! let file = File::open("archive.tar")?;
-//! let config = SecurityConfig::default();
-//! let mut archive = TarArchive::new(file, &config);
-//! let report = archive.extract(
-//!     Path::new("/output"),
-//!     &ExtractionOptions::default(),
-//!     &mut exarch_core::NoopProgress,
-//! )?;
-//! println!("Extracted {} files", report.files_extracted);
-//! # Ok::<(), exarch_core::ArchiveError>(())
-//! ```
-//!
-//! Gzip-compressed TAR:
-//!
-//! ```no_run
-//! use exarch_core::ExtractionOptions;
-//! use exarch_core::SecurityConfig;
-//! use exarch_core::formats::TarArchive;
-//! use exarch_core::formats::traits::ArchiveFormat;
-//! use flate2::read::GzDecoder;
-//! use std::fs::File;
-//! use std::path::Path;
-//!
-//! let file = File::open("archive.tar.gz")?;
-//! let decoder = GzDecoder::new(file);
-//! let config = SecurityConfig::default();
-//! let mut archive = TarArchive::new(decoder, &config);
-//! let report = archive.extract(
-//!     Path::new("/output"),
-//!     &ExtractionOptions::default(),
-//!     &mut exarch_core::NoopProgress,
-//! )?;
-//! # Ok::<(), exarch_core::ArchiveError>(())
-//! ```
 
 use std::io::Read;
 use std::path::Path;
@@ -137,9 +90,11 @@ use crate::SinkOptions;
 use crate::SpecialFile;
 use crate::TarAmbiguity;
 use crate::TarNonRegularKind;
+#[cfg(test)]
 use crate::VerificationOptions;
 use crate::Violation;
 use crate::inspection::integrity::TarTrailer;
+#[cfg(test)]
 use crate::inspection::list::ListPass;
 use crate::security::HardlinkTarget;
 use crate::security::RawMode;
@@ -181,27 +136,6 @@ use crate::reader::decode_tar_stream;
 /// # Type Parameters
 ///
 /// - `R`: Reader type that must implement `Read`
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::formats::TarArchive;
-/// use exarch_core::formats::traits::ArchiveFormat;
-/// use std::fs::File;
-/// use std::path::Path;
-///
-/// let file = File::open("archive.tar")?;
-/// let config = SecurityConfig::default();
-/// let mut archive = TarArchive::new(file, &config);
-/// let report = archive.extract(
-///     Path::new("/output"),
-///     &ExtractionOptions::default(),
-///     &mut exarch_core::NoopProgress,
-/// )?;
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
 pub struct TarArchive<R: Read> {
     /// Raw underlying reader, consumed by `extract()`/`list()`/`verify()`.
     ///
@@ -255,26 +189,14 @@ impl<R: Read> TarArchive<R> {
     /// - Output: File writes use `BufWriter` internally for optimal throughput
     /// - Memory: O(1) for archive processing, O(n) for hardlink tracking
     /// - Typical throughput: 100-500 MB/s on modern SSDs
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use exarch_core::SecurityConfig;
-    /// use exarch_core::formats::TarArchive;
-    /// use std::fs::File;
-    /// use std::io::BufReader;
-    ///
-    /// let file = File::open("archive.tar")?;
-    /// let reader = BufReader::new(file);
-    /// let archive = TarArchive::new(reader, &SecurityConfig::default());
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
+    #[cfg(test)]
     #[must_use]
     pub fn new(reader: R, config: &SecurityConfig) -> Self {
         Self::with_trailer(reader, TarTrailer::DrainToDecoderEof, config)
     }
 
     /// Creates a handler that checks the tail of the stream as `trailer` says.
+    #[cfg(test)]
     pub(crate) fn with_trailer(reader: R, trailer: TarTrailer, config: &SecurityConfig) -> Self {
         Self::with_source(reader, TapSource::Opaque, trailer, config)
     }
@@ -295,6 +217,7 @@ impl<R: Read> TarArchive<R> {
     }
 
     /// Lists the archive as `listing` asks, consuming the reader.
+    #[cfg(test)]
     fn list_with_pass(
         self,
         config: &SecurityConfig,
@@ -540,6 +463,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         )
     }
 
+    #[cfg(test)]
     fn list(self) -> Result<crate::inspection::ArchiveManifest> {
         let config = Arc::clone(&self.config);
         self.list_with_pass(&config, &mut ListPass::strict())
@@ -548,6 +472,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     /// Verifies the archive; the TAR stream's codec is unknown here, so with
     /// integrity requested the stream is read to decoder EOF within the budget
     /// after the end marker.
+    #[cfg(test)]
     fn verify(
         self,
         options: &VerificationOptions,
@@ -748,8 +673,8 @@ pub(crate) fn tar_permission_bits(header: &tar::Header) -> Option<RawMode> {
 /// given.
 ///
 /// This is the single place that decides how a TAR file is buffered, so
-/// extraction, listing and the public `open_tar_*` functions share one read
-/// path: file, one `BufReader`, then at most one decoder.
+/// extraction and listing share one read path: file, one `BufReader`, then at
+/// most one decoder.
 ///
 /// # Errors
 ///
@@ -763,156 +688,8 @@ pub(crate) fn open_tar_stream(
     decode_tar_stream(open_archive(path)?, codec, limits)
 }
 
-/// Opens `path` as a TAR archive whose trailer is read to decoder EOF, the
-/// shape every public `open_tar_*` function returns.
-fn open_tar_archive(
-    path: &Path,
-    codec: CompressionCodec,
-    config: &SecurityConfig,
-) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(path, Some(codec), DecoderLimits::of(config))
-        .map(|decoded| TarArchive::from_stream(decoded, TarTrailer::DrainToDecoderEof, config))
-}
-
-/// Opens a gzip-compressed TAR archive (.tar.gz).
-///
-/// The file is wrapped in `BufReader` for optimal performance.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be opened.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::formats::tar::open_tar_gz;
-/// use exarch_core::formats::traits::ArchiveFormat;
-/// use std::path::Path;
-///
-/// let config = SecurityConfig::default();
-/// let mut archive = open_tar_gz("archive.tar.gz", &config)?;
-/// let report = archive.extract(
-///     Path::new("/output"),
-///     &ExtractionOptions::default(),
-///     &mut exarch_core::NoopProgress,
-/// )?;
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
-pub fn open_tar_gz<P: AsRef<Path>>(
-    path: P,
-    config: &SecurityConfig,
-) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_archive(path.as_ref(), CompressionCodec::Gzip, config)
-}
-
-/// Opens a bzip2-compressed TAR archive (.tar.bz2).
-///
-/// The file is wrapped in `BufReader` for optimal performance.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be opened.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::formats::tar::open_tar_bz2;
-/// use exarch_core::formats::traits::ArchiveFormat;
-/// use std::path::Path;
-///
-/// let config = SecurityConfig::default();
-/// let mut archive = open_tar_bz2("archive.tar.bz2", &config)?;
-/// let report = archive.extract(
-///     Path::new("/output"),
-///     &ExtractionOptions::default(),
-///     &mut exarch_core::NoopProgress,
-/// )?;
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
-pub fn open_tar_bz2<P: AsRef<Path>>(
-    path: P,
-    config: &SecurityConfig,
-) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_archive(path.as_ref(), CompressionCodec::Bzip2, config)
-}
-
-/// Opens an xz-compressed TAR archive (.tar.xz).
-///
-/// The file is wrapped in `BufReader` for optimal performance.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be opened.
-///
-/// # Decoder memory
-///
-/// The decoder is bounded by `config.max_decoder_memory`, fixed when the
-/// archive is opened. The config later passed to `extract` is not consulted
-/// for this limit, so the two configs may disagree; use the same config for
-/// both.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::formats::tar::open_tar_xz;
-/// use exarch_core::formats::traits::ArchiveFormat;
-/// use std::path::Path;
-///
-/// let config = SecurityConfig::default();
-/// let mut archive = open_tar_xz("archive.tar.xz", &config)?;
-/// let report = archive.extract(
-///     Path::new("/output"),
-///     &ExtractionOptions::default(),
-///     &mut exarch_core::NoopProgress,
-/// )?;
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
-pub fn open_tar_xz<P: AsRef<Path>>(
-    path: P,
-    config: &SecurityConfig,
-) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_archive(path.as_ref(), CompressionCodec::Xz, config)
-}
-
-/// Opens a zstd-compressed TAR archive (.tar.zst).
-///
-/// The file is wrapped in `BufReader` for optimal performance.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be opened or if decompression
-/// initialization fails.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::formats::tar::open_tar_zst;
-/// use exarch_core::formats::traits::ArchiveFormat;
-/// use std::path::Path;
-///
-/// let config = SecurityConfig::default();
-/// let mut archive = open_tar_zst("archive.tar.zst", &config)?;
-/// let report = archive.extract(
-///     Path::new("/output"),
-///     &ExtractionOptions::default(),
-///     &mut exarch_core::NoopProgress,
-/// )?;
-/// # Ok::<(), exarch_core::ArchiveError>(())
-/// ```
-pub fn open_tar_zst<P: AsRef<Path>>(
-    path: P,
-    config: &SecurityConfig,
-) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_archive(path.as_ref(), CompressionCodec::Zstd, config)
-}
+#[cfg(test)]
+mod opaque_source_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -2,8 +2,9 @@
 
 use std::io::Cursor;
 
-use exarch_core::formats::ArchiveFormat as _;
-use exarch_core::formats::TarArchive;
+use exarch_core::ArchiveReader;
+use exarch_core::ListRequest;
+use exarch_core::VerifyRequest;
 use libfuzzer_sys::fuzz_target;
 
 #[path = "common.rs"]
@@ -12,9 +13,9 @@ mod common;
 fuzz_target!(|data: &[u8]| {
     let config = common::config();
 
-    let archive = TarArchive::new(Cursor::new(data), config);
-    let _ = archive.list();
+    let _ = ListRequest::new(config).list_reader(ArchiveReader::tar(Cursor::new(data), None));
 
-    let archive = TarArchive::new(Cursor::new(data), config);
-    let _ = archive.verify(&common::verification_options());
+    let _ = VerifyRequest::new(config)
+        .with_options(common::verification_options())
+        .verify_reader(ArchiveReader::tar(Cursor::new(data), None));
 });

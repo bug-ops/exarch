@@ -27,8 +27,6 @@
 use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
-use exarch_core::formats::ArchiveFormat;
-use exarch_core::formats::TarArchive;
 use std::io::Cursor;
 use tempfile::TempDir;
 
@@ -103,7 +101,7 @@ fn two_hop_symlink_chain_is_rejected() {
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);
-    let archive = TarArchive::new(cursor, &config);
+    let archive = crate::common::tar_archive(cursor, &config);
 
     let result = archive.extract(
         dest.path(),
@@ -147,7 +145,7 @@ fn two_hop_chain_rejected_when_symlinks_disabled() {
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);
-    let archive = TarArchive::new(cursor, &config);
+    let archive = crate::common::tar_archive(cursor, &config);
 
     let result = archive.extract(
         dest.path(),

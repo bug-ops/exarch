@@ -8,6 +8,7 @@
     clippy::field_reassign_with_default
 )]
 
+mod common;
 mod security;
 
 use exarch_core::ArchiveError;

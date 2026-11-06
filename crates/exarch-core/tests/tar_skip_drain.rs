@@ -33,8 +33,6 @@ use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
 use exarch_core::ZipBombScope;
-use exarch_core::formats::TarArchive;
-use exarch_core::formats::traits::ArchiveFormat;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use tempfile::TempDir;
@@ -372,23 +370,5 @@ fn plain_tar_with_skipped_data_passes_at_any_size() {
         .unwrap();
 
     assert_eq!(report.files_extracted, 1);
-    assert_eq!(report.files_skipped(), 1);
-}
-
-#[test]
-fn a_caller_decoded_stream_is_not_bounded_by_ratio() {
-    let gz = gzip(&zeros_tar("big.bin", 8 * MIB));
-    let decoder = flate2::read::GzDecoder::new(Cursor::new(gz));
-    let work = TempDir::new().unwrap();
-
-    let config = tight_config();
-    let report = TarArchive::new(decoder, &config)
-        .extract(
-            &work.path().join("out"),
-            &ExtractionOptions::default(),
-            &mut exarch_core::NoopProgress,
-        )
-        .unwrap();
-
     assert_eq!(report.files_skipped(), 1);
 }

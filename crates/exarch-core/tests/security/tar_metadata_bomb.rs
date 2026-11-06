@@ -37,8 +37,6 @@ use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::TarAmbiguity;
-use exarch_core::formats::ArchiveFormat;
-use exarch_core::formats::TarArchive;
 use exarch_testkit::pax::record as pax_record;
 use std::assert_matches;
 use std::io::Cursor;
@@ -174,7 +172,7 @@ fn extract_rejects_oversized_gnu_longname_metadata_entry() {
     let config =
         SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
-    let archive = TarArchive::new(Cursor::new(bomb), &config);
+    let archive = crate::common::tar_archive(Cursor::new(bomb), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -190,7 +188,7 @@ fn extract_rejects_oversized_gnu_longlink_metadata_entry() {
     let config =
         SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
-    let archive = TarArchive::new(Cursor::new(bomb), &config);
+    let archive = crate::common::tar_archive(Cursor::new(bomb), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -206,7 +204,7 @@ fn extract_rejects_oversized_pax_metadata_entry() {
     let config =
         SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
-    let archive = TarArchive::new(Cursor::new(bomb), &config);
+    let archive = crate::common::tar_archive(Cursor::new(bomb), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -235,7 +233,7 @@ fn extract_accepts_metadata_entry_within_the_configured_budget() {
     let temp = TempDir::new().unwrap();
     let config =
         SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
-    let archive = TarArchive::new(Cursor::new(t), &config);
+    let archive = crate::common::tar_archive(Cursor::new(t), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -299,7 +297,7 @@ fn default_config_budget_rejects_a_moderately_oversized_metadata_entry() {
     let bomb = metadata_bomb(b'L', 4 * 1024 * 1024 + 4096);
     let temp = TempDir::new().unwrap();
 
-    let archive = TarArchive::new(Cursor::new(bomb), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(bomb), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -434,7 +432,7 @@ fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str, refusal: Refusal
         SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(bomb.to_owned()), &config);
+    let archive = crate::common::tar_archive(Cursor::new(bomb.to_owned()), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -498,7 +496,7 @@ fn legitimate_pax_global_header_does_not_false_positive() {
     let temp = TempDir::new().unwrap();
     let config =
         SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
-    let archive = TarArchive::new(Cursor::new(t), &config);
+    let archive = crate::common::tar_archive(Cursor::new(t), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -774,7 +772,7 @@ fn extract_fully_skips_a_legitimate_large_disallowed_extension_entry_and_continu
         .try_add_allowed_extension("txt")
         .unwrap();
 
-    let archive = TarArchive::new(Cursor::new(data.clone()), &config);
+    let archive = crate::common::tar_archive(Cursor::new(data.clone()), &config);
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),
@@ -922,7 +920,7 @@ fn budget_violation_is_not_confused_with_other_archive_errors() {
     // archive (not a budget trip) must not be misclassified.
     let garbage = vec![1u8, 2, 3, 4, 5];
     let temp = TempDir::new().unwrap();
-    let archive = TarArchive::new(Cursor::new(garbage), &SecurityConfig::default());
+    let archive = crate::common::tar_archive(Cursor::new(garbage), &SecurityConfig::default());
     let result = archive.extract(
         temp.path(),
         &ExtractionOptions::default(),

@@ -9,6 +9,8 @@
     clippy::unwrap_used
 )]
 
+mod common;
+
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
@@ -19,7 +21,6 @@ use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::Uncompressed;
 use exarch_core::detect_format;
-use exarch_core::formats::detect::ZIP_FAMILY_ALIASES;
 use exarch_core::security::HardlinkTracker;
 use exarch_core::security::QuotaTracker;
 use exarch_core::types::DestDir;
@@ -35,9 +36,8 @@ use tempfile::TempDir;
 /// integration test) so the property test below can construct
 /// known-extension cases without duplicating the match logic under test.
 /// The ZIP-family aliases (`.jar`, `.whl`, ...) are intentionally not
-/// hardcoded here -- see `known_extensions` below, which appends the `pub`
-/// `ZIP_FAMILY_ALIASES` instead, the same constant `detect.rs` itself
-/// iterates to avoid drift.
+/// hardcoded here -- see `known_extensions` below, which appends the
+/// shared `common::ZIP_FAMILY_EXTENSIONS` list instead.
 const KNOWN_EXTENSIONS: &[(&str, ArchiveType)] = &[
     ("tar", ArchiveType::Tar),
     ("tgz", ArchiveType::TarGz),
@@ -59,7 +59,7 @@ fn known_extensions() -> Vec<(&'static str, ArchiveType)> {
         .iter()
         .copied()
         .chain(
-            ZIP_FAMILY_ALIASES
+            common::ZIP_FAMILY_EXTENSIONS
                 .iter()
                 .map(|&ext| (ext, ArchiveType::Zip)),
         )

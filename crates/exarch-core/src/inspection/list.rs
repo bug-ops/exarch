@@ -253,6 +253,7 @@ pub(crate) struct ListPass<'a, 'c> {
 impl<'a, 'c> ListPass<'a, 'c> {
     /// A bare listing with the default [`StoredTargets`], which leaves 7z link
     /// targets unread.
+    #[cfg(test)]
     pub(crate) const fn strict() -> Self {
         Self::strict_with(StoredTargets::Skip)
     }
@@ -606,6 +607,7 @@ fn list_zip(
 /// archive. `format` is passed through into `ArchiveManifest` as-is. `budget`
 /// must be the handle returned alongside `reader` from the same
 /// `budgeted_reader` call.
+#[cfg(test)]
 pub(crate) fn list_tar_reader<R: Read>(
     reader: crate::formats::tar_metadata_limit::BudgetedReader<R>,
     budget: TarReadBudget,

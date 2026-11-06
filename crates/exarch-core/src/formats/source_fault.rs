@@ -72,6 +72,7 @@ impl<'a> ReadFaults<'a> {
             TapSource::Tapped(tap) | TapSource::Replay(tap) => {
                 Self::new(ReadFamily::Tar, Some(tap))
             }
+            #[cfg(test)]
             TapSource::Opaque => Self::new(ReadFamily::Opaque, None),
         }
     }
@@ -285,6 +286,7 @@ pub enum TapSource {
     /// The caller supplied an already-decoded reader; core cannot see how much
     /// input produced it or which errors came from its source, so it records
     /// no faults and its I/O errors keep their existing classification.
+    #[cfg(test)]
     Opaque,
 }
 
@@ -294,6 +296,7 @@ impl TapSource {
     pub fn fault(&self) -> Option<io::Error> {
         match self {
             Self::Tapped(tap) | Self::Replay(tap) => tap.fault(),
+            #[cfg(test)]
             Self::Opaque => None,
         }
     }

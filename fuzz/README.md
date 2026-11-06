@@ -28,9 +28,9 @@ code. It has its own `Cargo.toml`, `[workspace]` table, and committed
 
 | Target | Covers |
 |---|---|
-| `tar` | `TarArchive` parsing (ustar/PAX/GNU headers), `list`/`verify` |
-| `zip` | `ZipArchive` parsing (central directory, per-entry headers) |
-| `sevenz` | `SevenZArchive` parsing (header, solid-block decode + memory cap — reachable since `allow_solid_archives` is enabled) |
+| `tar` | TAR parsing (ustar/PAX/GNU headers) through `ListRequest` / `VerifyRequest` over an `ArchiveReader::tar` |
+| `zip` | ZIP parsing (central directory, per-entry headers) through `ListRequest` / `VerifyRequest` |
+| `sevenz` | 7z parsing (header, solid-block decode + memory cap — reachable since `allow_solid_archives` is enabled) |
 | `safe_path` | `SafePath::validate` directly, on raw entry-name bytes, with symlinks/hardlinks allowed so escape-detection logic is reachable |
 | `sink` | `SinkExtractRequest` into a `MemorySink` under both path models and both duplicate policies, with a check after every run (success or error) that no stored path sits below a stored symlink, that every stored symlink target stays inside the root when resolved through the other stored links, and that no stored path has a `..`, root or prefix component |
 | `detect` | `ArchiveReader::detect` restores the stream position from any offset; `detect_stream` replays the bytes it consumed, so the detected reader lists the same archive as one given the detected format explicitly |

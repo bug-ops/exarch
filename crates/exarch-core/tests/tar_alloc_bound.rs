@@ -27,11 +27,8 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-use exarch_core::ExtractionOptions;
-use exarch_core::NoopProgress;
+use exarch_core::ExtractRequest;
 use exarch_core::SecurityConfig;
-use exarch_core::formats::ArchiveFormat;
-use exarch_core::formats::TarArchive;
 use exarch_testkit::pax::record as pax_record;
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -151,7 +148,7 @@ fn gnu_sparse_header(name: &[u8], size_field: u64, realsize: u64, gap: u64) -> V
     h
 }
 
-/// Runs `bytes` through `TarArchive::extract` inside a fresh, scoped `dhat`
+/// Runs `bytes` through `ExtractRequest::extract` inside a fresh, scoped `dhat`
 /// testing profiler and returns the peak live heap bytes observed. The
 /// profiler is created and dropped entirely within this call so callers can
 /// invoke it repeatedly (dhat permits only one profiler alive at a time, not
@@ -160,15 +157,16 @@ fn measure_extract_peak_bytes(bytes: &[u8], budget: u64) -> usize {
     let profiler = dhat::Profiler::builder().testing().build();
     {
         let temp = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let path = temp.path().join("archive.tar");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
         let config = SecurityConfig::default()
             .with_max_tar_metadata_bytes(std::num::NonZeroU64::new(budget).unwrap());
-        let archive = TarArchive::new(Cursor::new(bytes), &config);
         // Outcome (Ok or Err) is irrelevant here — only peak memory matters.
-        let _ = archive.extract(
-            temp.path(),
-            &ExtractionOptions::default(),
-            &mut NoopProgress,
-        );
+        let _ = ExtractRequest::new(&config).extract(&path, dest.path());
     }
     let stats = dhat::HeapStats::get();
     drop(profiler);
@@ -179,7 +177,7 @@ fn measure_extract_peak_bytes(bytes: &[u8], budget: u64) -> usize {
 /// scoped `dhat` profiler, returning peak live heap bytes.
 ///
 /// `list`/`verify` open `tar::Archive` directly (`inspection::list`), a
-/// separate code path from `TarArchive::extract` above — the C1 finding was
+/// separate code path from `ExtractRequest::extract` above — the C1 finding was
 /// specifically that this path's drain bound could be silently unbounded
 /// while `extract`'s stayed bounded, so it needs its own measurement, not an
 /// assumption that `extract`'s result generalizes.

@@ -37,22 +37,6 @@ function assertProgressCallShape(err, arg) {
   assert.strictEqual(typeof bytesWritten, 'number');
 }
 
-// ThreadsafeFunction dispatches callbacks via NonBlocking mode, so calls
-// queued during a *Sync function are only flushed on later event loop turns
-// even though the Rust call itself already returned. Poll until the queued
-// callbacks have run instead of guessing how many turns are needed.
-async function waitUntil(conditionFn, { timeoutMs = 2000, intervalMs = 5 } = {}) {
-  const start = Date.now();
-  while (!conditionFn()) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error('timed out waiting for condition');
-    }
-    await new Promise((resolve) => {
-      setTimeout(resolve, intervalMs);
-    });
-  }
-}
-
 describe('extractArchiveWithProgress', () => {
   let tempDir;
   let archivePath;

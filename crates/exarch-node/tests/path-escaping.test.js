@@ -32,7 +32,7 @@ const ARCHIVE = Buffer.concat([emptyFile(RAW), emptyFile(LITERAL), Buffer.alloc(
 describe('rendered entry paths are injective', () => {
   it('progress callbacks render the two names differently', async () => {
     const seen = [];
-    await verifyArchiveBytesWithProgress(ARCHIVE, null, null, null, (err, [entryPath]) => {
+    await verifyArchiveBytesWithProgress(ARCHIVE, null, null, null, (_err, [entryPath]) => {
       seen.push(entryPath);
     });
     assert.deepStrictEqual(seen.sort(), ['a\\x5CxFFb', 'a\\xFFb']);

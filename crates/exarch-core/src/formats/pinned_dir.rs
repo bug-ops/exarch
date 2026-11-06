@@ -47,10 +47,9 @@
 //! - The destination itself is opened by path once. Swapping it between the
 //!   caller's `canonicalize` and the open needs write access to the
 //!   destination's parent, which is outside the threat model of an attacker
-//!   confined to the destination. Closing the gap would compare the opened
-//!   descriptor's device and inode with a stat taken at canonicalize time (the
-//!   CLI's `verify_destination_unchanged` does this) or verify the descriptor's
-//!   path; both are left to the follow-up that covers the CLI as well.
+//!   confined to the destination. The destination swap narrows the same gap by
+//!   comparing the file identity read at pin time with one read right before
+//!   the destructive rename (`staging/replace.rs::verify_unchanged`).
 //! - Over SMB the redirector rebuilds a relative open as a full path, so the
 //!   server resolves the names. Third-party filesystem drivers are unverified.
 //! - Only NTFS is exercised in CI; `ReFS` and Dev Drive are untested.
@@ -65,6 +64,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use super::file_identity::FileIdentity;
 use super::run_record::RunRecord;
 use crate::ArchiveError;
 use crate::Result;
@@ -140,6 +140,85 @@ impl TempLeaf {
     pub(crate) fn as_leaf(&self) -> Leaf<'_> {
         Leaf(&self.0)
     }
+}
+
+/// An owned, generated name that is exactly one normal component, for the
+/// staging and backup entries the destination swap creates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeafBuf(OsString);
+
+impl LeafBuf {
+    /// The final component of `path`, or `None` when `path` ends in `.`, `..`
+    /// or a root, which have no usable final name.
+    pub(crate) fn of(path: &Path) -> Option<Self> {
+        let name = path.file_name()?;
+        let mut components = Path::new(name).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(only)), None) if only == name => {
+                Some(Self(name.to_os_string()))
+            }
+            _ => None,
+        }
+    }
+
+    /// `prefix` followed by 64 random bits in hex.
+    ///
+    /// The randomness comes from the standard library's per-process hasher
+    /// keys, so a local user cannot predict the next name.
+    pub(crate) fn random(prefix: &str) -> Self {
+        use std::hash::BuildHasher;
+        use std::hash::RandomState;
+
+        let bits = RandomState::new().hash_one(TEMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+        Self(OsString::from(format!("{prefix}{bits:016x}")))
+    }
+
+    /// Borrows the name as a [`Leaf`].
+    pub(crate) fn as_leaf(&self) -> Leaf<'_> {
+        Leaf(&self.0)
+    }
+}
+
+impl AsRef<Path> for LeafBuf {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+/// Permission bits and owner of a directory entry, as `stat` reports them.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EntryMode {
+    pub(crate) bits: u32,
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+}
+
+#[cfg(unix)]
+impl EntryMode {
+    // `st_mode` is `u16` on macOS and `u32` on Linux.
+    #[allow(clippy::useless_conversion)]
+    fn of_stat(stat: &rustix::fs::Stat) -> Self {
+        Self {
+            bits: u32::from(stat.st_mode) & 0o7777,
+            uid: stat.st_uid,
+            gid: stat.st_gid,
+        }
+    }
+}
+
+/// What a directory entry is, which inode it is and, on Unix, its mode and
+/// owner, read without following the entry.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EntryStatus {
+    pub(crate) occupant: Occupant,
+    /// Whether the entry is a reparse point of any kind (Windows only; a
+    /// non-name-surrogate reparse point is classified as a directory or file
+    /// by `occupant`).
+    pub(crate) reparse: bool,
+    pub(crate) identity: FileIdentity,
+    #[cfg(unix)]
+    pub(crate) mode: EntryMode,
 }
 
 /// The one rule that maps a file type onto an [`Occupant`].
@@ -253,6 +332,7 @@ mod imp {
     use rustix::fs::OFlags;
     use rustix::io::Errno;
 
+    use super::EntryStatus;
     use super::Leaf;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::file_identity::IdentityKey;
@@ -287,14 +367,14 @@ mod imp {
     impl VettedDir {
         /// Opens `path`, which the caller has canonicalized.
         #[cfg(unix)]
-        pub(super) fn open_path(path: &Path) -> io::Result<Self> {
+        pub(crate) fn open_path(path: &Path) -> io::Result<Self> {
             open_directory(|flags| rustix::fs::open(path, flags, Mode::empty())).map(Self)
         }
 
         /// Opens `path` through std, so nothing relies on `AT_FDCWD`, which
         /// WASI has no equivalent of.
         #[cfg(target_os = "wasi")]
-        pub(super) fn open_path(path: &Path) -> io::Result<Self> {
+        pub(crate) fn open_path(path: &Path) -> io::Result<Self> {
             File::open(path).map(|dir| Self(OwnedFd::from(dir)))
         }
 
@@ -323,23 +403,80 @@ mod imp {
             )?)
         }
 
-        /// What `name` is, without following a symlink; `None` if it is absent.
-        pub(crate) fn probe(&self, name: Leaf<'_>) -> io::Result<Option<Occupant>> {
+        /// What `name` is, which inode it is and its mode, without following a
+        /// symlink; `None` if it is absent.
+        pub(crate) fn status(&self, name: Leaf<'_>) -> io::Result<Option<EntryStatus>> {
             match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => Ok(Some(FileType::from_raw_mode(stat.st_mode).into())),
+                Ok(stat) => Ok(Some(EntryStatus {
+                    occupant: FileType::from_raw_mode(stat.st_mode).into(),
+                    reparse: false,
+                    identity: FileIdentity::Known(IdentityKey::of_stat(&stat)?),
+                    #[cfg(unix)]
+                    mode: super::EntryMode::of_stat(&stat),
+                })),
                 Err(e) if e == Errno::NOENT => Ok(None),
                 Err(e) => Err(e.into()),
             }
         }
 
+        /// What `name` is, without following a symlink; `None` if it is absent.
+        pub(crate) fn probe(&self, name: Leaf<'_>) -> io::Result<Option<Occupant>> {
+            Ok(self.status(name)?.map(|status| status.occupant))
+        }
+
         /// The identity of the entry `name` itself, never of a symlink's
         /// target; `None` if it is absent.
         pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<FileIdentity>> {
-            match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => Ok(Some(FileIdentity::Known(IdentityKey::of_stat(&stat)?))),
-                Err(e) if e == Errno::NOENT => Ok(None),
-                Err(e) => Err(e.into()),
-            }
+            Ok(self.status(name)?.map(|status| status.identity))
+        }
+
+        /// Opens the directory `name` for reading, refusing a symlink: the
+        /// handle `fchmod` and `fchown` need, which an `O_PATH` handle is not.
+        pub(crate) fn open_dir_file(&self, name: Leaf<'_>) -> io::Result<File> {
+            let fd = rustix::fs::openat(
+                &self.0,
+                name.as_os_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
+            Ok(File::from(fd))
+        }
+
+        /// Best effort: where the directory `name` is now, resolved from a
+        /// descriptor on the entry itself and so unaffected by a redirect of
+        /// any ancestor. `None` where the platform cannot say.
+        pub(crate) fn entry_path(&self, name: Leaf<'_>) -> Option<std::path::PathBuf> {
+            self.open_dir_file(name)
+                .ok()
+                .and_then(|dir| current_path(&dir))
+        }
+
+        /// Creates the subdirectory `name` readable and writable by the owner
+        /// only.
+        pub(crate) fn make_private_dir(&self, name: Leaf<'_>) -> io::Result<()> {
+            Ok(rustix::fs::mkdirat(&self.0, name.as_os_str(), Mode::RWXU)?)
+        }
+
+        /// Removes the empty directory `name`.
+        #[cfg(unix)]
+        pub(crate) fn remove_dir(&self, name: Leaf<'_>) -> io::Result<()> {
+            Ok(rustix::fs::unlinkat(
+                &self.0,
+                name.as_os_str(),
+                AtFlags::REMOVEDIR,
+            )?)
+        }
+
+        /// Renames the directory `from` to `to`, both in this directory. An
+        /// existing `to` is replaced only where the platform replaces an empty
+        /// directory on rename.
+        pub(crate) fn rename_dir_within(&self, from: Leaf<'_>, to: Leaf<'_>) -> io::Result<()> {
+            Ok(rustix::fs::renameat(
+                &self.0,
+                from.as_os_str(),
+                &self.0,
+                to.as_os_str(),
+            )?)
         }
 
         /// Creates `name` exclusively, never following a symlink at it.
@@ -420,21 +557,46 @@ mod imp {
             Ok(rustix::fs::symlinkat(target, &self.0, name.as_os_str())?)
         }
     }
+
+    /// Linux: the target of `/proc/self/fd/<fd>`.
+    #[cfg(target_os = "linux")]
+    fn current_path(fd: &File) -> Option<std::path::PathBuf> {
+        use std::os::fd::AsRawFd;
+        std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok()
+    }
+
+    /// macOS: `fcntl(fd, F_GETPATH)`.
+    #[cfg(target_os = "macos")]
+    fn current_path(fd: &File) -> Option<std::path::PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        rustix::fs::getpath(fd)
+            .ok()
+            .map(|c_path| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(c_path.as_bytes())))
+    }
+
+    /// Other targets have no descriptor-to-path facility implemented here.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[allow(clippy::missing_const_for_fn)]
+    fn current_path(_fd: &File) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 #[cfg(windows)]
 #[allow(unsafe_code)] // the only unsafe code on Windows: NT directory-relative calls
-mod nt;
+pub(in crate::formats) mod nt;
 
 #[cfg(windows)]
 mod imp {
     use std::fs::File;
     use std::io;
+    use std::os::windows::fs::MetadataExt;
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsHandle;
     use std::path::Path;
 
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
@@ -446,6 +608,7 @@ mod imp {
     use windows_sys::Win32::Storage::FileSystem::FILE_TRAVERSE;
     use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 
+    use super::EntryStatus;
     use super::Leaf;
     use super::nt;
     use super::nt::Disposition;
@@ -479,7 +642,7 @@ mod imp {
             clippy::disallowed_methods,
             reason = "opens the destination root itself; no directory handle exists yet"
         )]
-        pub(super) fn open_path(path: &Path) -> io::Result<Self> {
+        pub(crate) fn open_path(path: &Path) -> io::Result<Self> {
             let file = std::fs::OpenOptions::new()
                 .access_mode(DIR_ACCESS)
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
@@ -532,25 +695,55 @@ mod imp {
                 .map_err(|err| self.occupied_as_exists(name, err))
         }
 
+        /// What `name` is, which entry it is and whether it is a reparse
+        /// point, without following a link; `None` if it is absent.
+        pub(crate) fn status(&self, name: Leaf<'_>) -> io::Result<Option<EntryStatus>> {
+            let request = Request::open(FILE_READ_ATTRIBUTES);
+            let handle = match nt::create_at(self.0.as_handle(), name, request) {
+                Ok(handle) => handle,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let file = File::from(handle);
+            let meta = file.metadata()?;
+            Ok(Some(EntryStatus {
+                occupant: meta.file_type().into(),
+                reparse: meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+                identity: FileIdentity::of_file(&file),
+            }))
+        }
+
         /// What `name` is, without following a link; `None` if it is absent.
         pub(crate) fn probe(&self, name: Leaf<'_>) -> io::Result<Option<Occupant>> {
-            let request = Request::open(FILE_READ_ATTRIBUTES);
-            match nt::create_at(self.0.as_handle(), name, request) {
-                Ok(handle) => {
-                    let meta = File::from(handle).metadata()?;
-                    Ok(Some(meta.file_type().into()))
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e),
-            }
+            Ok(self.status(name)?.map(|status| status.occupant))
         }
 
         /// The identity of the entry `name` itself; `None` if it is absent.
         ///
-        /// Always [`FileIdentity::Unknown`] for now: no Windows identity source
-        /// is wired up.
+        /// [`FileIdentity::Unknown`] when the volume reports no file id.
         pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<FileIdentity>> {
-            Ok(self.probe(name)?.map(|_| FileIdentity::Unknown))
+            Ok(self.status(name)?.map(|status| status.identity))
+        }
+
+        /// There is no handle-to-path resolution here, so a surviving entry is
+        /// named logically by the caller.
+        #[allow(clippy::unused_self)]
+        pub(crate) fn entry_path(&self, _name: Leaf<'_>) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        /// Creates the subdirectory `name`.
+        ///
+        /// It inherits the parent's ACL, so it is not owner-only here.
+        // TODO(critic): an explicit owner-only DACL for staging directories.
+        pub(crate) fn make_private_dir(&self, name: Leaf<'_>) -> io::Result<()> {
+            self.make_dir(name)
+        }
+
+        /// Renames the directory `from` to `to`, both in this directory, and
+        /// fails if `to` exists.
+        pub(crate) fn rename_dir_within(&self, from: Leaf<'_>, to: Leaf<'_>) -> io::Result<()> {
+            nt::rename_with(self.0.as_handle(), from, to, nt::Replace::Never)
         }
 
         /// Creates the file `name` exclusively, never following a link at it.

@@ -5,11 +5,11 @@
 //! of the entry itself. Where the platform offers none the identity is
 //! [`FileIdentity::Unknown`], which no caller may treat as equal to anything.
 #![cfg_attr(
-    not(all(test, unix)),
+    target_os = "wasi",
     expect(
         dead_code,
-        reason = "`of_file` is adopted by the occupant track and the Windows bodies by the staging \
-                  track; the unix unit tests keep them live"
+        reason = "`of_file` is adopted by the occupant track; the unix staging and the Windows \
+                  directory status already use it"
     )
 )]
 
@@ -112,13 +112,16 @@ impl FileIdentity {
             .map_or(Self::Unknown, Self::Known)
     }
 
-    /// The identity of an open file.
-    ///
-    /// Always [`Unknown`](Self::Unknown) for now: no Windows identity source is
-    /// wired up.
-    #[cfg(not(any(unix, target_os = "wasi")))]
-    pub const fn of_file(_file: &File) -> Self {
-        Self::Unknown
+    /// The identity of an open file, from the volume serial number and file
+    /// id of its handle ([`Unknown`](Self::Unknown) when the volume reports
+    /// none, as FAT and some redirectors do).
+    #[cfg(windows)]
+    pub fn of_file(file: &File) -> Self {
+        use std::os::windows::io::AsHandle;
+
+        super::pinned_dir::nt::file_id(file.as_handle()).map_or(Self::Unknown, |(dev, ino)| {
+            Self::Known(IdentityKey { dev, ino })
+        })
     }
 }
 
@@ -147,14 +150,32 @@ pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
     IdentityKey::of_stat(&stat).map(FileIdentity::Known)
 }
 
-/// No identity is available on this target.
+/// The entry is opened for its attributes only and its handle is asked for the
+/// file id, so an 8.3 short name and the long name give one identity.
 ///
 /// # Errors
 ///
 /// The I/O error of the lookup.
-#[cfg(not(any(unix, target_os = "wasi")))]
+#[cfg(windows)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "opens an entry for its attributes only; nothing is written or created"
+)]
 pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
-    std::fs::metadata(path).map(|_| FileIdentity::Unknown)
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    Ok(FileIdentity::of_file(&file))
 }
 
 #[cfg(all(test, unix))]

@@ -1,0 +1,171 @@
+//! Giving the published root the destination's permissions.
+//!
+//! The staging directory is private (`0700`) while the archive extracts. The
+//! root that gets published must look like the destination it replaces, or a
+//! `0700` destination would come back `0755` and expose what it holds.
+
+use super::dir::StagingDir;
+
+#[cfg(unix)]
+mod imp {
+    use std::io;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::fchown;
+
+    use super::StagingDir;
+    use crate::formats::file_identity::FileIdentity;
+    use crate::formats::file_identity::IdentityCheck;
+    use crate::formats::pinned_dir::EntryStatus;
+    use crate::formats::pinned_dir::LeafBuf;
+
+    const PROBE_ATTEMPTS: usize = 16;
+    const GROUP_ACCESS_AND_SETGID: u32 = 0o2070;
+    const PRIVATE: u32 = 0o700;
+
+    /// The permission bits and owner the published root takes.
+    #[derive(Debug, Clone, Copy)]
+    pub(in crate::staging) struct Adoption {
+        mode: u32,
+        owner: Option<Owner>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct Owner {
+        uid: u32,
+        gid: u32,
+    }
+
+    impl Adoption {
+        /// The mode and owner of an existing destination directory (sticky
+        /// and setgid bits included, setuid never).
+        pub(in crate::staging) fn of(status: &EntryStatus) -> Self {
+            Self {
+                mode: status.mode.bits & 0o3777,
+                owner: Some(Owner {
+                    uid: status.mode.uid,
+                    gid: status.mode.gid,
+                }),
+            }
+        }
+
+        #[cfg(test)]
+        pub(in crate::staging) const fn for_test(mode: u32, uid: u32, gid: u32) -> Self {
+            Self {
+                mode,
+                owner: Some(Owner { uid, gid }),
+            }
+        }
+    }
+
+    impl StagingDir<'_> {
+        /// The mode a new directory gets under the process umask, read from a
+        /// throwaway directory made inside the private staging directory, so
+        /// the umask is never read through the racy `umask()` call.
+        ///
+        /// # Errors
+        ///
+        /// The I/O error of creating, inspecting or removing the probe.
+        pub(in crate::staging) fn probe_umask(&self) -> io::Result<Adoption> {
+            let staging = self.parent.open_dir(self.name.as_leaf())?;
+            for _ in 0..PROBE_ATTEMPTS {
+                let probe = LeafBuf::random(".exarch-probe-");
+                match staging.make_dir(probe.as_leaf()) {
+                    Ok(()) => {
+                        let status = staging.status(probe.as_leaf());
+                        staging.remove_dir(probe.as_leaf())?;
+                        let status =
+                            status?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+                        return Ok(Adoption {
+                            mode: status.mode.bits & 0o777,
+                            owner: None,
+                        });
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(io::Error::from(io::ErrorKind::AlreadyExists))
+        }
+
+        /// Applies `adoption` to the staging directory through a descriptor.
+        ///
+        /// The group is applied alone and first, so a uid the caller may not
+        /// give away cannot take a group it may keep down with it. When the
+        /// directory still is not in the destination's group, the group
+        /// permission bits and setgid are dropped instead of being granted to
+        /// whichever group the directory ended up in.
+        ///
+        /// # Errors
+        ///
+        /// The I/O error of opening the directory or changing its mode, or a
+        /// directory that is no longer the one created.
+        pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<()> {
+            let dir = self.parent.open_dir_file(self.name.as_leaf())?;
+            if FileIdentity::of_file(&dir).check(self.id) != IdentityCheck::Same {
+                return Err(io::Error::other("the staging directory was replaced"));
+            }
+            let mut mode = adoption.mode;
+            if let Some(owner) = adoption.owner {
+                // Best effort: only root may chown to a foreign uid, and a
+                // group member to any of its groups. The outcome is read back.
+                let _ = fchown(&dir, None, Some(owner.gid));
+                let _ = fchown(&dir, Some(owner.uid), None);
+                if dir.metadata()?.gid() != owner.gid {
+                    mode &= !GROUP_ACCESS_AND_SETGID;
+                }
+            }
+            let applied = dir.set_permissions(std::fs::Permissions::from_mode(mode));
+            self.adopted = Some(dir);
+            applied
+        }
+
+        /// Makes an adopted directory private again, through the descriptor
+        /// opened before the mode changed, so it can be removed.
+        pub(in crate::staging) fn reset_private(&self) {
+            if let Some(dir) = &self.adopted {
+                // Best effort: this runs on the way to removing the directory.
+                let _ = dir.set_permissions(std::fs::Permissions::from_mode(PRIVATE));
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod imp {
+    use std::io;
+
+    use super::StagingDir;
+    use crate::formats::pinned_dir::EntryStatus;
+
+    /// Platforms without Unix modes publish the staging directory as it is.
+    #[derive(Debug, Clone, Copy)]
+    pub(in crate::staging) struct Adoption;
+
+    impl Adoption {
+        pub(in crate::staging) const fn of(_status: &EntryStatus) -> Self {
+            Self
+        }
+    }
+
+    // No permission model to adopt here, so these only keep the call sites
+    // platform-neutral.
+    #[allow(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        clippy::needless_pass_by_ref_mut
+    )]
+    impl StagingDir<'_> {
+        pub(in crate::staging) fn probe_umask(&self) -> io::Result<Adoption> {
+            Ok(Adoption)
+        }
+
+        pub(in crate::staging) fn adopt(&mut self, _adoption: Adoption) -> io::Result<()> {
+            Ok(())
+        }
+
+        pub(in crate::staging) fn reset_private(&self) {}
+    }
+}
+
+pub(super) use imp::Adoption;

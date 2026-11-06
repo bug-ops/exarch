@@ -1,39 +1,36 @@
 //! [`Staging::AtomicReplace`](crate::Staging::AtomicReplace): swapping a staged
 //! tree over an existing destination directory.
 //!
-//! The extraction runs into a fresh staging directory next to the destination.
-//! Only after it succeeded is the original destination renamed aside to a
-//! backup name, the staging directory renamed into its place and the backup
-//! removed. If moving the staged tree into place fails, the backup is moved
-//! back, so the original is restored.
+//! The extraction runs into a fresh private staging directory next to the
+//! destination. Only after it succeeded is the original destination renamed
+//! aside to a backup name, the staging directory (given the original's
+//! permissions) renamed into its place and the backup removed. If moving the
+//! staged tree into place fails, the backup is moved back, so the original is
+//! restored.
 //!
-//! Every rename and removal is relative to a descriptor of the destination's
-//! parent (see [`PinnedParent`]), which closes the window in which an
-//! intermediate component is replaced with a symlink mid-swap (issue #526). A
-//! `(dev, ino)` recheck right before the destructive rename additionally
-//! narrows, without closing, the window around the destination itself: the
-//! recheck is a check followed by a use, shrunk from the length of the
-//! extraction to two system calls.
+//! Every rename and removal is relative to a pinned descriptor of the
+//! destination's parent (a [`VettedDir`], a directory handle on Windows), which
+//! closes the window in which an intermediate component is replaced with a
+//! symlink mid-swap (issue #526). A file-identity recheck right before the
+//! destructive rename additionally narrows, without closing, the window around
+//! the destination itself: the recheck is a check followed by a use, shrunk
+//! from the length of the extraction to two system calls.
 //!
-//! A destination that is a symlink or not a directory is refused, as is one
-//! that is a filesystem root or contains the archive or the working directory,
-//! because replacing it would destroy more than the caller asked to replace.
+//! A destination that is a symlink or reparse point or not a directory is
+//! refused, as is one that is a filesystem root or contains the archive or the
+//! working directory, because replacing it would destroy more than the caller
+//! asked to replace.
 
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
 use super::StagedRun;
+use super::adopt::Adoption;
 use super::cancelled_after;
+use super::dir::StagingDir;
 use super::io_context;
-use super::parent::DestEntryKind;
-use super::parent::EntryName;
-use super::parent::FileIdentity;
-use super::parent::IdentityCheck;
-use super::parent::PinnedParent;
-use super::parent::identity_of;
-use super::parent::is_absent;
-use super::parent::surviving_path;
+use super::parent_or_cwd;
 use super::staged_options;
 use crate::ArchiveError;
 use crate::BackupIdentity;
@@ -50,13 +47,22 @@ use crate::Restore;
 use crate::Result;
 use crate::StagingLeftover;
 use crate::Violation;
+use crate::formats::file_identity::FileIdentity;
+use crate::formats::file_identity::IdentityCheck;
+use crate::formats::file_identity::identity_of;
+use crate::formats::pinned_dir::EntryStatus;
+use crate::formats::pinned_dir::LeafBuf;
+use crate::formats::pinned_dir::VettedDir;
 use crate::sanitize_io_error_for_error;
+use crate::security::fs_view::Occupant;
+
+const BACKUP_ATTEMPTS: usize = 16;
 
 /// An existing destination directory, resolved and pinned before extraction
 /// starts.
 pub(super) struct ReplaceTarget {
-    pin: PinnedParent,
-    name: EntryName,
+    pin: VettedDir,
+    name: LeafBuf,
     id: FileIdentity,
     parent: PathBuf,
     path: PathBuf,
@@ -73,6 +79,10 @@ fn protected(path: ProtectedPath) -> ArchiveError {
     refuse(ConfigProblem::ReplacesProtectedPath { path })
 }
 
+fn is_absent(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
+}
+
 /// Splits `output_dir` into the directory to pin and the destination's name.
 ///
 /// The name stays `file_name()`-derived: `file_name()` strips a trailing
@@ -81,20 +91,16 @@ fn protected(path: ProtectedPath) -> ArchiveError {
 /// `..` or a root has no such name and goes through `canonicalize`.
 ///
 /// `Ok(None)` means nothing can exist at the destination.
-fn locate(output_dir: &Path) -> Result<Option<(PathBuf, EntryName)>> {
-    if let Some(name) = EntryName::of(output_dir) {
-        let parent = match output_dir.parent() {
-            Some(parent) if !parent.is_empty() => parent.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        return Ok(Some((parent, name)));
+fn locate(output_dir: &Path) -> Result<Option<(PathBuf, LeafBuf)>> {
+    if let Some(name) = LeafBuf::of(output_dir) {
+        return Ok(Some((parent_or_cwd(output_dir).to_path_buf(), name)));
     }
     match output_dir.canonicalize() {
         Ok(canonical) => {
             let Some(parent) = canonical.parent() else {
                 return Err(protected(ProtectedPath::FilesystemRoot));
             };
-            let name = EntryName::of(&canonical).ok_or_else(|| refuse(ConfigProblem::NoParent))?;
+            let name = LeafBuf::of(&canonical).ok_or_else(|| refuse(ConfigProblem::NoParent))?;
             Ok(Some((parent.to_path_buf(), name)))
         }
         Err(e) if is_absent(&e) => Ok(None),
@@ -115,7 +121,7 @@ fn locate(output_dir: &Path) -> Result<Option<(PathBuf, EntryName)>> {
 /// would destroy data the caller never named. A parent that is absent or not a
 /// directory only means there is nothing to replace.
 ///
-/// Pinning the parent needs read permission on it, even when the destination
+/// Pinning the parent needs search permission on it, even when the destination
 /// does not exist yet.
 ///
 /// # Errors
@@ -145,7 +151,7 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
             )));
         }
     };
-    let pin = PinnedParent::open(&parent).map_err(|e| {
+    let pin = VettedDir::open_path(&parent).map_err(|e| {
         ArchiveError::Io(io_context(
             &e,
             "failed to pin the destination parent",
@@ -153,9 +159,9 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
         ))
     })?;
     let path = parent.join(&name);
-    let (kind, id) = match pin.entry_status(&name) {
-        Ok(status) => status,
-        Err(e) if is_absent(&e) => return Ok(None),
+    let status = match pin.status(name.as_leaf()) {
+        Ok(Some(status)) => status,
+        Ok(None) => return Ok(None),
         Err(e) => {
             return Err(ArchiveError::Io(io_context(
                 &e,
@@ -164,21 +170,30 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
             )));
         }
     };
-    match kind {
-        DestEntryKind::Directory => {}
-        DestEntryKind::Symlink => return Err(refuse(ConfigProblem::IsSymlink)),
-        DestEntryKind::Other => return Err(refuse(ConfigProblem::NotADirectory)),
-    }
-    if let Some(guard) = protected_path(&path, id, archive) {
+    refuse_unreplaceable(&status)?;
+    if let Some(guard) = protected_path(&path, status.identity, archive) {
         return Err(protected(guard));
     }
     Ok(Some(ReplaceTarget {
         pin,
         name,
-        id,
+        id: status.identity,
         parent,
         path,
     }))
+}
+
+/// Refuses a destination that is not a plain directory: a symlink, any reparse
+/// point (a mount point, or a tag `std` does not call a link) or a file.
+fn refuse_unreplaceable(status: &EntryStatus) -> Result<()> {
+    if status.reparse {
+        return Err(refuse(ConfigProblem::IsSymlink));
+    }
+    match status.occupant {
+        Occupant::Directory => Ok(()),
+        Occupant::Symlink => Err(refuse(ConfigProblem::IsSymlink)),
+        Occupant::File => Err(refuse(ConfigProblem::NotADirectory)),
+    }
 }
 
 /// Why replacing the directory `dest`, identified by `dest_id`, would destroy
@@ -188,8 +203,8 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
 /// path text: on a case- or normalization-insensitive volume (APFS by default,
 /// NTFS) the caller can spell the destination differently from the canonical
 /// path of what it holds, and a text comparison would let the replace delete
-/// the archive or the working directory. Only where the platform has no
-/// identity is the text compared (case-insensitively on Windows).
+/// the archive or the working directory. Only where a volume reports no
+/// identity is the canonical path compared.
 ///
 /// An archive or working directory that cannot be resolved is not a reason to
 /// refuse: an archive that is missing fails the extraction, and a deleted
@@ -221,6 +236,11 @@ pub(super) fn protected_path(
 /// Whether `inner`, or one of its ancestors, is the directory `dest_id`
 /// identifies. `identify` looks an ancestor up; one that cannot be looked up
 /// counts as a match, so an uncertain answer refuses.
+///
+/// Where either identity is unknown the canonical form of `dest` is compared
+/// with the (canonical) ancestor, and a `dest` that cannot be canonicalized
+/// refuses too: comparing the destination as the caller spelled it would let
+/// another spelling of the same directory (an 8.3 short name on Windows) pass.
 pub(super) fn is_within(
     dest: &Path,
     dest_id: FileIdentity,
@@ -234,7 +254,9 @@ pub(super) fn is_within(
             identify(ancestor).map_or(true, |id| match id.check(dest_id) {
                 IdentityCheck::Same => true,
                 IdentityCheck::Different => false,
-                IdentityCheck::Unknown => same_text(ancestor, dest),
+                IdentityCheck::Unknown => dest
+                    .canonicalize()
+                    .map_or(true, |dest| same_text(ancestor, &dest)),
             })
         })
 }
@@ -251,45 +273,39 @@ fn same_text(a: &Path, b: &Path) -> bool {
     a == b
 }
 
-/// The staging directory, identified by the inode `entry_status` reported when
-/// it was created, so a later check asks whether this directory is still
-/// there and not just whether something has its name.
-struct Staged<'a> {
-    pin: &'a PinnedParent,
-    name: EntryName,
-    id: FileIdentity,
-    parent: &'a Path,
+/// A failure before the destination was touched.
+enum Refusal {
+    Failed {
+        error: io::Error,
+        context: &'static str,
+        path: PathBuf,
+    },
+    Error(ArchiveError),
 }
 
-impl Staged<'_> {
-    /// Removes the staging directory and says what survived the removal.
-    ///
-    /// The removal goes by the logical path, which a redirect of the parent
-    /// could point at a decoy; the survival check is relative to the pinned
-    /// parent and so still sees the real directory, and names it from a
-    /// descriptor on the entry itself.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "removes the private staging directory; std's removal does not follow symlinks"
-    )]
-    fn discard(&self) -> Option<StagingLeftover> {
-        let _ = std::fs::remove_dir_all(self.parent.join(&self.name));
-        match self.pin.entry_status(&self.name) {
-            Err(e) if is_absent(&e) => None,
-            Ok((_, observed)) if observed.check(self.id) == IdentityCheck::Different => None,
-            Ok(_) | Err(_) => Some(StagingLeftover {
-                path: surviving_path(self.pin, &self.name, self.parent),
-            }),
+impl Refusal {
+    fn failed(error: io::Error, context: &'static str, path: &Path) -> Self {
+        Self::Failed {
+            error,
+            context,
+            path: path.to_path_buf(),
         }
     }
 
-    /// The failure of a step that left the original destination in place.
-    fn failed(&self, error: &io::Error, context: &'static str, path: &Path) -> ArchiveError {
-        ArchiveError::ReplaceFailed(ReplaceFailure::new(
-            io_context(error, context, path),
-            Restore::NotNeeded,
-            self.discard(),
-        ))
+    /// The error, saying which staging directory survived its removal.
+    fn into_error(self, leftover: Option<StagingLeftover>) -> ArchiveError {
+        match self {
+            Self::Failed {
+                error,
+                context,
+                path,
+            } => ArchiveError::ReplaceFailed(ReplaceFailure::new(
+                io_context(&error, context, &path),
+                Restore::NotNeeded,
+                leftover,
+            )),
+            Self::Error(error) => error.rolled_back_with(leftover),
+        }
     }
 }
 
@@ -301,7 +317,8 @@ impl Staged<'_> {
 /// to stop once extraction finished; `SecurityViolation(DestinationChanged)`
 /// when the destination is no longer the directory that was pinned;
 /// `ReplaceFailed` when a rename failed, saying whether the original
-/// destination was restored.
+/// destination was restored. An error names the staging directory that could
+/// not be removed.
 pub(super) fn run(
     target: ReplaceTarget,
     options: &ExtractionOptions,
@@ -315,143 +332,99 @@ pub(super) fn run(
         parent,
         path,
     } = target;
-    let staging = tempfile::Builder::new()
-        .prefix(".exarch-")
-        .tempdir_in(&parent)
-        .map_err(|e| {
-            ArchiveError::Io(io_context(&e, "failed to create temp directory", &parent))
-        })?;
-    let staging_path = staging.keep();
-    let staged_name = EntryName::of(&staging_path).ok_or_else(|| {
-        ArchiveError::Io(io::Error::other(
-            "the staging directory has no usable file name",
-        ))
-    });
-    let staged_name = match staged_name {
-        Ok(name) => name,
-        Err(e) => {
-            discard_unnamed(&staging_path);
-            return Err(e);
-        }
-    };
-    let staged_id = match pin.entry_status(&staged_name) {
-        Ok((_, identity)) => identity,
-        Err(e) => {
-            discard_unnamed(&staging_path);
-            return Err(ArchiveError::Io(io_context(
-                &e,
-                "failed to inspect the staging directory",
-                &staging_path,
-            )));
-        }
-    };
-    let staged = Staged {
-        pin: &pin,
-        name: staged_name,
-        id: staged_id,
-        parent: &parent,
-    };
+    let staging = StagingDir::create(&pin, &parent)?;
 
-    let report = match extract(&staging_path, &staged_options(options), progress) {
+    let report = match extract(staging.path(), &staged_options(options), progress) {
         Ok(report) => report,
-        Err(e) => {
-            // TODO(#995): a staging directory that survives its removal here is
-            // lost; the extraction's error has no slot to report it.
-            let _ = staged.discard();
-            return Err(e.rolled_back());
-        }
+        Err(e) => return Err(e.rolled_back_with(staging.discard())),
     };
     if progress.is_cancelled() {
-        let _ = staged.discard();
-        return Err(cancelled_after(report));
+        return Err(cancelled_after(report, staging.discard()));
     }
-    swap(&staged, &name, id, &path, report)
+    let dest = Dest {
+        name: &name,
+        id,
+        path: &path,
+        parent: &parent,
+    };
+    swap(staging, &dest, report)
 }
 
-/// Removes a staging directory that has no name to identify it by.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "removes the private staging directory; std's removal does not follow symlinks"
-)]
-fn discard_unnamed(staging: &Path) {
-    let _ = std::fs::remove_dir_all(staging);
+/// The destination being replaced.
+struct Dest<'a> {
+    name: &'a LeafBuf,
+    id: FileIdentity,
+    path: &'a Path,
+    parent: &'a Path,
 }
 
 /// The original destination, moved aside to a backup name until the swap
 /// completes. Dropping it armed (a panic) moves the backup back, best effort.
 #[must_use = "dropping a displaced destination restores it"]
 struct Displaced<'a> {
-    pin: &'a PinnedParent,
-    dest_name: &'a EntryName,
-    backup_name: EntryName,
+    pin: &'a VettedDir,
+    dest_name: &'a LeafBuf,
+    backup_name: LeafBuf,
     backup_path: PathBuf,
-    backup_id: Option<FileIdentity>,
+    backup: Option<EntryStatus>,
     armed: bool,
 }
 
 impl<'a> Displaced<'a> {
-    /// Reserves a unique vacant sibling name, then renames the destination
-    /// onto it.
+    /// Reserves a vacant sibling name, then renames the destination onto it.
     ///
-    /// The reservation is a directory made by `tempfile` and freed again right
-    /// away, as renaming onto an existing directory is unsupported on Windows.
-    /// Every failure before the rename removes the staging directory.
-    fn displace(
-        staged: &Staged<'a>,
-        dest_name: &'a EntryName,
-        dest_id: FileIdentity,
-        dest_path: &Path,
-    ) -> Result<Self> {
-        let backup_dir = tempfile::Builder::new()
-            .prefix(".exarch-backup-")
-            .tempdir_in(staged.parent)
-            .map_err(|e| staged.failed(&e, "failed to reserve a backup path", staged.parent))?;
-        let backup_path = backup_dir.keep();
-        let Some(backup_name) = EntryName::of(&backup_path) else {
-            return Err(staged.failed(
-                &io::Error::other("the backup path has no usable file name"),
-                "failed to reserve a backup path",
-                &backup_path,
-            ));
-        };
-        staged
-            .pin
-            .remove_dir(&backup_name)
-            .map_err(|e| staged.failed(&e, "failed to free the backup path", &backup_path))?;
+    /// The name must be vacant: renaming onto an existing directory is
+    /// refused on Windows.
+    fn displace(pin: &'a VettedDir, dest: &Dest<'a>) -> std::result::Result<Self, Refusal> {
+        let backup_name = Self::vacant_name(pin)
+            .map_err(|e| Refusal::failed(e, "failed to reserve a backup path", dest.parent))?;
+        let backup_path = dest.parent.join(&backup_name);
 
-        verify_unchanged(staged.pin, dest_name, dest_id).inspect_err(|_| {
-            let _ = staged.discard();
-        })?;
+        verify_unchanged(pin, dest.name, dest.id).map_err(Refusal::Error)?;
 
-        staged.pin.rename(dest_name, &backup_name).map_err(|e| {
-            staged.failed(
-                &e,
-                "failed to move the existing destination aside",
-                dest_path,
-            )
-        })?;
+        pin.rename_dir_within(dest.name.as_leaf(), backup_name.as_leaf())
+            .map_err(|e| {
+                Refusal::failed(
+                    e,
+                    "failed to move the existing destination aside",
+                    dest.path,
+                )
+            })?;
         // Best effort: the destination is already moved, so a failure to
-        // inspect the backup must not abort the swap. Without an identity the
-        // cleanup warning is skipped rather than claimed.
-        let backup_id = staged
-            .pin
-            .entry_status(&backup_name)
-            .ok()
-            .map(|(_, identity)| identity);
+        // inspect the backup must not abort the swap. Without a status the
+        // cleanup warning and the permission adoption are skipped.
+        let backup = pin.status(backup_name.as_leaf()).ok().flatten();
         Ok(Self {
-            pin: staged.pin,
-            dest_name,
+            pin,
+            dest_name: dest.name,
             backup_name,
             backup_path,
-            backup_id,
+            backup,
             armed: true,
         })
+    }
+
+    fn vacant_name(pin: &VettedDir) -> io::Result<LeafBuf> {
+        for _ in 0..BACKUP_ATTEMPTS {
+            let name = LeafBuf::random(".exarch-backup-");
+            if pin.status(name.as_leaf())?.is_none() {
+                return Ok(name);
+            }
+        }
+        Err(io::Error::from(io::ErrorKind::AlreadyExists))
+    }
+
+    /// The permissions of the destination that was displaced, when they could
+    /// be read.
+    fn original_permissions(&self) -> Option<Adoption> {
+        self.backup.as_ref().map(Adoption::of)
     }
 
     /// Moves the backup back and disarms the guard.
     fn restore(mut self) -> io::Result<()> {
         self.armed = false;
-        self.pin.rename(&self.backup_name, self.dest_name)
+        self.pin
+            .rename_dir_within(self.backup_name.as_leaf(), self.dest_name.as_leaf())
     }
 
     /// Removes the backup after a successful swap and disarms the guard. A
@@ -466,13 +439,13 @@ impl<'a> Displaced<'a> {
         let Err(cleanup_error) = std::fs::remove_dir_all(&self.backup_path) else {
             return;
         };
-        let Some(backup_id) = self.backup_id else {
+        let Some(backup) = self.backup else {
             return;
         };
-        let Ok((_, observed)) = self.pin.entry_status(&self.backup_name) else {
+        let Ok(Some(observed)) = self.pin.status(self.backup_name.as_leaf()) else {
             return;
         };
-        let identity = match observed.check(backup_id) {
+        let identity = match observed.identity.check(backup.identity) {
             IdentityCheck::Same => BackupIdentity::Verified,
             IdentityCheck::Unknown => BackupIdentity::Unverified,
             IdentityCheck::Different => return,
@@ -491,51 +464,78 @@ impl Drop for Displaced<'_> {
         if self.armed {
             // Reached only when unwinding: every normal path consumes the guard
             // through `restore` or `discard`, which report their own outcome.
-            let _unreportable = self.pin.rename(&self.backup_name, self.dest_name);
+            let _unreportable = self
+                .pin
+                .rename_dir_within(self.backup_name.as_leaf(), self.dest_name.as_leaf());
         }
     }
 }
 
 /// Refuses the swap when the destination is no longer the directory that was
-/// pinned, or is no longer a directory. An identity the platform cannot
+/// pinned, or is no longer a plain directory. An identity the volume cannot
 /// provide is not a mismatch: there is nothing to compare, and refusing would
 /// make the replace unusable there.
-fn verify_unchanged(pin: &PinnedParent, name: &EntryName, expected: FileIdentity) -> Result<()> {
-    let (kind, current) = pin.entry_status(name).map_err(ArchiveError::Io)?;
-    if kind != DestEntryKind::Directory || current.check(expected) == IdentityCheck::Different {
+fn verify_unchanged(pin: &VettedDir, name: &LeafBuf, expected: FileIdentity) -> Result<()> {
+    let current = pin
+        .status(name.as_leaf())
+        .map_err(ArchiveError::Io)?
+        .filter(|status| status.occupant == Occupant::Directory && !status.reparse)
+        .ok_or(Violation::DestinationChanged)?;
+    if current.identity.check(expected) == IdentityCheck::Different {
         return Err(Violation::DestinationChanged.into());
     }
     Ok(())
 }
 
 /// Swaps the staged tree over the destination and removes the backup.
+///
+/// The staged root takes the original's permissions only now, right before it
+/// is published, so a failure anywhere earlier leaves it private. A failure to
+/// do that or to rename puts the original back.
 fn swap(
-    staged: &Staged<'_>,
-    dest_name: &EntryName,
-    dest_id: FileIdentity,
-    dest_path: &Path,
+    mut staging: StagingDir<'_>,
+    dest: &Dest<'_>,
     mut report: ExtractionReport,
 ) -> Result<ExtractionReport> {
-    let displaced = Displaced::displace(staged, dest_name, dest_id, dest_path)?;
-    if let Err(error) = staged.pin.rename(&staged.name, dest_name) {
-        let backup = displaced.backup_path.clone();
-        let restore = match displaced.restore() {
-            Ok(()) => Restore::Restored,
-            Err(restore_error) => Restore::Failed {
-                backup,
-                error: restore_error,
-            },
-        };
-        return Err(ArchiveError::ReplaceFailed(ReplaceFailure::new(
-            io_context(
-                &error,
-                "failed to move the extracted content into place",
-                dest_path,
-            ),
-            restore,
-            staged.discard(),
-        )));
+    let displaced = match Displaced::displace(staging.parent, dest) {
+        Ok(displaced) => displaced,
+        Err(refusal) => return Err(refusal.into_error(staging.discard())),
+    };
+    let adopted = displaced
+        .original_permissions()
+        .map_or(Ok(()), |permissions| staging.adopt(permissions));
+    if let Err(error) = adopted {
+        let context = "failed to give the extracted content the destination's permissions";
+        return Err(roll_back(displaced, staging, &error, context, dest.path));
+    }
+    if let Err(error) = staging.publish(dest.name) {
+        let context = "failed to move the extracted content into place";
+        return Err(roll_back(displaced, staging, &error, context, dest.path));
     }
     displaced.discard(&mut report);
     Ok(report)
+}
+
+/// Puts the original destination back after a failed publish and discards the
+/// staging directory.
+fn roll_back(
+    displaced: Displaced<'_>,
+    staging: StagingDir<'_>,
+    error: &io::Error,
+    context: &'static str,
+    dest_path: &Path,
+) -> ArchiveError {
+    let backup = displaced.backup_path.clone();
+    let restore = match displaced.restore() {
+        Ok(()) => Restore::Restored,
+        Err(restore_error) => Restore::Failed {
+            backup,
+            error: restore_error,
+        },
+    };
+    ArchiveError::ReplaceFailed(ReplaceFailure::new(
+        io_context(error, context, dest_path),
+        restore,
+        staging.discard(),
+    ))
 }

@@ -66,54 +66,6 @@ pub enum DestEntryKind {
     Other,
 }
 
-/// The identity of a directory entry.
-///
-/// Does not implement `PartialEq`: where the platform offers no stable
-/// identity ([`Unknown`](Self::Unknown)) a derived `==` would make every
-/// comparison succeed. [`check`](Self::check) makes each caller decide what an
-/// unverifiable identity means.
-#[derive(Debug, Clone, Copy)]
-pub enum FileIdentity {
-    /// A device and inode number from the filesystem.
-    #[cfg_attr(not(any(unix, target_os = "wasi")), allow(dead_code))]
-    Known {
-        /// Device number.
-        dev: u64,
-        /// Inode number.
-        ino: u64,
-    },
-    /// The platform provides no stable identity.
-    #[cfg_attr(any(unix, target_os = "wasi"), allow(dead_code))]
-    Unknown,
-}
-
-/// The outcome of comparing two [`FileIdentity`] values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentityCheck {
-    /// Both identities are known and equal.
-    Same,
-    /// Both identities are known and differ.
-    Different,
-    /// At least one identity is unknown, so nothing can be concluded.
-    Unknown,
-}
-
-impl FileIdentity {
-    /// Compares `self` (observed now) with `expected` (taken earlier).
-    pub const fn check(self, expected: Self) -> IdentityCheck {
-        match (self, expected) {
-            (Self::Known { dev: d1, ino: i1 }, Self::Known { dev: d2, ino: i2 }) => {
-                if d1 == d2 && i1 == i2 {
-                    IdentityCheck::Same
-                } else {
-                    IdentityCheck::Different
-                }
-            }
-            _ => IdentityCheck::Unknown,
-        }
-    }
-}
-
 #[cfg(any(unix, target_os = "wasi"))]
 mod imp {
     use std::fs::File;
@@ -128,6 +80,7 @@ mod imp {
     use super::DestEntryKind;
     use super::EntryName;
     use super::FileIdentity;
+    use crate::formats::file_identity::IdentityKey;
 
     /// A directory pinned by an open descriptor.
     ///
@@ -168,11 +121,6 @@ mod imp {
         ///
         /// `statat` needs only search permission on the pinned directory,
         /// where opening the entry would also need read permission on it.
-        // `st_dev` and `st_ino` are platform-native integers (`i32` and `u64`
-        // on macOS, `u64` on 64-bit Linux), so the conversion is a no-op on
-        // some targets. An unrepresentable value fails instead of collapsing
-        // to a shared sentinel that would make two inodes compare equal.
-        #[allow(clippy::useless_conversion)]
         pub fn entry_status(&self, name: &EntryName) -> io::Result<(DestEntryKind, FileIdentity)> {
             let stat = rustix::fs::statat(&self.0, &name.0, AtFlags::SYMLINK_NOFOLLOW)?;
             let kind = match FileType::from_raw_mode(stat.st_mode) {
@@ -180,11 +128,7 @@ mod imp {
                 FileType::Symlink => DestEntryKind::Symlink,
                 _ => DestEntryKind::Other,
             };
-            let dev = u64::try_from(stat.st_dev)
-                .map_err(|_| io::Error::other("unrepresentable st_dev"))?;
-            let ino = u64::try_from(stat.st_ino)
-                .map_err(|_| io::Error::other("unrepresentable st_ino"))?;
-            Ok((kind, FileIdentity::Known { dev, ino }))
+            Ok((kind, FileIdentity::Known(IdentityKey::of_stat(&stat)?)))
         }
 
         /// Renames `from` to `to`, both relative to the pinned directory.
@@ -319,41 +263,9 @@ mod imp {
 pub use imp::PinnedParent;
 pub use imp::current_path;
 
-/// The identity of the directory at `path`, following symlinks: the device and
-/// inode where the platform has them, [`FileIdentity::Unknown`] elsewhere.
-///
-/// # Errors
-///
-/// The I/O error of the lookup.
-#[cfg(unix)]
-#[allow(clippy::useless_conversion)] // `st_dev` is not `u64` on every target
-pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = std::fs::metadata(path)?;
-    Ok(FileIdentity::Known {
-        dev: u64::from(metadata.dev()),
-        ino: metadata.ino(),
-    })
-}
-
-/// WASI has no stable `MetadataExt`, so the directory is opened and its
-/// descriptor is stat'ed.
-#[cfg(target_os = "wasi")]
-pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
-    let stat = rustix::fs::fstat(std::fs::File::open(path)?)?;
-    Ok(FileIdentity::Known {
-        dev: stat.st_dev,
-        ino: stat.st_ino,
-    })
-}
-
-/// No identity is available on this target.
-#[cfg(not(any(unix, target_os = "wasi")))]
-#[allow(clippy::unnecessary_wraps)] // the identity-based arms can fail
-pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
-    std::fs::metadata(path).map(|_| FileIdentity::Unknown)
-}
+pub use crate::formats::file_identity::FileIdentity;
+pub use crate::formats::file_identity::IdentityCheck;
+pub use crate::formats::file_identity::identity_of;
 
 /// The path of a surviving staging or backup entry, resolved from the entry
 /// itself where the platform can and named logically otherwise.
@@ -383,6 +295,7 @@ mod tests {
     use super::IdentityCheck;
     use super::PinnedParent;
     use super::current_path;
+    use crate::formats::file_identity::IdentityKey;
 
     fn entry(name: &str) -> EntryName {
         EntryName::of(Path::new(name)).expect("single component")
@@ -446,14 +359,14 @@ mod tests {
         let pin = PinnedParent::open(root.path()).unwrap();
         let (_, first) = pin.entry_status(&entry("dest")).unwrap();
         let (_, second) = pin.entry_status(&entry("dest")).unwrap();
-        assert_matches!(first, FileIdentity::Known { .. });
+        assert_matches!(first, FileIdentity::Known(_));
         assert_eq!(second.check(first), IdentityCheck::Same);
     }
 
     #[test]
     fn an_unknown_identity_never_compares_as_same_or_different() {
-        let known = FileIdentity::Known { dev: 1, ino: 2 };
-        let other = FileIdentity::Known { dev: 1, ino: 3 };
+        let known = FileIdentity::Known(IdentityKey { dev: 1, ino: 2 });
+        let other = FileIdentity::Known(IdentityKey { dev: 1, ino: 3 });
         assert_eq!(known.check(known), IdentityCheck::Same);
         assert_eq!(known.check(other), IdentityCheck::Different);
         for (a, b) in [

@@ -231,6 +231,71 @@ impl EntrySelection {
         self
     }
 
+    /// Sets or clears the strip, leaving a flatten as it is.
+    ///
+    /// `None` removes a strip but keeps a flatten, so a front end can apply
+    /// its strip and flatten options independently, in either order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::EntrySelection;
+    /// use exarch_core::PathRewrite;
+    ///
+    /// let selection = EntrySelection::default()
+    ///     .with_flatten(true)
+    ///     .with_strip(None);
+    /// assert_eq!(selection.rewrite(), PathRewrite::Flatten);
+    /// ```
+    #[must_use]
+    pub const fn with_strip(mut self, strip: Option<StripComponents>) -> Self {
+        self.rewrite = match (strip, self.rewrite) {
+            (Some(strip), _) => PathRewrite::Strip(strip),
+            (None, PathRewrite::Flatten) => PathRewrite::Flatten,
+            (None, _) => PathRewrite::Keep,
+        };
+        self
+    }
+
+    /// Sets or clears the flatten, leaving a strip as it is.
+    ///
+    /// `false` removes a flatten but keeps a strip.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::EntrySelection;
+    /// use exarch_core::PathRewrite;
+    ///
+    /// let selection = EntrySelection::default()
+    ///     .with_flatten(true)
+    ///     .with_flatten(false);
+    /// assert_eq!(selection.rewrite(), PathRewrite::Keep);
+    /// ```
+    #[must_use]
+    pub const fn with_flatten(mut self, flatten: bool) -> Self {
+        self.rewrite = match (flatten, self.rewrite) {
+            (true, _) => PathRewrite::Flatten,
+            (false, PathRewrite::Flatten) => PathRewrite::Keep,
+            (false, rewrite) => rewrite,
+        };
+        self
+    }
+
+    /// Replaces the include patterns; the rewrite is kept.
+    #[must_use]
+    pub fn with_include_list(mut self, patterns: Vec<EntryPattern>) -> Self {
+        self.include = patterns.into_boxed_slice();
+        self
+    }
+
+    /// Replaces the exclude patterns; the rewrite is kept.
+    #[must_use]
+    pub fn with_exclude_list(mut self, patterns: Vec<EntryPattern>) -> Self {
+        self.exclude = patterns.into_boxed_slice();
+        self
+    }
+
     /// Decides what happens to an entry whose name `original` already passed
     /// path validation (so it holds only normal components).
     ///
@@ -670,6 +735,41 @@ mod tests {
             skipped(&decide(&selection, "src/a")),
             Some(SkipKind::NotSelected)
         );
+    }
+
+    #[test]
+    fn strip_and_flatten_builders_set_one_rewrite_without_disturbing_the_other() {
+        let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
+        let stripped = EntrySelection::default().with_strip(Some(strip));
+        let flattened = EntrySelection::default().with_flatten(true);
+
+        assert_eq!(stripped.rewrite(), PathRewrite::Strip(strip));
+        assert_eq!(flattened.rewrite(), PathRewrite::Flatten);
+        assert_eq!(
+            flattened.clone().with_strip(None).rewrite(),
+            PathRewrite::Flatten
+        );
+        assert_eq!(
+            stripped.clone().with_flatten(false).rewrite(),
+            PathRewrite::Strip(strip)
+        );
+        assert_eq!(stripped.with_strip(None).rewrite(), PathRewrite::Keep);
+        assert_eq!(flattened.with_flatten(false).rewrite(), PathRewrite::Keep);
+    }
+
+    #[test]
+    fn the_list_builders_replace_a_list_and_keep_the_rewrite() {
+        let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
+        let selection = EntrySelection::default()
+            .with_include(pattern("old"))
+            .with_exclude(pattern("old"))
+            .with_rewrite(PathRewrite::Strip(strip))
+            .with_include_list(vec![pattern("a"), pattern("b")])
+            .with_exclude_list(Vec::new());
+
+        assert_eq!(selection.include(), [pattern("a"), pattern("b")]);
+        assert!(selection.exclude().is_empty());
+        assert_eq!(selection.rewrite(), PathRewrite::Strip(strip));
     }
 
     #[test]

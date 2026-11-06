@@ -28,6 +28,7 @@ use crate::Restore;
 use crate::SecurityConfig;
 use crate::Staging;
 use crate::Violation;
+use crate::formats::file_identity::IdentityKey;
 use crate::test_utils::create_test_tar;
 
 type Action = Box<dyn FnMut() + Send>;
@@ -469,9 +470,9 @@ fn the_guard_compares_identity_so_another_spelling_of_the_destination_is_caught(
 
 #[test]
 fn the_guard_follows_an_injected_identity_source_not_the_path_text() {
-    let known = |ino| Ok(FileIdentity::Known { dev: 1, ino });
+    let known = |ino| Ok(FileIdentity::Known(IdentityKey { dev: 1, ino }));
     let dest = Path::new("/p/dest");
-    let dest_id = FileIdentity::Known { dev: 1, ino: 7 };
+    let dest_id = FileIdentity::Known(IdentityKey { dev: 1, ino: 7 });
     // A case-insensitive volume: `/p/DEST` and `/p/dest` are one directory.
     let case_insensitive = |path: &Path| match path.to_str().unwrap().to_lowercase().as_str() {
         "/p/dest" => known(7),

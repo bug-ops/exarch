@@ -6,7 +6,10 @@
 //! consume [`FfiErrorMessage`] instead of re-matching [`ArchiveError`].
 
 use super::config_error::ConfigSetting;
+use super::config_error::ProtectedPath;
 use super::redaction::sanitize_io_error_for_error;
+use super::redaction::sanitize_path_for_error;
+use super::replace::RestoreKind;
 use super::types::ArchiveError;
 use super::types::PartialWrites;
 use super::types::PolicySetting;
@@ -501,6 +504,116 @@ pub struct FfiErrorMessage {
     /// The failure behind an unreadable creation source, so a binding can
     /// expose `errno`, `strerror` and `filename`.
     pub source_fault: Option<FfiSourceFault>,
+
+    /// The host path the error is about, redacted: set for a missing source,
+    /// an existing output, an occupied destination and a leftover reservation
+    /// file, so a binding can expose it as `filename`.
+    pub path: Option<String>,
+
+    /// The staging directory or reservation file the failure left on disk,
+    /// redacted.
+    pub leftover_path: Option<String>,
+
+    /// Structured data of the error that a description cannot carry.
+    pub detail: FfiDetail,
+}
+
+/// Structured data behind an [`FfiErrorMessage`], one variant per error that
+/// carries some.
+///
+/// Exhaustive on purpose, unlike the rest of the public enums: a new detail
+/// must fail to compile in every binding that maps it, and adding a variant is
+/// a breaking change before 1.0.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveError;
+/// use exarch_core::FfiDetail;
+///
+/// let msg = ArchiveError::Cancelled.into_ffi_message();
+/// assert_eq!(msg.detail, FfiDetail::None);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FfiDetail {
+    /// The error has no structured data.
+    None,
+    /// The archive-relative paths of an occupied destination.
+    Occupied {
+        /// The occupied paths.
+        conflicts: Box<[String]>,
+    },
+    /// What a failed whole-destination replace did to the original.
+    Replace(FfiRestore),
+    /// What makes the destination too important to replace.
+    ProtectedPath(ProtectedPath),
+    /// Two entry names the host filesystem treats as one.
+    NameCollision(FfiNameCollision),
+    /// The include patterns that matched no entry.
+    UnmatchedInclude {
+        /// The patterns, as written.
+        patterns: Box<[String]>,
+    },
+    /// An entry path that is not valid UTF-8.
+    NonUtf8EntryPath {
+        /// The path, lossily rendered.
+        path: String,
+    },
+}
+
+/// What became of the original destination after a failed replace, redacted
+/// for a binding.
+///
+/// Exhaustive on purpose, like [`FfiDetail`].
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::FfiRestore;
+/// use exarch_core::RestoreKind;
+///
+/// let restore = FfiRestore::Failed {
+///     backup_path: ".exarch-backup-1".into(),
+/// };
+/// assert_eq!(restore.kind(), RestoreKind::Failed);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FfiRestore {
+    /// The original destination was never moved aside.
+    NotNeeded,
+    /// The original destination was moved aside and moved back.
+    Restored,
+    /// The original destination could not be moved back.
+    Failed {
+        /// Where the original destination is now.
+        backup_path: String,
+    },
+}
+
+impl FfiRestore {
+    /// Which outcome this is, without the backup path.
+    #[must_use]
+    pub const fn kind(&self) -> RestoreKind {
+        match self {
+            Self::NotNeeded => RestoreKind::NotNeeded,
+            Self::Restored => RestoreKind::Restored,
+            Self::Failed { .. } => RestoreKind::Failed,
+        }
+    }
+}
+
+/// Two entry names the host filesystem treats as one, redacted for a binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FfiNameCollision {
+    // ASSUMPTION: `name` is the stable text of the collision kind; the bindings
+    // track fixes it.
+    /// The collision kind, which sets how serious the collision is.
+    pub name: String,
+    /// The entry that was there first.
+    pub first: String,
+    /// The entry that collided with it.
+    pub second: String,
 }
 
 /// What a binding needs of an unreadable creation source, redacted like the
@@ -541,6 +654,9 @@ impl FfiErrorMessage {
             description,
             partial: None,
             source_fault: None,
+            path: None,
+            leftover_path: None,
+            detail: FfiDetail::None,
         }
     }
 }
@@ -572,8 +688,14 @@ impl ArchiveError {
     #[must_use]
     pub fn into_ffi_message(self) -> FfiErrorMessage {
         if let Self::PartialExtraction(partial) = self {
+            let leftover_path = partial
+                .leftover()
+                .map(|leftover| sanitize_path_for_error(&leftover.path));
             let (source, report, writes) = partial.into_parts();
             let mut msg = source.into_ffi_message();
+            if leftover_path.is_some() {
+                msg.leftover_path = leftover_path;
+            }
             msg.partial = Some(match writes {
                 PartialWrites::Kept => PartialOutcome::Kept(report),
                 PartialWrites::RolledBack => PartialOutcome::RolledBack,
@@ -582,6 +704,8 @@ impl ArchiveError {
             return msg;
         }
         let mut msg = FfiErrorMessage::new(self.ffi_kind(), self.ffi_description());
+        msg.path = self.ffi_path();
+        msg.leftover_path = self.ffi_leftover_path();
         if let Self::SourceNotAccessible { error, .. } = &self {
             msg.source_fault = Some(FfiSourceFault {
                 raw_os_error: error.raw_os_error(),
@@ -663,6 +787,29 @@ impl ArchiveError {
             },
             Self::ReaderFormat(_) => FfiKind::InvalidConfiguration { setting: None },
             Self::PartialExtraction(partial) => partial.cause().ffi_kind(),
+        }
+    }
+
+    /// The path of [`FfiErrorMessage::path`].
+    fn ffi_path(&self) -> Option<String> {
+        match self {
+            Self::SourceNotFound { .. }
+            | Self::OutputExists { .. }
+            | Self::DestinationOccupied { .. }
+            | Self::OutputReservationLeft { .. } => self.redacted_path(),
+            _ => None,
+        }
+    }
+
+    /// The path of [`FfiErrorMessage::leftover_path`].
+    fn ffi_leftover_path(&self) -> Option<String> {
+        match self {
+            Self::OutputReservationLeft { path, .. } => Some(sanitize_path_for_error(path)),
+            Self::ReplaceFailed(failure) => failure
+                .leftover
+                .as_ref()
+                .map(|leftover| sanitize_path_for_error(&leftover.path)),
+            _ => None,
         }
     }
 
@@ -1061,6 +1208,57 @@ mod tests {
         let discarded = wrap(PartialWrites::Discarded).into_ffi_message();
         assert_matches!(discarded.partial, Some(PartialOutcome::Discarded));
         assert_eq!(PartialOutcome::Discarded.writes(), PartialWrites::Discarded);
+    }
+
+    #[test]
+    fn path_and_leftover_path_are_filled_for_the_errors_that_name_one() {
+        let path = |error: ArchiveError| error.into_ffi_message().path;
+        assert!(path(ArchiveError::SourceNotFound { path: "a/b".into() }).is_some());
+        assert!(path(ArchiveError::OutputExists { path: "a/b".into() }).is_some());
+        assert!(
+            path(ArchiveError::DestinationOccupied {
+                destination: "out".into(),
+                conflicts: Box::new([]),
+            })
+            .is_some()
+        );
+        assert!(path(ArchiveError::Cancelled).is_none());
+        assert!(
+            path(ArchiveError::UnknownFormat { path: "a.x".into() }).is_none(),
+            "only the paths of the listed errors are exposed"
+        );
+
+        let reservation = ArchiveError::OutputReservationLeft {
+            path: "out.tar".into(),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        }
+        .into_ffi_message();
+        assert!(reservation.path.is_some());
+        assert_eq!(reservation.leftover_path, reservation.path);
+
+        let replace = ArchiveError::ReplaceFailed(crate::ReplaceFailure::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            crate::Restore::Restored,
+            Some(crate::StagingLeftover::new("out/.exarch-2".into())),
+        ))
+        .into_ffi_message();
+        assert!(
+            replace
+                .leftover_path
+                .is_some_and(|p| p.contains(".exarch-2"))
+        );
+        assert!(replace.path.is_none());
+        assert_eq!(replace.detail, FfiDetail::None);
+    }
+
+    #[test]
+    fn a_partial_leftover_reaches_the_message() {
+        let msg = ArchiveError::Cancelled
+            .rolled_back_with(Some(crate::StagingLeftover::new("out/.exarch-3".into())))
+            .into_ffi_message();
+
+        assert_matches!(msg.partial, Some(PartialOutcome::RolledBack));
+        assert!(msg.leftover_path.is_some_and(|p| p.contains(".exarch-3")));
     }
 
     #[test]

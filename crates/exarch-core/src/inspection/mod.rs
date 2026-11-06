@@ -34,6 +34,7 @@ pub mod report;
 pub mod verify;
 
 pub use landing::Disposition;
+pub use landing::DispositionKind;
 pub use landing::Landing;
 pub use landing::LandingKind;
 pub use landing::LandingPath;

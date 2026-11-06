@@ -6,11 +6,12 @@
 //! the two apart. It is kept per run, by the pinned destination, and is filled
 //! only under `Refuse`.
 //!
-//! A landing is keyed by file identity (device and inode of the entry itself,
-//! never of a symlink's target), which is exact on a case-insensitive host and
-//! needs no path folding. Where the platform gives no identity (Windows) the
-//! key is the landing path as the archive spelled it, so a duplicate that
-//! differs only in case is refused: the record fails closed.
+//! A landing is keyed by file identity (device and file index of the entry
+//! itself, never of a symlink's target), which is exact on a case-insensitive
+//! host and needs no path folding. Where the volume gives no identity the key
+//! is the landing path as the archive spelled it, so a duplicate that differs
+//! only in case is refused: the record fails closed. A failed identity lookup
+//! records nothing.
 //!
 //! The record is bounded by [`RECORD_CAP`]. Past it nothing more is recorded
 //! and every occupant counts as not created by this run, so the run fails
@@ -32,7 +33,9 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::Path;
+use std::path::PathBuf;
 
+use super::file_identity::IdentityKey;
 use super::pinned_dir::Leaf;
 use super::pinned_dir::VettedDir;
 use crate::ExistingFiles;
@@ -40,23 +43,23 @@ use crate::ExistingFiles;
 /// The most landings a run records (4 Mi, 64 MiB of identity keys).
 const RECORD_CAP: usize = 4 * 1024 * 1024;
 
-#[cfg(any(unix, target_os = "wasi"))]
-type LandingKey = (u64, u64);
-#[cfg(not(any(unix, target_os = "wasi")))]
-type LandingKey = std::path::PathBuf;
-
-#[cfg(any(unix, target_os = "wasi"))]
-fn key_of(dir: &VettedDir, leaf: Leaf<'_>, _rel: &Path) -> Option<LandingKey> {
-    dir.identity(leaf).ok().flatten()
+/// How a landing is recorded: by identity, or by path where the volume gives
+/// none (FAT, exFAT, and Windows until its identity is wired up).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum LandingKey {
+    Identity(IdentityKey),
+    Path(PathBuf),
 }
 
-#[cfg(not(any(unix, target_os = "wasi")))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "shares its signature with the identity-keyed arm, which can fail"
-)]
-fn key_of(_dir: &VettedDir, _leaf: Leaf<'_>, rel: &Path) -> Option<LandingKey> {
-    Some(rel.to_path_buf())
+/// The key of the occupant of `leaf`, `None` when it is absent or the lookup
+/// fails, so the landing is not recorded and a later duplicate is refused.
+fn key_of(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Option<LandingKey> {
+    let identity = dir.identity(leaf).ok().flatten()?;
+    Some(
+        identity
+            .key()
+            .map_or_else(|| LandingKey::Path(rel.to_path_buf()), LandingKey::Identity),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -106,8 +109,10 @@ impl RunRecord {
     }
 
     #[cfg(all(test, unix))]
-    pub(crate) fn insert_identity_for_test(&self, key: LandingKey) {
-        self.0.borrow_mut().keys.insert(key);
+    pub(crate) fn insert_identity_for_test(&self, identity: super::file_identity::FileIdentity) {
+        if let Some(key) = identity.key() {
+            self.0.borrow_mut().keys.insert(LandingKey::Identity(key));
+        }
     }
 
     #[cfg(all(test, unix))]

@@ -254,6 +254,8 @@ mod imp {
     use rustix::io::Errno;
 
     use super::Leaf;
+    use crate::formats::file_identity::FileIdentity;
+    use crate::formats::file_identity::IdentityKey;
     use crate::security::fs_view::Occupant;
     use crate::security::permissions::SanitizedMode;
 
@@ -330,21 +332,11 @@ mod imp {
             }
         }
 
-        /// The device and inode of the entry `name` itself, never of a
-        /// symlink's target; `None` if it is absent.
-        // `st_dev` and `st_ino` are platform-native integers, so the conversion
-        // is a no-op on some targets; an unrepresentable value fails instead of
-        // collapsing to a shared sentinel that would make two inodes equal.
-        #[allow(clippy::useless_conversion)]
-        pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<(u64, u64)>> {
+        /// The identity of the entry `name` itself, never of a symlink's
+        /// target; `None` if it is absent.
+        pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<FileIdentity>> {
             match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => {
-                    let dev = u64::try_from(stat.st_dev)
-                        .map_err(|_| io::Error::other("unrepresentable st_dev"))?;
-                    let ino = u64::try_from(stat.st_ino)
-                        .map_err(|_| io::Error::other("unrepresentable st_ino"))?;
-                    Ok(Some((dev, ino)))
-                }
+                Ok(stat) => Ok(Some(FileIdentity::Known(IdentityKey::of_stat(&stat)?))),
                 Err(e) if e == Errno::NOENT => Ok(None),
                 Err(e) => Err(e.into()),
             }
@@ -459,6 +451,7 @@ mod imp {
     use super::nt::Disposition;
     use super::nt::Kind;
     use super::nt::Request;
+    use crate::formats::file_identity::FileIdentity;
     use crate::security::fs_view::Occupant;
     use crate::security::permissions::SanitizedMode;
 
@@ -550,6 +543,14 @@ mod imp {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(e),
             }
+        }
+
+        /// The identity of the entry `name` itself; `None` if it is absent.
+        ///
+        /// Always [`FileIdentity::Unknown`] for now: no Windows identity source
+        /// is wired up.
+        pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<FileIdentity>> {
+            Ok(self.probe(name)?.map(|_| FileIdentity::Unknown))
         }
 
         /// Creates the file `name` exclusively, never following a link at it.

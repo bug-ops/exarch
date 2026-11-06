@@ -4,6 +4,34 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+use crate::closed_enum::closed_enum;
+
+closed_enum! {
+    /// The outcome of [`Restore`] without its payload.
+    ///
+    /// The string form is stable and shared by every front end.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::Restore;
+    /// use exarch_core::RestoreKind;
+    ///
+    /// assert_eq!(Restore::Restored.kind(), RestoreKind::Restored);
+    /// assert_eq!(RestoreKind::Failed.as_str(), "failed");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[non_exhaustive]
+    pub enum RestoreKind {
+        /// The original destination was never moved aside
+        NotNeeded => "not_needed",
+        /// The original destination was moved aside and moved back
+        Restored => "restored",
+        /// The original destination was moved aside and could not be moved back
+        Failed => "failed",
+    }
+}
+
 /// What became of the original destination after a failed replace.
 ///
 /// # Examples
@@ -36,6 +64,16 @@ impl Restore {
     pub const fn original_is_intact(&self) -> bool {
         matches!(self, Self::NotNeeded | Self::Restored)
     }
+
+    /// Which outcome this is, without the backup path and error.
+    #[must_use]
+    pub const fn kind(&self) -> RestoreKind {
+        match self {
+            Self::NotNeeded => RestoreKind::NotNeeded,
+            Self::Restored => RestoreKind::Restored,
+            Self::Failed { .. } => RestoreKind::Failed,
+        }
+    }
 }
 
 /// A staging directory that a failed replace left on disk.
@@ -44,6 +82,23 @@ impl Restore {
 pub struct StagingLeftover {
     /// The path of the leftover directory.
     pub path: PathBuf,
+}
+
+impl StagingLeftover {
+    /// Records a staging directory left at `path`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::StagingLeftover;
+    ///
+    /// let leftover = StagingLeftover::new("out/.exarch-1".into());
+    /// assert!(leftover.path.ends_with(".exarch-1"));
+    /// ```
+    #[must_use]
+    pub const fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
 }
 
 /// Why replacing an existing destination failed, and what is left behind.

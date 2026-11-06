@@ -27,7 +27,6 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::VerificationOptions;
-use crate::api::extract_staged;
 use crate::api::extract_to_sink_reusing;
 use crate::api::extract_validated;
 use crate::api::resolve_output_format;
@@ -45,6 +44,7 @@ use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
 use crate::inspection::list::ListPass;
 use crate::listed::ListedArchive;
+use crate::staging::extract_staged;
 
 /// The optional progress callback of a request; a missing one is a no-op.
 struct OptionalProgress<'a>(Option<&'a mut dyn ProgressCallback>);
@@ -148,9 +148,15 @@ impl<'a> ExtractRequest<'a> {
             progress,
         } = self;
         progress.run(|progress| {
-            extract_staged(output_dir.as_ref(), &options, |dir| {
-                extract_validated(archive.as_ref(), dir, config, &options, progress)
-            })
+            extract_staged(
+                output_dir.as_ref(),
+                &options,
+                Some(archive.as_ref()),
+                progress,
+                |dir, options, progress| {
+                    extract_validated(archive.as_ref(), dir, config, options, progress)
+                },
+            )
         })
     }
 }

@@ -40,6 +40,7 @@ pub mod report;
 mod request;
 pub mod security;
 pub mod sink;
+mod staging;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod types;

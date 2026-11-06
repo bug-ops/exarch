@@ -8,13 +8,11 @@ use crate::CreateRequest;
 use crate::EntrySink;
 use crate::ExtractRequest;
 use crate::ExtractionReport;
-use crate::IoContext;
 use crate::OutputFile;
 use crate::OutputFormat;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::Staging;
 use crate::config::ExtractionOptions;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
@@ -103,97 +101,6 @@ pub(crate) fn extract_validated<P: AsRef<Path>, Q: AsRef<Path>>(
         }
         FormatFamily::Seekable(SeekableFormat::SevenZ) => {
             extract_7z(archive_path, output_dir, config, options, progress)
-        }
-    }
-}
-
-/// Runs `extract` into `output_dir`, or into a staging directory that is
-/// renamed over `output_dir` on success when `options` ask for atomic
-/// extraction.
-pub(crate) fn extract_staged(
-    output_dir: &Path,
-    options: &ExtractionOptions,
-    extract: impl FnOnce(&Path) -> Result<ExtractionReport>,
-) -> Result<ExtractionReport> {
-    match options.staging {
-        Staging::InPlace => extract(output_dir),
-        Staging::Atomic => extract_atomic(output_dir, extract),
-        Staging::AtomicReplace => Err(ArchiveError::InvalidConfiguration {
-            setting: crate::ConfigSetting::Staging,
-            problem: crate::ConfigProblem::NotSupported,
-        }),
-    }
-}
-
-#[expect(
-    clippy::disallowed_methods,
-    reason = "stages the whole extraction in a private sibling directory, then renames it into place"
-)]
-fn extract_atomic(
-    output_dir: &Path,
-    extract: impl FnOnce(&Path) -> Result<ExtractionReport>,
-) -> Result<ExtractionReport> {
-    // Canonicalize output_dir to resolve any symlinks in the path before
-    // computing the parent, so temp dir lands on the same filesystem.
-    // If output_dir doesn't exist yet, use its lexical parent.
-    let canonical_output = if output_dir.exists() {
-        output_dir.canonicalize().map_err(ArchiveError::Io)?
-    } else {
-        output_dir.to_path_buf()
-    };
-
-    let parent = canonical_output
-        .parent()
-        .ok_or(ArchiveError::InvalidConfiguration {
-            setting: crate::ConfigSetting::OutputPath,
-            problem: crate::ConfigProblem::NoParent,
-        })?;
-
-    std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;
-
-    let temp_dir = tempfile::Builder::new()
-        .prefix(".exarch-")
-        .tempdir_in(parent)
-        .map_err(|e| {
-            ArchiveError::Io(std::io::Error::new(
-                e.kind(),
-                IoContext::new(
-                    "failed to create temp directory",
-                    format!("{}: {e}", parent.display()),
-                ),
-            ))
-        })?;
-
-    let result = extract(temp_dir.path());
-
-    match result {
-        Ok(report) => {
-            // Consume TempDir to prevent Drop cleanup, then rename.
-            let temp_path = temp_dir.keep();
-            std::fs::rename(&temp_path, output_dir).map_err(|e| {
-                // Rename failed: clean up temp dir
-                let _ = std::fs::remove_dir_all(&temp_path);
-                // Map AlreadyExists to OutputExists for caller clarity
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    ArchiveError::OutputExists {
-                        path: output_dir.to_path_buf(),
-                    }
-                } else {
-                    ArchiveError::Io(std::io::Error::new(
-                        e.kind(),
-                        IoContext::new(
-                            "failed to rename temp dir into place",
-                            format!("{}: {e}", output_dir.display()),
-                        ),
-                    ))
-                }
-            })?;
-
-            Ok(report)
-        }
-        Err(e) => {
-            // TempDir Drop runs here: cleans up temp dir automatically.
-            Err(e.rolled_back())
         }
     }
 }

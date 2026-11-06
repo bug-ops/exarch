@@ -49,7 +49,6 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Staging;
-use crate::api::extract_staged;
 use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
 use crate::closed_enum::closed_enum;
@@ -72,6 +71,7 @@ use crate::inspection::list::ListPass;
 use crate::inspection::list::list_detected;
 use crate::inspection::list::list_tar_stream;
 use crate::reader::SeekableFormat;
+use crate::staging::extract_staged;
 
 /// The most decoded TAR bytes a list pass keeps for extraction (256 MiB).
 ///
@@ -380,17 +380,27 @@ fn extract_kept(
     let spool = match kept {
         Kept::Zip(zip) => {
             let zip = (*zip).rebind(config);
-            return extract_staged(output_dir, options, |dir| {
-                zip.extract(dir, options, progress)
-            });
+            return extract_staged(
+                output_dir,
+                options,
+                Some(archive),
+                progress,
+                |dir, options, progress| zip.extract(dir, options, progress),
+            );
         }
         Kept::TarSpool(spool) => Some(spool),
         Kept::Nothing => None,
     };
-    extract_staged(output_dir, options, |dir| match spool {
-        Some(spool) => replay_spool(spool.file, dir, config, options, progress),
-        None => extract_validated(archive, dir, config, options, progress),
-    })
+    extract_staged(
+        output_dir,
+        options,
+        Some(archive),
+        progress,
+        |dir, options, progress| match spool {
+            Some(spool) => replay_spool(spool.file, dir, config, options, progress),
+            None => extract_validated(archive, dir, config, options, progress),
+        },
+    )
 }
 
 /// Extracts the decoded TAR stream `spool`, reporting a fault of the spool as

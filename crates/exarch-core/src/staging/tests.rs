@@ -565,3 +565,59 @@ fn a_backup_that_cannot_be_removed_is_reported_as_a_warning() {
     std::fs::set_permissions(path.join("old_dir"), std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::remove_dir_all(path).unwrap();
 }
+
+/// Races an attacker that flips the destination between a real directory and a
+/// symlink to a victim directory against `AtomicReplace`. Whatever the outcome
+/// of a run, the victim must keep exactly what it had: nothing is ever written
+/// through, renamed over, or removed behind the planted link.
+#[test]
+fn a_racing_destination_flip_never_touches_a_planted_symlinks_target() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    for _ in 0..60 {
+        let fx = Fixture::new();
+        let dest = fx.with_old_destination();
+        let victim = fx.parent.join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("sentinel"), b"victim").unwrap();
+        let aside = fx.parent.join("aside");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+
+        let attacker = {
+            let (stop, dest, victim, aside) =
+                (stop.clone(), dest.clone(), victim.clone(), aside.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if std::fs::rename(&dest, &aside).is_ok() {
+                        let _ = symlink(&victim, &dest);
+                        let _ = std::fs::remove_file(&dest);
+                        let _ = std::fs::rename(&aside, &dest);
+                    }
+                }
+            })
+        };
+        let outcome = fx.extract(&dest, Staging::AtomicReplace, &mut Hooks::default());
+        stop.store(true, Ordering::Relaxed);
+        attacker.join().unwrap();
+
+        if let Err(error) = &outcome {
+            assert!(
+                matches!(
+                    error,
+                    ArchiveError::SecurityViolation { .. }
+                        | ArchiveError::ReplaceFailed(_)
+                        | ArchiveError::InvalidConfiguration { .. }
+                        | ArchiveError::Io(_)
+                ),
+                "{error}"
+            );
+        }
+        let names: Vec<_> = std::fs::read_dir(&victim)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [OsString::from("sentinel")]);
+        assert_eq!(read(&victim.join("sentinel")), "victim");
+    }
+}

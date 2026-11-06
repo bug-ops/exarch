@@ -728,7 +728,7 @@ pub fn create_directory<P: ParentCheck>(
 /// walk in [`DirWalker::ensure_dir`] enforces the same refusals again. A name
 /// the host cannot look up by path (too long, or invalid on Windows) is left to
 /// that walk, as a missing one is.
-fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Result<()> {
+pub fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Result<()> {
     let file_type = match probe.lstat() {
         Ok(metadata) => metadata.file_type(),
         Err(e)

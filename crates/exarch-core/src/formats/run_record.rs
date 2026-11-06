@@ -46,6 +46,10 @@ fn key_of(dir: &VettedDir, leaf: Leaf<'_>, _rel: &Path) -> Option<LandingKey> {
 }
 
 #[cfg(not(any(unix, target_os = "wasi")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "shares its signature with the identity-keyed arm, which can fail"
+)]
 fn key_of(_dir: &VettedDir, _leaf: Leaf<'_>, rel: &Path) -> Option<LandingKey> {
     Some(rel.to_path_buf())
 }

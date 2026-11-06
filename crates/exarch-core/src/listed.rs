@@ -73,6 +73,8 @@ use crate::inspection::list::list_tar_stream;
 use crate::reader::SeekableFormat;
 use crate::staging::extract_staged;
 
+mod destination;
+
 /// The most decoded TAR bytes a list pass keeps for extraction (256 MiB).
 ///
 /// Beyond it the spool is dropped and extraction decodes again. Data after the
@@ -302,20 +304,15 @@ impl ListedArchive {
     ///
     /// # Errors
     ///
-    /// Until the staging track implements the check this refuses every call
-    /// with
-    /// [`ArchiveError::InvalidConfiguration`](crate::ArchiveError::InvalidConfiguration)
-    /// naming [`ConfigSetting::OutputPath`](crate::ConfigSetting::OutputPath)
-    /// with [`ConfigProblem::NotSupported`](crate::ConfigProblem::NotSupported),
-    /// so no caller can mistake the missing check for a passed one.
+    /// [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
+    /// for an occupied landing; the typed symlink refusal the write phase gives
+    /// for a symlink among the parents or at a landing; the I/O error of a path
+    /// that could not be inspected, which is never reported as a refusal; or
+    /// [`ConfigProblem::NotADirectory`](crate::ConfigProblem::NotADirectory)
+    /// when `dest` exists and is not a directory. A destination that does not
+    /// exist passes.
     pub fn check_destination(&self, dest: &Path, check: DestinationCheck) -> Result<()> {
-        // TODO(review): implement through handle-relative landings in the
-        // staging track; the interim refusal fails closed.
-        let _ = (dest, check);
-        Err(crate::ArchiveError::InvalidConfiguration {
-            setting: crate::ConfigSetting::OutputPath,
-            problem: crate::ConfigProblem::NotSupported,
-        })
+        destination::check(&self.manifest, &self.config, dest, check)
     }
 
     /// What the list pass found in the archive.

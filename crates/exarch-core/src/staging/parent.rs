@@ -289,10 +289,6 @@ mod imp {
             std::fs::remove_dir(self.parent.join(name))
         }
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the descriptor-relative open does not exist on this target"
-        )]
         pub fn open_entry(&self, name: &EntryName) -> io::Result<File> {
             File::open(self.parent.join(name))
         }

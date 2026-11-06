@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-05
+updated: 2026-11-06
 status: draft
 related:
   - "[[constitution]]"
@@ -30,6 +30,9 @@ related:
 > **MSRV**: Rust 1.99.1
 > **Build**: maturin + pyo3 0.30
 > **Source**: extracted from [[001-exarch-system/spec]]
+
+> [!note] Batch #981 amendments
+> `existing_files: "skip" | "overwrite" | "refuse"` replaces `skip_duplicates` (FR-108); an empty `allowed_extensions` list is refused (FR-109); `Cancelled` and the new errors are mapped (FR-110).
 
 ## 1. Overview
 
@@ -169,7 +172,7 @@ THEN extraction respects those settings
 | FR-093 | THE SYSTEM SHALL expose `extract_archive_to_callback(data, on_entry, config=None, options=None, path_model=None, format=None)`, delivering each verified entry to a callable through `extract_reader_to_callback` and re-raising the callable's exception unchanged; a non-callable `on_entry` is a `TypeError` (v0.8.0, #842, #860, #884) | must |
 | FR-094 | EVERY Python exception SHALL carry an instance attribute `code` (the stable `ErrorCode` id) set at raise time; `OutputExistsError(ArchiveError, FileExistsError)`, `SourceNotFoundError(ArchiveError, FileNotFoundError)`, `SourceNotAccessibleError(ArchiveError, PermissionError)`, `InvalidConfigurationError(ArchiveError, ValueError)` (with `setting`) and `InvalidCompressionLevelError(ArchiveError, ValueError)` SHALL be real classes built at module init with `builtins.type` over two bases and kept in a `PyOnceLock`, so both `except ArchiveError` and `except FileExistsError` (etc.) catch them; `_ErrorCode` and `_ConfigSetting` `Literal` aliases in `exarch.pyi` are under drift tests against core (#919) | must |
 | FR-095 | `create_archive` and `create_archive_with_progress` SHALL take `format: str \| None` (an `ArchiveType` string shared with `create_archive_to_bytes`) and `overwrite: bool = True`; `overwrite=False` maps to `OutputFile::create_new` and raises `OutputExistsError`; the default is `Replace`, so `OutputExistsError` is raised only for `overwrite=False`; creation is staged and atomic (see [[021-create-staging-and-output-policy/spec]]); a refused exclude pattern raises `InvalidConfigurationError` with `setting == "exclude_pattern"` (#915, #931, #916) | must |
-| FR-096 | The in-memory and callback functions SHALL take a frozen `SinkOptions(skip_duplicates=True, decode_reuse="off", decode_reuse_limit=None)` instead of `ExtractionOptions` (passing `ExtractionOptions` is a `TypeError`; a limit under `"off"` is a `ValueError`; the limit clamps to the core 256 MiB maximum) (#926) | must |
+| FR-096 | The in-memory and callback functions SHALL take a frozen `SinkOptions(existing_files="skip", decode_reuse="off", decode_reuse_limit=None)` instead of `ExtractionOptions` (passing `ExtractionOptions` is a `TypeError`; a limit under `"off"` is a `ValueError`; the limit clamps to the core 256 MiB maximum) (#926) | must |
 | FR-097 | `MemoryEntry` SHALL be a base class (`path`) with `MemoryFile` (`data`, `mode`), `MemoryDirectory`, `MemorySymlink` and `MemoryHardlink` (each only its own attributes, a `kind` class attribute from `MemoryEntryKind::as_str`), and `AnyMemoryEntry` in the stub; `ArchiveEntry` SHALL be a base class (`path`, `entry_type`, `compressed_size`, `mode`, `compression_ratio`) with `ArchiveFile` (the only class with `size`), `ArchiveDirectory`, `ArchiveSymlink` and `ArchiveHardlink`; link targets SHALL be `LinkTarget` subclasses by state (`RecordedLinkTarget.path`, `MissingLinkTarget`, `UnreadLinkTarget`, `UnreadableLinkTarget`, `OversizedLinkTarget.bytes`; a 7z symlink is `UnreadLinkTarget`); `is_symlink`, `is_hardlink`, `symlink_target` and `hardlink_target` are removed; drift tests cover every kind and link state (#923, #910) | must |
 | FR-098 | Integer limit setters and builders SHALL accept a Python `int` (a `bool` is a `TypeError`) through core `positive_from_i128`, and negative, zero and oversized integers (including beyond `i128`) SHALL raise `InvalidConfigurationError` with `setting`, never `OverflowError`; `max_file_size`, `max_total_size` and `max_file_count` getters return `None` when unbounded; `parallel_decode_memory` errors carry `setting == "parallel_decode_memory"`; an out-of-range compression level raises `InvalidCompressionLevelError`; `max_solid_block_memory` is `None` and its setter raises `InvalidConfigurationError` while solid archives are refused; an unknown `zip_consistency`, creatable or archive `format`, `path_model`, `decode_reuse` or skip kind raises `InvalidConfigurationError` with `setting` (`zip_consistency`, `archive_format`/`creation_format`, `path_model`, `decode_reuse`, `skip_kind`) and problem `NotOneOf`, and `SinkOptions.decode_reuse_limit` of 0, negative, oversized (`TooLarge`) or with `decode_reuse="off"` (`NotSupported`) raises it with `decode_reuse_limit`; a `bool` limit or ratio is a `TypeError` and `10**400` as a ratio is `NotFinite` (#921, #913, #911) | must |
 | FR-099 | `QuotaExceededError` and `ZipBombError` SHALL carry `sub_code` (quota kind or zip-bomb scope literal, including `SOLID_BLOCK_MEMORY`), and `InvalidArchiveError.sub_code` SHALL include `TAR_READER` and `SEVENZ_READER`, with `_QuotaSubCode`, `_ZipBombSubCode` and `_InvalidArchiveSubCode` literals under drift tests derived from `SubCode` (#918, #930, #896) | must |
@@ -181,6 +184,9 @@ THEN extraction respects those settings
 | FR-105 | The stub `exarch.pyi` SHALL be checked by `mypy --strict` in CI (blocking) and `stubtest`: `_CreatableFormat` excludes `SevenZ`, `SinkOptions` has `__new__`, leaf classes are `@final`, `CreationConfig` exposes properties, the typing aliases (`AnyMemoryEntry`, `AnyArchiveEntry`, `AnyLinkTarget`, `ProgressCallbackFn`) are importable at runtime, and sub-code and kind literals are derived by drift tests from core consts (`SubCode::QUOTA_ALL`, `ZIP_BOMB_ALL`); `ArchiveError.code` stays an instance attribute | should |
 | FR-106 | `SourceNotAccessibleError` SHALL be raised for an unreadable creation source with `errno` set from the underlying OS error (`errno.EACCES` for a mode-000 file), `strerror` set to the sanitized error text and `filename` set to the redacted source path; `str(err)` names the file and the OS error; the path and the I/O text pass through the shared `exarch_core::error::redaction` (see FR-081), carried to the binding as `FfiErrorMessage::raw_os_error` and the source-fault fields of `FfiKind`; callers that caught `PermissionError` for this error SHALL catch `SourceNotAccessibleError` or `OSError` (breaking, #956) | must |
 | FR-107 | Every enumerated string argument SHALL be parsed through core `ClosedEnum::parse_for`, so a value outside the set raises `InvalidConfigurationError` with the `setting` and the allowed values listed (see [[003-config-api/spec]] FR-056); the creation format uses `CreatableFormat::from_str`; `exarch.pyi` lists the `durability` setting literal | must |
+| FR-108 | `ExtractionOptions` and `SinkOptions` SHALL take `existing_files` as a `Literal["skip", "overwrite", "refuse"]` (`str` in the `.pyi`), default `"skip"`; an unknown token SHALL raise `InvalidConfigurationError` with setting `existing_files`; the binding adds no occupant logic | must |
+| FR-109 | `SecurityConfig.allowed_extensions` SHALL return `None` for `ExtensionFilter::Any`; assigning `None` SHALL mean Any and is the only clear; an empty list SHALL raise `InvalidConfigurationError` with setting `allowed_extension` and problem `Empty`, through the core `ExtensionFilter::only` | must |
+| FR-110 | The binding SHALL map `Cancelled` (found through `PartialExtraction` too) to the base `ArchiveError`, a callback exception winning as today; `DestinationOccupied` and `OutputReservationLeft` SHALL map with their host paths redacted in release builds through `into_ffi_message`; io kind names SHALL come from core `IoKind::as_str()` (#989) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -201,7 +207,7 @@ THEN extraction respects those settings
 | `PyExtractionReport` | Python class wrapping `ExtractionReport` | `files_extracted`, `bytes_written`, `duration`, `warnings`, `skipped`, `files_skipped` |
 | `PyCreationReport` | Python class wrapping `CreationReport` | `files_added`, `bytes_written`, `duration`, `skipped`, `warnings` |
 | `Skipped` / `Skip` | Typed skip accounting (#906) | `total`, `counts`, `sample`, `count(kind)`, `len()` / `kind`, `path`, `io_kind` |
-| `SinkOptions` | Frozen options of the in-memory and callback functions (#926) | `skip_duplicates`, `decode_reuse`, `decode_reuse_limit` |
+| `SinkOptions` | Frozen options of the in-memory and callback functions (#926) | `existing_files`, `decode_reuse`, `decode_reuse_limit` |
 | `ArchiveEntry` family | Listing entries by kind (#923, #910) | `ArchiveFile`, `ArchiveDirectory`, `ArchiveSymlink`, `ArchiveHardlink`; `LinkTarget` subclasses |
 | `PyArchiveManifest` | Python class wrapping `ArchiveManifest` | `total_entries`, `total_size`, `format`, `entries` |
 | `PyVerificationReport` | Python class wrapping `VerificationReport` | `status`, `issues`, `total_entries`, `total_size`, `integrity_status`, `integrity_gaps`, `security_status` |
@@ -286,24 +292,23 @@ class VerificationOptions:
     def with_integrity_check(self, budget: int | None = None) -> VerificationOptions
 
 class SinkOptions:  # frozen
-    def __init__(self, skip_duplicates: bool = True, decode_reuse: str = "off", decode_reuse_limit: int | None = None)
+    def __init__(self, existing_files: Literal["skip", "overwrite", "refuse"] = "skip", decode_reuse: str = "off", decode_reuse_limit: int | None = None)
 
 class ExtractionOptions:
     def with_atomic(self, atomic: bool = True) -> ExtractionOptions
-    def with_skip_duplicates(self, skip: bool = True) -> ExtractionOptions
+    def with_existing_files(self, existing_files: Literal["skip", "overwrite", "refuse"]) -> ExtractionOptions
     @property
     def atomic(self) -> bool
     @atomic.setter
     def atomic(self, value: bool) -> None
     @property
-    def skip_duplicates(self) -> bool
+    def existing_files(self) -> Literal["skip", "overwrite", "refuse"]
 ```
 
 > [!note] v0.5.0: `ExtractionOptions` and `extract_archive_with_progress` added
 > Both `extract_archive` and `extract_archive_with_progress` accept an optional `options`
 > parameter of type `ExtractionOptions`. `ExtractionOptions.atomic` triggers staging-directory
-> extraction with atomic rename; `ExtractionOptions.skip_duplicates` (default `True`) skips
-> duplicate entries. `with_atomic` and `with_skip_duplicates` are the fluent builder methods.
+> extraction with atomic rename; `ExtractionOptions.existing_files` (default `"skip"`; since #981 it replaces `skip_duplicates`) decides what happens to an occupied landing. `with_atomic` and `with_existing_files` are the fluent builder methods.
 
 > [!note] v0.5.0: builder method naming
 > All Python `SecurityConfig` builder methods that previously omitted `with_` (`allow_symlinks`,
@@ -365,6 +370,8 @@ class ExtractionOptions:
 - Expose `ArchiveError` as a raw Rust type to Python callers
 
 ## 9. Open Questions
+
+- [NEEDS CLARIFICATION: the Python surface of `Staging::AtomicReplace` (W2 of #981, replacing the `atomic` bool) is fixed by that step and recorded here when it lands.]
 
 - [NEEDS CLARIFICATION: Should an async Python interface (asyncio) be provided via `pyo3-asyncio` in a future version?]
 

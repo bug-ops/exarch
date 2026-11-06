@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-05
+updated: 2026-11-06
 status: draft
 related:
   - "[[constitution]]"
@@ -30,6 +30,9 @@ related:
 > **MSRV**: Rust 1.99.1
 > **Build**: napi-rs 3.x + tokio runtime
 > **Source**: extracted from [[001-exarch-system/spec]]
+
+> [!note] Batch #981 amendments
+> `setExistingFiles('skip' | 'overwrite' | 'refuse')` replaces `setSkipDuplicates` (FR-115); `setAllowedExtensions([])` throws and `null` clears (FR-116); `Cancelled` and the new errors are mapped (FR-117).
 
 ## 1. Overview
 
@@ -157,7 +160,7 @@ THEN extraction respects those settings
 | FR-104 | The seven async in-memory functions that take an `AsyncIterable` SHALL accept an optional trailing `signal` (`AbortSignalLike`); aborting rejects with `ABORT_ERR` and frees the blocking worker, the abort being noticed when the job starts, while it waits for JavaScript, at every read of a `Uint8Array` archive and at each progress callback; a pending `onEntry` call is abandoned, not cancelled; a `signal` that is not an `AbortSignal` throws a `TypeError` synchronously (v0.8.0, #848, #856) | must |
 | FR-105 | THE SYSTEM SHALL expose `extractArchiveToMemoryWithProgressSync`, `listArchiveBytesWithProgressSync` and `verifyArchiveBytesWithProgressSync`, and every error SHALL carry `subCode` and `setting` as properties with typings when core supplies them (v0.8.0, #842, #865, #870) | should |
 | FR-106 | `ExarchError` SHALL be a discriminated union that pairs each `code` with its properties (`ExarchCoreError` = every shape but `ExarchNativeError`; `INVALID_ARCHIVE` with optional `InvalidArchiveSubCode`, `SECURITY_VIOLATION` with a required `SecurityViolationSubCode` and optional `relaxableBy`, `QUOTA_EXCEEDED` and `ZIP_BOMB` with a required `QuotaSubCode` or `ZipBombSubCode`, `INVALID_CONFIGURATION` with `setting`, `IO_ERROR` with a required `ioKind: IoKind`), crossed with `writes`; `IoKind` is a stable string enum of 24 `io::ErrorKind` values plus `Other`; mirror enums have reverse drift tests (`mirror_maps_to_core!`) and `InvalidArchiveSubCode` includes `TAR_READER` and `SEVENZ_READER` (#924, #920, #918, #930, #896) | must |
-| FR-107 | The in-memory and callback functions SHALL take a `SinkOptions` class (`setSkipDuplicates`, `skipDuplicates`; `decodeReuse` is not exposed) instead of `ExtractionOptions` (passing `ExtractionOptions` throws `InvalidArg` synchronously; `atomic` cannot be requested) (#926) | must |
+| FR-107 | The in-memory and callback functions SHALL take a `SinkOptions` class (`setExistingFiles`, `existingFiles`; `decodeReuse` is not exposed) instead of `ExtractionOptions` (passing `ExtractionOptions` throws `InvalidArg` synchronously; `atomic` cannot be requested) (#926) | must |
 | FR-108 | `MemoryEntry` SHALL be a union discriminated by `kind` (`MemoryFileEntry`, `MemoryDirectoryEntry`, `MemorySymlinkEntry`, `MemoryHardlinkEntry`) and `MemoryExtraction.entries` SHALL be `StoredMemoryEntry[]` (no hardlink); `listArchive*` entries SHALL be `ArchiveEntry` = `ManifestFileEntry \| ManifestDirectoryEntry \| ManifestSymlinkEntry \| ManifestHardlinkEntry` discriminated by `entryType` with `size` only on files, `mode` the raw archive mode and links carrying `target: LinkTarget` (`recorded { path }`, `missing`, `unread`, `unreadable`, `oversized { bytes }`); `symlinkTarget` and `hardlinkTarget` are removed (#923, #910) | must |
 | FR-109 | `SecurityConfig` count, depth and size setters (and `CreationConfig.setMaxFileSize`) SHALL take a JS number through core `positive_from_f64`: negative, fractional, non-finite, zero and above 2^53-1 are `INVALID_CONFIGURATION` with `setting`; `maxFileCount` is `number \| null` (null is unbounded); `setParallelDecodeMemory`, `withIntegrityCheck` and `addExcludePattern` throw `INVALID_CONFIGURATION` with `parallel_decode_memory`, `decompression_budget` and `exclude_pattern`; `getMaxSolidBlockMemory` is `number \| null` and its setter throws `INVALID_CONFIGURATION` while solid archives are refused; every path argument goes through `BoundaryPath::parse` and only the parsed value reaches core (#917, #921, #927, #911) | must |
 | FR-110 | The progress callback tuple SHALL be `ProgressArgs = [path, total: number \| null, current, bytesWritten]` with `total` `null` while the count is unknown; reports SHALL carry `skipped: SkippedSummary { counts: { kind, count }[], sample: SkippedEntry[] }` (kind typed `SkipKind`, `ioKind?: IoKind`), `filesSkipped` is the total over all reasons, `warnings` stay `string[]`, and the error object of a kept partial extraction carries `skipped` as well as `filesSkipped`; the tuple is the exported alias `ProgressArgs` in every progress-taking function, listing and verification included (#904, #906) | must |
@@ -165,6 +168,9 @@ THEN extraction respects those settings
 | FR-112 | Listing SHALL refuse a non-UTF-8 entry name or link target with `INVALID_ARCHIVE` (`ENTRY_NAME`) through core `ArchiveEntry::utf8_path()`; verify issue paths, integrity gap paths, skip samples and progress paths SHALL use an injective `path_text` rendering (core `exarch_core::path_text`: `\` is written `\x5C`, each invalid Unix byte `\xNN`, each unpaired UTF-16 unit `\uNNNN`), so a literal name `a\xFFb` and a name with the byte 0xFF stay distinct; a caller cannot recover the original bytes (no `pathBytes` field); the `INVALID_ARCHIVE` error of a refused listing carries the same rendering as `nonUtf8EntryPath` (#925) | must |
 | FR-113 | `createArchive*` SHALL take an optional trailing `CreateOptions { format?: CreatableFormat, overwrite?: boolean, durability?: Durability }` (`createArchiveWithProgress` after the progress argument; `CreatableFormat` is a napi string enum without `'SevenZ'`, so `'SevenZ'` is a TypeScript compile error and a napi `InvalidArg` refusal; `Durability` is `'Synced' | 'Unsynced'`, see [[021-create-staging-and-output-policy/spec]] FR-027): the default replaces an existing output atomically (`OutputFile::replace`), `overwrite: false` maps to `create_new` and rejects with `OUTPUT_EXISTS`, `format` maps to `OutputFile::with_format` and `'SevenZ'` is refused; a failed creation leaves any previous archive untouched (see [[021-create-staging-and-output-policy/spec]]); a progress callback that throws cancels the creation (nothing is written, `PROGRESS_CALLBACK_ERROR`, typed `ExarchErrorReadCallback`/`ExarchErrorCreationCallback`); `addExcludePattern` parses with core `ExcludePattern::try_from` (#912, #915, #931, #916) | must |
 | FR-114 | `createArchiveToBytes` and `createArchiveToBytesSync` SHALL take `format: CreatableFormat`; the Node `ConfigSetting` mirror SHALL include `'durability'`, and a test SHALL pin that the napi `CreatableFormat` and `Durability` values equal the core `NAMES` | must |
+| FR-115 | `ExtractionOptions` and `SinkOptions` SHALL take `existingFiles` as the string union `'skip' | 'overwrite' | 'refuse'` (default `'skip'`, in `index.d.ts`); an unknown token SHALL reject with `INVALID_CONFIGURATION` naming `existing_files` | must |
+| FR-116 | `SecurityConfig` `allowedExtensions` SHALL return `null` for Any; `setAllowedExtensions(null)` SHALL clear it; `setAllowedExtensions([])` SHALL throw `INVALID_CONFIGURATION` with setting `allowed_extension` and problem `Empty`; `setBannedComponents([])` and `setExcludePatterns([])` keep their meaning (an empty ban or exclude list is not fail-open) | must |
+| FR-117 | The binding SHALL add `ErrorCode` `CANCELLED`, find `Cancelled` through `PartialExtraction`, keep `ABORT_ERR` for an `AbortSignal` stop and the callback's own error for a throwing callback, and map `DestinationOccupied` and `OutputReservationLeft` with host paths redacted in release builds; its `IoKind` mirror SHALL convert from core `IoKind` (#989) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -188,7 +194,7 @@ THEN extraction respects those settings
 | `VerificationReport` (JS object) | Verification result | `status`, `integrityStatus`, `integrityGaps`, `securityStatus`, `issues`, `totalEntries`, `suspiciousEntries`, `totalSize`, `format` |
 | `MemoryExtraction` / `MemoryEntry` / `CreatedArchive` (JS objects) | Results of the in-memory functions (v0.8.0; unions since #923) | `report`, `entries: StoredMemoryEntry[]` / `kind`-discriminated `MemoryFileEntry`, `MemoryDirectoryEntry`, `MemorySymlinkEntry`, `MemoryHardlinkEntry` / `data`, `report` |
 | `ArchiveEntry` (TS union) | Listing entries (#923, #910) | `ManifestFileEntry \| ManifestDirectoryEntry \| ManifestSymlinkEntry \| ManifestHardlinkEntry` by `entryType`; `target: LinkTarget` on links |
-| `SinkOptions` (JS class) | Options of the in-memory and callback functions (#926) | `setSkipDuplicates`, `skipDuplicates` |
+| `SinkOptions` (JS class) | Options of the in-memory and callback functions (#926) | `setExistingFiles`, `existingFiles` |
 | `SkippedSummary` / `SkippedEntry` | Typed skips in reports (#906) | `counts`, `sample`; `kind: SkipKind`, `path`, `ioKind?` |
 | `ExarchError` (TS type) | Union of the shapes a rejection or throw can have (v0.8.0; per-`code` pairing since #924) | `ExarchCoreError` (code-paired details) crossed with `writes`, plus `ExarchNativeError`; `relaxableBy?`, `cause?`, `ioKind`, `subCode`, `setting` |
 | `VerificationOptions` (JS class) | Options for `verifyArchive` (v0.7.0, #670) | `withIntegrityCheck(budget?)`, `integrityCheck`, `decompressionBudget` |
@@ -261,8 +267,8 @@ class SecurityConfig {
 }
 
 class SinkOptions {
-    setSkipDuplicates(skip: boolean): this
-    get skipDuplicates(): boolean
+    setExistingFiles(existingFiles: 'skip' | 'overwrite' | 'refuse'): this
+    get existingFiles(): 'skip' | 'overwrite' | 'refuse'
 }
 
 class VerificationOptions {
@@ -281,7 +287,7 @@ class CreationConfig {
 
 class ExtractionOptions {
     withAtomic(atomic: boolean): this
-    withSkipDuplicates(skip: boolean): this
+    withExistingFiles(existingFiles: 'skip' | 'overwrite' | 'refuse'): this
     get atomic(): boolean
 }
 ```
@@ -396,6 +402,8 @@ Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.
 - Expose raw Rust types without a JavaScript wrapper
 
 ## 9. Open Questions
+
+- [NEEDS CLARIFICATION: the Node surface of `Staging::AtomicReplace` (W2 of #981, replacing the `atomic` flag) is fixed by that step and recorded here when it lands.]
 
 - [NEEDS CLARIFICATION: What is the minimum supported Node.js version? (LTS policy — 18+, 20+?)]
 - [NEEDS CLARIFICATION: Should empty `sources` array in `createArchive` produce an empty archive or reject with an error?]

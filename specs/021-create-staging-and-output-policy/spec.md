@@ -10,7 +10,7 @@ tags:
   - security
   - rust
 created: 2026-11-04
-updated: 2026-11-05
+updated: 2026-11-06
 status: implemented
 related:
   - "[[constitution]]"
@@ -31,6 +31,9 @@ related:
 > **MSRV**: Rust 1.99.1
 > **Origin**: #931 (staged output), #915 (format moved off `CreationConfig`), #916 (typed exclude patterns) — 50-issue batch, 2026-11-04, shipped in 0.9.0 (#956, #953, #961 added typed source errors and durability)
 > **Status**: implemented — documents the behavior that shipped in 0.9.0
+
+> [!note] Batch #981 amendments
+> A creation stop is the typed `ArchiveError::Cancelled` (FR-044); a duplicate entry name is refused before any write (FR-045); a leftover reservation and a failed directory sync are typed (FR-046).
 
 ## 1. Overview
 
@@ -195,6 +198,10 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FR-041 | THE CLI `create -x` SHALL parse patterns with `ExcludePattern::try_from` after clap; a refused shape SHALL exit 1 with the JSON envelope (`setting: exclude_pattern`) and write no archive; the `-x` help text SHALL name the shapes | must |
 | FR-042 | Python `create_archive` and `create_archive_with_progress` SHALL take `format: str | None` and `overwrite: bool = True`; `overwrite=False` maps to `create_new` and raises `OutputExistsError` (a `FileExistsError`); a refused exclude pattern SHALL raise `InvalidConfigurationError` with `setting == "exclude_pattern"`; a progress callback that raises SHALL cancel the creation (nothing is committed, a previous archive stays); both take `durability: str = "synced"` (`"synced"` or `"unsynced"`, parsed with `ClosedEnum::parse_for`) | must |
 | FR-043 | Node `createArchive*` SHALL replace an existing output atomically (`OutputFile::replace`); it takes an optional trailing `CreateOptions { format?: CreatableFormat, overwrite?: boolean, durability?: Durability }` (`CreatableFormat` is a napi string enum without `'SevenZ'`, `Durability` is `'Synced' | 'Unsynced'`; a value outside either enum is refused by napi-rs with its own `InvalidArg` text, not `INVALID_CONFIGURATION`, the one intended divergence from the other bindings) (default replace; `overwrite: false` maps to `create_new`, `format` to `OutputFile::with_format`, `'SevenZ'` is refused); `addExcludePattern` SHALL throw `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'` for a refused shape | must |
+| FR-044 | A creation stopped through `ProgressCallback::is_cancelled` SHALL return `ArchiveError::Cancelled` (no longer the `Io(Interrupted)` sentinel, so a real `Interrupted` failure is never masked); creation polls per entry, once after the loop and before publishing ([[004-progress-tracking/spec]] FR-056, FR-057; #990) | must |
+| FR-045 | `collect_entries` SHALL refuse two sources that produce the same archive entry name, before any write, with `InvalidConfiguration` carrying `ConfigProblem::EntryNameCollision { name, first, second }`, for TAR and ZIP alike (#970) | must |
+| FR-046 | A leftover output reservation SHALL be `ArchiveError::OutputReservationLeft { path, error }` (error code `IoError`, `path` redacted in binding release builds) and `Durability::Synced` that cannot sync the parent directory SHALL push `CreationWarning::DirectoryNotSynced { io_kind }` instead of degrading silently (#976) | must |
+| FR-047 | `CreationConfig.permissions` is a `PermissionPolicy`; ZIP directory entries carry the source directory mode as TAR does ([[008-tar-empty-directory-preservation/spec]]); an invalid level is `InvalidCompressionLevel { level: RequestedLevel }` ([[003-config-api/spec]] FR-064) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -239,7 +246,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | Pattern `target/` or `src/gen` | `Path`, anchored at the archive root |
 | Pattern `*.{a,b}`, `file?.txt`, `[ab]`, `!x`, `a,b` or `" a"` | Refused (`glob_metacharacter`, `contains_comma`, `padded_with_blank`); the message names the pattern |
 | A non-UTF-8 file name and a pattern | Matched by raw bytes |
-| The progress callback raises (or throws) during creation | Creation stops with `Interrupted`, the staged file is deleted and the previous archive is kept (Python and Node surface the callback's exception) |
+| The progress callback raises (or throws) during creation | Creation stops with `Cancelled`, the staged file is deleted and the previous archive is kept (Python and Node surface the callback's exception) |
 | Pattern `*.tmp` and a source root under `x.tmp/` | Ancestors are not matched; the archive is not empty |
 | Single-file top-level source matching an exclude pattern | Not filtered (unchanged behavior) |
 

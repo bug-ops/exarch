@@ -8,7 +8,7 @@ tags:
   - progress
   - rust
 created: 2026-05-20
-updated: 2026-11-05
+updated: 2026-11-06
 status: draft
 related:
   - "[[constitution]]"
@@ -30,6 +30,9 @@ related:
 > **Subsystem**: exarch-core / report, io
 > **MSRV**: Rust 1.99.1
 > **Source**: extracted from [[001-exarch-system/spec]]
+
+> [!note] Batch #981 amendments
+> Cancellation now covers extraction, list, verify and creation through one per-entry poll and the typed `ArchiveError::Cancelled` (FR-056); the `Io(Interrupted)` sentinel is gone.
 
 ## 1. Overview
 
@@ -134,7 +137,10 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 | FR-052 | `ExtractionReport` and `CreationReport` SHALL be `#[non_exhaustive]` and SHALL carry `skipped: Skips` instead of a skipped-file counter and skip warning strings; `files_skipped()` is derived from it (#905, #906) | must |
 | FR-053 | `SkipKind` SHALL be a closed `#[non_exhaustive]` enum with seven kinds (`Duplicate`, `ExtensionNotAllowed`, `Excluded`, `Hidden`, `OverMaxFileSize`, `SymlinkUnsupported`, `Unreadable`); `Skip { kind, path, io_kind: Option<io::ErrorKind> }`; `Skips` SHALL keep a count per kind plus a sample bounded by `Skips::SAMPLE_CAP` (64) and expose `total()`, `count(kind)`, `sample()`, `is_empty()`; recording a skip SHALL fail closed with `QuotaExceeded { IntegerOverflow }` on counter overflow (`Unreadable` has no producer yet) (#906) | must |
 | FR-054 | The remaining report warnings SHALL be typed `#[non_exhaustive]` enums with `Display` that keeps the former text: `ExtractionWarning::{AntiItemsSkipped { count }, BackupCleanupFailed { path, identity_unverified, error }}` and `CreationWarning::{ZipRatioOverDefaultLimit, ZipRatioCheckFailed}`; a skipped entry SHALL NOT also appear as a warning string (#906) | must |
-| FR-055 | `ProgressCallback::is_cancelled(&mut self) -> bool` (default `false`) SHALL let a callback that hit an error of its own (a raising script callback, a closed channel) stop a creation: creation checks it and then returns `ArchiveError::Io` of kind `Interrupted`, the staged output is discarded and a previous archive at the output path stays untouched; the Python adapter reports a raised exception through it (the callback's exception wins over the core `Interrupted`, `KeyboardInterrupt` included) and the Node adapter does the same for a throwing callback (`PROGRESS_CALLBACK_ERROR`); extraction keeps the former behavior (it runs to completion and the callback error is raised after success) (#931) | must |
+| FR-055 | `ProgressCallback::is_cancelled(&mut self) -> bool` (default `false`) SHALL let a callback that hit an error of its own (a raising script callback, a closed channel) stop a creation: creation checks it and then returns `ArchiveError::Cancelled`, the staged output is discarded and a previous archive at the output path stays untouched; the Python adapter reports a raised exception through it (the callback's exception wins over the core `Cancelled`, `KeyboardInterrupt` included) and the Node adapter does the same for a throwing callback (`PROGRESS_CALLBACK_ERROR`); extraction, list and verify are cancelled the same way (FR-056) (#931, #973, #990) | must |
+| FR-056 | `EntryCompleteGuard::try_start` SHALL poll `ProgressCallback::is_cancelled` at the start of every entry in TAR, ZIP and 7z extraction, list, verify and the creation `ProgressTracker::begin` (which now returns `Result`); a stop returns `ArchiveError::Cancelled` (error code `CANCELLED`, `FfiKind::Cancelled`), and extraction wraps it in `Partial` when files were written; `ArchiveError::is_cancelled()` SHALL see through `Partial` | must |
+| FR-057 | Creation SHALL poll once more after the entry loop and before publishing the output; staged extraction SHALL poll before the `Atomic` rename and before the `AtomicReplace` displace step; a single entry is not interruptible and the docs SHALL say so | must |
+| FR-058 | A binding SHALL find `Cancelled` through `PartialExtraction` as well as at top level; Node keeps `ABORT_ERR` for an `AbortSignal` stop, raises the callback's own error for a throwing callback (now for every operation), and reports `CANCELLED` when neither applies; Python maps an unattributed `Cancelled` to the base `ArchiveError` | must |
 
 ## 4. Non-Functional Requirements
 
@@ -187,7 +193,7 @@ ProgressCallback: Send
 | Listing or verification progress for an entry | `on_bytes_written` is never called (FR-048) |
 | Progress callback panics | Panic propagates as normal Rust panic; not caught by exarch |
 | Creation progress for large directories | `on_entry_start` called for each file; the total is `Known` with the file count from the walk; the CLI `create` bar starts unsized and resizes from that total (`BarLength::Discover`) |
-| Python progress callback raises an exception (v0.6.0, #489) | Captured, not silently swallowed (previously discarded via `let _ = ...`); the `ProgressCallback` contract has no cancellation signal, so the operation still runs to completion, and if it otherwise succeeded the callback's exception now propagates to the caller carrying `files_extracted`/`files_added`, `bytes_written`, and a `progress_callback_error = True` marker attribute — see [[006-python-bindings/spec]] |
+| Python progress callback raises an exception (v0.6.0, #489) | Captured, not silently swallowed (previously discarded via `let _ = ...`); the `ProgressCallback` contract has no cancellation signal, so before #981 the operation ran to completion; since #981 `is_cancelled` stops it (FR-056) and the callback's exception propagates to the caller carrying `files_extracted`/`files_added`, `bytes_written`, and a `progress_callback_error = True` marker attribute — see [[006-python-bindings/spec]] |
 | Python or Node.js progress callback raises during an in-memory list, verify or extract (v0.8.0, #784, #783, #790) | Handled like the path-based calls: if the operation failed, its error is primary with the callback's exception chained (`__cause__` / `cause`); if it succeeded, the result is discarded and the callback's exception is raised (Python: `progress_callback_error = True`; Node: `code` `PROGRESS_CALLBACK_ERROR`); an in-memory extraction additionally carries `writes: discarded` and no counters — see [[006-python-bindings/spec]] and [[007-node-bindings/spec]] |
 | Node.js progress callback throws an `Error`/object (v0.6.0, #465) | Captured via `call_async_catch` instead of routing through `napi_fatal_exception` (which previously crashed the process uncatchably even inside `try`/`catch`); rejects the returned Promise instead — see [[007-node-bindings/spec]] |
 | Node.js progress callback throws a bare primitive (string/number/boolean) (v0.6.0, #473) | Also captured, not just `Error`/object throws — closed a separate napi-rs `napi_create_reference()` escalation gap via a JS shim wrapping the callback; does not cover `createArchiveWithProgressSync`, which dispatches unawaited and was never affected by this class of bug |

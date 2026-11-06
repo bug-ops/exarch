@@ -8,7 +8,7 @@ tags:
   - archive
   - rust
 created: 2026-05-20
-updated: 2026-11-05
+updated: 2026-11-06
 status: draft
 related:
   - "[[constitution]]"
@@ -34,6 +34,9 @@ related:
 > **MSRV**: Rust 1.99.1
 > **Codec and container dependencies (v0.8.0)**: `zip` 9.x (`Cargo.toml` `9.2`, locked 9.2.2; floor 9.0.5), `liblzma` 0.4.9 static for xz (bundles xz 5.8; replaces `xz2`, #763, #771), `sevenz-rust2` 0.24.2 (minimum), `lzma-rust2` 0.24
 > **Source**: extracted from [[001-exarch-system/spec]]
+
+> [!note] Batch #981 amendments
+> Read and write faults are classified at the copy (FR-063); zip 9.4 header refusals map to typed findings (FR-064); `formats` is crate-private (FR-062, #978B).
 
 ## 1. Overview
 
@@ -206,6 +209,11 @@ THEN magic bytes take precedence over the extension
 | FR-059 | WHEN a TAR or 7z reader fails, THE SYSTEM SHALL classify it as `InvalidArchive` with sub-code `TAR_READER` (five kinds, seven sites) or `SEVENZ_READER` (five kinds, five sites), messages unchanged (#930) | must |
 | FR-060 | WHEN a ZIP read-back needs the same decode again, THE SYSTEM SHALL keep the spooled plaintext according to `DecodeReuse`; the TAR spool is replayed unconditionally by `ListedArchive::extract` and `Kept::serves` is a `debug_assert!`; the `DecodeReuse::TempFile` rustdoc records the measured floor of the design (macOS, release CLI, deflate ZIPs of 10 MiB members: 1.15x the wall time of the build before decode reuse for 100 MiB decoded and 1.18x for 300 MiB; `Memory` 1.07x on the 100 MiB archive; Linux ext4 and tmpfs not measured, and the Linux detection was first built by CI, not run on a Linux host; writing decoder chunks straight to the file measured no faster, and the in-memory arena and `fadvise` ideas of #929 were not adopted) (#929) | should |
 | FR-061 | WHEN the `DecodeReuse::TempFile` spool lives on RAM-backed storage (`SpoolBacking::Ram`, detected with `fstatfs` for `TMPFS_MAGIC` or `RAMFS_MAGIC` on Linux and Android; every other host and every failed probe is `SpoolBacking::Disk`), THE SYSTEM SHALL charge the spool like `Memory` against the reuse limit, `max_decoder_memory` and `max_total_size`, with the used amount equal to the spool file length, and SHALL evict by truncating the spool tail; truncation SHALL NOT cut below the end of the entry just taken (`held_end`), and a taken entry's prefix stays charged until extraction ends; an open spool is a `TempSpool { file, backing }`; deferred follow-ups: Linux timings and non-Linux RAM-disk detection (#959, marker `TODO(#959)` in `open_spool`), and charging the TAR `ListedArchive` spool on a tmpfs (#960, marker `TODO(#960)` in `listed.rs`) | should |
+| FR-062 | The `formats` module and the concrete handlers (`TarArchive`, `ZipArchive`, `SevenZArchive`, the `ArchiveFormat` trait) SHALL be crate-private; callers use the request API and the root re-exports (`ArchiveType`, `CreatableFormat`, `CompressionCodec`, `detect_format`); `ZIP_FAMILY_ALIASES` stays private; the other public modules are private once the root re-exports every public item (#978) | must |
+| FR-063 | Every entry-data copy (host target, 7z writers, sink) SHALL use `copy_bounded` and classify through `ReadFaults::classify(CopyError)`: `Write` is always `Io`; `Read` is the budget violation if any, else `Io(fault)` when the source tap recorded a fault, else `Io` for an `Opaque` source, else `InvalidArchive` with the family malformation (`ZipEntryDataCorrupt`, `SevenZDataCorrupt`, a TAR codec error); `Short` is `TarEntryTruncated` for `Tar` with no recorded fault, else `DeclaredSizeMismatch`; `Overrun` and `Overflow` keep `DeclaredSizeExceeded` (GHSA-5j8q). A destination write fault SHALL stay `Io` for TAR, ZIP, 7z and sinks; `tar_metadata_limit::classify` SHALL delegate to the same helper (#964, #965) | must |
+| FR-064 | `ZipHeaderField` SHALL gain typed variants for the zip 9.4 header refusals the census catches (`classify` in `zip_structure`): name and UnicodePath disagreement under the language-encoding flag, NUL in a name, directory status, UnicodePath not UTF-8, control or homoglyph character, changed path components, trailing dots or spaces, changed extension; list, verify and extract SHALL agree on each, with one RawZip fixture per refusal site, and the `xl_type` expectation follows the typed finding; the `zip` requirement is the caret `"9.4"` and a weekly workflow (`.github/workflows/zip-drift.yml`, SHA-pinned) runs `cargo update -p zip` and the core tests to catch message drift (#971). No second copy of zip's rules is added | must |
+| FR-065 | `ZIP` directory entries SHALL carry the source directory mode as TAR does, subject to `PermissionPolicy` ([[008-tar-empty-directory-preservation/spec]], #968) | must |
+| FR-066 | A listed or spooled TAR (`open_spool`) SHALL be charged to a budget and a spool read fault SHALL be `Io`, never `InvalidArchive` (`TapSource::Replay`; #960) | must |
 
 ## 4. Non-Functional Requirements
 

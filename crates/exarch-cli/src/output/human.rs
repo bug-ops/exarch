@@ -14,6 +14,7 @@ use super::terminal::TerminalPath;
 use super::terminal::TerminalText;
 use crate::error::chain_hints;
 use crate::error::cli_message;
+use crate::error::join_chain;
 use crate::error::terminal;
 use crate::error::visible_chain;
 use crate::operation::Operation;
@@ -320,16 +321,12 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
 /// other link of the chain, including `ArchiveError` and `io::Error` sources
 /// that carry entry paths, is rendered as a single escaped line.
 fn escaped_chain(error: &anyhow::Error) -> String {
-    visible_chain(error)
-        .into_iter()
-        .map(|link| {
-            cli_message(link).map_or_else(
-                || TerminalText::new(&link.to_string()).to_string(),
-                |parts| terminal(&parts),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(": ")
+    join_chain(&visible_chain(error), |link| {
+        cli_message(link).map_or_else(
+            || TerminalText::new(&link.to_string()).to_string(),
+            |parts| terminal(&parts),
+        )
+    })
 }
 
 impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {

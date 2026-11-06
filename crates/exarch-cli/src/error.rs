@@ -434,13 +434,33 @@ impl std::error::Error for PartialExtractionContext {
     }
 }
 
-/// The visible links of `error`'s chain joined by `": "`, exactly as spelled.
+/// Joins the rendered links of a chain: a cause follows its message after
+/// `": "`, except after a partial-extraction report, which ends its own
+/// sentence and is followed by the cause on a line of its own.
+pub fn join_chain(
+    links: &[&(dyn std::error::Error + 'static)],
+    render: impl Fn(&(dyn std::error::Error + 'static)) -> String,
+) -> String {
+    let mut text = String::new();
+    let mut previous: Option<&(dyn std::error::Error + 'static)> = None;
+    for &link in links {
+        if let Some(previous) = previous {
+            text.push_str(if previous.is::<PartialExtractionContext>() {
+                "\n"
+            } else {
+                ": "
+            });
+        }
+        text.push_str(&render(link));
+        previous = Some(link);
+    }
+    text
+}
+
+/// The visible links of `error`'s chain joined by [`join_chain`], exactly as
+/// spelled.
 pub fn chain_text(error: &anyhow::Error) -> String {
-    visible_chain(error)
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(": ")
+    join_chain(&visible_chain(error), ToString::to_string)
 }
 
 /// What a destination conflict tells the user to do, which depends on the
@@ -510,10 +530,21 @@ fn occupied_message(destination: &Path, conflicts: &[PathBuf], advice: ConflictA
     message
 }
 
+/// `text` with its first letter in upper case.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 /// The message for a replace of the destination that failed part-way; the
 /// core error text names the paths, the hint says what to do about them.
 fn replace_failed_context(message: Message, failure: &ReplaceFailure) -> Message {
-    let message = message.lit("Failed to replace the destination");
+    let message = message
+        .restating_source()
+        .text(capitalized(&failure.to_string()));
     match (&failure.restore, &failure.leftover) {
         (Restore::Failed { .. }, _) => message.hint_lit(
             "The original destination was moved aside and could not be put back; its content is \
@@ -775,8 +806,12 @@ fn context_message(
     })
 }
 
-fn source_not_found_context(op: Operation, message: Message) -> Message {
-    message.lit("Source path not found").hint_lit(match op {
+fn source_not_found_context(op: Operation, path: &Path, message: Message) -> Message {
+    let message = message
+        .restating_source()
+        .lit("Source path not found: ")
+        .path(path);
+    message.hint_lit(match op {
         Operation::Create => "Verify the source path exists and is readable.",
         Operation::Extract | Operation::List | Operation::Verify => {
             "Verify the archive path exists and is readable."
@@ -784,8 +819,17 @@ fn source_not_found_context(op: Operation, message: Message) -> Message {
     })
 }
 
-fn source_not_accessible_context(op: Operation, error: &io::Error, message: Message) -> Message {
-    let message = message.lit("Source path is not accessible");
+fn source_not_accessible_context(
+    op: Operation,
+    path: &Path,
+    error: &io::Error,
+    message: Message,
+) -> Message {
+    let message = message
+        .restating_source()
+        .lit("Source path is not accessible: ")
+        .path(path)
+        .text(format!(": {error}"));
     if error.kind() != io::ErrorKind::PermissionDenied {
         return message;
     }
@@ -797,32 +841,23 @@ fn source_not_accessible_context(op: Operation, error: &io::Error, message: Mess
     })
 }
 
-/// The message of a refusal that has advice of its own; `None` for every
-/// other kind, which gets the generic relaxation hint.
-fn refusal_context(kind: &Violation, archive: &Path) -> Option<Message> {
-    let message = Message::default();
-    Some(match kind {
-        Violation::HardlinkTargetNotExtracted { .. } => message
-            .lit("Security violation: a hardlink in '")
-            .path(archive)
-            .lit("' points at an entry the selection does not extract")
-            .hint_lit(
-                "Select the link's target as well (--include), strip fewer components, or \
-                 leave the link out (--exclude); no flag relaxes this check.",
-            ),
-        Violation::LinkUnderFlatten { .. } => message
-            .lit("Security violation: '")
-            .path(archive)
-            .lit("' holds a link that --flatten cannot place")
-            .hint_lit("Leave links out with --exclude, or extract without --flatten."),
-        Violation::DestinationChanged => message
-            .lit("The destination changed while it was being replaced")
-            .hint_lit(
-                "Another process modified the destination during the replace, so nothing was \
-                 replaced. Re-run once the destination is no longer in use.",
-            ),
-        _ => return None,
-    })
+/// The advice of a refusal that has some of its own; `None` for every other
+/// kind, which gets the generic relaxation hint.
+const fn refusal_hint(kind: &Violation) -> Option<&'static str> {
+    match kind {
+        Violation::HardlinkTargetNotExtracted { .. } => Some(
+            "Select the link's target as well (--include), strip fewer components, or leave the \
+             link out (--exclude); no flag relaxes this check.",
+        ),
+        Violation::LinkUnderFlatten { .. } => {
+            Some("Leave links out with --exclude, or extract without --flatten.")
+        }
+        Violation::DestinationChanged => Some(
+            "Another process modified the destination during the replace, so nothing was \
+             replaced. Re-run once the destination is no longer in use.",
+        ),
+        _ => None,
+    }
 }
 
 /// The message of each known `ArchiveError` variant; `None` for a variant
@@ -834,11 +869,6 @@ fn dedicated_context(
     archive: &Path,
     advice: ConflictAdvice,
 ) -> Option<Message> {
-    if let ArchiveError::SecurityViolation { kind, .. } = err
-        && let Some(message) = refusal_context(kind, archive)
-    {
-        return Some(message);
-    }
     let message = Message::default();
     Some(match err {
         ArchiveError::PathTraversal { .. } => message
@@ -880,7 +910,11 @@ fn dedicated_context(
             .lit("Security violation while processing '")
             .path(archive)
             .lit("'")
-            .hint(Some(relaxation_hint(op, err.relaxable_by()))),
+            .hint(Some(match err {
+                ArchiveError::SecurityViolation { kind, .. } => refusal_hint(kind)
+                    .map_or_else(|| relaxation_hint(op, err.relaxable_by()), str::to_owned),
+                _ => relaxation_hint(op, err.relaxable_by()),
+            })),
         ArchiveError::InvalidArchive(_)
         | ArchiveError::TarAmbiguity(_)
         | ArchiveError::TarTrailer(_) => message
@@ -891,9 +925,9 @@ fn dedicated_context(
         ArchiveError::InvalidConfiguration { setting, problem } => message
             .text(format!("Cannot {} with these settings", op.name()))
             .hint_lit(configuration_hint(*setting, problem)),
-        ArchiveError::SourceNotFound { .. } => source_not_found_context(op, message),
-        ArchiveError::SourceNotAccessible { error, .. } => {
-            source_not_accessible_context(op, error, message)
+        ArchiveError::SourceNotFound { path } => source_not_found_context(op, path, message),
+        ArchiveError::SourceNotAccessible { path, error } => {
+            source_not_accessible_context(op, path, error, message)
         }
         ArchiveError::OutputExists { path } => message
             .restating_source()
@@ -1913,6 +1947,75 @@ mod tests {
                 None
             )
             .is_some_and(|h| h.contains("backup path"))
+        );
+    }
+
+    #[test]
+    fn each_fact_is_stated_once() {
+        let once = |err: ArchiveError, phrase: &str| {
+            let text = full_text(&convert_error(Operation::Extract, err, Path::new("a.tar")));
+            assert_eq!(text.to_lowercase().matches(phrase).count(), 1, "{text}");
+        };
+        once(
+            ArchiveError::SourceNotFound {
+                path: PathBuf::from("x"),
+            },
+            "source path not found",
+        );
+        once(
+            ArchiveError::SourceNotAccessible {
+                path: PathBuf::from("x"),
+                error: io::Error::from(io::ErrorKind::PermissionDenied),
+            },
+            "source path is not accessible",
+        );
+        once(
+            ArchiveError::ReplaceFailed(ReplaceFailure::new(
+                io::Error::other("boom"),
+                Restore::Restored,
+                None,
+            )),
+            "failed to replace the destination",
+        );
+        once(
+            ArchiveError::from(Violation::HardlinkTargetNotExtracted {
+                link: "l".into(),
+                target: "t".into(),
+            }),
+            "which the selection does not extract",
+        );
+        once(
+            ArchiveError::from(Violation::DestinationChanged),
+            "destination changed while it was being replaced",
+        );
+    }
+
+    #[test]
+    fn a_partial_report_is_followed_by_its_cause_on_its_own_line() {
+        let cause = convert_error(
+            Operation::Extract,
+            ArchiveError::from(Violation::SolidArchive),
+            Path::new("a.7z"),
+        );
+        let partial = anyhow::Error::new(PartialExtractionContext {
+            report: ExtractionReport::default(),
+            writes: PartialWrites::RolledBack,
+            inner: cause,
+        });
+        let text = chain_text(&partial);
+        assert!(!text.contains(".:"), "{text}");
+        let mut lines = text.lines();
+        assert!(
+            lines
+                .next()
+                .is_some_and(|report| report.ends_with("left unchanged.")),
+            "{text}"
+        );
+        assert!(
+            lines
+                .next()
+                .is_some_and(|cause| cause.starts_with("Security violation")),
+            "{text}"
         );
     }
 

@@ -526,7 +526,8 @@ closed_enum! {
     /// parent directory entry, so a published archive survives a crash or
     /// power loss. A directory that cannot be synced does not fail the
     /// creation, since the archive is already published: it adds a
-    /// [`CreationWarning::DirectoryNotSynced`] to the report. On Windows and
+    /// [`CreationWarning::DirectoryNotSynced`](crate::CreationWarning::DirectoryNotSynced)
+    /// to the report. On Windows and
     /// WASI the directory entry is not flushed and no warning is raised; only
     /// the file is.
     ///

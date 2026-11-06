@@ -6,10 +6,11 @@ pub(crate) mod compression;
 pub(crate) mod detect;
 pub(crate) mod dir_walker;
 pub(crate) mod file_identity;
-#[cfg(any(unix, target_os = "wasi"))]
 pub(crate) mod handle_resolution;
 pub(crate) mod occupant;
 pub(crate) mod pinned_dir;
+#[cfg(any(windows, test))]
+pub(crate) mod reparse;
 pub(crate) mod run_record;
 pub(crate) mod sevenz;
 pub(crate) mod source_fault;

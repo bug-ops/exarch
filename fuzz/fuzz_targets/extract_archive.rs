@@ -3,8 +3,8 @@
 use std::io::Write as _;
 
 use exarch_core::ExtractRequest;
-use exarch_core::Staging;
 use exarch_core::ExtractionOptions;
+use exarch_core::Staging;
 use libfuzzer_sys::fuzz_target;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;

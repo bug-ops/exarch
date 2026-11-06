@@ -344,7 +344,13 @@ mod tests {
 
         let result = DestDir::new(file_path);
         assert!(result.is_err());
-        assert_matches!(result, Err(ArchiveError::Io(_)));
+        assert_matches!(
+            result,
+            Err(ArchiveError::InvalidConfiguration {
+                setting: crate::ConfigSetting::OutputPath,
+                problem: crate::ConfigProblem::NotADirectory,
+            })
+        );
     }
 
     #[test]

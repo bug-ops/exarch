@@ -88,7 +88,9 @@ closed_enum! {
 /// A compression level exactly as the caller asked for it.
 ///
 /// Carries what a refused level looked like, including values a `u32` cannot
-/// hold, so a front end can echo `-3`, `1.5` or `2^40` back.
+/// hold, so a front end can echo `-3`, `1.5` or `2^40` back. The integer is an
+/// `i64`, not an `i128`, so the 16-byte alignment of the wider type does not
+/// grow every [`ArchiveError`].
 ///
 /// # Examples
 ///
@@ -98,12 +100,18 @@ closed_enum! {
 /// assert_eq!(RequestedLevel::Integer(-3).to_string(), "-3");
 /// assert_eq!(RequestedLevel::Fractional(1.5).to_string(), "1.5");
 /// assert_eq!(RequestedLevel::NonFinite.to_string(), "a non-finite number");
+/// assert_eq!(
+///     RequestedLevel::OutOfRange.to_string(),
+///     "an out-of-range integer"
+/// );
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum RequestedLevel {
-    /// A whole number.
-    Integer(i128),
+    /// A whole number that fits an `i64`.
+    Integer(i64),
+    /// A whole number outside the `i64` range.
+    OutOfRange,
     /// A finite number with a fractional part.
     Fractional(f64),
     /// NaN or an infinity.
@@ -116,6 +124,7 @@ impl std::fmt::Display for RequestedLevel {
             Self::Integer(level) => write!(f, "{level}"),
             Self::Fractional(level) => write!(f, "{level}"),
             Self::NonFinite => f.write_str("a non-finite number"),
+            Self::OutOfRange => f.write_str("an out-of-range integer"),
         }
     }
 }

@@ -547,6 +547,24 @@ pub fn convert_error(op: Operation, err: ArchiveError, archive: &Path) -> anyhow
     anyhow::Error::new(CliContext::wrapping(context.into_parts(), err))
 }
 
+fn zip_inconsistency_message(op: Operation, message: Message, archive: &Path) -> Message {
+    let relax = op.accepts(Flag::ZipConsistency).then(|| {
+        format!(
+            " Use {} ignore only for archives from a trusted producer.",
+            Flag::ZipConsistency.long()
+        )
+    });
+    message
+        .lit("Security violation: ZIP archive '")
+        .path(archive)
+        .lit("' is read differently by different tools")
+        .hint(Some(format!(
+            "The archive may be crafted to show different content to different \
+             extractors.{}",
+            relax.unwrap_or_default()
+        )))
+}
+
 fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message {
     let message = Message::default();
     match err {
@@ -562,23 +580,7 @@ fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message
             .path(archive)
             .lit("' appears to be a zip bomb")
             .hint(zip_bomb_hint(op, details)),
-        ArchiveError::ZipInconsistency(_) => {
-            let relax = op.accepts(Flag::ZipConsistency).then(|| {
-                format!(
-                    " Use {} ignore only for archives from a trusted producer.",
-                    Flag::ZipConsistency.long()
-                )
-            });
-            message
-                .lit("Security violation: ZIP archive '")
-                .path(archive)
-                .lit("' is read differently by different tools")
-                .hint(Some(format!(
-                    "The archive may be crafted to show different content to different \
-                     extractors.{}",
-                    relax.unwrap_or_default()
-                )))
-        }
+        ArchiveError::ZipInconsistency(_) => zip_inconsistency_message(op, message, archive),
         ArchiveError::QuotaExceeded { resource } => {
             quota_exceeded_context(op, resource.kind(), archive)
         }
@@ -628,10 +630,12 @@ fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message
             } else {
                 ""
             }),
-        ArchiveError::OutputExists { .. } => message.lit("Output path already exists").hint(
-            op.accepts(Flag::Force)
-                .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
-        ),
+        ArchiveError::OutputExists { .. } | ArchiveError::DestinationOccupied { .. } => {
+            message.lit("Output path already exists").hint(
+                op.accepts(Flag::Force)
+                    .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
+            )
+        }
         ArchiveError::InvalidPermissions { mode, .. } => message.text(format!(
             "Invalid permissions {:#o}: blocked by security policy.",
             mode.get()
@@ -641,16 +645,9 @@ fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message
         )),
 
         ArchiveError::Cancelled => message.lit("Operation cancelled"),
-        ArchiveError::DestinationOccupied { .. } => message
-            .lit("The destination already holds files the archive would write")
-            .hint(
-                op.accepts(Flag::Force)
-                    .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
-            ),
-        ArchiveError::OutputReservationLeft { .. } => {
-            message.lit("An empty reservation file was left at the output path")
+        ArchiveError::OutputReservationLeft { .. } | ArchiveError::ReplaceFailed(_) => {
+            message.lit("Failed to finish writing the output")
         }
-        ArchiveError::ReplaceFailed(_) => message.lit("Failed to replace the destination"),
 
         // Forward-compat: a variant added to ArchiveError after this match was
         // written. #[non_exhaustive] requires this arm to compile against a

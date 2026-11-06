@@ -20,6 +20,7 @@ use std::path::Component;
 use std::path::Path;
 
 use exarch_core::ArchiveReader;
+use exarch_core::ExistingFiles;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;

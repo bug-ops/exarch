@@ -44,6 +44,10 @@ use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::support::leaf;
 #[cfg(unix)]
 use crate::formats::pinned_dir::support::pinned_at;
+#[cfg(unix)]
+use crate::formats::source_fault::ReadFamily;
+#[cfg(unix)]
+use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Tally;
 use crate::inspection::integrity::IntegrityPass;
 use crate::security::Compressed;
@@ -465,6 +469,7 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
     let parent = pinned_at(temp.path());
     let bytes_written = write_file_with_permit_using(
         &mut reader,
+        ReadFaults::new(ReadFamily::Tar, None),
         &parent,
         leaf("real-output.txt"),
         &mut copy_buffer,
@@ -523,6 +528,7 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
     let parent = pinned_at(temp.path());
     let result = write_file_with_permit_using(
         &mut reader,
+        ReadFaults::new(ReadFamily::Tar, None),
         &parent,
         leaf("real-output.txt"),
         &mut copy_buffer,
@@ -562,6 +568,7 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
 
     let result = write_file_direct(
         &mut reader,
+        ReadFaults::new(ReadFamily::Tar, None),
         &pinned_at(temp.path()),
         leaf("bomb.bin"),
         &mut copy_buffer,
@@ -607,6 +614,7 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
 
     let result = write_file_with_permit(
         &mut reader,
+        ReadFaults::new(ReadFamily::Tar, None),
         &pinned_at(temp.path()),
         leaf("existing.bin"),
         &mut copy_buffer,

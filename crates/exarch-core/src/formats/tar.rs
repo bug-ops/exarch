@@ -77,7 +77,8 @@
 //! use exarch_core::SecurityConfig;
 //! use exarch_core::formats::TarArchive;
 //! use exarch_core::formats::traits::ArchiveFormat;
-//! //! use std::path::Path;
+//! use std::fs::File;
+//! use std::path::Path;
 //!
 //! let file = File::open("archive.tar")?;
 //! let config = SecurityConfig::default();
@@ -99,7 +100,8 @@
 //! use exarch_core::formats::TarArchive;
 //! use exarch_core::formats::traits::ArchiveFormat;
 //! use flate2::read::GzDecoder;
-//! //! use std::path::Path;
+//! use std::fs::File;
+//! use std::path::Path;
 //!
 //! let file = File::open("archive.tar.gz")?;
 //! let decoder = GzDecoder::new(file);
@@ -154,6 +156,8 @@ use crate::types::safe_path::ParentCheck;
 use super::common::EntryCompleteGuard;
 use super::common::open_archive;
 use super::compression::CompressionCodec;
+use super::source_fault::ReadFamily;
+use super::source_fault::ReadFaults;
 use super::source_fault::TapSource;
 use super::tar_metadata_limit::CheckedTarEntry;
 use super::tar_metadata_limit::SkipLimits;
@@ -186,7 +190,9 @@ use crate::reader::decode_tar_stream;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::formats::TarArchive;
 /// use exarch_core::formats::traits::ArchiveFormat;
-/// /// use std::path::Path;
+/// use std::fs::File;
+/// use std::path::Path;
+///
 /// let file = File::open("archive.tar")?;
 /// let config = SecurityConfig::default();
 /// let mut archive = TarArchive::new(file, &config);
@@ -256,7 +262,9 @@ impl<R: Read> TarArchive<R> {
     /// ```no_run
     /// use exarch_core::SecurityConfig;
     /// use exarch_core::formats::TarArchive;
-    /// /// use std::io::BufReader;
+    /// use std::fs::File;
+    /// use std::io::BufReader;
+    ///
     /// let file = File::open("archive.tar")?;
     /// let reader = BufReader::new(file);
     /// let archive = TarArchive::new(reader, &SecurityConfig::default());
@@ -352,7 +360,12 @@ impl<R: Read> TarArchive<R> {
                 };
                 match target.validate_file(request, tally)? {
                     FileAdmission::Write(admitted) => {
-                        target.file(entry, admitted, tally)?;
+                        target.file(
+                            entry,
+                            ReadFaults::new(ReadFamily::Tar, None),
+                            admitted,
+                            tally,
+                        )?;
                         Ok(EntryOutcome::Done)
                     }
                     FileAdmission::Skipped(_) => Ok(EntryOutcome::Skipped),

@@ -55,7 +55,7 @@ impl TryFrom<u8> for CompressionLevel {
             Ok(Self(level))
         } else {
             Err(ArchiveError::InvalidCompressionLevel {
-                level: RequestedLevel::Integer(i128::from(level)),
+                level: RequestedLevel::Integer(i64::from(level)),
             })
         }
     }
@@ -96,8 +96,9 @@ impl CompressionLevel {
             .ok()
             .filter(|level| (1..=9).contains(level))
             .map(Self)
-            .ok_or(ArchiveError::InvalidCompressionLevel {
-                level: RequestedLevel::Integer(level),
+            .ok_or_else(|| ArchiveError::InvalidCompressionLevel {
+                level: i64::try_from(level)
+                    .map_or(RequestedLevel::OutOfRange, RequestedLevel::Integer),
             })
     }
 
@@ -443,13 +444,13 @@ mod tests {
         for level in [0u8, 10, 200] {
             assert_matches!(
                 CompressionLevel::try_from(level),
-                Err(ArchiveError::InvalidCompressionLevel { level: RequestedLevel::Integer(l) }) if l == i128::from(level)
+                Err(ArchiveError::InvalidCompressionLevel { level: RequestedLevel::Integer(l) }) if l == i64::from(level)
             );
         }
         for level in [0u32, 10, 256, 4_294_967_295] {
             assert_matches!(
                 CompressionLevel::try_from(level),
-                Err(ArchiveError::InvalidCompressionLevel { level: RequestedLevel::Integer(l) }) if l == i128::from(level)
+                Err(ArchiveError::InvalidCompressionLevel { level: RequestedLevel::Integer(l) }) if l == i64::from(level)
             );
         }
     }

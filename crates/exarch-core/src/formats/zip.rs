@@ -170,6 +170,8 @@ use crate::types::safe_path::stream_separator_error;
 
 use super::common;
 use super::common::EntryCompleteGuard;
+use super::source_fault::ReadFamily;
+use super::source_fault::ReadFaults;
 use super::target::ExtractTarget;
 use super::target::FileAdmission;
 use super::target::FileRequest;
@@ -841,10 +843,20 @@ impl<R: Read + Seek> ZipArchive<R> {
             if let FileAdmission::Write(admitted) = target.validate_file(request, &mut ctx.tally)? {
                 let written = match (reuse, claimed) {
                     (Some(store), Some((taken, key))) => match store.retained(taken, &key) {
-                        Ok(retained) => target.file_retained(retained, admitted, &mut ctx.tally),
+                        Ok(retained) => target.file_retained(
+                            retained,
+                            ReadFaults::new(ReadFamily::Zip, None),
+                            admitted,
+                            &mut ctx.tally,
+                        ),
                         Err(e) => Err(ArchiveError::Io(e)),
                     },
-                    _ => target.file(&mut zip_file, admitted, &mut ctx.tally),
+                    _ => target.file(
+                        &mut zip_file,
+                        ReadFaults::new(ReadFamily::Zip, None),
+                        admitted,
+                        &mut ctx.tally,
+                    ),
                 };
                 written
                     .map_err(|e| Self::classify_declared_size_overrun(e, uncompressed_size.0))?;

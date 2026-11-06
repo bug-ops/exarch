@@ -21,6 +21,7 @@ use crate::SinkOptions;
 use crate::formats::common;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
@@ -216,6 +217,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
+        faults: ReadFaults<'_>,
         admitted: SevenZAdmittedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
@@ -227,12 +229,22 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let (path, permit, _mode) = file.into_parts();
         let (_, leaf) = Leaf::split(path.as_path())?;
         let written = match write_mode {
-            WriteMode::CreateNew => {
-                write_file_direct(reader, &parent, leaf, self.inner.copy_buffer_mut(), permit)?
-            }
-            WriteMode::ReplaceRegular => {
-                write_file_with_permit(reader, &parent, leaf, self.inner.copy_buffer_mut(), permit)?
-            }
+            WriteMode::CreateNew => write_file_direct(
+                reader,
+                faults,
+                &parent,
+                leaf,
+                self.inner.copy_buffer_mut(),
+                permit,
+            )?,
+            WriteMode::ReplaceRegular => write_file_with_permit(
+                reader,
+                faults,
+                &parent,
+                leaf,
+                self.inner.copy_buffer_mut(),
+                permit,
+            )?,
         };
         tally.record_file(written)
     }

@@ -179,8 +179,9 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::Staging;
 use crate::copy::CopyBuffer;
-use crate::copy::copy_with_buffer;
+use crate::copy::copy_bounded;
 use crate::formats::common;
+use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
@@ -652,18 +653,20 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
         &mut self,
         staged: StagedFile,
         reader: &mut R,
+        faults: ReadFaults<'_>,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         let mut file = self
             .sink
             .create_file(&staged.path, staged.mode, staged.size)
             .map_err(sink_error)?;
-        let written = copy_with_buffer(
+        let written = copy_bounded(
             reader,
             &mut file,
             &mut self.copy_buffer,
             Some(staged.size.get()),
-        )?;
+        )
+        .map_err(|error| faults.classify(error))?;
         self.finish_staged(staged.path, file, written, tally)
     }
 
@@ -827,18 +830,20 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
+        faults: ReadFaults<'_>,
         admitted: ValidatedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         let Some(staged) = self.stage_file(admitted, tally)? else {
             return Ok(());
         };
-        self.write_staged(staged, reader, tally)
+        self.write_staged(staged, reader, faults, tally)
     }
 
     fn file_retained(
         &mut self,
         retained: Retained<'_>,
+        faults: ReadFaults<'_>,
         admitted: ValidatedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
@@ -854,8 +859,10 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                     .map_err(sink_error)?;
                 self.finish_staged(staged.path, file, written, tally)
             }
-            Retained::Bytes(bytes) => self.write_staged(staged, &mut bytes.as_slice(), tally),
-            Retained::Spooled(mut reader) => self.write_staged(staged, &mut reader, tally),
+            Retained::Bytes(bytes) => {
+                self.write_staged(staged, &mut bytes.as_slice(), faults, tally)
+            }
+            Retained::Spooled(mut reader) => self.write_staged(staged, &mut reader, faults, tally),
         }
     }
 

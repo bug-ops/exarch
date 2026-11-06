@@ -51,6 +51,7 @@ use super::common;
 use super::dir_walker::DirWalker;
 use super::pinned_dir::PinnedRoot;
 use super::pinned_dir::TempFileGuard;
+use super::source_fault::ReadFaults;
 
 /// The per-run counters a target updates while it writes.
 pub struct Tally<'a> {
@@ -174,6 +175,7 @@ pub trait ExtractTarget {
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
+        faults: ReadFaults<'_>,
         admitted: Self::AdmittedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()>;
@@ -185,12 +187,13 @@ pub trait ExtractTarget {
     fn file_retained(
         &mut self,
         retained: Retained<'_>,
+        faults: ReadFaults<'_>,
         admitted: Self::AdmittedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         match retained {
-            Retained::Bytes(bytes) => self.file(&mut bytes.as_slice(), admitted, tally),
-            Retained::Spooled(mut reader) => self.file(&mut reader, admitted, tally),
+            Retained::Bytes(bytes) => self.file(&mut bytes.as_slice(), faults, admitted, tally),
+            Retained::Spooled(mut reader) => self.file(&mut reader, faults, admitted, tally),
         }
     }
 
@@ -363,12 +366,14 @@ impl ExtractTarget for HostTarget<'_> {
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
+        faults: ReadFaults<'_>,
         admitted: ValidatedFile<HostParent>,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         let (path, permit, mode) = admitted.into_parts();
         common::extract_file_with_permit(
             reader,
+            faults,
             &path,
             mode,
             permit,

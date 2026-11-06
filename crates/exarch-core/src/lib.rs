@@ -204,6 +204,7 @@ pub use path_text::utf8_entry_path;
 pub use security::fs_view::LinkKind;
 
 // Re-export security types
+pub use listed::DestinationCheck;
 pub use listed::ListedArchive;
 pub use listed::ListedExtractOptions;
 pub use security::AdmittedSize;

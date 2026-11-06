@@ -53,7 +53,8 @@ closed_enum! {
         AllowedExtension => "allowed_extension",
         /// An entry of the banned path component list.
         BannedPathComponent => "banned_path_component",
-        /// The path of the archive to create.
+        /// The path of the archive to create or the destination of an
+        /// extraction.
         OutputPath => "output_path",
         /// The paths to add to an archive.
         SourcePaths => "source_paths",

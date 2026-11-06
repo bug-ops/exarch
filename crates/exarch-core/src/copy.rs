@@ -164,6 +164,7 @@ impl From<CopyError> for ArchiveError {
 /// - Total bytes written would overflow u64 (quota protection)
 /// - `expected_size` is `Some` and the actual byte count exceeds or falls short
 ///   of it
+#[cfg(test)]
 #[inline]
 pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
     reader: &mut R,

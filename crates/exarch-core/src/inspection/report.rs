@@ -897,6 +897,14 @@ fn high_invalid_archive(message: String) -> (IssueSeverity, IssueCategory, Strin
     (IssueSeverity::High, IssueCategory::InvalidArchive, message)
 }
 
+fn medium_invalid_archive(message: String) -> (IssueSeverity, IssueCategory, String) {
+    (
+        IssueSeverity::Medium,
+        IssueCategory::InvalidArchive,
+        message,
+    )
+}
+
 /// The issue of a TAR header or stream-tail refusal.
 fn tar_framing_issue(error: &ArchiveError) -> (IssueSeverity, IssueCategory, String) {
     match error {
@@ -1056,11 +1064,7 @@ impl VerificationIssue {
                     mode.get()
                 ),
             ),
-            ArchiveError::Io(io_err) => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("I/O error: {io_err}"),
-            ),
+            ArchiveError::Io(io_err) => high_invalid_archive(format!("I/O error: {io_err}")),
             ArchiveError::InvalidArchive(msg) => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
@@ -1072,64 +1076,41 @@ impl VerificationIssue {
                 IssueCategory::SecurityPolicy,
                 format!("Security violation: {kind}"),
             ),
-            ArchiveError::SourceNotFound { path } => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("Source not found: {}", path.display()),
-            ),
-            ArchiveError::SourceNotAccessible { path, .. } => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("Source not accessible: {}", path.display()),
-            ),
-            ArchiveError::OutputExists { path } => (
-                IssueSeverity::Medium,
-                IssueCategory::InvalidArchive,
-                format!("Output already exists: {}", path.display()),
-            ),
-            ArchiveError::InvalidCompressionLevel { level } => (
-                IssueSeverity::Medium,
-                IssueCategory::InvalidArchive,
-                format!("Invalid compression level: {level}"),
-            ),
-            ArchiveError::UnknownFormat { path } => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("Unknown format: {}", path.display()),
-            ),
+            ArchiveError::SourceNotFound { path } => {
+                high_invalid_archive(format!("Source not found: {}", path.display()))
+            }
+            ArchiveError::SourceNotAccessible { path, .. } => {
+                high_invalid_archive(format!("Source not accessible: {}", path.display()))
+            }
+            ArchiveError::OutputExists { path } => {
+                medium_invalid_archive(format!("Output already exists: {}", path.display()))
+            }
+            ArchiveError::InvalidCompressionLevel { level } => {
+                medium_invalid_archive(format!("Invalid compression level: {level}"))
+            }
+            ArchiveError::UnknownFormat { path } => {
+                high_invalid_archive(format!("Unknown format: {}", path.display()))
+            }
             ArchiveError::InvalidConfiguration { setting, problem } => high_invalid_archive(
                 format!("Invalid configuration: {}", setting.describe(problem)),
             ),
             ArchiveError::ReaderFormat(reason) => {
                 high_invalid_archive(format!("Reader format: {reason}"))
             }
-            ArchiveError::Cancelled => (
-                IssueSeverity::Medium,
-                IssueCategory::InvalidArchive,
-                "Operation cancelled".to_string(),
-            ),
+            ArchiveError::Cancelled => medium_invalid_archive("Operation cancelled".to_owned()),
             ArchiveError::DestinationOccupied {
                 destination,
                 conflicts,
-            } => (
-                IssueSeverity::Medium,
-                IssueCategory::InvalidArchive,
-                format!(
-                    "Destination occupied: {} holds {} of the paths to extract",
-                    destination.display(),
-                    conflicts.len()
-                ),
-            ),
-            ArchiveError::OutputReservationLeft { path, .. } => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("Empty reservation file left at: {}", path.display()),
-            ),
-            ArchiveError::ReplaceFailed(failure) => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                failure.to_string(),
-            ),
+            } => medium_invalid_archive(format!(
+                "Destination occupied: {} holds {} of the paths to extract",
+                destination.display(),
+                conflicts.len()
+            )),
+            ArchiveError::OutputReservationLeft { path, .. } => high_invalid_archive(format!(
+                "Empty reservation file left at: {}",
+                path.display()
+            )),
+            ArchiveError::ReplaceFailed(failure) => high_invalid_archive(failure.to_string()),
             ArchiveError::PartialExtraction(partial) => {
                 return Self::from_error(partial.cause(), entry_path);
             }

@@ -33,6 +33,8 @@ use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::formats::common;
 use crate::formats::common::EntryCompleteGuard;
+use crate::formats::source_fault::ReadFamily;
+use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
@@ -335,7 +337,12 @@ pub(super) fn process_entry<T: ExtractTarget>(
             };
             if let FileAdmission::Write(admitted) = target.validate_file(request, tally)? {
                 let mut reader = reader;
-                target.file(&mut reader, admitted, tally)?;
+                target.file(
+                    &mut reader,
+                    ReadFaults::new(ReadFamily::SevenZ, None),
+                    admitted,
+                    tally,
+                )?;
             }
             Ok(())
         }

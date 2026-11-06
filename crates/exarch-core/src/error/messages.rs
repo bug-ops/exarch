@@ -648,10 +648,9 @@ impl ArchiveError {
             Self::Cancelled => FfiKind::Cancelled,
             Self::OutputReservationLeft { error, .. } => FfiKind::Io(error.kind()),
             Self::ReplaceFailed(failure) => FfiKind::Io(failure.error.kind()),
-            Self::DestinationOccupied { .. } => FfiKind::OutputExists,
             Self::SourceNotFound { .. } => FfiKind::SourceNotFound,
             Self::SourceNotAccessible { .. } => FfiKind::SourceNotAccessible,
-            Self::OutputExists { .. } => FfiKind::OutputExists,
+            Self::DestinationOccupied { .. } | Self::OutputExists { .. } => FfiKind::OutputExists,
             Self::InvalidCompressionLevel { .. } => FfiKind::InvalidCompressionLevel,
             Self::UnknownFormat { .. } | Self::ReaderFormat(ReaderFormatError::Unrecognized) => {
                 FfiKind::UnknownFormat
@@ -905,6 +904,20 @@ mod tests {
                 setting: ConfigSetting::OutputPath,
                 problem: ConfigProblem::NotSet,
             },
+            ArchiveError::Cancelled,
+            ArchiveError::DestinationOccupied {
+                destination: PathBuf::from("dest"),
+                conflicts: Box::new([PathBuf::from("a")]),
+            },
+            ArchiveError::OutputReservationLeft {
+                path: PathBuf::from("out.tar"),
+                error: std::io::Error::other("test"),
+            },
+            ArchiveError::ReplaceFailed(crate::ReplaceFailure::new(
+                std::io::Error::other("test"),
+                crate::Restore::Restored,
+                None,
+            )),
         ]
     }
 
@@ -920,12 +933,13 @@ mod tests {
     }
 
     #[test]
-    fn test_kind_code_covers_error_code_all_exactly_once() {
+    fn test_kind_code_covers_error_code_all() {
         let mut seen: Vec<ErrorCode> = one_error_per_variant()
             .into_iter()
             .map(|e| e.into_ffi_message().kind.code())
             .collect();
         seen.sort_by_key(|c| c.as_str());
+        seen.dedup();
         let mut expected = ErrorCode::ALL.to_vec();
         expected.sort_by_key(|c| c.as_str());
         assert_eq!(seen, expected);

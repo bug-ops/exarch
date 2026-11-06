@@ -43,7 +43,6 @@ use crate::Violation;
 use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
 use crate::copy::copy_bounded;
-use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
 use crate::formats::pinned_dir::Leaf;
@@ -51,6 +50,7 @@ use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::source_fault::ReadFaults;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
@@ -148,7 +148,7 @@ impl TempSpool {
 /// # Errors
 ///
 /// See above.
-pub(crate) fn open_archive(path: &Path) -> Result<File> {
+pub fn open_archive(path: &Path) -> Result<File> {
     File::open(path).map_err(|error| crate::creation::source::source_error(path, error))
 }
 
@@ -427,6 +427,7 @@ pub fn check_entry_name_limits(
 #[inline]
 pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     reader: &mut R,
+    faults: ReadFaults<'_>,
     safe_path: &SafePath<P>,
     mode: Option<SanitizedMode>,
     permit: QuotaPermit,
@@ -468,12 +469,13 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // `written_at` never holds a pre-existing entry, so nothing else is lost.
     let guard = written_at.guard(&parent, leaf);
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
-    let bytes_written = copy_with_buffer(
+    let bytes_written = copy_bounded(
         reader,
         &mut buffered_writer,
         copy_buffer,
         Some(expected_size),
-    )?;
+    )
+    .map_err(|error| faults.classify(error))?;
     buffered_writer.flush()?;
     drop(buffered_writer);
     commit_output(&parent, &written_at, leaf, safe_path.as_path())?;
@@ -616,7 +618,7 @@ fn open_output_slot(
 /// Every site that decides what to do with an occupant must route `Refuse` here
 /// and never into an overwrite branch: a missed arm would replace a file the
 /// caller asked to keep.
-pub(crate) fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveError {
+pub fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveError {
     ArchiveError::DestinationOccupied {
         destination: destination.to_path_buf(),
         conflicts: Box::new([rel.to_path_buf()]),
@@ -1072,6 +1074,7 @@ mod tests {
     use crate::NoopProgress;
     use crate::SecurityConfig;
     use crate::copy::CopyBuffer;
+    use crate::formats::source_fault::ReadFamily;
     use crate::security::RawMode;
     use crate::security::permissions::sanitize_permissions;
     use crate::security::quota::QuotaTracker;
@@ -1284,6 +1287,7 @@ mod tests {
 
         let result = extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized(0o644)),
             permit,
@@ -1345,6 +1349,7 @@ mod tests {
 
         let result = extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized(0o644)),
             permit,
@@ -1392,6 +1397,7 @@ mod tests {
 
         let result = extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized(0o644)),
             permit,
@@ -1436,6 +1442,7 @@ mod tests {
 
         let result = extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized(0o644)),
             permit,
@@ -1485,6 +1492,7 @@ mod tests {
 
         let result = extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized(0o644)),
             permit,
@@ -1522,7 +1530,11 @@ mod tests {
         let err = commit_output(dir, &written_at, leaf, Path::new("d")).unwrap_err();
         drop(guard);
 
-        assert!(err.to_string().contains("at d"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("cannot replace the existing file: d"),
+            "{err}"
+        );
         assert!(!written.exists(), "temp file must be removed");
         assert!(occupied.join("child").exists());
     }
@@ -1725,6 +1737,7 @@ mod tests {
 
         extract_file_with_permit(
             &mut reader,
+            ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
             Some(sanitized_mode),
             permit,

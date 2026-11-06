@@ -18,6 +18,62 @@ use std::sync::PoisonError;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use crate::ArchiveError;
+use crate::copy::CopyError;
+
+/// The decoder family that reads an entry's bytes, which decides how a failed
+/// read is classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadFamily {
+    /// A TAR stream.
+    Tar,
+    /// A ZIP archive.
+    Zip,
+    /// A 7z archive.
+    SevenZ,
+    /// A reader whose faults cannot be told apart from decoder errors.
+    #[expect(
+        dead_code,
+        reason = "constructed once the classification distinguishes it"
+    )]
+    Opaque,
+}
+
+/// What a copy of one entry's bytes knows about its source, so a failed read
+/// can be told from a failed write and a decoder error from a disk fault.
+///
+/// Passed through every
+/// [`ExtractTarget::file`](super::target::ExtractTarget::file) to the copy that
+/// reads the entry. Until the classification track fills it
+/// in, [`classify`](Self::classify) maps a [`CopyError`] exactly as
+/// [`ArchiveError::from`] does.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadFaults<'a> {
+    #[expect(dead_code, reason = "read by the classification of decoder errors")]
+    tap: Option<&'a SourceTap>,
+    #[expect(dead_code, reason = "read by the classification of decoder errors")]
+    family: ReadFamily,
+}
+
+impl<'a> ReadFaults<'a> {
+    /// The faults of an entry read by `family`, with the source's tap when it
+    /// has one.
+    #[must_use]
+    pub const fn new(family: ReadFamily, tap: Option<&'a SourceTap>) -> Self {
+        Self { tap, family }
+    }
+
+    /// Maps the failure of a copy to the error extraction reports.
+    #[must_use]
+    #[expect(
+        clippy::unused_self,
+        reason = "the classification track reads the tap and the family"
+    )]
+    pub fn classify(self, error: CopyError) -> ArchiveError {
+        ArchiveError::from(error)
+    }
+}
+
 /// An I/O error as the source raised it: kind, errno and message.
 #[derive(Debug, Clone)]
 struct RecordedFault {

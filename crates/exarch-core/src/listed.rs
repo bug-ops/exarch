@@ -52,6 +52,7 @@ use crate::Staging;
 use crate::api::extract_staged;
 use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
+use crate::closed_enum::closed_enum;
 use crate::config::ExtractionOptions;
 use crate::formats::common::open_archive;
 use crate::formats::compression::CompressionCodec;
@@ -183,6 +184,30 @@ impl ListedExtractOptions {
     }
 }
 
+closed_enum! {
+    /// What [`ListedArchive::check_destination`] requires of the paths the
+    /// extraction would write.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DestinationCheck;
+    ///
+    /// assert_eq!(DestinationCheck::Vacant.as_str(), "vacant");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum DestinationCheck {
+        /// Every file or link landing must be empty and every directory landing
+        /// must be a directory (a refuse-existing run).
+        Vacant => "vacant",
+
+        /// Only landings that must be directories are checked (an overwrite
+        /// run).
+        Replaceable => "replaceable",
+    }
+}
+
 /// An archive that was listed and is ready to extract without decoding it
 /// again where that is possible.
 ///
@@ -255,6 +280,39 @@ impl ListedArchive {
     #[cfg(test)]
     const fn has_spool(&self) -> bool {
         matches!(self.kept, Kept::TarSpool(_))
+    }
+
+    /// Refuses a destination that the write phase would refuse, with the same
+    /// typed error, before anything is written.
+    ///
+    /// [`DestinationCheck::Vacant`] requires every file or link landing to be
+    /// empty and every directory landing to be a directory;
+    /// [`DestinationCheck::Replaceable`] checks only the landings that must be
+    /// directories. A refusal is
+    /// [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
+    /// naming the occupied landings, or the typed symlink refusal when an
+    /// existing symlink would be followed out of `dest`.
+    ///
+    /// The check is advisory: the write itself decides again, so a path that
+    /// appears after the check is still handled by
+    /// [`ExistingFiles`](crate::ExistingFiles).
+    ///
+    /// # Errors
+    ///
+    /// Until the staging track implements the check this refuses every call
+    /// with
+    /// [`ArchiveError::InvalidConfiguration`](crate::ArchiveError::InvalidConfiguration)
+    /// naming [`ConfigSetting::OutputPath`](crate::ConfigSetting::OutputPath)
+    /// with [`ConfigProblem::NotSupported`](crate::ConfigProblem::NotSupported),
+    /// so no caller can mistake the missing check for a passed one.
+    pub fn check_destination(&self, dest: &Path, check: DestinationCheck) -> Result<()> {
+        // TODO(review): implement through handle-relative landings in the
+        // staging track; the interim refusal fails closed.
+        let _ = (dest, check);
+        Err(crate::ArchiveError::InvalidConfiguration {
+            setting: crate::ConfigSetting::OutputPath,
+            problem: crate::ConfigProblem::NotSupported,
+        })
     }
 
     /// What the list pass found in the archive.

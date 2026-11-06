@@ -861,7 +861,7 @@ mod tests {
     /// The text of each `one_of_each` row, in order; byte-identical to the
     /// pre-typing messages (verified by the security audit), and callers match
     /// on them, so a wording change must be a deliberate edit here.
-    const EXPECTED_TEXT: [&str; 43] = [
+    const EXPECTED_TEXT: [&str; 44] = [
         "empty path not allowed",
         "path contains null bytes: p",
         "path contains null bytes - potential security issue",
@@ -899,6 +899,7 @@ mod tests {
         "decompressed size exceeded the declared uncompressed size of 1 bytes",
         "decompressed size (2 bytes) does not match the declared uncompressed size (1 bytes)",
         "hardlink target changed while it was being copied",
+        "the destination changed while it was being replaced",
         "TAR metadata read budget exceeded: more than 1 bytes read while searching for the next archive entry (long-name/long-link/PAX headers, or a run of GNU sparse extension blocks)",
         "TAR cumulative synthetic-byte drain budget exceeded: more than 1 bytes of synthesized (unbacked) padding drained from unread entries across this archive",
         "symlinks are not supported on this platform",

@@ -86,12 +86,13 @@ impl OptionalProgress<'_> {
 /// use exarch_core::ExtractionOptions;
 /// use exarch_core::NoopProgress;
 /// use exarch_core::SecurityConfig;
+/// use exarch_core::Staging;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = SecurityConfig::default();
 /// let mut progress = NoopProgress;
 /// let report = ExtractRequest::new(&config)
-///     .with_options(ExtractionOptions::default().with_staging(crate::Staging::Atomic))
+///     .with_options(ExtractionOptions::default().with_staging(Staging::Atomic))
 ///     .with_progress(&mut progress)
 ///     .extract("archive.tar.gz", "/tmp/output")?;
 /// println!("Extracted {} files", report.files_extracted);

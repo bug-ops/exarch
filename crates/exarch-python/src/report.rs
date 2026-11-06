@@ -1319,7 +1319,7 @@ mod tests {
 
     #[test]
     fn test_archive_manifest_properties() {
-        use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
         for (name, size) in [("file1.txt", 100), ("file2.txt", 200)] {
@@ -1429,7 +1429,9 @@ mod tests {
 
     #[test]
     fn test_pyi_literal_aliases_match_core_enums() {
+        use exarch_core::ArchiveType;
         use exarch_core::ConfigSetting;
+        use exarch_core::CreatableFormat;
         use exarch_core::ErrorCode;
         use exarch_core::IntegrityStatus;
         use exarch_core::InvalidArchiveSubCode;
@@ -1442,8 +1444,6 @@ mod tests {
         use exarch_core::SubCode;
         use exarch_core::UnverifiedReason;
         use exarch_core::ZipConsistencyPolicy;
-        use exarch_core::formats::detect::ArchiveType;
-        use exarch_core::formats::detect::CreatableFormat;
         use exarch_core::inspection::CheckStatus;
         use exarch_core::inspection::IssueCategory;
         use exarch_core::inspection::IssueSeverity;

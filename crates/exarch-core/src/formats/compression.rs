@@ -42,7 +42,7 @@ use crate::formats::zstd_window::ZstdWindowLog;
 /// # Examples
 ///
 /// ```
-/// use exarch_core::formats::compression::CompressionCodec;
+/// use exarch_core::CompressionCodec;
 ///
 /// // Choose codec based on requirements
 /// let fast_codec = CompressionCodec::Gzip; // Fast compression
@@ -157,7 +157,7 @@ impl CompressionCodec {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::formats::compression::CompressionCodec;
+    /// use exarch_core::CompressionCodec;
     ///
     /// assert_eq!(CompressionCodec::Gzip.extension(), "tar.gz");
     /// assert_eq!(CompressionCodec::Bzip2.extension(), "tar.bz2");
@@ -260,7 +260,7 @@ impl CompressionCodec {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::formats::compression::CompressionCodec;
+    /// use exarch_core::CompressionCodec;
     ///
     /// assert_eq!(CompressionCodec::Gzip.name(), "gzip");
     /// assert_eq!(CompressionCodec::Bzip2.name(), "bzip2");

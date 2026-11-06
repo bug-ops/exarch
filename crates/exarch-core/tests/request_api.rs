@@ -10,6 +10,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 use exarch_core::ArchiveReader;
+use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
 use exarch_core::CreationConfig;
 use exarch_core::ExtractRequest;
@@ -23,7 +24,6 @@ use exarch_core::SinkExtractRequest;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
-use exarch_core::formats::detect::CreatableFormat;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use sink_support::tar_archive;

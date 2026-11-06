@@ -74,11 +74,11 @@ impl VerificationReport {
     ///
     /// use exarch_core::ArchiveEntry;
     /// use exarch_core::ArchiveManifest;
+    /// use exarch_core::ArchiveType;
     /// use exarch_core::ManifestEntryKind;
     /// use exarch_core::Uncompressed;
     /// use exarch_core::VerificationReport;
     /// use exarch_core::VerificationStatus;
-    /// use exarch_core::formats::detect::ArchiveType;
     ///
     /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
     /// let kind = ManifestEntryKind::File {

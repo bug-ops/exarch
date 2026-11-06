@@ -17,6 +17,7 @@ use std::sync::atomic::Ordering;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::CompressionCodec;
 use exarch_core::DecompressionBudget;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
@@ -32,7 +33,6 @@ use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
 use exarch_core::ZipBombScope;
-use exarch_core::formats::CompressionCodec;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use flate2::Compression;

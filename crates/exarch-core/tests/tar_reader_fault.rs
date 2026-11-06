@@ -13,6 +13,7 @@ use std::io::Write as _;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::CompressionCodec;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::ListOptions;
@@ -24,7 +25,6 @@ use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
 use exarch_core::VerificationOptions;
 use exarch_core::VerifyRequest;
-use exarch_core::formats::CompressionCodec;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 

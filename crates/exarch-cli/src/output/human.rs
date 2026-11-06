@@ -757,8 +757,8 @@ mod tests {
 
     fn sample_manifest() -> ArchiveManifest {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut file = ArchiveEntry::new(
             std::path::PathBuf::from("file.txt"),
@@ -831,8 +831,8 @@ mod tests {
     #[test]
     fn format_manifest_long_marks_links_without_a_target() {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
         for (path, target) in [
@@ -891,8 +891,8 @@ mod tests {
     #[test]
     fn format_manifest_long_shows_hardlink_target() {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut hard = ArchiveEntry::new(
             std::path::PathBuf::from("hard.txt"),
@@ -921,8 +921,8 @@ mod tests {
 
     fn sample_verification_report() -> VerificationReport {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         for i in 0..5 {
@@ -980,7 +980,7 @@ mod tests {
 
     fn hostile_manifest() -> ArchiveManifest {
         use exarch_core::ArchiveEntry;
-        use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         manifest

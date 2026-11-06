@@ -802,8 +802,8 @@ mod tests {
 
     fn sample_manifest() -> ArchiveManifest {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut entry = ArchiveEntry::new(
             PathBuf::from("file.txt"),
@@ -842,8 +842,8 @@ mod tests {
     #[test]
     fn format_verification_report_writes_full_report() {
         use exarch_core::ArchiveEntry;
+        use exarch_core::ArchiveType;
         use exarch_core::ManifestEntryKind;
-        use exarch_core::formats::detect::ArchiveType;
 
         let mut f = JsonFormatter::with_writer(Vec::new());
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn long_listing_reports_every_link_state_and_none_for_other_entries() {
         use exarch_core::ArchiveEntry;
-        use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
         let kinds = [

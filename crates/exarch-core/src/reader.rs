@@ -94,8 +94,8 @@ pub(crate) enum Source<'a> {
 ///
 /// ```
 /// use exarch_core::ArchiveReader;
+/// use exarch_core::ArchiveType;
 /// use exarch_core::SeekableFormat;
-/// use exarch_core::formats::detect::ArchiveType;
 /// use std::io::Cursor;
 ///
 /// let tar = ArchiveReader::tar(Cursor::new(Vec::<u8>::new()), None);
@@ -155,7 +155,7 @@ impl<'a> ArchiveReader<'a> {
     ///
     /// ```
     /// use exarch_core::ArchiveReader;
-    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::ArchiveType;
     /// use std::io::Cursor;
     ///
     /// let reader = ArchiveReader::of_type(Cursor::new(Vec::<u8>::new()), ArchiveType::TarGz);
@@ -180,7 +180,7 @@ impl<'a> ArchiveReader<'a> {
     ///
     /// ```
     /// use exarch_core::ArchiveReader;
-    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::ArchiveType;
     ///
     /// let tar = ArchiveReader::of_stream(&b""[..], ArchiveType::TarGz)?;
     /// assert_eq!(tar.format(), ArchiveType::TarGz);
@@ -207,7 +207,7 @@ impl<'a> ArchiveReader<'a> {
     ///
     /// ```
     /// use exarch_core::ArchiveReader;
-    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::ArchiveType;
     ///
     /// let bytes = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec();
     /// let detected = ArchiveReader::from_bytes(bytes.clone(), None)?;
@@ -254,7 +254,7 @@ impl<'a> ArchiveReader<'a> {
     ///
     /// ```
     /// use exarch_core::ArchiveReader;
-    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::ArchiveType;
     /// use std::io::Cursor;
     ///
     /// let empty_zip = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";

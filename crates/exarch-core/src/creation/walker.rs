@@ -182,11 +182,7 @@ impl<'a> FilteredWalker<'a> {
         // Check file size limit (only for regular files)
         let size = get_file_size(&metadata);
         if entry_type == EntryType::File && !self.config.max_file_size.admits(size) {
-            let shown = if relative.is_empty() {
-                path
-            } else {
-                relative
-            };
+            let shown = if relative.is_empty() { path } else { relative };
             return Ok(Some(WalkItem::Skipped(Skip::new(
                 SkipKind::OverMaxFileSize,
                 shown,

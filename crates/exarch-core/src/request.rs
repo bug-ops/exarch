@@ -625,10 +625,10 @@ pub enum OutputFormat {
 /// # Examples
 ///
 /// ```
+/// use exarch_core::CreatableFormat;
 /// use exarch_core::OutputFile;
 /// use exarch_core::OutputFormat;
 /// use exarch_core::OutputPolicy;
-/// use exarch_core::formats::detect::CreatableFormat;
 ///
 /// let out = OutputFile::replace("backup.tar.gz");
 /// assert_eq!(out.policy(), OutputPolicy::Replace);
@@ -818,9 +818,9 @@ impl<'a> CreateRequest<'a> {
     ///
     /// ```
     /// use exarch_core::ArchiveWriter;
+    /// use exarch_core::CompressionCodec;
     /// use exarch_core::CreateRequest;
     /// use exarch_core::CreationConfig;
-    /// use exarch_core::formats::CompressionCodec;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let src = tempfile::tempdir()?;
@@ -859,9 +859,9 @@ impl<'a> CreateRequest<'a> {
     /// # Examples
     ///
     /// ```
+    /// use exarch_core::CreatableFormat;
     /// use exarch_core::CreateRequest;
     /// use exarch_core::CreationConfig;
-    /// use exarch_core::formats::detect::CreatableFormat;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let src = tempfile::tempdir()?;

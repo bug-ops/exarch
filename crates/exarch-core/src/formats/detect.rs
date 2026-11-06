@@ -94,8 +94,8 @@ closed_enum! {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::formats::detect::ArchiveType;
-    /// use exarch_core::formats::detect::CreatableFormat;
+    /// use exarch_core::ArchiveType;
+    /// use exarch_core::CreatableFormat;
     ///
     /// assert_eq!(ArchiveType::from(CreatableFormat::TarGz), ArchiveType::TarGz);
     /// assert_eq!(
@@ -242,7 +242,7 @@ impl FromStr for CreatableFormat {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::formats::detect::CreatableFormat;
+    /// use exarch_core::CreatableFormat;
     ///
     /// assert_eq!(
     ///     "Zip".parse::<CreatableFormat>().unwrap(),
@@ -292,7 +292,7 @@ impl ArchiveType {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::ArchiveType;
     ///
     /// assert_eq!(ArchiveType::TarGz.extension(), "tar.gz");
     /// assert_eq!(ArchiveType::SevenZ.extension(), "7z");
@@ -315,7 +315,7 @@ impl ArchiveType {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::ArchiveType;
     ///
     /// assert!(ArchiveType::TarZst.is_tar());
     /// assert!(!ArchiveType::Zip.is_tar());

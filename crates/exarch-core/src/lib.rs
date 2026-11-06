@@ -122,6 +122,10 @@ pub use error::redaction::sanitize_io_error_for_error;
 /// Redacts a host-derived filesystem path for an FFI error message in
 /// release builds. Shared by `exarch-python` and `exarch-node`.
 pub use error::redaction::sanitize_path_for_error;
+pub use formats::CompressionCodec;
+pub use formats::detect::ArchiveType;
+pub use formats::detect::CreatableFormat;
+pub use formats::detect::detect_format;
 pub use limit::Limit;
 pub use limit::RatioLimit;
 pub use limit::non_zero_u64;

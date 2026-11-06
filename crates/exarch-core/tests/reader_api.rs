@@ -12,6 +12,7 @@ use std::io::Read;
 use std::io::Write;
 
 use exarch_core::ArchiveReader;
+use exarch_core::CompressionCodec;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::ListOptions;
@@ -21,7 +22,6 @@ use exarch_core::SeekableFormat;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
-use exarch_core::formats::compression::CompressionCodec;
 use exarch_core::list_archive;
 use sink_support::tar_archive;
 use sink_support::tar_dir;
@@ -193,7 +193,7 @@ fn verify_reader_matches_verify_archive_for_skip_and_decode_to_eof() {
 
 #[test]
 fn reader_format_reports_the_declared_type() {
-    use exarch_core::formats::detect::ArchiveType;
+    use exarch_core::ArchiveType;
     let formats: Vec<_> = cases()
         .iter()
         .map(|c| (c.make)(Vec::new()).format())

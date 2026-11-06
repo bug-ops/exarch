@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveReader;
+use exarch_core::ArchiveType;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::IntegrityStatus;
@@ -21,7 +22,6 @@ use exarch_core::SecurityConfig;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
-use exarch_core::formats::detect::ArchiveType;
 use sink_support::tar_archive;
 use sink_support::tar_file;
 use sink_support::zip_archive;

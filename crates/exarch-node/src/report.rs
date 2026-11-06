@@ -1,9 +1,9 @@
 //! Node.js bindings for `ExtractionReport`.
 
+use exarch_core::ArchiveType as CoreArchiveType;
+use exarch_core::CreatableFormat as CoreCreatableFormat;
 use exarch_core::Durability as CoreDurability;
 use exarch_core::ExtractionReport as CoreReport;
-use exarch_core::formats::detect::ArchiveType as CoreArchiveType;
-use exarch_core::formats::detect::CreatableFormat as CoreCreatableFormat;
 use exarch_core::inspection::CheckStatus as CoreCheckStatus;
 use exarch_core::inspection::IntegrityGaps as CoreIntegrityGaps;
 use exarch_core::inspection::IntegrityStatus as CoreIntegrityStatus;
@@ -103,7 +103,7 @@ impl From<ArchiveType> for CoreArchiveType {
 }
 
 /// Archive format that can be created: `ArchiveType` without `'SevenZ'`.
-// Values must equal `exarch_core::formats::detect::CreatableFormat::NAMES`.
+// Values must equal `exarch_core::CreatableFormat::NAMES`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreatableFormat {
@@ -1500,9 +1500,8 @@ mod tests {
         let issue = VerificationIssue::try_from(core_issue).unwrap();
         assert_eq!(issue.category, IssueCategory::SecurityPolicy);
 
-        let mut manifest = exarch_core::inspection::ArchiveManifest::new(
-            exarch_core::formats::detect::ArchiveType::Tar,
-        );
+        let mut manifest =
+            exarch_core::inspection::ArchiveManifest::new(exarch_core::ArchiveType::Tar);
         manifest
             .add_entry(exarch_core::inspection::ArchiveEntry::new(
                 std::path::PathBuf::from("link"),

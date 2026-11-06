@@ -293,7 +293,7 @@ mod unix {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
 
-    use exarch_core::formats::detect::CreatableFormat;
+    use exarch_core::CreatableFormat;
 
     use super::*;
 

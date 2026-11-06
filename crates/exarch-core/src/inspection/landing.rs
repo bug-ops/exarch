@@ -42,9 +42,9 @@ use crate::types::SafeSymlink;
 /// ```
 /// use exarch_core::ArchiveEntry;
 /// use exarch_core::ArchiveManifest;
+/// use exarch_core::ArchiveType;
 /// use exarch_core::ManifestEntryKind;
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::formats::detect::ArchiveType;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
@@ -131,9 +131,9 @@ impl ArchiveManifest {
     /// ```
     /// use exarch_core::ArchiveEntry;
     /// use exarch_core::ArchiveManifest;
+    /// use exarch_core::ArchiveType;
     /// use exarch_core::ManifestEntryKind;
     /// use exarch_core::SecurityConfig;
-    /// use exarch_core::formats::detect::ArchiveType;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
@@ -185,11 +185,11 @@ impl ArchiveManifest {
     /// ```
     /// use exarch_core::ArchiveEntry;
     /// use exarch_core::ArchiveManifest;
+    /// use exarch_core::ArchiveType;
     /// use exarch_core::LandingKind;
     /// use exarch_core::ManifestEntryKind;
     /// use exarch_core::SecurityConfig;
     /// use exarch_core::Uncompressed;
-    /// use exarch_core::formats::detect::ArchiveType;
     /// use std::assert_matches;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {

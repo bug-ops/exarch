@@ -475,7 +475,7 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
             "creation for .{ext_lower} isn't supported: the format is ZIP-based but \
              requires extra structure (signing, manifests, ordering) that exarch \
              doesn't produce. Use .zip, or state the format with \
-             OutputFile::with_format(exarch_core::formats::detect::CreatableFormat::Zip) \
+             OutputFile::with_format(exarch_core::CreatableFormat::Zip) \
              to override."
         )));
     }

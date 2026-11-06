@@ -76,8 +76,8 @@ enum Destination<'a> {
 ///
 /// ```
 /// use exarch_core::ArchiveWriter;
-/// use exarch_core::formats::CompressionCodec;
-/// use exarch_core::formats::detect::CreatableFormat;
+/// use exarch_core::CompressionCodec;
+/// use exarch_core::CreatableFormat;
 /// use std::io::Cursor;
 ///
 /// let tar = ArchiveWriter::tar(Vec::<u8>::new(), Some(CompressionCodec::Gzip));
@@ -136,7 +136,7 @@ impl<'a> ArchiveWriter<'a> {
     ///
     /// ```
     /// use exarch_core::ArchiveWriter;
-    /// use exarch_core::formats::detect::CreatableFormat;
+    /// use exarch_core::CreatableFormat;
     /// use std::io::Cursor;
     ///
     /// let writer = ArchiveWriter::of_type(Cursor::new(Vec::<u8>::new()), CreatableFormat::TarZst);

@@ -13,7 +13,8 @@ binding, which show an escaped text form; use ``os.fsencode`` to get the raw
 bytes back. The in-memory functions refuse such names instead.
 
 The aliases ``AnyMemoryEntry``, ``AnyArchiveEntry``, ``AnyLinkTarget``,
-``AnyExtractionWarning``, ``AnyCreationWarning`` and ``ProgressCallbackFn`` are
+``AnyExtractionWarning``, ``AnyCreationWarning``, ``AnyEntryDisposition`` and
+``ProgressCallbackFn`` are
 importable at runtime as typing objects.
 """
 
@@ -345,6 +346,58 @@ class SecurityConfig:
         """
         ...
 
+    def add_include_pattern(self, pattern: str) -> SecurityConfig:
+        """
+        Adds an include pattern: only entries that match an include pattern (and
+        no exclude pattern) are extracted. Patterns use the grammar of
+        ``CreationConfig`` exclude patterns and match the normalized archive
+        path before any stripping. An include pattern that matches nothing fails
+        the extraction after the scan with ``InvalidConfigurationError``
+        (``setting == "entry_include"``, the unmatched ``patterns``); the files
+        already written stay (or are rolled back under an atomic ``staging``).
+
+        Order of operations: the name is validated, matched on its original
+        path, stripped or flattened, and the new name is validated again. The
+        selection applies alike to ``extract_archive*``, ``list_archive*``
+        (see ``ArchiveManifest.dispositions``) and ``verify_archive*``.
+
+        Raises:
+            InvalidConfigurationError: a refused pattern
+                (``setting == "entry_include"``).
+        """
+        ...
+
+    def add_exclude_pattern(self, pattern: str) -> SecurityConfig:
+        """
+        Adds an exclude pattern: a matching entry is not extracted, whatever the
+        include patterns say. A pattern that matches nothing is not an error.
+
+        Raises:
+            InvalidConfigurationError: a refused pattern
+                (``setting == "entry_exclude"``).
+        """
+        ...
+
+    def with_strip_components(self, count: int) -> SecurityConfig:
+        """
+        Drops ``count`` leading path components from every selected entry. An
+        entry the strip consumes entirely is skipped (``"stripped_away"``).
+        Replaces ``with_flatten``.
+
+        Raises:
+            InvalidConfigurationError: zero, a negative or non-integer value, or
+                one above ``max_path_depth`` (``setting == "strip_components"``).
+        """
+        ...
+
+    def with_flatten(self, flatten: bool = True) -> SecurityConfig:
+        """
+        Lands every regular file under the destination root by its final path
+        component only. Directories are skipped; a symlink or hardlink entry is
+        refused. Replaces ``with_strip_components``.
+        """
+        ...
+
     def build(self) -> SecurityConfig:
         """Finalizes the configuration."""
         ...
@@ -480,6 +533,40 @@ class SecurityConfig:
 
     @banned_path_components.setter
     def banned_path_components(self, value: list[str]) -> None: ...
+    @property
+    def include_patterns(self) -> list[str]:
+        """The include patterns, in the order added; empty means every entry is a candidate."""
+        ...
+
+    @include_patterns.setter
+    def include_patterns(self, value: list[str]) -> None: ...
+    @property
+    def exclude_patterns(self) -> list[str]:
+        """The exclude patterns, in the order added."""
+        ...
+
+    @exclude_patterns.setter
+    def exclude_patterns(self, value: list[str]) -> None: ...
+    @property
+    def strip_components(self) -> int | None:
+        """The number of leading components dropped, or ``None`` when no strip is set.
+
+        Assigning ``None`` removes a strip (a flatten stays).
+        """
+        ...
+
+    @strip_components.setter
+    def strip_components(self, value: int | None) -> None: ...
+    @property
+    def flatten(self) -> bool:
+        """Whether files land by their final component only.
+
+        Assigning ``True`` replaces a strip; ``False`` removes a flatten.
+        """
+        ...
+
+    @flatten.setter
+    def flatten(self, value: bool) -> None: ...
 
 @final
 class VerificationOptions:
@@ -1190,6 +1277,43 @@ class ArchiveManifest:
     def format(self) -> _ArchiveType:
         """Archive format."""
         ...
+
+    def dispositions(self, config: SecurityConfig | None = None) -> list[AnyEntryDisposition]:
+        """
+        What extraction would do with each entry the validation accepts: where it
+        lands, or why it is left out. The selection is the one the manifest was
+        listed with; ``config`` supplies only limits and policies (default: the
+        secure defaults). An entry the validation refuses is not reported.
+        """
+        ...
+
+class EntryDisposition:
+    """What extraction does with one listed entry (see ``AnyEntryDisposition``)."""
+
+    @property
+    def path(self) -> str:
+        """The entry's path in the archive."""
+        ...
+
+@final
+class ExtractDisposition(EntryDisposition):
+    """An entry that extraction writes."""
+
+    @property
+    def landing(self) -> str:
+        """Where it lands, relative to the destination, after any strip or flatten."""
+        ...
+
+@final
+class SkipDisposition(EntryDisposition):
+    """An entry that is validated but not extracted."""
+
+    @property
+    def kind(self) -> _SkipKind:
+        """Why it is left out."""
+        ...
+
+AnyEntryDisposition = ExtractDisposition | SkipDisposition
 
 @final
 class VerificationIssue:
@@ -2079,9 +2203,12 @@ class InvalidConfigurationError(ArchiveError, ValueError):
 
     Attributes:
         setting: The refused setting, or ``None`` when the refusal names none.
+        patterns: With ``setting == "entry_include"`` after an extraction, the
+            include patterns that matched no entry; ``None`` otherwise.
     """
 
     setting: _ConfigSetting | None
+    patterns: list[str] | None
 
 class InvalidCompressionLevelError(ArchiveError, ValueError):
     """A compression level is out of range (``code == "INVALID_COMPRESSION_LEVEL"``)."""

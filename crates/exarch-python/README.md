@@ -318,6 +318,9 @@ config = config.add_allowed_extension(".txt")  # Extension allowlist
 config = config.add_allowed_extension(".md")
 config.allowed_extensions = None  # allow every extension again; [] is refused
 config = config.add_banned_component("__MACOSX")  # Skip components
+config = config.add_include_pattern("src")  # Extract only matching entries...
+config = config.add_exclude_pattern("*.tmp")  # ...except these
+config = config.with_strip_components(1)  # Drop leading path components (or .with_flatten())
 config = config.with_allow_solid_archives(True)  # Allow solid 7z archives
 config = config.with_zip_consistency(
     "ignore"
@@ -328,6 +331,8 @@ config = config.with_parallel_decode_memory(
 # Each extract/verify call may start up to 16 worker threads and hold its own
 # lookahead, so concurrent calls multiply both.
 ```
+
+**Entry selection.** Include and exclude patterns, `strip_components` and `flatten` live in `SecurityConfig`, so `extract_archive*`, `list_archive*` and `verify_archive*` apply them identically (`manifest.dispositions()` shows where each listed entry lands or why it is skipped). Order of operations: the entry name is validated, matched against the patterns on its original (pre-strip) path, stripped or flattened, and the new name is validated again. An exclude pattern wins over an include pattern, an include pattern that matches nothing fails the extraction (`InvalidConfigurationError`, `setting == "entry_include"`, `patterns`), and `staging="atomic_replace"` refuses a selection.
 
 ## Security Features
 

@@ -844,6 +844,9 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCreationReport>()?;
     m.add_class::<PyArchiveManifest>()?;
     m.add_class::<PyArchiveEntry>()?;
+    m.add_class::<report::PyEntryDisposition>()?;
+    m.add_class::<report::PyExtractDisposition>()?;
+    m.add_class::<report::PySkipDisposition>()?;
     m.add_class::<report::PyArchiveFile>()?;
     m.add_class::<report::PyArchiveDirectory>()?;
     m.add_class::<report::PyArchiveSymlink>()?;
@@ -914,6 +917,10 @@ fn register_type_aliases(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "ArchiveSymlink",
             "ArchiveHardlink",
         ])?,
+    )?;
+    m.add(
+        "AnyEntryDisposition",
+        union_of(&["ExtractDisposition", "SkipDisposition"])?,
     )?;
     m.add(
         "AnyExtractionWarning",

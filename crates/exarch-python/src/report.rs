@@ -1,6 +1,7 @@
 //! Python bindings for report types.
 
 use exarch_core::ConfigSetting;
+use exarch_core::Disposition;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
@@ -22,6 +23,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::buffer::parse_one;
+use crate::config::PySecurityConfig;
 use crate::warning::creation_warnings;
 use crate::warning::extraction_warnings;
 
@@ -685,6 +687,28 @@ impl PyArchiveManifest {
         self.inner.format().as_str().to_owned()
     }
 
+    /// What extraction would do with each entry the validation accepts: where
+    /// it lands, or why it is left out.
+    ///
+    /// The selection is the one the manifest was listed with (the
+    /// `SecurityConfig` passed to `list_archive`); `config` supplies only the
+    /// limits and policies, `None` meaning the secure defaults. An entry the
+    /// validation refuses is not reported.
+    #[pyo3(signature = (config=None))]
+    fn dispositions(
+        &self,
+        py: Python<'_>,
+        config: Option<PyRef<'_, PySecurityConfig>>,
+    ) -> PyResult<Vec<Py<PyEntryDisposition>>> {
+        let config = PySecurityConfig::snapshot(config);
+        self.inner
+            .dispositions(&config)
+            .map(|(entry, disposition)| {
+                PyEntryDisposition::into_py(py, entry.path.clone(), disposition)
+            })
+            .collect()
+    }
+
     fn __str__(&self) -> String {
         format!(
             "ArchiveManifest(entries={}, total_size={} bytes, format={})",
@@ -702,6 +726,88 @@ impl PyArchiveManifest {
 impl From<ArchiveManifest> for PyArchiveManifest {
     fn from(inner: ArchiveManifest) -> Self {
         Self { inner }
+    }
+}
+
+/// What extraction does with one listed entry.
+///
+/// The concrete class tells which: `ExtractDisposition` (the entry lands at
+/// `landing`) or `SkipDisposition` (the entry is validated but left out, for
+/// `kind`).
+///
+/// # Attributes
+///
+/// * `path` - The entry's path in the archive
+#[pyclass(name = "EntryDisposition", subclass, frozen)]
+pub struct PyEntryDisposition {
+    path: PathBuf,
+}
+
+#[pymethods]
+impl PyEntryDisposition {
+    #[getter]
+    fn path(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
+}
+
+/// An entry that extraction writes.
+///
+/// # Attributes
+///
+/// * `landing` - Where it lands, relative to the destination, after any strip
+///   or flatten
+#[pyclass(name = "ExtractDisposition", extends = PyEntryDisposition, frozen)]
+pub struct PyExtractDisposition {
+    landing: PathBuf,
+}
+
+#[pymethods]
+impl PyExtractDisposition {
+    #[getter]
+    fn landing(&self) -> &OsStr {
+        self.landing.as_os_str()
+    }
+}
+
+/// An entry that is validated but not extracted.
+///
+/// # Attributes
+///
+/// * `kind` - Why: `"not_selected"`, `"stripped_away"`,
+///   `"extension_not_allowed"`, ...
+#[pyclass(name = "SkipDisposition", extends = PyEntryDisposition, frozen)]
+pub struct PySkipDisposition {
+    kind: SkipKind,
+}
+
+#[pymethods]
+impl PySkipDisposition {
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind.as_str()
+    }
+}
+
+impl PyEntryDisposition {
+    fn into_py(py: Python<'_>, path: PathBuf, disposition: Disposition) -> PyResult<Py<Self>> {
+        let init = PyClassInitializer::from(Self { path });
+        match disposition {
+            Disposition::Extract(landing) => Bound::new(
+                py,
+                init.add_subclass(PyExtractDisposition {
+                    landing: landing.into_path_buf(),
+                }),
+            )
+            .map(|d| d.into_super().unbind()),
+            Disposition::Skip(kind) => {
+                Bound::new(py, init.add_subclass(PySkipDisposition { kind }))
+                    .map(|d| d.into_super().unbind())
+            }
+            _ => Err(PyRuntimeError::new_err(
+                "exarch-python is older than exarch-core: unknown entry disposition",
+            )),
+        }
     }
 }
 

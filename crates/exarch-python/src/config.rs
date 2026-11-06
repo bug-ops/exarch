@@ -5,6 +5,8 @@ use exarch_core::ArchiveError;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::DecompressionBudget;
+use exarch_core::EntryPattern;
+use exarch_core::EntrySelection;
 use exarch_core::ExistingFiles;
 use exarch_core::Extension;
 use exarch_core::ExtensionFilter;
@@ -13,11 +15,13 @@ use exarch_core::IntegrityCheck;
 use exarch_core::Limit;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
+use exarch_core::PathRewrite;
 use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
 use exarch_core::RequestedLevel;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::Staging;
+use exarch_core::StripComponents;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::creation::CompressionLevel;
@@ -473,6 +477,79 @@ impl PySecurityConfig {
         Ok(slf)
     }
 
+    /// Adds an include pattern: only entries that match an include pattern (and
+    /// no exclude pattern) are extracted, listed as extracted and verified as
+    /// extracted.
+    ///
+    /// Patterns use the grammar of `CreationConfig` exclude patterns and are
+    /// matched against the normalized archive path before any stripping. An
+    /// include pattern that matches nothing fails the extraction after the scan
+    /// with `InvalidConfigurationError` (`setting == "entry_include"`, with the
+    /// unmatched `patterns`).
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "entry_include"`) for a refused
+    /// pattern.
+    fn add_include_pattern<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        pattern: &str,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner = slf
+            .inner
+            .clone()
+            .try_add_include(pattern)
+            .map_err(convert_error)?;
+        Ok(slf)
+    }
+
+    /// Adds an exclude pattern: a matching entry is not extracted, whatever the
+    /// include patterns say. A pattern that matches nothing is not an error.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "entry_exclude"`) for a refused
+    /// pattern.
+    fn add_exclude_pattern<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        pattern: &str,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner = slf
+            .inner
+            .clone()
+            .try_add_exclude(pattern)
+            .map_err(convert_error)?;
+        Ok(slf)
+    }
+
+    /// Drops this many leading path components from every selected entry.
+    ///
+    /// Order of operations: the entry name is validated, matched against the
+    /// include and exclude patterns on its original path, stripped, and the
+    /// stripped name is validated again. An entry the strip consumes entirely
+    /// is skipped (`"stripped_away"`). Replaces `with_flatten`.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "strip_components"`) for zero,
+    /// a negative or non-integer value, or one above `max_path_depth`.
+    fn with_strip_components(
+        mut slf: PyRefMut<'_, Self>,
+        count: PyInteger,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.try_set_strip_components(Some(count))?;
+        Ok(slf)
+    }
+
+    /// Lands every regular file under the destination root by its final path
+    /// component only. Directories are skipped; a symlink or hardlink entry is
+    /// refused. Replaces `with_strip_components`.
+    #[pyo3(signature = (flatten=true))]
+    fn with_flatten(mut slf: PyRefMut<'_, Self>, flatten: bool) -> PyRefMut<'_, Self> {
+        slf.set_flatten(flatten);
+        slf
+    }
+
     /// Finalizes the configuration (for API consistency).
     ///
     /// This method is provided for builder pattern consistency but is optional.
@@ -700,6 +777,83 @@ impl PySecurityConfig {
         Ok(())
     }
 
+    /// The include patterns, in the order they were added. Empty means every
+    /// entry is a candidate.
+    #[getter]
+    fn get_include_patterns(&self) -> Vec<String> {
+        self.inner
+            .selection
+            .include()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Replaces the include patterns; an empty list removes them.
+    #[setter]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 setters receive the extracted list by value"
+    )]
+    fn set_include_patterns(&mut self, value: Vec<String>) -> PyResult<()> {
+        let include = parse_entry_patterns(ConfigSetting::EntryInclude, &value)?;
+        let exclude = self.inner.selection.exclude().to_vec();
+        self.inner.selection = rebuilt_selection(&self.inner.selection, include, exclude);
+        Ok(())
+    }
+
+    /// The exclude patterns, in the order they were added.
+    #[getter]
+    fn get_exclude_patterns(&self) -> Vec<String> {
+        self.inner
+            .selection
+            .exclude()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Replaces the exclude patterns; an empty list removes them.
+    #[setter]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 setters receive the extracted list by value"
+    )]
+    fn set_exclude_patterns(&mut self, value: Vec<String>) -> PyResult<()> {
+        let exclude = parse_entry_patterns(ConfigSetting::EntryExclude, &value)?;
+        let include = self.inner.selection.include().to_vec();
+        self.inner.selection = rebuilt_selection(&self.inner.selection, include, exclude);
+        Ok(())
+    }
+
+    /// How many leading components are dropped, or `None` when no strip is set.
+    #[getter]
+    fn get_strip_components(&self) -> Option<usize> {
+        match self.inner.selection.rewrite() {
+            PathRewrite::Strip(strip) => Some(strip.get().get()),
+            _ => None,
+        }
+    }
+
+    /// Sets the strip count; `None` removes a strip (a flatten stays).
+    #[setter]
+    fn set_strip_components(&mut self, value: Option<PyInteger>) -> PyResult<()> {
+        self.try_set_strip_components(value)
+    }
+
+    /// Whether files land by their final component only.
+    #[getter]
+    fn get_flatten(&self) -> bool {
+        self.inner.selection.rewrite() == PathRewrite::Flatten
+    }
+
+    /// `True` flattens (replacing a strip); `False` removes a flatten (a strip
+    /// stays).
+    #[setter(flatten)]
+    fn set_flatten_property(&mut self, value: bool) {
+        self.set_flatten(value);
+    }
+
     /// Returns a debug string representation.
     ///
     /// # Performance
@@ -716,6 +870,32 @@ impl PySecurityConfig {
             self.inner.max_path_depth
         )
     }
+}
+
+/// Parses entry patterns, each refused one naming `setting`.
+fn parse_entry_patterns(
+    setting: ConfigSetting,
+    patterns: &[String],
+) -> PyResult<Vec<EntryPattern>> {
+    patterns
+        .iter()
+        .map(|pattern| EntryPattern::parse_for(setting, pattern).map_err(convert_error))
+        .collect()
+}
+
+/// A selection with the rewrite of `current` and the given patterns.
+fn rebuilt_selection(
+    current: &EntrySelection,
+    include: Vec<EntryPattern>,
+    exclude: Vec<EntryPattern>,
+) -> EntrySelection {
+    let selection = EntrySelection::default().with_rewrite(current.rewrite());
+    let selection = include
+        .into_iter()
+        .fold(selection, EntrySelection::with_include);
+    exclude
+        .into_iter()
+        .fold(selection, EntrySelection::with_exclude)
 }
 
 /// Maps the Python value of `parallel_decode_memory` (`None` or a positive
@@ -748,6 +928,34 @@ impl PySecurityConfig {
     /// `RuntimeError: Already borrowed`.
     pub fn snapshot(config: Option<PyRef<'_, Self>>) -> CoreSecurityConfig {
         config.map_or_else(CoreSecurityConfig::default, |c| c.inner.clone())
+    }
+
+    /// Shared by the builder and the property setter of `strip_components`.
+    /// `None` removes a strip; a flatten is left alone.
+    fn try_set_strip_components(&mut self, count: Option<PyInteger>) -> PyResult<()> {
+        let rewrite = match count {
+            Some(count) => {
+                let count = count.positive(ConfigSetting::StripComponents)?;
+                PathRewrite::Strip(
+                    StripComponents::new(count, self.inner.max_path_depth)
+                        .map_err(convert_error)?,
+                )
+            }
+            None if self.inner.selection.rewrite() == PathRewrite::Flatten => PathRewrite::Flatten,
+            None => PathRewrite::Keep,
+        };
+        self.inner.selection = self.inner.selection.clone().with_rewrite(rewrite);
+        Ok(())
+    }
+
+    /// Shared by the builder and the property setter of `flatten`.
+    fn set_flatten(&mut self, flatten: bool) {
+        let rewrite = match (flatten, self.inner.selection.rewrite()) {
+            (true, _) => PathRewrite::Flatten,
+            (false, PathRewrite::Flatten) => PathRewrite::Keep,
+            (false, other) => other,
+        };
+        self.inner.selection = self.inner.selection.clone().with_rewrite(rewrite);
     }
 
     /// Shared by the builder and the property setter of

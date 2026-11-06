@@ -114,7 +114,7 @@ static SOURCE_NOT_ACCESSIBLE: DualClass =
 static INVALID_CONFIGURATION: DualClass = DualClass::new(
     "InvalidConfigurationError",
     PyValueError::type_object,
-    &["setting"],
+    &["setting", "patterns"],
 );
 static INVALID_COMPRESSION_LEVEL: DualClass = DualClass::new(
     "InvalidCompressionLevelError",
@@ -179,6 +179,7 @@ fn class_for(code: ErrorCode) -> Option<NewErr> {
 pub fn convert_error(err: CoreError) -> PyErr {
     let os_error = os_error_fields(&err);
     let conflicts = destination_conflicts(&err);
+    let patterns = unmatched_patterns(&err);
     let non_utf8_entry_path = non_utf8_entry_path(&err);
     let io_details = IoDetails::of(&err);
     let FfiErrorMessage {
@@ -213,6 +214,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
             kind.setting().map(exarch_core::ConfigSetting::as_str),
         );
         set_attr(&err, "conflicts", conflicts);
+        set_attr(&err, "patterns", patterns);
         set_attr(&err, "non_utf8_entry_path", non_utf8_entry_path);
         err
     };
@@ -310,6 +312,17 @@ fn destination_conflicts(err: &CoreError) -> Option<Vec<String>> {
                 .collect(),
         ),
         CoreError::PartialExtraction(partial) => destination_conflicts(partial.cause()),
+        _ => None,
+    }
+}
+
+/// The include patterns an extraction found no entry for.
+fn unmatched_patterns(err: &CoreError) -> Option<Vec<String>> {
+    match err {
+        CoreError::UnmatchedInclude { patterns } => {
+            Some(patterns.iter().map(ToString::to_string).collect())
+        }
+        CoreError::PartialExtraction(partial) => unmatched_patterns(partial.cause()),
         _ => None,
     }
 }

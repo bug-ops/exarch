@@ -42,8 +42,6 @@ mod inspection;
 mod limit;
 mod listed;
 mod path_text;
-#[cfg(test)]
-use exarch_testkit::raw_zip;
 #[allow(clippy::redundant_pub_crate)]
 mod reader;
 mod report;
@@ -60,6 +58,9 @@ pub(crate) mod test_utils;
 mod types;
 #[allow(clippy::redundant_pub_crate)]
 mod writer;
+
+#[cfg(test)]
+use exarch_testkit::raw_zip;
 
 // Re-export main API types
 pub use api::create_archive;
@@ -277,20 +278,29 @@ pub use types::SafePath;
 pub use types::SafeSymlink;
 
 #[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub use formats::detect::ZIP_FAMILY_ALIASES;
 #[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub use security::HardlinkTracker;
 #[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub use security::QuotaTracker;
 #[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub use security::sanitize_permissions;
 #[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub use security::validate_compression_ratio;
 #[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub use security::validate_path;
 #[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub use security::validate_symlink;
 #[cfg(all(feature = "testing", any(unix, target_os = "wasi")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub use types::Walked;
 #[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub use types::safe_path::is_windows_reserved_component;

@@ -739,6 +739,18 @@ pub enum ProgressCallbackError {
         /// The JS throw, attached as `cause`.
         source: Error,
     },
+    /// The JS progress callback threw during an extraction, listing or
+    /// verification, which core stopped at its next poll. A throw is the
+    /// callback's own failure, so it stays primary over the `Cancelled` it
+    /// caused.
+    CallbackCancelled {
+        /// The operation that was stopped.
+        operation: Operation,
+        /// The JS throw, attached as `cause`.
+        source: Error,
+        /// What the stop left behind, when the operation writes.
+        outcome: Option<PartialOutcome>,
+    },
     /// The JS progress callback threw while a listing itself succeeded; the
     /// manifest is discarded.
     ListCallback {
@@ -769,6 +781,53 @@ pub enum ProgressCallbackError {
         /// The signal's `reason`, attached as `cause`.
         reason: Option<Error>,
     },
+}
+
+/// The operation a JS progress callback ran under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    /// Extraction to disk or into a sink.
+    Extraction,
+    /// Archive creation.
+    Creation,
+    /// Listing.
+    Listing,
+    /// Verification.
+    Verification,
+}
+
+impl Operation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Extraction => "extraction",
+            Self::Creation => "creation",
+            Self::Listing => "listing",
+            Self::Verification => "verification",
+        }
+    }
+}
+
+impl ProgressCallbackError {
+    /// Merges a core failure with the JS throw seen in the same run.
+    ///
+    /// A core failure other than `Cancelled` stays primary so a throwing
+    /// callback never masks it. A `Cancelled` that a throw caused (core polls
+    /// `is_cancelled` between entries) becomes the callback's own failure.
+    pub fn merge(operation: Operation, source: CoreError, callback: Option<Error>) -> Self {
+        match callback {
+            Some(thrown) if source.is_cancelled() => match operation {
+                Operation::Creation => Self::CreationCancelled { source: thrown },
+                Operation::Extraction | Operation::Listing | Operation::Verification => {
+                    Self::CallbackCancelled {
+                        operation,
+                        source: thrown,
+                        outcome: source.into_ffi_message().partial,
+                    }
+                }
+            },
+            callback => Self::Core { source, callback },
+        }
+    }
 }
 
 /// Builds the JS `Error` for a failure on the JS thread.
@@ -946,6 +1005,26 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     io_kind: None,
                     non_utf8_entry_path: None,
                     details: Details::None,
+                    cause: Some(source),
+                },
+            },
+            ProgressCallbackError::CallbackCancelled {
+                operation,
+                source,
+                outcome,
+            } => Described {
+                description: format!(
+                    "progress callback threw, {} was cancelled",
+                    operation.as_str()
+                ),
+                props: ErrorProps {
+                    code: JsCode::ProgressCallback,
+                    relaxable_by: None,
+                    sub_code: None,
+                    setting: None,
+                    io_kind: None,
+                    non_utf8_entry_path: None,
+                    details: outcome.map_or(Details::None, Details::Extraction),
                     cause: Some(source),
                 },
             },
@@ -1182,6 +1261,13 @@ impl fmt::Display for Failure {
                 }
                 ProgressCallbackError::CreationCancelled { .. } => {
                     f.write_str("progress callback threw, creation was cancelled")
+                }
+                ProgressCallbackError::CallbackCancelled { operation, .. } => {
+                    write!(
+                        f,
+                        "progress callback threw, {} was cancelled",
+                        operation.as_str()
+                    )
                 }
                 ProgressCallbackError::ListCallback { .. } => {
                     f.write_str("progress callback threw after successful listing")
@@ -1880,6 +1966,87 @@ mod tests {
             callback: Some(Error::from_reason("boom")),
         }))
         .expect("callback errors are described");
+        assert_eq!(d.props.code.as_str(), "SYMLINK_ESCAPE");
+        assert!(d.props.cause.is_some());
+    }
+
+    fn cancelled_partial(writes: CorePartialWrites) -> CoreError {
+        let mut report = CoreExtractionReport::new();
+        report.files_extracted = 1;
+        CoreError::PartialExtraction(exarch_core::Partial::new(
+            CoreError::Cancelled,
+            report,
+            writes,
+        ))
+    }
+
+    fn merged(operation: Operation, source: CoreError, callback: Option<Error>) -> Described {
+        describe(Failure::from(ProgressCallbackError::merge(
+            operation, source, callback,
+        )))
+        .expect("callback errors are described")
+    }
+
+    #[test]
+    fn test_merge_cancelled_by_a_throw_is_the_callbacks_own_failure_with_the_partial_outcome() {
+        let d = merged(
+            Operation::Extraction,
+            cancelled_partial(CorePartialWrites::Kept),
+            Some(Error::from_reason("boom")),
+        );
+        assert_eq!(d.props.code, JsCode::ProgressCallback);
+        assert!(d.props.cause.is_some());
+        assert_eq!(d.description, "progress callback threw, extraction was cancelled");
+        let Details::Extraction(PartialOutcome::Kept(report)) = d.props.details else {
+            panic!("expected the kept outcome");
+        };
+        assert_eq!(report.files_extracted, 1);
+    }
+
+    #[test]
+    fn test_merge_cancelled_by_a_throw_during_a_read_only_operation_has_no_outcome() {
+        for operation in [Operation::Listing, Operation::Verification] {
+            let d = merged(operation, CoreError::Cancelled, Some(Error::from_reason("boom")));
+            assert_eq!(d.props.code, JsCode::ProgressCallback);
+            assert_matches!(d.props.details, Details::None);
+            assert!(d.description.contains(operation.as_str()), "{d:?}");
+        }
+    }
+
+    #[test]
+    fn test_merge_cancelled_creation_keeps_the_nothing_written_message() {
+        let d = merged(
+            Operation::Creation,
+            CoreError::Cancelled,
+            Some(Error::from_reason("boom")),
+        );
+        assert_eq!(d.props.code, JsCode::ProgressCallback);
+        assert!(d.description.contains("nothing was written"), "{d:?}");
+    }
+
+    #[test]
+    fn test_merge_cancelled_without_a_throw_is_core_cancelled() {
+        for operation in [
+            Operation::Extraction,
+            Operation::Creation,
+            Operation::Listing,
+            Operation::Verification,
+        ] {
+            let d = merged(operation, CoreError::Cancelled, None);
+            assert_eq!(d.props.code.as_str(), "CANCELLED", "{operation:?}");
+            assert!(d.props.cause.is_none());
+        }
+    }
+
+    #[test]
+    fn test_merge_never_masks_a_non_cancel_core_error_with_a_throw() {
+        let d = merged(
+            Operation::Extraction,
+            CoreError::SymlinkEscape {
+                path: PathBuf::from("ln"),
+            },
+            Some(Error::from_reason("boom")),
+        );
         assert_eq!(d.props.code.as_str(), "SYMLINK_ESCAPE");
         assert!(d.props.cause.is_some());
     }

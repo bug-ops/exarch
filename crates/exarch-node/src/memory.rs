@@ -28,6 +28,7 @@ use crate::config::CreationConfig;
 use crate::config::SecurityConfig;
 use crate::config::SinkOptions;
 use crate::error::Failure;
+use crate::error::Operation;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise;
@@ -260,6 +261,7 @@ impl<S: IntoSource> MemoryJob<S> {
         dispatch: ProgressDispatch,
     ) -> CoreResult<MemoryExtraction> {
         let (report, sink) = run_with_optional_progress(
+            Operation::Extraction,
             progress,
             dispatch,
             self.data.abort_handle(),

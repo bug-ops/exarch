@@ -23,6 +23,12 @@ function createValidArchive(archivePath, tempDir) {
   createArchiveSync(archivePath, [sourceDir]);
 }
 
+function extractedFiles(dir) {
+  return fs
+    .readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile());
+}
+
 describe('extractArchiveWithProgress', () => {
   let tempDir;
   let archivePath;
@@ -83,9 +89,11 @@ describe('extractArchiveWithProgress', () => {
     );
   });
 
-  // Regression test for the #465 follow-up: when the callback throws but
-  // extraction succeeded, the report must not be silently discarded — files
-  // really were written to disk and the caller may need to clean them up.
+  // Regression test for the #465 follow-up: when the callback throws, the
+  // report must not be silently discarded — files really were written to disk
+  // and the caller may need to clean them up. Core polls cancellation between
+  // entries, so the throw also stops the extraction after the entry it was
+  // raised for.
   it('preserves the extraction report when the callback throws', async () => {
     await assert.rejects(
       () =>
@@ -95,7 +103,7 @@ describe('extractArchiveWithProgress', () => {
       (err) => {
         assert.strictEqual(err.code, 'PROGRESS_CALLBACK_ERROR');
         assert.strictEqual(err.writes, 'kept');
-        assert.strictEqual(err.filesExtracted, 2);
+        assert.strictEqual(err.filesExtracted, 1);
         assert.strictEqual(typeof err.bytesWritten, 'number');
         assert.deepStrictEqual(err.warnings, []);
         // The throw's own text and stack must stay out of the message —
@@ -105,15 +113,16 @@ describe('extractArchiveWithProgress', () => {
         return true;
       }
     );
-    assert.ok(fs.existsSync(path.join(outputDir, 'hello.txt')));
+    assert.strictEqual(extractedFiles(outputDir).length, 1, 'the throw stops the extraction');
   });
 
   // Regression test for the #465 follow-up: a throwing progress callback must
   // not mask a core error. Callers grep the error-code prefix to detect
   // security violations, so the core error stays primary and the callback
-  // throw is reported alongside it.
+  // throw is reported alongside it. The oversized file fails on the same entry
+  // the callback threw for, before the next cancellation poll.
   it('surfaces the core error when the callback also throws', async () => {
-    const config = new SecurityConfig().setMaxFileCount(1);
+    const config = new SecurityConfig().setMaxFileSize(5);
 
     await assert.rejects(
       () =>
@@ -122,7 +131,6 @@ describe('extractArchiveWithProgress', () => {
         }),
       (err) => {
         assert.strictEqual(err.code, 'QUOTA_EXCEEDED');
-        assert.match(err.message, /file count/);
         assert.ok(!err.message.includes('boom from progress callback'));
         assert.strictEqual(err.cause.message, 'boom from progress callback');
         return true;
@@ -236,13 +244,13 @@ describe('extractArchiveWithProgress', () => {
         }),
       (err) => {
         assert.strictEqual(err.code, 'PROGRESS_CALLBACK_ERROR');
-        assert.strictEqual(err.filesExtracted, 2);
+        assert.strictEqual(err.filesExtracted, 1);
         assert.strictEqual(err.cause.message, 'progress callback threw a non-object value: oops');
         assert.strictEqual(err.cause.cause, 'oops');
         return true;
       }
     );
-    assert.ok(fs.existsSync(path.join(outputDir, 'hello.txt')));
+    assert.strictEqual(extractedFiles(outputDir).length, 1);
   });
 
   // Regression test for the #473 review: a non-function `progress` argument

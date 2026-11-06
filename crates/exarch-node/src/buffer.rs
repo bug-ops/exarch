@@ -13,6 +13,7 @@ use crate::ProgressDispatch;
 use crate::abort::AbortBinding;
 use crate::config::SecurityConfig;
 use crate::config::VerificationOptions;
+use crate::error::Operation;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise_with;
@@ -58,6 +59,7 @@ fn list_with_progress_core(
     dispatch: ProgressDispatch,
 ) -> CoreResult<ArchiveManifest> {
     run_with_optional_progress(
+        Operation::Listing,
         progress,
         dispatch,
         data.abort_handle(),
@@ -83,6 +85,7 @@ fn verify_with_progress_core(
     dispatch: ProgressDispatch,
 ) -> CoreResult<VerificationReport> {
     run_with_optional_progress(
+        Operation::Verification,
         progress,
         dispatch,
         data.abort_handle(),

@@ -101,6 +101,7 @@ use config::ExtractionOptions;
 use config::SecurityConfig;
 use config::VerificationOptions;
 use error::Failure;
+use error::Operation;
 use error::ProgressCallbackError;
 use error::run_sync;
 use error::spawn_blocking_promise;
@@ -209,7 +210,7 @@ const _: () = assert!(
 /// const report = await extractArchive('archive.tar.gz', '/tmp/output', config);
 ///
 /// // Customize extraction options
-/// const opts = new ExtractionOptions().withSkipDuplicates(false);
+/// const opts = new ExtractionOptions().withExistingFiles('overwrite');
 /// const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
 /// ```
 #[napi]
@@ -749,14 +750,11 @@ fn run_create_with_optional_progress(
                         report,
                     }))
                 }
-                (Err(error), Some(source)) if error.is_cancelled() => {
-                    Err(Box::new(ProgressCallbackError::CreationCancelled {
-                        source,
-                    }))
-                }
-                (Err(source), callback) => {
-                    Err(Box::new(ProgressCallbackError::Core { source, callback }))
-                }
+                (Err(source), callback) => Err(Box::new(ProgressCallbackError::merge(
+                    Operation::Creation,
+                    source,
+                    callback,
+                ))),
             }
         },
     )
@@ -1150,9 +1148,11 @@ fn run_extract_with_optional_progress(
                         report,
                     }))
                 }
-                (Err(source), callback) => {
-                    Err(Box::new(ProgressCallbackError::Core { source, callback }))
-                }
+                (Err(source), callback) => Err(Box::new(ProgressCallbackError::merge(
+                    Operation::Extraction,
+                    source,
+                    callback,
+                ))),
             }
         },
     )
@@ -1195,6 +1195,7 @@ struct NodeProgressAdapter {
 /// which receives the successful value so it can keep its counters; the value
 /// itself is discarded.
 fn run_with_optional_progress<T>(
+    operation: Operation,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
     abort: AbortHandle,
@@ -1209,12 +1210,9 @@ fn run_with_optional_progress<T>(
     match (result, adapter.into_callback_error()) {
         (Ok(value), None) => Ok(value),
         (Ok(value), Some(source)) => Err(Failure::Callback(Box::new(over_success(source, value)))),
-        (Err(Failure::Core(source)), callback) => {
-            Err(Failure::Callback(Box::new(ProgressCallbackError::Core {
-                source,
-                callback,
-            })))
-        }
+        (Err(Failure::Core(source)), callback) => Err(Failure::Callback(Box::new(
+            ProgressCallbackError::merge(operation, source, callback),
+        ))),
         (Err(other), _) => Err(other),
     }
 }
@@ -1300,7 +1298,7 @@ impl exarch_core::ProgressCallback for NodeProgressAdapter {
     fn on_complete(&mut self) {}
 
     fn is_cancelled(&mut self) -> bool {
-        self.callback_error.is_some()
+        self.callback_error.is_some() || self.abort.check().is_err()
     }
 }
 

@@ -159,7 +159,7 @@ describe('extraction error properties', () => {
 
   it('a failure before any write has no writes property', async () => {
     await assert.rejects(listArchive(path.join(tempDir, 'missing.tar')), (err) => {
-      assert.strictEqual(err.code, 'IO_ERROR');
+      assert.strictEqual(err.code, 'SOURCE_NOT_FOUND');
       assert.strictEqual(err.writes, undefined);
       assertDescriptionOnly(err);
       return true;
@@ -253,10 +253,19 @@ describe('subCode', () => {
 
 describe('ioKind', () => {
   it('an IO_ERROR keeps the kind core reported', async () => {
-    const missing = path.join(os.tmpdir(), 'exarch-node-missing', 'a.tar');
-    const err = await listArchive(missing).catch((e) => e);
-    assert.strictEqual(err.code, 'IO_ERROR');
-    assert.strictEqual(err.ioKind, 'NotFound');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-node-iokind-'));
+    try {
+      const directoryAsArchive = path.join(dir, 'dir.tar');
+      fs.mkdirSync(directoryAsArchive);
+      const err = await listArchive(directoryAsArchive).catch((e) => e);
+      assert.strictEqual(err.code, 'IO_ERROR');
+      assert.strictEqual(typeof err.ioKind, 'string');
+      if (process.platform !== 'win32') {
+        assert.strictEqual(err.ioKind, 'IsADirectory');
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('an error that is not an IO_ERROR carries no ioKind', async () => {

@@ -131,7 +131,7 @@ use crate::types::safe_path::has_null_bytes;
 /// # Ok(())
 /// # }
 /// ```
-pub fn list_archive<P: AsRef<Path>>(
+pub(crate) fn list_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {

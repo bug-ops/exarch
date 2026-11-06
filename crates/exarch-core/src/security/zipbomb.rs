@@ -43,6 +43,7 @@ pub struct Uncompressed(pub u64);
 /// # Errors
 ///
 /// Returns an error if the compression ratio exceeds the configured maximum.
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub fn validate_compression_ratio(
     compressed: Compressed,
     uncompressed: Uncompressed,
@@ -69,7 +70,10 @@ pub fn validate_compression_ratio(
 ///
 /// Returns [`ArchiveError::ZipBomb`] when the block claims data but no
 /// compressed bytes, or when the ratio exceeds the configured maximum.
-pub fn validate_solid_block_ratio(block: &SolidBlock, config: &SecurityConfig) -> Result<()> {
+pub(crate) fn validate_solid_block_ratio(
+    block: &SolidBlock,
+    config: &SecurityConfig,
+) -> Result<()> {
     check_ratio(
         ZipBombScope::SolidBlock,
         block.compressed,
@@ -92,7 +96,7 @@ pub fn validate_solid_block_ratio(block: &SolidBlock, config: &SecurityConfig) -
 ///
 /// Returns the error of [`validate_compression_ratio`] or
 /// [`validate_solid_block_ratio`].
-pub fn validate_entry_compression(
+pub(crate) fn validate_entry_compression(
     compression: &EntryCompression,
     uncompressed_size: Uncompressed,
     config: &SecurityConfig,
@@ -108,7 +112,11 @@ pub fn validate_entry_compression(
 
 /// Whether an entry of `uncompressed_size` bytes from `compressed_size` bytes
 /// is within `max_ratio`, by the same rule as [`validate_compression_ratio`].
-pub fn ratio_admitted(compressed: Compressed, uncompressed: Uncompressed, max_ratio: f64) -> bool {
+pub(crate) fn ratio_admitted(
+    compressed: Compressed,
+    uncompressed: Uncompressed,
+    max_ratio: f64,
+) -> bool {
     check_ratio(ZipBombScope::Entry, compressed, uncompressed, max_ratio).is_ok()
 }
 
@@ -136,14 +144,14 @@ fn check_ratio(
 /// which keeps per-entry compression-ratio checks anchored to real archive
 /// bytes.
 #[derive(Debug)]
-pub struct DeclaredCompressedBudget {
+pub(crate) struct DeclaredCompressedBudget {
     remaining: u64,
 }
 
 impl DeclaredCompressedBudget {
     /// Creates a budget of `data_region` bytes, the archive space that can
     /// hold compressed entry data.
-    pub const fn new(data_region: u64) -> Self {
+    pub(crate) const fn new(data_region: u64) -> Self {
         Self {
             remaining: data_region,
         }
@@ -155,7 +163,7 @@ impl DeclaredCompressedBudget {
     ///
     /// Returns [`ArchiveError::InvalidArchive`] when `declared` exceeds what
     /// is left of the budget.
-    pub fn charge(&mut self, declared: u64) -> Result<()> {
+    pub(crate) fn charge(&mut self, declared: u64) -> Result<()> {
         self.remaining = self
             .remaining
             .checked_sub(declared)

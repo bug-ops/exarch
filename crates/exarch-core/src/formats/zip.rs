@@ -471,7 +471,7 @@ impl<'a, R: Read + Seek> CheckedZip<'a, R> {
 /// - Selective decompression (only extract needed files)
 /// - Parallel decompression (future optimization)
 /// - Better compression ratio detection for zip bombs
-pub struct ZipArchive<R: Read + Seek> {
+pub(crate) struct ZipArchive<R: Read + Seek> {
     inner: ZipReader<Shared<R>>,
     structure: ZipStructure,
     /// The policy the census ran under and every operation enforces.
@@ -503,7 +503,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// - File is not a valid ZIP archive
     /// - Central directory is corrupted, or changes while it is being read
     /// - Archive is password-protected (rejected for security)
-    pub fn new(reader: R, config: &SecurityConfig) -> Result<Self> {
+    pub(crate) fn new(reader: R, config: &SecurityConfig) -> Result<Self> {
         Self::open_for(reader, config, DecodeReuse::Off)
     }
 

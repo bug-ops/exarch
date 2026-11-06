@@ -27,7 +27,7 @@ use crate::selection::EntryShape;
 ///   and refused on extraction.
 /// - **Hardlinks**: not detectable; extracted as separate files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SevenZClass {
+pub(crate) enum SevenZClass {
     /// A "delete this path" marker of an incremental update. Never extracted,
     /// validated, counted against quota or listed. Unlike `7z x`, which applies
     /// it as a deletion, exarch deliberately skips it: it applies no
@@ -41,7 +41,7 @@ pub enum SevenZClass {
 
 /// What a present 7z entry stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SevenZKind {
+pub(crate) enum SevenZKind {
     /// A regular file.
     File,
     /// A directory.
@@ -54,7 +54,7 @@ pub enum SevenZKind {
 
 /// Why a 7z entry is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnsupportedEntry {
+pub(crate) enum UnsupportedEntry {
     /// A FIFO, device node or socket.
     Special(SpecialFile),
     /// A Unix mode whose type bits name no defined file type.

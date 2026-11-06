@@ -341,7 +341,7 @@ impl BudgetState {
 /// both must wrap the *same* underlying reader passed to the *same*
 /// [`BudgetedEntries`] for the invariant to hold.
 #[derive(Clone)]
-pub struct TarReadBudget(Arc<BudgetState>);
+pub(crate) struct TarReadBudget(Arc<BudgetState>);
 
 impl TarReadBudget {
     /// Starts (or restarts) counting: `consumed = 0`, `allowance = limit`.
@@ -517,7 +517,7 @@ impl std::error::Error for SkippedEntriesExceeded {}
 /// memory than `max_decoder_memory` allows. Recovered via [`budget_violation`]
 /// and converted into `QuotaExceeded { DecoderMemory }`.
 #[derive(Debug)]
-pub struct DecoderMemoryExceeded {
+pub(crate) struct DecoderMemoryExceeded {
     pub max: u64,
 }
 
@@ -533,7 +533,7 @@ impl std::error::Error for DecoderMemoryExceeded {}
 /// its allowance admits. Recovered via [`budget_violation`] and converted into
 /// `QuotaExceeded { CompressedMembers }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CompressedMembersExceeded {
+pub(crate) struct CompressedMembersExceeded {
     /// The member that was refused, counting from one.
     pub members: u64,
     /// The most members the stream could have started at that point.
@@ -561,7 +561,7 @@ impl std::error::Error for CompressedMembersExceeded {}
 ///
 /// Returns `None` for any other error, so callers can fall back to their
 /// usual generic error mapping.
-pub fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
+pub(crate) fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(err) = current {
         if let Some(exceeded) = err.downcast_ref::<TarReadBudgetExceeded>() {
@@ -618,7 +618,7 @@ pub fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
 /// zero-length read would masquerade as clean end-of-archive to callers like
 /// `tar`'s own `try_read_all`, turning a budget trip into a silently
 /// truncated (but "successful") listing.
-pub struct BudgetedReader<R> {
+pub(crate) struct BudgetedReader<R> {
     inner: R,
     state: Arc<BudgetState>,
 }
@@ -673,7 +673,7 @@ impl<R: Read> Read for BudgetedReader<R> {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 #[must_use]
-pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, TarReadBudget) {
+pub(crate) fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, TarReadBudget) {
     let limit = NonZeroU64::new(limit).expect("a test budget is non-zero");
     budgeted_reader_with(inner, limit, TapSource::Opaque)
 }
@@ -693,7 +693,7 @@ pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, Tar
 // API), so a doctest importing it via `exarch_core::formats::...` would not
 // link — doctests only see the crate's public surface.
 #[must_use]
-pub fn budgeted_reader_with<R: Read>(
+pub(crate) fn budgeted_reader_with<R: Read>(
     inner: R,
     limit: NonZeroU64,
     source: TapSource,
@@ -727,29 +727,29 @@ pub fn budgeted_reader_with<R: Read>(
 /// Captured verbatim by [`BudgetedReader`] while the budget is armed, so its
 /// size is bounded by the metadata limit. `start` is the offset of the first
 /// byte from the beginning of the archive.
-pub struct MetadataWindow<'a> {
+pub(crate) struct MetadataWindow<'a> {
     start: u64,
     bytes: &'a [u8],
 }
 
 impl<'a> MetadataWindow<'a> {
     /// Wraps `bytes` that were read starting at offset `start`.
-    pub const fn new(start: u64, bytes: &'a [u8]) -> Self {
+    pub(crate) const fn new(start: u64, bytes: &'a [u8]) -> Self {
         Self { start, bytes }
     }
 
     /// Offset of the first captured byte from the start of the archive.
-    pub const fn start(&self) -> u64 {
+    pub(crate) const fn start(&self) -> u64 {
         self.start
     }
 
     /// The captured bytes.
-    pub const fn bytes(&self) -> &'a [u8] {
+    pub(crate) const fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
     /// Offset one past the last captured byte.
-    pub const fn end(&self) -> u64 {
+    pub(crate) const fn end(&self) -> u64 {
         self.start.saturating_add(self.bytes.len() as u64)
     }
 }
@@ -767,7 +767,7 @@ impl<'a> MetadataWindow<'a> {
 /// The guard is the *unchecked* state: it gives no access to the entry. The
 /// only way to a `tar::Entry` is [`check`](Self::check), which verifies the
 /// bytes `tar` consumed to reach it.
-pub struct TarEntryGuard<'a, 's, R: Read> {
+pub(crate) struct TarEntryGuard<'a, 's, R: Read> {
     entry: tar::Entry<'a, BudgetedReader<R>>,
     window_start: u64,
     budget: TarReadBudget,
@@ -787,7 +787,7 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
     ///
     /// The stream may then sit mid-entry, so the shared budget is marked and
     /// a later [`BudgetedEntries::next_entry`] refuses to read on.
-    pub fn abandon(&mut self) {
+    pub(crate) fn abandon(&mut self) {
         self.abandoned = true;
         self.budget.0.abandoned.store(true, Ordering::Relaxed);
     }
@@ -850,7 +850,7 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
     ///
     /// Returns [`crate::ArchiveError::InvalidArchive`] when the headers are
     /// ambiguous; the guard is then abandoned, as no further entry is read.
-    pub fn check(mut self, metadata_limit: u64) -> Result<CheckedTarEntry<'a, 's, R>> {
+    pub(crate) fn check(mut self, metadata_limit: u64) -> Result<CheckedTarEntry<'a, 's, R>> {
         let bytes = self.budget.take_window();
         let window = MetadataWindow::new(self.window_start, &bytes);
         let checked = check_entry_headers(
@@ -878,7 +878,7 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
 ///
 /// See [`CheckedTarEntry::drain_skipped`].
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SkipLimits {
+pub(crate) struct SkipLimits {
     per_file: Limit<NonZeroU64>,
     total: Limit<NonZeroU64>,
     ratio: f64,
@@ -916,11 +916,11 @@ impl SkipLimits {
 ///
 /// Constructible only by `check`, so holding a `tar::Entry` through this type
 /// proves the checks ran. Dropping it drains the entry like the guard does.
-pub struct CheckedTarEntry<'a, 's, R: Read>(TarEntryGuard<'a, 's, R>);
+pub(crate) struct CheckedTarEntry<'a, 's, R: Read>(TarEntryGuard<'a, 's, R>);
 
 impl<R: Read> CheckedTarEntry<'_, '_, R> {
     /// Suppresses the bounded drain on drop; see [`TarEntryGuard::abandon`].
-    pub fn abandon(&mut self) {
+    pub(crate) fn abandon(&mut self) {
         self.0.abandon();
     }
 
@@ -930,7 +930,7 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
     /// # Errors
     ///
     /// Returns the error `step` returned.
-    pub fn settle<T>(&mut self, step: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    pub(crate) fn settle<T>(&mut self, step: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         step(self).inspect_err(|_| self.abandon())
     }
 
@@ -953,7 +953,7 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
     ///
     /// Returns [`crate::ArchiveError::ZipBomb`] with
     /// [`ZipBombScope::SkippedEntries`] when the bound is exceeded.
-    pub fn drain_skipped(&mut self, limits: &SkipLimits) -> Result<()> {
+    pub(crate) fn drain_skipped(&mut self, limits: &SkipLimits) -> Result<()> {
         if self.mark_skipped(limits) == SkipAdmission::Admitted {
             return Ok(());
         }
@@ -975,7 +975,7 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
     /// [`ZipBombScope::SkippedEntries`].
     ///
     /// [`drain_skipped`]: Self::drain_skipped
-    pub fn mark_skipped(&mut self, limits: &SkipLimits) -> SkipAdmission {
+    pub(crate) fn mark_skipped(&mut self, limits: &SkipLimits) -> SkipAdmission {
         let budget = &self.0.budget;
         if self.0.skip_marked {
             return if budget.0.metering.load(Ordering::Relaxed) {
@@ -1000,7 +1000,7 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
 /// How [`CheckedTarEntry::mark_skipped`] treats the payload of a skipped
 /// entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkipAdmission {
+pub(crate) enum SkipAdmission {
     /// The quota admits the entry anyway; its payload is not metered.
     Admitted,
     /// The reader meters the payload against the skipped-entry bound.
@@ -1039,7 +1039,7 @@ impl<R: Read> Drop for TarEntryGuard<'_, '_, R> {
 /// simultaneously — compiling, but silently defeating the "always drained
 /// before the next entry" guarantee this type exists to enforce. Use
 /// `while let Some(entry) = entries.next_entry() { ... }`.
-pub struct BudgetedEntries<'a, R: Read> {
+pub(crate) struct BudgetedEntries<'a, R: Read> {
     entries: tar::Entries<'a, BudgetedReader<R>>,
     budget: TarReadBudget,
     /// `total_read` when iteration began; window offsets are relative to it.
@@ -1078,7 +1078,7 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
     ///
     /// Returns [`crate::ArchiveError::InvalidArchive`] when that padding is
     /// not zero.
-    pub fn finish(&mut self) -> Result<()> {
+    pub(crate) fn finish(&mut self) -> Result<()> {
         let Some(start) = self.end_window_start.take() else {
             return Ok(());
         };
@@ -1111,7 +1111,7 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
     /// An error is classified here: a budget violation as such, a read fault
     /// the source itself raised as [`crate::ArchiveError::Io`], anything else
     /// as [`crate::ArchiveError::InvalidArchive`].
-    pub fn next_entry(&mut self) -> Option<Result<TarEntryGuard<'a, '_, R>>> {
+    pub(crate) fn next_entry(&mut self) -> Option<Result<TarEntryGuard<'a, '_, R>>> {
         if self.poisoned {
             return None;
         }
@@ -1169,7 +1169,7 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
 ///
 /// Returns an error if `tar` cannot begin reading entries (e.g. the archive
 /// was already fully consumed).
-pub fn budgeted_tar_entries<R: Read>(
+pub(crate) fn budgeted_tar_entries<R: Read>(
     archive: &mut tar::Archive<BudgetedReader<R>>,
     budget: TarReadBudget,
 ) -> io::Result<BudgetedEntries<'_, R>> {

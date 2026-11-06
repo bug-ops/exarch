@@ -20,44 +20,34 @@
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+#![warn(unreachable_pub)]
+// `pub(crate)` marks internal items in private modules; `redundant_pub_crate`
+// contradicts `unreachable_pub` and would push them back to `pub`.
+#![allow(clippy::redundant_pub_crate)]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
-// NOTE: `pub(crate)` marks intent inside the private modules below;
-// `redundant_pub_crate` contradicts `unreachable_pub` (408 sites) and would
-// flatten it to `pub`.
-#[allow(clippy::redundant_pub_crate)]
 mod api;
 pub(crate) mod closed_enum;
-#[allow(clippy::redundant_pub_crate)]
 mod config;
 pub(crate) mod copy;
-#[allow(clippy::redundant_pub_crate)]
 mod creation;
 mod destination_state;
-#[allow(clippy::redundant_pub_crate)]
 mod error;
-#[allow(clippy::redundant_pub_crate)]
 mod formats;
-#[allow(clippy::redundant_pub_crate)]
 mod inspection;
 mod limit;
 mod listed;
 mod path_text;
-#[allow(clippy::redundant_pub_crate)]
 mod reader;
 mod report;
 mod request;
-#[allow(clippy::redundant_pub_crate)]
 mod security;
 mod selection;
-#[allow(clippy::redundant_pub_crate)]
 mod sink;
 mod staging;
 #[cfg(test)]
 pub(crate) mod test_utils;
-#[allow(clippy::redundant_pub_crate)]
 mod types;
-#[allow(clippy::redundant_pub_crate)]
 mod writer;
 
 #[cfg(test)]

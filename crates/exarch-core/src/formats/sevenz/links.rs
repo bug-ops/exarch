@@ -37,7 +37,7 @@ use std::path::PathBuf;
 
 /// A symlink target as its 7z entry stores it, consumed as soon as it is read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StoredLinkTarget {
+pub(crate) enum StoredLinkTarget {
     /// The target, within the stored-target size limit.
     Read(PathBuf),
     /// The entry holds more bytes than a target may; none were read.
@@ -50,7 +50,7 @@ pub enum StoredLinkTarget {
 /// Why a stored link target was not read. `list` and `verify` report such a
 /// target as unreadable; `extract` fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkReadFailure {
+pub(crate) enum LinkReadFailure {
     /// The block holding the target is refused for decoding.
     BlockRefused,
     /// The decoder failed before the target was complete.
@@ -63,7 +63,7 @@ pub enum LinkReadFailure {
 
 /// How the decoder failed to deliver a link target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkDecodeFailure {
+pub(crate) enum LinkDecodeFailure {
     /// The compressed data is malformed.
     Malformed,
     /// The data exceeds the size the entry declares.
@@ -124,7 +124,7 @@ impl LinkReadFailure {
 }
 
 /// What reading one link's target yields: the target, or why it stays unread.
-pub type LinkOutcome = std::result::Result<StoredLinkTarget, LinkReadFailure>;
+pub(crate) type LinkOutcome = std::result::Result<StoredLinkTarget, LinkReadFailure>;
 
 /// Reads the target of the link whose data `reader` yields, `size` bytes.
 ///
@@ -172,7 +172,7 @@ pub(super) fn link_storage(file: &sevenz_rust2::ArchiveEntry) -> LinkStorage {
 /// Entries can only be added in ascending index order, so lookups can bisect
 /// and every walk visits links in file order.
 #[derive(Debug)]
-pub struct LinkTable<T> {
+pub(crate) struct LinkTable<T> {
     entries: Vec<(usize, T)>,
 }
 
@@ -221,7 +221,7 @@ impl<T> LinkTable<T> {
 
 /// Hands `each` the targets of the links at `indices` (ascending archive file
 /// indices) that need no decoding, and returns the links that do.
-pub fn deliver_undecoded_links(
+pub(crate) fn deliver_undecoded_links(
     header: &SevenZHeader,
     indices: impl Iterator<Item = usize>,
     each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
@@ -304,7 +304,7 @@ pub(super) fn drain_unwanted(
 ///
 /// Returns the first error of `each`, a non-UTF-8 target, or a failing disk
 /// read.
-pub fn walk_sevenz_links<R: Read + Seek, T>(
+pub(crate) fn walk_sevenz_links<R: Read + Seek, T>(
     header: &SevenZHeader,
     source: &mut R,
     compression: &[EntryCompression],
@@ -392,7 +392,7 @@ pub(super) fn walk_block_links<R: Read + Seek>(
 }
 
 /// Where an integrity pass hands the link targets it reads while decoding.
-pub struct LinkCapture<'a> {
+pub(crate) struct LinkCapture<'a> {
     /// The manifest position of every listed link.
     pub(crate) links: &'a LinkTable<EntryPosition>,
     /// Receives the manifest position and target of each link the pass tried

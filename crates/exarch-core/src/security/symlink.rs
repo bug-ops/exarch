@@ -50,6 +50,7 @@ use crate::types::SafeSymlink;
 /// # Ok(())
 /// # }
 /// ```
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub fn validate_symlink(
     link_path: &SafePath,
     target: &Path,

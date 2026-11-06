@@ -1,17 +1,17 @@
 //! Error types for archive operations.
 
-pub mod config_error;
-pub mod io_context;
-pub mod io_kind;
-pub mod malformation;
-pub mod messages;
-pub mod redaction;
-pub mod replace;
-pub mod tar_ambiguity;
-pub mod tar_trailer;
-pub mod types;
-pub mod violation;
-pub mod zip_inconsistency;
+pub(crate) mod config_error;
+pub(crate) mod io_context;
+pub(crate) mod io_kind;
+pub(crate) mod malformation;
+pub(crate) mod messages;
+pub(crate) mod redaction;
+pub(crate) mod replace;
+pub(crate) mod tar_ambiguity;
+pub(crate) mod tar_trailer;
+pub(crate) mod types;
+pub(crate) mod violation;
+pub(crate) mod zip_inconsistency;
 
 pub use config_error::ConfigProblem;
 pub use config_error::ConfigSetting;

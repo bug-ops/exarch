@@ -89,7 +89,7 @@ impl MemoryLimit {
 /// The bytes a [`MemorySink`] has charged, readable while the sink is borrowed
 /// by an extraction, so the ZIP decode store can share the sink's limit.
 #[derive(Debug, Clone, Default)]
-pub struct SinkUsage(Arc<AtomicU64>);
+pub(crate) struct SinkUsage(Arc<AtomicU64>);
 
 impl SinkUsage {
     pub(crate) fn get(&self) -> u64 {
@@ -104,7 +104,7 @@ impl SinkUsage {
 /// What an extraction into a [`MemorySink`] shares with the ZIP decode store:
 /// the sink's charged bytes and its limit.
 #[derive(Debug)]
-pub struct SinkReuse {
+pub(crate) struct SinkReuse {
     pub(crate) usage: SinkUsage,
     pub(crate) limit: MemoryLimit,
 }

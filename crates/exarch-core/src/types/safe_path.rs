@@ -598,6 +598,7 @@ pub(crate) fn stream_separator_error(comp: &str) -> ArchiveError {
 /// assert!(!is_windows_reserved_component(OsStr::new("console.txt")));
 /// ```
 #[must_use]
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub fn is_windows_reserved_component(comp: &OsStr) -> bool {
     const PLAIN: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
     let lossy = comp.to_string_lossy();

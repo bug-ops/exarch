@@ -447,7 +447,7 @@ impl EntrySelection {
 /// A selection together with the record of include patterns that matched,
 /// for one pass over an archive's entries.
 #[derive(Debug, Clone, Copy)]
-pub struct SelectionRun<'a> {
+pub(crate) struct SelectionRun<'a> {
     /// The selection applied to every entry.
     pub selection: &'a EntrySelection,
     /// Where include matches are recorded; `None` for a pass that must not
@@ -465,7 +465,7 @@ impl SelectionRun<'_> {
 /// What kind of entry a name belongs to, for rewrites that treat kinds
 /// differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryShape {
+pub(crate) enum EntryShape {
     /// A directory entry.
     Directory,
     /// A regular file.
@@ -486,7 +486,7 @@ impl EntryShape {
 
 /// The outcome of [`EntrySelection::decide`].
 #[derive(Debug)]
-pub enum Decision {
+pub(crate) enum Decision {
     /// The entry is extracted at `Placement`.
     Extract(Placement),
     /// The entry is left out.
@@ -506,7 +506,7 @@ impl Decision {
 
 /// Where a selected entry lands.
 #[derive(Debug)]
-pub enum Placement {
+pub(crate) enum Placement {
     /// At its own validated path.
     Unchanged,
     /// At a rewritten path that still has to be validated.
@@ -519,7 +519,7 @@ pub enum Placement {
 /// [`SafePath::validate_rewritten_in`](crate::types::SafePath), so a stripped
 /// name cannot be written without passing validation again.
 #[derive(Debug)]
-pub struct Rewritten(PathBuf);
+pub(crate) struct Rewritten(PathBuf);
 
 impl Rewritten {
     /// The rewritten path, for validation.
@@ -530,7 +530,7 @@ impl Rewritten {
 
 /// What the selection makes of a hardlink target.
 #[derive(Debug)]
-pub enum TargetMapping {
+pub(crate) enum TargetMapping {
     /// Validate the target as it is.
     Unchanged,
     /// Validate this destination-relative path instead.
@@ -541,7 +541,7 @@ pub enum TargetMapping {
 
 /// Which include patterns matched at least one scanned entry.
 #[derive(Debug)]
-pub struct IncludeHits(Box<[Cell<bool>]>);
+pub(crate) struct IncludeHits(Box<[Cell<bool>]>);
 
 impl IncludeHits {
     /// A record with one slot per include pattern of `selection`.
@@ -583,7 +583,7 @@ impl IncludeHits {
 /// refuses it instead of copying the winner's bytes. Nothing is recorded
 /// under [`PathRewrite::Keep`], so a plain extraction pays nothing.
 #[derive(Debug, Default)]
-pub struct LandingClaims {
+pub(crate) struct LandingClaims {
     seen: RefCell<HashSet<PathBuf>>,
     ambiguous: RefCell<HashSet<PathBuf>>,
 }

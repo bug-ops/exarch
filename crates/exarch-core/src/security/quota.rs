@@ -97,6 +97,7 @@ pub struct EntryCount(PhantomData<()>);
 
 /// Tracks resource usage during extraction.
 #[derive(Debug, Default)]
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub struct QuotaTracker {
     files_extracted: usize,
     bytes_written: u64,
@@ -115,6 +116,7 @@ fn check_file_size(size: u64, max: Limit<NonZeroU64>) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 impl QuotaTracker {
     /// Creates a new quota tracker.
     #[must_use]

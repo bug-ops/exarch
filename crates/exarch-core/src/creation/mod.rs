@@ -3,17 +3,17 @@
 //! This module provides functionality for creating archives from filesystem
 //! sources with security and configuration options.
 
-pub mod filters;
+pub(crate) mod filters;
 pub(crate) mod walker;
 
 pub(crate) mod compression;
-pub mod config;
+pub(crate) mod config;
 pub(crate) mod progress;
-pub mod report;
+pub(crate) mod report;
 pub(crate) mod source;
 pub(crate) mod staged;
-pub mod tar;
-pub mod zip;
+pub(crate) mod tar;
+pub(crate) mod zip;
 
 // Re-exports for public API
 pub use config::CompressionLevel;

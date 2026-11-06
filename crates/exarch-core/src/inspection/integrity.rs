@@ -47,7 +47,7 @@ use crate::security::zipbomb::validate_entry_compression;
 /// A typed decoding failure; the one table in
 /// [`IntegrityPass::record`] maps it to an issue.
 #[derive(Debug)]
-pub enum DecodeFailure {
+pub(crate) enum DecodeFailure {
     Checksum,
     Malformed(io::Error),
     Truncated {
@@ -87,14 +87,18 @@ impl fmt::Display for DecodeFailure {
 
 impl DecodeFailure {
     /// Classifies a copy failure for an entry of `declared` bytes.
-    pub fn from_copy(err: CopyError, declared: u64) -> Self {
+    pub(crate) fn from_copy(err: CopyError, declared: u64) -> Self {
         Self::from_copy_with_fault(err, declared, None)
     }
 
     /// Classifies a copy failure the way extraction does, given the I/O
     /// `fault` the entry's source recorded, if any: a failed read and a short
     /// entry after a fault are that fault, not a corrupt archive.
-    pub fn from_copy_with_fault(err: CopyError, declared: u64, fault: Option<io::Error>) -> Self {
+    pub(crate) fn from_copy_with_fault(
+        err: CopyError,
+        declared: u64,
+        fault: Option<io::Error>,
+    ) -> Self {
         match err {
             CopyError::Read(e) => Self::from_read_error(e, declared, fault),
             CopyError::Write(e) => Self::Io(e),
@@ -113,7 +117,7 @@ impl DecodeFailure {
     }
 
     /// Classifies a failure of the 7z block decoder (setting up or running it).
-    pub fn from_sevenz(err: sevenz_rust2::Error) -> Self {
+    pub(crate) fn from_sevenz(err: sevenz_rust2::Error) -> Self {
         use sevenz_rust2::Error;
         match err {
             Error::ChecksumVerificationFailed => Self::Checksum,
@@ -139,13 +143,13 @@ impl DecodeFailure {
 
     /// Error returned when TAR entry content fails to decode: the scan stops,
     /// so no report can claim the uninspected entries are fine.
-    pub fn into_tar_error(self, path: &Path) -> ArchiveError {
+    pub(crate) fn into_tar_error(self, path: &Path) -> ArchiveError {
         self.into_error(&format!("at {}", crate::path_text(path)))
     }
 
     /// Error returned when the stream fails after the TAR end-of-archive
     /// marker (a gzip CRC or ISIZE mismatch, a corrupt or truncated tail).
-    pub fn into_trailer_error(self) -> ArchiveError {
+    pub(crate) fn into_trailer_error(self) -> ArchiveError {
         match self {
             Self::Checksum | Self::Malformed(_) => {
                 let cause = match &self {
@@ -181,7 +185,7 @@ impl DecodeFailure {
 
 /// Result of decoding one payload.
 #[derive(Debug)]
-pub enum DecodeOutcome {
+pub(crate) enum DecodeOutcome {
     Verified,
     Unverified(UnverifiedReason),
     Failed(DecodeFailure),
@@ -189,7 +193,7 @@ pub enum DecodeOutcome {
 
 /// Whether decoding an entry is charged to the budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Charge {
+pub(crate) enum Charge {
     /// Listing does not decode it by itself: charge the declared size.
     Declared,
     /// Listing decodes it anyway.
@@ -200,32 +204,32 @@ pub enum Charge {
 ///
 /// Covers the record padding of `tar -b 2048` (1 MiB), so an honest archive
 /// passes under a small `max_tar_metadata_bytes`.
-pub const MIN_TRAILER_CAP: u64 = 1024 * 1024;
+pub(crate) const MIN_TRAILER_CAP: u64 = 1024 * 1024;
 
 /// How many decoded bytes may follow the TAR end-of-archive marker.
 ///
 /// Zeros count: they are decode work all the same. Built only from the
 /// validated config, so every mode applies the same rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TrailerCap(u64);
+pub(crate) struct TrailerCap(u64);
 
 impl TrailerCap {
     /// `max_tar_metadata_bytes`, raised to [`MIN_TRAILER_CAP`].
     #[must_use]
-    pub fn of(config: &SecurityConfig) -> Self {
+    pub(crate) fn of(config: &SecurityConfig) -> Self {
         Self(config.max_tar_metadata_bytes.get().max(MIN_TRAILER_CAP))
     }
 
     /// The cap in bytes.
     #[must_use]
-    pub const fn get(self) -> u64 {
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 }
 
 /// Why the bytes after the end-of-archive marker were refused.
 #[derive(Debug)]
-pub enum TrailerFault {
+pub(crate) enum TrailerFault {
     /// More than the cap followed the marker.
     OverCap(TrailerCap),
     /// The decoder failed while reading the tail.
@@ -235,7 +239,7 @@ pub enum TrailerFault {
 impl TrailerFault {
     /// The refusal as an error; an over-cap tail is relaxable through
     /// `max_tar_metadata_bytes` and names the effective cap.
-    pub fn into_error(self) -> ArchiveError {
+    pub(crate) fn into_error(self) -> ArchiveError {
         match self {
             Self::OverCap(cap) => {
                 ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: cap.get() })
@@ -247,7 +251,7 @@ impl TrailerFault {
 
 /// How a TAR stream is checked after the entry loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TarTrailer {
+pub(crate) enum TarTrailer {
     /// Plain TAR: require one more byte, ignore anything after it.
     Probe,
     /// Compressed (or unknown) stream: read to decoder EOF within the
@@ -259,7 +263,7 @@ pub enum TarTrailer {
 impl TarTrailer {
     /// The check for a stream decoded with `codec`; `None` is a plain TAR.
     #[must_use]
-    pub const fn for_codec(codec: Option<CompressionCodec>) -> Self {
+    pub(crate) const fn for_codec(codec: Option<CompressionCodec>) -> Self {
         match codec {
             Some(_) => Self::DrainToDecoderEof,
             None => Self::Probe,
@@ -272,7 +276,7 @@ impl TarTrailer {
     ///
     /// [`TrailerFault::OverCap`] when more than `cap` bytes follow,
     /// [`TrailerFault::Failed`] when the decoder fails.
-    pub fn drain<R: Read>(
+    pub(crate) fn drain<R: Read>(
         self,
         reader: &mut R,
         cap: TrailerCap,
@@ -302,7 +306,7 @@ impl TarTrailer {
     /// # Errors
     ///
     /// The refusal from [`TrailerFault::into_error`].
-    pub fn enforce<R: Read>(self, reader: &mut R, config: &SecurityConfig) -> Result<()> {
+    pub(crate) fn enforce<R: Read>(self, reader: &mut R, config: &SecurityConfig) -> Result<()> {
         if self == Self::Probe {
             return Ok(());
         }
@@ -317,7 +321,7 @@ impl TarTrailer {
 /// [`IntegrityPass::begin_entry`] mints it, so a slot always refers to an entry
 /// that exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Slot(usize);
+pub(crate) struct Slot(usize);
 
 #[derive(Debug)]
 struct EntrySlot {
@@ -327,14 +331,14 @@ struct EntrySlot {
 
 /// What the pass hands to `verify_manifest`.
 #[derive(Debug)]
-pub struct IntegrityOutcome {
+pub(crate) struct IntegrityOutcome {
     pub entry_issues: Vec<Vec<VerificationIssue>>,
     pub archive_issues: Vec<VerificationIssue>,
     pub gaps: IntegrityGaps,
 }
 
 /// Decodes payloads during listing and collects the integrity issues.
-pub struct IntegrityPass<'c> {
+pub(crate) struct IntegrityPass<'c> {
     config: &'c SecurityConfig,
     quota: QuotaTracker,
     budget_remaining: u64,
@@ -345,7 +349,7 @@ pub struct IntegrityPass<'c> {
 }
 
 impl<'c> IntegrityPass<'c> {
-    pub fn new(config: &'c SecurityConfig, budget: DecompressionBudget) -> Self {
+    pub(crate) fn new(config: &'c SecurityConfig, budget: DecompressionBudget) -> Self {
         Self {
             config,
             quota: QuotaTracker::new(),
@@ -357,14 +361,14 @@ impl<'c> IntegrityPass<'c> {
         }
     }
 
-    pub const fn config(&self) -> &'c SecurityConfig {
+    pub(crate) const fn config(&self) -> &'c SecurityConfig {
         self.config
     }
 
     /// Opens the slot of the manifest entry about to be added and decides
     /// admission with the same quota and ratio checks `verify_manifest` runs.
     /// Returns the slot index, which equals the entry's manifest index.
-    pub fn begin_entry(&mut self, size: u64, compression: &EntryCompression) -> Slot {
+    pub(crate) fn begin_entry(&mut self, size: u64, compression: &EntryCompression) -> Slot {
         let quota_ok = self.quota.reserve(size, self.config).is_ok();
         let ratio_ok =
             validate_entry_compression(compression, Uncompressed(size), self.config).is_ok();
@@ -375,27 +379,27 @@ impl<'c> IntegrityPass<'c> {
         Slot(self.slots.len() - 1)
     }
 
-    pub fn is_admitted(&self, slot: Slot) -> bool {
+    pub(crate) fn is_admitted(&self, slot: Slot) -> bool {
         self.slots[slot.0].admitted
     }
 
-    pub fn push_issue(&mut self, slot: Slot, issue: VerificationIssue) {
+    pub(crate) fn push_issue(&mut self, slot: Slot, issue: VerificationIssue) {
         self.slots[slot.0].issues.push(issue);
     }
 
     /// Counts unverified items that belong to no single entry.
-    pub fn count_unverified(&mut self, reason: UnverifiedReason, items: u64) {
+    pub(crate) fn count_unverified(&mut self, reason: UnverifiedReason, items: u64) {
         self.gaps.count_items(reason, items);
     }
 
     /// Marks the entry at `path` as unverified, listing it in the report.
-    pub fn mark_unverified(&mut self, reason: UnverifiedReason, path: &Path) {
+    pub(crate) fn mark_unverified(&mut self, reason: UnverifiedReason, path: &Path) {
         self.gaps.mark_entry(reason, path);
     }
 
     /// Reserves `bytes` of the budget; an entry that does not fit leaves the
     /// remaining budget untouched so later, smaller entries are still tried.
-    pub fn try_charge(&mut self, bytes: u64) -> bool {
+    pub(crate) fn try_charge(&mut self, bytes: u64) -> bool {
         match self.budget_remaining.checked_sub(bytes) {
             Some(left) => {
                 self.budget_remaining = left;
@@ -406,7 +410,7 @@ impl<'c> IntegrityPass<'c> {
     }
 
     /// Decodes `reader` to its EOF, enforcing `declared` as an exact size.
-    pub fn decode<R: Read + ?Sized>(
+    pub(crate) fn decode<R: Read + ?Sized>(
         &mut self,
         slot: Slot,
         reader: &mut R,
@@ -425,7 +429,7 @@ impl<'c> IntegrityPass<'c> {
     /// [`decode`](Self::decode) for a reader whose source records its I/O
     /// faults: a failure the source caused is [`DecodeFailure::Io`], as in
     /// extraction.
-    pub fn decode_with_faults<R: Read + ?Sized>(
+    pub(crate) fn decode_with_faults<R: Read + ?Sized>(
         &mut self,
         slot: Slot,
         reader: &mut R,
@@ -451,7 +455,7 @@ impl<'c> IntegrityPass<'c> {
 
     /// Copies `reader` to `writer` with the pass's buffer, enforcing
     /// `declared`.
-    pub fn copy_into<R: Read + ?Sized, W: io::Write + ?Sized>(
+    pub(crate) fn copy_into<R: Read + ?Sized, W: io::Write + ?Sized>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
@@ -468,7 +472,7 @@ impl<'c> IntegrityPass<'c> {
     ///
     /// Returns the I/O error of a failing disk read, which is not a property
     /// of the archive.
-    pub fn record(&mut self, slot: Slot, path: &Path, outcome: DecodeOutcome) -> Result<()> {
+    pub(crate) fn record(&mut self, slot: Slot, path: &Path, outcome: DecodeOutcome) -> Result<()> {
         match outcome {
             DecodeOutcome::Verified => {}
             DecodeOutcome::Unverified(reason) => self.mark_unverified(reason, path),
@@ -529,7 +533,11 @@ impl<'c> IntegrityPass<'c> {
     /// # Errors
     ///
     /// Returns the I/O error of a failing disk read, or the over-cap refusal.
-    pub fn check_tar_trailer<R: Read>(&mut self, reader: &mut R, mode: TarTrailer) -> Result<()> {
+    pub(crate) fn check_tar_trailer<R: Read>(
+        &mut self,
+        reader: &mut R,
+        mode: TarTrailer,
+    ) -> Result<()> {
         let cap = TrailerCap::of(self.config);
         match mode.drain(reader, cap, &mut self.buffer) {
             Ok(0) => self.count_unverified(UnverifiedReason::NoEndMarker, 1),
@@ -542,7 +550,7 @@ impl<'c> IntegrityPass<'c> {
 
     /// Adds the single archive-level `IntegrityIncomplete` issue when anything
     /// was left unverified, and returns the collected issues.
-    pub fn finish(mut self) -> IntegrityOutcome {
+    pub(crate) fn finish(mut self) -> IntegrityOutcome {
         if !self.gaps.is_empty() {
             self.archive_issues.push(VerificationIssue::new(
                 IssueSeverity::Medium,

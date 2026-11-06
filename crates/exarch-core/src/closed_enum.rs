@@ -5,7 +5,7 @@ use crate::ConfigProblem;
 use crate::ConfigSetting;
 use crate::Result;
 
-pub mod private {
+pub(crate) mod private {
     pub trait Sealed {}
 }
 

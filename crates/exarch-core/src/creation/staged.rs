@@ -106,7 +106,7 @@ fn default_creation_mode(_: &mut Builder<'_, '_>) {}
 /// comparison is case-sensitive, so on a case-insensitive filesystem a target
 /// spelled in another case than its on-disk name is not recognized.
 #[derive(Debug)]
-pub struct ExcludedOutput {
+pub(crate) struct ExcludedOutput {
     parent: PathBuf,
     names: Vec<OsString>,
 }
@@ -139,7 +139,7 @@ impl ExcludedOutput {
 /// An archive being written to a temporary file next to its target.
 ///
 /// Dropping it without [`commit`](Self::commit) deletes the temporary file.
-pub struct StagedOutput {
+pub(crate) struct StagedOutput {
     temp: NamedTempFile,
     target: PathBuf,
     policy: OutputPolicy,

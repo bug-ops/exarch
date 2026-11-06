@@ -41,7 +41,7 @@ use dir::StagingDir;
 
 /// The extraction a staging mode wraps: it writes into the directory it is
 /// given, under the options it is given, reporting to the progress it is given.
-pub trait StagedRun:
+pub(crate) trait StagedRun:
     FnOnce(&Path, &ExtractionOptions, &mut dyn ProgressCallback) -> Result<ExtractionReport>
 {
 }
@@ -63,7 +63,7 @@ impl<F> StagedRun for F where
 ///
 /// The extraction's own error, rolled back under a staging mode, or a typed
 /// refusal or failure of the staging itself.
-pub fn extract_staged(
+pub(crate) fn extract_staged(
     output_dir: &Path,
     options: &ExtractionOptions,
     selection: &EntrySelection,

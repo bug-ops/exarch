@@ -364,7 +364,7 @@ where
 /// # Ok(())
 /// # }
 /// ```
-pub fn verify_archive<P: AsRef<Path>>(
+pub(crate) fn verify_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {

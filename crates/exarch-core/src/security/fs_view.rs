@@ -66,7 +66,7 @@ use crate::types::safe_path::ParentCheck;
 /// Maximum number of symlinks followed while resolving a single path, as the
 /// host's `realpath` allows it.
 #[cfg(target_os = "macos")]
-pub const MAX_SYMLINK_HOPS: usize = 33;
+pub(crate) const MAX_SYMLINK_HOPS: usize = 33;
 
 /// Maximum number of symlinks followed while resolving a single path, as the
 /// host's `realpath` allows it.
@@ -81,16 +81,16 @@ pub const MAX_SYMLINK_HOPS: usize = 40;
 /// Maximum number of symlinks followed while resolving a single path, as the
 /// host's `realpath` allows it.
 #[cfg(target_os = "windows")]
-pub const MAX_SYMLINK_HOPS: usize = 63;
+pub(crate) const MAX_SYMLINK_HOPS: usize = 63;
 
 /// Maximum number of symlinks followed while resolving a single path. A low
 /// guess can only turn a PASS into a false FAIL.
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-pub const MAX_SYMLINK_HOPS: usize = 32;
+pub(crate) const MAX_SYMLINK_HOPS: usize = 32;
 
 /// Longest single path component the host accepts (`NAME_MAX`), in bytes, or
 /// in UTF-16 units on Windows.
-pub const MAX_COMPONENT_LEN: usize = 255;
+pub(crate) const MAX_COMPONENT_LEN: usize = 255;
 
 /// Longest relative path the host accepts (`PATH_MAX` less the terminator), in
 /// bytes.
@@ -102,12 +102,12 @@ pub const MAX_PATH_LEN: usize = 4095;
 /// 32767 is the documented limit of an extended-length path. A symlink target
 /// is bounded much lower, see [`MAX_SYMLINK_TARGET_LEN`].
 #[cfg(target_os = "windows")]
-pub const MAX_PATH_LEN: usize = 32767;
+pub(crate) const MAX_PATH_LEN: usize = 32767;
 
 /// Longest relative path the host accepts (`PATH_MAX` less the terminator), in
 /// bytes. A low guess can only turn a PASS into a false FAIL.
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub const MAX_PATH_LEN: usize = 1023;
+pub(crate) const MAX_PATH_LEN: usize = 1023;
 
 /// Longest symlink target the host accepts, in UTF-16 units.
 ///
@@ -117,12 +117,12 @@ pub const MAX_PATH_LEN: usize = 1023;
 /// are equal, so `2 * 2n <= 16384 - 20` gives `n <= 4091`. Absolute targets
 /// (`\??\` prefix) would allow fewer units but are never created.
 #[cfg(target_os = "windows")]
-pub const MAX_SYMLINK_TARGET_LEN: usize = 4091;
+pub(crate) const MAX_SYMLINK_TARGET_LEN: usize = 4091;
 
 /// Longest symlink target the host accepts (`PATH_MAX` less the terminator),
 /// in bytes.
 #[cfg(not(target_os = "windows"))]
-pub const MAX_SYMLINK_TARGET_LEN: usize = MAX_PATH_LEN;
+pub(crate) const MAX_SYMLINK_TARGET_LEN: usize = MAX_PATH_LEN;
 
 /// Longest symlink target in bytes that can pass the
 /// [`MAX_SYMLINK_TARGET_LEN`] check; the read and allocation cap for targets
@@ -131,13 +131,13 @@ pub const MAX_SYMLINK_TARGET_LEN: usize = MAX_PATH_LEN;
 /// On Windows a UTF-16 unit takes at most 3 UTF-8 bytes, so a byte cap never
 /// rejects a target the unit check accepts.
 #[cfg(target_os = "windows")]
-pub const MAX_SYMLINK_TARGET_BYTES: usize = MAX_SYMLINK_TARGET_LEN * 3;
+pub(crate) const MAX_SYMLINK_TARGET_BYTES: usize = MAX_SYMLINK_TARGET_LEN * 3;
 
 /// Longest symlink target in bytes that can pass the
 /// [`MAX_SYMLINK_TARGET_LEN`] check; the read and allocation cap for targets
 /// stored as bytes.
 #[cfg(not(target_os = "windows"))]
-pub const MAX_SYMLINK_TARGET_BYTES: usize = MAX_SYMLINK_TARGET_LEN;
+pub(crate) const MAX_SYMLINK_TARGET_BYTES: usize = MAX_SYMLINK_TARGET_LEN;
 
 closed_enum! {
     /// The kind of link a target belongs to; the host limits them differently.
@@ -275,7 +275,7 @@ impl PathModel {
 
 /// `base` extended by `tail`; an empty `tail` adds no trailing separator, which
 /// would count one byte against the host path limit.
-pub fn joined(base: &Path, tail: &Path) -> PathBuf {
+pub(crate) fn joined(base: &Path, tail: &Path) -> PathBuf {
     if tail.is_empty() {
         base.to_path_buf()
     } else {
@@ -293,7 +293,7 @@ pub fn joined(base: &Path, tail: &Path) -> PathBuf {
 ///
 /// Returns the name-too-long error when the joined path or a component exceeds
 /// the model's limits.
-pub fn projected_landing_within_limits(
+pub(crate) fn projected_landing_within_limits(
     model: PathModel,
     landing: &Path,
     tail: &Path,
@@ -323,7 +323,7 @@ fn name_len(name: &OsStr) -> usize {
 ///
 /// Returns an error if the path or any of its components is too long.
 #[cfg(test)]
-pub fn check_name_lengths(path: &Path) -> io::Result<()> {
+pub(crate) fn check_name_lengths(path: &Path) -> io::Result<()> {
     PathModel::Host.check_name_lengths(path)
 }
 
@@ -335,13 +335,13 @@ pub fn check_name_lengths(path: &Path) -> io::Result<()> {
 /// # Errors
 ///
 /// Returns an error if the target is too long for `kind`.
-pub fn check_link_target_length(target: &Path, kind: LinkKind) -> io::Result<()> {
+pub(crate) fn check_link_target_length(target: &Path, kind: LinkKind) -> io::Result<()> {
     PathModel::Host.check_link_target_length(target, kind)
 }
 
 /// The error for a name beyond the host's limits.
 #[must_use]
-pub fn name_too_long() -> io::Error {
+pub(crate) fn name_too_long() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidFilename, "file name too long")
 }
 
@@ -350,7 +350,7 @@ pub fn name_too_long() -> io::Error {
 /// Implemented only by [`DestDir`] (the real destination) and [`VirtualRoot`]
 /// (the in-memory model), and tied to its [`FsView`] through
 /// [`FsView::Root`], so a root can never be paired with the wrong view.
-pub trait ModelRoot {
+pub(crate) trait ModelRoot {
     /// The root as a path.
     fn as_path(&self) -> &Path;
 }
@@ -372,12 +372,12 @@ const VIRTUAL_ROOT: &str = "/exarch-virtual-root";
 /// directory, so a virtual root can never reach a helper that writes to the
 /// host filesystem.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VirtualRoot(PathBuf);
+pub(crate) struct VirtualRoot(PathBuf);
 
 impl VirtualRoot {
     /// Creates the fixed virtual root.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(PathBuf::from(VIRTUAL_ROOT))
     }
 
@@ -401,7 +401,7 @@ impl ModelRoot for VirtualRoot {
 
 /// Where a canonicalized path ended up relative to the root of its view.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Containment {
+pub(crate) enum Containment {
     /// Inside the root, at this canonical path.
     Within(PathBuf),
     /// Outside the root, or not provably inside it.
@@ -410,7 +410,7 @@ pub enum Containment {
 
 /// What the target of a link is relative to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkBase {
+pub(crate) enum LinkBase {
     /// The directory the link sits in (a symlink target); the parents of the
     /// link are vetted as well.
     LinkDirectory,
@@ -419,7 +419,7 @@ pub enum LinkBase {
 }
 
 /// Filesystem probes needed while validating archive entries.
-pub trait FsView {
+pub(crate) trait FsView {
     /// The root type a validator resolves paths against in this view.
     type Root: ModelRoot;
 
@@ -489,7 +489,7 @@ pub trait FsView {
 /// `/tmp/dest` against sibling `/tmp/destevil`) is correctly rejected. See
 /// GHSA-wcmx-7f9h-5mv5.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub fn paths_start_with(path: &Path, base: &Path) -> bool {
+pub(crate) fn paths_start_with(path: &Path, base: &Path) -> bool {
     let mut path_components = path.components();
     for base_component in base.components() {
         let Some(path_component) = path_components.next() else {
@@ -506,13 +506,13 @@ pub fn paths_start_with(path: &Path, base: &Path) -> bool {
 
 /// Case-sensitive path prefix check for Unix (not macOS).
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn paths_start_with(path: &Path, base: &Path) -> bool {
+pub(crate) fn paths_start_with(path: &Path, base: &Path) -> bool {
     path.starts_with(base)
 }
 
 /// The real filesystem.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct HostFs;
+pub(crate) struct HostFs;
 
 impl FsView for HostFs {
     type Root = DestDir;
@@ -569,7 +569,7 @@ fn resolve_pinned(
 /// every write goes through. [`HostFs`] opens the destination by path on every
 /// call instead, so only an extraction should rely on the pinned form.
 #[derive(Debug, Clone, Copy)]
-pub struct PinnedHostFs<'r> {
+pub(crate) struct PinnedHostFs<'r> {
     #[cfg_attr(
         not(any(unix, target_os = "wasi")),
         expect(dead_code, reason = "only the handle-relative resolver reads the root")
@@ -580,7 +580,7 @@ pub struct PinnedHostFs<'r> {
 impl<'r> PinnedHostFs<'r> {
     /// Resolves link targets against `root`, the handle the extraction writes
     /// through.
-    pub const fn new(root: &'r PinnedRoot) -> Self {
+    pub(crate) const fn new(root: &'r PinnedRoot) -> Self {
         Self { root }
     }
 }
@@ -657,7 +657,7 @@ pub enum CollisionKind {
 
 /// Two entry names that differ exactly but are one name on the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NameCollision {
+pub(crate) struct NameCollision {
     /// Path of the node that was there first
     pub existing: PathBuf,
     /// Path of the entry that hit it
@@ -713,13 +713,13 @@ impl Occupant {
 /// Spells `path` with its components re-joined, so `./a//b` reads `a/b`, and
 /// injectively ([`path_text`](fn@crate::path_text)), so two names never read
 /// alike.
-pub fn normalized_display(path: &Path) -> String {
+pub(crate) fn normalized_display(path: &Path) -> String {
     crate::path_text(&path.components().collect::<PathBuf>())
 }
 
 /// What stops an entry's parent chain from being a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParentBlocker {
+pub(crate) enum ParentBlocker {
     /// A parent component is a file.
     File,
     /// A parent component is a symlink that dangles, loops or does not resolve
@@ -757,7 +757,7 @@ impl ParentBlocker {
 
 /// A parent component that stopped an entry from being placed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockedParent {
+pub(crate) struct BlockedParent {
     entry: PathBuf,
     parent: PathBuf,
     blocker: ParentBlocker,
@@ -771,7 +771,7 @@ impl BlockedParent {
 
 /// What a symlink at some path turns out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinkClass {
+pub(crate) enum LinkClass {
     /// A link to a directory inside the root, at this canonical path.
     InsideDir(PathBuf),
     /// A link nothing may be written through.
@@ -782,7 +782,7 @@ pub enum LinkClass {
 ///
 /// Resolving the link can trigger an automount lookup, so callers apply it
 /// only to a path already known to be a symlink.
-pub fn classify_link<V: FsView>(view: &V, link: &Path, root: &V::Root) -> LinkClass {
+pub(crate) fn classify_link<V: FsView>(view: &V, link: &Path, root: &V::Root) -> LinkClass {
     match view.canonicalize(link, root) {
         Ok(Containment::Within(resolved)) if view.is_dir(&resolved) => {
             LinkClass::InsideDir(resolved)
@@ -795,7 +795,7 @@ pub fn classify_link<V: FsView>(view: &V, link: &Path, root: &V::Root) -> LinkCl
 /// The first parent of `rel` that is not a directory `rel` can be created in,
 /// looked up through `view`. `None` when no parent is to blame, including a
 /// parent that cannot be inspected.
-pub fn first_blocking_ancestor<V: FsView>(
+pub(crate) fn first_blocking_ancestor<V: FsView>(
     view: &V,
     root: &V::Root,
     rel: &Path,
@@ -823,7 +823,7 @@ pub fn first_blocking_ancestor<V: FsView>(
 
 /// The refusal for `rel` when [`first_blocking_ancestor`] finds a parent to
 /// blame for a failed probe of `rel`.
-pub fn blocked_parent_error<V: FsView>(
+pub(crate) fn blocked_parent_error<V: FsView>(
     view: &V,
     root: &V::Root,
     rel: &Path,
@@ -833,7 +833,7 @@ pub fn blocked_parent_error<V: FsView>(
 
 /// Whether a projected landing is held to the model's name limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LandingLimits {
+pub(crate) enum LandingLimits {
     /// The landing must fit the model.
     Enforced,
     /// The entry is never created (a regular file the extension allowlist
@@ -843,7 +843,7 @@ pub enum LandingLimits {
 
 /// A failed [`VirtualTree::project_landing`].
 #[derive(Debug)]
-pub struct Conflict {
+pub(crate) struct Conflict {
     /// The error `insert` would report.
     pub(crate) error: io::Error,
     /// `None` when the failure is in the parent chain, not at the path itself.
@@ -914,7 +914,7 @@ impl From<io::Error> for Conflict {
 /// alias of a node is remembered, whatever the kind of the entry, so a flood
 /// of directory entries or case variants cannot grow the tree without limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NodeBudget {
+pub(crate) struct NodeBudget {
     max: usize,
     used: usize,
 }
@@ -929,7 +929,7 @@ impl NodeBudget {
     /// `max_file_count` is [`Limit::Unbounded`](crate::Limit::Unbounded); a
     /// product that overflows saturates at `usize::MAX`.
     #[must_use]
-    pub fn from_config(config: &SecurityConfig) -> Self {
+    pub(crate) fn from_config(config: &SecurityConfig) -> Self {
         let max = match config.max_file_count {
             crate::Limit::Bounded(count) => count
                 .get()
@@ -981,7 +981,7 @@ impl From<NodeBudgetExceeded> for ArchiveError {
 /// `verify` reports them; a sink only needs the merged path, so recording
 /// there would grow memory with every case variant for nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CollisionRecording {
+pub(crate) enum CollisionRecording {
     /// Keep collisions for [`VirtualTree::take_collisions`] and
     /// [`VirtualTree::take_empty_merges`].
     Record,
@@ -991,7 +991,7 @@ pub enum CollisionRecording {
 
 /// Why a [`VirtualTree`] refused to place a node.
 #[derive(Debug)]
-pub enum PlaceError {
+pub(crate) enum PlaceError {
     /// Extraction would fail or change what a path resolves to.
     Conflict(Conflict),
     /// The tree is full.
@@ -1032,7 +1032,7 @@ type FoldFn = for<'a> fn(&'a OsStr) -> Cow<'a, OsStr>;
 
 /// The kind of a node in the in-memory tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Node {
+pub(crate) enum Node {
     /// A directory.
     Dir,
     /// A regular file or materialized hardlink.
@@ -1106,7 +1106,7 @@ struct Found {
 /// every entry in a directory, hit the exact-spelling map.
 ///
 /// Every name it stores is charged to a [`NodeBudget`].
-pub struct VirtualTree {
+pub(crate) struct VirtualTree {
     root: PathBuf,
     nodes: Vec<TreeNode>,
     model: PathModel,
@@ -1125,7 +1125,7 @@ pub struct VirtualTree {
 
 impl VirtualTree {
     /// Creates an empty tree rooted at `root` that applies `model`.
-    pub fn new(
+    pub(crate) fn new(
         root: &VirtualRoot,
         model: PathModel,
         budget: NodeBudget,
@@ -1430,7 +1430,7 @@ impl VirtualTree {
     }
 
     /// Returns `true` if `path` resolves, through symlinks, to a directory.
-    pub fn resolves_to_dir(&self, path: &Path) -> bool {
+    pub(crate) fn resolves_to_dir(&self, path: &Path) -> bool {
         matches!(
             self.resolve(path),
             Ok(Resolved::Inside { id, .. }) if self.node(id).kind == Node::Dir

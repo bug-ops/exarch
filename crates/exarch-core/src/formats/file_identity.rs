@@ -12,15 +12,15 @@ use std::path::Path;
 /// The file index of an entry: 64 bits on Unix and WASI, the 128-bit
 /// `FILE_ID_128` on Windows.
 #[cfg(windows)]
-pub type FileIndex = u128;
+pub(crate) type FileIndex = u128;
 /// The file index of an entry: 64 bits on Unix and WASI, the 128-bit
 /// `FILE_ID_128` on Windows.
 #[cfg(not(windows))]
-pub type FileIndex = u64;
+pub(crate) type FileIndex = u64;
 
 /// A device and file index that together name one directory entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct IdentityKey {
+pub(crate) struct IdentityKey {
     pub(crate) dev: u64,
     pub(crate) ino: FileIndex,
 }
@@ -51,7 +51,7 @@ impl IdentityKey {
 /// comparison succeed. [`check`](Self::check) makes each caller decide what an
 /// unverifiable identity means.
 #[derive(Debug, Clone, Copy)]
-pub enum FileIdentity {
+pub(crate) enum FileIdentity {
     /// A device and file index from the filesystem.
     Known(IdentityKey),
     /// The platform or volume provides no stable identity.
@@ -60,7 +60,7 @@ pub enum FileIdentity {
 
 /// The outcome of comparing two [`FileIdentity`] values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentityCheck {
+pub(crate) enum IdentityCheck {
     /// Both identities are known and equal.
     Same,
     /// Both identities are known and differ.
@@ -71,7 +71,7 @@ pub enum IdentityCheck {
 
 impl FileIdentity {
     /// Compares `self` (observed now) with `expected` (taken earlier).
-    pub fn check(self, expected: Self) -> IdentityCheck {
+    pub(crate) fn check(self, expected: Self) -> IdentityCheck {
         match (self, expected) {
             (Self::Known(now), Self::Known(then)) => {
                 if now == then {
@@ -97,7 +97,7 @@ impl FileIdentity {
     /// Any failure to read it is [`Unknown`](Self::Unknown), which every
     /// consumer treats as unverified.
     #[cfg(any(unix, target_os = "wasi"))]
-    pub fn of_file(file: &File) -> Self {
+    pub(crate) fn of_file(file: &File) -> Self {
         rustix::fs::fstat(file)
             .ok()
             .and_then(|stat| IdentityKey::of_stat(&stat).ok())
@@ -108,7 +108,7 @@ impl FileIdentity {
     /// id of its handle ([`Unknown`](Self::Unknown) when the volume reports
     /// none, as FAT and some redirectors do).
     #[cfg(windows)]
-    pub fn of_file(file: &File) -> Self {
+    pub(crate) fn of_file(file: &File) -> Self {
         use std::os::windows::io::AsHandle;
 
         super::pinned_dir::nt::file_id(file.as_handle()).map_or(Self::Unknown, |(dev, ino)| {
@@ -125,7 +125,7 @@ impl FileIdentity {
 ///
 /// The I/O error of the lookup.
 #[cfg(unix)]
-pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
+pub(crate) fn identity_of(path: &Path) -> io::Result<FileIdentity> {
     let stat = rustix::fs::stat(path)?;
     IdentityKey::of_stat(&stat).map(FileIdentity::Known)
 }
@@ -137,7 +137,7 @@ pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
 ///
 /// The I/O error of the lookup.
 #[cfg(target_os = "wasi")]
-pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
+pub(crate) fn identity_of(path: &Path) -> io::Result<FileIdentity> {
     let stat = rustix::fs::fstat(File::open(path)?)?;
     IdentityKey::of_stat(&stat).map(FileIdentity::Known)
 }
@@ -153,7 +153,7 @@ pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
     clippy::disallowed_methods,
     reason = "opens an entry for its attributes only; nothing is written or created"
 )]
-pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
+pub(crate) fn identity_of(path: &Path) -> io::Result<FileIdentity> {
     use std::os::windows::fs::OpenOptionsExt;
 
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;

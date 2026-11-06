@@ -109,7 +109,7 @@ struct Created {
 
 /// The landings a run created, consulted when one is found occupied.
 #[derive(Debug, Default)]
-pub struct RunRecord(RefCell<Created>);
+pub(crate) struct RunRecord(RefCell<Created>);
 
 impl RunRecord {
     /// Records that the run just created `leaf` in `dir`, if `existing_files`

@@ -141,7 +141,7 @@ use crate::reader::decode_tar_stream;
 /// # Type Parameters
 ///
 /// - `R`: Reader type that must implement `Read`
-pub struct TarArchive<R: Read> {
+pub(crate) struct TarArchive<R: Read> {
     /// Raw underlying reader, consumed by `extract()`/`list()`/`verify()`.
     ///
     /// Wrapped in a metadata-size-limiting reader (using the config supplied
@@ -171,7 +171,7 @@ impl<'r> TarArchive<Box<dyn Read + Send + 'r>> {
     /// one: the input is metered and its faults recorded.
     #[cfg(test)]
     #[must_use]
-    pub fn new<R: Read + Send + 'r>(reader: R, config: &SecurityConfig) -> Self {
+    pub(crate) fn new<R: Read + Send + 'r>(reader: R, config: &SecurityConfig) -> Self {
         Self::with_trailer(reader, TarTrailer::Probe, config)
     }
 

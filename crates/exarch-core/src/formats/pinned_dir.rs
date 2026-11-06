@@ -71,11 +71,11 @@ use crate::Result;
 use crate::security::fs_view::Occupant;
 use crate::types::DestDir;
 
-pub use imp::VettedDir;
+pub(crate) use imp::VettedDir;
 
 /// Exactly one normal path component: a name inside a [`VettedDir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Leaf<'a>(&'a OsStr);
+pub(crate) struct Leaf<'a>(&'a OsStr);
 
 impl<'a> Leaf<'a> {
     /// Splits a relative path into its parent and its final name.
@@ -113,7 +113,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A generated temp-file name that is a single component by construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TempLeaf(OsString);
+pub(crate) struct TempLeaf(OsString);
 
 impl TempLeaf {
     /// The next candidate name, independent of the entry's own name so it stays
@@ -252,7 +252,7 @@ impl From<rustix::fs::FileType> for Occupant {
 
 /// The extraction destination, with its directory opened once.
 #[derive(Debug)]
-pub struct PinnedRoot {
+pub(crate) struct PinnedRoot {
     dest: DestDir,
     dir: VettedDir,
     created: RunRecord,
@@ -304,6 +304,7 @@ impl PinnedRoot {
 /// [`DirWalker`]: crate::formats::dir_walker::DirWalker
 #[cfg(any(unix, target_os = "wasi"))]
 #[derive(Debug)]
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub struct WalkerBacked<'r>(
     #[expect(dead_code, reason = "ties the proof to its root")] &'r PinnedRoot,
 );
@@ -364,7 +365,7 @@ mod imp {
 
     /// An open directory below the destination.
     #[derive(Debug)]
-    pub struct VettedDir(OwnedFd);
+    pub(crate) struct VettedDir(OwnedFd);
 
     impl VettedDir {
         /// Opens `path`, which the caller has canonicalized.
@@ -646,7 +647,7 @@ mod imp {
     /// Every operation is relative to this handle, so replacing or converting
     /// the directory's path cannot redirect it.
     #[derive(Debug)]
-    pub struct VettedDir(File);
+    pub(crate) struct VettedDir(File);
 
     impl VettedDir {
         fn into_dir(file: File) -> io::Result<Self> {
@@ -830,7 +831,7 @@ compile_error!("exarch-core has no directory-handle backend for this target");
 /// temp-file-then-rename write path so a fallible step between file creation
 /// and the operation's success point does not leave a partial artifact behind.
 /// The removal is relative to the directory the file was created in.
-pub struct TempFileGuard<'d> {
+pub(crate) struct TempFileGuard<'d> {
     dir: &'d VettedDir,
     name: OsString,
     should_cleanup: bool,
@@ -871,18 +872,18 @@ impl Drop for TempFileGuard<'_> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-pub mod support {
+pub(crate) mod support {
     use std::path::Path;
 
     use super::Leaf;
     use super::PinnedRoot;
     use super::VettedDir;
 
-    pub fn leaf(name: &str) -> Leaf<'_> {
+    pub(crate) fn leaf(name: &str) -> Leaf<'_> {
         Leaf::from_component(Path::new(name).components().next().unwrap()).unwrap()
     }
 
-    pub fn pinned_at(path: &Path) -> VettedDir {
+    pub(crate) fn pinned_at(path: &Path) -> VettedDir {
         PinnedRoot::open_for_test(path)
             .unwrap()
             .dir()

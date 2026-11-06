@@ -53,7 +53,7 @@ fn check_name_limits<V: FsView, P: ParentCheck>(
 
 /// Whether an archive entry is a directory, as the root-entry rule sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeKind {
+pub(crate) enum NodeKind {
     /// The entry is a directory (or stands for one, like ZIP's empty root
     /// file).
     Directory,
@@ -64,7 +64,7 @@ pub enum NodeKind {
 impl NodeKind {
     /// Converts a format's directory flag at the boundary, so the rule itself
     /// never takes a bare `bool`.
-    pub const fn directory_if(is_directory: bool) -> Self {
+    pub(crate) const fn directory_if(is_directory: bool) -> Self {
         if is_directory {
             Self::Directory
         } else {
@@ -80,7 +80,7 @@ impl NodeKind {
 /// path as carried at that stage (`&Path` for a raw name, `SafePath` once
 /// validated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryPath<P> {
+pub(crate) enum EntryPath<P> {
     /// The destination itself (`.`, `./`).
     Root(P),
     /// Any path below the destination.
@@ -90,7 +90,7 @@ pub enum EntryPath<P> {
 impl<'a> EntryPath<&'a Path> {
     /// Classifies a raw entry name; the single definition of "root" for names
     /// not yet validated.
-    pub fn of(path: &'a Path) -> Self {
+    pub(crate) fn of(path: &'a Path) -> Self {
         if path == Path::new(".") {
             Self::Root(path)
         } else {
@@ -102,12 +102,12 @@ impl<'a> EntryPath<&'a Path> {
 impl<P> EntryPath<P> {
     /// Whether this is the root; for tests and callers that only need to know
     /// that, not to act on the path.
-    pub const fn is_root(&self) -> bool {
+    pub(crate) const fn is_root(&self) -> bool {
         matches!(self, Self::Root(_))
     }
 
     /// The path, for callers that treat the root like any directory.
-    pub fn into_inner(self) -> P {
+    pub(crate) fn into_inner(self) -> P {
         match self {
             Self::Root(path) | Self::Child(path) => path,
         }
@@ -118,7 +118,7 @@ impl<P> EntryPath<P> {
     /// A file, symlink or hardlink standing for the root would be written
     /// onto, or remove, the destination. Shared by entry validation and
     /// listing so `extract`, `list` and `verify` agree.
-    pub fn require_directory_root(self, kind: NodeKind) -> Result<Self> {
+    pub(crate) fn require_directory_root(self, kind: NodeKind) -> Result<Self> {
         if self.is_root() && kind == NodeKind::NonDirectory {
             return Err(Violation::RootEntryNotDirectory.into());
         }
@@ -128,13 +128,13 @@ impl<P> EntryPath<P> {
 
 /// Rejects a root entry that is not a directory, for the TAR extractor, which
 /// checks the raw name before its extension filter.
-pub fn check_root_entry_is_directory(path: &Path, kind: NodeKind) -> Result<()> {
+pub(crate) fn check_root_entry_is_directory(path: &Path, kind: NodeKind) -> Result<()> {
     EntryPath::of(path).require_directory_root(kind).map(drop)
 }
 
 /// Rejects an empty entry name, so listing fails on the name that extraction
 /// and `verify` refuse, instead of joining it onto the destination directory.
-pub fn require_non_empty_name(path: &Path) -> Result<()> {
+pub(crate) fn require_non_empty_name(path: &Path) -> Result<()> {
     if path.is_empty() {
         return Err(Violation::EmptyPath.into());
     }
@@ -147,7 +147,7 @@ pub fn require_non_empty_name(path: &Path) -> Result<()> {
 /// The reason is [`SkipKind::NotSelected`] or [`SkipKind::StrippedAway`] from
 /// the selection, or [`SkipKind::ExtensionNotAllowed`] from the allowlist.
 #[derive(Debug)]
-pub enum Gated<T> {
+pub(crate) enum Gated<T> {
     /// The entry is extracted; `T` is what its validation produced.
     Admit(T),
     /// The entry is skipped and counted under this kind.
@@ -165,7 +165,7 @@ impl<T> Gated<T> {
     }
 
     /// Applies `f` to an admitted entry.
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Gated<U> {
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> Gated<U> {
         match self {
             Self::Admit(value) => Gated::Admit(f(value)),
             Self::Skip(kind) => Gated::Skip(kind),
@@ -184,7 +184,7 @@ impl<T> Gated<T> {
 ///
 /// Returns the validation error of the rewritten name, or the refusal a
 /// rewrite raises.
-pub fn route_validated<V: FsView, P: ParentCheck>(
+pub(crate) fn route_validated<V: FsView, P: ParentCheck>(
     run: SelectionRun<'_>,
     original: SafePath<P>,
     shape: EntryShape,
@@ -211,7 +211,7 @@ pub fn route_validated<V: FsView, P: ParentCheck>(
 /// It holds neither a root nor a view. Both are passed per call, tied by
 /// [`FsView::Root`], so a target can mutate its view between validations and a
 /// root can never be paired with the wrong view.
-pub struct ValidatorCore<'a> {
+pub(crate) struct ValidatorCore<'a> {
     config: &'a SecurityConfig,
     quota_tracker: QuotaTracker,
     hardlink_tracker: HardlinkTracker,
@@ -221,7 +221,7 @@ pub struct ValidatorCore<'a> {
 }
 
 impl<'a> ValidatorCore<'a> {
-    pub fn new(config: &'a SecurityConfig) -> Self {
+    pub(crate) fn new(config: &'a SecurityConfig) -> Self {
         Self {
             config,
             quota_tracker: QuotaTracker::new(),
@@ -239,7 +239,7 @@ impl<'a> ValidatorCore<'a> {
     /// # Errors
     ///
     /// Returns [`Violation::HardlinkTargetAmbiguous`].
-    pub fn require_unambiguous_target(&self, link: &Path, target: &Path) -> Result<()> {
+    pub(crate) fn require_unambiguous_target(&self, link: &Path, target: &Path) -> Result<()> {
         self.claims.require_unambiguous(link, target)
     }
 
@@ -250,14 +250,14 @@ impl<'a> ValidatorCore<'a> {
     ///
     /// Returns [`ArchiveError::UnmatchedInclude`] naming every unmatched
     /// pattern.
-    pub fn finish_selection(&self) -> Result<()> {
+    pub(crate) fn finish_selection(&self) -> Result<()> {
         self.include_hits
             .require_all_matched(&self.config.selection)
     }
 
     /// A context reflecting the symlinks seen so far; build a fresh one for
     /// every entry.
-    pub fn context<'r, V: FsView>(&self) -> ValidationContext<'r, V> {
+    pub(crate) fn context<'r, V: FsView>(&self) -> ValidationContext<'r, V> {
         let mut ctx = ValidationContext::new(self.config.allowed.symlinks.is_allowed());
         if self.symlink_seen {
             ctx.mark_symlink_seen();
@@ -268,7 +268,7 @@ impl<'a> ValidatorCore<'a> {
     /// Validates a regular file: path, selection, quota reservation, ratio and
     /// mode.
     #[cfg(test)]
-    pub fn validate_file_in<V: FsView, P: ParentCheck>(
+    pub(crate) fn validate_file_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
         size: EntrySize,
@@ -289,7 +289,7 @@ impl<'a> ValidatorCore<'a> {
     /// The original path comes first, so an unselected or disallowed entry
     /// named `../x.bin` is refused rather than skipped. This is the one place
     /// the allowlist rule is applied to extraction.
-    pub fn screen_file_path_in<V: FsView, P: ParentCheck>(
+    pub(crate) fn screen_file_path_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         size: EntrySize,
@@ -313,7 +313,7 @@ impl<'a> ValidatorCore<'a> {
 
     /// Reserves the quota of a screened file, checks its ratio and sanitizes
     /// its mode.
-    pub fn admit_file<P: ParentCheck>(
+    pub(crate) fn admit_file<P: ParentCheck>(
         &mut self,
         pending: PendingFile<P>,
     ) -> Result<ValidatedFile<P>> {
@@ -321,7 +321,7 @@ impl<'a> ValidatorCore<'a> {
     }
 
     /// Validates a directory entry: path, selection and ratio.
-    pub fn validate_directory_in<V: FsView, P: ParentCheck>(
+    pub(crate) fn validate_directory_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         size: EntrySize,
@@ -343,7 +343,7 @@ impl<'a> ValidatorCore<'a> {
     ///
     /// The target text is never rewritten: it is validated at the rewritten
     /// landing as the archive recorded it.
-    pub fn validate_symlink_in<V: FsView, P: ParentCheck>(
+    pub(crate) fn validate_symlink_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
         target: &Path,
@@ -372,7 +372,7 @@ impl<'a> ValidatorCore<'a> {
     /// The target is an archive path, so it goes through the selection and
     /// rewrite as entry names do; a target the extraction does not write
     /// refuses the link.
-    pub fn validate_hardlink_in<V: FsView, P: ParentCheck>(
+    pub(crate) fn validate_hardlink_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
         target: &Path,
@@ -416,7 +416,7 @@ impl<'a> ValidatorCore<'a> {
     ///
     /// The landing is the validated path itself, or, when the selection
     /// rewrites paths, the rewritten path validated again.
-    pub fn route_entry_in<V: FsView, P: ParentCheck>(
+    pub(crate) fn route_entry_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         shape: EntryShape,
@@ -443,7 +443,7 @@ impl<'a> ValidatorCore<'a> {
 
     /// Validates an entry's path, which must be a directory if it names the
     /// archive root.
-    pub fn validate_entry_path_in<V: FsView, P: ParentCheck>(
+    pub(crate) fn validate_entry_path_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         kind: NodeKind,
@@ -460,15 +460,19 @@ impl<'a> ValidatorCore<'a> {
         }
     }
 
-    pub fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
+    pub(crate) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
         self.quota_tracker.reserve(size, self.config)
     }
 
-    pub fn reserve_symlink(&mut self, size: u64) -> Result<()> {
+    pub(crate) fn reserve_symlink(&mut self, size: u64) -> Result<()> {
         self.quota_tracker.reserve(size, self.config).map(drop)
     }
 
-    pub fn charge_hardlink(&mut self, counted: EntryCount, size: u64) -> Result<QuotaPermit> {
+    pub(crate) fn charge_hardlink(
+        &mut self,
+        counted: EntryCount,
+        size: u64,
+    ) -> Result<QuotaPermit> {
         self.quota_tracker.charge(counted, size, self.config)
     }
 }

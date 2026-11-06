@@ -310,7 +310,7 @@ impl Slot {
 
 /// Most findings kept per archive; later ones are only counted.
 #[cfg(test)]
-pub const MAX_RETAINED_FINDINGS: usize = {
+pub(crate) const MAX_RETAINED_FINDINGS: usize = {
     let mut total = 0;
     let mut i = 0;
     while i < Slot::ALL.len() {
@@ -323,7 +323,7 @@ pub const MAX_RETAINED_FINDINGS: usize = {
 /// Findings of one archive, capped per kind so a crafted archive cannot make
 /// the report grow with its record count.
 #[derive(Debug, Default)]
-pub struct Findings {
+pub(crate) struct Findings {
     items: Vec<ZipInconsistency>,
     kept: [usize; Slot::ALL.len()],
     omitted: usize,
@@ -393,14 +393,14 @@ fn slot_of(finding: &ZipInconsistency) -> Slot {
 /// own calls; the record is what tells them apart, so a failing disk is never
 /// mistaken for a malformed archive.
 #[derive(Debug)]
-pub struct Shared<R> {
+pub(crate) struct Shared<R> {
     reader: Arc<Mutex<Windowed<R>>>,
     fault: FaultSlot,
 }
 
 impl<R> Shared<R> {
     /// Wraps `reader`; short reads are served from a window, see [`Windowed`].
-    pub fn new(reader: R) -> Self {
+    pub(crate) fn new(reader: R) -> Self {
         Self {
             reader: Arc::new(Mutex::new(Windowed::new(reader))),
             fault: FaultSlot::default(),
@@ -571,7 +571,7 @@ impl<R: Read + Seek> Seek for Shared<R> {
 
 /// What the census found out about an archive.
 #[derive(Debug)]
-pub struct ZipStructure {
+pub(crate) struct ZipStructure {
     central_entries: usize,
     findings: Findings,
     checks: StreamChecks,
@@ -803,7 +803,7 @@ pub(super) const fn recheck_allowance_for(quota: Limit<NonZeroU64>) -> u64 {
 /// Whether the census reads entry data to find where streaming readers
 /// resume inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamChecks {
+pub(crate) enum StreamChecks {
     /// Decode compressed streams and scan stored descriptor data.
     Run,
     /// Check only what the headers and the gaps between entries show.
@@ -812,7 +812,7 @@ pub enum StreamChecks {
 
 impl StreamChecks {
     /// The checks a policy needs: none when it discards the findings.
-    pub const fn of(policy: ZipConsistencyPolicy) -> Self {
+    pub(crate) const fn of(policy: ZipConsistencyPolicy) -> Self {
         match policy {
             ZipConsistencyPolicy::Enforce => Self::Run,
             ZipConsistencyPolicy::Ignore => Self::Skip,
@@ -1054,7 +1054,7 @@ fn overlaps(layouts: &[EntryLayout], directory_start: u64) -> bool {
 /// What a failed header-consistency check says about the comparison: the field
 /// that differs, or that the headers could not be compared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeaderFault {
+pub(crate) enum HeaderFault {
     Mismatch(ZipHeaderField),
     Uncomparable(ZipUncomparable),
 }
@@ -1077,7 +1077,7 @@ impl HeaderFault {
 /// An error without the crate's prefix (for example an I/O error while
 /// parsing the local header's extra fields) means the header could not be
 /// compared at all.
-pub fn classify(error: &ZipError) -> HeaderFault {
+pub(crate) fn classify(error: &ZipError) -> HeaderFault {
     let ZipError::InvalidArchive(msg) = error else {
         return HeaderFault::Uncomparable(ZipUncomparable::Unparseable);
     };

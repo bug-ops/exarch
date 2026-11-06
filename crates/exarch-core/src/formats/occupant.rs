@@ -16,7 +16,7 @@ use crate::Result;
 /// [`ExistingFiles::on_occupant`], so each replacement consumes its own
 /// decision.
 #[derive(Debug)]
-pub struct ReplacePermit(());
+pub(crate) struct ReplacePermit(());
 
 impl ReplacePermit {
     #[cfg(test)]
@@ -27,7 +27,7 @@ impl ReplacePermit {
 
 /// What to do with an occupied path.
 #[derive(Debug)]
-pub enum OccupantAction {
+pub(crate) enum OccupantAction {
     /// Leave the occupant in place and count a skip.
     Skip,
     /// Replace the occupant; the permit proves the policy allows it.

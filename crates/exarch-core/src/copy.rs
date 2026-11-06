@@ -36,7 +36,7 @@ const COPY_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Stack-allocated reusable buffer used internally by [`copy_bounded`].
 #[derive(Debug)]
-pub struct CopyBuffer {
+pub(crate) struct CopyBuffer {
     // Stack allocation is intentional for performance (avoids heap overhead)
     buf: [u8; COPY_BUFFER_SIZE],
 }
@@ -51,7 +51,7 @@ impl CopyBuffer {
         clippy::large_stack_arrays,
         reason = "the copy buffer is deliberately a fixed-size array"
     )]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             buf: [0u8; COPY_BUFFER_SIZE],
         }
@@ -61,7 +61,7 @@ impl CopyBuffer {
     #[inline]
     #[must_use]
     #[allow(dead_code, clippy::unused_self)]
-    pub fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         COPY_BUFFER_SIZE
     }
 }
@@ -77,7 +77,7 @@ impl Default for CopyBuffer {
 /// Shared by the streaming ceiling in [`copy_bounded`] and the ZIP
 /// reader's declared-size classification so the message stays identical.
 #[must_use]
-pub fn declared_size_exceeded(declared: u64) -> ArchiveError {
+pub(crate) fn declared_size_exceeded(declared: u64) -> ArchiveError {
     ArchiveError::from(Violation::DeclaredSizeExceeded { declared })
 }
 
@@ -120,7 +120,7 @@ impl From<CopyError> for ArchiveError {
 /// the size-ceiling rules (GHSA-5j8q-wxg5-hj4r).
 #[cfg(test)]
 #[inline]
-pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
+pub(crate) fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
     reader: &mut R,
     writer: &mut W,
     buffer: &mut CopyBuffer,
@@ -179,7 +179,7 @@ pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
 /// - `expected_size` is `Some` and the actual byte count exceeds or falls short
 ///   of it
 #[inline]
-pub fn copy_bounded<R: Read + ?Sized, W: Write + ?Sized>(
+pub(crate) fn copy_bounded<R: Read + ?Sized, W: Write + ?Sized>(
     reader: &mut R,
     writer: &mut W,
     buffer: &mut CopyBuffer,

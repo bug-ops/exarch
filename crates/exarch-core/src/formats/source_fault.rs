@@ -28,7 +28,7 @@ use crate::copy::CopyError;
 /// The decoder family that reads an entry's bytes, which decides how a failed
 /// read is classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadFamily {
+pub(crate) enum ReadFamily {
     /// A TAR stream.
     Tar,
     /// A ZIP archive.
@@ -48,7 +48,7 @@ pub enum ReadFamily {
 /// [`ExtractTarget::file`](super::target::ExtractTarget::file) to the copy that
 /// reads the entry, which hands a failure to [`classify`](Self::classify).
 #[derive(Debug, Clone, Copy)]
-pub struct ReadFaults<'a> {
+pub(crate) struct ReadFaults<'a> {
     tap: Option<&'a SourceTap>,
     family: ReadFamily,
 }
@@ -57,7 +57,7 @@ impl<'a> ReadFaults<'a> {
     /// The faults of an entry read by `family`, with the source's tap when it
     /// has one.
     #[must_use]
-    pub const fn new(family: ReadFamily, tap: Option<&'a SourceTap>) -> Self {
+    pub(crate) const fn new(family: ReadFamily, tap: Option<&'a SourceTap>) -> Self {
         Self { tap, family }
     }
 
@@ -66,7 +66,7 @@ impl<'a> ReadFaults<'a> {
     /// A stream whose source core cannot see has no way to tell a decoder
     /// error from a disk fault, so its read errors stay I/O errors.
     #[must_use]
-    pub const fn of_tar(source: &'a TapSource) -> Self {
+    pub(crate) const fn of_tar(source: &'a TapSource) -> Self {
         match source {
             TapSource::Tapped(tap) | TapSource::Replay(tap) => {
                 Self::new(ReadFamily::Tar, Some(tap))
@@ -90,7 +90,7 @@ impl<'a> ReadFaults<'a> {
     /// truncated archive; every other size mismatch and every overrun keeps
     /// the declared-size classification.
     #[must_use]
-    pub fn classify(self, error: CopyError) -> ArchiveError {
+    pub(crate) fn classify(self, error: CopyError) -> ArchiveError {
         match error {
             CopyError::Read(error) => self.classify_read(error),
             CopyError::Short { declared, actual } => match self.pending_fault() {
@@ -107,7 +107,7 @@ impl<'a> ReadFaults<'a> {
     /// Classifies the error of a read that is not part of a copy, such as
     /// draining the rest of an entry.
     #[must_use]
-    pub fn classify_read(self, error: io::Error) -> ArchiveError {
+    pub(crate) fn classify_read(self, error: io::Error) -> ArchiveError {
         let verdict = classify_decoder_read(error, self.pending_fault());
         if self.family == ReadFamily::Zip && matches!(verdict, ReadVerdict::DeclaredSizeOverrun(_))
         {
@@ -124,7 +124,7 @@ impl<'a> ReadFaults<'a> {
     /// Classifies the error of reading a stored symlink target: a source
     /// fault is I/O, anything else leaves the target unreadable.
     #[must_use]
-    pub fn classify_symlink_read(self, error: io::Error) -> ArchiveError {
+    pub(crate) fn classify_symlink_read(self, error: io::Error) -> ArchiveError {
         match classify_decoder_read(error, self.pending_fault()).into_decoder_error() {
             Ok(error) => ArchiveError::from(Malformation::SymlinkTargetUnreadable {
                 detail: error.to_string().into(),
@@ -344,7 +344,7 @@ impl RecordedFault {
 /// An [`io::ErrorKind::Interrupted`] error is a retry request, not a fault,
 /// and is never recorded. Cheap to clone; every clone sees the same slot.
 #[derive(Debug, Clone, Default)]
-pub struct FaultSlot(Arc<Mutex<Option<RecordedFault>>>);
+pub(crate) struct FaultSlot(Arc<Mutex<Option<RecordedFault>>>);
 
 impl FaultSlot {
     fn lock(&self) -> MutexGuard<'_, Option<RecordedFault>> {
@@ -353,7 +353,7 @@ impl FaultSlot {
 
     /// Remembers `error` unless a fault is already held or it is a retry
     /// request.
-    pub fn record(&self, error: &io::Error) {
+    pub(crate) fn record(&self, error: &io::Error) {
         if error.kind() == io::ErrorKind::Interrupted {
             return;
         }
@@ -362,13 +362,13 @@ impl FaultSlot {
 
     /// The recorded fault, rebuilt as an [`io::Error`], leaving it in place.
     #[must_use]
-    pub fn get(&self) -> Option<io::Error> {
+    pub(crate) fn get(&self) -> Option<io::Error> {
         self.lock().as_ref().map(RecordedFault::rebuild)
     }
 
     /// Forgets the recorded fault: the stream read on successfully, so it is
     /// aligned again and a later failure is not the fault's doing.
-    pub fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.lock().take();
     }
 }
@@ -378,7 +378,7 @@ impl FaultSlot {
 ///
 /// Cheap to clone; every clone observes the same counter and slot.
 #[derive(Debug, Clone, Default)]
-pub struct SourceTap {
+pub(crate) struct SourceTap {
     consumed: Arc<AtomicU64>,
     fault: FaultSlot,
 }
@@ -396,13 +396,13 @@ impl SourceTap {
 
     /// Raw bytes read from the source so far.
     #[must_use]
-    pub fn consumed(&self) -> u64 {
+    pub(crate) fn consumed(&self) -> u64 {
         self.consumed.load(Ordering::Relaxed)
     }
 
     /// The I/O fault the source raised, if one is pending.
     #[must_use]
-    pub fn fault(&self) -> Option<io::Error> {
+    pub(crate) fn fault(&self) -> Option<io::Error> {
         self.fault.get()
     }
 }
@@ -412,14 +412,14 @@ impl SourceTap {
 ///
 /// Never alters, buffers or reorders the bytes, and returns every error
 /// unchanged.
-pub struct SourceRead<R> {
+pub(crate) struct SourceRead<R> {
     inner: R,
     tap: SourceTap,
 }
 
 impl<R> SourceRead<R> {
     /// Wraps `inner`, recording into `tap`.
-    pub const fn new(inner: R, tap: SourceTap) -> Self {
+    pub(crate) const fn new(inner: R, tap: SourceTap) -> Self {
         Self { inner, tap }
     }
 }
@@ -452,7 +452,7 @@ impl<R: Seek> Seek for SourceRead<R> {
 
 /// The raw source behind a TAR byte stream, as the read budget sees it.
 #[derive(Debug, Clone)]
-pub enum TapSource {
+pub(crate) enum TapSource {
     /// Core built the stream and metered its input.
     Tapped(SourceTap),
     /// Core replays the decoded stream a list pass spooled to a file: the
@@ -469,7 +469,7 @@ pub enum TapSource {
 impl TapSource {
     /// The I/O fault the source raised, if one is pending.
     #[must_use]
-    pub fn fault(&self) -> Option<io::Error> {
+    pub(crate) fn fault(&self) -> Option<io::Error> {
         match self {
             Self::Tapped(tap) | Self::Replay(tap) => tap.fault(),
             #[cfg(test)]

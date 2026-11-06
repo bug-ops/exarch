@@ -31,7 +31,7 @@ use walkdir::WalkDir;
 /// - Symlink handling (follow or store as-is)
 /// - Size limit enforcement
 /// - Archive path computation
-pub struct FilteredWalker<'a> {
+pub(crate) struct FilteredWalker<'a> {
     root: &'a Path,
     config: &'a CreationConfig,
     excluded: &'a ExcludedOutput,
@@ -42,7 +42,7 @@ static NOTHING_EXCLUDED: ExcludedOutput = ExcludedOutput::none();
 impl<'a> FilteredWalker<'a> {
     /// Creates a new filtered walker for the given root directory.
     #[must_use]
-    pub fn new(root: &'a Path, config: &'a CreationConfig) -> Self {
+    pub(crate) fn new(root: &'a Path, config: &'a CreationConfig) -> Self {
         Self {
             root,
             config,
@@ -53,7 +53,7 @@ impl<'a> FilteredWalker<'a> {
     /// Leaves out the staged output file and its target before any filter
     /// rule sees them, so they are neither archived nor counted as skipped.
     #[must_use]
-    pub const fn excluding(mut self, excluded: &'a ExcludedOutput) -> Self {
+    pub(crate) const fn excluding(mut self, excluded: &'a ExcludedOutput) -> Self {
         self.excluded = excluded;
         self
     }
@@ -75,7 +75,7 @@ impl<'a> FilteredWalker<'a> {
     /// - File metadata cannot be read
     /// - Path is not valid UTF-8 (platform-specific)
     /// - Symlink target cannot be read
-    pub fn walk(&self) -> impl Iterator<Item = Result<WalkItem>> + '_ {
+    pub(crate) fn walk(&self) -> impl Iterator<Item = Result<WalkItem>> + '_ {
         let mut walker = WalkDir::new(self.root)
             .follow_links(self.config.follow_symlinks)
             .into_iter();
@@ -178,7 +178,7 @@ impl<'a> FilteredWalker<'a> {
 
 /// What the walker decided about one walked entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WalkItem {
+pub(crate) enum WalkItem {
     /// The entry goes into the archive.
     Entry(FilteredEntry),
 
@@ -188,7 +188,7 @@ pub enum WalkItem {
 
 /// The entries of a creation and what was left out on the way.
 #[derive(Debug, Default)]
-pub struct Collected {
+pub(crate) struct Collected {
     /// The entries to add, in walk order.
     pub entries: Vec<FilteredEntry>,
 
@@ -233,13 +233,13 @@ impl ClaimedNames {
 /// Built only by [`ArchiveEntryName::from_relative`], so a writer never has to
 /// re-check for the empty name of the walk root.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveEntryName(PathBuf);
+pub(crate) struct ArchiveEntryName(PathBuf);
 
 impl ArchiveEntryName {
     /// Returns the name for `path`, or `None` if it is empty, absolute or
     /// holds anything other than plain components (`.`, `..`, a prefix).
     #[must_use]
-    pub fn from_relative(path: &Path) -> Option<Self> {
+    pub(crate) fn from_relative(path: &Path) -> Option<Self> {
         let mut components = path.components().peekable();
         components.peek()?;
         components
@@ -279,7 +279,7 @@ fn entry_name(path: &Path, relative: &Path, is_dir: bool) -> Result<Option<Archi
 /// Represents a file, directory, or symlink that passed all filtering rules
 /// and is ready to be added to an archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FilteredEntry {
+pub(crate) struct FilteredEntry {
     /// Full filesystem path to the entry.
     pub path: PathBuf,
 
@@ -295,7 +295,7 @@ pub struct FilteredEntry {
 
 /// Type of directory entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EntryType {
+pub(crate) enum EntryType {
     /// Regular file.
     File,
 
@@ -322,7 +322,7 @@ pub enum EntryType {
 /// - Directory traversal fails
 /// - File metadata cannot be read
 /// - Two entries map to the same archive name
-pub fn collect_entries<P: AsRef<Path>>(
+pub(crate) fn collect_entries<P: AsRef<Path>>(
     sources: &[P],
     config: &CreationConfig,
     excluded: &ExcludedOutput,

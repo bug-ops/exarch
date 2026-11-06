@@ -16,7 +16,7 @@ use crate::inspection::VerificationReport;
 /// Supertrait that keeps [`ArchiveFormat`] implementable by this crate only.
 pub(crate) mod sealed {
     /// Implemented by the format handlers of this crate.
-    pub trait Sealed {}
+    pub(crate) trait Sealed {}
 }
 
 /// Trait for archive format handlers.
@@ -36,7 +36,7 @@ pub(crate) mod sealed {
 /// [`TarArchive`]: crate::formats::TarArchive
 /// [`ZipArchive`]: crate::formats::ZipArchive
 /// [`SevenZArchive`]: crate::formats::SevenZArchive
-pub trait ArchiveFormat: sealed::Sealed {
+pub(crate) trait ArchiveFormat: sealed::Sealed {
     /// Extracts the archive to the specified directory.
     ///
     /// `progress` receives per-entry callbacks during extraction.

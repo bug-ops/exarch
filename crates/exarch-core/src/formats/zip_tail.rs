@@ -75,7 +75,7 @@ impl Compressed {
 /// What the tail check needs to know about a data-descriptor entry; taken
 /// while the entry is open and used once it is closed.
 #[derive(Debug, Clone, Copy)]
-pub struct DescriptorTail {
+pub(crate) struct DescriptorTail {
     method: Compressed,
     data_start: u64,
     compressed: u64,
@@ -86,7 +86,7 @@ impl DescriptorTail {
     /// The entry's layout, or `None` when it has no data descriptor, so its
     /// compressed stream ends at the declared size by construction, or when it
     /// is stored, which the census covers.
-    pub fn of<R: Read>(entry: &ZipFile<'_, R>) -> Option<Self> {
+    pub(crate) fn of<R: Read>(entry: &ZipFile<'_, R>) -> Option<Self> {
         if !entry.flags().is_using_data_descriptor() {
             return None;
         }
@@ -111,7 +111,7 @@ impl DescriptorTail {
     /// # Errors
     ///
     /// Returns the I/O error of a failing disk read.
-    pub fn check<R: Read + Seek>(
+    pub(crate) fn check<R: Read + Seek>(
         self,
         archive: &mut ZipReader<R>,
         index: usize,

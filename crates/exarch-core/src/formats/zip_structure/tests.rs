@@ -32,6 +32,7 @@ mod known_size_stream_end;
 mod non_regular_payload;
 mod stored_resume;
 mod streaming;
+mod unicode_path;
 mod xl_type;
 mod zstd_bzip2_descriptor;
 

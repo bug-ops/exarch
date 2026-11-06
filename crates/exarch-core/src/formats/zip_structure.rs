@@ -180,7 +180,7 @@ const HEADER_INCONSISTENCY_PREFIX: &str = "header inconsistency detected: ";
 ///
 /// Matched with `starts_with`, never `contains`: several messages embed
 /// attacker-controlled names.
-const FIELD_MESSAGES: [(&str, ZipHeaderField); 9] = [
+const FIELD_MESSAGES: [(&str, ZipHeaderField); 19] = [
     (
         "Local file header filename mismatch",
         ZipHeaderField::FileName,
@@ -204,6 +204,43 @@ const FIELD_MESSAGES: [(&str, ZipHeaderField); 9] = [
     (
         "uncompressed size mismatch",
         ZipHeaderField::UncompressedSize,
+    ),
+    (
+        "compression flags mismatch",
+        ZipHeaderField::CompressionFlags,
+    ),
+    (
+        "AES encryption metadata mismatch",
+        ZipHeaderField::AesMetadata,
+    ),
+    ("filename contains null byte", ZipHeaderField::FileNameNul),
+    (
+        "UnicodePath (0x7075) does not match UTF-8 file name",
+        ZipHeaderField::UnicodePathLanguageEncoding,
+    ),
+    (
+        "UnicodePath (0x7075) directory status differs",
+        ZipHeaderField::UnicodePathDirectoryStatus,
+    ),
+    (
+        "UnicodePath (0x7075) is not valid UTF-8",
+        ZipHeaderField::UnicodePathNotUtf8,
+    ),
+    (
+        "UnicodePath (0x7075) contains illegal control or homoglyph character",
+        ZipHeaderField::UnicodePathIllegalCharacter,
+    ),
+    (
+        "UnicodePath (0x7075) changes file name path components",
+        ZipHeaderField::UnicodePathComponents,
+    ),
+    (
+        "UnicodePath (0x7075) has divergent trailing dots or spaces",
+        ZipHeaderField::UnicodePathTrailingDotsOrSpaces,
+    ),
+    (
+        "UnicodePath (0x7075) file extension differs",
+        ZipHeaderField::UnicodePathExtension,
     ),
 ];
 

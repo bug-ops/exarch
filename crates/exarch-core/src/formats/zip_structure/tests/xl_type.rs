@@ -301,12 +301,19 @@ fn local_xl_divergence_is_found_whatever_else_the_central_extra_block_holds() {
 }
 
 #[test]
-fn unicode_path_that_ends_in_a_slash_is_a_directory_to_both_sides() {
+fn unicode_path_that_ends_in_a_slash_over_a_plain_name_is_a_header_mismatch() {
     let upath = unicode_path_field(b"d", b"d/");
     let mut entry = with_xl(RawEntry::stored("d", b""), 0o100_644);
     entry.local_extra.extend_from_slice(&upath);
     entry.central_extra.extend_from_slice(&upath);
-    assert!(findings_of(&three_files(entry)).is_empty());
+    assert_eq!(
+        findings_of(&three_files(entry)),
+        [ZipInconsistency::HeaderMismatch {
+            entry: ZipEntryIndex::new(0),
+            field: ZipHeaderField::UnicodePathDirectoryStatus,
+            name: "d/".into(),
+        }]
+    );
 }
 
 #[test]

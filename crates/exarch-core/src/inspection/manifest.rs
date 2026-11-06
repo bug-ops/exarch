@@ -16,6 +16,7 @@ use crate::security::RawMode;
 use crate::security::Uncompressed;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::check_link_target_length;
+use crate::selection::EntryShape;
 
 /// Complete manifest of archive contents.
 ///
@@ -579,6 +580,16 @@ pub enum ManifestEntryKind {
 }
 
 impl ManifestEntryKind {
+    /// What kind of entry the selection sees.
+    pub(crate) const fn shape(&self) -> EntryShape {
+        match self {
+            Self::File { .. } => EntryShape::File,
+            Self::Directory => EntryShape::Directory,
+            Self::Symlink { .. } => EntryShape::Link(LinkKind::Symlink),
+            Self::Hardlink { .. } => EntryShape::Link(LinkKind::Hardlink),
+        }
+    }
+
     /// Returns the wire tag of this kind.
     #[must_use]
     pub const fn entry_type(&self) -> ManifestEntryType {

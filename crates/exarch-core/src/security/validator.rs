@@ -21,6 +21,7 @@ use crate::security::admitted::ValidatedHardlink;
 use crate::security::admitted::ValidatedSymlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::FsView;
+use crate::security::fs_view::LinkKind;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::require_hardlinks_allowed;
 use crate::security::permissions::RawMode;
@@ -28,9 +29,10 @@ use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
 use crate::selection::Decision;
-use crate::selection::EntrySelection;
+use crate::selection::EntryShape;
 use crate::selection::IncludeHits;
 use crate::selection::Placement;
+use crate::selection::SelectionRun;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::ParentCheck;
@@ -182,18 +184,18 @@ impl<T> Gated<T> {
 /// Returns the validation error of the rewritten name, or the refusal a
 /// rewrite raises.
 pub fn route_validated<V: FsView, P: ParentCheck>(
-    selection: &EntrySelection,
-    hits: Option<&IncludeHits>,
+    run: SelectionRun<'_>,
     original: SafePath<P>,
+    shape: EntryShape,
     root: &V::Root,
     config: &SecurityConfig,
     ctx: &ValidationContext<'_, V, P>,
     view: &V,
 ) -> Result<Gated<SafePath<P>>> {
-    if selection.is_default() {
+    if run.selection.is_default() {
         return Ok(Gated::Admit(original));
     }
-    match selection.decide(original.as_path(), hits) {
+    match run.decide(original.as_path(), shape)? {
         Decision::Skip(kind) => Ok(Gated::Skip(kind)),
         Decision::Extract(Placement::Unchanged) => Ok(Gated::Admit(original)),
         Decision::Extract(Placement::Rewritten(rewritten)) => {
@@ -282,7 +284,7 @@ impl<'a> ValidatorCore<'a> {
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
     ) -> Result<Gated<PendingFile<P>>> {
-        let safe_path = match self.route_entry_in(path, NodeKind::NonDirectory, root, view, ctx)? {
+        let safe_path = match self.route_entry_in(path, EntryShape::File, root, view, ctx)? {
             Gated::Admit(entry) => entry.into_inner(),
             Gated::Skip(kind) => return Ok(Gated::Skip(kind)),
         };
@@ -311,7 +313,7 @@ impl<'a> ValidatorCore<'a> {
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
     ) -> Result<Gated<SafePath<P>>> {
-        let safe_path = match self.route_entry_in(path, NodeKind::Directory, root, view, ctx)? {
+        let safe_path = match self.route_entry_in(path, EntryShape::Directory, root, view, ctx)? {
             Gated::Admit(entry) => entry.into_inner(),
             Gated::Skip(kind) => return Ok(Gated::Skip(kind)),
         };
@@ -334,7 +336,8 @@ impl<'a> ValidatorCore<'a> {
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
     ) -> Result<Gated<ValidatedSymlink<P>>> {
-        let safe_path = match self.route_entry_in(path, NodeKind::NonDirectory, root, view, ctx)? {
+        let shape = EntryShape::Link(LinkKind::Symlink);
+        let safe_path = match self.route_entry_in(path, shape, root, view, ctx)? {
             Gated::Admit(entry) => entry.into_inner(),
             Gated::Skip(kind) => return Ok(Gated::Skip(kind)),
         };
@@ -362,7 +365,8 @@ impl<'a> ValidatorCore<'a> {
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
     ) -> Result<Gated<ValidatedHardlink<P>>> {
-        let safe_path = match self.route_entry_in(path, NodeKind::NonDirectory, root, view, ctx)? {
+        let shape = EntryShape::Link(LinkKind::Hardlink);
+        let safe_path = match self.route_entry_in(path, shape, root, view, ctx)? {
             Gated::Admit(entry) => entry.into_inner(),
             Gated::Skip(kind) => return Ok(Gated::Skip(kind)),
         };
@@ -395,23 +399,19 @@ impl<'a> ValidatorCore<'a> {
     pub fn route_entry_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
-        kind: NodeKind,
+        shape: EntryShape,
         root: &V::Root,
         view: &V,
         ctx: &ValidationContext<'_, V, P>,
     ) -> Result<Gated<EntryPath<SafePath<P>>>> {
         let original = self
-            .validate_entry_path_in(path, kind, root, view, ctx)?
+            .validate_entry_path_in(path, shape.node_kind(), root, view, ctx)?
             .into_inner();
-        let routed = route_validated(
-            &self.config.selection,
-            Some(&self.include_hits),
-            original,
-            root,
-            self.config,
-            ctx,
-            view,
-        )?;
+        let run = SelectionRun {
+            selection: &self.config.selection,
+            hits: Some(&self.include_hits),
+        };
+        let routed = route_validated(run, original, shape, root, self.config, ctx, view)?;
         Ok(routed.map(|landing| {
             if landing.as_path().as_os_str().is_empty() {
                 EntryPath::Root(landing)

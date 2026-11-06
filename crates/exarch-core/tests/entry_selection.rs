@@ -136,7 +136,7 @@ fn root(error: &ArchiveError) -> &ArchiveError {
 }
 
 struct Run {
-    _work: TempDir,
+    work: TempDir,
     archive: PathBuf,
     dest: PathBuf,
     result: Result<ExtractionReport, ArchiveError>,
@@ -181,7 +181,7 @@ fn extract_with(
         .with_options(options)
         .extract(&archive, &dest);
     Run {
-        _work: work,
+        work,
         archive,
         dest,
         result,
@@ -443,7 +443,7 @@ fn a_refused_original_path_stays_refused_under_every_selection() {
                 ArchiveError::PathTraversal { .. },
                 "{format:?}"
             );
-            assert!(!run._work.path().join("x").exists(), "{format:?}");
+            assert!(!run.work.path().join("x").exists(), "{format:?}");
         }
     }
 }
@@ -458,7 +458,7 @@ fn a_name_that_would_leave_the_destination_after_stripping_is_refused() {
             ArchiveError::PathTraversal { .. },
             "{format:?}"
         );
-        assert!(!run._work.path().join("etc").exists(), "{format:?}");
+        assert!(!run.work.path().join("etc").exists(), "{format:?}");
     }
 }
 
@@ -858,5 +858,157 @@ fn a_refused_pattern_names_its_setting() {
             setting: ConfigSetting::EntryExclude,
             ..
         })
+    );
+}
+
+fn flatten() -> SecurityConfig {
+    base().with_path_rewrite(PathRewrite::Flatten)
+}
+
+#[test]
+fn flatten_lands_each_file_by_its_final_component_and_skips_directories() {
+    for format in FORMATS {
+        let run = extract(format, &wrapped(), &flatten());
+
+        let report = run.report();
+        assert_eq!(run.files(), ["README", "main.rs"], "{format:?}");
+        assert!(run.tree().dirs.is_empty(), "{format:?}");
+        assert_eq!(
+            report.skipped.count(SkipKind::StrippedAway),
+            2,
+            "{format:?}"
+        );
+    }
+}
+
+#[test]
+fn flatten_collisions_follow_the_existing_files_policy_and_count_a_duplicate() {
+    let items = [Item::File("a/x", b"first"), Item::File("b/x", b"second")];
+    for format in FORMATS {
+        for (policy, expected, duplicates) in [
+            (ExistingFiles::Skip, "first", 1),
+            (ExistingFiles::Refuse, "first", 1),
+            (ExistingFiles::Overwrite, "second", 0),
+        ] {
+            let options = ExtractionOptions::default().with_existing_files(policy);
+            let run = extract_with(format, &items, &flatten(), options);
+
+            let report = run.report();
+            assert_eq!(
+                std::fs::read(run.dest.join("x")).unwrap(),
+                expected.as_bytes(),
+                "{format:?} {policy:?}"
+            );
+            assert_eq!(
+                report.skipped.count(SkipKind::Duplicate),
+                duplicates,
+                "{format:?} {policy:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn flatten_collides_names_a_portable_destination_treats_as_one() {
+    let bytes = Format::Tar.build(&[Item::File("a/X", b"first"), Item::File("b/x", b"second")]);
+    let mut sink =
+        MemorySink::new(MemoryLimit::DEFAULT).with_path_model(exarch_core::PathModel::Portable);
+
+    let report = SinkExtractRequest::new(&flatten())
+        .with_options(SinkOptions::default())
+        .extract(ArchiveReader::tar(Cursor::new(bytes), None), &mut sink)
+        .unwrap();
+
+    assert_eq!(report.skipped.count(SkipKind::Duplicate), 1);
+    assert_eq!(sink.iter().count(), 1);
+}
+
+#[test]
+fn flatten_refuses_a_link_entry_it_would_have_to_move() {
+    for format in FORMATS {
+        let run = extract(
+            format,
+            &[Item::File("a/x", b"x"), Item::Symlink("a/link", "x")],
+            &flatten(),
+        );
+        assert_matches!(
+            run.error(),
+            ArchiveError::SecurityViolation {
+                kind: Violation::LinkUnderFlatten { .. },
+                ..
+            },
+            "{format:?}"
+        );
+    }
+
+    let run = extract(Format::Tar, &hardlinked(), &flatten());
+    assert_matches!(
+        run.error(),
+        ArchiveError::SecurityViolation {
+            kind: Violation::LinkUnderFlatten { .. },
+            ..
+        }
+    );
+}
+
+#[test]
+fn flatten_skips_a_link_the_selection_leaves_out() {
+    let config = flatten().try_add_include("a/x").unwrap();
+    let run = extract(
+        Format::Tar,
+        &[Item::File("a/x", b"x"), Item::Symlink("a/link", "x")],
+        &config,
+    );
+
+    assert_eq!(run.files(), ["x"]);
+    assert_eq!(run.report().skipped.count(SkipKind::NotSelected), 1);
+}
+
+#[test]
+fn flatten_is_modelled_by_list_and_verify() {
+    let work = TempDir::new().unwrap();
+    let archive = Format::Tar.write(work.path(), &wrapped());
+
+    let manifest = list_archive(&archive, &flatten()).unwrap();
+    let kinds: Vec<_> = manifest
+        .dispositions(&flatten())
+        .map(|(_, disposition)| disposition)
+        .collect();
+    assert_matches!(kinds[0], Disposition::Skip(SkipKind::StrippedAway));
+    assert_matches!(
+        &kinds[1],
+        Disposition::Extract(landing) if landing.as_path() == Path::new("README")
+    );
+    assert_matches!(kinds[2], Disposition::Skip(SkipKind::StrippedAway));
+    assert_matches!(
+        &kinds[3],
+        Disposition::Extract(landing) if landing.as_path() == Path::new("main.rs")
+    );
+
+    let report = verify_archive(&archive, &flatten()).unwrap();
+    assert_eq!(report.status(), VerificationStatus::Pass);
+
+    let linked = Format::Tar.write(
+        work.path(),
+        &[Item::File("a/x", b"x"), Item::Symlink("a/link", "x")],
+    );
+    let report = verify_archive(&linked, &flatten()).unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
+}
+
+#[test]
+fn replacing_a_destination_is_refused_for_flatten_too() {
+    let work = TempDir::new().unwrap();
+    let options = ExtractionOptions::default().with_staging(Staging::AtomicReplace);
+    let error = ExtractRequest::new(&flatten())
+        .with_options(options)
+        .extract(work.path().join("missing.tar"), work.path())
+        .unwrap_err();
+    assert_matches!(
+        error,
+        ArchiveError::InvalidConfiguration {
+            setting: ConfigSetting::EntrySelection,
+            ..
+        }
     );
 }

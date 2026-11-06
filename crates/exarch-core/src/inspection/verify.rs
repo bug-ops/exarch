@@ -65,6 +65,7 @@ use crate::security::validator::Gated;
 use crate::security::validator::route_validated;
 use crate::security::zipbomb::validate_entry_compression;
 use crate::selection::IncludeHits;
+use crate::selection::SelectionRun;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_symlink::require_symlinks_allowed;
@@ -450,15 +451,11 @@ impl Routing<'_> {
         }
         let original = SafePath::validate_in(&entry.path, dest, config, tree)?;
         let ctx = ValidationContext::<VirtualTree>::new(config.allowed.symlinks.is_allowed());
-        let routed = route_validated(
-            self.selection,
-            self.hits,
-            original,
-            dest,
-            config,
-            &ctx,
-            tree,
-        )?;
+        let run = SelectionRun {
+            selection: self.selection,
+            hits: self.hits,
+        };
+        let routed = route_validated(run, original, entry.kind.shape(), dest, config, &ctx, tree)?;
         if let Gated::Admit(landing) = &routed {
             name_limits(landing.as_path())?;
         }

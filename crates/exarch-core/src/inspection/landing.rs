@@ -29,6 +29,7 @@ use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
 use crate::security::validator::Gated;
 use crate::security::validator::route_validated;
+use crate::selection::SelectionRun;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 
@@ -320,10 +321,15 @@ fn land(
 ) -> Option<Disposition> {
     let original = SafePath::validate_in(&entry.path, root, config, tree).ok()?;
     let ctx = ValidationContext::<VirtualTree>::new(config.allowed.symlinks.is_allowed());
-    let safe = match route_validated(selection, None, original, root, config, &ctx, tree).ok()? {
-        Gated::Admit(safe) => safe,
-        Gated::Skip(kind) => return Some(Disposition::Skip(kind)),
+    let run = SelectionRun {
+        selection,
+        hits: None,
     };
+    let safe =
+        match route_validated(run, original, entry.kind.shape(), root, config, &ctx, tree).ok()? {
+            Gated::Admit(safe) => safe,
+            Gated::Skip(kind) => return Some(Disposition::Skip(kind)),
+        };
     let is_file = matches!(entry.kind, ManifestEntryKind::File { .. });
     if is_file && !is_extension_allowed(safe.as_path(), config) {
         return Some(Disposition::Skip(SkipKind::ExtensionNotAllowed));

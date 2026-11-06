@@ -315,11 +315,12 @@ fn reserve_entry(
     config: &SecurityConfig,
     mode: ListMode,
     path: &Path,
+    kind: NodeKind,
     is_file: bool,
 ) -> Result<Reservation> {
     let skipped = config
         .selection
-        .lexical_landing(path)
+        .lexical_landing(path, kind)
         .is_none_or(|landing| is_file && !is_extension_allowed(&landing, config));
     match (skipped, mode) {
         (true, _) => quota.reserve_count(config).map(|_| Reservation::Skipped),
@@ -453,8 +454,18 @@ fn list_tar_entries<R: std::io::Read>(
             // A rejection anywhere in this body abandons the entry (`settle`),
             // so the guard never decodes a refused entry to its end on the way
             // out.
-            let is_file = matches!(tar_node(entry.header().entry_type()), Ok(TarNode::File));
-            let reservation = reserve_entry(&mut quota, size, config, list_mode, &path, is_file)?;
+            let node = tar_node(entry.header().entry_type());
+            let is_file = matches!(node, Ok(TarNode::File));
+            let reserved_kind = NodeKind::directory_if(matches!(node, Ok(TarNode::Directory)));
+            let reservation = reserve_entry(
+                &mut quota,
+                size,
+                config,
+                list_mode,
+                &path,
+                reserved_kind,
+                is_file,
+            )?;
             // An integrity pass decodes the payload itself, below.
             if reservation == Reservation::Skipped {
                 if listing.integrity().is_none() {
@@ -663,7 +674,15 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         let kind = zip_node_kind(&path, &entry)?;
         let entry_type = convert_zip_entry_type(&entry, kind);
         let is_file = entry_type == ManifestEntryType::File;
-        reserve_entry(&mut quota, entry.size(), config, list_mode, &path, is_file)?;
+        reserve_entry(
+            &mut quota,
+            entry.size(),
+            config,
+            list_mode,
+            &path,
+            kind,
+            is_file,
+        )?;
         if !admit_path(&path, kind, is_file, config, &mut manifest, listing)? {
             continue;
         }
@@ -936,7 +955,15 @@ fn list_sevenz_archive(
         let path = PathBuf::from(normalize_entry_name(&entry.name));
         let entry_type = kind.manifest_type();
         let is_file = entry_type == ManifestEntryType::File;
-        reserve_entry(&mut quota, entry.size, config, list_mode, &path, is_file)?;
+        reserve_entry(
+            &mut quota,
+            entry.size,
+            config,
+            list_mode,
+            &path,
+            kind.node_kind(),
+            is_file,
+        )?;
 
         if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });
@@ -1045,7 +1072,7 @@ fn admit_path(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<bool> {
     EntryPath::of(path).require_directory_root(kind)?;
-    let Some(landing) = config.selection.lexical_landing(path) else {
+    let Some(landing) = config.selection.lexical_landing(path, kind) else {
         return Ok(true);
     };
     if check_entry_name_limits(PathModel::Host, &landing, regular_file, config).is_ok() {

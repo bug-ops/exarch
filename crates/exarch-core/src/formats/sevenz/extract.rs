@@ -45,8 +45,8 @@ use crate::security::Uncompressed;
 use crate::security::admitted::EntrySize;
 use crate::security::validator::EntryPath;
 use crate::security::validator::Gated;
-use crate::security::validator::NodeKind;
 use crate::security::zipbomb::validate_entry_compression;
+use crate::selection::EntryShape;
 use crate::types::SafePath;
 use crate::types::safe_symlink::require_symlinks_allowed;
 
@@ -100,7 +100,11 @@ pub trait PrePass {
     /// Validates an entry's path against the destination as it is now and
     /// applies the selection: the entry is skipped, or admitted at its
     /// landing.
-    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<Gated<EntryPath<SafePath>>>;
+    fn validate_path(
+        &mut self,
+        path: &Path,
+        shape: EntryShape,
+    ) -> Result<Gated<EntryPath<SafePath>>>;
 
     /// Checks a directory entry at its landing.
     fn directory(&mut self, landing: &SafePath) -> Result<()>;
@@ -191,7 +195,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 continue;
             };
             let path = PathBuf::from(common::normalize_entry_name(&entry.name));
-            let safe_path = match pre.validate_path(&path, kind.node_kind())? {
+            let safe_path = match pre.validate_path(&path, kind.shape())? {
                 Gated::Skip(_) | Gated::Admit(EntryPath::Root(_)) => continue,
                 Gated::Admit(EntryPath::Child(safe_path)) => safe_path,
             };

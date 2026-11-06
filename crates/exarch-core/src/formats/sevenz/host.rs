@@ -37,8 +37,8 @@ use crate::security::fs_view::Occupant;
 use crate::security::hardlink::HardlinkTarget;
 use crate::security::validator::EntryPath;
 use crate::security::validator::Gated;
-use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatorCore;
+use crate::selection::EntryShape;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -296,10 +296,14 @@ struct HostPrePass<'a> {
 }
 
 impl PrePass for HostPrePass<'_> {
-    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<Gated<EntryPath<SafePath>>> {
+    fn validate_path(
+        &mut self,
+        path: &Path,
+        shape: EntryShape,
+    ) -> Result<Gated<EntryPath<SafePath>>> {
         let ctx: ValidationContext<HostFs> = self.core.context();
         self.core
-            .route_entry_in(path, kind, self.dest, &HostFs, &ctx)
+            .route_entry_in(path, shape, self.dest, &HostFs, &ctx)
     }
 
     fn directory(&mut self, _landing: &SafePath) -> Result<()> {

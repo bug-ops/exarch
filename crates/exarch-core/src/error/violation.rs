@@ -359,6 +359,13 @@ pub enum Violation {
         /// The target path, as the archive names it.
         target: Box<str>,
     },
+    /// A symlink or hardlink entry under a flattening rewrite.
+    LinkUnderFlatten {
+        /// Which kind of link the entry is.
+        kind: LinkKind,
+        /// The entry path.
+        name: Box<str>,
+    },
     /// A source path to archive lies outside the archive root.
     SourceOutsideRoot {
         /// The source path.
@@ -421,6 +428,7 @@ impl Violation {
             | Self::ConflictUnlessSkipped { .. }
             | Self::ConflictFails { .. }
             | Self::HardlinkTargetNotExtracted { .. }
+            | Self::LinkUnderFlatten { .. }
             | Self::SourceOutsideRoot { .. } => None,
         }
     }
@@ -449,7 +457,7 @@ impl Violation {
             | Self::LinkTargetUnreadable(_)
             | Self::HardlinkTargetNotExtracted { .. }
             | Self::ReparsePointTarget { .. } => C::LinkTarget,
-            Self::LinksNotAllowed(_) => C::LinkPolicy,
+            Self::LinksNotAllowed(_) | Self::LinkUnderFlatten { .. } => C::LinkPolicy,
             Self::SymlinkComponent { .. }
             | Self::SymlinkParent { .. }
             | Self::ReplacesSymlink { .. } => C::ExistingSymlink,
@@ -633,6 +641,9 @@ impl fmt::Display for Violation {
                 f,
                 "hardlink {link} points at {target}, which the selection does not extract"
             ),
+            Self::LinkUnderFlatten { kind, name } => {
+                write!(f, "flattening refuses {kind} entries: {name}")
+            }
             Self::SourceOutsideRoot { path, root } => {
                 write!(f, "path {path} is not under root directory: {root}")
             }
@@ -860,6 +871,14 @@ mod tests {
                 None,
             ),
             (
+                Violation::LinkUnderFlatten {
+                    kind: link,
+                    name: text("n"),
+                },
+                C::LinkPolicy,
+                None,
+            ),
+            (
                 Violation::SourceOutsideRoot {
                     path: text("p"),
                     root: text("r"),
@@ -882,7 +901,7 @@ mod tests {
     /// The text of each `one_of_each` row, in order; byte-identical to the
     /// pre-typing messages (verified by the security audit), and callers match
     /// on them, so a wording change must be a deliberate edit here.
-    const EXPECTED_TEXT: [&str; 45] = [
+    const EXPECTED_TEXT: [&str; 46] = [
         "empty path not allowed",
         "path contains null bytes: p",
         "path contains null bytes - potential security issue",
@@ -927,6 +946,7 @@ mod tests {
         "extraction can fail at r unless duplicates are skipped: c",
         "extraction fails at r: c",
         "hardlink l points at t, which the selection does not extract",
+        "flattening refuses symlink entries: n",
         "path p is not under root directory: r",
     ];
 

@@ -28,6 +28,8 @@ use crate::ExcludePattern;
 use crate::Result;
 use crate::SkipKind;
 use crate::Violation;
+use crate::security::fs_view::LinkKind;
+use crate::security::validator::NodeKind;
 
 /// A glob-free entry pattern, with the grammar of creation excludes.
 ///
@@ -108,6 +110,17 @@ pub enum PathRewrite {
     /// The leading components are removed. An entry with no component left is
     /// skipped as [`SkipKind::StrippedAway`].
     Strip(StripComponents),
+    /// Every regular file lands in the destination root under its final
+    /// component. Directory entries are skipped as
+    /// [`SkipKind::StrippedAway`]; a symlink or hardlink entry is refused,
+    /// because its target was written for the original layout.
+    ///
+    /// Files that share a final name collide under the destination's
+    /// [`ExistingFiles`](crate::ExistingFiles) policy and are reported as
+    /// [`SkipKind::Duplicate`], so use
+    /// [`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse) where a silent
+    /// first-wins is not wanted.
+    Flatten,
 }
 
 /// The entries of an archive an extraction takes, and how their paths are
@@ -204,7 +217,17 @@ impl EntrySelection {
     /// Include patterns that match are recorded in `hits`, even when an
     /// exclude pattern then drops the entry, so only a pattern that matches no
     /// scanned entry at all is reported as unmatched.
-    pub(crate) fn decide(&self, original: &Path, hits: Option<&IncludeHits>) -> Decision {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Violation::LinkUnderFlatten`] for a selected link entry under
+    /// [`PathRewrite::Flatten`].
+    pub(crate) fn decide(
+        &self,
+        original: &Path,
+        shape: EntryShape,
+        hits: Option<&IncludeHits>,
+    ) -> Result<Decision> {
         let mut included = self.include.is_empty();
         for (index, pattern) in self.include.iter().enumerate() {
             if pattern.matches(original) {
@@ -215,19 +238,26 @@ impl EntrySelection {
             }
         }
         if !included || self.exclude.iter().any(|pattern| pattern.matches(original)) {
-            return Decision::Skip(SkipKind::NotSelected);
+            return Ok(Decision::Skip(SkipKind::NotSelected));
         }
-        match self.rewrite {
-            PathRewrite::Keep => Decision::Extract(Placement::Unchanged),
-            PathRewrite::Strip(strip) => {
+        Ok(match (self.rewrite, shape) {
+            (PathRewrite::Keep, _) => Decision::Extract(Placement::Unchanged),
+            (PathRewrite::Strip(strip), _) => {
                 let kept: PathBuf = original.components().skip(strip.get().get()).collect();
-                if kept.as_os_str().is_empty() {
-                    Decision::Skip(SkipKind::StrippedAway)
-                } else {
-                    Decision::Extract(Placement::Rewritten(Rewritten(kept)))
-                }
+                Decision::rewritten(kept)
             }
-        }
+            (PathRewrite::Flatten, EntryShape::File) => {
+                Decision::rewritten(original.file_name().map(PathBuf::from).unwrap_or_default())
+            }
+            (PathRewrite::Flatten, EntryShape::Directory) => Decision::Skip(SkipKind::StrippedAway),
+            (PathRewrite::Flatten, EntryShape::Link(kind)) => {
+                return Err(Violation::LinkUnderFlatten {
+                    kind,
+                    name: crate::path_text(original).into(),
+                }
+                .into());
+            }
+        })
     }
 
     /// Where a listed entry lands lexically, or `None` when the selection
@@ -236,7 +266,11 @@ impl EntrySelection {
     /// For the passes that run before or beside validation (name limits, quota
     /// charges), which only need the landing's shape. The default selection
     /// returns `raw` untouched.
-    pub(crate) fn lexical_landing<'a>(&self, raw: &'a Path) -> Option<Cow<'a, Path>> {
+    pub(crate) fn lexical_landing<'a>(
+        &self,
+        raw: &'a Path,
+        kind: NodeKind,
+    ) -> Option<Cow<'a, Path>> {
         if self.is_default() {
             return Some(Cow::Borrowed(raw));
         }
@@ -244,10 +278,14 @@ impl EntrySelection {
             .components()
             .filter(|component| matches!(component, Component::Normal(_)))
             .collect();
-        match self.decide(&normal, None) {
-            Decision::Extract(Placement::Unchanged) => Some(Cow::Owned(normal)),
-            Decision::Extract(Placement::Rewritten(rewritten)) => Some(Cow::Owned(rewritten.0)),
-            Decision::Skip(_) => None,
+        let shape = match kind {
+            NodeKind::Directory => EntryShape::Directory,
+            NodeKind::NonDirectory => EntryShape::File,
+        };
+        match self.decide(&normal, shape, None) {
+            Ok(Decision::Extract(Placement::Unchanged)) | Err(_) => Some(Cow::Owned(normal)),
+            Ok(Decision::Extract(Placement::Rewritten(rewritten))) => Some(Cow::Owned(rewritten.0)),
+            Ok(Decision::Skip(_)) => None,
         }
     }
 
@@ -303,13 +341,53 @@ impl EntrySelection {
         if normalized.as_os_str().is_empty() {
             return Ok(TargetMapping::Unchanged);
         }
-        Ok(match self.decide(&normalized, None) {
+        Ok(match self.decide(&normalized, EntryShape::File, None)? {
             Decision::Skip(_) => TargetMapping::NotExtracted,
             Decision::Extract(Placement::Unchanged) => TargetMapping::Mapped(normalized),
             Decision::Extract(Placement::Rewritten(rewritten)) => {
                 TargetMapping::Mapped(rewritten.0)
             }
         })
+    }
+}
+
+/// A selection together with the record of include patterns that matched,
+/// for one pass over an archive's entries.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionRun<'a> {
+    /// The selection applied to every entry.
+    pub selection: &'a EntrySelection,
+    /// Where include matches are recorded; `None` for a pass that must not
+    /// count again entries that were already counted.
+    pub hits: Option<&'a IncludeHits>,
+}
+
+impl SelectionRun<'_> {
+    /// Decides one entry; see [`EntrySelection::decide`].
+    pub(crate) fn decide(&self, original: &Path, shape: EntryShape) -> Result<Decision> {
+        self.selection.decide(original, shape, self.hits)
+    }
+}
+
+/// What kind of entry a name belongs to, for rewrites that treat kinds
+/// differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryShape {
+    /// A directory entry.
+    Directory,
+    /// A regular file.
+    File,
+    /// A symlink or hardlink.
+    Link(LinkKind),
+}
+
+impl EntryShape {
+    /// How the entry-root rule sees this kind.
+    pub(crate) const fn node_kind(self) -> NodeKind {
+        match self {
+            Self::Directory => NodeKind::Directory,
+            Self::File | Self::Link(_) => NodeKind::NonDirectory,
+        }
     }
 }
 
@@ -320,6 +398,17 @@ pub enum Decision {
     Extract(Placement),
     /// The entry is left out.
     Skip(SkipKind),
+}
+
+impl Decision {
+    /// An entry that lands at `kept`, or is stripped away when nothing is left.
+    fn rewritten(kept: PathBuf) -> Self {
+        if kept.as_os_str().is_empty() {
+            Self::Skip(SkipKind::StrippedAway)
+        } else {
+            Self::Extract(Placement::Rewritten(Rewritten(kept)))
+        }
+    }
 }
 
 /// Where a selected entry lands.
@@ -416,7 +505,9 @@ mod tests {
     }
 
     fn decide(selection: &EntrySelection, path: &str) -> Decision {
-        selection.decide(Path::new(path), None)
+        selection
+            .decide(Path::new(path), EntryShape::File, None)
+            .unwrap()
     }
 
     fn skipped(decision: &Decision) -> Option<SkipKind> {
@@ -536,7 +627,9 @@ mod tests {
             .with_include(pattern("b"))
             .with_exclude(pattern("a"));
         let hits = IncludeHits::of(&selection);
-        selection.decide(Path::new("a"), Some(&hits));
+        selection
+            .decide(Path::new("a"), EntryShape::File, Some(&hits))
+            .unwrap();
         let Err(ArchiveError::UnmatchedInclude { patterns }) = hits.require_all_matched(&selection)
         else {
             panic!("pattern b matched nothing");

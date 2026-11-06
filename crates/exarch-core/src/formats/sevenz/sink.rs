@@ -22,8 +22,8 @@ use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
 use crate::security::validator::EntryPath;
 use crate::security::validator::Gated;
-use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatorCore;
+use crate::selection::EntryShape;
 use crate::sink::EntrySink;
 use crate::sink::SinkTarget;
 use crate::types::SafePath;
@@ -51,10 +51,14 @@ impl SinkPrePass<'_> {
 }
 
 impl PrePass for SinkPrePass<'_> {
-    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<Gated<EntryPath<SafePath>>> {
+    fn validate_path(
+        &mut self,
+        path: &Path,
+        shape: EntryShape,
+    ) -> Result<Gated<EntryPath<SafePath>>> {
         let ctx = self.core.context::<VirtualTree>();
         self.core
-            .route_entry_in(path, kind, self.root, self.tree, &ctx)
+            .route_entry_in(path, shape, self.root, self.tree, &ctx)
     }
 
     fn directory(&mut self, landing: &SafePath) -> Result<()> {

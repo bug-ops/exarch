@@ -355,9 +355,8 @@ pub(super) fn run(
     let report = match extract(&staging_path, &staged_options(options), progress) {
         Ok(report) => report,
         Err(e) => {
-            // TODO(review): a staging directory that survives its removal after
-            // a failed extraction cannot be reported through the extraction's
-            // error.
+            // TODO(#995): a staging directory that survives its removal here is
+            // lost; the extraction's error has no slot to report it.
             let _ = staged.discard();
             return Err(e.rolled_back());
         }

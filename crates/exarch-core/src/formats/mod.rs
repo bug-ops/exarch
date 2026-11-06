@@ -8,6 +8,7 @@ pub(crate) mod dir_walker;
 #[cfg(any(unix, target_os = "wasi"))]
 pub(crate) mod handle_resolution;
 pub(crate) mod pinned_dir;
+pub(crate) mod run_record;
 pub mod sevenz;
 pub(crate) mod source_fault;
 pub mod tar;

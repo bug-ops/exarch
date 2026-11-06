@@ -627,13 +627,13 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
         common::checked_add_bytes(tally.report.bytes_written, size.get())?;
 
         let rel = path.as_path();
+        // The tree holds only what this run delivered, so under `Refuse` every
+        // occupant is a duplicate of an earlier entry and is skipped, as under
+        // `Skip`; an occupant this run did not create cannot exist here.
         match (self.tree.occupant(rel), tally.options.existing_files) {
-            (Some(_), ExistingFiles::Skip) => {
+            (Some(_), ExistingFiles::Skip | ExistingFiles::Refuse) => {
                 tally.record_duplicate_skip(rel)?;
                 return Ok(None);
-            }
-            (Some(_), ExistingFiles::Refuse) => {
-                return Err(common::destination_occupied(self.root.as_path(), rel));
             }
             (
                 Some(occupant @ (Occupant::Directory | Occupant::Symlink)),
@@ -872,9 +872,8 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         let target = symlink.target_path();
         let occupant = self.tree.occupant(rel);
         match (occupant, tally.options.existing_files) {
-            (Some(_), ExistingFiles::Skip) => return tally.record_duplicate_skip(rel).map(drop),
-            (Some(_), ExistingFiles::Refuse) => {
-                return Err(common::destination_occupied(self.root.as_path(), rel));
+            (Some(_), ExistingFiles::Skip | ExistingFiles::Refuse) => {
+                return tally.record_duplicate_skip(rel).map(drop);
             }
             (Some(Occupant::Directory), ExistingFiles::Overwrite) => {
                 return Err(common::occupant_at_dest_error(rel, Occupant::Directory).into());
@@ -947,11 +946,9 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         }
         if self.tree.occupant(link.as_path()).is_some() {
             return match tally.options.existing_files {
-                ExistingFiles::Skip => common::record_duplicate_skip(tally.report, link.as_path()),
-                ExistingFiles::Refuse => Err(common::destination_occupied(
-                    self.root.as_path(),
-                    link.as_path(),
-                )),
+                ExistingFiles::Skip | ExistingFiles::Refuse => {
+                    common::record_duplicate_skip(tally.report, link.as_path())
+                }
                 ExistingFiles::Overwrite => Err(ArchiveError::from(Malformation::DuplicateEntry {
                     path: link.as_path().to_path_buf(),
                 })),

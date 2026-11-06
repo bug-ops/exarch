@@ -65,6 +65,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use super::run_record::RunRecord;
 use crate::ArchiveError;
 use crate::Result;
 use crate::security::fs_view::Occupant;
@@ -175,6 +176,7 @@ impl From<rustix::fs::FileType> for Occupant {
 pub struct PinnedRoot {
     dest: DestDir,
     dir: VettedDir,
+    created: RunRecord,
 }
 
 impl PinnedRoot {
@@ -185,7 +187,16 @@ impl PinnedRoot {
     /// Returns an I/O error if the directory cannot be opened.
     pub(crate) fn open(dest: DestDir) -> Result<Self> {
         let dir = VettedDir::open_path(dest.as_path())?;
-        Ok(Self { dest, dir })
+        Ok(Self {
+            dest,
+            dir,
+            created: RunRecord::default(),
+        })
+    }
+
+    /// What this run created in the destination, for `ExistingFiles::Refuse`.
+    pub(crate) const fn created(&self) -> &RunRecord {
+        &self.created
     }
 
     pub(crate) const fn dest(&self) -> &DestDir {
@@ -314,6 +325,26 @@ mod imp {
         pub(crate) fn probe(&self, name: Leaf<'_>) -> io::Result<Option<Occupant>> {
             match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => Ok(Some(FileType::from_raw_mode(stat.st_mode).into())),
+                Err(e) if e == Errno::NOENT => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        }
+
+        /// The device and inode of the entry `name` itself, never of a
+        /// symlink's target; `None` if it is absent.
+        // `st_dev` and `st_ino` are platform-native integers, so the conversion
+        // is a no-op on some targets; an unrepresentable value fails instead of
+        // collapsing to a shared sentinel that would make two inodes equal.
+        #[allow(clippy::useless_conversion)]
+        pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<(u64, u64)>> {
+            match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => {
+                    let dev = u64::try_from(stat.st_dev)
+                        .map_err(|_| io::Error::other("unrepresentable st_dev"))?;
+                    let ino = u64::try_from(stat.st_ino)
+                        .map_err(|_| io::Error::other("unrepresentable st_ino"))?;
+                    Ok(Some((dev, ino)))
+                }
                 Err(e) if e == Errno::NOENT => Ok(None),
                 Err(e) => Err(e.into()),
             }

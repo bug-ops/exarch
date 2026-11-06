@@ -168,6 +168,16 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                         .map(FileAdmission::Skipped);
                 }
                 ExistingFiles::Refuse => {
+                    if self
+                        .inner
+                        .root()
+                        .created()
+                        .created_here(&parent, leaf, safe_path.as_path())
+                    {
+                        return tally
+                            .record_duplicate_skip(safe_path.as_path())
+                            .map(FileAdmission::Skipped);
+                    }
                     return Err(common::destination_occupied(
                         self.inner.root().dest().as_path(),
                         safe_path.as_path(),
@@ -246,6 +256,12 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 permit,
             )?,
         };
+        self.inner.root().created().note(
+            tally.options.existing_files,
+            &parent,
+            leaf,
+            path.as_path(),
+        );
         tally.record_file(written)
     }
 

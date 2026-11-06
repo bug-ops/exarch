@@ -455,10 +455,20 @@ impl ExtractTarget for HostTarget<'_> {
                     ExistingFiles::Skip => {
                         common::record_duplicate_skip(tally.report, link.as_path())
                     }
-                    ExistingFiles::Refuse => Err(common::destination_occupied(
-                        self.root.dest().as_path(),
-                        link.as_path(),
-                    )),
+                    ExistingFiles::Refuse => {
+                        if self
+                            .root
+                            .created()
+                            .created_here(&link_dir, link_leaf, link.as_path())
+                        {
+                            common::record_duplicate_skip(tally.report, link.as_path())
+                        } else {
+                            Err(common::destination_occupied(
+                                self.root.dest().as_path(),
+                                link.as_path(),
+                            ))
+                        }
+                    }
                     ExistingFiles::Overwrite => {
                         Err(ArchiveError::from(Malformation::DuplicateEntry {
                             path: link.as_path().to_path_buf(),
@@ -468,6 +478,12 @@ impl ExtractTarget for HostTarget<'_> {
             }
             Err(e) => return Err(ArchiveError::Io(e)),
         };
+        self.root.created().note(
+            tally.options.existing_files,
+            &link_dir,
+            link_leaf,
+            link.as_path(),
+        );
         let cleanup_guard = TempFileGuard::new(&link_dir, link_leaf);
 
         // Every hardlink copies the target's real bytes to a new inode, so it

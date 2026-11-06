@@ -463,14 +463,7 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     let Some(OutputSlot {
         file: output_file,
         written_at,
-    }) = open_output_slot(
-        &parent,
-        leaf,
-        safe_path.as_path(),
-        mode,
-        duplicates,
-        root.dest().as_path(),
-    )?
+    }) = open_output_slot(&parent, leaf, safe_path.as_path(), mode, duplicates, root)?
     else {
         return record_duplicate_skip(report, safe_path.as_path());
     };
@@ -591,24 +584,34 @@ struct OutputSlot {
 /// A free name is created in place with `O_EXCL`. When an entry already
 /// exists, overwrite mode writes a fresh sibling temp file that the caller
 /// renames over the entry, so other hardlinks to the old inode keep their
-/// content. Returns `None` when the entry exists and `duplicates` is `Skip`,
-/// and fails with `DestinationOccupied` under `Refuse`.
+/// content. Returns `None` when the entry exists and `duplicates` is `Skip`.
+/// Under `Refuse` an entry this run created is a duplicate and gives `None`
+/// as well; any other occupant fails with `DestinationOccupied`.
 fn open_output_slot(
     dir: &VettedDir,
     leaf: Leaf<'_>,
     rel: &Path,
     mode: Option<SanitizedMode>,
     duplicates: ExistingFiles,
-    destination: &Path,
+    root: &PinnedRoot,
 ) -> Result<Option<OutputSlot>> {
     match dir.create_new(leaf, mode) {
-        Ok(file) => Ok(Some(OutputSlot {
-            file,
-            written_at: WrittenAt::Final,
-        })),
+        Ok(file) => {
+            root.created().note(duplicates, dir, leaf, rel);
+            Ok(Some(OutputSlot {
+                file,
+                written_at: WrittenAt::Final,
+            }))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match duplicates {
             ExistingFiles::Skip => Ok(None),
-            ExistingFiles::Refuse => Err(destination_occupied(destination, rel)),
+            ExistingFiles::Refuse => {
+                if root.created().created_here(dir, leaf, rel) {
+                    Ok(None)
+                } else {
+                    Err(destination_occupied(root.dest().as_path(), rel))
+                }
+            }
             ExistingFiles::Overwrite => {
                 refuse_non_file_occupant(dir, leaf, rel)?;
                 let (temp, file) = create_temp_sibling(dir, leaf, mode, TempLeaf::next)
@@ -819,6 +822,12 @@ pub fn create_symlink<P: ParentCheck>(
                     return record_duplicate_skip(report, safe_symlink.link().as_path());
                 }
                 ExistingFiles::Refuse => {
+                    if root
+                        .created()
+                        .created_here(&parent, leaf, safe_symlink.link().as_path())
+                    {
+                        return record_duplicate_skip(report, safe_symlink.link().as_path());
+                    }
                     return Err(destination_occupied(
                         root.dest().as_path(),
                         safe_symlink.link().as_path(),
@@ -838,6 +847,8 @@ pub fn create_symlink<P: ParentCheck>(
         }
 
         parent.symlink(target_path, leaf)?;
+        root.created()
+            .note(duplicates, &parent, leaf, safe_symlink.link().as_path());
 
         report.symlinks_created += 1;
 

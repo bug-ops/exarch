@@ -4,6 +4,12 @@
   "description": "Memory-safe archive extraction library with built-in security validation",
   "main": "index.js",
   "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "*.node"
+  ],
   "keywords": [
     "archive",
     "extraction",

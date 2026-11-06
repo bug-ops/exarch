@@ -7,7 +7,7 @@ tags:
   - extraction
   - rust
 created: 2026-11-06
-status: ready
+status: done
 related:
   - "[[spec]]"
   - "[[plan]]"
@@ -22,33 +22,36 @@ related:
 > **Total tasks**: 22
 > **Track**: `core-selection` (T-001 to T-014), then CLI (T-015 to T-017), Python (T-018, T-019), Node (T-020, T-021) in their W2 steps; T-022 closes the batch.
 
+> [!success] Done in the #981 batch
+> All tasks are implemented; see [[plan]] section 10 for the names that changed (`route_entry_in` instead of `admit`, `dispositions(&SecurityConfig)`, `UnmatchedInclude` top-level, bindings take the selection on `SecurityConfig`). T-014 differential ran against bsdtar only.
+
 > [!note] Preconditions
 > The track worktree branches from the post-W0 tip (`73d694b` or later) of `feat/981-exarch-v-panics-with-exit-101`, and `git merge-base --is-ancestor <W0-sha> HEAD` is checked after creation. Core-staging and #972 are merged before T-004 starts. Every task keeps `cargo clippy --workspace --all-targets --all-features -- -D warnings` and the workspace nextest run green.
 
 ## Progress
 
-- [ ] T-001: Shared pattern type
-- [ ] T-002: `StripComponents`, `PathRewrite::{Keep, Strip}`, `EntrySelection` and builders
-- [ ] T-003: `SecurityConfig::selection` and `for_listing`
-- [ ] T-004: Shared admission gate
-- [ ] T-005: `max_file_count` charge audit
-- [ ] T-006: Selection and strip in TAR, ZIP, 7z hosts and sinks
-- [ ] T-007: Links under strip and selection
-- [ ] T-008: Unmatched include error and rollback
-- [ ] T-009: `AtomicReplace` refusal
-- [ ] T-010: Manifest selection, `dispositions`, projection
-- [ ] T-011: `verify` parity and integrity scope
-- [ ] T-012: `PathRewrite::Flatten`
-- [ ] T-013: Flatten collisions and link refusal
-- [ ] T-014: Differential, fuzz and bench
-- [ ] T-015: CLI flags
-- [ ] T-016: CLI output
-- [ ] T-017: CLI tests
-- [ ] T-018: Python surface
-- [ ] T-019: Python tests
-- [ ] T-020: Node surface
-- [ ] T-021: Node tests
-- [ ] T-022: Spec sync, skill and CHANGELOG hand-off
+- [x] T-001: Shared pattern type
+- [x] T-002: `StripComponents`, `PathRewrite::{Keep, Strip}`, `EntrySelection` and builders
+- [x] T-003: `SecurityConfig::selection` and `for_listing`
+- [x] T-004: Shared admission gate
+- [x] T-005: `max_file_count` charge audit
+- [x] T-006: Selection and strip in TAR, ZIP, 7z hosts and sinks
+- [x] T-007: Links under strip and selection
+- [x] T-008: Unmatched include error and rollback
+- [x] T-009: `AtomicReplace` refusal
+- [x] T-010: Manifest selection, `dispositions`, projection
+- [x] T-011: `verify` parity and integrity scope
+- [x] T-012: `PathRewrite::Flatten`
+- [x] T-013: Flatten collisions and link refusal
+- [x] T-014: Differential, fuzz and bench
+- [x] T-015: CLI flags
+- [x] T-016: CLI output
+- [x] T-017: CLI tests
+- [x] T-018: Python surface
+- [x] T-019: Python tests
+- [x] T-020: Node surface
+- [x] T-021: Node tests
+- [x] T-022: Spec sync, skill and CHANGELOG hand-off
 
 ## Dependency Graph
 

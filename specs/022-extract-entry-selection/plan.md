@@ -8,7 +8,7 @@ tags:
   - security
   - rust
 created: 2026-11-06
-status: draft
+status: implemented
 related:
   - "[[spec]]"
   - "[[constitution]]"
@@ -44,7 +44,7 @@ The spec's open questions are closed as follows. The spec carries the same answe
 | Q9 | Symlink and hardlink entries under `Flatten` are refused with a typed error | No silent loss |
 | Q10 | Collisions after strip or flatten follow `ExistingFiles` (see FR-020 in the spec): `Skip` first wins and counts a duplicate, `Overwrite` replaces where kinds allow, `Refuse` refuses an occupant the run did not create | No new default |
 | Q11 | Patterns are case-sensitive on every host, as the create matcher | One shared matcher |
-| Q12 | `ArchiveManifest` stores the `EntrySelection` it was listed with; `ArchiveManifest::dispositions()` takes no config and yields `(entry, Disposition::{Extract(LandingPath), Skip(SkipKind)})`; `landings(config)` projects through the stored selection; `total_size()` keeps counting every entry | A manifest cannot disagree with the selection of its own listing |
+| Q12 | `ArchiveManifest` stores the `EntrySelection` it was listed with; `ArchiveManifest::dispositions(&SecurityConfig)` (limits and policies only; the selection comes from the manifest) yields `(entry, Disposition::{Extract(LandingPath), Skip(SkipKind)})`; `landings(config)` projects through the stored selection; `total_size()` keeps counting every entry | A manifest cannot disagree with the selection of its own listing |
 | Q13 | `verify --check-integrity` decodes and checks unselected entries too | The gate speaks for the whole archive |
 | Q14 | CLI: `--include`, `--exclude`, `--strip-components` only; no positional members, no `-C` | |
 | Q15 | A selection skip is charged to `max_file_count` exactly as an allowlist skip is; the track reads the current extract, list and verify behavior first and aligns all three | Task T-005 |
@@ -67,7 +67,7 @@ All new public items are re-exported at the crate root. After #978B the modules 
 | `StripComponents` | newtype over `NonZeroUsize` | Range 1 to `max_path_depth` of the construction; one boundary function in `limit.rs` style takes the runtime integer (`i64`) and refuses `0`, negatives and out-of-range as `InvalidConfiguration{StripComponents, ..}` |
 | `Selected` | result enum | `Extract(Rewritten)` or `Skip(SkipKind)` where the kind is `NotSelected` or `StrippedAway` |
 | `Rewritten` | proof newtype, private constructor | The component list that remains after the rewrite; the only input of the second `SafePath` validation. The rewrite function is its only producer (FR-012, NFR-001) |
-| `Disposition<'a>` | enum | `Extract(LandingPath)` or `Skip(SkipKind)` for `ArchiveManifest::dispositions()` |
+| `Disposition<'a>` | enum | `Extract(LandingPath)` or `Skip(SkipKind)` for `ArchiveManifest::dispositions(&SecurityConfig)` |
 | `SelectionError` | typed error content, no new top-level variant where an existing one fits | Unmatched include patterns (`ArchiveError::UnmatchedInclude{patterns: Box<[EntryPattern]>}`, wrapped in `Partial` like other late errors); hardlink whose target is not extracted (`ArchiveError::HardlinkTargetNotExtracted{link, target}`) |
 
 `ConfigSetting::{EntrySelection, EntryInclude, EntryExclude, StripComponents}` and `SkipKind::{NotSelected, StrippedAway}` already exist from W0 (`73d694b`) and are not redefined. The new `ArchiveError` variants and their `ErrorCode` and `FfiKind` mappings are owned by the track; they follow the W0 error conventions (typed fields, host paths redacted where they are host paths, entry paths rendered as today).
@@ -117,7 +117,7 @@ The existing refusals (file over directory, symlink over file or link, hardlink 
 ### 2.6 Links (FR-030 to FR-033)
 
 - A symlink is validated at its rewritten landing with its original, unrewritten target text. `top/link -> ../other/x` with strip 1 is `SymlinkEscape`.
-- A hardlink target is an archive path: it goes through `admit` as well and the mapped target is validated as a `SafePath`. If the target is not selected, is stripped away, or is skipped for another reason, the link is refused with `HardlinkTargetNotExtracted{link, target}` (Q6).
+- A hardlink target is an archive path: it goes through `route_entry_in` as well and the mapped target is validated as a `SafePath`. If the target is not selected, is stripped away, or is skipped for another reason, the link is refused with `HardlinkTargetNotExtracted{link, target}` (Q6).
 - The hardlink mapping lives in the `sink.rs` and `target.rs` hardlink regions, where core-selection owns the gate and hardlink-mapping regions (see section 7).
 - Under `Flatten`, a symlink or hardlink entry is refused with a typed error (Q9). The error names the entry; no skip.
 
@@ -215,3 +215,22 @@ Track `core-selection` branches from the post-W0 tip of `feat/981-exarch-v-panic
 ## 9. Implementation order
 
 See [[tasks]] for the task list. Flatten (T-012 to T-014) is implemented last in the track, after strip and selection pass the full gate, so it can be reviewed or reverted as one unit.
+
+## 10. As-built reconciliation
+
+The names in sections 2.1 to 2.4 are the plan's. What shipped differs as follows; the spec's section 11 repeats the behavioral differences.
+
+| Plan | As built |
+|------|----------|
+| `admit(entry, config) -> Admission::{Extract, Skip}` | `ValidatorCore::route_entry_in` validates the original `SafePath`, runs `EntrySelection::decide`, and revalidates a rewritten name through `SafePath::validate_rewritten_in(&Rewritten)`; `route_validated` is the same step for `land` and `verify`. `FileAdmission` became `Admission {Admit, Skipped}`, `FileScreen` became `Gated<T> {Admit, Skip(SkipKind)}`; `ExtractTarget::validate_{directory,symlink,hardlink}` take `&mut Tally` and return `Admission`; `ExtractTarget::finish_scan` runs the unmatched-include check |
+| Builders `with_include`, `with_exclude`, `with_strip_components`, `with_flatten` | `SecurityConfig::with_selection`, `try_add_include(&str)`, `try_add_exclude(&str)` and `with_path_rewrite(PathRewrite)`; `EntrySelection` has `with_include`, `with_exclude`, `with_rewrite`, `is_default`, `include()`, `exclude()`, `rewrite()` |
+| `StripComponents` from `i64` | `StripComponents::new(NonZeroU64, max_path_depth: NonZeroUsize)`; bindings parse with `positive_from_i128` or `positive_from_f64` under `ConfigSetting::StripComponents` and then call `new`; `ExcludePattern::parse_for(ConfigSetting, &str)` is the shared pattern boundary and `EntryPattern` is an alias of `ExcludePattern` |
+| `SelectionError` and `HardlinkTargetNotExtracted` as `ArchiveError` | `ArchiveError::UnmatchedInclude { patterns }` is top-level; `HardlinkTargetNotExtracted { link, target }` and `LinkUnderFlatten { kind, name }` are `Violation` variants (sub-codes `LinkTarget`, `LinkPolicy`); no `ConfigProblem` was added |
+| `dispositions()` without config | `dispositions(&SecurityConfig)` |
+| Unmatched include bit set per run | As planned, evaluated in `finish_scan` before the hardlink pass, also on empty archives |
+| Python `flatten: bool` and `include`/`exclude` keyword arguments on extract | Selection on `SecurityConfig` for Python and Node (spec FR-104) |
+| CLI `--flatten` | As planned; conflicts with `--strip-components` at the clap level |
+| T-005 audit | Extraction charges no allowlist skip, `list` charged the count alone, `verify` charged the full size; `verify` was aligned to the count alone |
+| `ListedArchive` size | `SecurityConfig` grew by one 48-byte `EntrySelection` (boxed slices); `ExtractPlan::Listed` boxes the listing for the clippy large-variant lint |
+
+Verification as built: 40 integration tests over TAR, ZIP and 7z for host and `MemorySink`, a bsdtar differential test, the extraction fuzz target with a selector-derived selection, and a `skipped_entries` bench (allowlist skip 10.762 ms against exclude-pattern skip 10.755 ms on 10k files, within noise).

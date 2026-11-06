@@ -61,6 +61,12 @@ impl<'a> ReadFaults<'a> {
         Self { tap, family }
     }
 
+    /// The decoder family of the entry being read.
+    #[must_use]
+    pub(crate) const fn family(self) -> ReadFamily {
+        self.family
+    }
+
     /// The faults of a TAR entry read from `source`.
     ///
     /// A stream whose source core cannot see has no way to tell a decoder
@@ -108,7 +114,7 @@ impl<'a> ReadFaults<'a> {
     /// draining the rest of an entry.
     #[must_use]
     pub(crate) fn classify_read(self, error: io::Error) -> ArchiveError {
-        let verdict = classify_decoder_read(error, self.pending_fault());
+        let verdict = classify_decoder_read(error, self.pending_fault(), self.family);
         if self.family == ReadFamily::Zip && matches!(verdict, ReadVerdict::DeclaredSizeOverrun(_))
         {
             // The entry's caller knows the declared size and types it as a
@@ -125,7 +131,7 @@ impl<'a> ReadFaults<'a> {
     /// fault is I/O, anything else leaves the target unreadable.
     #[must_use]
     pub(crate) fn classify_symlink_read(self, error: io::Error) -> ArchiveError {
-        match classify_decoder_read(error, self.pending_fault()).into_decoder_error() {
+        match classify_decoder_read(error, self.pending_fault(), self.family).into_decoder_error() {
             Ok(error) => ArchiveError::from(Malformation::SymlinkTargetUnreadable {
                 detail: error.to_string().into(),
             }),
@@ -189,7 +195,11 @@ impl ReadVerdict {
 /// A budget refusal wins, then the source's recorded `fault`, then any errno
 /// (a decoder never raises one, so it is the disk's), then the decoder's own
 /// checksum, declared-size and truncation errors.
-pub(crate) fn classify_decoder_read(error: io::Error, fault: Option<io::Error>) -> ReadVerdict {
+pub(crate) fn classify_decoder_read(
+    error: io::Error,
+    fault: Option<io::Error>,
+    family: ReadFamily,
+) -> ReadVerdict {
     if let Some(violation) = budget_violation(&error) {
         return ReadVerdict::Budget(violation);
     }
@@ -199,10 +209,10 @@ pub(crate) fn classify_decoder_read(error: io::Error, fault: Option<io::Error>) 
     if error.raw_os_error().is_some() {
         return ReadVerdict::SourceFault(error);
     }
-    if is_checksum_failure(&error) {
+    if is_checksum_failure(&error, family) {
         return ReadVerdict::Checksum(error);
     }
-    if zip_crate_failure(&error) == Some(ZipCrateFailure::DeclaredSizeExceeded) {
+    if zip_crate_failure(&error, family) == Some(ZipCrateFailure::DeclaredSizeExceeded) {
         return ReadVerdict::DeclaredSizeOverrun(error);
     }
     if error.kind() == io::ErrorKind::UnexpectedEof {
@@ -260,31 +270,42 @@ enum ZipCrateFailure {
 /// raises as untyped `InvalidData` strings ("Invalid checksum" and "File is
 /// larger than its declared uncompressed size" in zip 9.4).
 ///
-/// Matches keywords rather than the exact text so that a rewording within the
-/// supported range keeps its meaning; `zip_crate_contract_holds` drives the
-/// real crate and fails loudly when a release changes either error.
-fn zip_crate_failure(error: &io::Error) -> Option<ZipCrateFailure> {
-    if error.kind() != io::ErrorKind::InvalidData || error.get_ref().is_none() {
+/// Only a [`ReadFamily::Zip`] read is looked at: another decoder's message that
+/// happens to contain the same words is not a ZIP verdict. Matches keywords
+/// rather than the exact text so that a rewording within the supported range
+/// keeps its meaning; `zip_crate_contract_holds` drives the real crate and
+/// fails loudly when a release changes either error.
+fn zip_crate_failure(error: &io::Error, family: ReadFamily) -> Option<ZipCrateFailure> {
+    if family != ReadFamily::Zip
+        || error.kind() != io::ErrorKind::InvalidData
+        || error.get_ref().is_none()
+    {
         return None;
     }
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("declared") && message.contains("size") {
+    let message = error.to_string();
+    let has = |needle: &str| {
+        message
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+    };
+    if has("declared") && has("size") {
         Some(ZipCrateFailure::DeclaredSizeExceeded)
-    } else if message.contains("checksum") {
+    } else if has("checksum") {
         Some(ZipCrateFailure::InvalidChecksum)
     } else {
         None
     }
 }
 
-fn is_checksum_failure(error: &io::Error) -> bool {
+fn is_checksum_failure(error: &io::Error, family: ReadFamily) -> bool {
     let sevenz = error
         .get_ref()
         .and_then(|inner| inner.downcast_ref::<sevenz_rust2::Error>())
         .is_some_and(|e| matches!(e, sevenz_rust2::Error::ChecksumVerificationFailed));
     ReplayChecksumMismatch::is(error)
         || sevenz
-        || zip_crate_failure(error) == Some(ZipCrateFailure::InvalidChecksum)
+        || zip_crate_failure(error, family) == Some(ZipCrateFailure::InvalidChecksum)
 }
 
 /// Reports a source `fault` as [`ArchiveError::Io`] in place of a verdict on
@@ -679,15 +700,40 @@ mod tests {
     #[test]
     fn zip_crate_contract_holds() {
         assert_eq!(
-            zip_crate_failure(&zip_read_error(&bad_crc_zip())),
+            zip_crate_failure(&zip_read_error(&bad_crc_zip()), ReadFamily::Zip),
             Some(ZipCrateFailure::InvalidChecksum),
             "the zip crate changed its checksum error; update zip_crate_failure"
         );
         assert_eq!(
-            zip_crate_failure(&zip_read_error(&forged_size_zip())),
+            zip_crate_failure(&zip_read_error(&forged_size_zip()), ReadFamily::Zip),
             Some(ZipCrateFailure::DeclaredSizeExceeded),
             "the zip crate changed its declared-size error; update zip_crate_failure"
         );
+    }
+
+    #[test]
+    fn only_a_zip_read_gets_the_zip_text_verdicts() {
+        let texts = [
+            "File is larger than its declared uncompressed size",
+            "Invalid checksum",
+        ];
+        for family in [ReadFamily::Tar, ReadFamily::SevenZ, ReadFamily::Opaque] {
+            for text in texts {
+                let error = io::Error::new(io::ErrorKind::InvalidData, text);
+                assert_matches!(
+                    classify_decoder_read(error, None, family),
+                    ReadVerdict::Malformed(_),
+                    "{family:?}: {text}"
+                );
+            }
+        }
+        for text in texts {
+            let error = io::Error::new(io::ErrorKind::InvalidData, text);
+            assert_matches!(
+                ReadFaults::new(ReadFamily::Tar, None).classify(CopyError::Read(error)),
+                ArchiveError::InvalidArchive(_)
+            );
+        }
     }
 
     #[test]
@@ -695,45 +741,51 @@ mod tests {
         let exceeded =
             io::Error::other(super::super::tar_metadata_limit::DecoderMemoryExceeded { max: 7 });
         assert_matches!(
-            classify_decoder_read(exceeded, Some(io::Error::from_raw_os_error(5))),
+            classify_decoder_read(
+                exceeded,
+                Some(io::Error::from_raw_os_error(5)),
+                ReadFamily::Zip
+            ),
             ReadVerdict::Budget(_)
         );
         assert_matches!(
             classify_decoder_read(
                 zip_read_error(&bad_crc_zip()),
-                Some(io::Error::other("eio"))
+                Some(io::Error::other("eio")),
+                ReadFamily::Zip
             ),
             ReadVerdict::SourceFault(_)
         );
         assert_matches!(
-            classify_decoder_read(io::Error::from_raw_os_error(28), None),
+            classify_decoder_read(io::Error::from_raw_os_error(28), None, ReadFamily::Zip),
             ReadVerdict::SourceFault(_)
         );
         assert_matches!(
-            classify_decoder_read(zip_read_error(&bad_crc_zip()), None),
+            classify_decoder_read(zip_read_error(&bad_crc_zip()), None, ReadFamily::Zip),
             ReadVerdict::Checksum(_)
         );
         assert_matches!(
-            classify_decoder_read(ReplayChecksumMismatch::into_io(), None),
+            classify_decoder_read(ReplayChecksumMismatch::into_io(), None, ReadFamily::Tar),
             ReadVerdict::Checksum(_)
         );
         assert_matches!(
             classify_decoder_read(
                 io::Error::other(sevenz_rust2::Error::ChecksumVerificationFailed),
-                None
+                None,
+                ReadFamily::SevenZ
             ),
             ReadVerdict::Checksum(_)
         );
         assert_matches!(
-            classify_decoder_read(zip_read_error(&forged_size_zip()), None),
+            classify_decoder_read(zip_read_error(&forged_size_zip()), None, ReadFamily::Zip),
             ReadVerdict::DeclaredSizeOverrun(_)
         );
         assert_matches!(
-            classify_decoder_read(io::ErrorKind::UnexpectedEof.into(), None),
+            classify_decoder_read(io::ErrorKind::UnexpectedEof.into(), None, ReadFamily::Tar),
             ReadVerdict::Truncated(_)
         );
         assert_matches!(
-            classify_decoder_read(decoder_error(), None),
+            classify_decoder_read(decoder_error(), None, ReadFamily::Tar),
             ReadVerdict::Malformed(_)
         );
     }
@@ -741,7 +793,7 @@ mod tests {
     #[test]
     fn a_plain_error_with_checksum_text_is_not_a_zip_failure_without_a_payload() {
         let bare = io::Error::from(io::ErrorKind::InvalidData);
-        assert_eq!(zip_crate_failure(&bare), None);
+        assert_eq!(zip_crate_failure(&bare, ReadFamily::Zip), None);
     }
 
     #[test]

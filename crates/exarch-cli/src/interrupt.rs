@@ -70,11 +70,25 @@ impl Interrupt {
 
 static INTERRUPT: Interrupt = Interrupt::new();
 #[cfg(not(target_os = "wasi"))]
-static OUTPUT: OnceLock<PathBuf> = OnceLock::new();
+static OUTPUT: OnceLock<(PathBuf, Run)> = OnceLock::new();
 
 /// Whether the process was asked to stop.
 pub fn requested() -> bool {
     INTERRUPT.requested()
+}
+
+/// What the interrupted command leaves on disk, which decides what the forced
+/// exit tells the user to look for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Run {
+    /// `create`: stages the archive in a temporary file next to the output.
+    Create,
+    /// `extract` without `--atomic`: writes straight into the destination.
+    ExtractInPlace,
+    /// `extract --atomic`: stages in a directory next to the destination.
+    ExtractAtomic,
+    /// `extract --atomic --force`: also moves an existing destination aside.
+    ExtractReplace,
 }
 
 /// What the forced exit tells the user to look for.
@@ -82,27 +96,40 @@ pub fn requested() -> bool {
 /// `.exarch-backup-*` holds the only copy of the original destination between
 /// the moment an atomic replace moves it aside and the moment the new content
 /// takes its place, so it is named apart from the staging entries that are safe
-/// to delete.
+/// to delete, and only for the run that makes one.
 #[cfg(not(target_os = "wasi"))]
-fn forced_exit_hint(output: &Path) -> String {
+fn forced_exit_hint(output: &Path, run: Run) -> String {
     let place = match output.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.display().to_string(),
         _ => "the current directory".to_owned(),
     };
-    format!(
-        "interrupted again, stopping at once; unfinished staging entries named .exarch-* may \
-         remain in {place}: remove them, but if {output} is missing, rename the \
-         .exarch-backup-* entry there back to {output} first, since it holds the original",
-        output = output.display(),
-    )
+    let output = output.display();
+    match run {
+        Run::Create => format!(
+            "interrupted again, stopping at once; an unfinished temporary file named .exarch-* \
+             may remain in {place}: remove it"
+        ),
+        Run::ExtractInPlace => format!(
+            "interrupted again, stopping at once; entries already extracted into {output} remain"
+        ),
+        Run::ExtractAtomic => format!(
+            "interrupted again, stopping at once; an unfinished staging directory named \
+             .exarch-* may remain in {place}: remove it"
+        ),
+        Run::ExtractReplace => format!(
+            "interrupted again, stopping at once; unfinished staging entries named .exarch-* may \
+             remain in {place}: remove them, but if {output} is missing, rename the \
+             .exarch-backup-* entry there back to {output} first, since it holds the original"
+        ),
+    }
 }
 
 #[cfg(not(target_os = "wasi"))]
 fn on_signal() {
     if INTERRUPT.request() == Signal::Repeated {
-        if let Some(output) = OUTPUT.get() {
+        if let Some((output, run)) = OUTPUT.get() {
             // A closed stderr must not stop the exit below.
-            let _ = writeln!(std::io::stderr(), "{}", forced_exit_hint(output));
+            let _ = writeln!(std::io::stderr(), "{}", forced_exit_hint(output, *run));
         }
         std::process::exit(i32::from(FORCED_EXIT_CODE));
     }
@@ -112,8 +139,8 @@ fn on_signal() {
 /// writes `output`. A handler that cannot be installed is reported and the
 /// default signal action stays.
 #[cfg(not(target_os = "wasi"))]
-pub fn install(output: &Path) {
-    OUTPUT.get_or_init(|| output.to_path_buf());
+pub fn install(output: &Path, run: Run) {
+    OUTPUT.get_or_init(|| (output.to_path_buf(), run));
     if let Err(error) = ctrlc::set_handler(on_signal) {
         eprintln!("warning: cannot install the interrupt handler: {error}");
     }
@@ -121,7 +148,7 @@ pub fn install(output: &Path) {
 
 /// WASI has no signals; there is nothing to install.
 #[cfg(target_os = "wasi")]
-pub const fn install(_output: &Path) {}
+pub const fn install(_output: &Path, _run: Run) {}
 
 /// Wraps a reporter so that a requested stop cancels the run.
 pub struct Interruptible {
@@ -190,11 +217,35 @@ mod tests {
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
-    fn the_forced_exit_hint_names_the_backup_apart_from_the_staging_entries() {
-        let hint = forced_exit_hint(Path::new("work/out"));
-        assert!(hint.contains("in work:"), "{hint}");
-        assert!(hint.contains("rename the .exarch-backup-* entry"), "{hint}");
-        assert!(hint.contains("work/out"), "{hint}");
-        assert!(forced_exit_hint(Path::new("out")).contains("in the current directory:"));
+    fn only_a_replace_names_the_backup() {
+        let replace = forced_exit_hint(Path::new("work/out"), Run::ExtractReplace);
+        assert!(replace.contains("in work:"), "{replace}");
+        assert!(
+            replace.contains("rename the .exarch-backup-* entry"),
+            "{replace}"
+        );
+        for run in [Run::Create, Run::ExtractInPlace, Run::ExtractAtomic] {
+            let hint = forced_exit_hint(Path::new("work/out"), run);
+            assert!(!hint.contains("backup"), "{run:?}: {hint}");
+        }
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn each_run_names_what_it_leaves() {
+        let create = forced_exit_hint(Path::new("o.tar"), Run::Create);
+        assert!(
+            create.contains("temporary file named .exarch-*"),
+            "{create}"
+        );
+        assert!(create.contains("in the current directory"), "{create}");
+        let atomic = forced_exit_hint(Path::new("work/out"), Run::ExtractAtomic);
+        assert!(
+            atomic.contains("staging directory named .exarch-*"),
+            "{atomic}"
+        );
+        let in_place = forced_exit_hint(Path::new("work/out"), Run::ExtractInPlace);
+        assert!(!in_place.contains(".exarch-"), "{in_place}");
+        assert!(in_place.contains("work/out"), "{in_place}");
     }
 }

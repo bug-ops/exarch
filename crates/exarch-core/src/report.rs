@@ -634,6 +634,9 @@ impl ProgressCallback for NoopProgress {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
+    use super::*;
+    use std::assert_matches;
+
     #[test]
     fn redacted_backup_warning_keeps_no_directory_in_release() {
         let warning = ExtractionWarning::BackupCleanupFailed {
@@ -648,9 +651,6 @@ mod tests {
             assert!(!redacted.to_string().contains("/srv/private"));
         }
     }
-
-    use super::*;
-    use std::assert_matches;
 
     #[test]
     fn test_new_report() {

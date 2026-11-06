@@ -45,6 +45,7 @@ use crate::formats::sevenz::read_sevenz_header;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
 use crate::formats::sevenz::walk_sevenz_links;
+use crate::formats::source_fault::ReadFamily;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::source_fault::TapSource;
 use crate::formats::tar::TarNode;
@@ -94,43 +95,8 @@ use crate::security::validator::NodeKind;
 use crate::security::validator::require_non_empty_name;
 use crate::types::safe_path::has_null_bytes;
 
-/// Lists archive contents without extracting.
-///
-/// Returns a manifest containing metadata for all entries in the archive.
-/// No files are written to disk during this operation.
-///
-/// # Arguments
-///
-/// * `archive_path` - Path to archive file
-/// * `config` - Security configuration (quota limits apply)
-///
-/// # Errors
-///
-/// Returns error if:
-/// - Archive file cannot be opened
-/// - Archive format is unsupported or corrupted
-/// - Quota limits exceeded (file count, total size, single file size)
-/// - A ZIP archive's structure is read differently by different tools
-///   ([`ArchiveError::ZipInconsistency`], unless `zip_consistency` is `Ignore`)
-/// - A link target exceeds the host's name limits
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::list_archive;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = SecurityConfig::default();
-/// let manifest = list_archive("archive.tar.gz", &config)?;
-///
-/// println!("Archive contains {} files", manifest.total_entries());
-/// for entry in manifest.entries() {
-///     println!("{}: {} bytes", entry.path.display(), entry.size());
-/// }
-/// # Ok(())
-/// # }
-/// ```
+/// Lists `archive_path` without extracting; the public wrapper is
+/// [`crate::list_archive`], which carries the contract.
 pub(crate) fn list_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
@@ -731,7 +697,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             && (entry_type != ManifestEntryType::Directory || size > 0);
         let mut descriptor_tail = None;
         if has_payload && let Some((pass, slot)) = tracked.as_mut() {
-            let outcome = pass.decode(*slot, &mut entry, size, Charge::Declared);
+            let outcome = pass.decode(*slot, &mut entry, size, Charge::Declared, ReadFamily::Zip);
             if matches!(outcome, DecodeOutcome::Verified) {
                 descriptor_tail = DescriptorTail::of(&entry);
             }

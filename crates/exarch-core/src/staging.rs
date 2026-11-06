@@ -210,20 +210,19 @@ fn extract_atomic(
     let mut staging = StagingDir::create(&destination.pin, &destination.parent)?;
 
     // An absent destination has no mode to keep: the one a new directory gets
-    // under the umask is read now, before any archive content is written.
-    let fresh_mode = if destination.existed {
-        None
-    } else {
-        match staging.probe_umask() {
-            Ok(adoption) => Some(adoption),
-            Err(e) => {
-                let error = ArchiveError::Io(io_context(
-                    &e,
-                    "failed to probe the umask",
-                    &destination.parent,
-                ));
-                return Err(error.rolled_back_with(staging.discard()));
-            }
+    // under the umask is read now, before any archive content is written. It is
+    // also read for an existing one, as the fallback should that destination
+    // vanish before the publish; only for an absent one is a failure fatal.
+    let fresh_mode = match staging.probe_umask() {
+        Ok(adoption) => Some(adoption),
+        Err(_) if destination.existed => None,
+        Err(e) => {
+            let error = ArchiveError::Io(io_context(
+                &e,
+                "failed to probe the umask",
+                &destination.parent,
+            ));
+            return Err(error.rolled_back_with(staging.discard()));
         }
     };
 

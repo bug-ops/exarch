@@ -235,7 +235,9 @@ pub fn create_archive<P: AsRef<Path>, Q: AsRef<Path>>(
 /// - Archive file cannot be opened
 /// - Archive format is unsupported or corrupted
 /// - Quota limits exceeded (file count, total size, single file size)
-/// - Declared compressed sizes exceed the archive length
+/// - A ZIP archive's structure is read differently by different tools
+///   ([`ArchiveError::ZipInconsistency`], unless `zip_consistency` is `Ignore`)
+/// - A link target exceeds the host's name limits
 ///
 /// # Examples
 ///
@@ -284,14 +286,69 @@ pub fn list_archive<P: AsRef<Path>>(
 /// - Archive file cannot be opened
 /// - Archive is severely corrupted (cannot read structure)
 /// - Declared compressed sizes exceed the archive length
+/// - A ZIP central directory holds more records than `max_file_count`, counting
+///   records the `zip` crate collapses or the end record does not count
 /// - An entry name is a path traversal (`..` component, or an absolute path
 ///   unless `allowed.absolute_paths` is set): the listing step rejects it with
 ///   [`ArchiveError::PathTraversal`] before a report exists
 ///
+/// The targets of 7z symlinks are stored in compressed entry data, so they are
+/// validated only when an integrity check decodes the archive. Without one,
+/// each such target stays unread and the report carries a single Medium issue
+/// counting them (status at least `WARNING`); entries that would land beneath
+/// an unread link are still reported. With an integrity check whose budget
+/// cannot cover a link, the target stays unread in the same way.
+///
 /// Other security violations are reported in `VerificationReport::issues`
 /// instead: disallowed links, link targets that escape the destination,
-/// quota and compression-ratio violations, NUL bytes, banned components and
-/// unsafe permissions.
+/// hardlinks whose target never appears, quota and compression-ratio
+/// violations, NUL bytes, banned components, unsafe permissions and, for ZIP
+/// under `zip_consistency = Enforce`, headers that disagree with the central
+/// directory, duplicate names, overlapping entries and hidden records or
+/// headers. The report's total is the ZIP's raw central directory count.
+///
+/// # Limitations
+///
+/// Verification models only the archive's own entries; it cannot account for
+/// files, directories or links already present in the extraction destination,
+/// so a PASS does not guarantee that extraction into a non-empty destination
+/// succeeds. Symlink chains are cut off after a per-OS number of hops that
+/// matches `std::fs::canonicalize` on macOS (33), glibc (40) and musl (39)
+/// hosts; Windows (63) is unverified and other Unix hosts assume 32, where a
+/// low guess can only give a false FAIL.
+///
+/// On macOS entry names are compared after NFD and a per-character case fold,
+/// on Windows after the same fold without normalisation, and elsewhere
+/// exactly. Two names that differ exactly but compare equal under that fold
+/// are reported as a
+/// [`IssueCategory::NameCollision`](crate::IssueCategory::NameCollision) (High
+/// when the kinds differ or a symlink is involved, Medium for two files or for
+/// directories that hold entries, Low for two directories that hold none), so a
+/// merge is never silent. The fold approximates the host
+/// table, so a pair it merges that the host keeps apart is reported too.
+/// Windows component checks (reserved names, `:`, trailing dot or space,
+/// `<>"|?*`, control characters) run only on Windows hosts.
+///
+/// Verification models extraction that skips an existing entry. With
+/// overwrite semantics extraction keeps the last entry at a path, which
+/// verification cannot model. A symlink entry over a path an earlier entry
+/// created as a file is reported as a security finding, since overwriting
+/// replaces the file and changes what the path resolves to. Where overwriting
+/// fails closed and replaces nothing (a symlink over a symlink or directory,
+/// a file over a directory or symlink, a hardlink over any earlier entry; a
+/// symlink repeating an earlier symlink's target is not noted at all) the
+/// entry is only noted as a Low
+/// [`IssueCategory::InvalidArchive`](crate::IssueCategory::InvalidArchive)
+/// issue, so the status stays `PASS`.
+///
+/// Hardlinks are materialized after every other entry, so their path and
+/// target are validated against the final tree.
+///
+/// # Limitations
+///
+/// Name lengths are checked on the entry's relative path. Extraction adds the
+/// destination prefix, so a long destination can make extraction fail with
+/// `File name too long` for an entry `verify` accepted.
 ///
 /// # Examples
 ///

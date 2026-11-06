@@ -27,6 +27,7 @@ use std::path::PathBuf;
 
 use super::StagedRun;
 use super::adopt::Adoption;
+use super::adopt::make_removable;
 use super::cancelled_after;
 use super::dir::StagingDir;
 use super::io_context;
@@ -279,6 +280,7 @@ enum Refusal {
         error: io::Error,
         context: &'static str,
         path: PathBuf,
+        restore: Restore,
     },
     Error(ArchiveError),
 }
@@ -289,6 +291,7 @@ impl Refusal {
             error,
             context,
             path: path.to_path_buf(),
+            restore: Restore::NotNeeded,
         }
     }
 
@@ -299,9 +302,10 @@ impl Refusal {
                 error,
                 context,
                 path,
+                restore,
             } => ArchiveError::ReplaceFailed(ReplaceFailure::new(
                 io_context(&error, context, &path),
-                Restore::NotNeeded,
+                restore,
                 leftover,
             )),
             Self::Error(error) => error.rolled_back_with(leftover),
@@ -366,8 +370,7 @@ struct Displaced<'a> {
     dest_name: &'a LeafBuf,
     backup_name: LeafBuf,
     backup_path: PathBuf,
-    backup: Option<EntryStatus>,
-    permissions: Option<Adoption>,
+    backup: EntryStatus,
     armed: bool,
 }
 
@@ -376,21 +379,29 @@ impl<'a> Displaced<'a> {
     ///
     /// The name must be vacant: renaming onto an existing directory is
     /// refused on Windows.
+    ///
+    /// The directory that was actually moved is inspected afterwards and must
+    /// still be the one pinned (`dest.id`): the check before the rename leaves
+    /// a window in which a writer of the parent could swap in a substitute,
+    /// whose permissions would then be adopted and whose tree would be
+    /// deleted. A mismatch moves the entry back and refuses. A volume that
+    /// reports no identity cannot be compared and is accepted, as in
+    /// [`verify_unchanged`].
     fn displace(pin: &'a VettedDir, dest: &Dest<'a>) -> std::result::Result<Self, Refusal> {
+        Self::displace_with(pin, dest, || {})
+    }
+
+    fn displace_with(
+        pin: &'a VettedDir,
+        dest: &Dest<'a>,
+        between_check_and_rename: impl FnOnce(),
+    ) -> std::result::Result<Self, Refusal> {
         let backup_name = Self::vacant_name(pin)
             .map_err(|e| Refusal::failed(e, "failed to reserve a backup path", dest.parent))?;
         let backup_path = dest.parent.join(&backup_name);
 
         verify_unchanged(pin, dest.name, dest.id).map_err(Refusal::Error)?;
-        // Read before the move: a failure here still leaves the destination in
-        // place, where the alternative is a root published private (`0700`).
-        let permissions = pin
-            .status(dest.name.as_leaf())
-            .map_err(|e| {
-                Refusal::failed(e, "failed to read the destination's permissions", dest.path)
-            })?
-            .as_ref()
-            .map(Adoption::of);
+        between_check_and_rename();
 
         pin.rename_dir_within(dest.name.as_leaf(), backup_name.as_leaf())
             .map_err(|e| {
@@ -400,19 +411,53 @@ impl<'a> Displaced<'a> {
                     dest.path,
                 )
             })?;
-        // Best effort: the destination is already moved, so a failure to
-        // inspect the backup must not abort the swap. Without a status the
-        // cleanup warning is skipped.
-        let backup = pin.status(backup_name.as_leaf()).ok().flatten();
+        let moved = match pin.status(backup_name.as_leaf()) {
+            Ok(Some(status)) if Self::is_pinned_directory(&status, dest.id) => status,
+            other => {
+                let (error, context, changed) = match other {
+                    Err(e) => (e, "failed to inspect the destination moved aside", false),
+                    _ => (
+                        io::Error::other("the destination changed while it was moved aside"),
+                        "failed to move the existing destination aside",
+                        true,
+                    ),
+                };
+                let restored = pin.rename_dir_within(backup_name.as_leaf(), dest.name.as_leaf());
+                return Err(match (restored, changed) {
+                    (Ok(()), true) => Refusal::Error(Violation::DestinationChanged.into()),
+                    (Ok(()), false) => Refusal::Failed {
+                        error,
+                        context,
+                        path: dest.path.to_path_buf(),
+                        restore: Restore::Restored,
+                    },
+                    (Err(restore_error), _) => Refusal::Failed {
+                        error,
+                        context,
+                        path: dest.path.to_path_buf(),
+                        restore: Restore::Failed {
+                            backup: backup_path,
+                            error: restore_error,
+                        },
+                    },
+                });
+            }
+        };
         Ok(Self {
             pin,
             dest_name: dest.name,
             backup_name,
             backup_path,
-            backup,
-            permissions,
+            backup: moved,
             armed: true,
         })
+    }
+
+    fn is_pinned_directory(status: &EntryStatus, expected: FileIdentity) -> bool {
+        status.occupant == Occupant::Directory
+            && !status.reparse
+            && (matches!(expected, FileIdentity::Unknown)
+                || status.identity.check(expected) == IdentityCheck::Same)
     }
 
     fn vacant_name(pin: &VettedDir) -> io::Result<LeafBuf> {
@@ -425,9 +470,10 @@ impl<'a> Displaced<'a> {
         Err(io::Error::from(io::ErrorKind::AlreadyExists))
     }
 
-    /// The permissions the destination had before it was displaced.
-    const fn original_permissions(&self) -> Option<Adoption> {
-        self.permissions
+    /// The permissions of the destination that was displaced, read from the
+    /// verified directory itself.
+    fn original_permissions(&self) -> Adoption {
+        Adoption::of(&self.backup)
     }
 
     /// Moves the backup back and disarms the guard.
@@ -446,12 +492,11 @@ impl<'a> Displaced<'a> {
     )]
     fn discard(mut self, report: &mut ExtractionReport) {
         self.armed = false;
+        make_removable(self.pin, self.backup_name.as_leaf(), self.backup.identity);
         let Err(cleanup_error) = std::fs::remove_dir_all(&self.backup_path) else {
             return;
         };
-        let Some(backup) = self.backup else {
-            return;
-        };
+        let backup = self.backup;
         let Ok(Some(observed)) = self.pin.status(self.backup_name.as_leaf()) else {
             return;
         };
@@ -511,10 +556,7 @@ fn swap(
         Ok(displaced) => displaced,
         Err(refusal) => return Err(refusal.into_error(staging.discard())),
     };
-    let adopted = displaced
-        .original_permissions()
-        .map_or(Ok(()), |permissions| staging.adopt(permissions));
-    if let Err(error) = adopted {
+    if let Err(error) = staging.adopt(displaced.original_permissions()) {
         let context = "failed to give the extracted content the destination's permissions";
         return Err(roll_back(displaced, staging, &error, context, dest.path));
     }
@@ -548,6 +590,62 @@ fn roll_back(
         restore,
         staging.discard(),
     ))
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+mod displace_tests {
+    use tempfile::TempDir;
+
+    use super::Dest;
+    use super::Displaced;
+    use super::Refusal;
+    use crate::ArchiveError;
+    use crate::Violation;
+    use crate::formats::file_identity::identity_of;
+    use crate::formats::pinned_dir::LeafBuf;
+    use crate::formats::pinned_dir::support::pinned_at;
+
+    #[test]
+    fn a_destination_swapped_after_the_check_is_moved_back_and_refused() {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let dest_path = parent.join("dest");
+        std::fs::create_dir(&dest_path).unwrap();
+        std::fs::write(dest_path.join("old"), b"original").unwrap();
+        let name = LeafBuf::of(&dest_path).unwrap();
+        let dest = Dest {
+            name: &name,
+            id: identity_of(&dest_path).unwrap(),
+            path: &dest_path,
+            parent: &parent,
+        };
+        let pin = pinned_at(&parent);
+        let aside = parent.join("aside");
+
+        let outcome = Displaced::displace_with(&pin, &dest, || {
+            std::fs::rename(&dest_path, &aside).unwrap();
+            std::fs::create_dir(&dest_path).unwrap();
+            std::fs::write(dest_path.join("substitute"), b"planted").unwrap();
+        });
+
+        let Err(Refusal::Error(ArchiveError::SecurityViolation {
+            kind: Violation::DestinationChanged,
+        })) = outcome
+        else {
+            panic!("expected a DestinationChanged refusal");
+        };
+        assert_eq!(std::fs::read(aside.join("old")).unwrap(), b"original");
+        assert!(dest_path.join("substitute").exists());
+        let names: Vec<_> = std::fs::read_dir(&parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|n| !n.starts_with(".exarch-")),
+            "{names:?}"
+        );
+    }
 }
 
 #[cfg(all(test, windows))]

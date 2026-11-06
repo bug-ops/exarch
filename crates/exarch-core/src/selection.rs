@@ -435,6 +435,10 @@ impl EntrySelection {
             return Ok(TargetMapping::Unchanged);
         }
         Ok(match self.decide(&normalized, EntryShape::File, None)? {
+            // A refused absolute target is refused by the validator whatever
+            // the selection says; reporting it as not extracted would blame
+            // the selection for a refusal that including it would not lift.
+            Decision::Skip(_) if !root.as_os_str().is_empty() => TargetMapping::Unchanged,
             Decision::Skip(_) => TargetMapping::NotExtracted,
             Decision::Extract(Placement::Unchanged) => TargetMapping::Mapped(root.join(normalized)),
             Decision::Extract(Placement::Rewritten(rewritten)) => {
@@ -837,6 +841,13 @@ mod tests {
         assert_matches!(
             selection
                 .map_link_target(Path::new("/abs"), Admit::Refuse)
+                .unwrap(),
+            TargetMapping::Unchanged,
+            "a refused absolute target stays for the validator to refuse"
+        );
+        assert_matches!(
+            selection
+                .map_link_target(Path::new("/abs"), Admit::Allow)
                 .unwrap(),
             TargetMapping::NotExtracted
         );

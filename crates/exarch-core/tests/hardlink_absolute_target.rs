@@ -88,6 +88,17 @@ fn an_absolute_target_outside_the_include_is_not_extracted() {
 }
 
 #[test]
+fn a_refused_absolute_target_outside_the_include_is_an_escape_not_an_unselected_target() {
+    let (work, result) = extract(&config(false), "/other/orig");
+
+    assert_matches!(
+        root(&result.unwrap_err()),
+        ArchiveError::HardlinkEscape { .. }
+    );
+    assert!(!work.path().join("out/l").exists());
+}
+
+#[test]
 fn an_absolute_target_stripped_away_entirely_is_not_extracted() {
     let (work, result) = extract(&config(true), "/top");
 

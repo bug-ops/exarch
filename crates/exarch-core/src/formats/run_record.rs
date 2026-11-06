@@ -149,6 +149,8 @@ impl RunRecord {
 
 #[cfg(test)]
 mod key_tests {
+    use std::assert_matches;
+
     use super::LandingKey;
     use super::RunRecord;
     use super::key_for;
@@ -168,10 +170,10 @@ mod key_tests {
         };
         assert!(created("dir/a"));
         assert!(!created("dir/A"));
-        assert!(matches!(
+        assert_matches!(
             key_for(FileIdentity::Unknown, "x".as_ref()),
             LandingKey::Path(_)
-        ));
+        );
     }
 }
 

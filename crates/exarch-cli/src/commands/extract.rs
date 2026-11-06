@@ -309,7 +309,12 @@ pub fn execute(
         None => env::current_dir().context("failed to get current directory")?,
     };
 
-    interrupt::install(&output_dir);
+    let run = match (args.atomic, args.force) {
+        (false, _) => interrupt::Run::ExtractInPlace,
+        (true, false) => interrupt::Run::ExtractAtomic,
+        (true, true) => interrupt::Run::ExtractReplace,
+    };
+    interrupt::install(&output_dir, run);
 
     let allowed_extensions = parse_extensions(&args.allowed_extensions)?;
 

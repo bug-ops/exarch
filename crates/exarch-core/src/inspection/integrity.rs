@@ -87,8 +87,8 @@ impl fmt::Display for DecodeFailure {
 
 impl DecodeFailure {
     /// Classifies a copy failure for an entry of `declared` bytes.
-    pub(crate) fn from_copy(err: CopyError, declared: u64) -> Self {
-        Self::from_copy_with_fault(err, declared, None)
+    pub(crate) fn from_copy(err: CopyError, declared: u64, family: ReadFamily) -> Self {
+        Self::from_copy_with_fault(err, declared, None, family)
     }
 
     /// Classifies a copy failure the way extraction does, given the I/O
@@ -98,9 +98,10 @@ impl DecodeFailure {
         err: CopyError,
         declared: u64,
         fault: Option<io::Error>,
+        family: ReadFamily,
     ) -> Self {
         match err {
-            CopyError::Read(e) => Self::from_read_error(e, declared, fault),
+            CopyError::Read(e) => Self::from_read_error(e, declared, fault, family),
             CopyError::Write(e) => Self::Io(e),
             CopyError::Overrun { declared } => Self::DeclaredSizeOverrun { declared },
             CopyError::Short { declared, actual } => fault.map_or(
@@ -121,14 +122,19 @@ impl DecodeFailure {
         use sevenz_rust2::Error;
         match err {
             Error::ChecksumVerificationFailed => Self::Checksum,
-            Error::Io(e, _) => Self::from_read_error(e, 0, None),
+            Error::Io(e, _) => Self::from_read_error(e, 0, None, ReadFamily::SevenZ),
             Error::Other(reason) => Self::Malformed(io::Error::other(reason.into_owned())),
             other => Self::NotDecodable(ArchiveError::from(other)),
         }
     }
 
-    fn from_read_error(e: io::Error, declared: u64, fault: Option<io::Error>) -> Self {
-        match classify_decoder_read(e, fault) {
+    fn from_read_error(
+        e: io::Error,
+        declared: u64,
+        fault: Option<io::Error>,
+        family: ReadFamily,
+    ) -> Self {
+        match classify_decoder_read(e, fault, family) {
             ReadVerdict::Budget(limit) => Self::ResourceLimit(limit),
             ReadVerdict::SourceFault(e) => Self::Io(e),
             ReadVerdict::Checksum(_) => Self::Checksum,
@@ -291,7 +297,9 @@ impl TarTrailer {
                     buffer,
                     None,
                 )
-                .map_err(|e| TrailerFault::Failed(DecodeFailure::from_copy(e, 0)))?;
+                .map_err(|e| {
+                    TrailerFault::Failed(DecodeFailure::from_copy(e, 0, ReadFamily::Tar))
+                })?;
                 if drained > cap.get() {
                     return Err(TrailerFault::OverCap(cap));
                 }
@@ -416,13 +424,14 @@ impl<'c> IntegrityPass<'c> {
         reader: &mut R,
         declared: u64,
         charge: Charge,
+        family: ReadFamily,
     ) -> DecodeOutcome {
         self.decode_with_faults(
             slot,
             reader,
             declared,
             charge,
-            ReadFaults::new(ReadFamily::Opaque, None),
+            ReadFaults::new(family, None),
         )
     }
 
@@ -449,6 +458,7 @@ impl<'c> IntegrityPass<'c> {
                 e,
                 declared,
                 faults.pending_fault(),
+                faults.family(),
             )),
         }
     }
@@ -460,9 +470,10 @@ impl<'c> IntegrityPass<'c> {
         reader: &mut R,
         writer: &mut W,
         declared: u64,
+        family: ReadFamily,
     ) -> std::result::Result<u64, DecodeFailure> {
         copy_bounded(reader, writer, &mut self.buffer, Some(declared))
-            .map_err(|e| DecodeFailure::from_copy(e, declared))
+            .map_err(|e| DecodeFailure::from_copy(e, declared, family))
     }
 
     /// Records an outcome against `slot`. The only place a [`DecodeFailure`]
@@ -571,7 +582,7 @@ fn probe_one_byte<R: Read>(reader: &mut R) -> std::result::Result<u64, DecodeFai
         match reader.read(&mut byte) {
             Ok(n) => return Ok(n as u64),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(DecodeFailure::from_read_error(e, 0, None)),
+            Err(e) => return Err(DecodeFailure::from_read_error(e, 0, None, ReadFamily::Tar)),
         }
     }
 }
@@ -604,7 +615,7 @@ mod tests {
     use crate::inspection::report::MAX_LISTED_UNVERIFIED;
 
     fn read_failure(e: io::Error) -> DecodeFailure {
-        DecodeFailure::from_copy(CopyError::Read(e), 10)
+        DecodeFailure::from_copy(CopyError::Read(e), 10, ReadFamily::Zip)
     }
 
     fn pass_with_budget(config: &SecurityConfig, bytes: u64) -> IntegrityPass<'_> {
@@ -629,7 +640,7 @@ mod tests {
         let slot = pass.begin_entry(6, &EntryCompression::Unknown);
 
         assert_matches!(
-            pass.decode(slot, &mut entry, 6, Charge::Free),
+            pass.decode(slot, &mut entry, 6, Charge::Free, ReadFamily::Zip),
             DecodeOutcome::Failed(DecodeFailure::Checksum)
         );
     }
@@ -650,7 +661,8 @@ mod tests {
             DecodeFailure::from_copy_with_fault(
                 CopyError::Read(io::Error::new(io::ErrorKind::InvalidData, "lzma data error")),
                 10,
-                fault()
+                fault(),
+                ReadFamily::Zip
             ),
             DecodeFailure::Io(ref e) if e.kind() == io::ErrorKind::TimedOut
         );
@@ -661,7 +673,8 @@ mod tests {
                     actual: 4
                 },
                 10,
-                fault()
+                fault(),
+                ReadFamily::Zip
             ),
             DecodeFailure::Io(_)
         );
@@ -672,7 +685,8 @@ mod tests {
                     actual: 4
                 },
                 10,
-                None
+                None,
+                ReadFamily::Zip
             ),
             DecodeFailure::Truncated {
                 declared: 10,
@@ -735,7 +749,7 @@ mod tests {
     #[test]
     fn test_classification_copy_size_errors() {
         assert_matches!(
-            DecodeFailure::from_copy(CopyError::Overrun { declared: 3 }, 3),
+            DecodeFailure::from_copy(CopyError::Overrun { declared: 3 }, 3, ReadFamily::Zip),
             DecodeFailure::DeclaredSizeOverrun { declared: 3 }
         );
         assert_matches!(
@@ -744,7 +758,8 @@ mod tests {
                     declared: 3,
                     actual: 1
                 },
-                3
+                3,
+                ReadFamily::Zip
             ),
             DecodeFailure::Truncated {
                 declared: 3,
@@ -752,7 +767,7 @@ mod tests {
             }
         );
         assert_matches!(
-            DecodeFailure::from_copy(CopyError::Overflow, 3),
+            DecodeFailure::from_copy(CopyError::Overflow, 3, ReadFamily::Zip),
             DecodeFailure::ResourceLimit(ArchiveError::QuotaExceeded { .. })
         );
     }
@@ -977,7 +992,13 @@ mod tests {
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(8, &EntryCompression::Unknown);
 
-        let outcome = pass.decode(slot, &mut io::Cursor::new(vec![0u8; 8]), 8, Charge::Free);
+        let outcome = pass.decode(
+            slot,
+            &mut io::Cursor::new(vec![0u8; 8]),
+            8,
+            Charge::Free,
+            ReadFamily::Opaque,
+        );
         assert_matches!(
             outcome,
             DecodeOutcome::Unverified(UnverifiedReason::ResourceLimit)
@@ -990,7 +1011,13 @@ mod tests {
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(4, &EntryCompression::Unknown);
 
-        let short = pass.decode(slot, &mut io::Cursor::new(vec![0u8; 2]), 4, Charge::Free);
+        let short = pass.decode(
+            slot,
+            &mut io::Cursor::new(vec![0u8; 2]),
+            4,
+            Charge::Free,
+            ReadFamily::Opaque,
+        );
         assert_matches!(
             short,
             DecodeOutcome::Failed(DecodeFailure::Truncated {
@@ -998,12 +1025,24 @@ mod tests {
                 actual: Some(2)
             })
         );
-        let long = pass.decode(slot, &mut io::Cursor::new(vec![0u8; 9]), 4, Charge::Free);
+        let long = pass.decode(
+            slot,
+            &mut io::Cursor::new(vec![0u8; 9]),
+            4,
+            Charge::Free,
+            ReadFamily::Opaque,
+        );
         assert_matches!(
             long,
             DecodeOutcome::Failed(DecodeFailure::DeclaredSizeOverrun { declared: 4 })
         );
-        let exact = pass.decode(slot, &mut io::Cursor::new(vec![0u8; 4]), 4, Charge::Free);
+        let exact = pass.decode(
+            slot,
+            &mut io::Cursor::new(vec![0u8; 4]),
+            4,
+            Charge::Free,
+            ReadFamily::Opaque,
+        );
         assert_matches!(exact, DecodeOutcome::Verified);
     }
 

@@ -23,7 +23,7 @@ pub fn execute(
     formatter: &mut dyn OutputFormatter,
     mode: OutputMode,
 ) -> CommandResult {
-    interrupt::install(&args.output);
+    interrupt::install(&args.output, interrupt::Run::Create);
 
     let max_file_size = match args.max_file_size {
         Some(size) => Limit::<NonZeroU64>::parse(ConfigSetting::MaxFileSize, size)?,

@@ -16,6 +16,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::copy::CopyError;
 use crate::formats::common;
+use crate::formats::source_fault::ReadFamily;
 use crate::inspection::integrity::Charge;
 use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
@@ -140,7 +141,7 @@ pub(super) fn read_sevenz_link_target(reader: &mut dyn Read, size: u64) -> Resul
         Ok(_) if bytes.len() as u64 == size => {}
         Ok(_) => return Ok(Err(LinkReadFailure::Truncated)),
         Err(e) => {
-            let failure = DecodeFailure::from_copy(CopyError::Read(e), size);
+            let failure = DecodeFailure::from_copy(CopyError::Read(e), size, ReadFamily::SevenZ);
             return LinkReadFailure::from_decode(failure).map(Err);
         }
     }
@@ -477,7 +478,9 @@ impl BlockScan<'_, '_> {
                     return false;
                 }
             },
-            None => self.pass.decode(slot, reader, file.size, Charge::Free),
+            None => self
+                .pass
+                .decode(slot, reader, file.size, Charge::Free, ReadFamily::SevenZ),
         };
         let abandon = match &outcome {
             DecodeOutcome::Failed(DecodeFailure::ResourceLimit(_)) => {
@@ -512,7 +515,10 @@ impl BlockScan<'_, '_> {
             return Ok(DecodeOutcome::Unverified(UnverifiedReason::ResourceLimit));
         }
         let mut bytes = Vec::new();
-        match self.pass.copy_into(reader, &mut bytes, file.size) {
+        match self
+            .pass
+            .copy_into(reader, &mut bytes, file.size, ReadFamily::SevenZ)
+        {
             Ok(_) => {
                 if let Some(capture) = self.links.as_mut() {
                     let target = common::symlink_target_from_bytes(&bytes)?;

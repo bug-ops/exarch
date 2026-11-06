@@ -32,14 +32,24 @@ impl IdentityKey {
     /// The one conversion from the platform-native `st_dev` and `st_ino`; an
     /// unrepresentable value fails instead of collapsing to a shared sentinel
     /// that would make two inodes compare equal.
-    // `st_dev` and `st_ino` are `i32` and `u64` on macOS and `u64` on 64-bit
-    // Linux, so the conversion is a no-op on some targets.
-    #[allow(clippy::useless_conversion)]
     pub(crate) fn of_stat(stat: &rustix::fs::Stat) -> io::Result<Self> {
-        let dev =
-            u64::try_from(stat.st_dev).map_err(|_| io::Error::other("unrepresentable st_dev"))?;
-        let ino =
-            u64::try_from(stat.st_ino).map_err(|_| io::Error::other("unrepresentable st_ino"))?;
+        Self::from_parts(stat.st_dev, stat.st_ino)
+    }
+
+    /// The key of a device and inode in the platform's native widths, which
+    /// differ between targets (`st_dev` is `i32` on macOS, negative for a major
+    /// number of 128 or more).
+    fn from_parts<D, I>(dev: D, ino: I) -> io::Result<Self>
+    where
+        D: TryInto<u64>,
+        I: TryInto<u64>,
+    {
+        let dev = dev
+            .try_into()
+            .map_err(|_| io::Error::other("unrepresentable st_dev"))?;
+        let ino = ino
+            .try_into()
+            .map_err(|_| io::Error::other("unrepresentable st_ino"))?;
         Ok(Self { dev, ino })
     }
 }
@@ -179,6 +189,14 @@ mod tests {
     use super::IdentityCheck;
     use super::IdentityKey;
     use super::identity_of;
+
+    #[test]
+    fn a_device_or_inode_outside_u64_has_no_key() {
+        assert!(IdentityKey::from_parts(-1_i32, 5_u64).is_err());
+        assert!(IdentityKey::from_parts(7_i32, -2_i64).is_err());
+        let key = IdentityKey::from_parts(7_i32, 9_u64).unwrap();
+        assert_eq!((key.dev, key.ino), (7, 9));
+    }
 
     #[test]
     fn an_untouched_entry_matches_itself_and_a_sibling_differs() {

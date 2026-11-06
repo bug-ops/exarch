@@ -1096,7 +1096,7 @@ pub(crate) fn read_zip_symlink_target_checked<R: Read>(
     common::check_symlink_target_size(declared)?;
 
     let mut target_bytes = Vec::new();
-    if let Err(failure) = pass.copy_into(zip_file, &mut target_bytes, declared) {
+    if let Err(failure) = pass.copy_into(zip_file, &mut target_bytes, declared, ReadFamily::Zip) {
         match failure {
             DecodeFailure::Checksum => {
                 pass.record(slot, entry_path, DecodeOutcome::Failed(failure))?;

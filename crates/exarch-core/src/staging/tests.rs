@@ -658,6 +658,21 @@ fn a_backup_that_cannot_be_removed_is_reported_as_a_warning() {
     std::fs::remove_dir_all(path).unwrap();
 }
 
+#[test]
+fn a_read_only_destination_is_replaced_and_its_backup_removed() {
+    let fx = Fixture::new();
+    let dest = fx.with_old_destination();
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let result = fx.extract(&dest, Staging::AtomicReplace, &mut Hooks::default());
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let report = result.unwrap();
+
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(read(&dest.join("a.txt")), "new a");
+    assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
+}
+
 /// Races an attacker that flips the destination between a real directory and a
 /// symlink to a victim directory against `AtomicReplace`. Whatever the outcome
 /// of a run, the victim must keep exactly what it had: nothing is ever written
@@ -898,6 +913,7 @@ mod adoption {
     use std::os::unix::fs::MetadataExt;
 
     use super::super::adopt::Adoption;
+    use super::super::adopt::Claim;
     use super::super::dir::StagingDir;
     use super::*;
     use crate::formats::pinned_dir::VettedDir;
@@ -915,7 +931,12 @@ mod adoption {
         let own = std::fs::metadata(&parent).unwrap();
 
         staging
-            .adopt(Adoption::for_test(0o2750, own.uid(), own.gid()))
+            .adopt(Adoption::for_test(
+                0o2750,
+                own.uid(),
+                own.gid(),
+                Claim::Full,
+            ))
             .unwrap();
 
         assert_eq!(mode_of(staging.path()) & 0o777, 0o750);
@@ -934,7 +955,7 @@ mod adoption {
         }
 
         staging
-            .adopt(Adoption::for_test(0o2775, own.uid(), foreign))
+            .adopt(Adoption::for_test(0o2775, own.uid(), foreign, Claim::Full))
             .unwrap();
 
         assert_eq!(mode_of(staging.path()), 0o705);
@@ -949,7 +970,12 @@ mod adoption {
         let foreign_uid = own.uid().wrapping_add(1);
 
         staging
-            .adopt(Adoption::cautious_for_test(0o2777, foreign_uid, own.gid()))
+            .adopt(Adoption::for_test(
+                0o2777,
+                foreign_uid,
+                own.gid(),
+                Claim::Cautious,
+            ))
             .unwrap();
 
         let applied = std::fs::metadata(staging.path()).unwrap();
@@ -965,7 +991,12 @@ mod adoption {
         let own = std::fs::metadata(&parent).unwrap();
 
         staging
-            .adopt(Adoption::cautious_for_test(0o775, own.uid(), own.gid()))
+            .adopt(Adoption::for_test(
+                0o775,
+                own.uid(),
+                own.gid(),
+                Claim::Cautious,
+            ))
             .unwrap();
 
         assert_eq!(mode_of(staging.path()) & 0o777, 0o775);
@@ -980,7 +1011,7 @@ mod adoption {
         std::fs::write(staging.path().join("f"), b"x").unwrap();
 
         staging
-            .adopt(Adoption::for_test(0o000, own.uid(), own.gid()))
+            .adopt(Adoption::for_test(0o000, own.uid(), own.gid(), Claim::Full))
             .unwrap();
         let path = staging.path().to_path_buf();
 

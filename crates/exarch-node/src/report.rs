@@ -1485,11 +1485,11 @@ impl TryFrom<exarch_core::VerificationIssue> for VerificationIssue {
     reason = "tests assert by panicking"
 )]
 mod tests {
-    const MAX_SAFE: i64 = 9_007_199_254_740_991;
-
     use super::*;
     use crate::utils::union_line;
     use std::assert_matches;
+
+    const MAX_SAFE: i64 = 9_007_199_254_740_991;
 
     fn skipped(count: usize) -> exarch_core::Skips {
         let mut skips = exarch_core::Skips::default();

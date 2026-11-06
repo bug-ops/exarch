@@ -21,7 +21,7 @@ mod imp {
 
     const PROBE_ATTEMPTS: usize = 16;
     const GROUP_ACCESS_AND_SETGID: u32 = 0o2070;
-    const PRIVATE: u32 = 0o700;
+    pub(super) const PRIVATE: u32 = 0o700;
     const FOREIGN_WRITE_AND_SETGID: u32 = 0o2022;
 
     /// The permission bits and owner the published root takes.
@@ -40,7 +40,7 @@ mod imp {
 
     /// How far the published root takes over the destination's owner.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Claim {
+    pub(in crate::staging) enum Claim {
         /// The uid and the gid, as for a destination being replaced.
         Full,
         /// Never the uid; the gid only when the caller owns the destination;
@@ -76,26 +76,15 @@ mod imp {
         }
 
         #[cfg(test)]
-        pub(in crate::staging) const fn for_test(mode: u32, uid: u32, gid: u32) -> Self {
+        pub(in crate::staging) const fn for_test(
+            mode: u32,
+            uid: u32,
+            gid: u32,
+            claim: Claim,
+        ) -> Self {
             Self {
                 mode,
-                owner: Some(Owner {
-                    uid,
-                    gid,
-                    claim: Claim::Full,
-                }),
-            }
-        }
-
-        #[cfg(test)]
-        pub(in crate::staging) const fn cautious_for_test(mode: u32, uid: u32, gid: u32) -> Self {
-            Self {
-                mode,
-                owner: Some(Owner {
-                    uid,
-                    gid,
-                    claim: Claim::Cautious,
-                }),
+                owner: Some(Owner { uid, gid, claim }),
             }
         }
     }
@@ -184,6 +173,48 @@ mod imp {
     }
 }
 
+#[cfg(unix)]
+mod removable {
+    use std::os::unix::fs::PermissionsExt;
+
+    use crate::formats::file_identity::FileIdentity;
+    use crate::formats::file_identity::IdentityCheck;
+    use crate::formats::pinned_dir::Leaf;
+    use crate::formats::pinned_dir::VettedDir;
+
+    /// Makes the directory `name` of `pin` writable by its owner so it can be
+    /// removed, through a descriptor on the entry itself, when it still is
+    /// the directory `expected` names. Best effort: the removal reports what
+    /// survives.
+    pub(in crate::staging) fn make_removable(
+        pin: &VettedDir,
+        name: Leaf<'_>,
+        expected: FileIdentity,
+    ) {
+        let Ok(dir) = pin.open_dir_file(name) else {
+            return;
+        };
+        if FileIdentity::of_file(&dir).check(expected) != IdentityCheck::Different {
+            let _ = dir.set_permissions(std::fs::Permissions::from_mode(super::imp::PRIVATE));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod removable {
+    use crate::formats::file_identity::FileIdentity;
+    use crate::formats::pinned_dir::Leaf;
+    use crate::formats::pinned_dir::VettedDir;
+
+    /// Windows removal does not depend on the directory's mode bits.
+    pub(in crate::staging) const fn make_removable(
+        _pin: &VettedDir,
+        _name: Leaf<'_>,
+        _expected: FileIdentity,
+    ) {
+    }
+}
+
 #[cfg(not(unix))]
 mod imp {
     use std::io;
@@ -226,3 +257,6 @@ mod imp {
 }
 
 pub(super) use imp::Adoption;
+#[cfg(all(test, unix))]
+pub(super) use imp::Claim;
+pub(super) use removable::make_removable;

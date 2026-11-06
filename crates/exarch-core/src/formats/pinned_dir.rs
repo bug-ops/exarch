@@ -196,8 +196,10 @@ pub(crate) struct EntryMode {
 
 #[cfg(unix)]
 impl EntryMode {
-    // `st_mode` is `u16` on macOS and `u32` on Linux.
-    #[allow(clippy::useless_conversion)]
+    #[allow(
+        clippy::useless_conversion,
+        reason = "`st_mode` is `u16` on macOS and `u32` on Linux"
+    )]
     fn of_stat(stat: &rustix::fs::Stat) -> Self {
         Self {
             bits: u32::from(stat.st_mode) & 0o7777,
@@ -407,13 +409,16 @@ mod imp {
         }
 
         /// What `name` is, which inode it is and its mode, without following a
-        /// symlink; `None` if it is absent.
+        /// symlink; `None` if it is absent. An identity that does not fit the
+        /// key is [`FileIdentity::Unknown`]; what the entry is never depends on
+        /// it.
         pub(crate) fn status(&self, name: Leaf<'_>) -> io::Result<Option<EntryStatus>> {
             match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => Ok(Some(EntryStatus {
                     occupant: FileType::from_raw_mode(stat.st_mode).into(),
                     reparse: false,
-                    identity: FileIdentity::Known(IdentityKey::of_stat(&stat)?),
+                    identity: IdentityKey::of_stat(&stat)
+                        .map_or(FileIdentity::Unknown, FileIdentity::Known),
                     #[cfg(unix)]
                     mode: super::EntryMode::of_stat(&stat),
                 })),
@@ -596,7 +601,6 @@ mod imp {
 
     /// Other targets have no descriptor-to-path facility implemented here.
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    #[allow(clippy::missing_const_for_fn)]
     fn current_path(_fd: &File) -> Option<std::path::PathBuf> {
         None
     }
@@ -749,7 +753,10 @@ mod imp {
 
         /// There is no handle-to-path resolution here, so a surviving entry is
         /// named logically by the caller.
-        #[allow(clippy::unused_self)]
+        #[allow(
+            clippy::unused_self,
+            reason = "keeps the signature of the platforms that name the entry by path"
+        )]
         pub(crate) fn entry_path(&self, _name: Leaf<'_>) -> Option<std::path::PathBuf> {
             None
         }

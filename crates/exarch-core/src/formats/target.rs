@@ -539,8 +539,9 @@ impl ExtractTarget for HostTarget<'_> {
             }
             Err(e) => return Err(ArchiveError::Io(e)),
         };
-        self.root.created().note(
+        self.root.created().note_file(
             tally.options.existing_files,
+            &link_file,
             &link_dir,
             link_leaf,
             link.as_path(),

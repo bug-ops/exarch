@@ -32,9 +32,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::fs::File;
+use std::hash::BuildHasherDefault;
+use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
 
+use super::file_identity::FileIdentity;
 use super::file_identity::IdentityKey;
 use super::pinned_dir::Leaf;
 use super::pinned_dir::VettedDir;
@@ -51,20 +55,55 @@ enum LandingKey {
     Path(PathBuf),
 }
 
+fn key_for(identity: FileIdentity, rel: &Path) -> LandingKey {
+    identity
+        .key()
+        .map_or_else(|| LandingKey::Path(rel.to_path_buf()), LandingKey::Identity)
+}
+
 /// The key of the occupant of `leaf`, `None` when it is absent or the lookup
 /// fails, so the landing is not recorded and a later duplicate is refused.
 fn key_of(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Option<LandingKey> {
     let identity = dir.identity(leaf).ok().flatten()?;
-    Some(
-        identity
-            .key()
-            .map_or_else(|| LandingKey::Path(rel.to_path_buf()), LandingKey::Identity),
-    )
+    Some(key_for(identity, rel))
+}
+
+/// A multiply-rotate hasher for the record's keys, which are filesystem
+/// identities and paths already in the run's hands rather than adversarial
+/// hash inputs a peer could aim at the table; `SipHash` costs more per created
+/// file than the record is worth.
+#[derive(Default)]
+struct KeyHasher(u64);
+
+impl KeyHasher {
+    const SEED: u64 = 0x517c_c1b7_2722_0a95;
+
+    fn mix(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
+    }
+}
+
+impl Hasher for KeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.mix(u64::from_le_bytes(word));
+        }
+    }
+
+    fn write_u64(&mut self, word: u64) {
+        self.mix(word);
+    }
 }
 
 #[derive(Debug, Default)]
 struct Created {
-    keys: HashSet<LandingKey>,
+    keys: HashSet<LandingKey, BuildHasherDefault<KeyHasher>>,
     saturated: bool,
 }
 
@@ -85,11 +124,33 @@ impl RunRecord {
         leaf: Leaf<'_>,
         rel: &Path,
     ) {
-        match existing_files {
-            ExistingFiles::Refuse => {}
-            ExistingFiles::Skip | ExistingFiles::Overwrite => return,
+        if matches!(existing_files, ExistingFiles::Refuse) {
+            self.insert(key_of(dir, leaf, rel));
         }
-        let Some(key) = key_of(dir, leaf, rel) else {
+    }
+
+    /// Like [`note`](Self::note) for the file `leaf` the run just created and
+    /// still holds open: keyed by its handle, so no lookup by name unless the
+    /// handle gives no identity, which the lookup by name then classifies.
+    pub(crate) fn note_file(
+        &self,
+        existing_files: ExistingFiles,
+        file: &File,
+        dir: &VettedDir,
+        leaf: Leaf<'_>,
+        rel: &Path,
+    ) {
+        if !matches!(existing_files, ExistingFiles::Refuse) {
+            return;
+        }
+        match FileIdentity::of_file(file) {
+            FileIdentity::Unknown => self.insert(key_of(dir, leaf, rel)),
+            known @ FileIdentity::Known(_) => self.insert(Some(key_for(known, rel))),
+        }
+    }
+
+    fn insert(&self, key: Option<LandingKey>) {
+        let Some(key) = key else {
             return;
         };
         let mut created = self.0.borrow_mut();
@@ -146,6 +207,34 @@ mod tests {
         assert!(record.created_here(&dir, leaf("made"), "made".as_ref()));
         assert!(!record.created_here(&dir, leaf("foreign"), "foreign".as_ref()));
         assert!(!record.created_here(&dir, leaf("absent"), "absent".as_ref()));
+    }
+
+    #[test]
+    fn a_file_noted_by_its_handle_counts_as_created_only_under_refuse() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = pinned_at(temp.path());
+        let made = std::fs::File::create(temp.path().join("made")).unwrap();
+        std::fs::write(temp.path().join("foreign"), b"y").unwrap();
+        let record = RunRecord::default();
+
+        record.note_file(
+            ExistingFiles::Skip,
+            &made,
+            &dir,
+            leaf("made"),
+            "made".as_ref(),
+        );
+        assert!(!record.created_here(&dir, leaf("made"), "made".as_ref()));
+
+        record.note_file(
+            ExistingFiles::Refuse,
+            &made,
+            &dir,
+            leaf("made"),
+            "made".as_ref(),
+        );
+        assert!(record.created_here(&dir, leaf("made"), "made".as_ref()));
+        assert!(!record.created_here(&dir, leaf("foreign"), "foreign".as_ref()));
     }
 
     #[test]

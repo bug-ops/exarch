@@ -4,14 +4,6 @@
 //! so the staging guards and the run record compare the device and file index
 //! of the entry itself. Where the platform offers none the identity is
 //! [`FileIdentity::Unknown`], which no caller may treat as equal to anything.
-#![cfg_attr(
-    target_os = "wasi",
-    expect(
-        dead_code,
-        reason = "`of_file` is adopted by the occupant track; the unix staging and the Windows \
-                  directory status already use it"
-    )
-)]
 
 use std::fs::File;
 use std::io;

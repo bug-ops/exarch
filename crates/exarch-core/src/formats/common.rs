@@ -593,7 +593,7 @@ fn open_output_slot(
 ) -> Result<Option<OutputSlot>> {
     match dir.create_new(leaf, mode) {
         Ok(file) => {
-            root.created().note(duplicates, dir, leaf, rel);
+            root.created().note_file(duplicates, &file, dir, leaf, rel);
             Ok(Some(OutputSlot {
                 file,
                 written_at: WrittenAt::Final,

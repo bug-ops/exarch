@@ -611,7 +611,6 @@ dependencies = [
  "flate2",
  "indicatif",
  "predicates",
- "rustix",
  "serde",
  "serde_json",
  "sevenz-rust2",

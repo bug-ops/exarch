@@ -42,24 +42,25 @@ use exarch_core::ArchiveError as CoreError;
 use exarch_core::CreationReport as CoreCreationReport;
 use exarch_core::ErrorCode as CoreErrorCode;
 use exarch_core::ExtractionReport as CoreExtractionReport;
+use exarch_core::FfiDetail;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
-use exarch_core::FfiSourceFault;
+use exarch_core::FfiNameCollision;
+use exarch_core::FfiRestore;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting as CorePolicySetting;
-use exarch_core::ProtectedPath as CoreProtectedPath;
-use exarch_core::Restore as CoreRestore;
 use exarch_core::SubCode;
 use napi::Env;
 use napi::Error;
 use napi::Status;
+use napi::bindgen_prelude::Either4;
 use napi::bindgen_prelude::JsValue;
 use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::ToNapiValue;
 use napi_derive::napi;
 
-use crate::report::SkippedSummary;
-use crate::report::extraction_warning;
+use crate::mirror::mirror_from_core;
+use crate::report::ExtractionReport;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
 
@@ -85,9 +86,8 @@ pub const ABORT_ERR: &str = "ABORT_ERR";
 /// progress callback threw), `STREAM_ERROR` (an `AsyncIterable` archive
 /// failed), `ENTRY_CALLBACK_ERROR` (an `onEntry` callback threw) and
 /// `ABORT_ERR` (the `AbortSignal` fired).
-// Generates the TypeScript union only: runtime values come from core's
-// `as_str`, and a unit test keeps this list equal to core's plus the
-// Node-only codes.
+// The runtime type of `VerificationIssue.code`; a unit test keeps this list
+// equal to core's plus the Node-only codes.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -158,24 +158,24 @@ pub enum ErrorCode {
 
 /// Value of the `relaxableBy` property: the `SecurityConfig` setting whose
 /// current value refused the entry.
-// Generates the TypeScript union only; runtime values come from core's
-// `as_str`, guarded by a unit test.
+// The runtime type of the matching report field: core's variants map in
+// through `TryFrom`, and a unit test keeps the spellings equal to core's.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicySetting {
-    /// `SecurityConfig.setAllowSymlinks`.
+    /// `SecurityConfig.withAllowSymlinks`.
     #[napi(value = "symlinks")]
     Symlinks,
-    /// `SecurityConfig.setAllowHardlinks`.
+    /// `SecurityConfig.withAllowHardlinks`.
     #[napi(value = "hardlinks")]
     Hardlinks,
-    /// `SecurityConfig.setAllowSolidArchives`.
+    /// `SecurityConfig.withAllowSolidArchives`.
     #[napi(value = "solid_archives")]
     SolidArchives,
     /// `SecurityConfig.addBannedComponent`.
     #[napi(value = "banned_components")]
     BannedComponents,
-    /// `SecurityConfig.setMaxPathDepth`.
+    /// `SecurityConfig.withMaxPathDepth`.
     #[napi(value = "max_path_depth")]
     MaxPathDepth,
     /// Rust API only: no setter in this binding.
@@ -187,8 +187,8 @@ pub enum PolicySetting {
 }
 
 /// Value of the `subCode` property of an `INVALID_ARCHIVE` error.
-// Generates the TypeScript union only; runtime values come from core's
-// `as_str`, guarded by a unit test.
+// The runtime type of the matching report field: core's variants map in
+// through `TryFrom`, and a unit test keeps the spellings equal to core's.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidArchiveSubCode {
@@ -226,8 +226,8 @@ pub enum InvalidArchiveSubCode {
 
 /// Value of the `subCode` property of a `QUOTA_EXCEEDED` error: the quota
 /// that was exceeded.
-// Generates the TypeScript union only; runtime values come from core's
-// `SubCode::as_str`, guarded by a unit test.
+// The runtime type of the matching report field; a unit test keeps the
+// spellings equal to core's `SubCode::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaSubCode {
@@ -262,8 +262,8 @@ pub enum QuotaSubCode {
 
 /// Value of the `subCode` property of a `ZIP_BOMB` error: what the refused
 /// ratio was measured over.
-// Generates the TypeScript union only; runtime values come from core's
-// `SubCode::as_str`, guarded by a unit test.
+// The runtime type of the matching report field; a unit test keeps the
+// spellings equal to core's `SubCode::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZipBombSubCode {
@@ -279,8 +279,8 @@ pub enum ZipBombSubCode {
 }
 
 /// Value of the `setting` property of an `INVALID_CONFIGURATION` error.
-// Generates the TypeScript union only; runtime values come from core's
-// `as_str`, guarded by a unit test.
+// The runtime type of the matching report field: core's variants map in
+// through `TryFrom`, and a unit test keeps the spellings equal to core's.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigSetting {
@@ -393,8 +393,8 @@ pub enum ConfigSetting {
 /// without parsing the message.
 ///
 /// A kind with no entry here, and `ErrorKind::Other`, is `Other`.
-// Generates the TypeScript union only; the runtime spelling is `as_str`,
-// guarded by a unit test that maps every value back to its core kind.
+// The runtime type of the matching report fields; a unit test maps every value
+// back to its core kind.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoKind {
@@ -539,10 +539,34 @@ impl IoKind {
 
 impl From<exarch_core::IoKind> for IoKind {
     fn from(kind: exarch_core::IoKind) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|candidate| candidate.as_str() == kind.as_str())
-            .unwrap_or(Self::Other)
+        match kind {
+            exarch_core::IoKind::NotFound => Self::NotFound,
+            exarch_core::IoKind::PermissionDenied => Self::PermissionDenied,
+            exarch_core::IoKind::AlreadyExists => Self::AlreadyExists,
+            exarch_core::IoKind::NotADirectory => Self::NotADirectory,
+            exarch_core::IoKind::IsADirectory => Self::IsADirectory,
+            exarch_core::IoKind::DirectoryNotEmpty => Self::DirectoryNotEmpty,
+            exarch_core::IoKind::ReadOnlyFilesystem => Self::ReadOnlyFilesystem,
+            exarch_core::IoKind::StorageFull => Self::StorageFull,
+            exarch_core::IoKind::QuotaExceeded => Self::QuotaExceeded,
+            exarch_core::IoKind::FileTooLarge => Self::FileTooLarge,
+            exarch_core::IoKind::InvalidInput => Self::InvalidInput,
+            exarch_core::IoKind::InvalidData => Self::InvalidData,
+            exarch_core::IoKind::InvalidFilename => Self::InvalidFilename,
+            exarch_core::IoKind::TimedOut => Self::TimedOut,
+            exarch_core::IoKind::Interrupted => Self::Interrupted,
+            exarch_core::IoKind::UnexpectedEof => Self::UnexpectedEof,
+            exarch_core::IoKind::WriteZero => Self::WriteZero,
+            exarch_core::IoKind::Unsupported => Self::Unsupported,
+            exarch_core::IoKind::CrossesDevices => Self::CrossesDevices,
+            exarch_core::IoKind::TooManyLinks => Self::TooManyLinks,
+            exarch_core::IoKind::ResourceBusy => Self::ResourceBusy,
+            exarch_core::IoKind::BrokenPipe => Self::BrokenPipe,
+            exarch_core::IoKind::OutOfMemory => Self::OutOfMemory,
+            exarch_core::IoKind::WouldBlock => Self::WouldBlock,
+            // `Other` and the `#[non_exhaustive]` tail of core's enum.
+            _ => Self::Other,
+        }
     }
 }
 
@@ -553,8 +577,8 @@ impl From<std::io::ErrorKind> for IoKind {
 }
 
 /// Value of the `subCode` property of a `SECURITY_VIOLATION` error.
-// Generates the TypeScript union only; runtime values come from core's
-// `as_str`, guarded by a unit test.
+// The runtime type of the matching report field: core's variants map in
+// through `TryFrom`, and a unit test keeps the spellings equal to core's.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityViolationSubCode {
@@ -611,10 +635,176 @@ pub enum SecurityViolationSubCode {
     SourcePath,
 }
 
+mirror_from_core!(
+    ErrorCode,
+    CoreErrorCode,
+    "error code",
+    [
+        PathTraversal,
+        SymlinkEscape,
+        HardlinkEscape,
+        ZipBomb,
+        ZipInconsistency,
+        QuotaExceeded,
+        SecurityViolation,
+        InvalidArchive,
+        IoError,
+        InvalidPermissions,
+        SourceNotFound,
+        SourceNotAccessible,
+        OutputExists,
+        InvalidCompressionLevel,
+        UnknownFormat,
+        InvalidConfiguration,
+        Cancelled
+    ]
+);
+mirror_from_core!(
+    PolicySetting,
+    CorePolicySetting,
+    "policy setting",
+    [
+        Symlinks,
+        Hardlinks,
+        SolidArchives,
+        BannedComponents,
+        MaxPathDepth,
+        WindowsReservedNames,
+        MaxTarMetadataBytes
+    ]
+);
+mirror_from_core!(
+    ConfigSetting,
+    exarch_core::ConfigSetting,
+    "config setting",
+    [
+        MaxFileSize,
+        MaxTotalSize,
+        MaxFileCount,
+        MaxPathDepth,
+        MaxCompressionRatio,
+        MaxSolidCompressionRatio,
+        MaxSolidBlockMemory,
+        MaxTarMetadataBytes,
+        MaxDecoderMemory,
+        DecompressionBudget,
+        AllowedExtension,
+        BannedPathComponent,
+        OutputPath,
+        SourcePaths,
+        StripPrefix,
+        CreationFormat,
+        AtomicExtraction,
+        ZipOutputWriter,
+        MaxBytes,
+        ParallelDecodeMemory,
+        ExcludePattern,
+        ZipConsistency,
+        PathModel,
+        ArchiveFormat,
+        DecodeReuse,
+        DecodeReuseLimit,
+        SkipKind,
+        Durability,
+        ExistingFiles,
+        Staging,
+        EntrySelection,
+        EntryInclude,
+        EntryExclude,
+        StripComponents
+    ]
+);
+mirror_from_core!(
+    InvalidArchiveSubCode,
+    exarch_core::InvalidArchiveSubCode,
+    "invalid archive sub-code",
+    [
+        TarAmbiguity,
+        TarTrailer,
+        LinkTarget,
+        DuplicateEntry,
+        EntryName,
+        DeclaredSize,
+        Integrity,
+        ZipReader,
+        TarReader,
+        SevenZReader
+    ]
+);
+mirror_from_core!(
+    SecurityViolationSubCode,
+    exarch_core::SecurityViolationSubCode,
+    "security violation sub-code",
+    [
+        PathName,
+        PathDepth,
+        LinkTarget,
+        LinkPolicy,
+        ExistingSymlink,
+        EntryType,
+        RootEntry,
+        Encrypted,
+        CompressionMethod,
+        SolidArchive,
+        DeclaredSize,
+        ConcurrentChange,
+        TarMetadata,
+        TarTrailer,
+        Platform,
+        OutputConflict,
+        SourcePath
+    ]
+);
+mirror_from_core!(
+    QuotaSubCode,
+    exarch_core::QuotaKind,
+    "quota sub-code",
+    [
+        FileCount,
+        TotalSize,
+        FileSize,
+        IntegerOverflow,
+        DecoderMemory,
+        CompressedMembers,
+        TreeNodes,
+        SinkCapacity,
+        SolidBlockMemory
+    ]
+);
+mirror_from_core!(
+    ZipBombSubCode,
+    exarch_core::ZipBombScope,
+    "zip bomb sub-code",
+    [Entry, SolidBlock, SkippedEntries]
+);
+
+/// The finer classification of a refusal: the sub-code of whichever family
+/// the refusal belongs to.
+pub type SubCodeValue =
+    Either4<InvalidArchiveSubCode, SecurityViolationSubCode, QuotaSubCode, ZipBombSubCode>;
+
+/// The typed value of a core [`SubCode`].
+///
+/// # Errors
+///
+/// Returns "older than exarch-core" for a family or code this binding does not
+/// know.
+pub fn sub_code_value(code: SubCode) -> napi::Result<SubCodeValue> {
+    Ok(match code {
+        SubCode::InvalidArchive(code) => Either4::A(code.try_into()?),
+        SubCode::SecurityViolation(code) => Either4::B(code.try_into()?),
+        SubCode::Quota(kind) => Either4::C(kind.try_into()?),
+        SubCode::ZipBomb(scope) => Either4::D(scope.try_into()?),
+        other => {
+            return Err(crate::report::unknown_variant("sub-code", other.as_str()));
+        }
+    })
+}
+
 /// Value of the `writes` property: whether a failed extraction left files on
 /// disk.
-// Generates the TypeScript union only; runtime values come from core's
-// `as_str`, guarded by a unit test.
+// The runtime type of the matching report field: core's variants map in
+// through `TryFrom`, and a unit test keeps the spellings equal to core's.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialWrites {
@@ -691,6 +881,8 @@ pub enum ProgressCallbackError {
     CreationCancelled {
         /// The JS throw, attached as `cause`.
         source: Error,
+        /// The staging entry a failed cleanup left behind, redacted.
+        leftover_path: Option<String>,
     },
     /// The JS progress callback threw during an extraction, listing or
     /// verification, which core stopped at its next poll. A throw is the
@@ -703,6 +895,8 @@ pub enum ProgressCallbackError {
         source: Error,
         /// What the stop left behind, when the operation writes.
         outcome: Option<PartialOutcome>,
+        /// The staging entry a failed cleanup left behind, redacted.
+        leftover_path: Option<String>,
     },
     /// The JS progress callback threw while a listing itself succeeded; the
     /// manifest is discarded.
@@ -768,16 +962,27 @@ impl ProgressCallbackError {
     /// `is_cancelled` between entries) becomes the callback's own failure.
     pub fn merge(operation: Operation, source: CoreError, callback: Option<Error>) -> Self {
         match callback {
-            Some(thrown) if source.is_cancelled() => match operation {
-                Operation::Creation => Self::CreationCancelled { source: thrown },
-                Operation::Extraction | Operation::Listing | Operation::Verification => {
-                    Self::CallbackCancelled {
-                        operation,
+            Some(thrown) if source.is_cancelled() => {
+                let FfiErrorMessage {
+                    partial,
+                    leftover_path,
+                    ..
+                } = source.into_ffi_message();
+                match operation {
+                    Operation::Creation => Self::CreationCancelled {
                         source: thrown,
-                        outcome: source.into_ffi_message().partial,
+                        leftover_path,
+                    },
+                    Operation::Extraction | Operation::Listing | Operation::Verification => {
+                        Self::CallbackCancelled {
+                            operation,
+                            source: thrown,
+                            outcome: partial,
+                            leftover_path,
+                        }
                     }
                 }
-            },
+            }
             callback => Self::Core { source, callback },
         }
     }
@@ -829,7 +1034,8 @@ enum Details {
 
 /// What became of the original destination after a failed replace
 /// (`restore` property of an `IO_ERROR` raised by `'atomic_replace'`).
-// Generates the TypeScript union only; runtime values come from `as_str`.
+// Generates the TypeScript union only; the runtime token is core's
+// `RestoreKind::as_str`, guarded by a unit test.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestoreOutcome {
@@ -843,16 +1049,6 @@ pub enum RestoreOutcome {
     /// where it is now.
     #[napi(value = "failed")]
     Failed,
-}
-
-impl RestoreOutcome {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::NotNeeded => "not_needed",
-            Self::Restored => "restored",
-            Self::Failed => "failed",
-        }
-    }
 }
 
 /// What makes a destination too important to replace as a whole (the
@@ -872,26 +1068,6 @@ pub enum ProtectedPath {
     WorkingDirectory,
 }
 
-impl ProtectedPath {
-    fn from_core(path: CoreProtectedPath) -> Option<Self> {
-        Some(match path {
-            CoreProtectedPath::FilesystemRoot => Self::FilesystemRoot,
-            CoreProtectedPath::ArchiveAncestor => Self::ArchiveAncestor,
-            CoreProtectedPath::WorkingDirectory => Self::WorkingDirectory,
-            _ => return None,
-        })
-    }
-
-    #[cfg(test)]
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::FilesystemRoot => "filesystem_root",
-            Self::ArchiveAncestor => "archive_ancestor",
-            Self::WorkingDirectory => "working_directory",
-        }
-    }
-}
-
 /// The two creation sources that map to one archive entry name (the
 /// `collision` property of an `INVALID_CONFIGURATION` for `source_paths`).
 #[napi(object)]
@@ -905,103 +1081,12 @@ pub struct NameCollision {
     pub second: String,
 }
 
-/// The typed extras of an error about the destination of an operation.
-#[derive(Debug, Default)]
-struct OutputDetail {
-    restore: Option<RestoreOutcome>,
-    backup_path: Option<String>,
-    leftover_path: Option<String>,
-    conflicts: Option<Vec<String>>,
-    protected_path: Option<ProtectedPath>,
-    collision: Option<NameCollision>,
-    unmatched_patterns: Option<Vec<String>>,
-}
-
-impl OutputDetail {
-    fn of(err: &CoreError) -> Self {
-        use exarch_core::ConfigProblem;
-        use exarch_core::sanitize_path_for_error as host;
-
-        match err {
-            CoreError::ReplaceFailed(failure) => {
-                let (restore, backup_path) = match &failure.restore {
-                    CoreRestore::NotNeeded => (Some(RestoreOutcome::NotNeeded), None),
-                    CoreRestore::Restored => (Some(RestoreOutcome::Restored), None),
-                    CoreRestore::Failed { backup, .. } => {
-                        (Some(RestoreOutcome::Failed), Some(host(backup)))
-                    }
-                    _ => (None, None),
-                };
-                Self {
-                    restore,
-                    backup_path,
-                    leftover_path: failure.leftover.as_ref().map(|left| host(&left.path)),
-                    ..Self::default()
-                }
-            }
-            CoreError::OutputReservationLeft { path, .. } => Self {
-                leftover_path: Some(host(path)),
-                ..Self::default()
-            },
-            CoreError::DestinationOccupied { conflicts, .. } => Self {
-                conflicts: Some(
-                    conflicts
-                        .iter()
-                        .map(|path| crate::utils::path_text(path))
-                        .collect(),
-                ),
-                ..Self::default()
-            },
-            CoreError::InvalidConfiguration {
-                problem: ConfigProblem::ReplacesProtectedPath { path },
-                ..
-            } => Self {
-                protected_path: ProtectedPath::from_core(*path),
-                ..Self::default()
-            },
-            CoreError::InvalidConfiguration {
-                problem:
-                    ConfigProblem::EntryNameCollision {
-                        name,
-                        first,
-                        second,
-                    },
-                ..
-            } => Self {
-                collision: Some(NameCollision {
-                    name: name.clone(),
-                    first: host(first),
-                    second: host(second),
-                }),
-                ..Self::default()
-            },
-            CoreError::UnmatchedInclude { patterns } => Self {
-                unmatched_patterns: Some(patterns.iter().map(ToString::to_string).collect()),
-                ..Self::default()
-            },
-            CoreError::PartialExtraction(partial) => Self::of(partial.cause()),
-            _ => Self::default(),
-        }
-    }
-}
-
 /// What the OS reported for an unreadable creation source, redacted like the
 /// rest of the message.
 #[derive(Debug)]
 struct SourceFault {
     errno: Option<i32>,
     strerror: String,
-    path: String,
-}
-
-impl From<FfiSourceFault> for SourceFault {
-    fn from(fault: FfiSourceFault) -> Self {
-        Self {
-            errno: fault.raw_os_error,
-            strerror: fault.text,
-            path: fault.name,
-        }
-    }
 }
 
 /// Everything about an error except its message, ready to be applied to a JS
@@ -1013,11 +1098,32 @@ struct ErrorProps {
     sub_code: Option<SubCode>,
     setting: Option<exarch_core::ConfigSetting>,
     io_kind: Option<IoKind>,
-    non_utf8_entry_path: Option<String>,
     source_fault: Option<SourceFault>,
-    output: OutputDetail,
+    path: Option<String>,
+    leftover_path: Option<String>,
+    detail: FfiDetail,
     details: Details,
     cause: Option<Error>,
+}
+
+impl ErrorProps {
+    /// The properties of an error that did not come from core: a code, the
+    /// counters of the operation and the JS error behind it.
+    const fn js(code: JsCode, details: Details, cause: Option<Error>) -> Self {
+        Self {
+            code,
+            relaxable_by: None,
+            sub_code: None,
+            setting: None,
+            io_kind: None,
+            source_fault: None,
+            path: None,
+            leftover_path: None,
+            detail: FfiDetail::None,
+            details,
+            cause,
+        }
+    }
 }
 
 /// An error message plus the properties to attach to it.
@@ -1027,81 +1133,57 @@ struct Described {
     props: ErrorProps,
 }
 
-/// The injective rendering of the entry path a listing or in-memory extraction
-/// refused for not being valid UTF-8.
-fn non_utf8_entry_path(err: &CoreError) -> Option<String> {
-    match err {
-        CoreError::InvalidArchive(exarch_core::Malformation::EntryPathNotUtf8 { path }) => {
-            Some(crate::utils::path_text(path))
-        }
-        CoreError::PartialExtraction(partial) => non_utf8_entry_path(partial.cause()),
-        _ => None,
-    }
-}
-
 fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
-    let non_utf8_entry_path = non_utf8_entry_path(&err);
-    let output = OutputDetail::of(&err);
     let FfiErrorMessage {
         kind,
         description,
         partial,
         source_fault,
+        path,
+        leftover_path,
+        detail,
         ..
     } = err.into_ffi_message();
-    Described {
-        description,
-        props: ErrorProps {
-            code: JsCode::Core(kind.code()),
-            relaxable_by: kind.relaxable_by(),
-            sub_code: kind.sub_code(),
-            setting: kind.setting(),
-            io_kind: match kind {
-                FfiKind::Io(io_kind) => Some(IoKind::from(io_kind)),
-                _ => None,
-            },
-            non_utf8_entry_path,
-            source_fault: source_fault.map(SourceFault::from),
-            output,
-            details: partial.map_or(Details::None, Details::Extraction),
-            cause,
-        },
-    }
+    let (source_fault, fault_path) = match source_fault {
+        Some(fault) => (
+            Some(SourceFault {
+                errno: fault.raw_os_error,
+                strerror: fault.text,
+            }),
+            Some(fault.name),
+        ),
+        None => (None, None),
+    };
+    let mut props = ErrorProps::js(
+        JsCode::Core(kind.code()),
+        partial.map_or(Details::None, Details::Extraction),
+        cause,
+    );
+    props.relaxable_by = kind.relaxable_by();
+    props.sub_code = kind.sub_code();
+    props.setting = kind.setting();
+    props.io_kind = match kind {
+        FfiKind::Io(io_kind) => Some(IoKind::from(io_kind)),
+        _ => None,
+    };
+    props.source_fault = source_fault;
+    props.path = fault_path.or(path);
+    props.leftover_path = leftover_path;
+    props.detail = detail;
+    Described { description, props }
 }
 
 fn describe_callback_over_success(operation: &str, details: Details, source: Error) -> Described {
     Described {
         description: format!("progress callback threw after successful {operation}"),
-        props: ErrorProps {
-            code: JsCode::ProgressCallback,
-            relaxable_by: None,
-            sub_code: None,
-            setting: None,
-            io_kind: None,
-            non_utf8_entry_path: None,
-            source_fault: None,
-            output: OutputDetail::default(),
-            details,
-            cause: Some(source),
-        },
+        props: ErrorProps::js(JsCode::ProgressCallback, details, Some(source)),
     }
 }
 
 fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Described {
     Described {
         description: description.to_owned(),
-        props: ErrorProps {
-            code,
-            relaxable_by: None,
-            sub_code: None,
-            setting: None,
-            io_kind: None,
-            non_utf8_entry_path: None,
-            source_fault: None,
-            output: OutputDetail::default(),
-            details: Details::None,
-            cause: Some(source),
-        },
+        props: ErrorProps::js(code, Details::None, Some(source)),
     }
 }
 
@@ -1134,43 +1216,35 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     source,
                 )
             }
-            ProgressCallbackError::CreationCancelled { source } => Described {
+            ProgressCallbackError::CreationCancelled {
+                source,
+                leftover_path,
+            } => Described {
                 description:
                     "progress callback threw, creation was cancelled and nothing was written"
                         .to_owned(),
                 props: ErrorProps {
-                    code: JsCode::ProgressCallback,
-                    relaxable_by: None,
-                    sub_code: None,
-                    setting: None,
-                    io_kind: None,
-                    non_utf8_entry_path: None,
-                    source_fault: None,
-                    output: OutputDetail::default(),
-                    details: Details::None,
-                    cause: Some(source),
+                    leftover_path,
+                    ..ErrorProps::js(JsCode::ProgressCallback, Details::None, Some(source))
                 },
             },
             ProgressCallbackError::CallbackCancelled {
                 operation,
                 source,
                 outcome,
+                leftover_path,
             } => Described {
                 description: format!(
                     "progress callback threw, {} was cancelled",
                     operation.as_str()
                 ),
                 props: ErrorProps {
-                    code: JsCode::ProgressCallback,
-                    relaxable_by: None,
-                    sub_code: None,
-                    setting: None,
-                    io_kind: None,
-                    non_utf8_entry_path: None,
-                    source_fault: None,
-                    output: OutputDetail::default(),
-                    details: outcome.map_or(Details::None, Details::Extraction),
-                    cause: Some(source),
+                    leftover_path,
+                    ..ErrorProps::js(
+                        JsCode::ProgressCallback,
+                        outcome.map_or(Details::None, Details::Extraction),
+                        Some(source),
+                    )
                 },
             },
             ProgressCallbackError::ListCallback { source } => {
@@ -1187,18 +1261,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
             }
             ProgressCallbackError::Aborted { reason } => Described {
                 description: "The operation was aborted".to_owned(),
-                props: ErrorProps {
-                    code: JsCode::Abort,
-                    relaxable_by: None,
-                    sub_code: None,
-                    setting: None,
-                    io_kind: None,
-                    non_utf8_entry_path: None,
-                    source_fault: None,
-                    output: OutputDetail::default(),
-                    details: Details::None,
-                    cause: reason,
-                },
+                props: ErrorProps::js(JsCode::Abort, Details::None, reason),
             },
         }),
         Failure::Native(err) => Err(err),
@@ -1224,55 +1287,57 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     if let Some(io_kind) = props.io_kind {
         obj.set("ioKind", io_kind.as_str())?;
     }
-    if let Some(path) = props.non_utf8_entry_path {
-        obj.set("nonUtf8EntryPath", path)?;
-    }
     if let Some(fault) = props.source_fault {
         if let Some(errno) = fault.errno {
             obj.set("errno", errno)?;
         }
         obj.set("strerror", fault.strerror)?;
-        obj.set("path", fault.path)?;
     }
-    let output = props.output;
-    if let Some(restore) = output.restore {
-        obj.set("restore", restore.as_str())?;
+    if let Some(path) = props.path {
+        obj.set("path", path)?;
     }
-    if let Some(path) = output.backup_path {
-        obj.set("backupPath", path)?;
-    }
-    if let Some(path) = output.leftover_path {
+    if let Some(path) = props.leftover_path {
         obj.set("leftoverPath", path)?;
     }
-    if let Some(conflicts) = output.conflicts {
-        obj.set("conflicts", conflicts)?;
-    }
-    if let Some(path) = output.protected_path {
-        obj.set("protectedPath", path)?;
-    }
-    if let Some(collision) = output.collision {
-        obj.set("collision", collision)?;
-    }
-    if let Some(patterns) = output.unmatched_patterns {
-        obj.set("unmatchedPatterns", patterns)?;
+    match props.detail {
+        FfiDetail::None => {}
+        FfiDetail::Occupied { conflicts } => obj.set("conflicts", conflicts.into_vec())?,
+        FfiDetail::Replace(restore) => {
+            obj.set("restore", restore.kind().as_str())?;
+            if let FfiRestore::Failed { backup_path } = restore {
+                obj.set("backupPath", backup_path)?;
+            }
+        }
+        FfiDetail::ProtectedPath(path) => obj.set("protectedPath", path.as_str())?,
+        FfiDetail::NameCollision(FfiNameCollision {
+            name,
+            first,
+            second,
+            ..
+        }) => obj.set(
+            "collision",
+            NameCollision {
+                name,
+                first,
+                second,
+            },
+        )?,
+        FfiDetail::UnmatchedInclude { patterns } => {
+            obj.set("unmatchedPatterns", patterns.into_vec())?;
+        }
+        FfiDetail::NonUtf8EntryPath { path } => obj.set("nonUtf8EntryPath", path)?,
     }
     match props.details {
         Details::None => {}
         Details::Extraction(outcome) => {
             obj.set("writes", outcome.writes().as_str())?;
             if let PartialOutcome::Kept(report) = outcome {
-                obj.set("filesExtracted", saturating_u32(report.files_extracted))?;
-                obj.set("bytesWritten", saturating_i64(report.bytes_written))?;
-                obj.set("filesSkipped", saturating_u32(report.files_skipped()))?;
-                obj.set("skipped", SkippedSummary::from(&report.skipped))?;
-                obj.set(
-                    "warnings",
-                    report
-                        .warnings
-                        .iter()
-                        .map(extraction_warning)
-                        .collect::<napi::Result<Vec<_>>>()?,
-                )?;
+                let report = ExtractionReport::try_from(report)?;
+                obj.set("filesExtracted", report.files_extracted)?;
+                obj.set("bytesWritten", report.bytes_written)?;
+                obj.set("filesSkipped", report.files_skipped)?;
+                obj.set("skipped", report.skipped)?;
+                obj.set("warnings", report.warnings)?;
             }
         }
         Details::Creation {
@@ -1817,6 +1882,69 @@ mod tests {
         ]
     );
 
+    /// Every variant of the core enum converts to the mirror variant of the
+    /// same name, so no report field can hold a token outside its union.
+    macro_rules! every_core_variant_converts {
+        ($test:ident, $mirror:ty, $core:ty) => {
+            #[test]
+            fn $test() {
+                for core in <$core>::ALL {
+                    let mirror = <$mirror>::try_from(*core).expect("every core variant is mapped");
+                    assert_eq!(format!("{mirror:?}"), format!("{core:?}"));
+                }
+            }
+        };
+    }
+
+    every_core_variant_converts!(every_error_code_converts, ErrorCode, CoreErrorCode);
+    every_core_variant_converts!(
+        every_policy_setting_converts,
+        PolicySetting,
+        CorePolicySetting
+    );
+    every_core_variant_converts!(
+        every_config_setting_converts,
+        ConfigSetting,
+        exarch_core::ConfigSetting
+    );
+    every_core_variant_converts!(
+        every_invalid_archive_sub_code_converts,
+        InvalidArchiveSubCode,
+        CoreInvalidArchiveSubCode
+    );
+    every_core_variant_converts!(
+        every_security_violation_sub_code_converts,
+        SecurityViolationSubCode,
+        CoreSecurityViolationSubCode
+    );
+    every_core_variant_converts!(
+        every_quota_kind_converts,
+        QuotaSubCode,
+        exarch_core::QuotaKind
+    );
+    every_core_variant_converts!(
+        every_zip_bomb_scope_converts,
+        ZipBombSubCode,
+        exarch_core::ZipBombScope
+    );
+    every_core_variant_converts!(
+        every_skip_kind_converts,
+        crate::report::SkipKind,
+        exarch_core::SkipKind
+    );
+    every_core_variant_converts!(
+        every_disposition_kind_converts,
+        crate::report::DispositionKind,
+        exarch_core::DispositionKind
+    );
+
+    #[test]
+    fn every_sub_code_converts_to_its_family() {
+        for code in SubCode::QUOTA_ALL.iter().chain(SubCode::ZIP_BOMB_ALL) {
+            assert!(sub_code_value(*code).is_ok(), "{code:?}");
+        }
+    }
+
     fn described(err: CoreError) -> Described {
         describe(Failure::Core(err)).expect("core errors are always described")
     }
@@ -1918,13 +2046,15 @@ mod tests {
             exarch_core::Malformation::EntryPathNotUtf8 { path },
         ));
         assert_eq!(
-            d.props.non_utf8_entry_path.as_deref(),
-            Some("a\\xFFb\\x5Cc")
+            d.props.detail,
+            FfiDetail::NonUtf8EntryPath {
+                path: "a\\xFFb\\x5Cc".to_owned()
+            }
         );
         let d = described(CoreError::PathTraversal {
             path: PathBuf::from("../x"),
         });
-        assert_eq!(d.props.non_utf8_entry_path, None);
+        assert_eq!(d.props.detail, FfiDetail::None);
     }
 
     #[test]
@@ -2154,6 +2284,19 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_cancelled_by_a_throw_keeps_the_staging_leftover() {
+        for operation in [Operation::Extraction, Operation::Creation] {
+            let cancelled = CoreError::Cancelled.rolled_back_with(Some(
+                exarch_core::StagingLeftover::new(PathBuf::from("/srv/out/.exarch-left")),
+            ));
+            let d = merged(operation, cancelled, Some(Error::from_reason("boom")));
+            assert_eq!(d.props.code, JsCode::ProgressCallback);
+            let leftover = d.props.leftover_path.expect("the leftover is named");
+            assert!(leftover.ends_with(".exarch-left"), "{leftover}");
+        }
+    }
+
+    #[test]
     fn test_merge_cancelled_by_a_throw_during_a_read_only_operation_has_no_outcome() {
         for operation in [Operation::Listing, Operation::Verification] {
             let d = merged(
@@ -2214,7 +2357,8 @@ mod tests {
         assert_eq!(d.props.code.as_str(), "SOURCE_NOT_ACCESSIBLE");
         let fault = d.props.source_fault.expect("the fault is carried");
         assert_eq!(fault.errno, Some(13));
-        assert!(fault.path.ends_with("a.txt"), "{}", fault.path);
+        let path = d.props.path.expect("the source is named");
+        assert!(path.ends_with("a.txt"), "{path}");
         assert!(!fault.strerror.is_empty());
     }
 
@@ -2255,7 +2399,7 @@ mod tests {
     fn test_replace_failed_carries_typed_restore_state_and_redacted_paths() {
         let failure = exarch_core::ReplaceFailure::new(
             std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-            CoreRestore::Failed {
+            exarch_core::Restore::Failed {
                 backup: PathBuf::from("/srv/internal/app/.backup-1"),
                 error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             },
@@ -2264,10 +2408,14 @@ mod tests {
         let d = described(CoreError::ReplaceFailed(failure));
         assert_eq!(d.props.code.as_str(), "IO_ERROR");
         assert_eq!(d.props.io_kind, Some(IoKind::PermissionDenied));
-        assert_eq!(d.props.output.restore, Some(RestoreOutcome::Failed));
-        let backup = d.props.output.backup_path.expect("the backup is named");
+        let FfiDetail::Replace(FfiRestore::Failed {
+            backup_path: backup,
+        }) = d.props.detail
+        else {
+            panic!("the failed restore is carried");
+        };
         assert!(backup.ends_with(".backup-1"), "{backup}");
-        assert!(d.props.output.leftover_path.is_none());
+        assert!(d.props.leftover_path.is_none());
         #[cfg(not(debug_assertions))]
         {
             assert!(!backup.contains("internal"), "{backup}");
@@ -2279,12 +2427,11 @@ mod tests {
     fn test_replace_failed_that_restored_has_no_backup_path() {
         let failure = exarch_core::ReplaceFailure::new(
             std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-            CoreRestore::Restored,
+            exarch_core::Restore::Restored,
             None,
         );
         let d = described(CoreError::ReplaceFailed(failure));
-        assert_eq!(d.props.output.restore, Some(RestoreOutcome::Restored));
-        assert!(d.props.output.backup_path.is_none());
+        assert_eq!(d.props.detail, FfiDetail::Replace(FfiRestore::Restored));
     }
 
     #[test]
@@ -2293,13 +2440,10 @@ mod tests {
             path: PathBuf::from("/srv/internal/app/out.tar"),
             error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         });
-        let leftover = d
-            .props
-            .output
-            .leftover_path
-            .expect("the reservation is named");
+        let leftover = d.props.leftover_path.expect("the reservation is named");
         assert!(leftover.ends_with("out.tar"), "{leftover}");
-        assert!(d.props.output.restore.is_none());
+        assert_eq!(d.props.path.as_deref(), Some(leftover.as_str()));
+        assert_eq!(d.props.detail, FfiDetail::None);
     }
 
     #[test]
@@ -2309,17 +2453,30 @@ mod tests {
             conflicts: vec![PathBuf::from("a.txt"), PathBuf::from("d/b.txt")].into_boxed_slice(),
         });
         assert_eq!(
-            d.props.output.conflicts,
-            Some(vec!["a.txt".to_owned(), "d/b.txt".to_owned()])
+            d.props.detail,
+            FfiDetail::Occupied {
+                conflicts: Box::new(["a.txt".to_owned(), "d/b.txt".to_owned()])
+            }
         );
+        let path = d.props.path.expect("the destination is named");
+        assert!(path.ends_with("out"), "{path}");
     }
 
     #[test]
     fn test_protected_path_refusal_names_the_reason() {
         for (core, expected) in [
-            (CoreProtectedPath::FilesystemRoot, "filesystem_root"),
-            (CoreProtectedPath::ArchiveAncestor, "archive_ancestor"),
-            (CoreProtectedPath::WorkingDirectory, "working_directory"),
+            (
+                exarch_core::ProtectedPath::FilesystemRoot,
+                "filesystem_root",
+            ),
+            (
+                exarch_core::ProtectedPath::ArchiveAncestor,
+                "archive_ancestor",
+            ),
+            (
+                exarch_core::ProtectedPath::WorkingDirectory,
+                "working_directory",
+            ),
         ] {
             let d = described(CoreError::InvalidConfiguration {
                 setting: exarch_core::ConfigSetting::OutputPath,
@@ -2330,13 +2487,8 @@ mod tests {
                 d.props.setting,
                 Some(exarch_core::ConfigSetting::OutputPath)
             );
-            assert_eq!(
-                d.props.output.protected_path.map(ProtectedPath::as_str),
-                Some(expected)
-            );
-        }
-        for core in CoreProtectedPath::ALL {
-            assert!(ProtectedPath::from_core(*core).is_some(), "{core:?}");
+            assert_eq!(d.props.detail, FfiDetail::ProtectedPath(core));
+            assert_eq!(core.as_str(), expected);
         }
     }
 
@@ -2350,7 +2502,9 @@ mod tests {
                 second: PathBuf::from("/srv/internal/two/a.txt"),
             },
         });
-        let collision = d.props.output.collision.expect("the collision is named");
+        let FfiDetail::NameCollision(collision) = d.props.detail else {
+            panic!("the collision is named");
+        };
         assert_eq!(collision.name, "a.txt");
         assert!(collision.first.ends_with("a.txt") && collision.second.ends_with("a.txt"));
         #[cfg(not(debug_assertions))]
@@ -2366,22 +2520,23 @@ mod tests {
         let partial =
             exarch_core::Partial::new(source, CoreExtractionReport::new(), CorePartialWrites::Kept);
         let d = described(CoreError::PartialExtraction(partial));
-        assert_eq!(d.props.output.conflicts, Some(vec!["a.txt".to_owned()]));
+        assert_eq!(
+            d.props.detail,
+            FfiDetail::Occupied {
+                conflicts: Box::new(["a.txt".to_owned()])
+            }
+        );
     }
 
     #[test]
     fn test_index_d_ts_unions_for_destination_details_match() {
-        let restore: BTreeSet<String> = [
-            RestoreOutcome::NotNeeded,
-            RestoreOutcome::Restored,
-            RestoreOutcome::Failed,
-        ]
-        .iter()
-        .map(|value| value.as_str().to_owned())
-        .collect();
+        let restore: BTreeSet<String> = exarch_core::RestoreKind::ALL
+            .iter()
+            .map(|value| value.as_str().to_owned())
+            .collect();
         assert_eq!(dts_union("RestoreOutcome"), restore);
 
-        let protected: BTreeSet<String> = CoreProtectedPath::ALL
+        let protected: BTreeSet<String> = exarch_core::ProtectedPath::ALL
             .iter()
             .map(|path| path.as_str().to_owned())
             .collect();
@@ -2404,8 +2559,10 @@ mod tests {
             Some(exarch_core::ConfigSetting::EntryInclude)
         );
         assert_eq!(
-            d.props.output.unmatched_patterns,
-            Some(vec!["a/b".to_owned(), "*.rs".to_owned()])
+            d.props.detail,
+            FfiDetail::UnmatchedInclude {
+                patterns: Box::new(["a/b".to_owned(), "*.rs".to_owned()])
+            }
         );
         assert!(d.description.contains("a/b"), "{}", d.description);
     }

@@ -100,7 +100,7 @@ describe('archive bytes', () => {
   });
 
   it('honours the SecurityConfig', async () => {
-    const config = new SecurityConfig().setMaxFileCount(1);
+    const config = new SecurityConfig().withMaxFileCount(1);
     await assert.rejects(listArchiveBytes(archives.Tar.bytes, config), {
       code: 'QUOTA_EXCEEDED',
     });

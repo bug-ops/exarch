@@ -32,7 +32,7 @@ use std::path::Path;
 /// - `on_entry_complete`: Called when the guard from `begin` completes or
 ///   drops, so it follows every start even if the entry fails
 /// - `on_complete`: Called once when the entire operation finishes
-pub struct ProgressTracker<'a> {
+pub(crate) struct ProgressTracker<'a> {
     /// Reference to the progress callback implementation
     progress: &'a mut dyn ProgressCallback,
     /// Current entry number (1-indexed for user display)
@@ -49,7 +49,7 @@ impl<'a> ProgressTracker<'a> {
     /// - `progress`: Mutable reference to the progress callback
     /// - `total_entries`: Total number of entries that will be processed
     #[must_use]
-    pub fn new(progress: &'a mut dyn ProgressCallback, total_entries: usize) -> Self {
+    pub(crate) fn new(progress: &'a mut dyn ProgressCallback, total_entries: usize) -> Self {
         Self {
             progress,
             current_entry: 0,
@@ -66,7 +66,7 @@ impl<'a> ProgressTracker<'a> {
     ///
     /// Returns [`ArchiveError::Cancelled`](crate::ArchiveError::Cancelled)
     /// without announcing the entry when the callback asks to stop.
-    pub fn begin<'p>(&'p mut self, path: &'p Path) -> crate::Result<EntryCompleteGuard<'p>> {
+    pub(crate) fn begin<'p>(&'p mut self, path: &'p Path) -> crate::Result<EntryCompleteGuard<'p>> {
         let position =
             EntryPosition::at_index(self.current_entry, EntryTotal::Known(self.total_entries));
         self.current_entry += 1;
@@ -77,7 +77,7 @@ impl<'a> ProgressTracker<'a> {
     ///
     /// This should be called exactly once after all entries have been
     /// processed.
-    pub fn on_complete(&mut self) {
+    pub(crate) fn on_complete(&mut self) {
         self.progress.on_complete();
     }
 
@@ -88,7 +88,7 @@ impl<'a> ProgressTracker<'a> {
     ///
     /// Returns [`ArchiveError::Cancelled`](crate::ArchiveError::Cancelled) when
     /// cancelled.
-    pub fn check_cancelled(&mut self) -> crate::Result<()> {
+    pub(crate) fn check_cancelled(&mut self) -> crate::Result<()> {
         check_cancelled(&mut *self.progress)
     }
 }
@@ -109,7 +109,7 @@ impl<'a> ProgressTracker<'a> {
 ///
 /// This reduces callback overhead for large files while still providing
 /// responsive progress updates.
-pub struct ProgressReader<'a, R> {
+pub(crate) struct ProgressReader<'a, R> {
     /// Inner reader being wrapped
     inner: R,
     /// Reference to the progress callback
@@ -130,7 +130,7 @@ impl<'a, R> ProgressReader<'a, R> {
     /// - `inner`: The reader to wrap
     /// - `progress`: Mutable reference to the progress callback
     #[must_use]
-    pub fn new(inner: R, progress: &'a mut dyn ProgressCallback) -> Self {
+    pub(crate) fn new(inner: R, progress: &'a mut dyn ProgressCallback) -> Self {
         Self {
             inner,
             progress,
@@ -148,7 +148,7 @@ impl<'a, R> ProgressReader<'a, R> {
     /// - `batch_threshold`: Number of bytes to accumulate before reporting
     #[must_use]
     #[allow(dead_code)]
-    pub fn with_batch_threshold(
+    pub(crate) fn with_batch_threshold(
         inner: R,
         progress: &'a mut dyn ProgressCallback,
         batch_threshold: u64,
@@ -165,7 +165,7 @@ impl<'a, R> ProgressReader<'a, R> {
     ///
     /// This is called automatically when the reader is dropped, but can
     /// be called manually if needed.
-    pub fn flush_progress(&mut self) {
+    pub(crate) fn flush_progress(&mut self) {
         if self.bytes_since_last_update > 0 {
             self.progress.on_bytes_written(self.bytes_since_last_update);
             self.bytes_since_last_update = 0;
@@ -199,7 +199,7 @@ impl<R> Drop for ProgressReader<'_, R> {
 ///
 /// Returns [`ArchiveError::Cancelled`](crate::ArchiveError::Cancelled) when
 /// `progress` is cancelled.
-pub fn check_cancelled(progress: &mut dyn ProgressCallback) -> crate::Result<()> {
+pub(crate) fn check_cancelled(progress: &mut dyn ProgressCallback) -> crate::Result<()> {
     if progress.is_cancelled() {
         return Err(crate::ArchiveError::Cancelled);
     }

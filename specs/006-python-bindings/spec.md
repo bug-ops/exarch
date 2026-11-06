@@ -31,6 +31,9 @@ related:
 > **Build**: maturin + pyo3 0.30
 > **Source**: extracted from [[001-exarch-system/spec]]
 
+> [!note] Batch #1008 amendments
+> `leftover_path`, `filename` and the I/O attributes are always set (FR-113); `patterns` becomes `unmatched_patterns`, new `suspicious_entries`/`format` stubs (FR-114); `dispositions` is an attribute with `action` (FR-115).
+
 > [!note] Batch #981 amendments
 > `existing_files: "skip" | "overwrite" | "refuse"` replaces `skip_duplicates` (FR-108); an empty `allowed_extensions` list is refused (FR-109); `Cancelled` and the new errors are mapped (FR-110); `staging` replaces `atomic` (FR-111); typed warnings, `io_kind` and errno fields (FR-112); selection on `SecurityConfig` ([[022-extract-entry-selection/spec]] FR-104).
 
@@ -189,6 +192,9 @@ THEN extraction respects those settings
 | FR-110 | The binding SHALL map `Cancelled` (found through `PartialExtraction` too; an atomic or `atomic_replace` cancel gives `writes == "rolled_back"`, no counters, original destination intact) to the base `ArchiveError`, a callback exception winning as today; progress variants release the GIL (`py.detach`) with configs and options copied by `snapshot()` before the detach; `DestinationOccupied` and `OutputReservationLeft` SHALL map with host paths redacted in release builds through `into_ffi_message` (`OutputExistsError.filename` and warning paths through `sanitize_path_for_error`); `SourceNotFoundError` and `OutputExistsError` set errno (ENOENT, EEXIST), strerror and filename, so `str(err)` reads `[Errno 2] ...` | must |
 | FR-111 | `ExtractionOptions.with_staging(str)` and the `staging` property SHALL replace `atomic` and `with_atomic`, with values `"in_place"`, `"atomic"`, `"atomic_replace"` (`_Staging`, checked against core); a bad token is `InvalidConfigurationError(setting="staging")`; `atomic` into a non-empty directory raises `OutputExistsError` before extraction (it was `OSError` `IO_ERROR`), into a file `InvalidConfigurationError(output_path)`, and `atomic_replace` swaps a non-empty directory and refuses the archive's own directory (`ReplacesProtectedPath`); a failed swap (`ReplaceFailed`, an `OSError` with `io_kind`) carries `restore` (`"not_needed"`, `"restored"`, `"failed"`), `backup_path` (redacted, only with a failed restore) and `leftover_path` (redacted); `OutputReservationLeft` and `ReplaceFailed` set `filename` (redacted); `InvalidConfigurationError` carries `protected_path` (`"filesystem_root"`, `"archive_ancestor"`, `"working_directory"`) for `ReplacesProtectedPath` and `collision` (a `NameCollision` with `name`, `first`, `second`) for `EntryNameCollision` | must |
 | FR-112 | Reports and `PartialExtraction` exceptions SHALL carry typed warnings (`ExtractionWarning` and `CreationWarning` bases with `kind` and `message`, one final subclass per core variant, aliases `AnyExtractionWarning` and `AnyCreationWarning`; `warnings` was `list[str]`); every I/O exception and `VerificationIssue` SHALL carry `io_kind` (core `IoKind` token; `ErrorKind::OutOfMemory` is an `OSError`, not `MemoryError`); `InvalidArchiveError.non_utf8_entry_path` SHALL be set for a non-UTF-8 entry path; a `TarEntryTruncated` is `InvalidArchiveError` with `sub_code == "TAR_READER"`; `EntryNameCollision` on create is `InvalidConfigurationError(source_paths)`; paths cross the boundary as `os.fsdecode` plus `BoundaryPath::parse_os`, so bytes and surrogate-escaped paths reach core | must |
+| FR-113 | Every exception SHALL carry `leftover_path` (`str | None`, redacted like a message): the staging directory or empty output reservation a failure left on disk, also on a progress-callback cancellation; the I/O `OSError` attributes `restore`, `backup_path`, `leftover_path` and `filename` SHALL always be set (`None` when they do not apply); `OutputExistsError.filename` (and the `DestinationOccupied` refusal) and `SourceNotFoundError.filename` SHALL name the redacted path (#995, #1009) | must |
+| FR-114 | `InvalidConfigurationError.unmatched_patterns` SHALL replace `patterns` as the attribute naming the include patterns that matched no entry; `VerificationReport` SHALL expose `suspicious_entries` and `format`; `sub_code` SHALL be typed as the union of the four sub-code literals; `create_archive*` take `durability: str | None = None` (`None` is the default `"synced"`); the stub and the Node `index.d.ts` SHALL agree on every enumerable token of the core `ALL` tables, checked by `test_binding_parity.py`, which CI also runs on a change to the Node stubs (#1009, #1011) | must |
+| FR-115 | `ArchiveManifest.dispositions` SHALL be an attribute (not a method taking a `SecurityConfig`) holding the `EntryDisposition` list core computed when the archive was listed, under that call's config; each item has the class attribute `action` (`"extract"` for `ExtractDisposition` with `landing`, `"skip"` for `SkipDisposition` with `kind`), derived from core `DispositionKind`; an entry validation refuses is not reported (#1009, #998) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -211,8 +217,8 @@ THEN extraction respects those settings
 | `Skipped` / `Skip` | Typed skip accounting (#906) | `total`, `counts`, `sample`, `count(kind)`, `len()` / `kind`, `path`, `io_kind` |
 | `SinkOptions` | Frozen options of the in-memory and callback functions (#926) | `existing_files`, `decode_reuse`, `decode_reuse_limit` |
 | `ArchiveEntry` family | Listing entries by kind (#923, #910) | `ArchiveFile`, `ArchiveDirectory`, `ArchiveSymlink`, `ArchiveHardlink`; `LinkTarget` subclasses |
-| `PyArchiveManifest` | Python class wrapping `ArchiveManifest` | `total_entries`, `total_size`, `format`, `entries` |
-| `PyVerificationReport` | Python class wrapping `VerificationReport` | `status`, `issues`, `total_entries`, `total_size`, `integrity_status`, `integrity_gaps`, `security_status` |
+| `PyArchiveManifest` | Python class wrapping `ArchiveManifest` | `total_entries`, `total_size`, `format`, `entries`, `dispositions` (attribute, FR-115) |
+| `PyVerificationReport` | Python class wrapping `VerificationReport` | `status`, `issues`, `total_entries`, `suspicious_entries`, `total_size`, `format`, `integrity_status`, `integrity_gaps`, `security_status` |
 | `PyVerificationOptions` | Python class `VerificationOptions` wrapping core `VerificationOptions` (v0.7.0, #670) | `with_integrity_check(budget)`, `integrity_check`, `decompression_budget` |
 | `PyIntegrityGaps` / `PyUnverifiedEntry` | Python classes `IntegrityGaps` / `UnverifiedEntry` wrapping the report's unverified-entry data (v0.7.0, #672) | `counts`, `entries`, `omitted`, `total` / `path`, `reason` |
 | `MemoryExtraction` / `MemoryEntry` / `CreatedArchive` | Results of the in-memory functions (v0.8.0; per-kind classes since #923) | `report`, `entries` / `MemoryFile`, `MemoryDirectory`, `MemorySymlink`, `MemoryHardlink` (`kind` class attribute) / `data`, `report` |
@@ -226,7 +232,7 @@ ArchiveError(Exception)          # base exception (renamed from ExtractionError 
   OutputExistsError(ArchiveError, FileExistsError)            # #919
   SourceNotFoundError(ArchiveError, FileNotFoundError)        # #919
   SourceNotAccessibleError(ArchiveError, OSError)             # #919, #956
-  InvalidConfigurationError(ArchiveError, ValueError)         # #919, carries `setting`
+  InvalidConfigurationError(ArchiveError, ValueError)         # #919, carries `setting`, `unmatched_patterns` (was `patterns`, #1009)
   InvalidCompressionLevelError(ArchiveError, ValueError)      # #919
   PathTraversalError(ArchiveError)      # may carry files_extracted, bytes_written
   SymlinkEscapeError(ArchiveError)      # may carry files_extracted, bytes_written

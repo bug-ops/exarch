@@ -132,7 +132,7 @@ describe('ZIP structure through the Node API', () => {
 
   function ignoring() {
     const config = new SecurityConfig();
-    config.setZipConsistency('ignore');
+    config.withZipConsistency('ignore');
     return config;
   }
 
@@ -214,7 +214,7 @@ describe('ZIP structure through the Node API', () => {
     const target = Buffer.alloc(5000, 'a');
     const file = write('link.zip', buildZip([{ name: 'link', data: target, mode: 0o120777 }]));
     const config = new SecurityConfig();
-    config.setAllowSymlinks(true);
+    config.withAllowSymlinks(true);
     const report = verifyArchiveSync(file, config);
     assert.strictEqual(report.status, 'FAIL');
     assert.ok(categories(report).has('Invalid Archive'));

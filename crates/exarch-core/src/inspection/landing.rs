@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use crate::EntrySelection;
 use crate::SecurityConfig;
 use crate::SkipKind;
+use crate::closed_enum::closed_enum;
 use crate::formats::common::is_extension_allowed;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
@@ -125,6 +126,53 @@ pub enum Disposition {
     Extract(LandingPath),
     /// The entry is validated but not extracted, for this reason.
     Skip(SkipKind),
+}
+
+closed_enum! {
+    /// Which way a [`Disposition`] went, without its payload.
+    ///
+    /// The string form is stable and shared by every front end.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DispositionKind;
+    ///
+    /// assert_eq!(DispositionKind::Skip.as_str(), "skip");
+    /// assert_eq!(DispositionKind::NAMES, &["extract", "skip"]);
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[non_exhaustive]
+    pub enum DispositionKind {
+        /// The entry is extracted
+        Extract => "extract",
+        /// The entry is validated but left out
+        Skip => "skip",
+    }
+}
+
+impl Disposition {
+    /// Which way this disposition went.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::Disposition;
+    /// use exarch_core::DispositionKind;
+    /// use exarch_core::SkipKind;
+    ///
+    /// assert_eq!(
+    ///     Disposition::Skip(SkipKind::NotSelected).kind(),
+    ///     DispositionKind::Skip
+    /// );
+    /// ```
+    #[must_use]
+    pub const fn kind(&self) -> DispositionKind {
+        match self {
+            Self::Extract(_) => DispositionKind::Extract,
+            Self::Skip(_) => DispositionKind::Skip,
+        }
+    }
 }
 
 /// What put a path in the landing set.
@@ -341,7 +389,9 @@ fn land(
                 return None;
             }
             if let LinkTarget::Recorded(target) = target {
-                selection.mapped_link_target(&entry.path, target).ok()?;
+                selection
+                    .mapped_link_target(&entry.path, target, config.allowed.absolute_paths)
+                    .ok()?;
             }
             Node::File
         }

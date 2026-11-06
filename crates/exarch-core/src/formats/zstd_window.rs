@@ -32,57 +32,57 @@ const fn is_legacy_magic(magic: u32) -> bool {
 /// The invariant is `10..=27`: libzstd's smallest settable limit and its
 /// default, which the `zip` crate's decoders keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ZstdWindowLog(u32);
+pub(crate) struct ZstdWindowLog(u32);
 
 impl ZstdWindowLog {
     /// The limit libzstd applies when none is set.
-    pub const LIBZSTD_DEFAULT: Self = Self(Self::MAX);
+    pub(crate) const LIBZSTD_DEFAULT: Self = Self(Self::MAX);
     const MAX: u32 = 27;
     const MIN: u32 = 10;
 
     /// The limit `config.max_decoder_memory` implies.
-    pub fn of(config: &SecurityConfig) -> Self {
+    pub(crate) fn of(config: &SecurityConfig) -> Self {
         Self::for_memory(config.max_decoder_memory)
     }
 
     /// The largest power of two at or below `memory`, clamped to the range the
     /// decoder supports.
-    pub fn for_memory(memory: NonZeroU64) -> Self {
+    pub(crate) fn for_memory(memory: NonZeroU64) -> Self {
         Self(memory.ilog2().clamp(Self::MIN, Self::MAX))
     }
 
     /// The base-2 logarithm of the limit.
-    pub const fn get(self) -> u32 {
+    pub(crate) const fn get(self) -> u32 {
         self.0
     }
 
     /// Whether a frame declaring `window` decodes under this limit.
-    pub const fn admits(self, window: ZstdWindow) -> bool {
+    pub(crate) const fn admits(self, window: ZstdWindow) -> bool {
         window.0 <= 1u64 << self.0
     }
 }
 
 /// A window size in bytes, never below libzstd's 1 KiB minimum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ZstdWindow(u64);
+pub(crate) struct ZstdWindow(u64);
 
 impl ZstdWindow {
     const MIN: Self = Self(1 << ZstdWindowLog::MIN);
 
     /// The window of `bytes`, raised to the 1 KiB minimum.
-    pub fn of_bytes(bytes: u64) -> Self {
+    pub(crate) fn of_bytes(bytes: u64) -> Self {
         Self(bytes.max(Self::MIN.0))
     }
 
     #[cfg(test)]
-    pub const fn bytes(self) -> u64 {
+    pub(crate) const fn bytes(self) -> u64 {
         self.0
     }
 }
 
 /// What a walk over the zstd entries of an archive found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ZstdWindows {
+pub(crate) enum ZstdWindows {
     /// The archive has no zstd entry.
     NoZstdEntries,
     /// The largest window any frame in the entries declares.
@@ -95,7 +95,7 @@ pub enum ZstdWindows {
 
 /// Byte range of one zstd entry's data.
 #[derive(Debug, Clone, Copy)]
-pub struct ZstdRange {
+pub(crate) struct ZstdRange {
     /// Offset of the first byte of the entry's data.
     pub data_start: u64,
     /// Offset one past the last byte of the entry's data.
@@ -114,7 +114,7 @@ pub struct ZstdRange {
 /// that share frames, or a huge declared skippable-frame size, cannot make the
 /// walk longer than the budget. An honest archive's ranges are disjoint and sum
 /// to less than its extent.
-pub fn walk<R: Read + Seek>(
+pub(crate) fn walk<R: Read + Seek>(
     reader: &mut R,
     ranges: impl IntoIterator<Item = ZstdRange>,
     budget: u64,

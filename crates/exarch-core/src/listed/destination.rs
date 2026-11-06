@@ -58,7 +58,8 @@ fn needs_directory(landing: &Landing<'_>) -> bool {
 ///
 /// # Errors
 ///
-/// `DestinationOccupied` naming every occupied landing; the typed symlink
+/// `DestinationOccupied` naming every occupied landing, in path-component
+/// order; the typed symlink
 /// refusal the write phase gives for a link among the parents or at a
 /// landing; or the I/O error of a path that could not be inspected.
 pub(super) fn check(
@@ -89,6 +90,8 @@ pub(super) fn check(
             Err(error) => return Err(error),
         }
     }
+    conflicts.sort();
+    conflicts.dedup();
     conflicts
         .is_empty()
         .ok_or_else(|| ArchiveError::DestinationOccupied {

@@ -375,7 +375,7 @@ fn list_archive(
         py.detach(|| ListRequest::new(&config).list(&archive_path))
     })?;
 
-    Ok(PyArchiveManifest::from(manifest))
+    Ok(PyArchiveManifest::new(manifest, &config))
 }
 
 /// Verify archive security.
@@ -592,8 +592,12 @@ fn merge_progress_result<T>(
             // The core stopped because the callback asked it to (see
             // `PyProgressAdapter::is_cancelled`); the callback's own exception
             // wins and says what the stop left behind.
-            if let Some(outcome) = error.into_ffi_message().partial {
+            let message = error.into_ffi_message();
+            if let Some(outcome) = message.partial {
                 attach_partial(&cb_err, outcome);
+            }
+            if let Some(leftover) = message.leftover_path {
+                let _ = cb_err.value(py).setattr("leftover_path", leftover);
             }
             let _ = cb_err.value(py).setattr("progress_callback_error", true);
             Err(cb_err)
@@ -780,8 +784,8 @@ impl exarch_core::ProgressCallback for PyProgressAdapter {
 
     /// A callback that raised (`KeyboardInterrupt` included) cancels the
     /// operation, so a creation does not commit its staged archive. The
-    /// recorded exception, not the core's `Interrupted` error, is what the
-    /// caller sees (see `merge_progress_result`).
+    /// recorded exception, not the core's `ArchiveError::Cancelled`, is what
+    /// the caller sees (see `merge_progress_result`).
     fn is_cancelled(&mut self) -> bool {
         self.callback_error.is_some()
     }
@@ -1387,6 +1391,33 @@ mod tests {
             let files: usize = value.getattr("files_extracted").unwrap().extract().unwrap();
             assert!(marker);
             assert_eq!((writes.as_str(), files), ("kept", 2));
+        });
+    }
+
+    /// A callback-cancelled run that left its staging entry behind reports
+    /// the redacted `leftover_path` on the callback's own exception.
+    #[test]
+    fn test_merge_cancelled_run_keeps_the_staging_leftover() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let cancelled = exarch_core::ArchiveError::Cancelled.rolled_back_with(Some(
+                exarch_core::StagingLeftover::new(std::path::PathBuf::from(
+                    "/srv/out/.exarch-left",
+                )),
+            ));
+            let cb_err = PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("callback boom");
+
+            let err =
+                merge_progress_result(py, Err(cancelled), Some(cb_err), attach_finished_extraction)
+                    .expect_err("callback exception must propagate");
+
+            let leftover: String = err
+                .value(py)
+                .getattr("leftover_path")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(leftover.ends_with(".exarch-left"), "{leftover}");
         });
     }
 }

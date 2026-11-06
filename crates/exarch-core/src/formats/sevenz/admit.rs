@@ -115,7 +115,7 @@ fn tally_blocks(header: &SevenZHeader) -> Vec<BlockTally> {
 /// Returns [`ArchiveError::InvalidArchive`] when the declared pack sizes
 /// exceed the space the archive can hold, or a pack size sum overflows, and
 /// [`ArchiveError::QuotaExceeded`] when a block's uncompressed sum overflows.
-pub fn sevenz_entry_compression(
+pub(crate) fn sevenz_entry_compression(
     header: &SevenZHeader,
     source_len: u64,
 ) -> Result<Vec<EntryCompression>> {
@@ -411,7 +411,7 @@ pub(super) fn admit_sevenz_block(
 
 /// Part of a 7z archive that a policy refuses to decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefusalScope {
+pub(super) enum RefusalScope {
     /// The whole archive.
     Archive,
     /// One block.
@@ -420,7 +420,7 @@ pub enum RefusalScope {
 
 /// A refusal of extraction, shared by `extract` and `verify`.
 #[derive(Debug)]
-pub struct SevenZRefusal {
+pub(crate) struct SevenZRefusal {
     pub(super) scope: RefusalScope,
     unverified: UnverifiedReason,
     pub(super) error: ArchiveError,
@@ -455,7 +455,7 @@ impl SevenZRefusal {
 ///
 /// The iterator is lazy: `extract` takes only the first refusal and stops
 /// checking blocks there.
-pub fn iter_sevenz_refusals<'a>(
+pub(crate) fn iter_sevenz_refusals<'a>(
     header: &'a SevenZHeader,
     config: &'a SecurityConfig,
 ) -> impl Iterator<Item = SevenZRefusal> + 'a {
@@ -480,7 +480,10 @@ pub fn iter_sevenz_refusals<'a>(
 }
 
 /// Every refusal of [`iter_sevenz_refusals`], for `verify` to report.
-pub fn sevenz_refusals(header: &SevenZHeader, config: &SecurityConfig) -> Vec<SevenZRefusal> {
+pub(crate) fn sevenz_refusals(
+    header: &SevenZHeader,
+    config: &SecurityConfig,
+) -> Vec<SevenZRefusal> {
     iter_sevenz_refusals(header, config).collect()
 }
 
@@ -489,7 +492,7 @@ pub(super) const MAX_REFUSAL_ISSUES: usize = 32;
 
 /// Archive-level `verify` issues for the refusals, capped at
 /// [`MAX_REFUSAL_ISSUES`].
-pub fn refusal_issues(refusals: &[SevenZRefusal]) -> Vec<VerificationIssue> {
+pub(crate) fn refusal_issues(refusals: &[SevenZRefusal]) -> Vec<VerificationIssue> {
     let mut issues: Vec<_> = refusals
         .iter()
         .take(MAX_REFUSAL_ISSUES)

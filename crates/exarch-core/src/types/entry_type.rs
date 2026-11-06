@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// `ValidatorCore`, which hands the target a proof token per kind, so there is
 /// no public second pipeline that consumes this type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum EntryType {
+pub(crate) enum EntryType {
     /// Regular file entry.
     File,
 

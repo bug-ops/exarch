@@ -13,7 +13,6 @@ use std::path::Path;
 use super::zip_reuse::Retained;
 
 use crate::ArchiveError;
-use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::Malformation;
 use crate::ProgressCallback;
@@ -22,6 +21,7 @@ use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::SkipKind;
 use crate::copy::CopyBuffer;
+use crate::formats::occupant::OccupantAction;
 use crate::security::RawMode;
 use crate::security::admitted::EntrySize;
 use crate::security::admitted::PendingFile;
@@ -54,7 +54,7 @@ use super::pinned_dir::TempFileGuard;
 use super::source_fault::ReadFaults;
 
 /// The per-run counters a target updates while it writes.
-pub struct Tally<'a> {
+pub(crate) struct Tally<'a> {
     pub(crate) report: &'a mut ExtractionReport,
     pub(crate) options: SinkOptions,
     pub(crate) progress: &'a mut dyn ProgressCallback,
@@ -110,11 +110,11 @@ impl Tally<'_> {
 /// What [`Tally`]'s `record_*_skip` methods return once a file is counted as
 /// skipped, so a target that skips in `validate_file` has to count it.
 #[derive(Debug)]
-pub struct SkipRecorded(());
+pub(crate) struct SkipRecorded(());
 
 /// A file entry as a target is asked to admit it.
 #[derive(Debug, Clone, Copy)]
-pub struct FileRequest<'p> {
+pub(crate) struct FileRequest<'p> {
     pub(crate) path: &'p Path,
     pub(crate) size: EntrySize,
     pub(crate) mode: Option<RawMode>,
@@ -122,7 +122,7 @@ pub struct FileRequest<'p> {
 
 /// A target's decision on a requested entry.
 #[derive(Debug)]
-pub enum Admission<A> {
+pub(crate) enum Admission<A> {
     /// The entry is admitted and is to be written with `A`.
     Admit(A),
     /// The entry was skipped (a duplicate, a disallowed extension, or left out
@@ -143,7 +143,7 @@ impl<A> Admission<A> {
 
 /// Runs `f` with a throwaway tally, for tests that drive a target directly.
 #[cfg(all(test, unix))]
-pub fn with_tally<R>(f: impl FnOnce(&mut Tally<'_>) -> R) -> R {
+pub(crate) fn with_tally<R>(f: impl FnOnce(&mut Tally<'_>) -> R) -> R {
     let mut report = ExtractionReport::new();
     let mut progress = crate::NoopProgress;
     let mut tally = Tally {
@@ -157,14 +157,14 @@ pub fn with_tally<R>(f: impl FnOnce(&mut Tally<'_>) -> R) -> R {
 /// How a [`HostTarget`] has the parent directory of every path it validates
 /// vetted: by the directory walker at write time where the root is pinned.
 #[cfg(any(unix, target_os = "wasi"))]
-pub type HostParent = Walked;
+pub(crate) type HostParent = Walked;
 /// How a [`HostTarget`] has the parent directory of every path it validates
 /// vetted: by the validator, where no pinned root exists.
 #[cfg(not(any(unix, target_os = "wasi")))]
-pub type HostParent = Resolved;
+pub(crate) type HostParent = Resolved;
 
 /// The validation and write half of an extraction.
-pub trait ExtractTarget {
+pub(crate) trait ExtractTarget {
     /// How the parent directory of every path this target validates is vetted,
     /// which decides how the target may write it.
     type Parent: ParentCheck;
@@ -288,7 +288,7 @@ pub(super) fn host_context<'r, V: FsView>(
 }
 
 /// Extraction onto the real filesystem.
-pub struct HostTarget<'a> {
+pub(crate) struct HostTarget<'a> {
     root: PinnedRoot,
     dirs: DirWalker,
     copy_buffer: CopyBuffer,
@@ -518,25 +518,19 @@ impl ExtractTarget for HostTarget<'_> {
         let link_file = match link_dir.create_new(link_leaf, link_mode) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return match tally.options.existing_files {
-                    ExistingFiles::Skip => {
-                        common::record_duplicate_skip(tally.report, link.as_path())
-                    }
-                    ExistingFiles::Refuse => {
-                        if self
-                            .root
+                let action = tally.options.existing_files.on_occupant(
+                    || {
+                        self.root
                             .created()
                             .created_here(&link_dir, link_leaf, link.as_path())
-                        {
-                            common::record_duplicate_skip(tally.report, link.as_path())
-                        } else {
-                            Err(common::destination_occupied(
-                                self.root.dest().as_path(),
-                                link.as_path(),
-                            ))
-                        }
+                    },
+                    || common::destination_occupied(self.root.dest().as_path(), link.as_path()),
+                )?;
+                return match action {
+                    OccupantAction::Skip => {
+                        common::record_duplicate_skip(tally.report, link.as_path())
                     }
-                    ExistingFiles::Overwrite => {
+                    OccupantAction::Replace(_) => {
                         Err(ArchiveError::from(Malformation::DuplicateEntry {
                             path: link.as_path().to_path_buf(),
                         }))
@@ -545,8 +539,9 @@ impl ExtractTarget for HostTarget<'_> {
             }
             Err(e) => return Err(ArchiveError::Io(e)),
         };
-        self.root.created().note(
+        self.root.created().note_file(
             tally.options.existing_files,
+            &link_file,
             &link_dir,
             link_leaf,
             link.as_path(),

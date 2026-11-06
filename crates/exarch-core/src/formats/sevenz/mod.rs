@@ -173,7 +173,7 @@ const SIGNATURE_HEADER_SIZE: u64 = 32;
 /// **Security Policy**: Solid archives are rejected by default.
 /// Use `SecurityConfig::with_allow_solid_archives` to enable with block limits.
 #[derive(Debug)]
-pub struct SevenZArchive<R: Read + Seek> {
+pub(crate) struct SevenZArchive<R: Read + Seek> {
     source: R,
     entries: Vec<CachedEntry>,
     /// Header already parsed by [`Self::new`], borrowed by extraction, `list`
@@ -200,7 +200,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// - Archive is encrypted
     /// - Archive header is invalid
     /// - Format is not recognized
-    pub fn new(mut source: R, config: &SecurityConfig) -> Result<Self> {
+    pub(crate) fn new(mut source: R, config: &SecurityConfig) -> Result<Self> {
         let header = read_sevenz_header(&mut source)?;
 
         let source_len = source.seek(SeekFrom::End(0)).map_err(ArchiveError::Io)?;

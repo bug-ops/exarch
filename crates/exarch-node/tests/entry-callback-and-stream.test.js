@@ -49,7 +49,7 @@ function tar(entries) {
 }
 
 const file = (name, text) => tarEntry(name, { data: Buffer.from(text) });
-const linksConfig = () => new SecurityConfig().setAllowSymlinks(true).setAllowHardlinks(true);
+const linksConfig = () => new SecurityConfig().withAllowSymlinks(true).withAllowHardlinks(true);
 
 async function* chunked(buffer, size = 700) {
   for (let at = 0; at < buffer.length; at += size) {

@@ -57,7 +57,7 @@ use crate::types::safe_symlink::require_symlinks_allowed;
 /// from the admission's `config`, so the pre-pass, the decode and the target
 /// use the one configuration. The token owns the archive borrow, so it cannot
 /// be redeemed against another archive.
-pub struct AdmittedSevenZ<'a, R: Read + Seek> {
+pub(crate) struct AdmittedSevenZ<'a, R: Read + Seek> {
     archive: &'a mut SevenZArchive<R>,
     config: &'a SecurityConfig,
 }
@@ -84,7 +84,7 @@ impl<'a, R: Read + Seek> AdmittedSevenZ<'a, R> {
 
 /// What the pre-pass does with a file entry once its destination is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilePlan {
+pub(crate) enum FilePlan {
     /// Reserve the file's quota.
     Reserve,
     /// Extraction will skip the entry as a duplicate, so it reserves nothing.
@@ -96,7 +96,7 @@ pub enum FilePlan {
 /// Each method is one place where the host filesystem and an entry sink
 /// differ; the order of the checks around them is fixed by
 /// [`SevenZArchive::run_pre_pass`].
-pub trait PrePass {
+pub(crate) trait PrePass {
     /// Validates an entry's path against the destination as it is now and
     /// applies the selection: the entry is skipped, or admitted at its
     /// landing.
@@ -124,7 +124,7 @@ pub trait PrePass {
 }
 
 /// A destination the shared 7z loop can extract into.
-pub trait SevenZTarget: ExtractTarget {
+pub(crate) trait SevenZTarget: ExtractTarget {
     /// Runs `run` against a fresh pre-pass over this destination.
     ///
     /// The pre-pass keeps its own quota, so the extraction that follows does

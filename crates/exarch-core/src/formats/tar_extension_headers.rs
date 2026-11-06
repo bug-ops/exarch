@@ -42,7 +42,7 @@ const PAX_SPARSE_PREFIX: &[u8] = b"GNU.sparse.";
 const PAX_REALSIZE: &[u8] = b"SCHILY.realsize";
 
 /// Longest PAX record `libarchive` accepts, in bytes.
-pub const MAX_PAX_RECORD_BYTES: usize = 999_999;
+pub(crate) const MAX_PAX_RECORD_BYTES: usize = 999_999;
 
 /// Longest key or name echoed in an error message.
 const MAX_ECHOED_BYTES: usize = 256;
@@ -62,7 +62,7 @@ enum PaxScope {
 /// Kind of the entry a header window follows, which decides whether the
 /// padding at the start of the window belongs to a global PAX body.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PrecedingEntry {
+pub(crate) enum PrecedingEntry {
     /// No entry yet, or an entry whose padding readers never parse.
     #[default]
     Other,
@@ -215,7 +215,7 @@ fn check_header_block(bytes: &[u8; 512], has_ustar_magic: bool) -> Result<()> {
 /// # Errors
 ///
 /// Returns [`ArchiveError::InvalidArchive`] when the padding is not zero.
-pub fn check_trailing_headers(
+pub(crate) fn check_trailing_headers(
     window: &MetadataWindow<'_>,
     preceding: PrecedingEntry,
 ) -> Result<()> {
@@ -256,7 +256,7 @@ pub fn check_trailing_headers(
 ///
 /// Returns [`ArchiveError::InvalidArchive`] naming the ambiguous construct, or
 /// when the header body cannot be read.
-pub fn check_entry_headers<R: Read>(
+pub(crate) fn check_entry_headers<R: Read>(
     entry: &mut Entry<'_, R>,
     window: &MetadataWindow<'_>,
     metadata_limit: u64,

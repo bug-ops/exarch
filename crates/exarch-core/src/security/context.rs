@@ -20,7 +20,7 @@ use std::marker::PhantomData;
 /// `V` is the view the context is used against. `P` is how validated paths
 /// have their parent directory vetted: [`Resolved`] by the validator itself,
 /// or by a directory walker whose proof the context holds for `'r`.
-pub struct ValidationContext<'r, V: FsView = HostFs, P: ParentCheck = Resolved> {
+pub(crate) struct ValidationContext<'r, V: FsView = HostFs, P: ParentCheck = Resolved> {
     symlink_seen: bool,
     symlinks_allowed: bool,
     _proof: P::Proof<'r>,
@@ -32,7 +32,7 @@ impl<V: FsView> ValidationContext<'_, V, Resolved> {
     ///
     /// `symlinks_allowed` is the config's symlink policy.
     #[must_use]
-    pub fn new(symlinks_allowed: bool) -> Self {
+    pub(crate) fn new(symlinks_allowed: bool) -> Self {
         Self {
             symlink_seen: false,
             symlinks_allowed,
@@ -58,7 +58,7 @@ impl<V: FsView> ValidationContext<'_, V, Resolved> {
 impl<V: FsView, P: ParentCheck> ValidationContext<'_, V, P> {
     /// Records that the archive contains a symlink, which re-enables the full
     /// `canonicalize()` even when the config disallows them.
-    pub fn mark_symlink_seen(&mut self) {
+    pub(crate) fn mark_symlink_seen(&mut self) {
         self.symlink_seen = true;
     }
 
@@ -67,7 +67,7 @@ impl<V: FsView, P: ParentCheck> ValidationContext<'_, V, P> {
     /// Can be skipped when symlinks are impossible: config disallows them AND
     /// no symlink entries have been seen in the archive so far.
     #[inline]
-    pub fn needs_full_canonicalize(&self) -> bool {
+    pub(crate) fn needs_full_canonicalize(&self) -> bool {
         self.symlinks_allowed || self.symlink_seen
     }
 }

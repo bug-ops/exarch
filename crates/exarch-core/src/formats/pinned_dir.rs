@@ -47,10 +47,9 @@
 //! - The destination itself is opened by path once. Swapping it between the
 //!   caller's `canonicalize` and the open needs write access to the
 //!   destination's parent, which is outside the threat model of an attacker
-//!   confined to the destination. Closing the gap would compare the opened
-//!   descriptor's device and inode with a stat taken at canonicalize time (the
-//!   CLI's `verify_destination_unchanged` does this) or verify the descriptor's
-//!   path; both are left to the follow-up that covers the CLI as well.
+//!   confined to the destination. The destination swap narrows the same gap by
+//!   comparing the file identity read at pin time with one read right before
+//!   the destructive rename (`staging/replace.rs::verify_unchanged`).
 //! - Over SMB the redirector rebuilds a relative open as a full path, so the
 //!   server resolves the names. Third-party filesystem drivers are unverified.
 //! - Only NTFS is exercised in CI; `ReFS` and Dev Drive are untested.
@@ -65,17 +64,18 @@ use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use super::file_identity::FileIdentity;
 use super::run_record::RunRecord;
 use crate::ArchiveError;
 use crate::Result;
 use crate::security::fs_view::Occupant;
 use crate::types::DestDir;
 
-pub use imp::VettedDir;
+pub(crate) use imp::VettedDir;
 
 /// Exactly one normal path component: a name inside a [`VettedDir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Leaf<'a>(&'a OsStr);
+pub(crate) struct Leaf<'a>(&'a OsStr);
 
 impl<'a> Leaf<'a> {
     /// Splits a relative path into its parent and its final name.
@@ -113,7 +113,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A generated temp-file name that is a single component by construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TempLeaf(OsString);
+pub(crate) struct TempLeaf(OsString);
 
 impl TempLeaf {
     /// The next candidate name, independent of the entry's own name so it stays
@@ -140,6 +140,87 @@ impl TempLeaf {
     pub(crate) fn as_leaf(&self) -> Leaf<'_> {
         Leaf(&self.0)
     }
+}
+
+/// An owned, generated name that is exactly one normal component, for the
+/// staging and backup entries the destination swap creates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeafBuf(OsString);
+
+impl LeafBuf {
+    /// The final component of `path`, or `None` when `path` ends in `.`, `..`
+    /// or a root, which have no usable final name.
+    pub(crate) fn of(path: &Path) -> Option<Self> {
+        let name = path.file_name()?;
+        let mut components = Path::new(name).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(only)), None) if only == name => {
+                Some(Self(name.to_os_string()))
+            }
+            _ => None,
+        }
+    }
+
+    /// `prefix` followed by 64 random bits in hex.
+    ///
+    /// The randomness comes from the standard library's per-process hasher
+    /// keys, so a local user cannot predict the next name.
+    pub(crate) fn random(prefix: &str) -> Self {
+        use std::hash::BuildHasher;
+        use std::hash::RandomState;
+
+        let bits = RandomState::new().hash_one(TEMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+        Self(OsString::from(format!("{prefix}{bits:016x}")))
+    }
+
+    /// Borrows the name as a [`Leaf`].
+    pub(crate) fn as_leaf(&self) -> Leaf<'_> {
+        Leaf(&self.0)
+    }
+}
+
+impl AsRef<Path> for LeafBuf {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+/// Permission bits and owner of a directory entry, as `stat` reports them.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EntryMode {
+    pub(crate) bits: u32,
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+}
+
+#[cfg(unix)]
+impl EntryMode {
+    #[allow(
+        clippy::useless_conversion,
+        reason = "`st_mode` is `u16` on macOS and `u32` on Linux"
+    )]
+    fn of_stat(stat: &rustix::fs::Stat) -> Self {
+        Self {
+            bits: u32::from(stat.st_mode) & 0o7777,
+            uid: stat.st_uid,
+            gid: stat.st_gid,
+        }
+    }
+}
+
+/// What a directory entry is, which inode it is and, on Unix, its mode and
+/// owner, read without following the entry.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EntryStatus {
+    pub(crate) occupant: Occupant,
+    /// Whether the entry is a reparse point of any kind (Windows only; a
+    /// non-name-surrogate reparse point is classified as a directory or file
+    /// by `occupant`).
+    pub(crate) reparse: bool,
+    pub(crate) identity: FileIdentity,
+    #[cfg(unix)]
+    pub(crate) mode: EntryMode,
 }
 
 /// The one rule that maps a file type onto an [`Occupant`].
@@ -173,7 +254,7 @@ impl From<rustix::fs::FileType> for Occupant {
 
 /// The extraction destination, with its directory opened once.
 #[derive(Debug)]
-pub struct PinnedRoot {
+pub(crate) struct PinnedRoot {
     dest: DestDir,
     dir: VettedDir,
     created: RunRecord,
@@ -225,6 +306,7 @@ impl PinnedRoot {
 /// [`DirWalker`]: crate::formats::dir_walker::DirWalker
 #[cfg(any(unix, target_os = "wasi"))]
 #[derive(Debug)]
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub struct WalkerBacked<'r>(
     #[expect(dead_code, reason = "ties the proof to its root")] &'r PinnedRoot,
 );
@@ -253,7 +335,12 @@ mod imp {
     use rustix::fs::OFlags;
     use rustix::io::Errno;
 
+    use super::EntryStatus;
     use super::Leaf;
+    use super::TempLeaf;
+    use crate::formats::file_identity::FileIdentity;
+    use crate::formats::file_identity::IdentityKey;
+    use crate::formats::occupant::ReplacePermit;
     use crate::security::fs_view::Occupant;
     use crate::security::permissions::SanitizedMode;
 
@@ -280,19 +367,19 @@ mod imp {
 
     /// An open directory below the destination.
     #[derive(Debug)]
-    pub struct VettedDir(OwnedFd);
+    pub(crate) struct VettedDir(OwnedFd);
 
     impl VettedDir {
         /// Opens `path`, which the caller has canonicalized.
         #[cfg(unix)]
-        pub(super) fn open_path(path: &Path) -> io::Result<Self> {
+        pub(crate) fn open_path(path: &Path) -> io::Result<Self> {
             open_directory(|flags| rustix::fs::open(path, flags, Mode::empty())).map(Self)
         }
 
         /// Opens `path` through std, so nothing relies on `AT_FDCWD`, which
         /// WASI has no equivalent of.
         #[cfg(target_os = "wasi")]
-        pub(super) fn open_path(path: &Path) -> io::Result<Self> {
+        pub(crate) fn open_path(path: &Path) -> io::Result<Self> {
             File::open(path).map(|dir| Self(OwnedFd::from(dir)))
         }
 
@@ -321,33 +408,83 @@ mod imp {
             )?)
         }
 
-        /// What `name` is, without following a symlink; `None` if it is absent.
-        pub(crate) fn probe(&self, name: Leaf<'_>) -> io::Result<Option<Occupant>> {
+        /// What `name` is, which inode it is and its mode, without following a
+        /// symlink; `None` if it is absent. An identity that does not fit the
+        /// key is [`FileIdentity::Unknown`]; what the entry is never depends on
+        /// it.
+        pub(crate) fn status(&self, name: Leaf<'_>) -> io::Result<Option<EntryStatus>> {
             match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => Ok(Some(FileType::from_raw_mode(stat.st_mode).into())),
+                Ok(stat) => Ok(Some(EntryStatus {
+                    occupant: FileType::from_raw_mode(stat.st_mode).into(),
+                    reparse: false,
+                    identity: IdentityKey::of_stat(&stat)
+                        .map_or(FileIdentity::Unknown, FileIdentity::Known),
+                    #[cfg(unix)]
+                    mode: super::EntryMode::of_stat(&stat),
+                })),
                 Err(e) if e == Errno::NOENT => Ok(None),
                 Err(e) => Err(e.into()),
             }
         }
 
-        /// The device and inode of the entry `name` itself, never of a
-        /// symlink's target; `None` if it is absent.
-        // `st_dev` and `st_ino` are platform-native integers, so the conversion
-        // is a no-op on some targets; an unrepresentable value fails instead of
-        // collapsing to a shared sentinel that would make two inodes equal.
-        #[allow(clippy::useless_conversion)]
-        pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<(u64, u64)>> {
-            match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => {
-                    let dev = u64::try_from(stat.st_dev)
-                        .map_err(|_| io::Error::other("unrepresentable st_dev"))?;
-                    let ino = u64::try_from(stat.st_ino)
-                        .map_err(|_| io::Error::other("unrepresentable st_ino"))?;
-                    Ok(Some((dev, ino)))
-                }
-                Err(e) if e == Errno::NOENT => Ok(None),
-                Err(e) => Err(e.into()),
-            }
+        /// What `name` is, without following a symlink; `None` if it is absent.
+        pub(crate) fn probe(&self, name: Leaf<'_>) -> io::Result<Option<Occupant>> {
+            Ok(self.status(name)?.map(|status| status.occupant))
+        }
+
+        /// The identity of the entry `name` itself, never of a symlink's
+        /// target; `None` if it is absent.
+        pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<FileIdentity>> {
+            Ok(self.status(name)?.map(|status| status.identity))
+        }
+
+        /// Opens the directory `name` for reading, refusing a symlink: the
+        /// handle `fchmod` and `fchown` need, which an `O_PATH` handle is not.
+        pub(crate) fn open_dir_file(&self, name: Leaf<'_>) -> io::Result<File> {
+            let fd = rustix::fs::openat(
+                &self.0,
+                name.as_os_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
+            Ok(File::from(fd))
+        }
+
+        /// Best effort: where the directory `name` is now, resolved from a
+        /// descriptor on the entry itself and so unaffected by a redirect of
+        /// any ancestor. `None` where the platform cannot say.
+        pub(crate) fn entry_path(&self, name: Leaf<'_>) -> Option<std::path::PathBuf> {
+            self.open_dir_file(name)
+                .ok()
+                .and_then(|dir| current_path(&dir))
+        }
+
+        /// Creates the subdirectory `name` readable and writable by the owner
+        /// only.
+        pub(crate) fn make_private_dir(&self, name: Leaf<'_>) -> io::Result<()> {
+            Ok(rustix::fs::mkdirat(&self.0, name.as_os_str(), Mode::RWXU)?)
+        }
+
+        /// Removes the empty directory `name`.
+        #[cfg(unix)]
+        pub(crate) fn remove_dir(&self, name: Leaf<'_>) -> io::Result<()> {
+            Ok(rustix::fs::unlinkat(
+                &self.0,
+                name.as_os_str(),
+                AtFlags::REMOVEDIR,
+            )?)
+        }
+
+        /// Renames the directory `from` to `to`, both in this directory. An
+        /// existing `to` is replaced only where the platform replaces an empty
+        /// directory on rename.
+        pub(crate) fn rename_dir_within(&self, from: Leaf<'_>, to: Leaf<'_>) -> io::Result<()> {
+            Ok(rustix::fs::renameat(
+                &self.0,
+                from.as_os_str(),
+                &self.0,
+                to.as_os_str(),
+            )?)
         }
 
         /// Creates `name` exclusively, never following a symlink at it.
@@ -390,18 +527,35 @@ mod imp {
             Ok(File::from(fd))
         }
 
-        /// Renames `from` over `to`, both in this directory.
-        pub(crate) fn rename_within(&self, from: Leaf<'_>, to: Leaf<'_>) -> io::Result<()> {
+        /// Renames the temp file `from` over the occupant `to`, both in this
+        /// directory; the permit proves the policy allows replacing it.
+        pub(crate) fn replace_entry(
+            &self,
+            from: &TempLeaf,
+            to: Leaf<'_>,
+            _permit: ReplacePermit,
+        ) -> io::Result<()> {
             Ok(rustix::fs::renameat(
                 &self.0,
-                from.as_os_str(),
+                from.as_leaf().as_os_str(),
                 &self.0,
                 to.as_os_str(),
             )?)
         }
 
-        /// Unlinks the non-directory `name`.
-        pub(crate) fn remove_file(&self, name: Leaf<'_>) -> io::Result<()> {
+        /// Unlinks the occupant `name`; the permit proves the policy allows
+        /// destroying it.
+        #[cfg(unix)]
+        pub(crate) fn remove_occupant(
+            &self,
+            name: Leaf<'_>,
+            _permit: ReplacePermit,
+        ) -> io::Result<()> {
+            self.unlink_own(name)
+        }
+
+        /// Unlinks a file this run created.
+        pub(super) fn unlink_own(&self, name: Leaf<'_>) -> io::Result<()> {
             Ok(rustix::fs::unlinkat(
                 &self.0,
                 name.as_os_str(),
@@ -428,21 +582,45 @@ mod imp {
             Ok(rustix::fs::symlinkat(target, &self.0, name.as_os_str())?)
         }
     }
+
+    /// Linux: the target of `/proc/self/fd/<fd>`.
+    #[cfg(target_os = "linux")]
+    fn current_path(fd: &File) -> Option<std::path::PathBuf> {
+        use std::os::fd::AsRawFd;
+        std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok()
+    }
+
+    /// macOS: `fcntl(fd, F_GETPATH)`.
+    #[cfg(target_os = "macos")]
+    fn current_path(fd: &File) -> Option<std::path::PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        rustix::fs::getpath(fd)
+            .ok()
+            .map(|c_path| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(c_path.as_bytes())))
+    }
+
+    /// Other targets have no descriptor-to-path facility implemented here.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn current_path(_fd: &File) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 #[cfg(windows)]
 #[allow(unsafe_code)] // the only unsafe code on Windows: NT directory-relative calls
-mod nt;
+pub(in crate::formats) mod nt;
 
 #[cfg(windows)]
 mod imp {
     use std::fs::File;
     use std::io;
+    use std::os::windows::fs::MetadataExt;
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsHandle;
     use std::path::Path;
 
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
@@ -454,11 +632,15 @@ mod imp {
     use windows_sys::Win32::Storage::FileSystem::FILE_TRAVERSE;
     use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 
+    use super::EntryStatus;
     use super::Leaf;
+    use super::TempLeaf;
     use super::nt;
     use super::nt::Disposition;
     use super::nt::Kind;
     use super::nt::Request;
+    use crate::formats::file_identity::FileIdentity;
+    use crate::formats::occupant::ReplacePermit;
     use crate::security::fs_view::Occupant;
     use crate::security::permissions::SanitizedMode;
 
@@ -469,7 +651,7 @@ mod imp {
     /// Every operation is relative to this handle, so replacing or converting
     /// the directory's path cannot redirect it.
     #[derive(Debug)]
-    pub struct VettedDir(File);
+    pub(crate) struct VettedDir(File);
 
     impl VettedDir {
         fn into_dir(file: File) -> io::Result<Self> {
@@ -486,7 +668,7 @@ mod imp {
             clippy::disallowed_methods,
             reason = "opens the destination root itself; no directory handle exists yet"
         )]
-        pub(super) fn open_path(path: &Path) -> io::Result<Self> {
+        pub(crate) fn open_path(path: &Path) -> io::Result<Self> {
             let file = std::fs::OpenOptions::new()
                 .access_mode(DIR_ACCESS)
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
@@ -539,17 +721,58 @@ mod imp {
                 .map_err(|err| self.occupied_as_exists(name, err))
         }
 
+        /// What `name` is, which entry it is and whether it is a reparse
+        /// point, without following a link; `None` if it is absent.
+        pub(crate) fn status(&self, name: Leaf<'_>) -> io::Result<Option<EntryStatus>> {
+            let request = Request::open(FILE_READ_ATTRIBUTES);
+            let handle = match nt::create_at(self.0.as_handle(), name, request) {
+                Ok(handle) => handle,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let file = File::from(handle);
+            let meta = file.metadata()?;
+            Ok(Some(EntryStatus {
+                occupant: meta.file_type().into(),
+                reparse: meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+                identity: FileIdentity::of_file(&file),
+            }))
+        }
+
         /// What `name` is, without following a link; `None` if it is absent.
         pub(crate) fn probe(&self, name: Leaf<'_>) -> io::Result<Option<Occupant>> {
-            let request = Request::open(FILE_READ_ATTRIBUTES);
-            match nt::create_at(self.0.as_handle(), name, request) {
-                Ok(handle) => {
-                    let meta = File::from(handle).metadata()?;
-                    Ok(Some(meta.file_type().into()))
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e),
-            }
+            Ok(self.status(name)?.map(|status| status.occupant))
+        }
+
+        /// The identity of the entry `name` itself; `None` if it is absent.
+        ///
+        /// [`FileIdentity::Unknown`] when the volume reports no file id.
+        pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<FileIdentity>> {
+            Ok(self.status(name)?.map(|status| status.identity))
+        }
+
+        /// There is no handle-to-path resolution here, so a surviving entry is
+        /// named logically by the caller.
+        #[allow(
+            clippy::unused_self,
+            reason = "keeps the signature of the platforms that name the entry by path"
+        )]
+        pub(crate) fn entry_path(&self, _name: Leaf<'_>) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        /// Creates the subdirectory `name`.
+        ///
+        /// It inherits the parent's ACL, so it is not owner-only here.
+        // TODO(critic): an explicit owner-only DACL for staging directories.
+        pub(crate) fn make_private_dir(&self, name: Leaf<'_>) -> io::Result<()> {
+            self.make_dir(name)
+        }
+
+        /// Renames the directory `from` to `to`, both in this directory, and
+        /// fails if `to` exists.
+        pub(crate) fn rename_dir_within(&self, from: Leaf<'_>, to: Leaf<'_>) -> io::Result<()> {
+            nt::rename_with(self.0.as_handle(), from, to, nt::Replace::Never)
         }
 
         /// Creates the file `name` exclusively, never following a link at it.
@@ -576,13 +799,30 @@ mod imp {
                 .map(File::from)
         }
 
-        /// Renames `from` over `to`, both in this directory.
-        pub(crate) fn rename_within(&self, from: Leaf<'_>, to: Leaf<'_>) -> io::Result<()> {
-            nt::rename_within(self.0.as_handle(), from, to)
+        /// Renames the temp file `from` over the occupant `to`, both in this
+        /// directory; the permit proves the policy allows replacing it.
+        pub(crate) fn replace_entry(
+            &self,
+            from: &TempLeaf,
+            to: Leaf<'_>,
+            _permit: ReplacePermit,
+        ) -> io::Result<()> {
+            nt::rename_within(self.0.as_handle(), from.as_leaf(), to)
         }
 
-        /// Deletes the non-directory `name`.
-        pub(crate) fn remove_file(&self, name: Leaf<'_>) -> io::Result<()> {
+        /// Deletes the occupant `name`; the permit proves the policy allows
+        /// destroying it. Only Unix replaces a symlink, so only tests call it.
+        #[cfg(test)]
+        pub(crate) fn remove_occupant(
+            &self,
+            name: Leaf<'_>,
+            _permit: ReplacePermit,
+        ) -> io::Result<()> {
+            self.unlink_own(name)
+        }
+
+        /// Deletes a file this run created.
+        pub(super) fn unlink_own(&self, name: Leaf<'_>) -> io::Result<()> {
             nt::remove_file(self.0.as_handle(), name)
         }
     }
@@ -598,7 +838,7 @@ compile_error!("exarch-core has no directory-handle backend for this target");
 /// temp-file-then-rename write path so a fallible step between file creation
 /// and the operation's success point does not leave a partial artifact behind.
 /// The removal is relative to the directory the file was created in.
-pub struct TempFileGuard<'d> {
+pub(crate) struct TempFileGuard<'d> {
     dir: &'d VettedDir,
     name: OsString,
     should_cleanup: bool,
@@ -632,25 +872,25 @@ impl<'d> TempFileGuard<'d> {
 impl Drop for TempFileGuard<'_> {
     fn drop(&mut self) {
         if self.should_cleanup {
-            let _ = self.dir.remove_file(Leaf(&self.name));
+            let _ = self.dir.unlink_own(Leaf(&self.name));
         }
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-pub mod support {
+pub(crate) mod support {
     use std::path::Path;
 
     use super::Leaf;
     use super::PinnedRoot;
     use super::VettedDir;
 
-    pub fn leaf(name: &str) -> Leaf<'_> {
+    pub(crate) fn leaf(name: &str) -> Leaf<'_> {
         Leaf::from_component(Path::new(name).components().next().unwrap()).unwrap()
     }
 
-    pub fn pinned_at(path: &Path) -> VettedDir {
+    pub(crate) fn pinned_at(path: &Path) -> VettedDir {
         PinnedRoot::open_for_test(path)
             .unwrap()
             .dir()
@@ -670,6 +910,7 @@ mod tests {
     use super::support::pinned;
     use super::support::pinned_at;
     use super::*;
+    use crate::formats::occupant::ReplacePermit;
     use crate::security::RawMode;
     use std::assert_matches;
     use std::fs;
@@ -746,7 +987,12 @@ mod tests {
         let (a, outside) = swapped(&temp);
 
         a.create_new(leaf("tmp"), None).unwrap();
-        a.rename_within(leaf("tmp"), leaf("final")).unwrap();
+        a.replace_entry(
+            &TempLeaf::named("tmp"),
+            leaf("final"),
+            ReplacePermit::for_test(),
+        )
+        .unwrap();
         a.symlink(Path::new("final"), leaf("alias")).unwrap();
 
         assert!(temp.path().join("base/a_moved/final").is_file());
@@ -864,6 +1110,8 @@ mod windows_tests {
     use super::support::pinned;
     use super::support::pinned_at;
     use super::*;
+    use crate::formats::file_identity::IdentityCheck;
+    use crate::formats::occupant::ReplacePermit;
     use std::fs;
     use std::io;
     use std::io::Write;
@@ -896,6 +1144,57 @@ mod windows_tests {
     }
 
     #[test]
+    fn a_handle_relative_status_carries_the_file_identity_of_the_path() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        dir.make_dir(leaf("sub")).unwrap();
+        fs::write(temp.path().join("other"), b"x").unwrap();
+
+        let sub = dir.status(leaf("sub")).unwrap().unwrap();
+        let other = dir.status(leaf("other")).unwrap().unwrap();
+        let by_path = crate::formats::file_identity::identity_of(&temp.path().join("sub")).unwrap();
+        if matches!(
+            sub.identity,
+            crate::formats::file_identity::FileIdentity::Unknown
+        ) {
+            eprintln!("skipping: the volume reports no file id");
+            return;
+        }
+
+        assert_eq!(sub.identity.check(by_path), IdentityCheck::Same);
+        assert_eq!(sub.identity.check(other.identity), IdentityCheck::Different);
+        assert!(!sub.reparse);
+    }
+
+    #[test]
+    fn a_junction_is_reported_as_a_reparse_point() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        fs::create_dir(temp.path().join("target")).unwrap();
+        if !junction(&temp.path().join("link"), &temp.path().join("target")) {
+            eprintln!("skipping: cannot create a junction");
+            return;
+        }
+
+        let status = dir.status(leaf("link")).unwrap().unwrap();
+
+        assert!(status.reparse);
+    }
+
+    #[test]
+    fn renaming_a_directory_onto_an_existing_name_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        dir.make_dir(leaf("from")).unwrap();
+        dir.make_dir(leaf("taken")).unwrap();
+
+        assert!(dir.rename_dir_within(leaf("from"), leaf("taken")).is_err());
+        assert_eq!(entries(temp.path()), 2);
+        dir.rename_dir_within(leaf("from"), leaf("free")).unwrap();
+        assert_eq!(dir.probe(leaf("free")).unwrap(), Some(Occupant::Directory));
+    }
+
+    #[test]
     fn basic_operations_stay_relative_to_the_handle() {
         let temp = TempDir::new().unwrap();
         let dir = pinned(&temp);
@@ -919,13 +1218,18 @@ mod windows_tests {
         );
 
         fs::write(temp.path().join("b"), b"old").unwrap();
-        dir.rename_within(leaf("a"), leaf("b")).unwrap();
+        dir.replace_entry(&TempLeaf::named("a"), leaf("b"), ReplacePermit::for_test())
+            .unwrap();
         assert_eq!(fs::read(temp.path().join("b")).unwrap(), b"one");
         assert!(!temp.path().join("a").exists());
 
-        assert!(dir.remove_file(leaf("sub")).is_err());
+        assert!(
+            dir.remove_occupant(leaf("sub"), ReplacePermit::for_test())
+                .is_err()
+        );
         assert!(temp.path().join("sub").is_dir());
-        dir.remove_file(leaf("b")).unwrap();
+        dir.remove_occupant(leaf("b"), ReplacePermit::for_test())
+            .unwrap();
         assert_eq!(dir.probe(leaf("b")).unwrap(), None);
 
         dir.reopen().unwrap().create_new(leaf("c"), None).unwrap();
@@ -972,7 +1276,8 @@ mod windows_tests {
                 .is_file()
         );
 
-        dir.remove_file(leaf("j")).unwrap();
+        dir.remove_occupant(leaf("j"), ReplacePermit::for_test())
+            .unwrap();
         assert!(fs::symlink_metadata(&link).is_err());
         assert_eq!(fs::read(outside.join("keep")).unwrap(), b"k");
     }
@@ -996,7 +1301,12 @@ mod windows_tests {
         );
 
         c.create_new(leaf("tmp"), None).unwrap();
-        c.rename_within(leaf("tmp"), leaf("final")).unwrap();
+        c.replace_entry(
+            &TempLeaf::named("tmp"),
+            leaf("final"),
+            ReplacePermit::for_test(),
+        )
+        .unwrap();
         assert!(base.join("a/b/c/final").is_file());
     }
 
@@ -1080,9 +1390,13 @@ mod windows_tests {
         let [first, second, third] = &names;
 
         let created = held.create_new(leaf(first), None);
-        let renamed = created
-            .is_ok()
-            .then(|| held.rename_within(leaf(first), leaf(second)));
+        let renamed = created.is_ok().then(|| {
+            held.replace_entry(
+                &TempLeaf::named(first),
+                leaf(second),
+                ReplacePermit::for_test(),
+            )
+        });
         let made = held.make_dir(leaf(third));
         let opened = made.is_ok().then(|| held.open_dir(leaf(third)).map(drop));
 

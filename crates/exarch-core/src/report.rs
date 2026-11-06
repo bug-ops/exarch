@@ -306,6 +306,36 @@ impl ExtractionWarning {
             Self::BackupCleanupFailed { .. } => ExtractionWarningKind::BackupCleanupFailed,
         }
     }
+
+    /// A copy whose host paths are redacted like those of an error message
+    /// (the file name only in release builds), so a binding or a JSON consumer
+    /// can show it without leaking the host layout.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ExtractionWarning;
+    ///
+    /// let warning = ExtractionWarning::AntiItemsSkipped { count: 2 };
+    /// assert_eq!(warning.redacted(), warning);
+    /// ```
+    #[must_use]
+    pub fn redacted(&self) -> Self {
+        match self {
+            Self::AntiItemsSkipped { .. } => self.clone(),
+            Self::BackupCleanupFailed {
+                path,
+                identity,
+                io_kind,
+                message,
+            } => Self::BackupCleanupFailed {
+                path: crate::sanitize_path_for_error(path).into(),
+                identity: *identity,
+                io_kind: *io_kind,
+                message: message.clone(),
+            },
+        }
+    }
 }
 
 impl fmt::Display for ExtractionWarning {
@@ -606,6 +636,21 @@ impl ProgressCallback for NoopProgress {
 mod tests {
     use super::*;
     use std::assert_matches;
+
+    #[test]
+    fn redacted_backup_warning_keeps_no_directory_in_release() {
+        let warning = ExtractionWarning::BackupCleanupFailed {
+            path: "/srv/private/backup".into(),
+            identity: BackupIdentity::Verified,
+            io_kind: IoKind::Other,
+            message: "denied".into(),
+        };
+        let redacted = warning.redacted();
+        assert_eq!(redacted.kind(), warning.kind());
+        if !cfg!(debug_assertions) {
+            assert!(!redacted.to_string().contains("/srv/private"));
+        }
+    }
 
     #[test]
     fn test_new_report() {

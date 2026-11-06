@@ -38,13 +38,15 @@ use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::Skip;
 use crate::SkipKind;
-pub use crate::SpecialFile;
+pub(crate) use crate::SpecialFile;
 use crate::Violation;
 use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
 use crate::copy::copy_bounded;
 use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
+use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::TempFileGuard;
@@ -66,7 +68,7 @@ use crate::types::safe_path::ParentCheck;
 
 /// Where a spool's bytes live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpoolBacking {
+pub(crate) enum SpoolBacking {
     /// A disk-backed filesystem, or one that could not be classified.
     #[cfg(not(target_os = "wasi"))]
     Disk,
@@ -123,7 +125,7 @@ impl SpoolBacking {
 
 /// An anonymous spool file and where its bytes live.
 #[derive(Debug)]
-pub struct TempSpool {
+pub(crate) struct TempSpool {
     /// The unnamed temporary file.
     pub file: File,
     /// Whether writing to it consumes memory.
@@ -158,7 +160,7 @@ impl TempSpool {
 /// # Errors
 ///
 /// See above.
-pub fn open_archive(path: &Path) -> Result<File> {
+pub(crate) fn open_archive(path: &Path) -> Result<File> {
     File::open(path).map_err(|error| crate::creation::source::source_error(path, error))
 }
 
@@ -166,7 +168,7 @@ pub fn open_archive(path: &Path) -> Result<File> {
 ///
 /// WASI has no temporary directory and `std::env::temp_dir` panics there, so
 /// no temporary file is attempted on that target.
-pub fn open_spool() -> Option<TempSpool> {
+pub(crate) fn open_spool() -> Option<TempSpool> {
     // TODO(#959): Linux timings for ext4 and tmpfs; tmpfs detection on FreeBSD
     // and macOS RAM disks.
     cfg_select! {
@@ -184,7 +186,7 @@ pub fn open_spool() -> Option<TempSpool> {
 /// `try_start` is the single per-entry cancellation hook of extraction,
 /// listing, verification and creation: it polls
 /// [`ProgressCallback::is_cancelled`] before announcing an entry.
-pub struct EntryCompleteGuard<'a> {
+pub(crate) struct EntryCompleteGuard<'a> {
     progress: &'a mut dyn ProgressCallback,
     path: &'a std::path::Path,
     fired: bool,
@@ -198,7 +200,7 @@ impl<'a> EntryCompleteGuard<'a> {
     ///
     /// Returns [`ArchiveError::Cancelled`] without announcing the entry when
     /// the callback asks to stop.
-    pub fn try_start(
+    pub(crate) fn try_start(
         progress: &'a mut dyn ProgressCallback,
         path: &'a std::path::Path,
         position: EntryPosition,
@@ -218,13 +220,13 @@ impl<'a> EntryCompleteGuard<'a> {
     ///
     /// Use this to pass the callback to nested helpers while keeping the guard
     /// in scope for RAII completion.
-    pub fn progress_mut(&mut self) -> &mut dyn ProgressCallback {
+    pub(crate) fn progress_mut(&mut self) -> &mut dyn ProgressCallback {
         self.progress
     }
 
     /// Fire `on_entry_complete` immediately and prevent the drop from firing
     /// again.
-    pub fn complete(mut self) {
+    pub(crate) fn complete(mut self) {
         self.fired = true;
         self.progress.on_entry_complete(self.path);
     }
@@ -250,7 +252,7 @@ impl Drop for EntryCompleteGuard<'_> {
 /// This is a no-op for entry names that contain no `\`.
 #[inline]
 #[must_use]
-pub fn normalize_entry_name(name: &str) -> String {
+pub(crate) fn normalize_entry_name(name: &str) -> String {
     if name.contains('\\') {
         name.replace('\\', "/")
     } else {
@@ -261,7 +263,7 @@ pub fn normalize_entry_name(name: &str) -> String {
 /// Builds the error returned for any password-protected archive, so ZIP and
 /// 7z (open, list and extract paths) report encryption identically.
 #[must_use]
-pub fn encrypted_archive_error() -> ArchiveError {
+pub(crate) fn encrypted_archive_error() -> ArchiveError {
     Violation::EncryptedArchive.into()
 }
 
@@ -271,7 +273,7 @@ pub fn encrypted_archive_error() -> ArchiveError {
 ///
 /// Returns `QuotaExceeded` on overflow.
 #[inline]
-pub fn checked_add_bytes(total: u64, n: u64) -> Result<u64> {
+pub(crate) fn checked_add_bytes(total: u64, n: u64) -> Result<u64> {
     total.checked_add(n).ok_or(ArchiveError::QuotaExceeded {
         resource: QuotaResource::IntegerOverflow,
     })
@@ -283,7 +285,7 @@ pub fn checked_add_bytes(total: u64, n: u64) -> Result<u64> {
 ///
 /// Returns `QuotaExceeded` on overflow.
 #[inline]
-pub fn checked_add_count(total: usize, n: usize) -> Result<usize> {
+pub(crate) fn checked_add_count(total: usize, n: usize) -> Result<usize> {
     total.checked_add(n).ok_or(ArchiveError::QuotaExceeded {
         resource: QuotaResource::IntegerOverflow,
     })
@@ -298,7 +300,11 @@ pub fn checked_add_count(total: usize, n: usize) -> Result<usize> {
 ///
 /// Returns `QuotaExceeded { resource: IntegerOverflow }` when the counter
 /// would overflow.
-pub fn record_skip(report: &mut ExtractionReport, kind: SkipKind, path: &Path) -> Result<()> {
+pub(crate) fn record_skip(
+    report: &mut ExtractionReport,
+    kind: SkipKind,
+    path: &Path,
+) -> Result<()> {
     report.skipped.record(Skip::new(kind, path))
 }
 
@@ -307,7 +313,7 @@ pub fn record_skip(report: &mut ExtractionReport, kind: SkipKind, path: &Path) -
 /// # Errors
 ///
 /// See [`record_skip`].
-pub fn record_duplicate_skip(report: &mut ExtractionReport, path: &Path) -> Result<()> {
+pub(crate) fn record_duplicate_skip(report: &mut ExtractionReport, path: &Path) -> Result<()> {
     record_skip(report, SkipKind::Duplicate, path)
 }
 
@@ -316,7 +322,7 @@ pub fn record_duplicate_skip(report: &mut ExtractionReport, path: &Path) -> Resu
 /// The one definition of the rule, applied by the validator's file screen and
 /// by the passes that must agree with it on which files are skipped.
 #[must_use]
-pub fn is_extension_allowed(path: &Path, config: &SecurityConfig) -> bool {
+pub(crate) fn is_extension_allowed(path: &Path, config: &SecurityConfig) -> bool {
     config.is_extension_allowed(path.extension().and_then(|e| e.to_str()))
 }
 
@@ -330,7 +336,7 @@ pub fn is_extension_allowed(path: &Path, config: &SecurityConfig) -> bool {
 ///
 /// Returns the name-too-long error when the path or a component exceeds the
 /// model's limits.
-pub fn check_entry_name_limits(
+pub(crate) fn check_entry_name_limits(
     model: PathModel,
     path: &Path,
     regular_file: bool,
@@ -427,7 +433,7 @@ pub fn check_entry_name_limits(
     reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
 )]
 #[inline]
-pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
+pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     reader: &mut R,
     faults: ReadFaults<'_>,
     safe_path: &SafePath<P>,
@@ -473,7 +479,7 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     .map_err(|error| faults.classify(error))?;
     buffered_writer.flush()?;
     drop(buffered_writer);
-    commit_output(&parent, &written_at, leaf, safe_path.as_path())?;
+    commit_output(&parent, written_at, leaf, safe_path.as_path())?;
     guard.persist();
 
     record_file_written(report, progress, bytes_written)
@@ -487,7 +493,7 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
 /// # Errors
 ///
 /// Returns `QuotaExceeded` when a counter would overflow.
-pub fn record_file_written(
+pub(crate) fn record_file_written(
     report: &mut ExtractionReport,
     progress: &mut dyn ProgressCallback,
     written: u64,
@@ -506,7 +512,7 @@ pub fn record_file_written(
 /// Bounds retry cost when predicted `.exarch-tmp-{pid}-{counter}` names are
 /// pre-occupied; a genuine collision from concurrent extraction into the same
 /// directory resolves on the first or second attempt.
-pub const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
+pub(crate) const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 
 /// Creates a new file in `dir` under the first free name drawn from
 /// `next_candidate`, retrying on `AlreadyExists` up to
@@ -514,16 +520,18 @@ pub const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 ///
 /// Each attempt uses [`VettedDir::create_new`] (`O_EXCL`), so a planted entry
 /// at a predicted name is never followed or reused. `entry` names the file the
-/// temp file stands in for, for the error text only.
+/// temp file stands in for, for the error text only. The permit proves the
+/// policy allows replacing `entry`, which the temp file exists to do.
 ///
 /// # Errors
 ///
 /// Returns the first non-`AlreadyExists` I/O error, or `AlreadyExists` when
 /// every attempt collided.
-pub fn create_temp_sibling(
+pub(crate) fn create_temp_sibling(
     dir: &VettedDir,
     entry: Leaf<'_>,
     mode: Option<SanitizedMode>,
+    _replace: &ReplacePermit,
     mut next_candidate: impl FnMut() -> TempLeaf,
 ) -> std::io::Result<(TempLeaf, File)> {
     for _ in 0..MAX_TEMP_FILE_CREATE_ATTEMPTS {
@@ -551,7 +559,7 @@ enum WrittenAt {
     /// The final name itself.
     Final,
     /// A sibling temp file that is renamed over the existing entry.
-    Temp(TempLeaf),
+    Temp(TempLeaf, ReplacePermit),
 }
 
 impl WrittenAt {
@@ -559,7 +567,7 @@ impl WrittenAt {
     fn guard<'d>(&self, dir: &'d VettedDir, final_name: Leaf<'_>) -> TempFileGuard<'d> {
         match self {
             Self::Final => TempFileGuard::new(dir, final_name),
-            Self::Temp(temp) => TempFileGuard::for_temp(dir, temp.clone()),
+            Self::Temp(temp, _) => TempFileGuard::for_temp(dir, temp.clone()),
         }
     }
 }
@@ -589,31 +597,28 @@ fn open_output_slot(
 ) -> Result<Option<OutputSlot>> {
     match dir.create_new(leaf, mode) {
         Ok(file) => {
-            root.created().note(duplicates, dir, leaf, rel);
+            root.created().note_file(duplicates, &file, dir, leaf, rel);
             Ok(Some(OutputSlot {
                 file,
                 written_at: WrittenAt::Final,
             }))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match duplicates {
-            ExistingFiles::Skip => Ok(None),
-            ExistingFiles::Refuse => {
-                if root.created().created_here(dir, leaf, rel) {
-                    Ok(None)
-                } else {
-                    Err(destination_occupied(root.dest().as_path(), rel))
-                }
-            }
-            ExistingFiles::Overwrite => {
-                refuse_non_file_occupant(dir, leaf, rel)?;
-                let (temp, file) = create_temp_sibling(dir, leaf, mode, TempLeaf::next)
-                    .map_err(|e| replace_error(rel, &e))?;
-                Ok(Some(OutputSlot {
-                    file,
-                    written_at: WrittenAt::Temp(temp),
-                }))
-            }
-        },
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let action = duplicates.on_occupant(
+                || root.created().created_here(dir, leaf, rel),
+                || destination_occupied(root.dest().as_path(), rel),
+            )?;
+            let OccupantAction::Replace(permit) = action else {
+                return Ok(None);
+            };
+            refuse_non_file_occupant(dir, leaf, rel)?;
+            let (temp, file) = create_temp_sibling(dir, leaf, mode, &permit, TempLeaf::next)
+                .map_err(|e| replace_error(rel, &e))?;
+            Ok(Some(OutputSlot {
+                file,
+                written_at: WrittenAt::Temp(temp, permit),
+            }))
+        }
         Err(e) => Err(name_occupant_on_open_error(dir, leaf, rel, e).into()),
     }
 }
@@ -623,7 +628,7 @@ fn open_output_slot(
 /// Every site that decides what to do with an occupant must route `Refuse` here
 /// and never into an overwrite branch: a missed arm would replace a file the
 /// caller asked to keep.
-pub fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveError {
+pub(crate) fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveError {
     ArchiveError::DestinationOccupied {
         destination: destination.to_path_buf(),
         conflicts: Box::new([rel.to_path_buf()]),
@@ -631,14 +636,9 @@ pub fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveError {
 }
 
 /// Renames the completed temp file over the entry it replaces, if any.
-fn commit_output(
-    dir: &VettedDir,
-    written_at: &WrittenAt,
-    leaf: Leaf<'_>,
-    rel: &Path,
-) -> Result<()> {
-    if let WrittenAt::Temp(temp) = written_at {
-        dir.rename_within(temp.as_leaf(), leaf)
+fn commit_output(dir: &VettedDir, written_at: WrittenAt, leaf: Leaf<'_>, rel: &Path) -> Result<()> {
+    if let WrittenAt::Temp(temp, permit) = written_at {
+        dir.replace_entry(&temp, leaf, permit)
             .map_err(|e| replace_error(rel, &e))?;
     }
     Ok(())
@@ -693,7 +693,7 @@ fn refuse_non_file_occupant(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Resu
 ///
 /// Returns an error if directory creation fails due to I/O errors or a
 /// component is a symlink the policy refuses.
-pub fn create_directory<P: ParentCheck>(
+pub(crate) fn create_directory<P: ParentCheck>(
     safe_path: &SafePath<P>,
     root: &PinnedRoot,
     report: &mut ExtractionReport,
@@ -720,7 +720,11 @@ pub fn create_directory<P: ParentCheck>(
 /// walk in [`DirWalker::ensure_dir`] enforces the same refusals again. A name
 /// the host cannot look up by path (too long, or invalid on Windows) is left to
 /// that walk, as a missing one is.
-pub fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Result<()> {
+pub(crate) fn check_directory_occupant(
+    probe: &ProbePath,
+    rel: &Path,
+    dest: &DestDir,
+) -> Result<()> {
     let file_type = match probe.lstat() {
         Ok(metadata) => metadata.file_type(),
         Err(e)
@@ -794,7 +798,7 @@ pub fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -
         reason = "only the Unix path updates the counters; the signature is shared"
     )
 )]
-pub fn create_symlink<P: ParentCheck>(
+pub(crate) fn create_symlink<P: ParentCheck>(
     safe_symlink: &SafeSymlink<P>,
     root: &PinnedRoot,
     report: &mut ExtractionReport,
@@ -809,24 +813,14 @@ pub fn create_symlink<P: ParentCheck>(
         let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link())?;
 
         if let Some(existing) = parent.probe(leaf)? {
-            match duplicates {
-                ExistingFiles::Skip => {
-                    return record_duplicate_skip(report, safe_symlink.link().as_path());
-                }
-                ExistingFiles::Refuse => {
-                    if root
-                        .created()
-                        .created_here(&parent, leaf, safe_symlink.link().as_path())
-                    {
-                        return record_duplicate_skip(report, safe_symlink.link().as_path());
-                    }
-                    return Err(destination_occupied(
-                        root.dest().as_path(),
-                        safe_symlink.link().as_path(),
-                    ));
-                }
-                ExistingFiles::Overwrite => {}
-            }
+            let link_path = safe_symlink.link().as_path();
+            let action = duplicates.on_occupant(
+                || root.created().created_here(&parent, leaf, link_path),
+                || destination_occupied(root.dest().as_path(), link_path),
+            )?;
+            let OccupantAction::Replace(permit) = action else {
+                return record_duplicate_skip(report, link_path);
+            };
             if existing == Occupant::Symlink {
                 // An unchanged link re-points nothing; a different target could
                 // re-point a path that an earlier link's `..` resolved through.
@@ -835,7 +829,7 @@ pub fn create_symlink<P: ParentCheck>(
                 }
                 return Err(symlink_at_dest_error(safe_symlink.link().as_path()).into());
             }
-            parent.remove_file(leaf)?;
+            parent.remove_occupant(leaf, permit)?;
         }
 
         parent.symlink(target_path, leaf)?;
@@ -859,7 +853,7 @@ pub fn create_symlink<P: ParentCheck>(
 ///
 /// A symlink maps to the loop kind on Unix (what `O_NOFOLLOW` reports) and to
 /// `AlreadyExists` elsewhere; the text is identical on every platform.
-pub fn occupant_at_dest_error(rel: &Path, occupant: Occupant) -> std::io::Error {
+pub(crate) fn occupant_at_dest_error(rel: &Path, occupant: Occupant) -> std::io::Error {
     use std::io::ErrorKind;
 
     #[cfg(unix)]
@@ -876,7 +870,7 @@ pub fn occupant_at_dest_error(rel: &Path, occupant: Occupant) -> std::io::Error 
 }
 
 /// The error for a symlink that occupies a path extraction would overwrite.
-pub fn symlink_at_dest_error(rel: &Path) -> std::io::Error {
+pub(crate) fn symlink_at_dest_error(rel: &Path) -> std::io::Error {
     occupant_at_dest_error(rel, Occupant::Symlink)
 }
 
@@ -924,7 +918,7 @@ fn refused_occupant(dir: &VettedDir, leaf: Leaf<'_>, err: &std::io::Error) -> Op
 /// # Errors
 ///
 /// Returns `SecurityViolation` on a non-Unix host.
-pub fn require_symlink_creation() -> Result<()> {
+pub(crate) fn require_symlink_creation() -> Result<()> {
     cfg!(unix).ok_or_else(|| Violation::SymlinksUnsupported.into())
 }
 
@@ -933,7 +927,7 @@ const S_IFMT: u32 = 0o17_0000;
 
 /// The file type recorded in the type bits of a Unix mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnixFileType {
+pub(crate) enum UnixFileType {
     /// `S_IFREG`.
     Regular,
     /// `S_IFDIR`.
@@ -949,7 +943,7 @@ pub enum UnixFileType {
 impl UnixFileType {
     /// Reads the type bits of `mode`; `None` when they are all zero, which
     /// records no type.
-    pub fn from_mode(mode: u32) -> Option<Self> {
+    pub(crate) fn from_mode(mode: u32) -> Option<Self> {
         match mode & S_IFMT {
             0 => None,
             0o10_0000 => Some(Self::Regular),
@@ -965,7 +959,7 @@ impl UnixFileType {
 }
 
 /// Longest symlink target stored as entry data that is read at all.
-pub const MAX_STORED_SYMLINK_TARGET: u64 =
+pub(crate) const MAX_STORED_SYMLINK_TARGET: u64 =
     crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES as u64;
 
 /// The refusal for a symlink target stored as entry data above the host's
@@ -975,7 +969,7 @@ pub const MAX_STORED_SYMLINK_TARGET: u64 =
 ///
 /// Returns `SecurityViolation` when `size` exceeds
 /// [`MAX_STORED_SYMLINK_TARGET`].
-pub fn check_symlink_target_size(size: u64) -> Result<()> {
+pub(crate) fn check_symlink_target_size(size: u64) -> Result<()> {
     if size > MAX_STORED_SYMLINK_TARGET {
         return Err(symlink_target_too_large(size));
     }
@@ -983,7 +977,7 @@ pub fn check_symlink_target_size(size: u64) -> Result<()> {
 }
 
 /// The refusal for a stored symlink target of `size` bytes above the limit.
-pub fn symlink_target_too_large(size: u64) -> ArchiveError {
+pub(crate) fn symlink_target_too_large(size: u64) -> ArchiveError {
     Violation::LinkTargetTooLarge {
         size,
         max: MAX_STORED_SYMLINK_TARGET,
@@ -996,7 +990,7 @@ pub fn symlink_target_too_large(size: u64) -> ArchiveError {
 /// # Errors
 ///
 /// Returns `InvalidArchive` when the bytes are not UTF-8.
-pub fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> {
+pub(crate) fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> {
     let target_str = std::str::from_utf8(target_bytes)
         .map_err(|_| ArchiveError::from(Malformation::SymlinkTargetNotUtf8))?;
 
@@ -1014,7 +1008,7 @@ pub fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> {
 /// Used only to word an error: whether a symlink is to blame is decided by a
 /// `probe` of the name, not by this code.
 #[must_use]
-pub fn is_filesystem_loop_error(error: &std::io::Error) -> bool {
+pub(crate) fn is_filesystem_loop_error(error: &std::io::Error) -> bool {
     #[cfg(unix)]
     {
         error.raw_os_error() == Some(libc::ELOOP)
@@ -1068,7 +1062,7 @@ fn hardlink_target_changed(error: CopyError) -> ArchiveError {
 ///
 /// Returns `SecurityViolation` if the target's length differs from
 /// the permit's byte count, and an I/O error if the copy fails.
-pub fn copy_file_content_with_permit(
+pub(crate) fn copy_file_content_with_permit(
     mut from: File,
     mut to: File,
     copy_buffer: &mut CopyBuffer,
@@ -1561,10 +1555,13 @@ mod tests {
         let root = pinned(&DestDir::new(temp.path()).expect("dest"));
         let dir = root.dir();
         let leaf = Leaf::split(Path::new("d")).expect("leaf").1;
-        let written_at = WrittenAt::Temp(TempLeaf::named(".exarch-tmp-test"));
+        let written_at = WrittenAt::Temp(
+            TempLeaf::named(".exarch-tmp-test"),
+            ReplacePermit::for_test(),
+        );
 
         let guard = written_at.guard(dir, leaf);
-        let err = commit_output(dir, &written_at, leaf, Path::new("d")).unwrap_err();
+        let err = commit_output(dir, written_at, leaf, Path::new("d")).unwrap_err();
         drop(guard);
 
         assert!(

@@ -13,14 +13,13 @@
 //! duplicates are still skipped through the run record, but a file planted in
 //! the staging directory is refused instead of being kept and published.
 
-mod parent;
+mod adopt;
+mod dir;
 mod replace;
 
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-
-use tempfile::TempDir;
 
 use crate::ArchiveError;
 use crate::ConfigProblem;
@@ -33,10 +32,16 @@ use crate::IoContext;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::Staging;
+use crate::StagingLeftover;
+use crate::formats::pinned_dir::LeafBuf;
+use crate::formats::pinned_dir::VettedDir;
+use crate::security::fs_view::Occupant;
+use adopt::Adoption;
+use dir::StagingDir;
 
 /// The extraction a staging mode wraps: it writes into the directory it is
 /// given, under the options it is given, reporting to the progress it is given.
-pub trait StagedRun:
+pub(crate) trait StagedRun:
     FnOnce(&Path, &ExtractionOptions, &mut dyn ProgressCallback) -> Result<ExtractionReport>
 {
 }
@@ -58,7 +63,7 @@ impl<F> StagedRun for F where
 ///
 /// The extraction's own error, rolled back under a staging mode, or a typed
 /// refusal or failure of the staging itself.
-pub fn extract_staged(
+pub(crate) fn extract_staged(
     output_dir: &Path,
     options: &ExtractionOptions,
     selection: &EntrySelection,
@@ -91,11 +96,22 @@ fn staged_options(options: &ExtractionOptions) -> ExtractionOptions {
     options.clone().with_existing_files(existing_files)
 }
 
-/// Where [`Staging::Atomic`] publishes, and the directory its staging
-/// directory is created in.
+/// The directory holding `path`; the working directory when `path` is a bare
+/// name and so has an empty parent.
+fn parent_or_cwd(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// Where [`Staging::Atomic`] publishes: the destination's name inside its
+/// pinned parent, which is also where its staging directory is created.
 struct AtomicDestination {
-    path: PathBuf,
+    name: LeafBuf,
     parent: PathBuf,
+    pin: VettedDir,
+    existed: bool,
 }
 
 impl AtomicDestination {
@@ -104,14 +120,18 @@ impl AtomicDestination {
     /// An existing destination is canonicalized, and both the staging
     /// directory's parent and the rename target come from that one path, so a
     /// symlinked `output_dir` is renamed onto its target and the staging
-    /// directory is on the target's filesystem. A destination that is absent
-    /// is used as given.
+    /// directory is on the target's filesystem. For a destination that is
+    /// absent the parent is created and canonicalized.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the parent of a destination that is only opened after the rename"
+    )]
     fn resolve(output_dir: &Path) -> Result<Self> {
         let refuse = |problem| ArchiveError::InvalidConfiguration {
             setting: ConfigSetting::OutputPath,
             problem,
         };
-        let path = if output_dir.exists() {
+        let (parent, name, existed) = if output_dir.exists() {
             let canonical = output_dir.canonicalize().map_err(ArchiveError::Io)?;
             if !canonical.is_dir() {
                 return Err(refuse(ConfigProblem::NotADirectory));
@@ -121,7 +141,12 @@ impl AtomicDestination {
                     path: output_dir.to_path_buf(),
                 });
             }
-            canonical
+            let name = LeafBuf::of(&canonical).ok_or_else(|| refuse(ConfigProblem::NoParent))?;
+            let parent = canonical
+                .parent()
+                .ok_or_else(|| refuse(ConfigProblem::NoParent))?
+                .to_path_buf();
+            (parent, name, true)
         } else {
             if output_dir
                 .symlink_metadata()
@@ -129,13 +154,25 @@ impl AtomicDestination {
             {
                 return Err(refuse(ConfigProblem::IsSymlink));
             }
-            output_dir.to_path_buf()
+            let name = LeafBuf::of(output_dir).ok_or_else(|| refuse(ConfigProblem::NoParent))?;
+            let parent = parent_or_cwd(output_dir);
+            std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;
+            let parent = parent.canonicalize().map_err(ArchiveError::Io)?;
+            (parent, name, false)
         };
-        let parent = path
-            .parent()
-            .ok_or_else(|| refuse(ConfigProblem::NoParent))?
-            .to_path_buf();
-        Ok(Self { path, parent })
+        let pin = VettedDir::open_path(&parent).map_err(|e| {
+            ArchiveError::Io(io_context(
+                &e,
+                "failed to pin the destination parent",
+                &parent,
+            ))
+        })?;
+        Ok(Self {
+            name,
+            parent,
+            pin,
+            existed,
+        })
     }
 }
 
@@ -148,19 +185,6 @@ fn is_empty_dir(dir: &Path) -> Result<bool> {
         .map_err(ArchiveError::Io)
 }
 
-/// Creates the private staging directory next to the destination.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "creates the parent of a destination that is only opened after the rename"
-)]
-fn create_staging_dir(parent: &Path) -> Result<TempDir> {
-    std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;
-    tempfile::Builder::new()
-        .prefix(".exarch-")
-        .tempdir_in(parent)
-        .map_err(|e| ArchiveError::Io(io_context(&e, "failed to create temp directory", parent)))
-}
-
 /// Wraps `error` with a static `context` and the `path` it concerns.
 fn io_context(error: &io::Error, context: &'static str, path: &Path) -> io::Error {
     io::Error::new(
@@ -170,9 +194,10 @@ fn io_context(error: &io::Error, context: &'static str, path: &Path) -> io::Erro
 }
 
 /// The error of an extraction that was cancelled after it finished, once
-/// nothing was published.
-fn cancelled_after(report: ExtractionReport) -> ArchiveError {
-    ArchiveError::partial_or(report, ArchiveError::Cancelled).rolled_back()
+/// nothing was published; `leftover` is the staging directory that survived
+/// its removal.
+fn cancelled_after(report: ExtractionReport, leftover: Option<StagingLeftover>) -> ArchiveError {
+    ArchiveError::partial_or(report, ArchiveError::Cancelled).rolled_back_with(leftover)
 }
 
 fn extract_atomic(
@@ -182,28 +207,70 @@ fn extract_atomic(
     extract: impl StagedRun,
 ) -> Result<ExtractionReport> {
     let destination = AtomicDestination::resolve(output_dir)?;
-    let staging = create_staging_dir(&destination.parent)?;
+    let mut staging = StagingDir::create(&destination.pin, &destination.parent)?;
 
-    let report = extract(staging.path(), &staged_options(options), progress)
-        .map_err(ArchiveError::rolled_back)?;
+    // An absent destination has no mode to keep: the one a new directory gets
+    // under the umask is read now, before any archive content is written. It is
+    // also read for an existing one, as the fallback should that destination
+    // vanish before the publish; only for an absent one is a failure fatal.
+    let fresh_mode = match staging.probe_umask() {
+        Ok(adoption) => Some(adoption),
+        Err(_) if destination.existed => None,
+        Err(e) => {
+            let error = ArchiveError::Io(io_context(
+                &e,
+                "failed to probe the umask",
+                &destination.parent,
+            ));
+            return Err(error.rolled_back_with(staging.discard()));
+        }
+    };
+
+    let report = match extract(staging.path(), &staged_options(options), progress) {
+        Ok(report) => report,
+        Err(e) => return Err(e.rolled_back_with(staging.discard())),
+    };
     if progress.is_cancelled() {
-        return Err(cancelled_after(report));
+        return Err(cancelled_after(report, staging.discard()));
     }
-    publish(staging, &destination.path, output_dir)?;
-    Ok(report)
+    match publish(&mut staging, &destination, fresh_mode, output_dir) {
+        Ok(()) => Ok(report),
+        Err(error) => Err(error.rolled_back_with(staging.discard())),
+    }
 }
 
-/// Renames the staging directory onto the destination, removing it if that
-/// fails.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "publishes the staging directory with one rename; it is not a write into the destination"
-)]
-fn publish(staging: TempDir, destination: &Path, output_dir: &Path) -> Result<()> {
-    let staged = staging.keep();
-    std::fs::rename(&staged, destination).map_err(|e| {
-        let _ = std::fs::remove_dir_all(&staged);
-        match e.kind() {
+/// Gives the staging directory the destination's permissions and renames it
+/// onto the destination.
+///
+/// Both happen only now so every earlier failure leaves the staging directory
+/// private; a failure here leaves the caller to discard it.
+fn publish(
+    staging: &mut StagingDir<'_>,
+    destination: &AtomicDestination,
+    fresh_mode: Option<Adoption>,
+    output_dir: &Path,
+) -> Result<()> {
+    let existing = destination
+        .pin
+        .status(destination.name.as_leaf())
+        .map_err(ArchiveError::Io)?
+        .filter(|status| status.occupant == Occupant::Directory);
+    if let Some(adoption) = existing
+        .as_ref()
+        .map(Adoption::of_empty_destination)
+        .or(fresh_mode)
+    {
+        staging.adopt(adoption).map_err(|e| {
+            ArchiveError::Io(io_context(
+                &e,
+                "failed to give the extracted content the destination's permissions",
+                output_dir,
+            ))
+        })?;
+    }
+    staging
+        .publish(&destination.name)
+        .map_err(|e| match e.kind() {
             io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty => {
                 ArchiveError::OutputExists {
                     path: output_dir.to_path_buf(),
@@ -214,8 +281,7 @@ fn publish(staging: TempDir, destination: &Path, output_dir: &Path) -> Result<()
                 "failed to rename temp dir into place",
                 output_dir,
             )),
-        }
-    })
+        })
 }
 
 #[cfg(all(test, unix))]

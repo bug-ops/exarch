@@ -58,7 +58,71 @@ impl CommandError {
 /// What a command returns.
 pub type CommandResult = Result<Outcome, CommandError>;
 
+use crate::cli::PolicyFlags;
 use crate::error::convert_error;
 use crate::operation::Operation;
 use exarch_core::ArchiveError;
+use exarch_core::ConfigSetting;
+use exarch_core::SecurityConfig;
+use exarch_core::non_zero_usize;
 use std::path::Path;
+
+/// The configuration `flags` describe on top of `base`: limits, link policy,
+/// ZIP policy, decode lookahead and the path-depth limit, then the selection,
+/// which core checks against that depth.
+///
+/// # Errors
+///
+/// `InvalidConfiguration` naming the setting of the flag core refuses.
+pub fn security_config(
+    flags: &impl PolicyFlags,
+    base: SecurityConfig,
+) -> Result<SecurityConfig, ArchiveError> {
+    let mut config = flags.limits().apply(base)?;
+    if let Some(links) = flags.links() {
+        config = links.apply(config);
+    }
+    config = flags.zip().apply(config);
+    if let Some(parallel) = flags.parallel() {
+        config = parallel.apply(config)?;
+    }
+    if let Some(depth) = flags.max_path_depth() {
+        config = config.with_max_path_depth(non_zero_usize(ConfigSetting::MaxPathDepth, depth)?);
+    }
+    flags.selection().apply(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Cli;
+    use crate::cli::Commands;
+    use clap::Parser as _;
+
+    fn extract_flags(extra: &[&str]) -> crate::cli::ExtractArgs {
+        let words = ["exarch", "extract", "a.tar"]
+            .into_iter()
+            .chain(extra.iter().copied());
+        let Commands::Extract(args) = Cli::parse_from(words).command else {
+            panic!("expected extract command");
+        };
+        args
+    }
+
+    #[test]
+    fn the_selection_is_checked_against_the_path_depth_flag() {
+        let over_depth = security_config(
+            &extract_flags(&["--strip-components", "5", "--max-path-depth", "3"]),
+            SecurityConfig::default(),
+        );
+        assert!(
+            over_depth.is_err(),
+            "strip above the depth limit is refused"
+        );
+        let within_depth = security_config(
+            &extract_flags(&["--strip-components", "5", "--max-path-depth", "9"]),
+            SecurityConfig::default(),
+        );
+        assert!(within_depth.is_ok(), "{within_depth:?}");
+    }
+}

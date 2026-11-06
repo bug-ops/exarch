@@ -14,6 +14,7 @@ use exarch_core::SkipKind;
 use exarch_core::Skips;
 use human::HumanFormatter;
 use json::JsonFormatter;
+use std::io;
 use std::io::Write;
 
 /// Output verbosity level for human-readable formatters.
@@ -89,26 +90,38 @@ impl From<&crate::cli::Cli> for OutputMode {
 /// internal buffering), turning one logical line into several syscalls.
 /// Formatting into a `String` first and writing it in one call restores the
 /// single-write-per-line behavior of the old `Term::write_line`.
-pub fn emit_line<W: Write>(writer: &mut W, args: std::fmt::Arguments<'_>) {
-    use std::fmt::Write as _;
-    let mut line = String::new();
-    let _ = line.write_fmt(args);
+///
+/// # Errors
+///
+/// Any write failure except a closed reader (see [`tolerate_closed`]).
+pub fn emit_line<W: Write>(writer: &mut W, args: std::fmt::Arguments<'_>) -> io::Result<()> {
+    let mut line = args.to_string();
     line.push('\n');
-    let _ = writer.write_all(line.as_bytes());
+    tolerate_closed(writer.write_all(line.as_bytes()))
 }
 
 /// Writes a single blank line in one call. See [`emit_line`].
-pub fn emit_blank<W: Write>(writer: &mut W) {
-    let _ = writer.write_all(b"\n");
+pub fn emit_blank<W: Write>(writer: &mut W) -> io::Result<()> {
+    tolerate_closed(writer.write_all(b"\n"))
 }
 
-/// The reasons entries were skipped for and how many were, in the fixed order
+/// The one place that decides which stdout failures are not errors: a reader
+/// that stopped reading (`BrokenPipe`, #981) is not a failure of the command.
+fn tolerate_closed(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+/// One indented line per reason entries were skipped for, in the fixed order
 /// of [`SkipKind::ALL`]; reasons that did not occur are left out.
-pub fn skip_breakdown(skips: &Skips) -> impl Iterator<Item = (SkipKind, usize)> + '_ {
+pub fn skip_breakdown_lines(skips: &Skips) -> impl Iterator<Item = String> + '_ {
     SkipKind::ALL
         .iter()
         .map(|&kind| (kind, skips.count(kind)))
         .filter(|&(_, count)| count > 0)
+        .map(|(kind, count)| format!("    {kind}: {count}"))
 }
 
 /// Creates the output formatter for `mode`.

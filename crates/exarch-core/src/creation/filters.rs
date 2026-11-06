@@ -290,7 +290,7 @@ impl fmt::Display for ExcludePattern {
 /// when it matches an exclude pattern. The size limit is checked separately,
 /// where the size is known.
 #[must_use]
-pub fn skip_reason(archive_path: &Path, config: &CreationConfig) -> Option<SkipKind> {
+pub(crate) fn skip_reason(archive_path: &Path, config: &CreationConfig) -> Option<SkipKind> {
     if !config.include_hidden && is_hidden(archive_path) {
         return Some(SkipKind::Hidden);
     }
@@ -306,7 +306,7 @@ pub fn skip_reason(archive_path: &Path, config: &CreationConfig) -> Option<SkipK
 /// On Unix-like systems, files starting with '.' are considered hidden.
 /// This function checks the file name component, not the full path.
 #[must_use]
-pub fn is_hidden(path: &Path) -> bool {
+pub(crate) fn is_hidden(path: &Path) -> bool {
     path.file_name()
         .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
 }
@@ -322,7 +322,7 @@ pub fn is_hidden(path: &Path) -> bool {
 ///
 /// A `strip_prefix` that does not match the computed relative path is
 /// ignored; the unstripped relative path is used.
-pub fn compute_archive_path(
+pub(crate) fn compute_archive_path(
     source_path: &Path,
     root: &Path,
     config: &CreationConfig,

@@ -1,19 +1,18 @@
 //! Python exception types for archive extraction errors.
 
 use exarch_core::ArchiveError as CoreError;
-use exarch_core::ConfigProblem;
 use exarch_core::ErrorCode;
 use exarch_core::ExtractionReport;
+use exarch_core::FfiDetail;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
+use exarch_core::FfiNameCollision;
+use exarch_core::FfiRestore;
 use exarch_core::FfiSourceFault;
 use exarch_core::IoKind;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting;
-use exarch_core::Restore;
 use exarch_core::SubCode;
-use exarch_core::format_entry_path_for_error;
-use exarch_core::sanitize_path_for_error;
 use pyo3::PyTypeInfo;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -116,7 +115,12 @@ static SOURCE_NOT_ACCESSIBLE: DualClass =
 static INVALID_CONFIGURATION: DualClass = DualClass::new(
     "InvalidConfigurationError",
     PyValueError::type_object,
-    &["setting", "patterns", "protected_path", "collision"],
+    &[
+        "setting",
+        "unmatched_patterns",
+        "protected_path",
+        "collision",
+    ],
 );
 static INVALID_COMPRESSION_LEVEL: DualClass = DualClass::new(
     "InvalidCompressionLevelError",
@@ -174,36 +178,38 @@ fn class_for(code: ErrorCode) -> Option<NewErr> {
 /// The exception class, message and attached attributes all come from
 /// [`CoreError::into_ffi_message`], so the mapping is written once in
 /// `exarch-core`; this function only picks the Python class for each
-/// [`FfiKind`].
+/// [`FfiKind`] and names the attributes.
 ///
 /// This function is a workaround for Rust's orphan rules, which prevent
 /// implementing `From<CoreError> for PyErr` directly.
 pub fn convert_error(err: CoreError) -> PyErr {
-    let os_error = os_error_fields(&err);
-    let conflicts = destination_conflicts(&err);
-    let patterns = unmatched_patterns(&err);
-    let problem = ProblemDetails::of(&err);
-    let non_utf8_entry_path = non_utf8_entry_path(&err);
-    let io_details = IoDetails::of(&err);
     let FfiErrorMessage {
         kind,
         description,
         partial,
         source_fault,
+        path,
+        leftover_path,
+        detail,
         ..
     } = err.into_ffi_message();
     let code = kind.code();
     let py_err = if let FfiKind::Io(io_kind) = kind {
         let err = io_error(io_kind, description);
-        io_details.attach(&err);
+        // A builtin `OSError` has no class defaults, so these read `None`
+        // only when set.
+        for name in ["restore", "backup_path", "leftover_path"] {
+            set_none(&err, name);
+        }
+        set_attr(&err, "filename", path);
         err
     } else {
         let err = class_for(kind.code()).unwrap_or(new_base_error)(description);
         if let Some(fault) = source_fault {
             set_os_error_fields(&err, &fault);
         }
-        if let Some(fields) = os_error {
-            set_errno_fields(&err, &fields);
+        if let (Some(errno), Some(filename)) = (errno_name(&kind), path) {
+            set_errno_fields(&err, errno, &filename);
         }
         set_optional_str(
             &err,
@@ -216,12 +222,10 @@ pub fn convert_error(err: CoreError) -> PyErr {
             "setting",
             kind.setting().map(exarch_core::ConfigSetting::as_str),
         );
-        set_attr(&err, "conflicts", conflicts);
-        set_attr(&err, "patterns", patterns);
-        problem.attach(&err);
-        set_attr(&err, "non_utf8_entry_path", non_utf8_entry_path);
         err
     };
+    attach_detail(&py_err, detail);
+    set_attr(&py_err, "leftover_path", leftover_path);
     set_optional_str(&py_err, "code", Some(code.as_str()));
     if let Some(outcome) = partial {
         attach_partial(&py_err, outcome);
@@ -243,79 +247,12 @@ fn io_error(kind: std::io::ErrorKind, description: String) -> PyErr {
     err
 }
 
-/// What a failed replace or a left-behind reservation tells beyond the I/O
-/// kind: where the original destination, the staging directory or the empty
-/// output file remain. Paths are redacted like those of an `Io` error.
-#[derive(Default)]
-struct IoDetails {
-    restore: Option<&'static str>,
-    backup: Option<String>,
-    leftover: Option<String>,
-    filename: Option<String>,
-}
-
-impl IoDetails {
-    fn of(err: &CoreError) -> Self {
-        match err {
-            CoreError::ReplaceFailed(failure) => Self {
-                restore: Some(match &failure.restore {
-                    Restore::NotNeeded => "not_needed",
-                    Restore::Restored => "restored",
-                    _ => "failed",
-                }),
-                backup: match &failure.restore {
-                    Restore::Failed { backup, .. } => Some(sanitize_path_for_error(backup)),
-                    _ => None,
-                },
-                leftover: failure
-                    .leftover
-                    .as_ref()
-                    .map(|leftover| sanitize_path_for_error(&leftover.path)),
-                filename: None,
-            },
-            CoreError::OutputReservationLeft { .. } => Self {
-                filename: err.redacted_path(),
-                ..Self::default()
-            },
-            _ => Self::default(),
-        }
-    }
-
-    fn attach(self, err: &PyErr) {
-        set_optional_str(err, "restore", self.restore);
-        set_attr(err, "backup_path", self.backup);
-        set_attr(err, "leftover_path", self.leftover);
-        set_attr(err, "filename", self.filename);
-    }
-}
-
-/// The `errno` name and redacted file name of a refusal that is also a
-/// builtin `OSError` (`FileNotFoundError`, `FileExistsError`).
-struct OsErrorFields {
-    errno: &'static str,
-    filename: String,
-}
-
-fn os_error_fields(err: &CoreError) -> Option<OsErrorFields> {
-    let errno = match err.ffi_kind() {
-        FfiKind::SourceNotFound => "ENOENT",
-        FfiKind::OutputExists => "EEXIST",
-        _ => return None,
-    };
-    err.redacted_path()
-        .map(|filename| OsErrorFields { errno, filename })
-}
-
-/// The archive-relative paths a `DestinationOccupied` refusal names.
-fn destination_conflicts(err: &CoreError) -> Option<Vec<String>> {
-    match err {
-        CoreError::DestinationOccupied { conflicts, .. } => Some(
-            conflicts
-                .iter()
-                .map(|path| format_entry_path_for_error(path))
-                .collect(),
-        ),
-        CoreError::PartialExtraction(partial) => destination_conflicts(partial.cause()),
+/// The `errno` name of a refusal that is also a builtin `OSError`
+/// (`FileNotFoundError`, `FileExistsError`).
+const fn errno_name(kind: &FfiKind) -> Option<&'static str> {
+    match kind {
+        FfiKind::SourceNotFound => Some("ENOENT"),
+        FfiKind::OutputExists => Some("EEXIST"),
         _ => None,
     }
 }
@@ -347,94 +284,56 @@ impl PyNameCollision {
     }
 }
 
-/// What an `InvalidConfiguration` refusal says beyond its setting: why an
-/// `atomic_replace` destination was refused, or which creation sources
-/// collided.
-#[derive(Default)]
-struct ProblemDetails {
-    protected_path: Option<&'static str>,
-    collision: Option<PyNameCollision>,
-}
-
-impl ProblemDetails {
-    fn of(err: &CoreError) -> Self {
-        match err {
-            CoreError::InvalidConfiguration {
-                problem: ConfigProblem::ReplacesProtectedPath { path },
-                ..
-            } => Self {
-                protected_path: Some(path.as_str()),
-                ..Self::default()
-            },
-            CoreError::InvalidConfiguration {
-                problem:
-                    ConfigProblem::EntryNameCollision {
-                        name,
-                        first,
-                        second,
-                    },
-                ..
-            } => Self {
-                collision: Some(PyNameCollision {
-                    name: name.clone(),
-                    first: sanitize_path_for_error(first),
-                    second: sanitize_path_for_error(second),
-                }),
-                ..Self::default()
-            },
-            CoreError::PartialExtraction(partial) => Self::of(partial.cause()),
-            _ => Self::default(),
+/// Attaches the structured data of an error under the attribute names of the
+/// exception class that documents them.
+///
+/// Exhaustive over [`FfiDetail`]: a new detail does not compile until it is
+/// named here.
+fn attach_detail(err: &PyErr, detail: FfiDetail) {
+    match detail {
+        FfiDetail::None => {}
+        FfiDetail::Occupied { conflicts } => set_attr(err, "conflicts", Some(conflicts.into_vec())),
+        FfiDetail::Replace(restore) => {
+            set_optional_str(err, "restore", Some(restore.kind().as_str()));
+            if let FfiRestore::Failed { backup_path } = restore {
+                set_attr(err, "backup_path", Some(backup_path));
+            }
         }
-    }
-
-    fn attach(self, err: &PyErr) {
-        set_optional_str(err, "protected_path", self.protected_path);
-        if let Some(collision) = self.collision {
-            Python::attach(|py| {
-                if let Ok(object) = Py::new(py, collision) {
-                    // setattr failures are silenced to preserve the `PyErr`
-                    // signature.
-                    let _ = err.value(py).setattr("collision", object);
-                }
-            });
+        FfiDetail::ProtectedPath(path) => {
+            set_optional_str(err, "protected_path", Some(path.as_str()));
         }
-    }
-}
-
-/// The include patterns an extraction found no entry for.
-fn unmatched_patterns(err: &CoreError) -> Option<Vec<String>> {
-    match err {
-        CoreError::UnmatchedInclude { patterns } => {
-            Some(patterns.iter().map(ToString::to_string).collect())
+        FfiDetail::NameCollision(FfiNameCollision {
+            name,
+            first,
+            second,
+            ..
+        }) => set_attr(
+            err,
+            "collision",
+            Some(PyNameCollision {
+                name,
+                first,
+                second,
+            }),
+        ),
+        FfiDetail::UnmatchedInclude { patterns } => {
+            set_attr(err, "unmatched_patterns", Some(patterns.into_vec()));
         }
-        CoreError::PartialExtraction(partial) => unmatched_patterns(partial.cause()),
-        _ => None,
-    }
-}
-
-/// The injective rendering of the entry path a listing or in-memory extraction
-/// refused for not being valid UTF-8.
-fn non_utf8_entry_path(err: &CoreError) -> Option<String> {
-    match err {
-        CoreError::InvalidArchive(exarch_core::Malformation::EntryPathNotUtf8 { path }) => {
-            Some(format_entry_path_for_error(path))
-        }
-        CoreError::PartialExtraction(partial) => non_utf8_entry_path(partial.cause()),
-        _ => None,
+        FfiDetail::NonUtf8EntryPath { path } => set_attr(err, "non_utf8_entry_path", Some(path)),
     }
 }
 
 /// Sets `errno`, `strerror` and `filename` the way `open()` fills them for the
 /// same failure.
-fn set_errno_fields(err: &PyErr, fields: &OsErrorFields) {
+fn set_errno_fields(err: &PyErr, errno: &str, filename: &str) {
     Python::attach(|py| {
         let fill = || -> PyResult<()> {
-            let errno: i32 = py.import("errno")?.getattr(fields.errno)?.extract()?;
+            let errno: i32 = py.import("errno")?.getattr(errno)?.extract()?;
             let strerror = py.import("os")?.call_method1("strerror", (errno,))?;
             let value = err.value(py);
             value.setattr("errno", errno)?;
             value.setattr("strerror", strerror)?;
-            value.setattr("filename", fields.filename.as_str())
+            value.setattr("filename", filename)
         };
         // Best-effort, like the other attributes: the exception is raised
         // either way.
@@ -453,6 +352,14 @@ where
             let _ = err.value(py).setattr(name, value);
         });
     }
+}
+
+/// Sets `name` to `None` on an exception whose class has no default for it.
+fn set_none(err: &PyErr, name: &str) {
+    Python::attach(|py| {
+        // setattr failures are silenced to preserve the `PyErr` signature.
+        let _ = err.value(py).setattr(name, py.None());
+    });
 }
 
 /// Sets `name` on the exception when `value` is present; otherwise the class
@@ -514,7 +421,9 @@ pub fn attach_extraction_report(exc: &Bound<'_, PyAny>, report: &ExtractionRepor
 /// Registers all exception types with the Python module.
 pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNameCollision>()?;
-    m.add("ArchiveError", m.py().get_type::<ArchiveError>())?;
+    let base = m.py().get_type::<ArchiveError>();
+    base.setattr("leftover_path", m.py().None())?;
+    m.add("ArchiveError", base)?;
     m.add(
         "PathTraversalError",
         m.py().get_type::<PathTraversalError>(),
@@ -685,7 +594,9 @@ mod tests {
     use exarch_core::Compressed;
     use exarch_core::PartialWrites;
     use exarch_core::QuotaResource as CoreQuotaResource;
+    use exarch_core::Restore;
     use exarch_core::Uncompressed;
+    use exarch_core::sanitize_path_for_error;
     use std::path::PathBuf;
 
     /// Asserts the full attacker-supplied path is present in both debug and

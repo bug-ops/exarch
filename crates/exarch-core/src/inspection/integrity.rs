@@ -29,9 +29,10 @@ use crate::copy::declared_size_exceeded;
 use crate::error::TrailerCorruption;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::is_trailing_data;
-use crate::formats::tar_metadata_limit::budget_violation;
-use crate::formats::zip::ZIP_DECLARED_SIZE_EXCEEDED;
-use crate::formats::zip::ZIP_INVALID_CHECKSUM;
+use crate::formats::source_fault::ReadFamily;
+use crate::formats::source_fault::ReadFaults;
+use crate::formats::source_fault::ReadVerdict;
+use crate::formats::source_fault::classify_decoder_read;
 use crate::inspection::manifest::EntryCompression;
 use crate::inspection::report::Finding;
 use crate::inspection::report::Heuristic;
@@ -46,7 +47,7 @@ use crate::security::zipbomb::validate_entry_compression;
 /// A typed decoding failure; the one table in
 /// [`IntegrityPass::record`] maps it to an issue.
 #[derive(Debug)]
-pub enum DecodeFailure {
+pub(crate) enum DecodeFailure {
     Checksum,
     Malformed(io::Error),
     Truncated {
@@ -86,15 +87,30 @@ impl fmt::Display for DecodeFailure {
 
 impl DecodeFailure {
     /// Classifies a copy failure for an entry of `declared` bytes.
-    pub fn from_copy(err: CopyError, declared: u64) -> Self {
+    pub(crate) fn from_copy(err: CopyError, declared: u64, family: ReadFamily) -> Self {
+        Self::from_copy_with_fault(err, declared, None, family)
+    }
+
+    /// Classifies a copy failure the way extraction does, given the I/O
+    /// `fault` the entry's source recorded, if any: a failed read and a short
+    /// entry after a fault are that fault, not a corrupt archive.
+    pub(crate) fn from_copy_with_fault(
+        err: CopyError,
+        declared: u64,
+        fault: Option<io::Error>,
+        family: ReadFamily,
+    ) -> Self {
         match err {
-            CopyError::Read(e) => Self::from_read_error(e, declared),
+            CopyError::Read(e) => Self::from_read_error(e, declared, fault, family),
             CopyError::Write(e) => Self::Io(e),
             CopyError::Overrun { declared } => Self::DeclaredSizeOverrun { declared },
-            CopyError::Short { declared, actual } => Self::Truncated {
-                declared,
-                actual: Some(actual),
-            },
+            CopyError::Short { declared, actual } => fault.map_or(
+                Self::Truncated {
+                    declared,
+                    actual: Some(actual),
+                },
+                Self::Io,
+            ),
             CopyError::Overflow => Self::ResourceLimit(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::IntegerOverflow,
             }),
@@ -102,54 +118,44 @@ impl DecodeFailure {
     }
 
     /// Classifies a failure of the 7z block decoder (setting up or running it).
-    pub fn from_sevenz(err: sevenz_rust2::Error) -> Self {
+    pub(crate) fn from_sevenz(err: sevenz_rust2::Error) -> Self {
         use sevenz_rust2::Error;
         match err {
             Error::ChecksumVerificationFailed => Self::Checksum,
-            Error::Io(e, _) => Self::from_read_error(e, 0),
+            Error::Io(e, _) => Self::from_read_error(e, 0, None, ReadFamily::SevenZ),
             Error::Other(reason) => Self::Malformed(io::Error::other(reason.into_owned())),
             other => Self::NotDecodable(ArchiveError::from(other)),
         }
     }
 
-    fn from_read_error(e: io::Error, declared: u64) -> Self {
-        if let Some(limit) = budget_violation(&e) {
-            return Self::ResourceLimit(limit);
-        }
-        let message = e.to_string();
-        if e.kind() == io::ErrorKind::InvalidData && message == ZIP_INVALID_CHECKSUM {
-            return Self::Checksum;
-        }
-        if e.kind() == io::ErrorKind::InvalidData && message == ZIP_DECLARED_SIZE_EXCEEDED {
-            return Self::DeclaredSizeOverrun { declared };
-        }
-        if e.get_ref()
-            .and_then(|inner| inner.downcast_ref::<sevenz_rust2::Error>())
-            .is_some_and(|inner| matches!(inner, sevenz_rust2::Error::ChecksumVerificationFailed))
-        {
-            return Self::Checksum;
-        }
-        if e.raw_os_error().is_some() {
-            return Self::Io(e);
-        }
-        if e.kind() == io::ErrorKind::UnexpectedEof {
-            return Self::Truncated {
+    fn from_read_error(
+        e: io::Error,
+        declared: u64,
+        fault: Option<io::Error>,
+        family: ReadFamily,
+    ) -> Self {
+        match classify_decoder_read(e, fault, family) {
+            ReadVerdict::Budget(limit) => Self::ResourceLimit(limit),
+            ReadVerdict::SourceFault(e) => Self::Io(e),
+            ReadVerdict::Checksum(_) => Self::Checksum,
+            ReadVerdict::DeclaredSizeOverrun(_) => Self::DeclaredSizeOverrun { declared },
+            ReadVerdict::Truncated(_) => Self::Truncated {
                 declared,
                 actual: None,
-            };
+            },
+            ReadVerdict::Malformed(e) => Self::Malformed(e),
         }
-        Self::Malformed(e)
     }
 
     /// Error returned when TAR entry content fails to decode: the scan stops,
     /// so no report can claim the uninspected entries are fine.
-    pub fn into_tar_error(self, path: &Path) -> ArchiveError {
+    pub(crate) fn into_tar_error(self, path: &Path) -> ArchiveError {
         self.into_error(&format!("at {}", crate::path_text(path)))
     }
 
     /// Error returned when the stream fails after the TAR end-of-archive
     /// marker (a gzip CRC or ISIZE mismatch, a corrupt or truncated tail).
-    pub fn into_trailer_error(self) -> ArchiveError {
+    pub(crate) fn into_trailer_error(self) -> ArchiveError {
         match self {
             Self::Checksum | Self::Malformed(_) => {
                 let cause = match &self {
@@ -185,7 +191,7 @@ impl DecodeFailure {
 
 /// Result of decoding one payload.
 #[derive(Debug)]
-pub enum DecodeOutcome {
+pub(crate) enum DecodeOutcome {
     Verified,
     Unverified(UnverifiedReason),
     Failed(DecodeFailure),
@@ -193,7 +199,7 @@ pub enum DecodeOutcome {
 
 /// Whether decoding an entry is charged to the budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Charge {
+pub(crate) enum Charge {
     /// Listing does not decode it by itself: charge the declared size.
     Declared,
     /// Listing decodes it anyway.
@@ -204,32 +210,32 @@ pub enum Charge {
 ///
 /// Covers the record padding of `tar -b 2048` (1 MiB), so an honest archive
 /// passes under a small `max_tar_metadata_bytes`.
-pub const MIN_TRAILER_CAP: u64 = 1024 * 1024;
+pub(crate) const MIN_TRAILER_CAP: u64 = 1024 * 1024;
 
 /// How many decoded bytes may follow the TAR end-of-archive marker.
 ///
 /// Zeros count: they are decode work all the same. Built only from the
 /// validated config, so every mode applies the same rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TrailerCap(u64);
+pub(crate) struct TrailerCap(u64);
 
 impl TrailerCap {
     /// `max_tar_metadata_bytes`, raised to [`MIN_TRAILER_CAP`].
     #[must_use]
-    pub fn of(config: &SecurityConfig) -> Self {
+    pub(crate) fn of(config: &SecurityConfig) -> Self {
         Self(config.max_tar_metadata_bytes.get().max(MIN_TRAILER_CAP))
     }
 
     /// The cap in bytes.
     #[must_use]
-    pub const fn get(self) -> u64 {
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 }
 
 /// Why the bytes after the end-of-archive marker were refused.
 #[derive(Debug)]
-pub enum TrailerFault {
+pub(crate) enum TrailerFault {
     /// More than the cap followed the marker.
     OverCap(TrailerCap),
     /// The decoder failed while reading the tail.
@@ -239,7 +245,7 @@ pub enum TrailerFault {
 impl TrailerFault {
     /// The refusal as an error; an over-cap tail is relaxable through
     /// `max_tar_metadata_bytes` and names the effective cap.
-    pub fn into_error(self) -> ArchiveError {
+    pub(crate) fn into_error(self) -> ArchiveError {
         match self {
             Self::OverCap(cap) => {
                 ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: cap.get() })
@@ -251,7 +257,7 @@ impl TrailerFault {
 
 /// How a TAR stream is checked after the entry loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TarTrailer {
+pub(crate) enum TarTrailer {
     /// Plain TAR: require one more byte, ignore anything after it.
     Probe,
     /// Compressed (or unknown) stream: read to decoder EOF within the
@@ -263,7 +269,7 @@ pub enum TarTrailer {
 impl TarTrailer {
     /// The check for a stream decoded with `codec`; `None` is a plain TAR.
     #[must_use]
-    pub const fn for_codec(codec: Option<CompressionCodec>) -> Self {
+    pub(crate) const fn for_codec(codec: Option<CompressionCodec>) -> Self {
         match codec {
             Some(_) => Self::DrainToDecoderEof,
             None => Self::Probe,
@@ -276,7 +282,7 @@ impl TarTrailer {
     ///
     /// [`TrailerFault::OverCap`] when more than `cap` bytes follow,
     /// [`TrailerFault::Failed`] when the decoder fails.
-    pub fn drain<R: Read>(
+    pub(crate) fn drain<R: Read>(
         self,
         reader: &mut R,
         cap: TrailerCap,
@@ -291,7 +297,9 @@ impl TarTrailer {
                     buffer,
                     None,
                 )
-                .map_err(|e| TrailerFault::Failed(DecodeFailure::from_copy(e, 0)))?;
+                .map_err(|e| {
+                    TrailerFault::Failed(DecodeFailure::from_copy(e, 0, ReadFamily::Tar))
+                })?;
                 if drained > cap.get() {
                     return Err(TrailerFault::OverCap(cap));
                 }
@@ -306,7 +314,7 @@ impl TarTrailer {
     /// # Errors
     ///
     /// The refusal from [`TrailerFault::into_error`].
-    pub fn enforce<R: Read>(self, reader: &mut R, config: &SecurityConfig) -> Result<()> {
+    pub(crate) fn enforce<R: Read>(self, reader: &mut R, config: &SecurityConfig) -> Result<()> {
         if self == Self::Probe {
             return Ok(());
         }
@@ -321,7 +329,7 @@ impl TarTrailer {
 /// [`IntegrityPass::begin_entry`] mints it, so a slot always refers to an entry
 /// that exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Slot(usize);
+pub(crate) struct Slot(usize);
 
 #[derive(Debug)]
 struct EntrySlot {
@@ -331,14 +339,14 @@ struct EntrySlot {
 
 /// What the pass hands to `verify_manifest`.
 #[derive(Debug)]
-pub struct IntegrityOutcome {
+pub(crate) struct IntegrityOutcome {
     pub entry_issues: Vec<Vec<VerificationIssue>>,
     pub archive_issues: Vec<VerificationIssue>,
     pub gaps: IntegrityGaps,
 }
 
 /// Decodes payloads during listing and collects the integrity issues.
-pub struct IntegrityPass<'c> {
+pub(crate) struct IntegrityPass<'c> {
     config: &'c SecurityConfig,
     quota: QuotaTracker,
     budget_remaining: u64,
@@ -349,7 +357,7 @@ pub struct IntegrityPass<'c> {
 }
 
 impl<'c> IntegrityPass<'c> {
-    pub fn new(config: &'c SecurityConfig, budget: DecompressionBudget) -> Self {
+    pub(crate) fn new(config: &'c SecurityConfig, budget: DecompressionBudget) -> Self {
         Self {
             config,
             quota: QuotaTracker::new(),
@@ -361,14 +369,14 @@ impl<'c> IntegrityPass<'c> {
         }
     }
 
-    pub const fn config(&self) -> &'c SecurityConfig {
+    pub(crate) const fn config(&self) -> &'c SecurityConfig {
         self.config
     }
 
     /// Opens the slot of the manifest entry about to be added and decides
     /// admission with the same quota and ratio checks `verify_manifest` runs.
     /// Returns the slot index, which equals the entry's manifest index.
-    pub fn begin_entry(&mut self, size: u64, compression: &EntryCompression) -> Slot {
+    pub(crate) fn begin_entry(&mut self, size: u64, compression: &EntryCompression) -> Slot {
         let quota_ok = self.quota.reserve(size, self.config).is_ok();
         let ratio_ok =
             validate_entry_compression(compression, Uncompressed(size), self.config).is_ok();
@@ -379,27 +387,27 @@ impl<'c> IntegrityPass<'c> {
         Slot(self.slots.len() - 1)
     }
 
-    pub fn is_admitted(&self, slot: Slot) -> bool {
+    pub(crate) fn is_admitted(&self, slot: Slot) -> bool {
         self.slots[slot.0].admitted
     }
 
-    pub fn push_issue(&mut self, slot: Slot, issue: VerificationIssue) {
+    pub(crate) fn push_issue(&mut self, slot: Slot, issue: VerificationIssue) {
         self.slots[slot.0].issues.push(issue);
     }
 
     /// Counts unverified items that belong to no single entry.
-    pub fn count_unverified(&mut self, reason: UnverifiedReason, items: u64) {
+    pub(crate) fn count_unverified(&mut self, reason: UnverifiedReason, items: u64) {
         self.gaps.count_items(reason, items);
     }
 
     /// Marks the entry at `path` as unverified, listing it in the report.
-    pub fn mark_unverified(&mut self, reason: UnverifiedReason, path: &Path) {
+    pub(crate) fn mark_unverified(&mut self, reason: UnverifiedReason, path: &Path) {
         self.gaps.mark_entry(reason, path);
     }
 
     /// Reserves `bytes` of the budget; an entry that does not fit leaves the
     /// remaining budget untouched so later, smaller entries are still tried.
-    pub fn try_charge(&mut self, bytes: u64) -> bool {
+    pub(crate) fn try_charge(&mut self, bytes: u64) -> bool {
         match self.budget_remaining.checked_sub(bytes) {
             Some(left) => {
                 self.budget_remaining = left;
@@ -410,12 +418,33 @@ impl<'c> IntegrityPass<'c> {
     }
 
     /// Decodes `reader` to its EOF, enforcing `declared` as an exact size.
-    pub fn decode<R: Read + ?Sized>(
+    pub(crate) fn decode<R: Read + ?Sized>(
         &mut self,
         slot: Slot,
         reader: &mut R,
         declared: u64,
         charge: Charge,
+        family: ReadFamily,
+    ) -> DecodeOutcome {
+        self.decode_with_faults(
+            slot,
+            reader,
+            declared,
+            charge,
+            ReadFaults::new(family, None),
+        )
+    }
+
+    /// [`decode`](Self::decode) for a reader whose source records its I/O
+    /// faults: a failure the source caused is [`DecodeFailure::Io`], as in
+    /// extraction.
+    pub(crate) fn decode_with_faults<R: Read + ?Sized>(
+        &mut self,
+        slot: Slot,
+        reader: &mut R,
+        declared: u64,
+        charge: Charge,
+        faults: ReadFaults<'_>,
     ) -> DecodeOutcome {
         if !self.is_admitted(slot) {
             return DecodeOutcome::Unverified(UnverifiedReason::ResourceLimit);
@@ -425,20 +454,26 @@ impl<'c> IntegrityPass<'c> {
         }
         match copy_bounded(reader, &mut io::sink(), &mut self.buffer, Some(declared)) {
             Ok(_) => DecodeOutcome::Verified,
-            Err(e) => DecodeOutcome::Failed(DecodeFailure::from_copy(e, declared)),
+            Err(e) => DecodeOutcome::Failed(DecodeFailure::from_copy_with_fault(
+                e,
+                declared,
+                faults.pending_fault(),
+                faults.family(),
+            )),
         }
     }
 
     /// Copies `reader` to `writer` with the pass's buffer, enforcing
     /// `declared`.
-    pub fn copy_into<R: Read + ?Sized, W: io::Write + ?Sized>(
+    pub(crate) fn copy_into<R: Read + ?Sized, W: io::Write + ?Sized>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
         declared: u64,
+        family: ReadFamily,
     ) -> std::result::Result<u64, DecodeFailure> {
         copy_bounded(reader, writer, &mut self.buffer, Some(declared))
-            .map_err(|e| DecodeFailure::from_copy(e, declared))
+            .map_err(|e| DecodeFailure::from_copy(e, declared, family))
     }
 
     /// Records an outcome against `slot`. The only place a [`DecodeFailure`]
@@ -448,7 +483,7 @@ impl<'c> IntegrityPass<'c> {
     ///
     /// Returns the I/O error of a failing disk read, which is not a property
     /// of the archive.
-    pub fn record(&mut self, slot: Slot, path: &Path, outcome: DecodeOutcome) -> Result<()> {
+    pub(crate) fn record(&mut self, slot: Slot, path: &Path, outcome: DecodeOutcome) -> Result<()> {
         match outcome {
             DecodeOutcome::Verified => {}
             DecodeOutcome::Unverified(reason) => self.mark_unverified(reason, path),
@@ -509,7 +544,11 @@ impl<'c> IntegrityPass<'c> {
     /// # Errors
     ///
     /// Returns the I/O error of a failing disk read, or the over-cap refusal.
-    pub fn check_tar_trailer<R: Read>(&mut self, reader: &mut R, mode: TarTrailer) -> Result<()> {
+    pub(crate) fn check_tar_trailer<R: Read>(
+        &mut self,
+        reader: &mut R,
+        mode: TarTrailer,
+    ) -> Result<()> {
         let cap = TrailerCap::of(self.config);
         match mode.drain(reader, cap, &mut self.buffer) {
             Ok(0) => self.count_unverified(UnverifiedReason::NoEndMarker, 1),
@@ -522,7 +561,7 @@ impl<'c> IntegrityPass<'c> {
 
     /// Adds the single archive-level `IntegrityIncomplete` issue when anything
     /// was left unverified, and returns the collected issues.
-    pub fn finish(mut self) -> IntegrityOutcome {
+    pub(crate) fn finish(mut self) -> IntegrityOutcome {
         if !self.gaps.is_empty() {
             self.archive_issues.push(VerificationIssue::new(
                 IssueSeverity::Medium,
@@ -543,7 +582,7 @@ fn probe_one_byte<R: Read>(reader: &mut R) -> std::result::Result<u64, DecodeFai
         match reader.read(&mut byte) {
             Ok(n) => return Ok(n as u64),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(DecodeFailure::from_read_error(e, 0)),
+            Err(e) => return Err(DecodeFailure::from_read_error(e, 0, None, ReadFamily::Tar)),
         }
     }
 }
@@ -569,12 +608,14 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::formats::source_fault::zip_fixtures::forged_size_zip;
+    use crate::formats::source_fault::zip_fixtures::zip_read_error;
     use crate::formats::tar_metadata_limit::DecoderMemoryExceeded;
     use crate::inspection::report::IssueCategory;
     use crate::inspection::report::MAX_LISTED_UNVERIFIED;
 
     fn read_failure(e: io::Error) -> DecodeFailure {
-        DecodeFailure::from_copy(CopyError::Read(e), 10)
+        DecodeFailure::from_copy(CopyError::Read(e), 10, ReadFamily::Zip)
     }
 
     fn pass_with_budget(config: &SecurityConfig, bytes: u64) -> IntegrityPass<'_> {
@@ -599,17 +640,66 @@ mod tests {
         let slot = pass.begin_entry(6, &EntryCompression::Unknown);
 
         assert_matches!(
-            pass.decode(slot, &mut entry, 6, Charge::Free),
+            pass.decode(slot, &mut entry, 6, Charge::Free, ReadFamily::Zip),
             DecodeOutcome::Failed(DecodeFailure::Checksum)
         );
     }
 
     #[test]
     fn test_classification_zip_declared_size_overrun() {
-        let e = io::Error::new(io::ErrorKind::InvalidData, ZIP_DECLARED_SIZE_EXCEEDED);
+        let e = zip_read_error(&forged_size_zip());
         assert_matches!(
             read_failure(e),
             DecodeFailure::DeclaredSizeOverrun { declared: 10 }
+        );
+    }
+
+    #[test]
+    fn test_classification_source_fault_wins_in_verify() {
+        let fault = || Some(io::Error::new(io::ErrorKind::TimedOut, "slow"));
+        assert_matches!(
+            DecodeFailure::from_copy_with_fault(
+                CopyError::Read(io::Error::new(io::ErrorKind::InvalidData, "lzma data error")),
+                10,
+                fault(),
+                ReadFamily::Zip
+            ),
+            DecodeFailure::Io(ref e) if e.kind() == io::ErrorKind::TimedOut
+        );
+        assert_matches!(
+            DecodeFailure::from_copy_with_fault(
+                CopyError::Short {
+                    declared: 10,
+                    actual: 4
+                },
+                10,
+                fault(),
+                ReadFamily::Zip
+            ),
+            DecodeFailure::Io(_)
+        );
+        assert_matches!(
+            DecodeFailure::from_copy_with_fault(
+                CopyError::Short {
+                    declared: 10,
+                    actual: 4
+                },
+                10,
+                None,
+                ReadFamily::Zip
+            ),
+            DecodeFailure::Truncated {
+                declared: 10,
+                actual: Some(4)
+            }
+        );
+    }
+
+    #[test]
+    fn test_classification_replay_checksum_mismatch() {
+        assert_matches!(
+            read_failure(crate::formats::source_fault::ReplayChecksumMismatch::into_io()),
+            DecodeFailure::Checksum
         );
     }
 
@@ -659,7 +749,7 @@ mod tests {
     #[test]
     fn test_classification_copy_size_errors() {
         assert_matches!(
-            DecodeFailure::from_copy(CopyError::Overrun { declared: 3 }, 3),
+            DecodeFailure::from_copy(CopyError::Overrun { declared: 3 }, 3, ReadFamily::Zip),
             DecodeFailure::DeclaredSizeOverrun { declared: 3 }
         );
         assert_matches!(
@@ -668,7 +758,8 @@ mod tests {
                     declared: 3,
                     actual: 1
                 },
-                3
+                3,
+                ReadFamily::Zip
             ),
             DecodeFailure::Truncated {
                 declared: 3,
@@ -676,7 +767,7 @@ mod tests {
             }
         );
         assert_matches!(
-            DecodeFailure::from_copy(CopyError::Overflow, 3),
+            DecodeFailure::from_copy(CopyError::Overflow, 3, ReadFamily::Zip),
             DecodeFailure::ResourceLimit(ArchiveError::QuotaExceeded { .. })
         );
     }
@@ -901,7 +992,13 @@ mod tests {
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(8, &EntryCompression::Unknown);
 
-        let outcome = pass.decode(slot, &mut io::Cursor::new(vec![0u8; 8]), 8, Charge::Free);
+        let outcome = pass.decode(
+            slot,
+            &mut io::Cursor::new(vec![0u8; 8]),
+            8,
+            Charge::Free,
+            ReadFamily::Opaque,
+        );
         assert_matches!(
             outcome,
             DecodeOutcome::Unverified(UnverifiedReason::ResourceLimit)
@@ -914,7 +1011,13 @@ mod tests {
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(4, &EntryCompression::Unknown);
 
-        let short = pass.decode(slot, &mut io::Cursor::new(vec![0u8; 2]), 4, Charge::Free);
+        let short = pass.decode(
+            slot,
+            &mut io::Cursor::new(vec![0u8; 2]),
+            4,
+            Charge::Free,
+            ReadFamily::Opaque,
+        );
         assert_matches!(
             short,
             DecodeOutcome::Failed(DecodeFailure::Truncated {
@@ -922,12 +1025,24 @@ mod tests {
                 actual: Some(2)
             })
         );
-        let long = pass.decode(slot, &mut io::Cursor::new(vec![0u8; 9]), 4, Charge::Free);
+        let long = pass.decode(
+            slot,
+            &mut io::Cursor::new(vec![0u8; 9]),
+            4,
+            Charge::Free,
+            ReadFamily::Opaque,
+        );
         assert_matches!(
             long,
             DecodeOutcome::Failed(DecodeFailure::DeclaredSizeOverrun { declared: 4 })
         );
-        let exact = pass.decode(slot, &mut io::Cursor::new(vec![0u8; 4]), 4, Charge::Free);
+        let exact = pass.decode(
+            slot,
+            &mut io::Cursor::new(vec![0u8; 4]),
+            4,
+            Charge::Free,
+            ReadFamily::Opaque,
+        );
         assert_matches!(exact, DecodeOutcome::Verified);
     }
 

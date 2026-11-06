@@ -16,22 +16,22 @@ use std::io::Write;
 /// The host's relative path limit, written out per host and independent of the
 /// production constant so a wrong value there is caught.
 #[cfg(target_os = "linux")]
-pub const HOST_PATH_LIMIT: usize = 4095;
+pub(crate) const HOST_PATH_LIMIT: usize = 4095;
 #[cfg(target_os = "windows")]
-pub const HOST_PATH_LIMIT: usize = 32767;
+pub(crate) const HOST_PATH_LIMIT: usize = 32767;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub const HOST_PATH_LIMIT: usize = 1023;
+pub(crate) const HOST_PATH_LIMIT: usize = 1023;
 
 /// The most bytes a symlink target may take on the host, written out per host
 /// like [`HOST_PATH_LIMIT`]: on Windows 4091 UTF-16 units of at most 3 bytes.
 #[cfg(target_os = "windows")]
-pub const HOST_SYMLINK_TARGET_BYTES: usize = 4091 * 3;
+pub(crate) const HOST_SYMLINK_TARGET_BYTES: usize = 4091 * 3;
 #[cfg(not(target_os = "windows"))]
-pub const HOST_SYMLINK_TARGET_BYTES: usize = HOST_PATH_LIMIT;
+pub(crate) const HOST_SYMLINK_TARGET_BYTES: usize = HOST_PATH_LIMIT;
 
 /// Flips the low bit of the first byte of `marker` found in `bytes`, so stored
 /// data fails its checksum.
-pub fn flip_first(bytes: &mut [u8], marker: &[u8]) {
+pub(crate) fn flip_first(bytes: &mut [u8], marker: &[u8]) {
     let at = bytes
         .windows(marker.len())
         .position(|w| w == marker)
@@ -41,7 +41,7 @@ pub fn flip_first(bytes: &mut [u8], marker: &[u8]) {
 
 /// A relative path of exactly `len` bytes made of 100-byte components.
 #[must_use]
-pub fn path_of_len(len: usize) -> String {
+pub(crate) fn path_of_len(len: usize) -> String {
     let mut parts = Vec::new();
     let mut left = len;
     while left > 0 {
@@ -56,7 +56,7 @@ pub fn path_of_len(len: usize) -> String {
 ///
 /// All files are created with mode `0o644`.
 #[must_use]
-pub fn create_test_tar(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
+pub(crate) fn create_test_tar(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
     let mut ar = tar::Builder::new(Vec::new());
     for (path, data) in entries {
         let mut header = tar::Header::new_gnu();
@@ -72,7 +72,7 @@ pub fn create_test_tar(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
 ///
 /// Files are stored uncompressed with mode `0o644`.
 #[must_use]
-pub fn create_test_zip(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
+pub(crate) fn create_test_zip(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
     use zip::write::SimpleFileOptions;
     use zip::write::ZipWriter;
 
@@ -97,7 +97,7 @@ pub fn create_test_zip(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
 /// craft entries with absolute paths or traversal sequences that
 /// the `zip` crate's own writer refuses to produce.
 #[must_use]
-pub fn create_raw_zip_entry(entry_name: &str, content: &[u8]) -> Vec<u8> {
+pub(crate) fn create_raw_zip_entry(entry_name: &str, content: &[u8]) -> Vec<u8> {
     use exarch_testkit::raw_zip::RawEntry;
     use exarch_testkit::raw_zip::RawZip;
 
@@ -111,14 +111,14 @@ pub fn create_raw_zip_entry(entry_name: &str, content: &[u8]) -> Vec<u8> {
 
 /// Builder for creating TAR test archives with files, directories, symlinks,
 /// and hardlinks.
-pub struct TarTestBuilder {
+pub(crate) struct TarTestBuilder {
     builder: tar::Builder<Vec<u8>>,
 }
 
 impl TarTestBuilder {
     /// Creates a new TAR test builder.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             builder: tar::Builder::new(Vec::new()),
         }
@@ -126,7 +126,7 @@ impl TarTestBuilder {
 
     /// Adds a regular file to the archive.
     #[must_use]
-    pub fn add_file(mut self, path: &str, data: &[u8]) -> Self {
+    pub(crate) fn add_file(mut self, path: &str, data: &[u8]) -> Self {
         let mut header = tar::Header::new_gnu();
         header.set_size(data.len() as u64);
         header.set_mode(0o644);
@@ -137,7 +137,7 @@ impl TarTestBuilder {
 
     /// Adds a directory to the archive.
     #[must_use]
-    pub fn add_directory(mut self, path: &str) -> Self {
+    pub(crate) fn add_directory(mut self, path: &str) -> Self {
         let mut header = tar::Header::new_gnu();
         header.set_size(0);
         header.set_mode(0o755);
@@ -151,7 +151,7 @@ impl TarTestBuilder {
 
     /// Builds and returns the TAR archive data.
     #[must_use]
-    pub fn build(self) -> Vec<u8> {
+    pub(crate) fn build(self) -> Vec<u8> {
         self.builder.into_inner().unwrap()
     }
 }
@@ -169,7 +169,7 @@ impl Default for TarTestBuilder {
 /// external attributes field. This bypasses the zip crate writer's
 /// `unix_permissions()` path, which does not set external attributes reliably.
 #[must_use]
-pub fn create_zip_with_symlink(link_path: &str, target: &str) -> Vec<u8> {
+pub(crate) fn create_zip_with_symlink(link_path: &str, target: &str) -> Vec<u8> {
     use exarch_testkit::raw_zip::RawEntry;
     use exarch_testkit::raw_zip::RawZip;
     use exarch_testkit::raw_zip::SYMLINK_MODE;
@@ -184,14 +184,14 @@ pub fn create_zip_with_symlink(link_path: &str, target: &str) -> Vec<u8> {
 
 /// Builder for creating ZIP test archives with files, directories, and
 /// symlinks.
-pub struct ZipTestBuilder {
+pub(crate) struct ZipTestBuilder {
     zip: zip::ZipWriter<Cursor<Vec<u8>>>,
 }
 
 impl ZipTestBuilder {
     /// Creates a new ZIP test builder.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             zip: zip::ZipWriter::new(Cursor::new(Vec::new())),
         }
@@ -199,7 +199,7 @@ impl ZipTestBuilder {
 
     /// Adds a regular file to the archive.
     #[must_use]
-    pub fn add_file(mut self, path: &str, data: &[u8]) -> Self {
+    pub(crate) fn add_file(mut self, path: &str, data: &[u8]) -> Self {
         use zip::write::SimpleFileOptions;
 
         let options = SimpleFileOptions::default()
@@ -213,7 +213,7 @@ impl ZipTestBuilder {
 
     /// Adds a directory to the archive.
     #[must_use]
-    pub fn add_directory(mut self, path: &str) -> Self {
+    pub(crate) fn add_directory(mut self, path: &str) -> Self {
         use zip::write::SimpleFileOptions;
 
         let options = SimpleFileOptions::default().unix_permissions(0o755);
@@ -223,7 +223,7 @@ impl ZipTestBuilder {
 
     /// Builds and returns the ZIP archive data.
     #[must_use]
-    pub fn build(self) -> Vec<u8> {
+    pub(crate) fn build(self) -> Vec<u8> {
         self.zip.finish().unwrap().into_inner()
     }
 }
@@ -274,7 +274,7 @@ fn pad_tar_block(out: &mut Vec<u8>, data: &[u8]) {
 /// value in a `path`/`linkpath` record — can be constructed for security
 /// regression tests.
 #[must_use]
-pub fn tar_with_pax_record(
+pub(crate) fn tar_with_pax_record(
     pax_key: &str,
     pax_value: &[u8],
     entry_name: &[u8],
@@ -296,7 +296,7 @@ pub fn tar_with_pax_record(
 /// `pax_path` (which may contain a NUL byte) as the effective path of a
 /// regular-file entry with body `data`.
 #[must_use]
-pub fn tar_with_pax_nul_path(pax_path: &[u8], data: &[u8]) -> Vec<u8> {
+pub(crate) fn tar_with_pax_nul_path(pax_path: &[u8], data: &[u8]) -> Vec<u8> {
     tar_with_pax_record("path", pax_path, b"ustar_name.txt", b'0', data)
 }
 
@@ -305,7 +305,7 @@ pub fn tar_with_pax_nul_path(pax_path: &[u8], data: &[u8]) -> Vec<u8> {
 /// the effective link target of a symlink/hardlink entry. `typeflag` is
 /// `b'2'` for a symlink entry, `b'1'` for a hardlink entry.
 #[must_use]
-pub fn tar_with_pax_linkpath(pax_linkpath: &[u8], typeflag: u8) -> Vec<u8> {
+pub(crate) fn tar_with_pax_linkpath(pax_linkpath: &[u8], typeflag: u8) -> Vec<u8> {
     tar_with_pax_record("linkpath", pax_linkpath, b"link_entry", typeflag, b"")
 }
 
@@ -316,7 +316,7 @@ pub fn tar_with_pax_linkpath(pax_linkpath: &[u8], typeflag: u8) -> Vec<u8> {
 /// (which requires a `Path`), so arbitrary non-UTF8 byte sequences can be
 /// used as the entry name for extractability regression tests.
 #[must_use]
-pub fn tar_with_nonutf8_name(name_bytes: &[u8], data: &[u8]) -> Vec<u8> {
+pub(crate) fn tar_with_nonutf8_name(name_bytes: &[u8], data: &[u8]) -> Vec<u8> {
     let mut tar = Vec::new();
     tar.extend_from_slice(&raw_tar_header(name_bytes, data.len(), b'0'));
     pad_tar_block(&mut tar, data);

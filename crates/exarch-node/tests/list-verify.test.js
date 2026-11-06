@@ -132,7 +132,7 @@ describe('verifyArchive (async)', () => {
     createValidArchive(archivePath, tempDir);
 
     const config = new SecurityConfig();
-    config.setMaxFileSize(1024);
+    config.withMaxFileSize(1024);
     const report = await verifyArchive(archivePath, config);
 
     assert.ok(report.status);
@@ -269,7 +269,7 @@ describe('verifyArchiveSync link policy', () => {
 
     assert.strictEqual(verifyArchiveSync(archivePath).status, 'FAIL');
 
-    const config = new SecurityConfig().setAllowSymlinks(true);
+    const config = new SecurityConfig().withAllowSymlinks(true);
     assert.strictEqual(verifyArchiveSync(archivePath, config).status, 'PASS');
   });
 });

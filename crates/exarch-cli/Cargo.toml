@@ -26,6 +26,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tempfile.workspace = true
 
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+ctrlc.workspace = true
+
 [dev-dependencies]
 assert_cmd.workspace = true
 exarch-testkit.workspace = true

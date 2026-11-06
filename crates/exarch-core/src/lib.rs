@@ -20,43 +20,34 @@
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+#![warn(unreachable_pub)]
+// `pub(crate)` marks internal items in private modules; `redundant_pub_crate`
+// contradicts `unreachable_pub` and would push them back to `pub`.
+#![allow(clippy::redundant_pub_crate)]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
-// NOTE: `pub(crate)` marks intent inside the private modules below;
-// `redundant_pub_crate` contradicts `unreachable_pub` (408 sites) and would
-// flatten it to `pub`.
-#[allow(clippy::redundant_pub_crate)]
 mod api;
 pub(crate) mod closed_enum;
-#[allow(clippy::redundant_pub_crate)]
 mod config;
 pub(crate) mod copy;
-#[allow(clippy::redundant_pub_crate)]
 mod creation;
-#[allow(clippy::redundant_pub_crate)]
+mod destination_state;
 mod error;
-#[allow(clippy::redundant_pub_crate)]
 mod formats;
-#[allow(clippy::redundant_pub_crate)]
 mod inspection;
 mod limit;
 mod listed;
 mod path_text;
-#[allow(clippy::redundant_pub_crate)]
 mod reader;
 mod report;
 mod request;
-#[allow(clippy::redundant_pub_crate)]
 mod security;
 mod selection;
-#[allow(clippy::redundant_pub_crate)]
 mod sink;
 mod staging;
 #[cfg(test)]
 pub(crate) mod test_utils;
-#[allow(clippy::redundant_pub_crate)]
 mod types;
-#[allow(clippy::redundant_pub_crate)]
 mod writer;
 
 #[cfg(test)]
@@ -87,6 +78,7 @@ pub use config::Staging;
 pub use config::StoredTargets;
 pub use config::VerificationOptions;
 pub use config::ZipConsistencyPolicy;
+pub use destination_state::DestinationState;
 pub use error::ArchiveError;
 pub use error::CentralRecordOrdinal;
 pub use error::CompressionRatio;
@@ -95,8 +87,11 @@ pub use error::ConfigSetting;
 pub use error::EndRecordKind;
 pub use error::ErrorCode;
 pub use error::ExcludeRefusal;
+pub use error::FfiDetail;
 pub use error::FfiErrorMessage;
 pub use error::FfiKind;
+pub use error::FfiNameCollision;
+pub use error::FfiRestore;
 pub use error::FfiSourceFault;
 pub use error::HiddenRegion;
 pub use error::InvalidArchiveSubCode;
@@ -117,6 +112,7 @@ pub use error::ReaderFormatError;
 pub use error::ReplaceFailure;
 pub use error::RequestedLevel;
 pub use error::Restore;
+pub use error::RestoreKind;
 pub use error::Result;
 pub use error::SecurityViolationSubCode;
 pub use error::SolidMemoryScope;
@@ -201,6 +197,7 @@ pub use inspection::ArchiveEntry;
 pub use inspection::ArchiveManifest;
 pub use inspection::CheckStatus;
 pub use inspection::Disposition;
+pub use inspection::DispositionKind;
 pub use inspection::EntryCompression;
 pub use inspection::Finding;
 pub use inspection::Heuristic;

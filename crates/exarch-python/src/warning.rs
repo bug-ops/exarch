@@ -7,7 +7,6 @@
 use exarch_core::BackupIdentity;
 use exarch_core::CreationWarning;
 use exarch_core::ExtractionWarning;
-use exarch_core::sanitize_path_for_error;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -182,33 +181,14 @@ impl PyDirectoryNotSyncedWarning {
     }
 }
 
-/// The description of an extraction warning with host paths redacted: core's
-/// `Display` is run over a copy whose backup path is already redacted.
-fn extraction_message(warning: &ExtractionWarning) -> String {
-    match warning {
-        ExtractionWarning::BackupCleanupFailed {
-            path,
-            identity,
-            io_kind,
-            message,
-        } => ExtractionWarning::BackupCleanupFailed {
-            path: sanitize_path_for_error(path).into(),
-            identity: *identity,
-            io_kind: *io_kind,
-            message: message.clone(),
-        }
-        .to_string(),
-        _ => warning.to_string(),
-    }
-}
-
 fn extraction_warning(py: Python<'_>, warning: &ExtractionWarning) -> PyResult<Py<PyAny>> {
+    let warning = warning.redacted();
     let base = PyExtractionWarning {
         kind: warning.kind().as_str(),
-        message: extraction_message(warning),
+        message: warning.to_string(),
     };
     let initializer = PyClassInitializer::from(base);
-    match warning {
+    match &warning {
         ExtractionWarning::AntiItemsSkipped { count } => Bound::new(
             py,
             initializer.add_subclass(PyAntiItemsSkippedWarning { count: *count }),
@@ -222,7 +202,7 @@ fn extraction_warning(py: Python<'_>, warning: &ExtractionWarning) -> PyResult<P
         } => Bound::new(
             py,
             initializer.add_subclass(PyBackupCleanupFailedWarning {
-                path: sanitize_path_for_error(path),
+                path: path.to_string_lossy().into_owned(),
                 identity: *identity,
                 io_kind: io_kind.as_str(),
                 reason: message.to_string(),
@@ -339,7 +319,7 @@ mod tests {
             let path = attr::<String>(&object, "path");
             assert_eq!(
                 path,
-                sanitize_path_for_error(std::path::Path::new("/srv/private/backup"))
+                exarch_core::sanitize_path_for_error(std::path::Path::new("/srv/private/backup"))
             );
             assert!(attr::<String>(&object, "message").contains(&path));
         });

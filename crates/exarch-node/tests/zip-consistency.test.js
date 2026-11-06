@@ -37,14 +37,14 @@ describe('SecurityConfig zipConsistency', () => {
 
   it('round-trips through the setter', () => {
     const config = new SecurityConfig();
-    config.setZipConsistency('ignore');
+    config.withZipConsistency('ignore');
     assert.strictEqual(config.zipConsistency, 'ignore');
-    config.setZipConsistency('enforce');
+    config.withZipConsistency('enforce');
     assert.strictEqual(config.zipConsistency, 'enforce');
   });
 
   it('rejects unknown values', () => {
-    assert.throws(() => new SecurityConfig().setZipConsistency('off'));
+    assert.throws(() => new SecurityConfig().withZipConsistency('off'));
   });
 });
 
@@ -70,7 +70,7 @@ describe('ZIP structure policy', () => {
   it('extract with ignore keeps the central directory name', () => {
     const out = path.join(tempDir, 'out');
     const config = new SecurityConfig();
-    config.setZipConsistency('ignore');
+    config.withZipConsistency('ignore');
     extractArchiveSync(archive, out, config);
     assert.ok(fs.existsSync(path.join(out, 'sample.txt')));
   });
@@ -78,7 +78,7 @@ describe('ZIP structure policy', () => {
   it('list rejects under enforce and succeeds under ignore', () => {
     assert.throws(() => listArchiveSync(archive), { code: 'ZIP_INCONSISTENCY' });
     const config = new SecurityConfig();
-    config.setZipConsistency('ignore');
+    config.withZipConsistency('ignore');
     assert.strictEqual(listArchiveSync(archive, config).totalEntries, 1);
   });
 
@@ -88,7 +88,7 @@ describe('ZIP structure policy', () => {
     assert.ok(report.issues.some((issue) => issue.category === 'Header Mismatch'));
 
     const config = new SecurityConfig();
-    config.setZipConsistency('ignore');
+    config.withZipConsistency('ignore');
     assert.strictEqual(verifyArchiveSync(archive, config).status, 'PASS');
   });
 });

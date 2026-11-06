@@ -23,7 +23,7 @@ use crate::types::safe_path::check_component_for;
 use crate::types::safe_symlink::has_root_or_prefix;
 
 /// Error for a hardlink whose target is absent when the link is created.
-pub fn hardlink_target_missing(target: &Path) -> ArchiveError {
+pub(crate) fn hardlink_target_missing(target: &Path) -> ArchiveError {
     ArchiveError::from(Malformation::HardlinkTargetAbsent {
         target: target.to_path_buf(),
     })
@@ -35,7 +35,7 @@ pub fn hardlink_target_missing(target: &Path) -> ArchiveError {
 ///
 /// Returns `SecurityViolation` ("hardlinks not allowed") when hardlinks are
 /// disabled.
-pub fn require_hardlinks_allowed(config: &SecurityConfig) -> Result<()> {
+pub(crate) fn require_hardlinks_allowed(config: &SecurityConfig) -> Result<()> {
     config
         .allowed
         .hardlinks
@@ -144,11 +144,13 @@ impl HardlinkTarget {
 /// # }
 /// ```
 #[derive(Debug, Default)]
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub struct HardlinkTracker {
     /// Maps target path to the first link path that referenced it
     seen_targets: HashMap<PathBuf, PathBuf>,
 }
 
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 impl HardlinkTracker {
     /// Creates a new hardlink tracker.
     #[must_use]

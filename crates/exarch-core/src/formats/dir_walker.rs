@@ -55,7 +55,7 @@ use crate::types::safe_path::ParentCheck;
 /// handle is already pinned, so lending it saves an `openat` and a `close` per
 /// top-level entry.
 #[derive(Debug)]
-pub enum DirRef<'r> {
+pub(crate) enum DirRef<'r> {
     /// The destination's pinned root handle, lent by the [`PinnedRoot`].
     Root(&'r VettedDir),
     /// A handle the walk opened below the root, owned by the caller.
@@ -86,7 +86,7 @@ impl std::ops::Deref for DirRef<'_> {
 
 /// What an existing symlink among the parent components may be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkPolicy {
+pub(crate) enum LinkPolicy {
     /// Any symlink component is refused.
     Refuse,
     /// A symlink component is accepted only if it resolves to a directory
@@ -139,13 +139,13 @@ impl Hop<'_> {
 
 /// Creates and vets the directories that archive entries are written into.
 #[derive(Debug, Clone, Copy)]
-pub struct DirWalker {
+pub(crate) struct DirWalker {
     links: LinkPolicy,
 }
 
 impl DirWalker {
     /// Builds a walker that applies the symlink policy of `config`.
-    pub fn new(config: &SecurityConfig) -> Self {
+    pub(crate) fn new(config: &SecurityConfig) -> Self {
         Self {
             links: LinkPolicy::of(config),
         }

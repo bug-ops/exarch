@@ -27,17 +27,18 @@
 //! ```
 
 pub(crate) mod integrity;
-pub mod landing;
-pub mod list;
-pub mod manifest;
-pub mod report;
-pub mod verify;
+pub(crate) mod landing;
+pub(crate) mod list;
+pub(crate) mod manifest;
+pub(crate) mod report;
+pub(crate) mod verify;
 
 pub use landing::Disposition;
+pub use landing::DispositionKind;
 pub use landing::Landing;
 pub use landing::LandingKind;
 pub use landing::LandingPath;
-pub use list::list_archive;
+pub(crate) use list::list_archive;
 pub(crate) use list::list_archive_with_progress;
 pub use manifest::ArchiveEntry;
 pub use manifest::ArchiveManifest;
@@ -61,5 +62,5 @@ pub use report::UnverifiedReason;
 pub use report::VerificationIssue;
 pub use report::VerificationReport;
 pub use report::VerificationStatus;
-pub use verify::verify_archive;
+pub(crate) use verify::verify_archive;
 pub(crate) use verify::verify_archive_with_progress;

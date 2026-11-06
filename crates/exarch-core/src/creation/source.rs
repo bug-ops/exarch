@@ -13,7 +13,7 @@ use std::path::PathBuf;
 /// A source that is gone (`NotFound`, or a parent that is not a directory) is
 /// [`ArchiveError::SourceNotFound`]; every other failure keeps its cause in
 /// [`ArchiveError::SourceNotAccessible`].
-pub fn source_error(path: &Path, error: io::Error) -> ArchiveError {
+pub(crate) fn source_error(path: &Path, error: io::Error) -> ArchiveError {
     if matches!(
         error.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
@@ -33,7 +33,7 @@ pub fn source_error(path: &Path, error: io::Error) -> ArchiveError {
 ///
 /// An I/O cause is a source failure at the path walkdir names; a walk error
 /// without one (a symlink loop) stays a context-carrying `Io` error.
-pub fn walk_error(error: walkdir::Error, fallback: &Path) -> ArchiveError {
+pub(crate) fn walk_error(error: walkdir::Error, fallback: &Path) -> ArchiveError {
     let path: PathBuf = error.path().unwrap_or(fallback).to_path_buf();
     let text = error.to_string();
     error.into_io_error().map_or_else(
@@ -60,13 +60,13 @@ fn duplicate(error: &io::Error) -> io::Error {
 /// A copy into the archive fails with one `io::Error` whether the read or the
 /// write side broke; the slot tells the two apart so only a read fault is
 /// reported as an unreadable source.
-pub struct FaultSlotReader<'a, R> {
+pub(crate) struct FaultSlotReader<'a, R> {
     inner: R,
     fault: &'a mut Option<io::Error>,
 }
 
 impl<'a, R> FaultSlotReader<'a, R> {
-    pub const fn new(inner: R, fault: &'a mut Option<io::Error>) -> Self {
+    pub(crate) const fn new(inner: R, fault: &'a mut Option<io::Error>) -> Self {
         Self { inner, fault }
     }
 }
@@ -86,7 +86,11 @@ impl<R: Read> Read for FaultSlotReader<'_, R> {
 
 /// Resolves the outcome of a copy out of the source `path`: a recorded read
 /// fault is a source error, any other failure is the writer's.
-pub fn copy_outcome<T>(result: io::Result<T>, fault: Option<io::Error>, path: &Path) -> Result<T> {
+pub(crate) fn copy_outcome<T>(
+    result: io::Result<T>,
+    fault: Option<io::Error>,
+    path: &Path,
+) -> Result<T> {
     result.map_err(|error| fault.map_or_else(|| error.into(), |fault| source_error(path, fault)))
 }
 

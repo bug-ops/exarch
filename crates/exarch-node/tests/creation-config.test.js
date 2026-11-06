@@ -28,33 +28,33 @@ describe('CreationConfig', () => {
   describe('builder methods', () => {
     it('should set compression level', () => {
       const config = new CreationConfig();
-      config.setCompressionLevel(9);
+      config.withCompressionLevel(9);
 
       assert.strictEqual(config.compressionLevel, 9);
     });
 
     it('should set preserve permissions', () => {
       const config = new CreationConfig();
-      config.setPreservePermissions(false);
+      config.withPreservePermissions(false);
 
       assert.strictEqual(config.preservePermissions, false);
     });
 
     it('should set preserve permissions back to true', () => {
       const config = new CreationConfig();
-      config.setPreservePermissions(false);
-      config.setPreservePermissions(true);
+      config.withPreservePermissions(false);
+      config.withPreservePermissions(true);
 
       assert.strictEqual(config.preservePermissions, true);
     });
 
-    it('should throw when setPreservePermissions is called with no argument, undefined, or null', () => {
+    it('should throw when withPreservePermissions is called with no argument, undefined, or null', () => {
       const config = new CreationConfig();
-      config.setPreservePermissions(false);
+      config.withPreservePermissions(false);
 
-      assert.throws(() => config.setPreservePermissions());
-      assert.throws(() => config.setPreservePermissions(undefined));
-      assert.throws(() => config.setPreservePermissions(null));
+      assert.throws(() => config.withPreservePermissions());
+      assert.throws(() => config.withPreservePermissions(undefined));
+      assert.throws(() => config.withPreservePermissions(null));
       assert.strictEqual(
         config.preservePermissions,
         false,
@@ -64,26 +64,26 @@ describe('CreationConfig', () => {
 
     it('should set follow symlinks', () => {
       const config = new CreationConfig();
-      config.setFollowSymlinks(true);
+      config.withFollowSymlinks(true);
 
       assert.strictEqual(config.followSymlinks, true);
     });
 
     it('should set follow symlinks back to false', () => {
       const config = new CreationConfig();
-      config.setFollowSymlinks(true);
-      config.setFollowSymlinks(false);
+      config.withFollowSymlinks(true);
+      config.withFollowSymlinks(false);
 
       assert.strictEqual(config.followSymlinks, false);
     });
 
-    it('should throw when setFollowSymlinks is called with no argument, undefined, or null', () => {
+    it('should throw when withFollowSymlinks is called with no argument, undefined, or null', () => {
       const config = new CreationConfig();
-      config.setFollowSymlinks(true);
+      config.withFollowSymlinks(true);
 
-      assert.throws(() => config.setFollowSymlinks());
-      assert.throws(() => config.setFollowSymlinks(undefined));
-      assert.throws(() => config.setFollowSymlinks(null));
+      assert.throws(() => config.withFollowSymlinks());
+      assert.throws(() => config.withFollowSymlinks(undefined));
+      assert.throws(() => config.withFollowSymlinks(null));
       assert.strictEqual(
         config.followSymlinks,
         true,
@@ -93,26 +93,26 @@ describe('CreationConfig', () => {
 
     it('should set include hidden', () => {
       const config = new CreationConfig();
-      config.setIncludeHidden(true);
+      config.withIncludeHidden(true);
 
       assert.strictEqual(config.includeHidden, true);
     });
 
     it('should set include hidden back to false', () => {
       const config = new CreationConfig();
-      config.setIncludeHidden(true);
-      config.setIncludeHidden(false);
+      config.withIncludeHidden(true);
+      config.withIncludeHidden(false);
 
       assert.strictEqual(config.includeHidden, false);
     });
 
-    it('should throw when setIncludeHidden is called with no argument, undefined, or null', () => {
+    it('should throw when withIncludeHidden is called with no argument, undefined, or null', () => {
       const config = new CreationConfig();
-      config.setIncludeHidden(true);
+      config.withIncludeHidden(true);
 
-      assert.throws(() => config.setIncludeHidden());
-      assert.throws(() => config.setIncludeHidden(undefined));
-      assert.throws(() => config.setIncludeHidden(null));
+      assert.throws(() => config.withIncludeHidden());
+      assert.throws(() => config.withIncludeHidden(undefined));
+      assert.throws(() => config.withIncludeHidden(null));
       assert.strictEqual(
         config.includeHidden,
         true,
@@ -122,7 +122,7 @@ describe('CreationConfig', () => {
 
     it('should set max file size', () => {
       const config = new CreationConfig();
-      config.setMaxFileSize(100 * 1024 * 1024);
+      config.withMaxFileSize(100 * 1024 * 1024);
 
       assert.strictEqual(config.maxFileSize, 100 * 1024 * 1024);
     });
@@ -131,18 +131,18 @@ describe('CreationConfig', () => {
       const config = new CreationConfig();
       assert.strictEqual(config.maxFileSize, null);
 
-      config.setMaxFileSize(1024);
-      config.setMaxFileSize(null);
+      config.withMaxFileSize(1024);
+      config.withMaxFileSize(null);
       assert.strictEqual(config.maxFileSize, null);
     });
 
     it('should refuse a zero or negative max file size as INVALID_CONFIGURATION', () => {
       const config = new CreationConfig();
-      config.setMaxFileSize(1024);
+      config.withMaxFileSize(1024);
 
       for (const bad of [0, -1]) {
         assert.throws(
-          () => config.setMaxFileSize(bad),
+          () => config.withMaxFileSize(bad),
           (err) => {
             assert.strictEqual(err.code, 'INVALID_CONFIGURATION');
             assert.strictEqual(err.setting, 'max_file_size');
@@ -177,15 +177,15 @@ describe('CreationConfig', () => {
     it('should replace the exclude patterns and clear them with an empty list', () => {
       const config = new CreationConfig();
       assert.ok(config.excludePatterns.includes('.git'));
-      assert.strictEqual(config.setExcludePatterns(['target', '*.log']), config);
+      assert.strictEqual(config.withExcludePatterns(['target', '*.log']), config);
       assert.deepStrictEqual(config.excludePatterns, ['target', '*.log']);
-      config.setExcludePatterns([]);
+      config.withExcludePatterns([]);
       assert.deepStrictEqual(config.excludePatterns, []);
     });
 
     it('should refuse a bad member as INVALID_CONFIGURATION and keep the old list', () => {
-      const config = new CreationConfig().setExcludePatterns(['target']);
-      assert.throws(() => config.setExcludePatterns(['ok', 'bad\0pattern']), {
+      const config = new CreationConfig().withExcludePatterns(['target']);
+      assert.throws(() => config.withExcludePatterns(['ok', 'bad\0pattern']), {
         code: 'INVALID_CONFIGURATION',
         setting: 'exclude_pattern',
       });
@@ -197,7 +197,7 @@ describe('CreationConfig', () => {
     it('should accept valid compression levels 1-9', () => {
       for (let level = 1; level <= 9; level++) {
         const config = new CreationConfig();
-        config.setCompressionLevel(level);
+        config.withCompressionLevel(level);
         assert.strictEqual(config.compressionLevel, level);
       }
     });
@@ -206,11 +206,11 @@ describe('CreationConfig', () => {
       const config = new CreationConfig();
 
       assert.throws(() => {
-        config.setCompressionLevel(0);
+        config.withCompressionLevel(0);
       }, /1.*9|invalid/i);
 
       assert.throws(() => {
-        config.setCompressionLevel(10);
+        config.withCompressionLevel(10);
       }, /1.*9|invalid/i);
     });
 
@@ -218,7 +218,7 @@ describe('CreationConfig', () => {
       for (const bad of [0, 10, 4294967295, 1.5, -3, NaN, Infinity, 4294967302, 2 ** 40]) {
         const config = new CreationConfig();
         assert.throws(
-          () => config.setCompressionLevel(bad),
+          () => config.withCompressionLevel(bad),
           { code: 'INVALID_COMPRESSION_LEVEL' },
           String(bad)
         );
@@ -228,7 +228,7 @@ describe('CreationConfig', () => {
 
     it('names a whole refused level in the message', () => {
       for (const bad of [0, 10, -3]) {
-        assert.throws(() => new CreationConfig().setCompressionLevel(bad), {
+        assert.throws(() => new CreationConfig().withCompressionLevel(bad), {
           message: new RegExp(`level ${bad}\\b`),
         });
       }

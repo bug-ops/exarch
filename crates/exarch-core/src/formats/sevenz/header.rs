@@ -23,7 +23,7 @@ use std::io::Seek;
 use std::io::SeekFrom;
 
 /// The six signature bytes every 7z archive starts with.
-pub const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+pub(crate) const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
 /// A valid empty 7z archive is exactly 32 bytes: signature (6) + version (2) +
 /// start header CRC (4) + start header (20). Shorter files are truncated.
@@ -34,11 +34,11 @@ const EMPTY_ARCHIVE_SIZE: u64 = 32;
 /// Only [`SevenZHeader`] mints one, so an accessor that takes it needs no
 /// bounds check. It is only meaningful for the header that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct BlockIndex(usize);
+pub(crate) struct BlockIndex(usize);
 
 impl BlockIndex {
     /// The position of the block in the archive's block list.
-    pub const fn get(self) -> usize {
+    pub(crate) const fn get(self) -> usize {
         self.0
     }
 }
@@ -50,7 +50,7 @@ impl BlockIndex {
 /// for every pack stream an offset; every mapped block and every block's file
 /// span lies within the archive. Obtained only from [`read_sevenz_header`].
 #[derive(Debug, Clone)]
-pub struct SevenZHeader {
+pub(crate) struct SevenZHeader {
     archive: Archive,
 }
 
@@ -85,43 +85,43 @@ impl SevenZHeader {
     /// Wraps a hand-built archive without checking it, for tests that
     /// construct inconsistent-looking archives on purpose.
     #[cfg(test)]
-    pub fn assume_checked(archive: Archive) -> Self {
+    pub(crate) fn assume_checked(archive: Archive) -> Self {
         Self { archive }
     }
 
     /// The parsed archive, for `sevenz-rust2` calls that take it whole.
-    pub const fn archive(&self) -> &Archive {
+    pub(crate) const fn archive(&self) -> &Archive {
         &self.archive
     }
 
     /// The archive's file entries.
-    pub fn files(&self) -> &[sevenz_rust2::ArchiveEntry] {
+    pub(crate) fn files(&self) -> &[sevenz_rust2::ArchiveEntry] {
         &self.archive.files
     }
 
     /// Whether the archive is solid.
-    pub const fn is_solid(&self) -> bool {
+    pub(crate) const fn is_solid(&self) -> bool {
         self.archive.is_solid
     }
 
     /// Number of blocks.
-    pub fn block_count(&self) -> usize {
+    pub(crate) fn block_count(&self) -> usize {
         self.archive.blocks.len()
     }
 
     /// Every block index, ascending.
-    pub fn block_indices(&self) -> impl Iterator<Item = BlockIndex> + use<> {
+    pub(crate) fn block_indices(&self) -> impl Iterator<Item = BlockIndex> + use<> {
         (0..self.archive.blocks.len()).map(BlockIndex)
     }
 
     /// The block at `index`.
-    pub fn block(&self, index: BlockIndex) -> &Block {
+    pub(crate) fn block(&self, index: BlockIndex) -> &Block {
         &self.archive.blocks[index.0]
     }
 
     /// The block holding the data of `file`, or `None` for a file without data
     /// or an index past the file list.
-    pub fn file_block(&self, file: usize) -> Option<BlockIndex> {
+    pub(crate) fn file_block(&self, file: usize) -> Option<BlockIndex> {
         self.archive
             .stream_map
             .file_block_index
@@ -132,17 +132,17 @@ impl SevenZHeader {
     }
 
     /// The index of the first file `block` decodes.
-    pub fn block_first_file(&self, block: BlockIndex) -> usize {
+    pub(crate) fn block_first_file(&self, block: BlockIndex) -> usize {
         self.archive.stream_map.block_first_file_index[block.0]
     }
 
     /// The index of the first pack stream of `block`.
-    pub fn block_first_pack(&self, block: BlockIndex) -> usize {
+    pub(crate) fn block_first_pack(&self, block: BlockIndex) -> usize {
         self.archive.stream_map.block_first_pack_stream_index()[block.0]
     }
 
     /// The first pack stream of the block after `block`, if there is one.
-    pub fn next_block_first_pack(&self, block: BlockIndex) -> Option<usize> {
+    pub(crate) fn next_block_first_pack(&self, block: BlockIndex) -> Option<usize> {
         self.archive
             .stream_map
             .block_first_pack_stream_index()
@@ -151,7 +151,7 @@ impl SevenZHeader {
     }
 
     /// Offset of each pack stream from the first one.
-    pub fn pack_stream_offsets(&self) -> &[u64] {
+    pub(crate) fn pack_stream_offsets(&self) -> &[u64] {
         self.archive.stream_map.pack_stream_offsets()
     }
 }
@@ -166,7 +166,7 @@ impl SevenZHeader {
 ///
 /// Returns [`ArchiveError::InvalidArchive`] for a header that does not parse
 /// or that lists pack streams without a stream-map offset for each.
-pub fn read_sevenz_header<R: Read + Seek>(source: &mut R) -> Result<SevenZHeader> {
+pub(crate) fn read_sevenz_header<R: Read + Seek>(source: &mut R) -> Result<SevenZHeader> {
     let tap = SourceTap::default();
     let parsed = Archive::read(
         &mut SourceRead::new(&mut *source, tap.clone()),

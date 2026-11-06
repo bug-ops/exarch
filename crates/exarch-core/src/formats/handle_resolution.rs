@@ -51,7 +51,7 @@ const MAX_HELD_DIRS: usize = 32;
 
 /// Why a cursor refused to resolve a target.
 #[derive(Debug)]
-pub enum Refusal {
+pub(crate) enum Refusal {
     /// The path leaves the destination, or maps through a spelling of it the
     /// cursor does not trust.
     Escape,
@@ -65,7 +65,7 @@ pub enum Refusal {
 
 impl Refusal {
     /// The blocker the directory walker reports for this refusal.
-    pub const fn blocker(&self) -> ParentBlocker {
+    pub(crate) const fn blocker(&self) -> ParentBlocker {
         match self {
             Self::Escape => ParentBlocker::Escape,
             Self::Unresolvable | Self::NameTooLong(_) | Self::Resource(_) => ParentBlocker::Symlink,
@@ -78,7 +78,7 @@ impl Refusal {
     /// # Errors
     ///
     /// Returns `self` for a verdict on the path.
-    pub fn into_failure(self) -> std::result::Result<ArchiveError, Self> {
+    pub(crate) fn into_failure(self) -> std::result::Result<ArchiveError, Self> {
         match self {
             Self::NameTooLong(error) | Self::Resource(error) => Ok(ArchiveError::Io(error)),
             other => Err(other),
@@ -86,7 +86,7 @@ impl Refusal {
     }
 
     /// The error link validation reports for `link`.
-    pub fn into_error(self, link: &Path) -> ArchiveError {
+    pub(crate) fn into_error(self, link: &Path) -> ArchiveError {
         self.into_failure()
             .unwrap_or_else(|_| ArchiveError::SymlinkEscape {
                 path: link.to_path_buf(),
@@ -139,7 +139,7 @@ enum Existence {
 /// the window only moves the position; the ancestors are re-opened from the
 /// root, keeping the last window, only when a later component needs a handle,
 /// so a run of `..` that ends at the root opens nothing.
-pub struct LinkCursor<'r> {
+pub(crate) struct LinkCursor<'r> {
     root: &'r PinnedRoot,
     /// The handle of `position`, or `None` until it is re-opened.
     dir: Option<VettedDir>,
@@ -165,7 +165,7 @@ impl<'r> LinkCursor<'r> {
     ///
     /// Returns a [`Refusal`] when the link dangles, loops, does not name a
     /// directory or leaves the destination.
-    pub fn at_site(
+    pub(crate) fn at_site(
         root: &'r PinnedRoot,
         parent: &VettedDir,
         here: &Path,
@@ -231,7 +231,7 @@ impl<'r> LinkCursor<'r> {
     /// Returns a [`Refusal`] when the target leaves the destination, runs
     /// through a link that dangles or loops, or names something the host
     /// cannot look up.
-    pub fn for_target(
+    pub(crate) fn for_target(
         root: &'r PinnedRoot,
         link: &Path,
         base: LinkBase,

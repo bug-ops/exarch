@@ -5,6 +5,7 @@ use exarch_core::ArchiveManifest;
 use exarch_core::ConfigSetting;
 use exarch_core::CreationReport as CoreCreationReport;
 use exarch_core::Disposition;
+use exarch_core::DispositionKind;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::IntegrityGaps;
 use exarch_core::LinkTarget;
@@ -23,7 +24,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::buffer::parse_one;
-use crate::config::PySecurityConfig;
 use crate::warning::creation_warnings;
 use crate::warning::extraction_warnings;
 
@@ -654,10 +654,13 @@ impl PyLinkTarget {
 /// * `total_entries` - Total number of entries
 /// * `total_size` - Total uncompressed size
 /// * `entries` - List of archive entries
+/// * `dispositions` - What extraction would do with each entry, under the
+///   `SecurityConfig` the manifest was listed with
 #[pyclass(name = "ArchiveManifest")]
 #[derive(Clone)]
 pub struct PyArchiveManifest {
     inner: ArchiveManifest,
+    dispositions: Vec<(PathBuf, Disposition)>,
 }
 
 #[pymethods]
@@ -690,21 +693,15 @@ impl PyArchiveManifest {
     /// What extraction would do with each entry the validation accepts: where
     /// it lands, or why it is left out.
     ///
-    /// The selection is the one the manifest was listed with (the
-    /// `SecurityConfig` passed to `list_archive`); `config` supplies only the
-    /// limits and policies, `None` meaning the secure defaults. An entry the
+    /// Computed when the archive was listed, under that call's
+    /// `SecurityConfig` (its selection, limits and policies). An entry the
     /// validation refuses is not reported.
-    #[pyo3(signature = (config=None))]
-    fn dispositions(
-        &self,
-        py: Python<'_>,
-        config: Option<PyRef<'_, PySecurityConfig>>,
-    ) -> PyResult<Vec<Py<PyEntryDisposition>>> {
-        let config = PySecurityConfig::snapshot(config);
-        self.inner
-            .dispositions(&config)
-            .map(|(entry, disposition)| {
-                PyEntryDisposition::into_py(py, entry.path.clone(), disposition)
+    #[getter]
+    fn dispositions(&self, py: Python<'_>) -> PyResult<Vec<Py<PyEntryDisposition>>> {
+        self.dispositions
+            .iter()
+            .map(|(path, disposition)| {
+                PyEntryDisposition::into_py(py, path.clone(), disposition.clone())
             })
             .collect()
     }
@@ -723,9 +720,18 @@ impl PyArchiveManifest {
     }
 }
 
-impl From<ArchiveManifest> for PyArchiveManifest {
-    fn from(inner: ArchiveManifest) -> Self {
-        Self { inner }
+impl PyArchiveManifest {
+    /// Wraps a manifest listed under `config`, recording what extraction under
+    /// that config would do with each entry.
+    pub fn new(inner: ArchiveManifest, config: &exarch_core::SecurityConfig) -> Self {
+        let dispositions = inner
+            .dispositions(config)
+            .map(|(entry, disposition)| (entry.path.clone(), disposition))
+            .collect();
+        Self {
+            inner,
+            dispositions,
+        }
     }
 }
 
@@ -737,6 +743,7 @@ impl From<ArchiveManifest> for PyArchiveManifest {
 ///
 /// # Attributes
 ///
+/// * `action` - `"extract"` or `"skip"`
 /// * `path` - The entry's path in the archive
 #[pyclass(name = "EntryDisposition", subclass, frozen)]
 pub struct PyEntryDisposition {
@@ -764,6 +771,11 @@ pub struct PyExtractDisposition {
 
 #[pymethods]
 impl PyExtractDisposition {
+    #[classattr]
+    fn action() -> &'static str {
+        DispositionKind::Extract.as_str()
+    }
+
     #[getter]
     fn landing(&self) -> &OsStr {
         self.landing.as_os_str()
@@ -783,6 +795,11 @@ pub struct PySkipDisposition {
 
 #[pymethods]
 impl PySkipDisposition {
+    #[classattr]
+    fn action() -> &'static str {
+        DispositionKind::Skip.as_str()
+    }
+
     #[getter]
     fn kind(&self) -> &'static str {
         self.kind.as_str()
@@ -1023,6 +1040,16 @@ impl PyVerificationReport {
     #[getter]
     fn total_size(&self) -> u64 {
         self.inner.total_size()
+    }
+
+    #[getter]
+    fn suspicious_entries(&self) -> usize {
+        self.inner.suspicious_entries()
+    }
+
+    #[getter]
+    fn format(&self) -> String {
+        self.inner.format().as_str().to_owned()
     }
 
     #[getter]
@@ -1459,7 +1486,7 @@ mod tests {
             manifest.add_entry(entry).unwrap();
         }
 
-        let py_manifest = PyArchiveManifest::from(manifest);
+        let py_manifest = PyArchiveManifest::new(manifest, &exarch_core::SecurityConfig::default());
 
         assert_eq!(py_manifest.total_entries(), 2, "total_entries should be 2");
         assert_eq!(py_manifest.total_size(), 300, "total_size should be 300");
@@ -1670,6 +1697,16 @@ mod tests {
                 "_Staging",
                 exarch_core::Staging::ALL,
                 exarch_core::Staging::as_str,
+            ),
+            literal_line(
+                "_Restore",
+                exarch_core::RestoreKind::ALL,
+                exarch_core::RestoreKind::as_str,
+            ),
+            literal_line(
+                "_DispositionKind",
+                exarch_core::DispositionKind::ALL,
+                exarch_core::DispositionKind::as_str,
             ),
             literal_line(
                 "_IoKind",

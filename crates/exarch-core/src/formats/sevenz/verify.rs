@@ -53,7 +53,7 @@ pub(super) fn payload_by_block(
 /// Whether the integrity decode of the file at `index` (rather than the listing
 /// walk) reports it: a payload file that has an integrity slot (`has_slot`) and
 /// belongs to a block.
-pub fn is_decode_announced(header: &SevenZHeader, index: usize, has_slot: bool) -> bool {
+pub(crate) fn is_decode_announced(header: &SevenZHeader, index: usize, has_slot: bool) -> bool {
     has_slot
         && header.file_block(index).is_some()
         && header.files().get(index).is_some_and(is_sevenz_payload)
@@ -80,7 +80,7 @@ pub fn is_decode_announced(header: &SevenZHeader, index: usize, has_slot: bool) 
 ///
 /// Returns the I/O error of a failing disk read, or an error for a link target
 /// that is not UTF-8.
-pub fn verify_sevenz_blocks<R: Read + Seek>(
+pub(crate) fn verify_sevenz_blocks<R: Read + Seek>(
     header: &SevenZHeader,
     source: &mut R,
     pass: &mut IntegrityPass<'_>,

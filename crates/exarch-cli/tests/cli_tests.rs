@@ -3996,8 +3996,12 @@ fn test_extract_7z_anti_item_warning_in_json() {
 
     let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
     assert_eq!(
-        json["data"]["warnings"][0],
-        "skipped 1 7z anti-item (deletion markers are not applied)"
+        json["data"]["warnings"],
+        serde_json::json!([{
+            "kind": "anti_items_skipped",
+            "message": "skipped 1 7z anti-item (deletion markers are not applied)",
+            "count": 1
+        }])
     );
     assert!(!out.join("gone.txt").exists());
 }
@@ -4901,8 +4905,8 @@ fn test_extract_atomic_force_requires_parent_read_permission_even_for_fresh_dest
 
 /// Windows-only regression test (v3/v4): a junction at the destination must
 /// be rejected the same way a Unix symlink is. `entry_status` classifies
-/// `FILE_ATTRIBUTE_REPARSE_POINT` tag-agnostically as
-/// `DestEntryKind::Symlink`, so this covers junctions — the practical
+/// `FILE_ATTRIBUTE_REPARSE_POINT` tag-agnostically as a symlink, so this
+/// covers junctions — the practical
 /// Windows redirect primitive, which (unlike a true symlink) needs no
 /// elevation to create — without depending on which specific reparse tag an
 /// attacker used. `mklink /J` requires no elevation either, so this fixture
@@ -7383,7 +7387,115 @@ fn test_extract_conflict_json_is_typed_with_sorted_conflicts() {
     assert_eq!(conflicts, sorted);
     let message = json["error"]["message"].as_str().expect("message");
     assert!(!message.contains("already holds"), "{message}");
-    assert!(message.contains("use --force to overwrite"), "{message}");
+    assert!(!message.contains("--force"), "{message}");
+    assert_eq!(json["error"]["hint"], "Use --force to overwrite.", "{json}");
+}
+
+/// Conflicts come in path-component order and the human listing leads with
+/// the same paths, with the advice on a `HINT:` line (#1013, #1015).
+#[test]
+fn test_extract_conflicts_are_listed_in_path_component_order() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let tar = temp.path().join("c.tar");
+    let mut builder = tar::Builder::new(std::fs::File::create(&tar).expect("create tar"));
+    for name in ["a.c", "a-b", "a/b"] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, name, &b"x"[..])
+            .expect("append entry");
+    }
+    builder.finish().expect("finish tar");
+    let out = temp.path().join("out");
+    std::fs::create_dir_all(out.join("a")).expect("create dirs");
+    for name in ["a.c", "a-b", "a/b"] {
+        std::fs::write(out.join(name), "old").expect("write old");
+    }
+
+    let stdout = exarch_cmd()
+        .args(["extract", "--json"])
+        .arg(&tar)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(
+        json["error"]["conflicts"],
+        serde_json::json!(["a/b", "a-b", "a.c"]),
+        "{json}"
+    );
+
+    let stderr = exarch_cmd()
+        .arg("extract")
+        .arg(&tar)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).expect("utf-8");
+    let listing = stderr.replace('\\', "/");
+    let at = |name: &str| listing.find(&format!("out/{name}")).expect(name);
+    assert!(at("a/b") < at("a-b") && at("a-b") < at("a.c"), "{stderr}");
+    assert!(
+        stderr.contains("HINT: Use --force to overwrite."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("(use --force"), "{stderr}");
+}
+
+/// With `--force` already given, the conflict advice never tells the user to
+/// pass it again (#1015).
+#[test]
+fn test_extract_force_conflict_hint_does_not_repeat_force() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let tar = temp.path().join("d.tar");
+    write_wrapped_tar(&tar);
+    let out = temp.path().join("out");
+    std::fs::create_dir_all(&out).expect("create out");
+    std::fs::write(out.join("proj"), "a file where the archive has a directory")
+        .expect("write blocker");
+
+    let stdout = exarch_cmd()
+        .args(["extract", "--json", "--force"])
+        .arg(&tar)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "OutputExists", "{json}");
+    let hint = json["error"]["hint"].as_str().expect("hint");
+    assert!(hint.contains("cannot replace"), "{hint}");
+    assert!(!hint.contains("Use --force"), "{hint}");
+}
+
+/// An I/O failure carries the same `io_kind` token the bindings report (#1016).
+#[test]
+fn test_json_io_error_carries_io_kind() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let source = temp.path().join("f.txt");
+    std::fs::write(&source, "x").expect("write source");
+
+    let stdout = exarch_cmd()
+        .args(["create", "--json"])
+        .arg(temp.path().join("missing-dir").join("o.tar"))
+        .arg(&source)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "IoError", "{json}");
+    assert_eq!(json["error"]["io_kind"], "NotFound", "{json}");
 }
 
 /// The staged replace refuses a protected destination with a typed
@@ -7719,4 +7831,191 @@ fn test_output_exists_text_names_the_path_once() {
         stderr.contains("HINT: Use --force to overwrite."),
         "{stderr}"
     );
+}
+
+#[cfg(unix)]
+mod interrupt {
+    use super::exarch_cmd;
+    use std::io::BufRead;
+    use std::io::BufReader;
+    use std::path::Path;
+    use std::process::Command;
+    use std::process::Stdio;
+    use tempfile::TempDir;
+
+    fn write_many_entries_tar(path: &Path, entries: usize) {
+        let mut builder = tar::Builder::new(std::fs::File::create(path).expect("create tar"));
+        for i in 0..entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            builder
+                .append_data(&mut header, format!("d/f{i}"), &b"x"[..])
+                .expect("append entry");
+        }
+        builder.finish().expect("finish tar");
+    }
+
+    fn exarch() -> Command {
+        Command::new(exarch_cmd().get_program())
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with(".exarch-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Starts `command` with a piped stderr and waits for its first
+    /// per-entry line, which proves the signal handler is installed and the
+    /// run is under way.
+    fn running(mut command: Command) -> std::process::Child {
+        let mut child = command
+            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn exarch");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let mut lines = BufReader::new(stderr);
+        let mut first = String::new();
+        lines.read_line(&mut first).expect("first progress line");
+        assert!(!first.is_empty(), "the run produced no progress line");
+        std::thread::spawn(move || {
+            let mut sink = String::new();
+            while lines.read_line(&mut sink).is_ok_and(|n| n > 0) {
+                sink.clear();
+            }
+        });
+        child
+    }
+
+    fn sigint(child: &std::process::Child) {
+        let status = Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .expect("run kill");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn extract_stops_with_130_and_leaves_no_staging_entry() {
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+
+        let mut command = exarch();
+        command.args(["--verbose", "extract"]).arg(&tar).arg(&out);
+        let mut child = running(command);
+        sigint(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert!(!out.exists(), "the destination must not be published");
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn atomic_extract_stops_with_130_and_publishes_nothing() {
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+
+        let mut command = exarch();
+        command
+            .args(["--verbose", "extract", "--atomic"])
+            .arg(&tar)
+            .arg(&out);
+        let mut child = running(command);
+        sigint(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert!(!out.exists(), "the destination must not be published");
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn atomic_force_extract_stops_with_130_and_leaves_the_destination_untouched() {
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("create destination");
+        std::fs::write(out.join("keep"), "original").expect("write marker");
+
+        let mut command = exarch();
+        command
+            .args(["--verbose", "extract", "--atomic", "--force"])
+            .arg(&tar)
+            .arg(&out);
+        let mut child = running(command);
+        sigint(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(130), "{status:?}");
+        let names: Vec<_> = std::fs::read_dir(&out)
+            .expect("read destination")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("keep")]);
+        assert_eq!(
+            std::fs::read_to_string(out.join("keep")).expect("read marker"),
+            "original"
+        );
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn create_zip_stops_with_130_and_leaves_no_staging_entry() {
+        let temp = TempDir::new().expect("temp dir");
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        for i in 0..20_000 {
+            std::fs::write(src.join(format!("f{i}")), "x").expect("write source file");
+        }
+        let output = temp.path().join("o.zip");
+
+        let mut command = exarch();
+        command.args(["--verbose", "create"]).arg(&output).arg(&src);
+        let mut child = running(command);
+        sigint(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert!(!output.exists(), "no archive may be published");
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn create_stops_with_130_and_leaves_no_staging_entry() {
+        let temp = TempDir::new().expect("temp dir");
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        for i in 0..20_000 {
+            std::fs::write(src.join(format!("f{i}")), "x").expect("write source file");
+        }
+        let output = temp.path().join("o.tar");
+
+        let mut command = exarch();
+        command.args(["--verbose", "create"]).arg(&output).arg(&src);
+        let mut child = running(command);
+        sigint(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert!(!output.exists(), "no archive may be published");
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
 }

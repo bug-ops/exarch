@@ -90,26 +90,28 @@ describe('entry selection', () => {
     it('appends, replaces and clears the pattern lists', () => {
       const config = new SecurityConfig().addIncludePattern('a').addIncludePattern('b/c');
       assert.deepStrictEqual(config.includePatterns, ['a', 'b/c']);
-      assert.strictEqual(config.setIncludePatterns(['x']), config);
+      assert.strictEqual(config.withIncludePatterns(['x']), config);
       assert.deepStrictEqual(config.includePatterns, ['x']);
       config.addExcludePattern('*.tmp').addExcludePattern('gen');
       assert.deepStrictEqual(config.excludePatterns, ['*.tmp', 'gen']);
-      config.setExcludePatterns([]).setIncludePatterns([]);
+      config.withExcludePatterns([]).withIncludePatterns([]);
       assert.deepStrictEqual(config.includePatterns, []);
       assert.deepStrictEqual(config.excludePatterns, []);
     });
 
     it('refuses a bad pattern as INVALID_CONFIGURATION naming its list and keeps the old one', () => {
-      const config = new SecurityConfig().setIncludePatterns(['keep']).setExcludePatterns(['gone']);
+      const config = new SecurityConfig()
+        .withIncludePatterns(['keep'])
+        .withExcludePatterns(['gone']);
       assert.throws(() => config.addIncludePattern('**/x'), {
         code: 'INVALID_CONFIGURATION',
         setting: 'entry_include',
       });
-      assert.throws(() => config.setIncludePatterns(['ok', 'a,b']), {
+      assert.throws(() => config.withIncludePatterns(['ok', 'a,b']), {
         code: 'INVALID_CONFIGURATION',
         setting: 'entry_include',
       });
-      assert.throws(() => config.setExcludePatterns(['ok', '?x']), {
+      assert.throws(() => config.withExcludePatterns(['ok', '?x']), {
         code: 'INVALID_CONFIGURATION',
         setting: 'entry_exclude',
       });
@@ -123,45 +125,45 @@ describe('entry selection', () => {
 
     it('sets a strip count, which flatten replaces and the reverse', () => {
       const config = new SecurityConfig();
-      assert.strictEqual(config.setStripComponents(2), config);
+      assert.strictEqual(config.withStripComponents(2), config);
       assert.strictEqual(config.stripComponents, 2);
-      config.setFlatten(true);
+      config.withFlatten(true);
       assert.strictEqual(config.flatten, true);
       assert.strictEqual(config.stripComponents, null);
-      config.setStripComponents(1);
+      config.withStripComponents(1);
       assert.strictEqual(config.flatten, false);
-      config.setStripComponents(null);
+      config.withStripComponents(null);
       assert.strictEqual(config.stripComponents, null);
       assert.strictEqual(config.flatten, false);
     });
 
     it('keeps flatten when the strip count is cleared', () => {
-      const config = new SecurityConfig().setFlatten(true);
-      config.setStripComponents(null);
+      const config = new SecurityConfig().withFlatten(true);
+      config.withStripComponents(null);
       assert.strictEqual(config.flatten, true);
-      config.setFlatten(false);
+      config.withFlatten(false);
       assert.strictEqual(config.flatten, false);
       assert.strictEqual(config.stripComponents, null);
     });
 
     it('refuses an unusable strip count as INVALID_CONFIGURATION and keeps the old one', () => {
-      const config = new SecurityConfig().setStripComponents(1);
+      const config = new SecurityConfig().withStripComponents(1);
       for (const bad of [0, -1, 1.5, NaN, Infinity, 2 ** 60, 10_000]) {
         assert.throws(
-          () => config.setStripComponents(bad),
+          () => config.withStripComponents(bad),
           { code: 'INVALID_CONFIGURATION', setting: 'strip_components' },
           String(bad)
         );
         assert.strictEqual(config.stripComponents, 1);
       }
-      assert.throws(() => config.setStripComponents(undefined));
+      assert.throws(() => config.withStripComponents(undefined));
       assert.strictEqual(config.stripComponents, 1);
     });
 
     it('bounds the strip count by maxPathDepth', () => {
-      const config = new SecurityConfig().setMaxPathDepth(2);
-      config.setStripComponents(2);
-      assert.throws(() => config.setStripComponents(3), { setting: 'strip_components' });
+      const config = new SecurityConfig().withMaxPathDepth(2);
+      config.withStripComponents(2);
+      assert.throws(() => config.withStripComponents(3), { setting: 'strip_components' });
     });
   });
 
@@ -192,7 +194,7 @@ describe('entry selection', () => {
     });
 
     it('strips leading components and counts what is left with no name', () => {
-      const config = new SecurityConfig().setStripComponents(1);
+      const config = new SecurityConfig().withStripComponents(1);
       const report = extractArchiveSync(archive, out, config);
       assert.deepStrictEqual(extractedFiles(), ['a.txt', 'sub/b.rs', 'sub/c.tmp', 'sub/deep/d.rs']);
       const kinds = Object.fromEntries(report.skipped.counts.map((c) => [c.kind, c.count]));
@@ -200,13 +202,13 @@ describe('entry selection', () => {
     });
 
     it('matches patterns against the path before stripping', () => {
-      const config = new SecurityConfig().addIncludePattern('top/sub').setStripComponents(2);
+      const config = new SecurityConfig().addIncludePattern('top/sub').withStripComponents(2);
       extractArchiveSync(archive, out, config);
       assert.deepStrictEqual(extractedFiles(), ['b.rs', 'c.tmp', 'deep/d.rs']);
     });
 
     it('flattens regular files to their final component and skips directories', () => {
-      const config = new SecurityConfig().setFlatten(true);
+      const config = new SecurityConfig().withFlatten(true);
       const report = extractArchiveSync(archive, out, config);
       assert.deepStrictEqual(extractedFiles(), ['a.txt', 'b.rs', 'c.tmp', 'd.rs']);
       const kinds = Object.fromEntries(report.skipped.counts.map((c) => [c.kind, c.count]));
@@ -217,7 +219,7 @@ describe('entry selection', () => {
       const clash = tarOf(file('x/a.txt', 'first'), file('y/a.txt', 'second'));
       const clashPath = path.join(tempDir, 'clash.tar');
       fs.writeFileSync(clashPath, clash);
-      const config = new SecurityConfig().setFlatten(true);
+      const config = new SecurityConfig().withFlatten(true);
       const report = extractArchiveSync(clashPath, out, config);
       assert.strictEqual(report.filesExtracted, 1);
       const kinds = Object.fromEntries(report.skipped.counts.map((c) => [c.kind, c.count]));
@@ -264,8 +266,8 @@ describe('entry selection', () => {
       const options = new ExtractionOptions().withStaging('atomic_replace');
       for (const config of [
         new SecurityConfig().addIncludePattern('top'),
-        new SecurityConfig().setStripComponents(1),
-        new SecurityConfig().setFlatten(true),
+        new SecurityConfig().withStripComponents(1),
+        new SecurityConfig().withFlatten(true),
       ]) {
         assert.throws(() => extractArchiveSync(archive, out, config, options), {
           code: 'INVALID_CONFIGURATION',
@@ -278,7 +280,7 @@ describe('entry selection', () => {
       const links = tarOf(file('d/f.txt'), tarEntry('d/ln', { type: '2', link: 'f.txt' }));
       const linksPath = path.join(tempDir, 'links.tar');
       fs.writeFileSync(linksPath, links);
-      const config = new SecurityConfig().setAllowSymlinks(true).setFlatten(true);
+      const config = new SecurityConfig().withAllowSymlinks(true).withFlatten(true);
       assert.throws(() => extractArchiveSync(linksPath, out, config), {
         code: 'SECURITY_VIOLATION',
         subCode: 'LINK_POLICY',
@@ -289,7 +291,7 @@ describe('entry selection', () => {
       const links = tarOf(file('t.txt'), tarEntry('h', { type: '1', link: 't.txt' }));
       const linksPath = path.join(tempDir, 'hard.tar');
       fs.writeFileSync(linksPath, links);
-      const config = new SecurityConfig().setAllowHardlinks(true).addIncludePattern('h');
+      const config = new SecurityConfig().withAllowHardlinks(true).addIncludePattern('h');
       assert.throws(() => extractArchiveSync(linksPath, out, config), {
         code: 'SECURITY_VIOLATION',
         subCode: 'LINK_TARGET',
@@ -304,7 +306,7 @@ describe('entry selection', () => {
       );
       const linksPath = path.join(tempDir, 'ambiguous.tar');
       fs.writeFileSync(linksPath, links);
-      const config = new SecurityConfig().setAllowHardlinks(true).setStripComponents(1);
+      const config = new SecurityConfig().withAllowHardlinks(true).withStripComponents(1);
       assert.throws(() => extractArchiveSync(linksPath, out, config), {
         code: 'SECURITY_VIOLATION',
         subCode: 'LINK_TARGET',
@@ -331,36 +333,36 @@ describe('entry selection', () => {
     });
 
     it('reports what extraction does with every entry as typed dispositions', () => {
-      const config = new SecurityConfig().addIncludePattern('top/sub').setStripComponents(1);
+      const config = new SecurityConfig().addIncludePattern('top/sub').withStripComponents(1);
       const manifest = listArchiveSync(archive, config);
       const byPath = Object.fromEntries(manifest.dispositions.map((d) => [d.path, d]));
       assert.deepStrictEqual(byPath['top/sub/b.rs'], {
-        kind: 'extract',
+        action: 'extract',
         path: 'top/sub/b.rs',
         landing: 'sub/b.rs',
       });
       assert.deepStrictEqual(byPath['top/a.txt'], {
-        kind: 'skip',
+        action: 'skip',
         path: 'top/a.txt',
-        reason: 'not_selected',
+        kind: 'not_selected',
       });
-      assert.strictEqual(byPath['top/'].kind, 'skip');
+      assert.strictEqual(byPath['top/'].action, 'skip');
     });
 
     it('reports every entry as extracted at its own path without a selection', () => {
       const manifest = listArchiveSync(archive);
       assert.strictEqual(manifest.dispositions.length, manifest.totalEntries);
       for (const disposition of manifest.dispositions) {
-        assert.strictEqual(disposition.kind, 'extract');
+        assert.strictEqual(disposition.action, 'extract');
         assert.strictEqual(disposition.landing, disposition.path.replace(/\/$/, ''));
       }
     });
 
     it('agrees with what extraction writes', () => {
-      const config = new SecurityConfig().addExcludePattern('*.tmp').setFlatten(true);
+      const config = new SecurityConfig().addExcludePattern('*.tmp').withFlatten(true);
       const manifest = listArchiveSync(archive, config);
       const landings = manifest.dispositions
-        .filter((d) => d.kind === 'extract')
+        .filter((d) => d.action === 'extract')
         .map((d) => d.landing)
         .sort();
       extractArchiveSync(archive, out, config);
@@ -368,15 +370,15 @@ describe('entry selection', () => {
     });
 
     it('also lists dispositions for in-memory archives', async () => {
-      const config = new SecurityConfig().setFlatten(true);
+      const config = new SecurityConfig().withFlatten(true);
       const manifest = await listArchiveBytes(TREE, config);
-      const skipped = manifest.dispositions.filter((d) => d.kind === 'skip');
-      assert.ok(skipped.every((d) => d.reason === 'stripped_away'));
+      const skipped = manifest.dispositions.filter((d) => d.action === 'skip');
+      assert.ok(skipped.every((d) => d.kind === 'stripped_away'));
       assert.strictEqual(manifest.dispositions.length - skipped.length, 4);
     });
 
     it('verifies a selection that extract would accept', () => {
-      const config = new SecurityConfig().addIncludePattern('top/sub').setStripComponents(1);
+      const config = new SecurityConfig().addIncludePattern('top/sub').withStripComponents(1);
       const report = verifyArchiveSync(archive, config);
       assert.strictEqual(report.status, 'PASS', JSON.stringify(report.issues));
     });
@@ -393,7 +395,7 @@ describe('entry selection', () => {
 
     it('reports a hardlink to an unselected target as an issue, as extract refuses it', () => {
       const links = tarOf(file('t.txt'), tarEntry('h', { type: '1', link: 't.txt' }));
-      const config = new SecurityConfig().setAllowHardlinks(true).addIncludePattern('h');
+      const config = new SecurityConfig().withAllowHardlinks(true).addIncludePattern('h');
       const report = verifyArchiveBytesSync(links, config);
       assert.strictEqual(report.status, 'FAIL');
       assert.ok(
@@ -405,7 +407,7 @@ describe('entry selection', () => {
 
   describe('in-memory and callback extraction', () => {
     it('applies the selection to extractArchiveToMemory', async () => {
-      const config = new SecurityConfig().addIncludePattern('top/sub').setStripComponents(2);
+      const config = new SecurityConfig().addIncludePattern('top/sub').withStripComponents(2);
       const result = await extractArchiveToMemory(TREE, config);
       const paths = result.entries.map((entry) => entry.path).sort();
       assert.deepStrictEqual(paths, ['b.rs', 'c.tmp', 'deep/d.rs']);
@@ -413,7 +415,7 @@ describe('entry selection', () => {
 
     it('applies flatten to extractArchiveToCallbackSync', () => {
       const seen = [];
-      const config = new SecurityConfig().setFlatten(true);
+      const config = new SecurityConfig().withFlatten(true);
       extractArchiveToCallbackSync(TREE, (entry) => seen.push(entry.path), config);
       assert.deepStrictEqual(seen.sort(), ['a.txt', 'b.rs', 'c.tmp', 'd.rs']);
     });

@@ -124,6 +124,7 @@ impl SanitizedMode {
 /// # fn main() {}
 /// ```
 #[must_use]
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub fn sanitize_permissions(mode: RawMode, config: &SecurityConfig) -> SanitizedMode {
     let mut sanitized = mode.get();
 

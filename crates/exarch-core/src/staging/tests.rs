@@ -7,8 +7,6 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use super::parent::FileIdentity;
-use super::parent::identity_of;
 use super::replace::is_within;
 use super::replace::protected_path;
 use super::staged_options;
@@ -28,6 +26,9 @@ use crate::Restore;
 use crate::SecurityConfig;
 use crate::Staging;
 use crate::Violation;
+use crate::formats::file_identity::FileIdentity;
+use crate::formats::file_identity::IdentityKey;
+use crate::formats::file_identity::identity_of;
 use crate::test_utils::create_test_tar;
 
 type Action = Box<dyn FnMut() + Send>;
@@ -469,9 +470,9 @@ fn the_guard_compares_identity_so_another_spelling_of_the_destination_is_caught(
 
 #[test]
 fn the_guard_follows_an_injected_identity_source_not_the_path_text() {
-    let known = |ino| Ok(FileIdentity::Known { dev: 1, ino });
+    let known = |ino| Ok(FileIdentity::Known(IdentityKey { dev: 1, ino }));
     let dest = Path::new("/p/dest");
-    let dest_id = FileIdentity::Known { dev: 1, ino: 7 };
+    let dest_id = FileIdentity::Known(IdentityKey { dev: 1, ino: 7 });
     // A case-insensitive volume: `/p/DEST` and `/p/dest` are one directory.
     let case_insensitive = |path: &Path| match path.to_str().unwrap().to_lowercase().as_str() {
         "/p/dest" => known(7),
@@ -504,9 +505,33 @@ fn the_guard_follows_an_injected_identity_source_not_the_path_text() {
         )),
         "an ancestor that cannot be identified refuses"
     );
+}
+
+#[test]
+fn an_unknown_identity_compares_the_canonical_destination_and_fails_closed() {
+    let fx = Fixture::new();
+    let dest = fx.with_old_destination();
+    let sibling = fx.parent.join("destx");
+    std::fs::create_dir(&sibling).unwrap();
+    let alias = fx.parent.join("alias");
+    symlink(&dest, &alias).unwrap();
     let unknown = |_: &Path| Ok(FileIdentity::Unknown);
-    assert!(is_within(dest, dest_id, Path::new("/p/dest/x"), unknown));
-    assert!(!is_within(dest, dest_id, Path::new("/p/destx/x"), unknown));
+    let inner = dest.join("a.tar");
+
+    assert!(
+        is_within(&alias, FileIdentity::Unknown, &inner, unknown),
+        "another spelling of the destination is the destination"
+    );
+    assert!(!is_within(&sibling, FileIdentity::Unknown, &inner, unknown));
+    assert!(
+        is_within(
+            &fx.parent.join("missing"),
+            FileIdentity::Unknown,
+            &inner,
+            unknown
+        ),
+        "a destination that cannot be canonicalized refuses"
+    );
 }
 
 #[test]
@@ -633,6 +658,21 @@ fn a_backup_that_cannot_be_removed_is_reported_as_a_warning() {
     std::fs::remove_dir_all(path).unwrap();
 }
 
+#[test]
+fn a_read_only_destination_is_replaced_and_its_backup_removed() {
+    let fx = Fixture::new();
+    let dest = fx.with_old_destination();
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let result = fx.extract(&dest, Staging::AtomicReplace, &mut Hooks::default());
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let report = result.unwrap();
+
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(read(&dest.join("a.txt")), "new a");
+    assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
+}
+
 /// Races an attacker that flips the destination between a real directory and a
 /// symlink to a victim directory against `AtomicReplace`. Whatever the outcome
 /// of a run, the victim must keep exactly what it had: nothing is ever written
@@ -686,4 +726,316 @@ fn a_racing_destination_flip_never_touches_a_planted_symlinks_target() {
         assert_eq!(names, [OsString::from("sentinel")]);
         assert_eq!(read(&victim.join("sentinel")), "victim");
     }
+}
+
+fn mode_of(path: &Path) -> u32 {
+    std::fs::symlink_metadata(path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777
+}
+
+fn private_destination(fx: &Fixture) -> PathBuf {
+    let dest = fx.with_old_destination();
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o700)).unwrap();
+    dest
+}
+
+#[test]
+fn replace_keeps_a_private_destination_private() {
+    let fx = Fixture::new();
+    let dest = private_destination(&fx);
+
+    fx.extract(&dest, Staging::AtomicReplace, &mut Hooks::default())
+        .unwrap();
+
+    assert_eq!(mode_of(&dest), 0o700);
+    assert_eq!(read(&dest.join("a.txt")), "new a");
+}
+
+#[test]
+fn replace_gives_the_published_root_the_destination_mode() {
+    let fx = Fixture::new();
+    let dest = fx.with_old_destination();
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+    fx.extract(&dest, Staging::AtomicReplace, &mut Hooks::default())
+        .unwrap();
+
+    assert_eq!(mode_of(&dest), 0o750);
+}
+
+#[test]
+fn atomic_onto_an_empty_private_directory_keeps_it_private() {
+    let fx = Fixture::new();
+    let dest = fx.dest();
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    fx.extract(&dest, Staging::Atomic, &mut Hooks::default())
+        .unwrap();
+
+    assert_eq!(mode_of(&dest), 0o700);
+    assert_eq!(read(&dest.join("a.txt")), "new a");
+}
+
+#[test]
+fn atomic_into_an_absent_destination_gets_the_umask_mode() {
+    let fx = Fixture::new();
+    let expected = fx.parent.join("expected");
+    std::fs::create_dir(&expected).unwrap();
+    let dest = fx.dest();
+
+    fx.extract(&dest, Staging::Atomic, &mut Hooks::default())
+        .unwrap();
+
+    assert_eq!(mode_of(&dest), mode_of(&expected));
+}
+
+#[test]
+fn the_staging_directory_is_private_while_the_archive_extracts() {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    for staging in [Staging::Atomic, Staging::AtomicReplace] {
+        let fx = Fixture::new();
+        let dest = if staging == Staging::Atomic {
+            fx.dest()
+        } else {
+            fx.with_old_destination()
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (parent, record) = (fx.parent.clone(), seen.clone());
+        let mut hooks = Hooks {
+            on_first_entry: Some(Box::new(move || {
+                for dir in staging_dirs(&parent) {
+                    record.lock().unwrap().push(mode_of(&dir));
+                }
+            })),
+            ..Hooks::default()
+        };
+
+        fx.extract(&dest, staging, &mut hooks).unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), [0o700], "{staging:?}");
+    }
+}
+
+#[test]
+fn an_extraction_error_removes_the_staging_directory_on_every_path() {
+    let fx = Fixture::new();
+    let dest = fx.with_old_destination();
+    let mut hooks = Hooks {
+        cancel_at_end: true,
+        ..Hooks::default()
+    };
+
+    for staging in [Staging::Atomic, Staging::AtomicReplace] {
+        let target = if staging == Staging::Atomic {
+            fx.parent.join("fresh")
+        } else {
+            dest.clone()
+        };
+        let error = fx.extract(&target, staging, &mut hooks).unwrap_err();
+        assert!(error.is_cancelled(), "{error}");
+        assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
+    }
+}
+
+/// Plants a directory the staging removal cannot enter, so removal fails.
+fn lock_inside_staging(parent: &Path) -> Action {
+    let parent = parent.to_path_buf();
+    Box::new(move || {
+        for staging in staging_dirs(&parent) {
+            let locked = staging.join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::write(locked.join("f"), b"x").unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+    })
+}
+
+fn removal_is_enforced(parent: &Path) -> bool {
+    let probe = parent.join("probe_locked");
+    std::fs::create_dir(&probe).unwrap();
+    std::fs::write(probe.join("f"), b"x").unwrap();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let enforced = std::fs::read_dir(&probe).is_err();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_dir_all(&probe).unwrap();
+    enforced
+}
+
+fn unlock_and_remove(leftover: &Path) {
+    std::fs::set_permissions(
+        leftover.join("locked"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(leftover).unwrap();
+}
+
+#[test]
+fn a_staging_directory_that_survives_its_removal_is_named_by_the_error() {
+    for staging in [Staging::Atomic, Staging::AtomicReplace] {
+        let fx = Fixture::new();
+        if !removal_is_enforced(&fx.parent) {
+            eprintln!("skipping: directory permissions are not enforced (running as root?)");
+            return;
+        }
+        let target = if staging == Staging::Atomic {
+            fx.dest()
+        } else {
+            fx.with_old_destination()
+        };
+        let mut hooks = Hooks {
+            cancel_at_end: true,
+            at_end: Some(lock_inside_staging(&fx.parent)),
+            ..Hooks::default()
+        };
+
+        let error = fx.extract(&target, staging, &mut hooks).unwrap_err();
+
+        let ArchiveError::PartialExtraction(partial) = &error else {
+            panic!("expected a partial extraction, got {error}");
+        };
+        assert_eq!(partial.writes(), crate::PartialWrites::RolledBack);
+        let leftover = partial.leftover().expect("the leftover is named");
+        assert_eq!(fx.leftovers().len(), 1);
+        assert!(leftover.path.starts_with(&fx.parent), "{leftover:?}");
+        assert!(leftover.path.join("locked").exists());
+        unlock_and_remove(&leftover.path);
+    }
+}
+
+mod adoption {
+    use std::os::unix::fs::MetadataExt;
+
+    use super::super::adopt::Adoption;
+    use super::super::adopt::Claim;
+    use super::super::dir::StagingDir;
+    use super::*;
+    use crate::formats::pinned_dir::VettedDir;
+
+    fn staging_in(parent: &Path) -> (VettedDir, PathBuf) {
+        let parent = parent.canonicalize().unwrap();
+        (VettedDir::open_path(&parent).unwrap(), parent)
+    }
+
+    #[test]
+    fn an_adopted_mode_is_applied_through_the_descriptor() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = staging_in(temp.path());
+        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let own = std::fs::metadata(&parent).unwrap();
+
+        staging
+            .adopt(Adoption::for_test(
+                0o2750,
+                own.uid(),
+                own.gid(),
+                Claim::Full,
+            ))
+            .unwrap();
+
+        assert_eq!(mode_of(staging.path()) & 0o777, 0o750);
+    }
+
+    #[test]
+    fn a_group_the_directory_cannot_join_loses_its_group_access() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = staging_in(temp.path());
+        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let own = std::fs::metadata(&parent).unwrap();
+        let foreign = std::fs::metadata("/").unwrap().gid();
+        if foreign == own.gid() || own.uid() == 0 {
+            eprintln!("skipping: no group this caller is outside of");
+            return;
+        }
+
+        staging
+            .adopt(Adoption::for_test(0o2775, own.uid(), foreign, Claim::Full))
+            .unwrap();
+
+        assert_eq!(mode_of(staging.path()), 0o705);
+    }
+
+    #[test]
+    fn a_cautious_adoption_never_takes_a_foreign_uid_nor_its_write_bits() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = staging_in(temp.path());
+        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let own = std::fs::metadata(&parent).unwrap();
+        let foreign_uid = own.uid().wrapping_add(1);
+
+        staging
+            .adopt(Adoption::for_test(
+                0o2777,
+                foreign_uid,
+                own.gid(),
+                Claim::Cautious,
+            ))
+            .unwrap();
+
+        let applied = std::fs::metadata(staging.path()).unwrap();
+        assert_eq!(applied.uid(), own.uid());
+        assert_eq!(applied.mode() & 0o7777, 0o755);
+    }
+
+    #[test]
+    fn a_cautious_adoption_of_an_own_destination_keeps_its_mode() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = staging_in(temp.path());
+        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let own = std::fs::metadata(&parent).unwrap();
+
+        staging
+            .adopt(Adoption::for_test(
+                0o775,
+                own.uid(),
+                own.gid(),
+                Claim::Cautious,
+            ))
+            .unwrap();
+
+        assert_eq!(mode_of(staging.path()) & 0o777, 0o775);
+    }
+
+    #[test]
+    fn a_read_only_adopted_directory_can_still_be_discarded() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = staging_in(temp.path());
+        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let own = std::fs::metadata(&parent).unwrap();
+        std::fs::write(staging.path().join("f"), b"x").unwrap();
+
+        staging
+            .adopt(Adoption::for_test(0o000, own.uid(), own.gid(), Claim::Full))
+            .unwrap();
+        let path = staging.path().to_path_buf();
+
+        assert!(staging.discard().is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn dropping_a_staging_directory_removes_it() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = staging_in(temp.path());
+        let staging = StagingDir::create(&pin, &parent).unwrap();
+        let path = staging.path().to_path_buf();
+        assert_eq!(mode_of(&path), 0o700);
+
+        drop(staging);
+
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn a_bare_destination_name_has_the_working_directory_as_its_parent() {
+    assert_eq!(super::parent_or_cwd(Path::new("out")), Path::new("."));
+    assert_eq!(super::parent_or_cwd(Path::new("a/out")), Path::new("a"));
+    assert_eq!(super::parent_or_cwd(Path::new("/out")), Path::new("/"));
 }

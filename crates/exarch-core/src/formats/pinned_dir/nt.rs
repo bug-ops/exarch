@@ -59,10 +59,13 @@ use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_FLAG_POSIX_SEMANTI
 use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_INFO;
 use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_INFO_EX;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+use windows_sys::Win32::Storage::FileSystem::FILE_ID_INFO;
 use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+use windows_sys::Win32::Storage::FileSystem::FileIdInfo;
+use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_POSIX_SEMANTICS;
@@ -296,15 +299,44 @@ fn lacks_ex_classes(err: &io::Error) -> bool {
     has_code(err, ERROR_INVALID_PARAMETER) || has_code(err, ERROR_NOT_SUPPORTED)
 }
 
+/// Whether a rename replaces an existing target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Replace {
+    /// Replace the target if it exists, even if it is open.
+    IfExists,
+    /// Fail if the target exists.
+    Never,
+}
+
+impl Replace {
+    const fn flag(self) -> u32 {
+        match self {
+            Self::IfExists => FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+            Self::Never => 0,
+        }
+    }
+}
+
 /// Renames `from` over `to`, both inside `dir`.
 ///
 /// Uses POSIX semantics, so the target is replaced even if it is open, and
-/// falls back to the legacy replace-if-exists rename where the filesystem or OS
-/// build does not support them.
+/// falls back to the legacy rename where the filesystem or OS build does not
+/// support them.
 pub(super) fn rename_within(
     dir: BorrowedHandle<'_>,
     from: Leaf<'_>,
     to: Leaf<'_>,
+) -> io::Result<()> {
+    rename_with(dir, from, to, Replace::IfExists)
+}
+
+/// Renames `from` to `to`, both inside `dir`, replacing `to` only as `replace`
+/// says.
+pub(super) fn rename_with(
+    dir: BorrowedHandle<'_>,
+    from: Leaf<'_>,
+    to: Leaf<'_>,
+    replace: Replace,
 ) -> io::Result<()> {
     let source = create_at(dir, from, Request::open(DELETE | FILE_READ_ATTRIBUTES))?;
     let target = wide(to.as_os_str());
@@ -312,11 +344,11 @@ pub(super) fn rename_within(
     let posix = rename_info(
         root,
         &target,
-        FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS,
+        replace.flag() | FILE_RENAME_FLAG_POSIX_SEMANTICS,
     )?;
     match set_info(source.as_handle(), FileRenameInformationEx, &posix) {
         Err(err) if lacks_ex_classes(&err) => {
-            let legacy = rename_info(root, &target, FILE_RENAME_FLAG_REPLACE_IF_EXISTS)?;
+            let legacy = rename_info(root, &target, replace.flag())?;
             set_info(source.as_handle(), FileRenameInformation, &legacy)
         }
         other => other,
@@ -347,5 +379,48 @@ pub(super) fn remove_file(dir: BorrowedHandle<'_>, name: Leaf<'_>) -> io::Result
             set_info(file.as_handle(), FileDispositionInformation, &legacy)
         }
         other => other,
+    }
+}
+
+/// The volume serial number and 128-bit file id of the open `handle`, from
+/// `FileIdInfo` only.
+///
+/// `None` when the volume cannot provide them. There is deliberately no
+/// fallback to the 64-bit `GetFileInformationByHandle` index: it is not unique
+/// on `ReFS`, and a wrong "same" or "different" is worse than "unknown".
+pub(in crate::formats) fn file_id(handle: BorrowedHandle<'_>) -> Option<(u64, u128)> {
+    let mut info = FILE_ID_INFO::default();
+    // SAFETY: `info` is a valid, writable `FILE_ID_INFO` of exactly the size
+    // passed, `handle` is a live handle, and the call retains neither.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut info).cast(),
+            length_u32(size_of::<FILE_ID_INFO>()).ok()?,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    nonzero_file_id(info.FileId.Identifier).map(|id| (info.VolumeSerialNumber, id))
+}
+
+/// The file id, or `None` for the all-zero id some redirectors report for
+/// every file: it names nothing, so it must not compare equal to itself.
+fn nonzero_file_id(identifier: [u8; 16]) -> Option<u128> {
+    Some(u128::from_le_bytes(identifier)).filter(|&id| id != 0)
+}
+
+#[cfg(test)]
+mod file_id_tests {
+    use super::nonzero_file_id;
+
+    #[test]
+    fn an_all_zero_file_id_is_unknown() {
+        assert_eq!(nonzero_file_id([0; 16]), None);
+        let mut id = [0; 16];
+        id[0] = 7;
+        assert_eq!(nonzero_file_id(id), Some(7));
     }
 }

@@ -45,6 +45,7 @@ const MAGIC_SIGNATURES: &[(usize, &[u8], ArchiveType)] = &[
 /// for these formats. Extraction treats them as ZIP; creation is
 /// rejected separately in `api::reject_zip_family_creation`. Kept as a
 /// single source of truth so the two call sites don't drift.
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub const ZIP_FAMILY_ALIASES: &[&str] = &[
     "jar", "war", "ear", "nar", "nbm", "apk", "aab", "ipa", "appx", "msix", "whl", "vsix", "xpi",
     "epub",

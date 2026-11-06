@@ -65,7 +65,7 @@ impl EntrySize {
 /// A regular file whose path passed validation and the extension allowlist,
 /// and whose quota is not yet reserved.
 #[derive(Debug)]
-pub struct PendingFile<P: ParentCheck = Resolved> {
+pub(crate) struct PendingFile<P: ParentCheck = Resolved> {
     path: SafePath<P>,
     size: EntrySize,
     mode: Option<RawMode>,
@@ -104,7 +104,7 @@ impl<P: ParentCheck> PendingFile<P> {
 
 /// A regular file that passed path, quota and ratio validation.
 #[derive(Debug)]
-pub struct ValidatedFile<P: ParentCheck = Resolved> {
+pub(crate) struct ValidatedFile<P: ParentCheck = Resolved> {
     path: SafePath<P>,
     permit: QuotaPermit,
     mode: Option<SanitizedMode>,
@@ -126,14 +126,14 @@ impl<P: ParentCheck> ValidatedFile<P> {
 /// A symlink entry that passed validation; the symlink carries its own
 /// validated location.
 #[derive(Debug)]
-pub struct ValidatedSymlink<P: ParentCheck = Resolved> {
+pub(crate) struct ValidatedSymlink<P: ParentCheck = Resolved> {
     /// The validated link and target.
     pub symlink: SafeSymlink<P>,
 }
 
 /// A hardlink entry that passed first-pass validation.
 #[derive(Debug)]
-pub struct ValidatedHardlink<P: ParentCheck = Resolved> {
+pub(crate) struct ValidatedHardlink<P: ParentCheck = Resolved> {
     /// Validated location of the link.
     pub link: SafePath<P>,
     /// Validated target of the link.

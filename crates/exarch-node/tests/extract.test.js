@@ -65,7 +65,7 @@ describe('extractArchive (async)', () => {
     createValidArchive(archivePath, tempDir);
 
     const config = new SecurityConfig();
-    config.setMaxFileSize(1024 * 1024);
+    config.withMaxFileSize(1024 * 1024);
     const report = await extractArchive(archivePath, outputDir, config);
 
     assert.ok(report.filesExtracted >= 1);
@@ -101,7 +101,7 @@ describe('extractArchive (async)', () => {
 
     const config = new SecurityConfig();
     config.addAllowedExtension('txt');
-    config.setMaxFileCount(1);
+    config.withMaxFileCount(1);
 
     await assert.rejects(
       () => extractArchive(archivePath, outputDir, config),
@@ -166,7 +166,7 @@ describe('extractArchive (async)', () => {
 
     const config = new SecurityConfig();
     config.addAllowedExtension('txt');
-    config.setAllowSymlinks(true);
+    config.withAllowSymlinks(true);
 
     await assert.rejects(
       () => extractArchive(archivePath, outputDir, config),
@@ -220,7 +220,7 @@ describe('extractArchiveSync', () => {
     createValidArchive(archivePath, tempDir);
 
     const config = new SecurityConfig();
-    config.setMaxFileCount(100);
+    config.withMaxFileCount(100);
     const report = extractArchiveSync(archivePath, outputDir, config);
 
     assert.ok(report.filesExtracted >= 1);

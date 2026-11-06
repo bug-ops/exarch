@@ -687,12 +687,15 @@ pub enum ArchiveError {
     /// `writes` says whether that output is still on disk
     /// ([`PartialWrites::Kept`]), was discarded by atomic rollback
     /// ([`PartialWrites::RolledBack`]), or was never written anywhere
-    /// ([`PartialWrites::Discarded`]).
+    /// ([`PartialWrites::Discarded`]). A rolled-back extraction whose staging
+    /// directory could not be removed also carries it
+    /// ([`Partial::leftover`]).
     #[error(transparent)]
     PartialExtraction(Partial),
 }
 
-/// An extraction that stopped after recording progress.
+/// An extraction that stopped after recording progress, or that left its
+/// staging directory behind.
 ///
 /// The cause is never itself a partial extraction: [`Partial::new`] looks
 /// through one level of wrapping, so every accessor of [`ArchiveError`] can
@@ -722,6 +725,7 @@ pub struct Partial {
     cause: Box<ArchiveError>,
     report: crate::ExtractionReport,
     writes: PartialWrites,
+    leftover: Option<Box<crate::StagingLeftover>>,
 }
 
 impl Partial {
@@ -746,11 +750,13 @@ impl Partial {
                 } else {
                     writes
                 },
+                leftover: inner.leftover,
             },
             other => Self {
                 cause: Box::new(other),
                 report,
                 writes,
+                leftover: None,
             },
         }
     }
@@ -773,6 +779,15 @@ impl Partial {
         self.writes
     }
 
+    /// The staging directory an atomic extraction could not remove, if any.
+    ///
+    /// Present only after [`ArchiveError::rolled_back_with`]; read it before
+    /// [`into_parts`](Self::into_parts), which drops it.
+    #[must_use]
+    pub fn leftover(&self) -> Option<&crate::StagingLeftover> {
+        self.leftover.as_deref()
+    }
+
     /// Splits into the cause, the report and the fate of the writes.
     #[must_use]
     pub fn into_parts(self) -> (ArchiveError, crate::ExtractionReport, PartialWrites) {
@@ -781,6 +796,10 @@ impl Partial {
 
     fn with_writes(self, writes: PartialWrites) -> Self {
         Self { writes, ..self }
+    }
+
+    fn with_leftover(self, leftover: Option<Box<crate::StagingLeftover>>) -> Self {
+        Self { leftover, ..self }
     }
 }
 
@@ -822,8 +841,8 @@ closed_enum! {
         /// Atomic extraction discarded the written files with its temporary
         /// directory.
         ///
-        /// Cleanup is best effort: a failed removal can leave a `.tmp*` sibling
-        /// in the destination's parent directory.
+        /// Cleanup is best effort: a failed removal leaves a staging directory
+        /// next to the destination, named by [`Partial::leftover`].
         RolledBack => "rolled_back",
         /// The extraction collected its entries in memory, wrote nothing to a
         /// destination, and dropped them with the error.
@@ -1133,11 +1152,55 @@ impl ArchiveError {
     /// ```
     #[must_use]
     pub fn rolled_back(self) -> Self {
-        match self {
-            Self::PartialExtraction(partial) => {
-                Self::PartialExtraction(partial.with_writes(PartialWrites::RolledBack))
+        self.rolled_back_with(None)
+    }
+
+    /// Like [`rolled_back`](Self::rolled_back), and records the staging
+    /// directory that rollback could not remove.
+    ///
+    /// Nothing was published, so the destination is unchanged and the writes
+    /// still count as rolled back; the leftover is a sibling artifact the
+    /// caller can name. With a `leftover`, an error that is not a partial
+    /// extraction is wrapped in one with an empty report; without one it is
+    /// returned unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::PartialWrites;
+    /// use exarch_core::StagingLeftover;
+    ///
+    /// let err = ArchiveError::Cancelled
+    ///     .rolled_back_with(Some(StagingLeftover::new("out/.exarch-1".into())));
+    /// match err {
+    ///     ArchiveError::PartialExtraction(partial) => {
+    ///         assert_eq!(partial.writes(), PartialWrites::RolledBack);
+    ///         assert!(partial.leftover().is_some());
+    ///     }
+    ///     other => panic!("unexpected: {other:?}"),
+    /// }
+    /// ```
+    #[must_use]
+    pub fn rolled_back_with(self, leftover: Option<crate::StagingLeftover>) -> Self {
+        match (self, leftover.map(Box::new)) {
+            (Self::PartialExtraction(partial), leftover) => {
+                let partial = partial.with_writes(PartialWrites::RolledBack);
+                Self::PartialExtraction(if leftover.is_some() {
+                    partial.with_leftover(leftover)
+                } else {
+                    partial
+                })
             }
-            other => other,
+            (other, None) => other,
+            (other, leftover @ Some(_)) => {
+                let partial = Partial::new(
+                    other,
+                    crate::ExtractionReport::default(),
+                    PartialWrites::RolledBack,
+                );
+                Self::PartialExtraction(partial.with_leftover(leftover))
+            }
         }
     }
 
@@ -1615,6 +1678,42 @@ mod tests {
         );
         assert_matches!(nested.cause(), ArchiveError::SecurityViolation { .. });
         assert_eq!(nested.report().files_extracted, 5);
+    }
+
+    #[test]
+    fn a_leftover_survives_nesting_and_marks_a_plain_error_as_rolled_back() {
+        let leftover = || Some(crate::StagingLeftover::new("out/.exarch-1".into()));
+        let inner = ArchiveError::from(Violation::EncryptedArchive).rolled_back_with(leftover());
+        let ArchiveError::PartialExtraction(inner) = inner else {
+            panic!("a leftover wraps a plain error");
+        };
+        assert_eq!(inner.writes(), PartialWrites::RolledBack);
+        assert_eq!(inner.report().total_items(), 0);
+
+        let nested = Partial::new(
+            ArchiveError::PartialExtraction(inner),
+            crate::ExtractionReport::default(),
+            PartialWrites::Kept,
+        );
+
+        assert!(nested.leftover().is_some());
+        assert_eq!(nested.writes(), PartialWrites::RolledBack);
+    }
+
+    #[test]
+    fn rolling_back_without_a_leftover_leaves_a_plain_error_alone() {
+        assert_matches!(
+            ArchiveError::Cancelled.rolled_back_with(None),
+            ArchiveError::Cancelled
+        );
+        let kept = partial_with(2, PartialWrites::Kept);
+        let ArchiveError::PartialExtraction(rolled) =
+            ArchiveError::PartialExtraction(kept).rolled_back()
+        else {
+            panic!("a partial stays a partial");
+        };
+        assert_eq!(rolled.writes(), PartialWrites::RolledBack);
+        assert!(rolled.leftover().is_none());
     }
 
     #[test]

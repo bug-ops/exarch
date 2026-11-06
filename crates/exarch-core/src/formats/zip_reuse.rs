@@ -33,7 +33,7 @@ use flate2::Crc;
 
 use super::common::SpoolBacking;
 use super::common::TempSpool;
-use super::zip::ZIP_INVALID_CHECKSUM;
+use super::source_fault::ReplayChecksumMismatch;
 use crate::DecodeReuse;
 use crate::SecurityConfig;
 use crate::formats::zip::ZipMethod;
@@ -50,7 +50,7 @@ const SPOOL_BUFFER: usize = 64 * 1024;
 /// `max_decoder_memory` and `max_total_size`, and an entry that the size or
 /// ratio limits would refuse at extraction is not kept at all.
 #[derive(Debug, Clone, Copy)]
-pub struct ReusePlan {
+pub(crate) struct ReusePlan {
     mode: DecodeReuse,
     limit: u64,
     max_entry: u64,
@@ -90,7 +90,7 @@ impl ReusePlan {
 /// What identifies an entry's decoded output: where its compressed data is,
 /// what the central directory declares for it, and its checksum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RetainKey {
+pub(crate) struct RetainKey {
     pub(crate) method: ZipMethod,
     pub(crate) data_start: u64,
     pub(crate) compressed: Compressed,
@@ -113,11 +113,11 @@ struct Slot {
 
 /// The kept output of one entry, taken out of the store.
 #[derive(Debug)]
-pub struct Taken(Kept);
+pub(crate) struct Taken(Kept);
 
 /// Kept output ready to be written: owned bytes, or a reader over the spool.
 #[derive(Debug)]
-pub enum Retained<'s> {
+pub(crate) enum Retained<'s> {
     /// Bytes checked against the entry's length and CRC-32.
     Bytes(Vec<u8>),
     /// A reader that checks them at its end.
@@ -169,7 +169,7 @@ enum Backend {
 }
 
 /// Decoded deflate output of a census, by entry.
-pub struct ReuseStore {
+pub(crate) struct ReuseStore {
     plan: ReusePlan,
     limit: u64,
     used: u64,
@@ -453,7 +453,7 @@ fn flip_spooled_bit(spool: &mut SpoolFile, offset: u64) -> io::Result<()> {
 ///
 /// Dropped without [`Capture::finish`], it releases what it took, so a failed
 /// or oversized decode leaves nothing behind.
-pub struct Capture<'s> {
+pub(crate) struct Capture<'s> {
     store: &'s mut ReuseStore,
     key: RetainKey,
     crc: Crc,
@@ -559,10 +559,7 @@ fn check_kept(bytes: &[u8], key: &RetainKey) -> io::Result<()> {
     let mut crc = Crc::new();
     crc.update(bytes);
     if crc.sum() != key.crc32 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            ZIP_INVALID_CHECKSUM,
-        ));
+        return Err(ReplayChecksumMismatch::into_io());
     }
     Ok(())
 }
@@ -570,7 +567,7 @@ fn check_kept(bytes: &[u8], key: &RetainKey) -> io::Result<()> {
 /// Reads kept bytes and checks them against the entry's declared length and
 /// CRC-32 at the end, failing as the `zip` crate does for a damaged entry.
 #[derive(Debug)]
-pub struct ReplayReader<S> {
+pub(crate) struct ReplayReader<S> {
     inner: S,
     crc: Crc,
     key: RetainKey,
@@ -599,10 +596,7 @@ impl<S: Read> Read for ReplayReader<S> {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
             if self.crc.sum() != self.key.crc32 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    ZIP_INVALID_CHECKSUM,
-                ));
+                return Err(ReplayChecksumMismatch::into_io());
             }
         }
         Ok(n)

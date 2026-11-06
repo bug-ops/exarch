@@ -39,6 +39,8 @@ use crate::error::NativeKind;
 #[cfg(unix)]
 use crate::formats::common::MAX_TEMP_FILE_CREATE_ATTEMPTS;
 #[cfg(unix)]
+use crate::formats::occupant::ReplacePermit;
+#[cfg(unix)]
 use crate::formats::pinned_dir::TempLeaf;
 #[cfg(unix)]
 use crate::formats::pinned_dir::support::leaf;
@@ -472,6 +474,7 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
         leaf("real-output.txt"),
         &mut copy_buffer,
         test_permit(13),
+        ReplacePermit::for_test(),
         || {
             let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
             next_candidate += 1;
@@ -531,6 +534,7 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
         leaf("real-output.txt"),
         &mut copy_buffer,
         test_permit(13),
+        ReplacePermit::for_test(),
         || {
             let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
             next_candidate += 1;
@@ -617,6 +621,7 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
         leaf("existing.bin"),
         &mut copy_buffer,
         test_permit(50),
+        ReplacePermit::for_test(),
     );
 
     assert!(

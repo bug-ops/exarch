@@ -107,7 +107,7 @@ describe('InvalidArchive families', () => {
 
   it('a hardlink to a missing target is LINK_TARGET', async () => {
     const bytes = tarOf({ name: 'h', type: '1', linkname: 'nothere' });
-    const config = new SecurityConfig().setAllowHardlinks(true);
+    const config = new SecurityConfig().withAllowHardlinks(true);
     const err = await extractFailure('absent.tar', bytes, config);
     assert.strictEqual(err.code, 'INVALID_ARCHIVE');
     assert.strictEqual(err.subCode, 'LINK_TARGET');
@@ -115,7 +115,7 @@ describe('InvalidArchive families', () => {
 
   it('a symlink without a target is LINK_TARGET', async () => {
     const bytes = tarOf({ name: 's', type: '2' });
-    const config = new SecurityConfig().setAllowSymlinks(true);
+    const config = new SecurityConfig().withAllowSymlinks(true);
     const err = await extractFailure('nolink.tar', bytes, config);
     assert.strictEqual(err.code, 'INVALID_ARCHIVE');
     assert.strictEqual(err.subCode, 'LINK_TARGET');
@@ -127,7 +127,7 @@ describe('InvalidArchive families', () => {
       { name: 'h', type: '1', linkname: 't' },
       { name: 'h', type: '1', linkname: 't' }
     );
-    const config = new SecurityConfig().setAllowHardlinks(true);
+    const config = new SecurityConfig().withAllowHardlinks(true);
     const options = new ExtractionOptions().withExistingFiles('overwrite');
     const err = await extractFailure('dup.tar', bytes, config, options);
     assert.strictEqual(err.code, 'INVALID_ARCHIVE');
@@ -163,15 +163,15 @@ describe('InvalidArchive families', () => {
 
 describe('INVALID_CONFIGURATION setting', () => {
   const refused = [
-    ['setMaxFileCount', 0, 'max_file_count'],
-    ['setMaxPathDepth', 0, 'max_path_depth'],
-    ['setMaxFileSize', 0, 'max_file_size'],
-    ['setMaxFileSize', -1, 'max_file_size'],
-    ['setMaxTotalSize', 0, 'max_total_size'],
-    ['setMaxSolidBlockMemory', 0, 'max_solid_block_memory'],
-    ['setMaxCompressionRatio', 0, 'max_compression_ratio'],
-    ['setMaxCompressionRatio', NaN, 'max_compression_ratio'],
-    ['setMaxCompressionRatio', Infinity, 'max_compression_ratio'],
+    ['withMaxFileCount', 0, 'max_file_count'],
+    ['withMaxPathDepth', 0, 'max_path_depth'],
+    ['withMaxFileSize', 0, 'max_file_size'],
+    ['withMaxFileSize', -1, 'max_file_size'],
+    ['withMaxTotalSize', 0, 'max_total_size'],
+    ['withMaxSolidBlockMemory', 0, 'max_solid_block_memory'],
+    ['withMaxCompressionRatio', 0, 'max_compression_ratio'],
+    ['withMaxCompressionRatio', NaN, 'max_compression_ratio'],
+    ['withMaxCompressionRatio', Infinity, 'max_compression_ratio'],
   ];
 
   for (const [method, value, setting] of refused) {

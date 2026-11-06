@@ -4,6 +4,7 @@
 mod cli;
 mod commands;
 mod error;
+mod interrupt;
 mod operation;
 mod output;
 mod progress;
@@ -29,6 +30,7 @@ enum ExitStatus {
     Success = 0,
     Failure = 1,
     StrictWarning = 3,
+    Interrupted = interrupt::FORCED_EXIT_CODE,
 }
 
 impl From<ExitStatus> for ExitCode {
@@ -103,7 +105,11 @@ fn main() -> ExitCode {
         Ok(Outcome::StrictWarning) => ExitStatus::StrictWarning,
         Err(failure) => {
             formatter.format_error(failure.operation, &failure.error);
-            ExitStatus::Failure
+            if interrupt::requested() && error::is_cancelled(&failure.error) {
+                ExitStatus::Interrupted
+            } else {
+                ExitStatus::Failure
+            }
         }
     };
     status.into()
@@ -120,6 +126,7 @@ mod tests {
             ExitStatus::Success,
             ExitStatus::Failure,
             ExitStatus::StrictWarning,
+            ExitStatus::Interrupted,
         ] {
             assert_ne!(status as u8, CLAP_USAGE_ERROR, "{status:?}");
         }

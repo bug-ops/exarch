@@ -53,6 +53,7 @@ use crate::types::SafePath;
 /// # Ok(())
 /// # }
 /// ```
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub fn validate_path(path: &Path, dest: &DestDir, config: &SecurityConfig) -> Result<SafePath> {
     SafePath::validate(path, dest, config)
 }

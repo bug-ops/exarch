@@ -48,7 +48,7 @@ const MAX_THREADS: usize = 16;
 /// Tuning knobs of the parallel decoder, passed explicitly so tests and fuzz
 /// targets can force the parallel path on small inputs.
 #[derive(Debug, Clone, Copy)]
-pub struct DecodeKnobs {
+pub(super) struct DecodeKnobs {
     /// Output a run accumulates before the planner ends it at the next reset.
     pub min_unit: u64,
     /// Most runs decoded by workers at the same time.
@@ -60,7 +60,7 @@ pub struct DecodeKnobs {
 /// A failure injected into the worker with the given spawn index.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkerFault {
+pub(super) enum WorkerFault {
     PanicOn(usize),
     SpawnFailsOn(usize),
 }
@@ -70,7 +70,7 @@ impl DecodeKnobs {
     ///
     /// Under `cfg(fuzzing)` runs shrink to 1 KiB on two workers so small fuzz
     /// inputs reach the parallel path.
-    pub fn production() -> Self {
+    pub(super) fn production() -> Self {
         #[cfg(fuzzing)]
         return Self::new(1 << 10, 2);
         #[cfg(not(fuzzing))]
@@ -80,7 +80,7 @@ impl DecodeKnobs {
         }
     }
 
-    pub fn new(min_unit: u64, threads: usize) -> Self {
+    pub(super) fn new(min_unit: u64, threads: usize) -> Self {
         Self {
             min_unit,
             threads: NonZeroUsize::new(threads).unwrap_or(NonZeroUsize::MIN),
@@ -92,7 +92,7 @@ impl DecodeKnobs {
 
 /// One LZMA2 stream inside a source.
 #[derive(Debug, Clone, Copy)]
-pub struct Lzma2Stream {
+pub(super) struct Lzma2Stream {
     /// Absolute offset of the stream in the source.
     pub offset: u64,
     /// Packed length of the stream.
@@ -509,7 +509,7 @@ enum Current<'a, S> {
 }
 
 /// Reads the decoded stream in order while workers decode ahead.
-pub struct ParallelLzma2<'scope, 'env, S> {
+pub(super) struct ParallelLzma2<'scope, 'env, S> {
     scope: &'scope Scope<'scope, 'env>,
     cancel: &'env AtomicBool,
     pack: PackSource<'env, S>,
@@ -793,7 +793,7 @@ impl<S> Drop for ParallelLzma2<'_, '_, S> {
 /// Every worker is joined before this returns, on success, error and panic
 /// alike. Decode and source errors surface as read errors of the reader
 /// `consume` receives.
-pub fn with_parallel_reader<S: Read + Seek, T>(
+pub(super) fn with_parallel_reader<S: Read + Seek, T>(
     source: S,
     stream: Lzma2Stream,
     knobs: DecodeKnobs,

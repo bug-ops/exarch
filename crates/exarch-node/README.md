@@ -113,9 +113,9 @@ console.log(`Extracted ${result.filesExtracted} files`);
 import { extractArchive, SecurityConfig } from 'exarch-rs';
 
 const config = new SecurityConfig()
-  .setMaxFileSize(100 * 1024 * 1024)   // 100 MB per file
-  .setMaxTotalSize(1024 * 1024 * 1024) // 1 GB total
-  .setMaxFileCount(10_000);             // Max 10k files
+  .withMaxFileSize(100 * 1024 * 1024)   // 100 MB per file
+  .withMaxTotalSize(1024 * 1024 * 1024) // 1 GB total
+  .withMaxFileCount(10_000);             // Max 10k files
 
 const result = await extractArchive('archive.tar.gz', '/output', config);
 ```
@@ -135,7 +135,7 @@ console.log(report.integrityStatus); // 'OK', 'FAILED', 'INCOMPLETE' or 'SKIPPED
 ```
 
 **Note:** `'INCOMPLETE'` means part of the payload was not verified (budget,
-resource limit, solid 7z archive while `setAllowSolidArchives` is off, TAR without
+resource limit, solid 7z archive while `withAllowSolidArchives` is off, TAR without
 an end-of-archive marker); it comes with a Medium issue, so `status` is at least
 `'WARNING'`. With the check on, a TAR entry whose content fails to decode rejects
 the promise.
@@ -292,7 +292,9 @@ try {
 | `relaxableBy` | a `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit | The `PolicySetting` id, for example `'symlinks'` |
 | `subCode` | an `INVALID_ARCHIVE` with a finer classification, every core `SECURITY_VIOLATION`, every `QUOTA_EXCEEDED` and every `ZIP_BOMB` | on `INVALID_ARCHIVE`, `'TAR_AMBIGUITY'` (a TAR header read differently by different tools), `'TAR_TRAILER'` (the stream after the TAR end-of-archive marker is corrupt or truncated), `'ZIP_READER'` (a failure of the ZIP reader or of the structural check built on it), `'LINK_TARGET'`, `'DUPLICATE_ENTRY'`, `'ENTRY_NAME'`, `'DECLARED_SIZE'`, `'INTEGRITY'` (the refusal of that family), `'TAR_READER'` or `'SEVENZ_READER'` (a failure of the TAR or 7z reader); on `SECURITY_VIOLATION`, the family of the refusal, one of `'PATH_NAME'`, `'PATH_DEPTH'`, `'LINK_TARGET'`, `'LINK_POLICY'`, `'EXISTING_SYMLINK'`, `'ENTRY_TYPE'`, `'ROOT_ENTRY'`, `'ENCRYPTED'`, `'COMPRESSION_METHOD'`, `'SOLID_ARCHIVE'`, `'DECLARED_SIZE'`, `'CONCURRENT_CHANGE'`, `'TAR_METADATA'`, `'TAR_TRAILER'`, `'PLATFORM'`, `'OUTPUT_CONFLICT'`, `'SOURCE_PATH'`; on `QUOTA_EXCEEDED`, the quota (`'FILE_COUNT'`, `'TOTAL_SIZE'`, `'FILE_SIZE'`, `'INTEGER_OVERFLOW'`, `'DECODER_MEMORY'`, `'COMPRESSED_MEMBERS'`, `'TREE_NODES'`, `'SINK_CAPACITY'` or `'SOLID_BLOCK_MEMORY'`); on `ZIP_BOMB`, what the ratio was measured over (`'ENTRY'`, `'SOLID_BLOCK'` or `'SKIPPED_ENTRIES'`); typed `InvalidArchiveSubCode`, `SecurityViolationSubCode`, `QuotaSubCode` or `ZipBombSubCode` |
 | `nonUtf8EntryPath` | an `INVALID_ARCHIVE` (`'ENTRY_NAME'`) refusal of an entry name that is not valid UTF-8 | The name written injectively: a backslash is `\x5C`, each invalid byte `\xNN` |
-| `restore`, `backupPath`, `leftoverPath` | an `IO_ERROR` from a failed `'atomic_replace'` (`leftoverPath` also from a creation that left an empty output reservation) | `restore` is `'not_needed'`, `'restored'` or `'failed'`; `backupPath` names where the original remains after `'failed'`; `leftoverPath` a staging directory or reservation left on disk; paths are redacted like the message |
+| `restore`, `backupPath` | an `IO_ERROR` from a failed `'atomic_replace'` | `restore` is `'not_needed'`, `'restored'` or `'failed'`; `backupPath` names where the original remains after `'failed'`; paths are redacted like the message |
+| `leftoverPath` | a staging directory or an empty output reservation file stayed on disk (a failed `'atomic_replace'`, a rolled-back extraction, a creation that left its reservation) | The leftover, redacted like the message |
+| `path` | a `SOURCE_NOT_FOUND`, an `OUTPUT_EXISTS`, or an `IO_ERROR` that left an empty output reservation | The source, the existing output or destination, or the reservation file, redacted like the message |
 | `conflicts` | an `OUTPUT_EXISTS` from a `'refuse'` extraction | The entry names that found an occupant |
 | `protectedPath`, `collision`, `unmatchedPatterns` | an `INVALID_CONFIGURATION` for a protected `'atomic_replace'` destination, for creation sources that map to one entry name, or for include patterns that matched no entry | `'filesystem_root'`, `'archive_ancestor'` or `'working_directory'`; `{ name, first, second }`; the unmatched patterns |
 | `ioKind` | an `IO_ERROR` | The `IoKind` core reported, for example `'NotFound'`, `'PermissionDenied'` or `'StorageFull'`; `'Other'` for a kind with no entry in `IoKind` |
@@ -399,7 +401,7 @@ const result = await extractArchiveWithProgress(
 
 ### Exclude patterns
 
-`CreationConfig.setExcludePatterns(patterns)` replaces the list (the defaults included)
+`CreationConfig.withExcludePatterns(patterns)` replaces the list (the defaults included)
 and `addExcludePattern(pattern)` appends one; both accept four shapes: `name` (a path
 component equal to it), `name*`, `*name` and `dir/sub` (that path and its
 subtree). Patterns match the entry's archive path, never the ancestors of a
@@ -469,21 +471,21 @@ Builder-style security configuration.
 
 ```typescript
 const config = new SecurityConfig()
-  .setMaxFileSize(bytes)                     // Max size per file
-  .setMaxTotalSize(bytes)                    // Max total extraction size
-  .setMaxFileCount(count)                    // Max number of files
-  .setMaxCompressionRatio(n)                 // Max compression ratio (zip bomb detection)
+  .withMaxFileSize(bytes)                     // Max size per file
+  .withMaxTotalSize(bytes)                    // Max total extraction size
+  .withMaxFileCount(count)                    // Max number of files
+  .withMaxCompressionRatio(n)                 // Max compression ratio (zip bomb detection)
   .addAllowedExtension(".txt")               // Restrict to a set of extensions (repeatable)
-  .setAllowedExtensions([".txt", ".md"])     // Replace the allowlist; null allows every extension, [] is refused
+  .withAllowedExtensions([".txt", ".md"])     // Replace the allowlist; null allows every extension, [] is refused
   .addBannedComponent("__MACOSX")            // Skip this path component (repeatable)
-  .setBannedComponents(["__MACOSX"])         // Replace the banned components; [] bans nothing
-  .addIncludePattern("src")                  // Extract only matching entries (repeatable, or setIncludePatterns([...]))
-  .addExcludePattern("*.tmp")                // Never extract matching entries; wins over include (or setExcludePatterns([...]))
-  .setStripComponents(1)                     // Drop leading path components, like tar --strip-components; null removes a count but keeps flatten
-  .setFlatten(true)                          // Land every file under its final component (replaces a strip count)
-  .setAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
-  .setZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'
-  .setParallelDecodeMemory(256 * 1024 * 1024); // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread
+  .withBannedComponents(["__MACOSX"])         // Replace the banned components; [] bans nothing
+  .addIncludePattern("src")                  // Extract only matching entries (repeatable, or withIncludePatterns([...]))
+  .addExcludePattern("*.tmp")                // Never extract matching entries; wins over include (or withExcludePatterns([...]))
+  .withStripComponents(1)                     // Drop leading path components, like tar --strip-components; null removes a count but keeps flatten
+  .withFlatten(true)                          // Land every file under its final component (replaces a strip count)
+  .withAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
+  .withZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'
+  .withParallelDecodeMemory(256 * 1024 * 1024); // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread
 ```
 
 **Getters:** `allowedExtensions` returns the allowlist, or `null` while every extension is allowed. `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`. `parallelDecodeMemory` returns the 7z lookahead memory in bytes, or `null` when decoding runs on one thread. Each extract or verify call may start up to 16 worker threads and hold its own lookahead, so concurrent calls multiply both.
@@ -515,8 +517,8 @@ everything.
 - `'atomic_replace'` staging with a non-default selection is refused
   (`INVALID_CONFIGURATION`, `setting` `'entry_selection'`).
 - `listArchive*` still lists every entry and adds `dispositions`: one object per
-  entry validation accepts, `{ kind: 'extract', path, landing }` or
-  `{ kind: 'skip', path, reason }`, computed with the listing's `SecurityConfig`
+  entry validation accepts, `{ action: 'extract', path, landing }` or
+  `{ action: 'skip', path, kind }` (`kind` is the `SkipKind`), computed with the listing's `SecurityConfig`
   (an entry validation refuses is not reported). `verifyArchive*` reports the
   refusals extraction would raise for the same selection as issues.
 

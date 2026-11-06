@@ -227,6 +227,8 @@ The names in sections 2.1 to 2.4 are the plan's. What shipped differs as follows
 | `StripComponents` from `i64` | `StripComponents::new(NonZeroU64, max_path_depth: NonZeroUsize)`; bindings parse with `positive_from_i128` or `positive_from_f64` under `ConfigSetting::StripComponents` and then call `new`; `ExcludePattern::parse_for(ConfigSetting, &str)` is the shared pattern boundary and `EntryPattern` is an alias of `ExcludePattern` |
 | `SelectionError` and `HardlinkTargetNotExtracted` as `ArchiveError` | `ArchiveError::UnmatchedInclude { patterns }` is top-level; `HardlinkTargetNotExtracted { link, target }` and `LinkUnderFlatten { kind, name }` are `Violation` variants (sub-codes `LinkTarget`, `LinkPolicy`); no `ConfigProblem` was added |
 | `dispositions()` without config | `dispositions(&SecurityConfig)` |
+| Disposition discriminant in the bindings | Core `DispositionKind` (`extract`, `skip`) with `Disposition::kind()`; Python and Node expose it as `action` and the skip reason as `kind`; Python computes the list once at listing time and keeps it as an attribute (#1009, #1010) |
+| Selection helpers in the bindings | `EntrySelection::with_strip`, `with_flatten`, `with_include_list`, `with_exclude_list` (#998); an absolute hardlink target is mapped with the entry names where absolute paths are allowed (#997) |
 | Unmatched include bit set per run | As planned, evaluated in `finish_scan` before the hardlink pass, also on empty archives |
 | Python `flatten: bool` and `include`/`exclude` keyword arguments on extract | Selection on `SecurityConfig` for Python and Node (spec FR-104) |
 | CLI `--flatten` | As planned; conflicts with `--strip-components` at the clap level |

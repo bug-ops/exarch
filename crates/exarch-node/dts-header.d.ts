@@ -44,6 +44,12 @@ export interface ExarchErrorBase extends Error {
    * `cause` is the primitive.
    */
   cause?: unknown
+  /**
+   * A staging directory or empty output reservation file the failure left on
+   * disk, redacted like an error path. Any failure of an atomic extraction can
+   * carry it when the cleanup of its staging directory failed.
+   */
+  leftoverPath?: string
 }
 
 /**
@@ -180,7 +186,6 @@ export interface ExarchInvalidArchiveDetail {
   ioKind?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -200,7 +205,6 @@ export interface ExarchSecurityViolationDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -220,7 +224,6 @@ export interface ExarchInvalidConfigurationDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   /** Why a destination is too important to replace as a whole. */
   protectedPath?: ProtectedPath
@@ -245,15 +248,14 @@ export interface ExarchIoDetail {
   restore?: RestoreOutcome
   /** Where the original destination remains when `restore` is `'failed'`, redacted like an error path. */
   backupPath?: string
-  /** A staging directory or empty output reservation left on disk, redacted like an error path. */
-  leftoverPath?: string
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
-  path?: undefined
+  /** The empty output reservation file a failed creation left at its output path, redacted like an error path. */
+  path?: string
 }
 
 /** A quota refusal; `subCode` names the quota that was exceeded. */
@@ -266,7 +268,6 @@ export interface ExarchQuotaDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -286,7 +287,6 @@ export interface ExarchZipBombDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -313,7 +313,6 @@ export interface ExarchSourceNotAccessibleDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -333,15 +332,34 @@ export interface ExarchOutputExistsDetail {
   nonUtf8EntryPath?: undefined
   errno?: undefined
   strerror?: undefined
-  path?: undefined
+  /** The existing output, or the destination an extraction refused to touch, redacted like an error path. */
+  path: string
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
   conflicts?: Array<string>
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
+}
+
+/** A source path or archive that does not exist; `path` is redacted like an error path. */
+export interface ExarchSourceNotFoundDetail {
+  code: 'SOURCE_NOT_FOUND'
+  path: string
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
 }
 
 /** Every other code carries no detail property. */
@@ -356,6 +374,7 @@ export interface ExarchPlainCodeDetail {
     | 'ZIP_BOMB'
     | 'SOURCE_NOT_ACCESSIBLE'
     | 'OUTPUT_EXISTS'
+    | 'SOURCE_NOT_FOUND'
   >
   subCode?: undefined
   relaxableBy?: undefined
@@ -364,7 +383,6 @@ export interface ExarchPlainCodeDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -384,6 +402,7 @@ export type ExarchErrorCodeDetail =
   | ExarchZipBombDetail
   | ExarchSourceNotAccessibleDetail
   | ExarchOutputExistsDetail
+  | ExarchSourceNotFoundDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -452,8 +471,9 @@ export type CreationWarning =
   | DirectoryNotSyncedWarning
 
 /**
- * What extraction does with a listed entry, discriminated by `kind`: an
- * `'extract'` disposition has a `landing`, a `'skip'` one a `reason`.
+ * What extraction does with a listed entry, discriminated by `action`: an
+ * `'extract'` disposition has a `landing`, a `'skip'` one a `kind`, the
+ * `SkipKind` it is left out for.
  */
 export type EntryDisposition = ExtractDisposition | SkipDisposition
 
@@ -491,7 +511,6 @@ export interface HeuristicIssueDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined

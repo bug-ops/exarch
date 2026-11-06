@@ -1,5 +1,6 @@
 //! JSON output formatter for machine-readable results.
 
+use super::emit_line;
 use super::formatter::Dispositions;
 use super::formatter::Envelope;
 use super::formatter::JsonError;
@@ -9,11 +10,13 @@ use super::formatter::JsonKind;
 use super::formatter::JsonPartialReport;
 use super::formatter::JsonRefusal;
 use super::formatter::JsonSkips;
+use super::formatter::JsonWarning;
 use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use crate::error::PartialExtractionContext;
 use crate::error::chain_hints;
 use crate::error::chain_text;
+use crate::error::leftover_path;
 use crate::error::raw;
 use crate::operation::Operation;
 use anyhow::Result;
@@ -109,10 +112,8 @@ impl<W: Write> JsonFormatter<W> {
 
     fn output<T: Serialize>(&mut self, value: &T) -> Result<()> {
         let json = serde_json::to_string_pretty(value)?;
-        match writeln!(self.out, "{json}") {
-            Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-            written => written.map_err(Into::into),
-        }
+        emit_line(&mut self.out, format_args!("{json}"))?;
+        Ok(())
     }
 
     fn success<T: Serialize>(&mut self, operation: Operation, data: T) -> Result<()> {
@@ -121,30 +122,39 @@ impl<W: Write> JsonFormatter<W> {
 }
 
 /// What a selection does to a listed entry, as `--json` reports it.
+///
+/// `action` is the core's [`DispositionKind`](exarch_core::DispositionKind)
+/// token, so a new core variant reaches the output under its own name; only
+/// its payload fields wait for a case here.
 #[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-enum JsonDisposition {
-    Extract {
-        landing: String,
-    },
-    Skip {
-        kind: &'static str,
-    },
-    /// A disposition added to the `#[non_exhaustive]` core enum after this
-    /// match was written.
-    Unknown,
+struct JsonDisposition {
+    action: &'static str,
+    #[serde(flatten)]
+    payload: Option<DispositionPayload>,
+}
+
+/// The fields that go with each [`JsonDisposition`] action.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+enum DispositionPayload {
+    Landing { landing: String },
+    Skip { kind: &'static str },
 }
 
 impl From<&Disposition> for JsonDisposition {
     fn from(disposition: &Disposition) -> Self {
-        match disposition {
-            Disposition::Extract(landing) => Self::Extract {
+        let payload = match disposition {
+            Disposition::Extract(landing) => Some(DispositionPayload::Landing {
                 landing: path_text(landing.as_path()),
-            },
-            Disposition::Skip(kind) => Self::Skip {
+            }),
+            Disposition::Skip(kind) => Some(DispositionPayload::Skip {
                 kind: kind.as_str(),
-            },
-            _ => Self::Unknown,
+            }),
+            _ => None,
+        };
+        Self {
+            action: disposition.kind().as_str(),
+            payload,
         }
     }
 }
@@ -273,7 +283,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             #[serde(flatten)]
             skips: JsonSkips,
             duration_ms: u128,
-            warnings: Vec<String>,
+            warnings: Vec<JsonWarning>,
         }
 
         self.success(
@@ -289,7 +299,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                 compression_percentage: report.compression_percentage(),
                 skips: JsonSkips::from(&report.skipped),
                 duration_ms: report.duration.as_millis(),
-                warnings: report.warnings.iter().map(ToString::to_string).collect(),
+                warnings: report.warnings.iter().map(JsonWarning::from).collect(),
             },
         )
     }
@@ -320,12 +330,10 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             });
         }
         if let Some(ArchiveError::DestinationOccupied { conflicts, .. }) = extraction_err {
-            json_error = json_error.with_conflicts({
-                let mut names: Vec<_> = conflicts.iter().map(|c| path_text(c)).collect();
-                names.sort();
-                names
-            });
+            json_error =
+                json_error.with_conflicts(conflicts.iter().map(|c| path_text(c)).collect());
         }
+        json_error = json_error.with_leftover_path(leftover_path(error).map(path_text));
         if let Some(kind) = &ffi_kind {
             json_error = json_error.with_ffi_kind(kind);
         }
@@ -440,24 +448,15 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
 mod tests {
     use super::*;
     use crate::output::formatter::SizeUnits;
+    use crate::test_support::FailingWriter;
     use exarch_core::Compressed;
+    use exarch_core::CreationWarning;
     use exarch_core::ErrorCode;
+    use exarch_core::ExtractionWarning;
     use exarch_core::QuotaResource;
     use exarch_core::Uncompressed;
     use exarch_core::Violation;
     use std::path::PathBuf;
-
-    struct FailingWriter(io::ErrorKind);
-
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(self.0.into())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Err(self.0.into())
-        }
-    }
 
     #[test]
     fn a_closed_stdout_is_not_a_failure() {
@@ -651,6 +650,34 @@ mod tests {
     }
 
     #[test]
+    fn test_error_envelope_reports_the_io_kind_of_an_io_error() {
+        let denied = envelope_for(&ArchiveError::Io(io::Error::from(
+            io::ErrorKind::PermissionDenied,
+        )));
+        assert_eq!(denied["error"]["kind"], "IoError");
+        assert_eq!(denied["error"]["io_kind"], "PermissionDenied");
+
+        let other = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
+        assert!(other["error"].get("io_kind").is_none());
+    }
+
+    #[test]
+    fn test_error_envelope_names_the_leftover_staging_directory() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let err = ArchiveError::Cancelled.rolled_back_with(Some(
+            exarch_core::StagingLeftover::new(PathBuf::from("out/.exarch-AbC123")),
+        ));
+        let converted = crate::error::convert_error(Operation::Extract, err, Path::new("a.tar"));
+        f.format_error(Operation::Extract, &converted);
+        let v = parsed(&f);
+        assert_eq!(v["error"]["leftover_path"], "out/.exarch-AbC123");
+        assert_eq!(v["error"]["partial_report"]["writes"], "rolled_back");
+
+        let clean = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
+        assert!(clean["error"].get("leftover_path").is_none());
+    }
+
+    #[test]
     fn test_error_envelope_reports_tar_sub_codes() {
         use exarch_core::TarTrailerRefusal;
 
@@ -815,12 +842,17 @@ mod tests {
         f.format_extraction_result(&report).unwrap();
         let v = parsed(&f);
         assert_eq!(v["data"]["files_skipped"], 2);
+        let warning = &v["data"]["warnings"][0];
+        assert_eq!(warning["kind"], "backup_cleanup_failed");
         assert!(
-            v["data"]["warnings"][0]
+            warning["message"]
                 .as_str()
                 .unwrap()
                 .contains("skipped 2 entries with disallowed extensions")
         );
+        assert_eq!(warning["path"], "backup");
+        assert_eq!(warning["identity"], "verified");
+        assert_eq!(warning["io_kind"], "Other");
         assert_eq!(v["data"]["skipped_by_kind"]["duplicate"], 2);
         assert_eq!(v["data"]["skipped_sample"][0]["kind"], "duplicate");
     }
@@ -896,8 +928,10 @@ mod tests {
         let v = parsed(&f);
         assert_eq!(v["error"]["partial_report"]["files_skipped"], 3);
         assert_eq!(v["error"]["partial_report"]["writes"], "kept");
+        let warning = &v["error"]["partial_report"]["warnings"][0];
+        assert_eq!(warning["kind"], "backup_cleanup_failed");
         assert!(
-            v["error"]["partial_report"]["warnings"][0]
+            warning["message"]
                 .as_str()
                 .unwrap()
                 .contains("skipped disallowed extension")
@@ -1134,5 +1168,80 @@ mod tests {
                 .contains("we\x1bird.tar"),
             "{v}"
         );
+    }
+
+    #[test]
+    fn every_disposition_has_a_dedicated_json_action_and_payload() {
+        let (manifest, config) = crate::test_support::selected_manifest();
+        let dispositions = Dispositions::of(&manifest, &config);
+        let mut seen = Vec::new();
+        for index in 0..manifest.entries().len() {
+            let disposition = dispositions.get(index).unwrap();
+            let json = JsonDisposition::from(disposition);
+            assert_eq!(json.action, disposition.kind().as_str());
+            assert!(
+                json.payload.is_some(),
+                "{disposition:?} fell to the wildcard"
+            );
+            seen.push(disposition.kind());
+        }
+        for kind in exarch_core::DispositionKind::ALL {
+            assert!(seen.contains(kind), "no fixture entry is {kind}");
+        }
+    }
+
+    #[test]
+    fn every_extraction_warning_has_dedicated_json_fields() {
+        let warnings = [
+            ExtractionWarning::AntiItemsSkipped { count: 2 },
+            crate::test_support::extraction_warning("gone"),
+        ];
+        for kind in exarch_core::ExtractionWarningKind::ALL {
+            assert!(
+                warnings.iter().any(|w| w.kind() == *kind),
+                "no fixture warning is {kind}"
+            );
+        }
+        for warning in &warnings {
+            let json = serde_json::to_value(JsonWarning::from(warning)).unwrap();
+            assert_eq!(json["kind"], warning.kind().as_str());
+            assert_eq!(json["message"], warning.to_string());
+            assert!(json.as_object().unwrap().len() > 2, "{json}");
+        }
+        let leftover = serde_json::to_value(JsonWarning::from(&warnings[1])).unwrap();
+        assert_eq!(leftover["reason"], "gone");
+    }
+
+    #[test]
+    fn every_creation_warning_has_dedicated_json_fields() {
+        let warnings = [
+            CreationWarning::ZipRatioOverDefaultLimit {
+                entries: 3,
+                limit: 100.0,
+                needed_ratio: 250.5,
+            },
+            crate::test_support::creation_warning("unreadable"),
+            CreationWarning::DirectoryNotSynced {
+                io_kind: exarch_core::IoKind::PermissionDenied,
+            },
+        ];
+        for kind in exarch_core::CreationWarningKind::ALL {
+            assert!(
+                warnings.iter().any(|w| w.kind() == *kind),
+                "no fixture warning is {kind}"
+            );
+        }
+        let json: Vec<_> = warnings
+            .iter()
+            .map(|w| serde_json::to_value(JsonWarning::from(w)).unwrap())
+            .collect();
+        for (warning, json) in warnings.iter().zip(&json) {
+            assert_eq!(json["kind"], warning.kind().as_str());
+            assert!(json.as_object().unwrap().len() > 2, "{json}");
+        }
+        assert_eq!(json[0]["entries"], 3);
+        assert_eq!(json[0]["needed_ratio"], 250.5);
+        assert_eq!(json[1]["reason"], "unreadable");
+        assert_eq!(json[2]["io_kind"], "PermissionDenied");
     }
 }

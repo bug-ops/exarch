@@ -23,6 +23,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::Admit;
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
@@ -231,6 +232,71 @@ impl EntrySelection {
         self
     }
 
+    /// Sets or clears the strip, leaving a flatten as it is.
+    ///
+    /// `None` removes a strip but keeps a flatten, so a front end can apply
+    /// its strip and flatten options independently, in either order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::EntrySelection;
+    /// use exarch_core::PathRewrite;
+    ///
+    /// let selection = EntrySelection::default()
+    ///     .with_flatten(true)
+    ///     .with_strip(None);
+    /// assert_eq!(selection.rewrite(), PathRewrite::Flatten);
+    /// ```
+    #[must_use]
+    pub const fn with_strip(mut self, strip: Option<StripComponents>) -> Self {
+        self.rewrite = match (strip, self.rewrite) {
+            (Some(strip), _) => PathRewrite::Strip(strip),
+            (None, PathRewrite::Flatten) => PathRewrite::Flatten,
+            (None, _) => PathRewrite::Keep,
+        };
+        self
+    }
+
+    /// Sets or clears the flatten, leaving a strip as it is.
+    ///
+    /// `false` removes a flatten but keeps a strip.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::EntrySelection;
+    /// use exarch_core::PathRewrite;
+    ///
+    /// let selection = EntrySelection::default()
+    ///     .with_flatten(true)
+    ///     .with_flatten(false);
+    /// assert_eq!(selection.rewrite(), PathRewrite::Keep);
+    /// ```
+    #[must_use]
+    pub const fn with_flatten(mut self, flatten: bool) -> Self {
+        self.rewrite = match (flatten, self.rewrite) {
+            (true, _) => PathRewrite::Flatten,
+            (false, PathRewrite::Flatten) => PathRewrite::Keep,
+            (false, rewrite) => rewrite,
+        };
+        self
+    }
+
+    /// Replaces the include patterns; the rewrite is kept.
+    #[must_use]
+    pub fn with_include_list(mut self, patterns: Vec<EntryPattern>) -> Self {
+        self.include = patterns.into_boxed_slice();
+        self
+    }
+
+    /// Replaces the exclude patterns; the rewrite is kept.
+    #[must_use]
+    pub fn with_exclude_list(mut self, patterns: Vec<EntryPattern>) -> Self {
+        self.exclude = patterns.into_boxed_slice();
+        self
+    }
+
     /// Decides what happens to an entry whose name `original` already passed
     /// path validation (so it holds only normal components).
     ///
@@ -322,8 +388,9 @@ impl EntrySelection {
         &self,
         link: &Path,
         target: &'t Path,
+        absolute: Admit,
     ) -> Result<Cow<'t, Path>> {
-        match self.map_link_target(target)? {
+        match self.map_link_target(target, absolute)? {
             TargetMapping::Unchanged => Ok(Cow::Borrowed(target)),
             TargetMapping::Mapped(mapped) => Ok(Cow::Owned(mapped)),
             TargetMapping::NotExtracted => Err(target_not_extracted(link, target)),
@@ -333,42 +400,49 @@ impl EntrySelection {
     /// Maps the target of a hardlink, an archive path, as the entry names are
     /// mapped, without recording include hits.
     ///
-    /// A target the plain extraction would have to refuse itself (empty, NUL
-    /// bytes, a root or drive prefix) is returned unchanged for its own
-    /// validation to refuse with the same typed error.
+    /// Where `absolute` admits absolute paths, a root or drive prefix is
+    /// dropped, as it is from an entry name, so the target lands where the
+    /// entry of that name does and is selected and rewritten with it. Elsewhere
+    /// the root is kept and the validator refuses the target as it does without
+    /// a selection. A target with no normal component is returned unchanged for
+    /// its own validation to refuse with the same typed error.
     ///
     /// # Errors
     ///
     /// Returns [`ArchiveError::PathTraversal`] for a target holding `..`, which
     /// cannot be matched against patterns or stripped lexically.
-    pub(crate) fn map_link_target(&self, target: &Path) -> Result<TargetMapping> {
+    pub(crate) fn map_link_target(&self, target: &Path, absolute: Admit) -> Result<TargetMapping> {
         if self.is_default() {
             return Ok(TargetMapping::Unchanged);
         }
+        let mut root = PathBuf::new();
         let mut normalized = PathBuf::new();
         for component in target.components() {
             match component {
                 Component::Normal(name) => normalized.push(name),
-                Component::CurDir => {}
                 Component::ParentDir => {
                     return Err(ArchiveError::PathTraversal {
                         path: target.to_path_buf(),
                     });
                 }
-                // TODO(#997): strip a root or drive prefix like an entry name,
-                // or refuse here, instead of leaving it to the tracker's
-                // HardlinkEscape.
-                Component::RootDir | Component::Prefix(_) => return Ok(TargetMapping::Unchanged),
+                Component::RootDir | Component::Prefix(_) if !absolute.is_allowed() => {
+                    root.push(component.as_os_str());
+                }
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
             }
         }
         if normalized.is_empty() {
             return Ok(TargetMapping::Unchanged);
         }
         Ok(match self.decide(&normalized, EntryShape::File, None)? {
+            // A refused absolute target is refused by the validator whatever
+            // the selection says; reporting it as not extracted would blame
+            // the selection for a refusal that including it would not lift.
+            Decision::Skip(_) if !root.as_os_str().is_empty() => TargetMapping::Unchanged,
             Decision::Skip(_) => TargetMapping::NotExtracted,
-            Decision::Extract(Placement::Unchanged) => TargetMapping::Mapped(normalized),
+            Decision::Extract(Placement::Unchanged) => TargetMapping::Mapped(root.join(normalized)),
             Decision::Extract(Placement::Rewritten(rewritten)) => {
-                TargetMapping::Mapped(rewritten.0)
+                TargetMapping::Mapped(root.join(rewritten.0))
             }
         })
     }
@@ -377,7 +451,7 @@ impl EntrySelection {
 /// A selection together with the record of include patterns that matched,
 /// for one pass over an archive's entries.
 #[derive(Debug, Clone, Copy)]
-pub struct SelectionRun<'a> {
+pub(crate) struct SelectionRun<'a> {
     /// The selection applied to every entry.
     pub selection: &'a EntrySelection,
     /// Where include matches are recorded; `None` for a pass that must not
@@ -395,7 +469,7 @@ impl SelectionRun<'_> {
 /// What kind of entry a name belongs to, for rewrites that treat kinds
 /// differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryShape {
+pub(crate) enum EntryShape {
     /// A directory entry.
     Directory,
     /// A regular file.
@@ -416,7 +490,7 @@ impl EntryShape {
 
 /// The outcome of [`EntrySelection::decide`].
 #[derive(Debug)]
-pub enum Decision {
+pub(crate) enum Decision {
     /// The entry is extracted at `Placement`.
     Extract(Placement),
     /// The entry is left out.
@@ -436,7 +510,7 @@ impl Decision {
 
 /// Where a selected entry lands.
 #[derive(Debug)]
-pub enum Placement {
+pub(crate) enum Placement {
     /// At its own validated path.
     Unchanged,
     /// At a rewritten path that still has to be validated.
@@ -449,7 +523,7 @@ pub enum Placement {
 /// [`SafePath::validate_rewritten_in`](crate::types::SafePath), so a stripped
 /// name cannot be written without passing validation again.
 #[derive(Debug)]
-pub struct Rewritten(PathBuf);
+pub(crate) struct Rewritten(PathBuf);
 
 impl Rewritten {
     /// The rewritten path, for validation.
@@ -460,7 +534,7 @@ impl Rewritten {
 
 /// What the selection makes of a hardlink target.
 #[derive(Debug)]
-pub enum TargetMapping {
+pub(crate) enum TargetMapping {
     /// Validate the target as it is.
     Unchanged,
     /// Validate this destination-relative path instead.
@@ -471,7 +545,7 @@ pub enum TargetMapping {
 
 /// Which include patterns matched at least one scanned entry.
 #[derive(Debug)]
-pub struct IncludeHits(Box<[Cell<bool>]>);
+pub(crate) struct IncludeHits(Box<[Cell<bool>]>);
 
 impl IncludeHits {
     /// A record with one slot per include pattern of `selection`.
@@ -513,7 +587,7 @@ impl IncludeHits {
 /// refuses it instead of copying the winner's bytes. Nothing is recorded
 /// under [`PathRewrite::Keep`], so a plain extraction pays nothing.
 #[derive(Debug, Default)]
-pub struct LandingClaims {
+pub(crate) struct LandingClaims {
     seen: RefCell<HashSet<PathBuf>>,
     ambiguous: RefCell<HashSet<PathBuf>>,
 }
@@ -673,6 +747,41 @@ mod tests {
     }
 
     #[test]
+    fn strip_and_flatten_builders_set_one_rewrite_without_disturbing_the_other() {
+        let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
+        let stripped = EntrySelection::default().with_strip(Some(strip));
+        let flattened = EntrySelection::default().with_flatten(true);
+
+        assert_eq!(stripped.rewrite(), PathRewrite::Strip(strip));
+        assert_eq!(flattened.rewrite(), PathRewrite::Flatten);
+        assert_eq!(
+            flattened.clone().with_strip(None).rewrite(),
+            PathRewrite::Flatten
+        );
+        assert_eq!(
+            stripped.clone().with_flatten(false).rewrite(),
+            PathRewrite::Strip(strip)
+        );
+        assert_eq!(stripped.with_strip(None).rewrite(), PathRewrite::Keep);
+        assert_eq!(flattened.with_flatten(false).rewrite(), PathRewrite::Keep);
+    }
+
+    #[test]
+    fn the_list_builders_replace_a_list_and_keep_the_rewrite() {
+        let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
+        let selection = EntrySelection::default()
+            .with_include(pattern("old"))
+            .with_exclude(pattern("old"))
+            .with_rewrite(PathRewrite::Strip(strip))
+            .with_include_list(vec![pattern("a"), pattern("b")])
+            .with_exclude_list(Vec::new());
+
+        assert_eq!(selection.include(), [pattern("a"), pattern("b")]);
+        assert!(selection.exclude().is_empty());
+        assert_eq!(selection.rewrite(), PathRewrite::Strip(strip));
+    }
+
+    #[test]
     fn strip_count_is_bounded_by_the_path_depth() {
         assert!(StripComponents::new(non_zero!(32), non_zero!(32)).is_ok());
         let refused = StripComponents::new(non_zero!(33), non_zero!(32));
@@ -710,26 +819,69 @@ mod tests {
             .with_exclude(pattern("hidden"))
             .with_rewrite(PathRewrite::Strip(strip));
         assert_matches!(
-            selection.map_link_target(Path::new("./top/orig")).unwrap(),
+            selection.map_link_target(Path::new("./top/orig"), Admit::Refuse).unwrap(),
             TargetMapping::Mapped(path) if path == Path::new("orig")
         );
         assert_matches!(
-            selection.map_link_target(Path::new("top")).unwrap(),
-            TargetMapping::NotExtracted
-        );
-        assert_matches!(
             selection
-                .map_link_target(Path::new("top/hidden/x"))
+                .map_link_target(Path::new("top"), Admit::Refuse)
                 .unwrap(),
             TargetMapping::NotExtracted
         );
         assert_matches!(
-            selection.map_link_target(Path::new("top/../x")),
+            selection
+                .map_link_target(Path::new("top/hidden/x"), Admit::Refuse)
+                .unwrap(),
+            TargetMapping::NotExtracted
+        );
+        assert_matches!(
+            selection.map_link_target(Path::new("top/../x"), Admit::Refuse),
             Err(ArchiveError::PathTraversal { .. })
         );
         assert_matches!(
-            selection.map_link_target(Path::new("/abs")).unwrap(),
+            selection
+                .map_link_target(Path::new("/abs"), Admit::Refuse)
+                .unwrap(),
+            TargetMapping::Unchanged,
+            "a refused absolute target stays for the validator to refuse"
+        );
+        assert_matches!(
+            selection
+                .map_link_target(Path::new("/abs"), Admit::Allow)
+                .unwrap(),
+            TargetMapping::NotExtracted
+        );
+        assert_matches!(
+            selection
+                .map_link_target(Path::new("/"), Admit::Refuse)
+                .unwrap(),
             TargetMapping::Unchanged
+        );
+    }
+
+    #[test]
+    fn absolute_link_target_is_relocated_only_where_absolute_paths_are_admitted() {
+        let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
+        let selection = EntrySelection::default()
+            .with_include(pattern("top"))
+            .with_rewrite(PathRewrite::Strip(strip));
+        assert_matches!(
+            selection.map_link_target(Path::new("/top/orig"), Admit::Allow).unwrap(),
+            TargetMapping::Mapped(path) if path == Path::new("orig")
+        );
+        assert_matches!(
+            selection
+                .map_link_target(Path::new("/other/orig"), Admit::Allow)
+                .unwrap(),
+            TargetMapping::NotExtracted
+        );
+        assert_matches!(
+            selection.map_link_target(Path::new("/top/../x"), Admit::Allow),
+            Err(ArchiveError::PathTraversal { .. })
+        );
+        assert_matches!(
+            selection.map_link_target(Path::new("/top/orig"), Admit::Refuse).unwrap(),
+            TargetMapping::Mapped(path) if path == Path::new("/orig")
         );
     }
 }

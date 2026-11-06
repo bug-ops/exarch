@@ -44,6 +44,12 @@ export interface ExarchErrorBase extends Error {
    * `cause` is the primitive.
    */
   cause?: unknown
+  /**
+   * A staging directory or empty output reservation file the failure left on
+   * disk, redacted like an error path. Any failure of an atomic extraction can
+   * carry it when the cleanup of its staging directory failed.
+   */
+  leftoverPath?: string
 }
 
 /**
@@ -180,7 +186,6 @@ export interface ExarchInvalidArchiveDetail {
   ioKind?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -200,7 +205,6 @@ export interface ExarchSecurityViolationDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -220,7 +224,6 @@ export interface ExarchInvalidConfigurationDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   /** Why a destination is too important to replace as a whole. */
   protectedPath?: ProtectedPath
@@ -245,15 +248,14 @@ export interface ExarchIoDetail {
   restore?: RestoreOutcome
   /** Where the original destination remains when `restore` is `'failed'`, redacted like an error path. */
   backupPath?: string
-  /** A staging directory or empty output reservation left on disk, redacted like an error path. */
-  leftoverPath?: string
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
-  path?: undefined
+  /** The empty output reservation file a failed creation left at its output path, redacted like an error path. */
+  path?: string
 }
 
 /** A quota refusal; `subCode` names the quota that was exceeded. */
@@ -266,7 +268,6 @@ export interface ExarchQuotaDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -286,7 +287,6 @@ export interface ExarchZipBombDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -313,7 +313,6 @@ export interface ExarchSourceNotAccessibleDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -333,15 +332,34 @@ export interface ExarchOutputExistsDetail {
   nonUtf8EntryPath?: undefined
   errno?: undefined
   strerror?: undefined
-  path?: undefined
+  /** The existing output, or the destination an extraction refused to touch, redacted like an error path. */
+  path: string
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
   conflicts?: Array<string>
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
+}
+
+/** A source path or archive that does not exist; `path` is redacted like an error path. */
+export interface ExarchSourceNotFoundDetail {
+  code: 'SOURCE_NOT_FOUND'
+  path: string
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  conflicts?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
 }
 
 /** Every other code carries no detail property. */
@@ -356,6 +374,7 @@ export interface ExarchPlainCodeDetail {
     | 'ZIP_BOMB'
     | 'SOURCE_NOT_ACCESSIBLE'
     | 'OUTPUT_EXISTS'
+    | 'SOURCE_NOT_FOUND'
   >
   subCode?: undefined
   relaxableBy?: undefined
@@ -364,7 +383,6 @@ export interface ExarchPlainCodeDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -384,6 +402,7 @@ export type ExarchErrorCodeDetail =
   | ExarchZipBombDetail
   | ExarchSourceNotAccessibleDetail
   | ExarchOutputExistsDetail
+  | ExarchSourceNotFoundDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -452,8 +471,9 @@ export type CreationWarning =
   | DirectoryNotSyncedWarning
 
 /**
- * What extraction does with a listed entry, discriminated by `kind`: an
- * `'extract'` disposition has a `landing`, a `'skip'` one a `reason`.
+ * What extraction does with a listed entry, discriminated by `action`: an
+ * `'extract'` disposition has a `landing`, a `'skip'` one a `kind`, the
+ * `SkipKind` it is left out for.
  */
 export type EntryDisposition = ExtractDisposition | SkipDisposition
 
@@ -491,7 +511,6 @@ export interface HeuristicIssueDetail {
   nonUtf8EntryPath?: undefined
   restore?: undefined
   backupPath?: undefined
-  leftoverPath?: undefined
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
@@ -555,13 +574,13 @@ export declare class CreationConfig {
    * to 9 (a fraction, `NaN`, a negative or an out-of-range number is
    * refused, never wrapped).
    */
-  setCompressionLevel(level: number): this
+  withCompressionLevel(level: number): this
   /**
    * Sets whether to preserve file permissions from source.
    *
    * Default: true.
    */
-  setPreservePermissions(preserve: boolean): this
+  withPreservePermissions(preserve: boolean): this
   /**
    * Sets whether to follow symlinks when adding files.
    *
@@ -570,13 +589,13 @@ export declare class CreationConfig {
    * Security note: Following symlinks may include unintended files
    * from outside the source directory.
    */
-  setFollowSymlinks(follow: boolean): this
+  withFollowSymlinks(follow: boolean): this
   /**
    * Sets whether to include hidden files (files starting with '.').
    *
    * Default: false.
    */
-  setIncludeHidden(include: boolean): this
+  withIncludeHidden(include: boolean): this
   /**
    * Sets maximum size for a single file in bytes, or `null` for no limit.
    *
@@ -587,7 +606,7 @@ export declare class CreationConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
    * negative or zero. Pass `null` to remove the limit.
    */
-  setMaxFileSize(size: number | null): this
+  withMaxFileSize(size: number | null): this
   /**
    * Adds an exclude pattern.
    *
@@ -619,7 +638,7 @@ export declare class CreationConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
    * pattern `addExcludePattern` refuses.
    */
-  setExcludePatterns(patterns: Array<string>): this
+  withExcludePatterns(patterns: Array<string>): this
   /** Finalizes the configuration (for API consistency). */
   build(): this
   /** Compression level (1-9). */
@@ -684,6 +703,14 @@ export declare class ExtractionOptions {
    * directory or one that contains it, is refused with
    * `INVALID_CONFIGURATION` (`setting` is `output_path`, `protectedPath`
    * names the reason).
+   *
+   * The staging directory is private (`0700`) while the archive extracts. On
+   * Unix the published root then takes the mode of the destination it
+   * replaces (or fills), never setuid; with `'atomic_replace'` also its
+   * owner as far as the caller may, and with `'atomic'` never the uid and
+   * the group only when the caller owns the destination. On Windows the
+   * staging directory inherits the ACL of the destination's parent, and
+   * `'atomic'` onto an existing empty directory fails with `OUTPUT_EXISTS`.
    */
   withStaging(staging: Staging): this
   /** Finalizes the configuration (for API consistency). */
@@ -757,7 +784,7 @@ export declare class SecurityConfig {
    * not a positive whole number up to 2^53 - 1 (zero, negative, fractional,
    * `NaN` and infinite values are refused, never wrapped).
    */
-  setMaxFileSize(size: number): this
+  withMaxFileSize(size: number): this
   /**
    * Sets the maximum total size in bytes.
    *
@@ -766,7 +793,7 @@ export declare class SecurityConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_total_size`) if size
    * is negative or zero.
    */
-  setMaxTotalSize(size: number): this
+  withMaxTotalSize(size: number): this
   /**
    * Sets the maximum compression ratio.
    *
@@ -778,7 +805,7 @@ export declare class SecurityConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_compression_ratio`) if
    * ratio is not a positive finite number.
    */
-  setMaxCompressionRatio(ratio: number): this
+  withMaxCompressionRatio(ratio: number): this
   /**
    * Sets the maximum file count.
    *
@@ -790,7 +817,7 @@ export declare class SecurityConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_file_count`) if count
    * is not a positive whole number up to 2^53 - 1.
    */
-  setMaxFileCount(count: number): this
+  withMaxFileCount(count: number): this
   /**
    * Sets the maximum path depth.
    *
@@ -799,15 +826,15 @@ export declare class SecurityConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_path_depth`) if depth
    * is not a positive whole number up to 2^53 - 1.
    */
-  setMaxPathDepth(depth: number): this
+  withMaxPathDepth(depth: number): this
   /** Allows or denies symlinks. */
-  setAllowSymlinks(allow: boolean): this
+  withAllowSymlinks(allow: boolean): this
   /** Allows or denies hardlinks. */
-  setAllowHardlinks(allow: boolean): this
+  withAllowHardlinks(allow: boolean): this
   /** Allows or denies absolute paths. */
-  setAllowAbsolutePaths(allow: boolean): this
+  withAllowAbsolutePaths(allow: boolean): this
   /** Allows or denies world-writable files. */
-  setAllowWorldWritable(allow: boolean): this
+  withAllowWorldWritable(allow: boolean): this
   /**
    * Allows or denies solid 7z archives.
    *
@@ -815,9 +842,9 @@ export declare class SecurityConfig {
    * entry, which may allow a crafted archive to consume excessive
    * memory. Disabled by default.
    */
-  setAllowSolidArchives(allow: boolean): this
+  withAllowSolidArchives(allow: boolean): this
   /** Sets how ZIP archives with ambiguous structure are handled. */
-  setZipConsistency(policy: ZipConsistencyPolicy): this
+  withZipConsistency(policy: ZipConsistencyPolicy): this
   /**
    * Sets the memory in bytes for decoding independent LZMA2 runs of a 7z
    * block ahead on worker threads, or `null` to decode on one thread.
@@ -833,22 +860,22 @@ export declare class SecurityConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `parallel_decode_memory`)
    * if `size` is not a positive whole number of bytes.
    */
-  setParallelDecodeMemory(size?: number | undefined | null): this
+  withParallelDecodeMemory(size?: number | undefined | null): this
   /**
    * Sets the maximum decoded size of a solid 7z block, in bytes.
    *
    * The limit bounds the decoded volume of each solid block, not resident
    * memory. It exists only while solid archives are allowed, so call
-   * `setAllowSolidArchives(true)` first. Default: 512 MB.
+   * `withAllowSolidArchives(true)` first. Default: 512 MB.
    *
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `max_solid_block_memory`)
    * if size is negative or zero, or while solid archives are not allowed.
    */
-  setMaxSolidBlockMemory(size: number): this
+  withMaxSolidBlockMemory(size: number): this
   /** Sets whether to preserve permissions from archive. */
-  setPreservePermissions(preserve: boolean): this
+  withPreservePermissions(preserve: boolean): this
   /**
    * Adds an allowed file extension.
    *
@@ -883,7 +910,7 @@ export declare class SecurityConfig {
    * an empty array, which would otherwise read as "allow everything", and
    * for any value `addAllowedExtension` refuses.
    */
-  setAllowedExtensions(extensions: Array<string> | null): this
+  withAllowedExtensions(extensions: Array<string> | null): this
   /**
    * Replaces the banned path components, so the defaults can be dropped.
    *
@@ -895,7 +922,7 @@ export declare class SecurityConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `banned_path_component`)
    * for any value `addBannedComponent` refuses.
    */
-  setBannedComponents(components: Array<string>): this
+  withBannedComponents(components: Array<string>): this
   /**
    * Adds an include pattern: only entries that match an include pattern (and
    * no exclude pattern) are extracted, listed as extracted or verified as
@@ -930,7 +957,7 @@ export declare class SecurityConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
    * pattern shape that is refused.
    */
-  setIncludePatterns(patterns: Array<string>): this
+  withIncludePatterns(patterns: Array<string>): this
   /**
    * Adds an exclude pattern: an entry that matches one is never extracted,
    * whatever the include patterns say. A pattern that matches nothing is not
@@ -955,7 +982,7 @@ export declare class SecurityConfig {
    * Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
    * pattern shape that is refused.
    */
-  setExcludePatterns(patterns: Array<string>): this
+  withExcludePatterns(patterns: Array<string>): this
   /**
    * Drops the first `count` leading path components of every extracted
    * entry, like `tar --strip-components`; `null` removes a strip count and
@@ -972,7 +999,7 @@ export declare class SecurityConfig {
    * `count` is not a positive whole number up to 2^53 - 1 or exceeds
    * `maxPathDepth`.
    */
-  setStripComponents(count: number | null): this
+  withStripComponents(count: number | null): this
   /**
    * Lands every regular file in the destination root under its final path
    * component; `false` keeps every path.
@@ -981,9 +1008,9 @@ export declare class SecurityConfig {
    * symlink or hardlink entry is refused with `SECURITY_VIOLATION`
    * (`subCode` is `LINK_POLICY`). Files that share a final name follow
    * `existingFiles`. Setting `flatten` replaces a strip count, and
-   * `setStripComponents(null)` leaves `flatten` as it is.
+   * `withStripComponents(null)` leaves `flatten` as it is.
    */
-  setFlatten(flatten: boolean): this
+  withFlatten(flatten: boolean): this
   /**
    * Finalizes the configuration (for API consistency).
    *
@@ -1223,6 +1250,8 @@ export interface BackupCleanupFailedWarning {
   identity: BackupIdentity
   /** The kind of the removal failure. */
   ioKind: IoKind
+  /** The removal failure's text, redacted like an I/O error message. */
+  reason: string
 }
 
 /**
@@ -1266,7 +1295,7 @@ export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 
  * console.log(`Created archive with ${report.filesAdded} files`);
  *
  * // Customize configuration
- * const config = new CreationConfig().setCompressionLevel(9);
+ * const config = new CreationConfig().withCompressionLevel(9);
  * const report = await createArchive('output.tar.gz', ['src/'], config);
  * ```
  */
@@ -1650,7 +1679,7 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  * console.log(`Extracted ${report.filesExtracted} files`);
  *
  * // Customize security settings
- * const config = new SecurityConfig().setMaxFileSize(100 * 1024 * 1024);
+ * const config = new SecurityConfig().withMaxFileSize(100 * 1024 * 1024);
  * const report = await extractArchive('archive.tar.gz', '/tmp/output', config);
  *
  * // Customize extraction options
@@ -1689,7 +1718,7 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
  * console.log(`Extracted ${report.filesExtracted} files`);
  *
  * // Customize security settings
- * const config = new SecurityConfig().setMaxFileSize(100 * 1024 * 1024);
+ * const config = new SecurityConfig().withMaxFileSize(100 * 1024 * 1024);
  * const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
  * ```
  */
@@ -2043,7 +2072,7 @@ export declare function extractArchiveWithProgress(archivePath: string, outputDi
 /** An entry that extraction writes. */
 export interface ExtractDisposition {
   /** Always `'extract'`. */
-  kind: 'extract'
+  action: 'extract'
   /** The entry's path in the archive. */
   path: string
   /**
@@ -2534,11 +2563,11 @@ export interface SkipCount {
 /** An entry that is validated but not extracted. */
 export interface SkipDisposition {
   /** Always `'skip'`. */
-  kind: 'skip'
+  action: 'skip'
   /** The entry's path in the archive. */
   path: string
   /** Why it is left out, for example `'not_selected'` or `'stripped_away'`. */
-  reason: SkipKind
+  kind: SkipKind
 }
 
 /** Why an entry was left out of an extraction or a creation. */

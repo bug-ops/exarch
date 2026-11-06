@@ -6,11 +6,12 @@
 //! the two apart. It is kept per run, by the pinned destination, and is filled
 //! only under `Refuse`.
 //!
-//! A landing is keyed by file identity (device and inode of the entry itself,
-//! never of a symlink's target), which is exact on a case-insensitive host and
-//! needs no path folding. Where the platform gives no identity (Windows) the
-//! key is the landing path as the archive spelled it, so a duplicate that
-//! differs only in case is refused: the record fails closed.
+//! A landing is keyed by file identity (device and file index of the entry
+//! itself, never of a symlink's target), which is exact on a case-insensitive
+//! host and needs no path folding. Where the volume gives no identity the key
+//! is the landing path as the archive spelled it, so a duplicate that differs
+//! only in case is refused: the record fails closed. A failed identity lookup
+//! records nothing.
 //!
 //! The record is bounded by [`RECORD_CAP`]. Past it nothing more is recorded
 //! and every occupant counts as not created by this run, so the run fails
@@ -31,32 +32,38 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::fs::File;
 use std::path::Path;
+use std::path::PathBuf;
 
+use super::file_identity::FileIdentity;
+use super::file_identity::IdentityKey;
 use super::pinned_dir::Leaf;
 use super::pinned_dir::VettedDir;
 use crate::ExistingFiles;
 
-/// The most landings a run records (4 Mi, 64 MiB of identity keys).
+/// The most landings a run records (4 Mi keys).
 const RECORD_CAP: usize = 4 * 1024 * 1024;
 
-#[cfg(any(unix, target_os = "wasi"))]
-type LandingKey = (u64, u64);
-#[cfg(not(any(unix, target_os = "wasi")))]
-type LandingKey = std::path::PathBuf;
-
-#[cfg(any(unix, target_os = "wasi"))]
-fn key_of(dir: &VettedDir, leaf: Leaf<'_>, _rel: &Path) -> Option<LandingKey> {
-    dir.identity(leaf).ok().flatten()
+/// How a landing is recorded: by identity, or by path where the volume gives
+/// none (FAT, exFAT, and Windows volumes without `FileIdInfo`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum LandingKey {
+    Identity(IdentityKey),
+    Path(PathBuf),
 }
 
-#[cfg(not(any(unix, target_os = "wasi")))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "shares its signature with the identity-keyed arm, which can fail"
-)]
-fn key_of(_dir: &VettedDir, _leaf: Leaf<'_>, rel: &Path) -> Option<LandingKey> {
-    Some(rel.to_path_buf())
+fn key_for(identity: FileIdentity, rel: &Path) -> LandingKey {
+    identity
+        .key()
+        .map_or_else(|| LandingKey::Path(rel.to_path_buf()), LandingKey::Identity)
+}
+
+/// The key of the occupant of `leaf`, `None` when it is absent or the lookup
+/// fails, so the landing is not recorded and a later duplicate is refused.
+fn key_of(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Option<LandingKey> {
+    let identity = dir.identity(leaf).ok().flatten()?;
+    Some(key_for(identity, rel))
 }
 
 #[derive(Debug, Default)]
@@ -67,7 +74,7 @@ struct Created {
 
 /// The landings a run created, consulted when one is found occupied.
 #[derive(Debug, Default)]
-pub struct RunRecord(RefCell<Created>);
+pub(crate) struct RunRecord(RefCell<Created>);
 
 impl RunRecord {
     /// Records that the run just created `leaf` in `dir`, if `existing_files`
@@ -82,11 +89,33 @@ impl RunRecord {
         leaf: Leaf<'_>,
         rel: &Path,
     ) {
-        match existing_files {
-            ExistingFiles::Refuse => {}
-            ExistingFiles::Skip | ExistingFiles::Overwrite => return,
+        if matches!(existing_files, ExistingFiles::Refuse) {
+            self.insert(key_of(dir, leaf, rel));
         }
-        let Some(key) = key_of(dir, leaf, rel) else {
+    }
+
+    /// Like [`note`](Self::note) for the file `leaf` the run just created and
+    /// still holds open: keyed by its handle, so no lookup by name unless the
+    /// handle gives no identity, which the lookup by name then classifies.
+    pub(crate) fn note_file(
+        &self,
+        existing_files: ExistingFiles,
+        file: &File,
+        dir: &VettedDir,
+        leaf: Leaf<'_>,
+        rel: &Path,
+    ) {
+        if !matches!(existing_files, ExistingFiles::Refuse) {
+            return;
+        }
+        match FileIdentity::of_file(file) {
+            FileIdentity::Unknown => self.insert(key_of(dir, leaf, rel)),
+            known @ FileIdentity::Known(_) => self.insert(Some(key_for(known, rel))),
+        }
+    }
+
+    fn insert(&self, key: Option<LandingKey>) {
+        let Some(key) = key else {
             return;
         };
         let mut created = self.0.borrow_mut();
@@ -106,13 +135,45 @@ impl RunRecord {
     }
 
     #[cfg(all(test, unix))]
-    pub(crate) fn insert_identity_for_test(&self, key: LandingKey) {
-        self.0.borrow_mut().keys.insert(key);
+    pub(crate) fn insert_identity_for_test(&self, identity: super::file_identity::FileIdentity) {
+        if let Some(key) = identity.key() {
+            self.0.borrow_mut().keys.insert(LandingKey::Identity(key));
+        }
     }
 
     #[cfg(all(test, unix))]
     pub(crate) fn saturate(&self) {
         self.0.borrow_mut().saturated = true;
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use std::assert_matches;
+
+    use super::LandingKey;
+    use super::RunRecord;
+    use super::key_for;
+    use crate::formats::file_identity::FileIdentity;
+
+    #[test]
+    fn an_unknown_identity_is_keyed_by_the_path_as_spelled() {
+        let record = RunRecord::default();
+        record.insert(Some(key_for(FileIdentity::Unknown, "dir/a".as_ref())));
+
+        let created = |rel: &str| {
+            record
+                .0
+                .borrow()
+                .keys
+                .contains(&key_for(FileIdentity::Unknown, rel.as_ref()))
+        };
+        assert!(created("dir/a"));
+        assert!(!created("dir/A"));
+        assert_matches!(
+            key_for(FileIdentity::Unknown, "x".as_ref()),
+            LandingKey::Path(_)
+        );
     }
 }
 
@@ -141,6 +202,34 @@ mod tests {
         assert!(record.created_here(&dir, leaf("made"), "made".as_ref()));
         assert!(!record.created_here(&dir, leaf("foreign"), "foreign".as_ref()));
         assert!(!record.created_here(&dir, leaf("absent"), "absent".as_ref()));
+    }
+
+    #[test]
+    fn a_file_noted_by_its_handle_counts_as_created_only_under_refuse() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = pinned_at(temp.path());
+        let made = std::fs::File::create(temp.path().join("made")).unwrap();
+        std::fs::write(temp.path().join("foreign"), b"y").unwrap();
+        let record = RunRecord::default();
+
+        record.note_file(
+            ExistingFiles::Skip,
+            &made,
+            &dir,
+            leaf("made"),
+            "made".as_ref(),
+        );
+        assert!(!record.created_here(&dir, leaf("made"), "made".as_ref()));
+
+        record.note_file(
+            ExistingFiles::Refuse,
+            &made,
+            &dir,
+            leaf("made"),
+            "made".as_ref(),
+        );
+        assert!(record.created_here(&dir, leaf("made"), "made".as_ref()));
+        assert!(!record.created_here(&dir, leaf("foreign"), "foreign".as_ref()));
     }
 
     #[test]

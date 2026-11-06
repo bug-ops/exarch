@@ -202,7 +202,7 @@ fn replay_of_damaged_bytes_fails_with_the_checksum_error() {
         .read_to_end(&mut out)
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(error.to_string(), ZIP_INVALID_CHECKSUM);
+    assert!(ReplayChecksumMismatch::is(&error));
 }
 
 #[test]
@@ -387,14 +387,15 @@ fn extraction_refuses_damaged_kept_output_as_io_without_decoding_again() {
             .corrupt()
             .unwrap();
         let error = extract(&mut opened, dir.path()).unwrap_err();
-        assert!(
-            format!("{error:?}").contains(ZIP_INVALID_CHECKSUM),
-            "{mode:?}: {error:?}"
-        );
         let cause = match &error {
             ArchiveError::PartialExtraction(partial) => partial.cause(),
             other => other,
         };
+        assert_matches!(
+            cause,
+            ArchiveError::Io(io) if ReplayChecksumMismatch::is(io),
+            "{mode:?}: {error:?}"
+        );
         assert_matches!(
             cause,
             ArchiveError::Io(_),

@@ -148,6 +148,7 @@ use crate::types::safe_path::stream_separator_error;
 
 use super::common;
 use super::common::EntryCompleteGuard;
+use super::source_fault::DeclaredSizeCeiling;
 use super::source_fault::ReadFamily;
 use super::source_fault::ReadFaults;
 use super::source_fault::SourceTap;
@@ -168,15 +169,6 @@ use super::zip_structure::ZipStructure;
 use super::zip_tail::Compressed as StreamMethod;
 use super::zstd_window::ZstdWindowLog;
 use super::zstd_window::ZstdWindows;
-
-/// Message of the `io::Error` the `zip` crate (>= 9.0.1) raises when an entry
-/// decompresses past its declared size.
-pub(crate) const ZIP_DECLARED_SIZE_EXCEEDED: &str =
-    "File is larger than its declared uncompressed size";
-
-/// Message of the `io::Error` the `zip` crate raises when an entry's CRC-32
-/// does not match, at the read that reaches the entry's EOF.
-pub(crate) const ZIP_INVALID_CHECKSUM: &str = "Invalid checksum";
 
 /// Shared context passed to every ZIP entry extraction call.
 ///
@@ -479,7 +471,7 @@ impl<'a, R: Read + Seek> CheckedZip<'a, R> {
 /// - Selective decompression (only extract needed files)
 /// - Parallel decompression (future optimization)
 /// - Better compression ratio detection for zip bombs
-pub struct ZipArchive<R: Read + Seek> {
+pub(crate) struct ZipArchive<R: Read + Seek> {
     inner: ZipReader<Shared<R>>,
     structure: ZipStructure,
     /// The policy the census ran under and every operation enforces.
@@ -511,7 +503,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// - File is not a valid ZIP archive
     /// - Central directory is corrupted, or changes while it is being read
     /// - Archive is password-protected (rejected for security)
-    pub fn new(reader: R, config: &SecurityConfig) -> Result<Self> {
+    pub(crate) fn new(reader: R, config: &SecurityConfig) -> Result<Self> {
         Self::open_for(reader, config, DecodeReuse::Off)
     }
 
@@ -826,10 +818,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// forgery.
     fn classify_declared_size_overrun(err: ArchiveError, declared: u64) -> ArchiveError {
         match err {
-            ArchiveError::Io(ref io)
-                if io.kind() == std::io::ErrorKind::InvalidData
-                    && io.to_string() == ZIP_DECLARED_SIZE_EXCEEDED =>
-            {
+            ArchiveError::Io(ref io) if DeclaredSizeCeiling::is(io) => {
                 declared_size_exceeded(declared)
             }
             other => other,
@@ -1107,7 +1096,7 @@ pub(crate) fn read_zip_symlink_target_checked<R: Read>(
     common::check_symlink_target_size(declared)?;
 
     let mut target_bytes = Vec::new();
-    if let Err(failure) = pass.copy_into(zip_file, &mut target_bytes, declared) {
+    if let Err(failure) = pass.copy_into(zip_file, &mut target_bytes, declared, ReadFamily::Zip) {
         match failure {
             DecodeFailure::Checksum => {
                 pass.record(slot, entry_path, DecodeOutcome::Failed(failure))?;

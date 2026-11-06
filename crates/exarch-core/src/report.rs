@@ -135,11 +135,11 @@ impl Skips {
     /// Returns how many entries were skipped, over all kinds.
     #[must_use]
     pub fn total(&self) -> usize {
-        self.detail.as_ref().map_or(0, |detail| {
+        self.detail.as_ref().map_or_default(|detail| {
             detail
                 .counts
                 .values()
-                .fold(0, |sum, count| sum.saturating_add(*count))
+                .fold(0_usize, |sum, count| sum.saturating_add(*count))
         })
     }
 

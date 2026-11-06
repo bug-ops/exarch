@@ -218,7 +218,7 @@ impl ArchiveManifest {
                 .as_path()
                 .ancestors()
                 .skip(1)
-                .filter(|p| !p.as_os_str().is_empty())
+                .filter(|p| !p.is_empty())
                 .map(Path::to_path_buf)
                 .collect();
             for parent in ancestors.into_iter().rev() {

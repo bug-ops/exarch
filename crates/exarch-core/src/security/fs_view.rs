@@ -276,7 +276,7 @@ impl PathModel {
 /// `base` extended by `tail`; an empty `tail` adds no trailing separator, which
 /// would count one byte against the host path limit.
 pub fn joined(base: &Path, tail: &Path) -> PathBuf {
-    if tail.as_os_str().is_empty() {
+    if tail.is_empty() {
         base.to_path_buf()
     } else {
         base.join(tail)

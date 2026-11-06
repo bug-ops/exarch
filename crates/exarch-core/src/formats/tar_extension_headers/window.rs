@@ -190,11 +190,10 @@ pub(super) fn check_trailing_global_padding(window: &MetadataWindow<'_>) -> Resu
 
 fn check_zero_padding(padding: Option<&[u8]>) -> Result<()> {
     let padding = padding.ok_or(TarAmbiguity::WindowMismatch)?;
-    if padding.iter().all(|&b| b == 0) {
-        Ok(())
-    } else {
-        Err(TarAmbiguity::NonZeroPadding.into())
-    }
+    padding
+        .iter()
+        .all(|&b| b == 0)
+        .ok_or_else(|| TarAmbiguity::NonZeroPadding.into())
 }
 
 /// Readers cut a GNU long name or link at the first NUL of the padded block,

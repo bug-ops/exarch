@@ -807,7 +807,7 @@ impl Heuristic {
     }
 
     fn message(&self, entry_path: Option<&Path>) -> String {
-        let entry = || entry_path.map(crate::path_text).unwrap_or_default();
+        let entry = || entry_path.map_or_default(crate::path_text);
         match self {
             Self::ExecutableFile { .. } => format!("Executable file: {}", entry()),
             Self::SuspiciousExtension => format!("Suspicious extension: {}", entry()),

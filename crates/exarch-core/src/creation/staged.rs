@@ -129,7 +129,7 @@ impl ExcludedOutput {
         }
         let parent = path
             .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
+            .filter(|parent| !parent.is_empty())
             .unwrap_or_else(|| Path::new("."));
         fs::canonicalize(parent).is_ok_and(|parent| parent == self.parent)
     }
@@ -166,7 +166,7 @@ impl StagedOutput {
             setting: ConfigSetting::OutputPath,
             problem: ConfigProblem::NoParent,
         })?;
-        let parent = fs::canonicalize(if parent.as_os_str().is_empty() {
+        let parent = fs::canonicalize(if parent.is_empty() {
             Path::new(".")
         } else {
             parent

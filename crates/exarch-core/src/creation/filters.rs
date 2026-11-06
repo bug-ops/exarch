@@ -220,7 +220,7 @@ fn parse_path(text: &str) -> Result<ExcludePattern> {
     {
         return Err(refuse(text, ExcludeRefusal::Absolute));
     }
-    if relative.as_os_str().is_empty() {
+    if relative.is_empty() {
         return Err(refuse(text, ExcludeRefusal::Empty));
     }
     Ok(ExcludePattern::Path { relative })

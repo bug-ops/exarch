@@ -156,6 +156,7 @@ export interface ExarchNativeError extends Error {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -180,6 +181,7 @@ export interface ExarchInvalidArchiveDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -199,6 +201,7 @@ export interface ExarchSecurityViolationDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -220,6 +223,8 @@ export interface ExarchInvalidConfigurationDetail {
   protectedPath?: ProtectedPath
   /** The two creation sources that map to one entry name. */
   collision?: NameCollision
+  /** The include patterns that matched no entry of the archive. */
+  unmatchedPatterns?: Array<string>
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -242,6 +247,7 @@ export interface ExarchIoDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -261,6 +267,7 @@ export interface ExarchQuotaDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -280,6 +287,7 @@ export interface ExarchZipBombDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -306,6 +314,7 @@ export interface ExarchSourceNotAccessibleDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
 }
 
 /**
@@ -329,6 +338,7 @@ export interface ExarchOutputExistsDetail {
   conflicts?: Array<string>
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
 }
 
 /** Every other code carries no detail property. */
@@ -355,6 +365,7 @@ export interface ExarchPlainCodeDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -475,6 +486,7 @@ export interface HeuristicIssueDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined

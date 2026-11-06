@@ -294,7 +294,7 @@ try {
 | `nonUtf8EntryPath` | an `INVALID_ARCHIVE` (`'ENTRY_NAME'`) refusal of an entry name that is not valid UTF-8 | The name written injectively: a backslash is `\x5C`, each invalid byte `\xNN` |
 | `restore`, `backupPath`, `leftoverPath` | an `IO_ERROR` from a failed `'atomic_replace'` (`leftoverPath` also from a creation that left an empty output reservation) | `restore` is `'not_needed'`, `'restored'` or `'failed'`; `backupPath` names where the original remains after `'failed'`; `leftoverPath` a staging directory or reservation left on disk; paths are redacted like the message |
 | `conflicts` | an `OUTPUT_EXISTS` from a `'refuse'` extraction | The entry names that found an occupant |
-| `protectedPath`, `collision` | an `INVALID_CONFIGURATION` for a protected `'atomic_replace'` destination, or for creation sources that map to one entry name | `'filesystem_root'`, `'archive_ancestor'` or `'working_directory'`; `{ name, first, second }` |
+| `protectedPath`, `collision`, `unmatchedPatterns` | an `INVALID_CONFIGURATION` for a protected `'atomic_replace'` destination, for creation sources that map to one entry name, or for include patterns that matched no entry | `'filesystem_root'`, `'archive_ancestor'` or `'working_directory'`; `{ name, first, second }`; the unmatched patterns |
 | `ioKind` | an `IO_ERROR` | The `IoKind` core reported, for example `'NotFound'`, `'PermissionDenied'` or `'StorageFull'`; `'Other'` for a kind with no entry in `IoKind` |
 | `writes` | an extraction failed after producing output | `'kept'`, `'rolled_back'` (atomic extraction discarded the output) or `'discarded'` (an in-memory extraction wrote nothing to disk and dropped its entries) |
 | `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`, `warnings` | `writes === 'kept'` | Counters, the skips by reason and the typed `ExtractionWarning[]` |
@@ -477,12 +477,45 @@ const config = new SecurityConfig()
   .setAllowedExtensions([".txt", ".md"])     // Replace the allowlist; null allows every extension, [] is refused
   .addBannedComponent("__MACOSX")            // Skip this path component (repeatable)
   .setBannedComponents(["__MACOSX"])         // Replace the banned components; [] bans nothing
+  .addIncludePattern("src")                  // Extract only matching entries (repeatable, or setIncludePatterns([...]))
+  .addExcludePattern("*.tmp")                // Never extract matching entries; wins over include (or setExcludePatterns([...]))
+  .setStripComponents(1)                     // Drop leading path components, like tar --strip-components; null keeps paths
+  .setFlatten(true)                          // Land every file under its final component (replaces a strip count)
   .setAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
   .setZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'
   .setParallelDecodeMemory(256 * 1024 * 1024); // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread
 ```
 
 **Getters:** `allowedExtensions` returns the allowlist, or `null` while every extension is allowed. `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`. `parallelDecodeMemory` returns the 7z lookahead memory in bytes, or `null` when decoding runs on one thread. Each extract or verify call may start up to 16 worker threads and hold its own lookahead, so concurrent calls multiply both.
+
+### Selecting and rewriting entries
+
+`includePatterns`, `excludePatterns`, `stripComponents` and `flatten` live on
+`SecurityConfig`, so `extractArchive*`, `extractArchiveToMemory`,
+`extractArchiveToCallback`, `listArchive*` and `verifyArchive*` apply the same
+selection with the same code. Order of operations: the original entry name is
+validated first (an unsafe name is refused even when it is not selected), then
+include and exclude patterns select entries, matching the path **before**
+stripping, then `stripComponents` or `flatten` rewrite the name, which is
+validated again. Patterns have four shapes (`name`, `name*`, `*name` and
+`dir/sub`, which selects that path and everything below it), compare raw
+components and are case-sensitive on every host. An empty pattern list selects
+everything.
+
+- Entries left out are counted in `skipped` as `'not_selected'`, and entries
+  with no component left after stripping, or directories under `flatten`, as
+  `'stripped_away'`. They are not charged to the size limits.
+- An include pattern that matches nothing fails the extraction after the
+  scan with `INVALID_CONFIGURATION` (`setting` `'entry_include'`) and
+  `unmatchedPatterns`; `'atomic'` rolls back. An exclude pattern that matches
+  nothing is not an error.
+- A hardlink whose target the selection leaves out, and any symlink or hardlink
+  under `flatten`, are refused with `SECURITY_VIOLATION`
+  (`subCode` `'LINK_TARGET'` and `'LINK_POLICY'`).
+- `'atomic_replace'` staging with a non-default selection is refused
+  (`INVALID_CONFIGURATION`, `setting` `'entry_selection'`).
+- `listArchive*` still lists every entry; `verifyArchive*` reports the refusals
+  extraction would raise for the same selection as issues.
 
 ## Security Features
 

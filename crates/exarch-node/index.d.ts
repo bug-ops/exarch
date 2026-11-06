@@ -156,6 +156,7 @@ export interface ExarchNativeError extends Error {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -180,6 +181,7 @@ export interface ExarchInvalidArchiveDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -199,6 +201,7 @@ export interface ExarchSecurityViolationDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -220,6 +223,8 @@ export interface ExarchInvalidConfigurationDetail {
   protectedPath?: ProtectedPath
   /** The two creation sources that map to one entry name. */
   collision?: NameCollision
+  /** The include patterns that matched no entry of the archive. */
+  unmatchedPatterns?: Array<string>
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -242,6 +247,7 @@ export interface ExarchIoDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -261,6 +267,7 @@ export interface ExarchQuotaDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -280,6 +287,7 @@ export interface ExarchZipBombDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -306,6 +314,7 @@ export interface ExarchSourceNotAccessibleDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
 }
 
 /**
@@ -329,6 +338,7 @@ export interface ExarchOutputExistsDetail {
   conflicts?: Array<string>
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
 }
 
 /** Every other code carries no detail property. */
@@ -355,6 +365,7 @@ export interface ExarchPlainCodeDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -475,6 +486,7 @@ export interface HeuristicIssueDetail {
   conflicts?: undefined
   protectedPath?: undefined
   collision?: undefined
+  unmatchedPatterns?: undefined
   errno?: undefined
   strerror?: undefined
   path?: undefined
@@ -708,6 +720,8 @@ export declare class ExtractionOptions {
  * | `preserve_permissions` | false |
  * | `allowed_extensions` | `null` (all allowed) |
  * | `banned_path_components` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
+ * | `include` / `exclude` | none (every entry is selected) |
+ * | `stripComponents` / `flatten` | off (every path is kept) |
  */
 export declare class SecurityConfig {
   /** Creates a new `SecurityConfig` with secure defaults. */
@@ -874,6 +888,92 @@ export declare class SecurityConfig {
    */
   setBannedComponents(components: Array<string>): this
   /**
+   * Adds an include pattern: only entries that match an include pattern (and
+   * no exclude pattern) are extracted, listed as extracted or verified as
+   * extracted.
+   *
+   * Four shapes exist, as for `CreationConfig.addExcludePattern`: `name`
+   * (a path component equal to it), `name*`, `*name` and `dir/sub` (that
+   * path and everything below it). A pattern is matched against the entry's
+   * archive path before any stripping, and is case-sensitive on every host.
+   * An include pattern that matches no entry fails the extraction after the
+   * scan with `INVALID_CONFIGURATION` (`setting` is `entry_include`) and
+   * `unmatchedPatterns`.
+   *
+   * Operations apply, in order: path validation of the original name,
+   * selection, then `stripComponents` or `flatten`, then validation of the
+   * rewritten name.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
+   * pattern shape that is refused.
+   */
+  addIncludePattern(pattern: string): this
+  /**
+   * Replaces the include patterns; an empty array selects every entry.
+   *
+   * The list is validated as a whole: on an error the previous patterns
+   * stay. See `addIncludePattern` for the pattern shapes.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
+   * pattern shape that is refused.
+   */
+  setIncludePatterns(patterns: Array<string>): this
+  /**
+   * Adds an exclude pattern: an entry that matches one is never extracted,
+   * whatever the include patterns say. A pattern that matches nothing is not
+   * an error.
+   *
+   * The shapes and matching rules are those of `addIncludePattern`.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
+   * pattern shape that is refused.
+   */
+  addExcludePattern(pattern: string): this
+  /**
+   * Replaces the exclude patterns; an empty array excludes nothing.
+   *
+   * The list is validated as a whole: on an error the previous patterns
+   * stay.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
+   * pattern shape that is refused.
+   */
+  setExcludePatterns(patterns: Array<string>): this
+  /**
+   * Drops the first `count` leading path components of every extracted
+   * entry, like `tar --strip-components`; `null` keeps every path.
+   *
+   * An entry with no component left is skipped and counted as
+   * `'stripped_away'`. Include and exclude patterns match the path before
+   * stripping. Setting a strip count replaces `flatten`, and the maximum
+   * is the current `maxPathDepth`, so set that first.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `strip_components`) if
+   * `count` is not a positive whole number up to 2^53 - 1 or exceeds
+   * `maxPathDepth`.
+   */
+  setStripComponents(count: number | null): this
+  /**
+   * Lands every regular file in the destination root under its final path
+   * component; `false` keeps every path.
+   *
+   * Directory entries are skipped and counted as `'stripped_away'`; a
+   * symlink or hardlink entry is refused with `SECURITY_VIOLATION`
+   * (`subCode` is `LINK_POLICY`). Files that share a final name follow
+   * `existingFiles`. Setting `flatten` replaces a strip count.
+   */
+  setFlatten(flatten: boolean): this
+  /**
    * Finalizes the configuration (for API consistency).
    *
    * This method is provided for builder pattern consistency but is optional.
@@ -941,6 +1041,17 @@ export declare class SecurityConfig {
   getAllowedExtensionsCount(): number
   /** Checks if a specific extension is in the allowed list. */
   hasAllowedExtension(ext: string): boolean
+  /** The include patterns, as they were given. */
+  get includePatterns(): Array<string>
+  /** The exclude patterns, as they were given. */
+  get excludePatterns(): Array<string>
+  /**
+   * The number of leading path components dropped, or `null` while paths
+   * are kept or flattened.
+   */
+  get stripComponents(): number | null
+  /** Whether every regular file lands under its final path component. */
+  get flatten(): boolean
   /**
    * List of banned path components.
    *

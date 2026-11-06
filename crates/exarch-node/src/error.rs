@@ -24,8 +24,8 @@
 //! - `restore`, `backupPath`, `leftoverPath`: what a failed `'atomic_replace'`
 //!   (or a left-behind output reservation) left on disk, redacted like paths.
 //! - `conflicts`: the entry names that stopped a `'refuse'` extraction.
-//! - `protectedPath`, `collision`: the typed reason of the matching
-//!   `INVALID_CONFIGURATION`.
+//! - `protectedPath`, `collision`, `unmatchedPatterns`: the typed reason of the
+//!   matching `INVALID_CONFIGURATION`.
 //! - `nonUtf8EntryPath`: the injectively escaped path of an `INVALID_ARCHIVE`
 //!   (`ENTRY_NAME`) refusal of an entry name that is not valid UTF-8.
 //! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`,
@@ -914,6 +914,7 @@ struct OutputDetail {
     conflicts: Option<Vec<String>>,
     protected_path: Option<ProtectedPath>,
     collision: Option<NameCollision>,
+    unmatched_patterns: Option<Vec<String>>,
 }
 
 impl OutputDetail {
@@ -972,6 +973,10 @@ impl OutputDetail {
                     first: host(first),
                     second: host(second),
                 }),
+                ..Self::default()
+            },
+            CoreError::UnmatchedInclude { patterns } => Self {
+                unmatched_patterns: Some(patterns.iter().map(ToString::to_string).collect()),
                 ..Self::default()
             },
             CoreError::PartialExtraction(partial) => Self::of(partial.cause()),
@@ -1247,6 +1252,9 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     }
     if let Some(collision) = output.collision {
         obj.set("collision", collision)?;
+    }
+    if let Some(patterns) = output.unmatched_patterns {
+        obj.set("unmatchedPatterns", patterns)?;
     }
     match props.details {
         Details::None => {}
@@ -2378,6 +2386,47 @@ mod tests {
             .map(|path| path.as_str().to_owned())
             .collect();
         assert_eq!(dts_union("ProtectedPath"), protected);
+    }
+
+    #[test]
+    fn test_unmatched_include_names_every_pattern_through_a_partial() {
+        let patterns = ["a/b", "*.rs"]
+            .map(|text| {
+                exarch_core::EntryPattern::parse_for(exarch_core::ConfigSetting::EntryInclude, text)
+                    .unwrap()
+            })
+            .into();
+        let source = CoreError::UnmatchedInclude { patterns };
+        let d = described(source);
+        assert_eq!(d.props.code.as_str(), "INVALID_CONFIGURATION");
+        assert_eq!(
+            d.props.setting,
+            Some(exarch_core::ConfigSetting::EntryInclude)
+        );
+        assert_eq!(
+            d.props.output.unmatched_patterns,
+            Some(vec!["a/b".to_owned(), "*.rs".to_owned()])
+        );
+        assert!(d.description.contains("a/b"), "{}", d.description);
+    }
+
+    #[test]
+    fn test_new_selection_violations_keep_their_sub_codes() {
+        let target = CoreError::from(CoreViolation::HardlinkTargetNotExtracted {
+            link: "h".into(),
+            target: "t".into(),
+        });
+        let d = described(target);
+        assert_eq!(d.props.code.as_str(), "SECURITY_VIOLATION");
+        assert_eq!(
+            d.props.sub_code.map(exarch_core::SubCode::as_str),
+            Some("LINK_TARGET")
+        );
+        assert!(
+            d.description.contains('h') && d.description.contains('t'),
+            "{}",
+            d.description
+        );
     }
 
     #[test]

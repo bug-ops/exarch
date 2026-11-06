@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: atomic staging is created at 0700 and published with the destination's mode, an existing empty destination keeps its mode but never takes the owner, and an interrupted or failed run reports the leftover directory (#1002, #995, #PR).
 - Core: absolute hardlink targets are stripped like entry names under selection when absolute paths are allowed, and every overwrite needs a `ReplacePermit` from `ExistingFiles` (#997, #1004, #PR).
 - Core: decoder read errors share one typed classifier for extract, list and verify, so verify of a TAR now reports an `Io` error for a source I/O fault instead of `IntegrityCheckFailed` (#1006, #PR).
+- **Breaking**: `ArchiveError::rolled_back_with` wraps non-partial errors (`Cancelled`, `OutputExists`, `DestinationChanged`) in `PartialExtraction` when a staging directory is left behind (#995, #PR).
+- **Breaking**: atomic and replace extraction need search permission on the destination's parent instead of read, and Windows `--atomic` onto an existing empty directory fails with `OutputExists` (#1005, #PR).
 - Core: modules expose only items reachable from the crate root, enforced by `unreachable_pub` (#1007, #PR).
 - Python and Node: the binding error and report fields are derived from core `FfiDetail`, which is exhaustive on purpose so a new detail fails to compile in both bindings (#1010, #PR).
 

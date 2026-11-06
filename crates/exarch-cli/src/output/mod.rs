@@ -5,6 +5,7 @@ mod human;
 mod json;
 pub mod terminal;
 
+pub use formatter::Dispositions;
 pub use formatter::ManifestView;
 pub use formatter::OutputFormatter;
 pub use formatter::SizeUnits;

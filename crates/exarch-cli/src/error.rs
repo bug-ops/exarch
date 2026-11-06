@@ -19,6 +19,7 @@ use exarch_core::ArchiveError;
 use exarch_core::ArchiveType;
 use exarch_core::CompressionRatio;
 use exarch_core::ConfigProblem;
+use exarch_core::ConfigSetting;
 use exarch_core::ExtractionReport;
 use exarch_core::PartialWrites;
 use exarch_core::PathComponentName;
@@ -527,7 +528,17 @@ fn replace_failed_context(message: Message, failure: &ReplaceFailure) -> Message
 }
 
 /// The advice for a refused configuration, by what was wrong with it.
-fn configuration_hint(problem: &ConfigProblem) -> &'static str {
+fn configuration_hint(setting: ConfigSetting, problem: &ConfigProblem) -> &'static str {
+    match (setting, problem) {
+        (ConfigSetting::EntrySelection, ConfigProblem::NotSupported) => {
+            "--atomic --force replaces the whole destination, so it cannot be combined with \
+             --include, --exclude, --strip-components or --flatten; drop --force or those flags."
+        }
+        (_, problem) => problem_hint(problem),
+    }
+}
+
+fn problem_hint(problem: &ConfigProblem) -> &'static str {
     match problem {
         ConfigProblem::EntryNameCollision { .. } => {
             "Rename or exclude one of the colliding sources, or strip a different prefix."
@@ -764,6 +775,56 @@ fn context_message(
     })
 }
 
+fn source_not_found_context(op: Operation, message: Message) -> Message {
+    message.lit("Source path not found").hint_lit(match op {
+        Operation::Create => "Verify the source path exists and is readable.",
+        Operation::Extract | Operation::List | Operation::Verify => {
+            "Verify the archive path exists and is readable."
+        }
+    })
+}
+
+fn source_not_accessible_context(op: Operation, error: &io::Error, message: Message) -> Message {
+    let message = message.lit("Source path is not accessible");
+    if error.kind() != io::ErrorKind::PermissionDenied {
+        return message;
+    }
+    message.hint_lit(match op {
+        Operation::Create => "Check file permissions on the source.",
+        Operation::Extract | Operation::List | Operation::Verify => {
+            "Check file permissions on the archive."
+        }
+    })
+}
+
+/// The message of a refusal that has advice of its own; `None` for every
+/// other kind, which gets the generic relaxation hint.
+fn refusal_context(kind: &Violation, archive: &Path) -> Option<Message> {
+    let message = Message::default();
+    Some(match kind {
+        Violation::HardlinkTargetNotExtracted { .. } => message
+            .lit("Security violation: a hardlink in '")
+            .path(archive)
+            .lit("' points at an entry the selection does not extract")
+            .hint_lit(
+                "Select the link's target as well (--include), strip fewer components, or \
+                 leave the link out (--exclude); no flag relaxes this check.",
+            ),
+        Violation::LinkUnderFlatten { .. } => message
+            .lit("Security violation: '")
+            .path(archive)
+            .lit("' holds a link that --flatten cannot place")
+            .hint_lit("Leave links out with --exclude, or extract without --flatten."),
+        Violation::DestinationChanged => message
+            .lit("The destination changed while it was being replaced")
+            .hint_lit(
+                "Another process modified the destination during the replace, so nothing was \
+                 replaced. Re-run once the destination is no longer in use.",
+            ),
+        _ => return None,
+    })
+}
+
 /// The message of each known `ArchiveError` variant; `None` for a variant
 /// added after this match was written, which
 /// `every_archive_error_has_a_dedicated_context` rejects.
@@ -773,6 +834,11 @@ fn dedicated_context(
     archive: &Path,
     advice: ConflictAdvice,
 ) -> Option<Message> {
+    if let ArchiveError::SecurityViolation { kind, .. } = err
+        && let Some(message) = refusal_context(kind, archive)
+    {
+        return Some(message);
+    }
     let message = Message::default();
     Some(match err {
         ArchiveError::PathTraversal { .. } => message
@@ -801,14 +867,13 @@ fn dedicated_context(
         ArchiveError::UnknownFormat { .. } => message
             .lit("Cannot determine archive format")
             .hint(Some(format!("Supported formats: {}", supported_formats()))),
-        ArchiveError::SecurityViolation {
-            kind: Violation::DestinationChanged,
-            ..
-        } => message
-            .lit("The destination changed while it was being replaced")
+        ArchiveError::UnmatchedInclude { .. } => message
+            .lit("No entry of '")
+            .path(archive)
+            .lit("' matches an --include pattern")
             .hint_lit(
-                "Another process modified the destination during the replace, so nothing was \
-                 replaced. Re-run once the destination is no longer in use.",
+                "Patterns match the entry path as the archive lists it, before \
+                 --strip-components; run `exarch list` to see the names.",
             ),
         ArchiveError::SecurityViolation { .. }
         | ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }) => message
@@ -823,29 +888,12 @@ fn dedicated_context(
             .path(archive)
             .lit("'")
             .hint_lit("The archive may be corrupted or malformed."),
-        ArchiveError::InvalidConfiguration { problem, .. } => message
+        ArchiveError::InvalidConfiguration { setting, problem } => message
             .text(format!("Cannot {} with these settings", op.name()))
-            .hint_lit(configuration_hint(problem)),
-        ArchiveError::SourceNotFound { .. } => {
-            message.lit("Source path not found").hint_lit(match op {
-                Operation::Create => "Verify the source path exists and is readable.",
-                Operation::Extract | Operation::List | Operation::Verify => {
-                    "Verify the archive path exists and is readable."
-                }
-            })
-        }
+            .hint_lit(configuration_hint(*setting, problem)),
+        ArchiveError::SourceNotFound { .. } => source_not_found_context(op, message),
         ArchiveError::SourceNotAccessible { error, .. } => {
-            let message = message.lit("Source path is not accessible");
-            if error.kind() == io::ErrorKind::PermissionDenied {
-                message.hint_lit(match op {
-                    Operation::Create => "Check file permissions on the source.",
-                    Operation::Extract | Operation::List | Operation::Verify => {
-                        "Check file permissions on the archive."
-                    }
-                })
-            } else {
-                message
-            }
+            source_not_accessible_context(op, error, message)
         }
         ArchiveError::OutputExists { .. } => message.lit("Output path already exists").hint(
             op.accepts(Flag::Force)
@@ -1682,6 +1730,7 @@ mod tests {
     /// `dedicated_context` with (a `PartialExtraction` is unwrapped first).
     /// `ArchiveError` has no `ALL`, so a variant added to core needs a sample
     /// here by hand.
+    #[allow(clippy::unwrap_used)]
     fn every_archive_error_variant() -> Vec<ArchiveError> {
         let path = || PathBuf::from("p");
         vec![
@@ -1719,6 +1768,13 @@ mod tests {
             },
             ArchiveError::UnknownFormat { path: path() },
             ArchiveError::ReaderFormat(exarch_core::ReaderFormatError::Unrecognized),
+            ArchiveError::UnmatchedInclude {
+                patterns: Box::new([exarch_core::EntryPattern::parse_for(
+                    ConfigSetting::EntryInclude,
+                    "a",
+                )
+                .unwrap()]),
+            },
             ArchiveError::InvalidConfiguration {
                 setting: exarch_core::ConfigSetting::OutputPath,
                 problem: exarch_core::ConfigProblem::Empty,

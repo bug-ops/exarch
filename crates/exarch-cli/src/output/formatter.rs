@@ -5,11 +5,13 @@ use anyhow::Result;
 use exarch_core::ArchiveManifest;
 use exarch_core::ConfigSetting;
 use exarch_core::CreationReport;
+use exarch_core::Disposition;
 use exarch_core::ErrorCode;
 use exarch_core::ExtractionReport;
 use exarch_core::FfiKind;
 use exarch_core::PartialWrites;
 use exarch_core::PolicySetting;
+use exarch_core::SecurityConfig;
 use exarch_core::SkipKind;
 use exarch_core::Skips;
 use exarch_core::SubCode;
@@ -38,6 +40,43 @@ pub enum ManifestView {
     Long(SizeUnits),
 }
 
+/// What the selection of a listing does to each entry, aligned with
+/// `manifest.entries()`; empty when the selection is the default, which
+/// leaves every entry extracted where it is named.
+#[derive(Debug, Default)]
+pub struct Dispositions(Vec<Option<Disposition>>);
+
+impl Dispositions {
+    /// No disposition for any entry.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The disposition of each entry of `manifest` under its own selection.
+    pub fn of(manifest: &ArchiveManifest, config: &SecurityConfig) -> Self {
+        if manifest.selection().is_default() {
+            return Self::none();
+        }
+        let mut judged = manifest.dispositions(config).peekable();
+        Self(
+            manifest
+                .entries()
+                .iter()
+                .map(|entry| {
+                    judged
+                        .next_if(|(candidate, _)| std::ptr::eq(*candidate, entry))
+                        .map(|(_, disposition)| disposition)
+                })
+                .collect(),
+        )
+    }
+
+    /// The disposition of the entry at `index`, when the selection judged it.
+    pub fn get(&self, index: usize) -> Option<&Disposition> {
+        self.0.get(index).and_then(Option::as_ref)
+    }
+}
+
 /// Common output formatter trait
 pub trait OutputFormatter {
     /// Format extraction result
@@ -48,7 +87,12 @@ pub trait OutputFormatter {
     -> Result<()>;
 
     /// Format an archive manifest
-    fn format_manifest(&mut self, manifest: &ArchiveManifest, view: ManifestView) -> Result<()>;
+    fn format_manifest(
+        &mut self,
+        manifest: &ArchiveManifest,
+        view: ManifestView,
+        dispositions: &Dispositions,
+    ) -> Result<()>;
 
     /// Format verification report
     fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()>;

@@ -359,6 +359,7 @@ pub fn execute(
         Some(components) => config.with_banned_path_components(components),
         None => config,
     };
+    let config = args.selection.apply(config)?;
 
     let plan = plan_extraction(args, WriteMode::of(args), &output_dir, &config)?;
     let length = plan.manifest().map_or(BarLength::Discover, |manifest| {

@@ -106,7 +106,12 @@ mod tests {
             Ok(())
         }
 
-        fn format_manifest(&mut self, _: &ArchiveManifest, _: ManifestView) -> Result<()> {
+        fn format_manifest(
+            &mut self,
+            _: &ArchiveManifest,
+            _: ManifestView,
+            _: &crate::output::Dispositions,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -147,7 +152,12 @@ mod tests {
             Ok(())
         }
 
-        fn format_manifest(&mut self, _: &ArchiveManifest, _: ManifestView) -> Result<()> {
+        fn format_manifest(
+            &mut self,
+            _: &ArchiveManifest,
+            _: ManifestView,
+            _: &crate::output::Dispositions,
+        ) -> Result<()> {
             Ok(())
         }
 

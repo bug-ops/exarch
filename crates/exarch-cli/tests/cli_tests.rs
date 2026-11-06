@@ -7456,3 +7456,283 @@ fn test_extract_atomic_force_protected_destination_is_a_typed_refusal() {
     assert_eq!(json["error"]["setting"], "output_path", "{json}");
     assert!(json["error"]["hint"].is_string(), "{json}");
 }
+
+/// A release-style TAR: everything under one `proj/` wrapper directory.
+fn write_wrapped_tar(path: &std::path::Path) {
+    let mut builder = tar::Builder::new(std::fs::File::create(path).expect("create tar"));
+    for (name, body) in [
+        ("proj/README", &b"r"[..]),
+        ("proj/src/main.rs", &b"m"[..]),
+        ("proj/src/gen.tmp", &b"t"[..]),
+        ("proj/docs/a.md", &b"d"[..]),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, name, body)
+            .expect("append entry");
+    }
+    builder.finish().expect("finish tar");
+}
+
+fn extracted_files(root: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                found.push(
+                    path.strip_prefix(root)
+                        .expect("under root")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// `--strip-components`, `--include` and `--exclude` choose what lands where
+/// (#967).
+#[test]
+fn test_extract_selection_flags_choose_the_extracted_set() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+
+    let out = temp.path().join("stripped");
+    exarch_cmd()
+        .arg("extract")
+        .arg("--strip-components")
+        .arg("1")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Files extracted: 4"));
+    assert_eq!(
+        extracted_files(&out),
+        ["README", "docs/a.md", "src/gen.tmp", "src/main.rs"]
+    );
+
+    let out = temp.path().join("selected");
+    exarch_cmd()
+        .arg("extract")
+        .arg("--include")
+        .arg("proj/src")
+        .arg("--exclude")
+        .arg("*.tmp")
+        .arg("--strip-components")
+        .arg("2")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not_selected"));
+    assert_eq!(extracted_files(&out), ["main.rs"]);
+
+    let out = temp.path().join("flat");
+    exarch_cmd()
+        .arg("extract")
+        .arg("--flatten")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(
+        extracted_files(&out),
+        ["README", "a.md", "gen.tmp", "main.rs"]
+    );
+}
+
+/// An include pattern that matches nothing fails after the scan with the typed
+/// configuration error, and `--atomic` commits nothing (#967).
+#[test]
+fn test_extract_unmatched_include_is_typed_and_atomic_commits_nothing() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+    let out = temp.path().join("out");
+
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg("--atomic")
+        .arg("--include")
+        .arg("nope")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{json}");
+    assert_eq!(json["error"]["setting"], "entry_include", "{json}");
+    assert_eq!(json["error"]["partial_report"]["writes"], "rolled_back");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("nope"),
+        "{json}"
+    );
+    assert!(!out.exists(), "an atomic run commits nothing");
+}
+
+/// Core refuses the replace-the-destination mode together with a selection,
+/// and the CLI hint names the flags to drop (#967).
+#[test]
+fn test_extract_atomic_force_with_selection_is_refused() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg("--strip-components")
+        .arg("1")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("cannot be combined with"));
+}
+
+/// A strip count core cannot use is a typed refusal that names the setting;
+/// pattern syntax is refused the same way (#967).
+#[test]
+fn test_extract_selection_values_are_validated_by_core() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+
+    for (flag, value, setting) in [
+        ("--strip-components", "0", "strip_components"),
+        ("--strip-components", "-2", "strip_components"),
+        ("--strip-components", "9999", "strip_components"),
+        ("--include", "**/x", "entry_include"),
+        ("--exclude", "a/*", "entry_exclude"),
+    ] {
+        let stdout = exarch_cmd()
+            .arg("extract")
+            .arg("--json")
+            .arg(flag)
+            .arg(value)
+            .arg(&archive)
+            .arg(temp.path().join("out"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+        assert_eq!(
+            json["error"]["kind"], "InvalidConfiguration",
+            "{flag} {value}"
+        );
+        assert_eq!(json["error"]["setting"], setting, "{flag} {value}");
+    }
+    assert!(!temp.path().join("out").exists());
+}
+
+/// `--flatten` and `--strip-components` are two ways to rewrite one path.
+#[test]
+fn test_flatten_conflicts_with_strip_components() {
+    exarch_cmd()
+        .arg("extract")
+        .arg("--flatten")
+        .arg("--strip-components")
+        .arg("1")
+        .arg("a.tar")
+        .assert()
+        .code(2);
+}
+
+/// `list` shows what a selection does to each entry, in text and `--json`;
+/// without a selection nothing is added (#967).
+#[test]
+fn test_list_reports_dispositions_only_under_a_selection() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+
+    exarch_cmd()
+        .arg("list")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[").not());
+
+    exarch_cmd()
+        .arg("list")
+        .arg("--strip-components")
+        .arg("1")
+        .arg("--exclude")
+        .arg("docs")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("proj/README  [lands at README]"))
+        .stdout(predicate::str::contains(
+            "proj/docs/a.md  [skipped: not_selected]",
+        ));
+
+    let stdout = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg("--strip-components")
+        .arg("1")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    let entries = json["data"]["entries"].as_array().expect("entries");
+    let readme = entries
+        .iter()
+        .find(|e| e["path"] == "proj/README")
+        .expect("README entry");
+    assert_eq!(readme["disposition"]["action"], "extract");
+    assert_eq!(readme["disposition"]["landing"], "README");
+}
+
+/// `verify` applies the same selection and reports an unmatched include as an
+/// archive issue, so it never passes what `extract` would refuse (#967).
+#[test]
+fn test_verify_reports_an_unmatched_include() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--strip-components")
+        .arg("1")
+        .arg(&archive)
+        .assert()
+        .success();
+    exarch_cmd()
+        .arg("verify")
+        .arg("--include")
+        .arg("nope")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "include pattern matched no entry: nope",
+        ));
+}

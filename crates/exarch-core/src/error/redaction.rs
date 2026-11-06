@@ -234,6 +234,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::InvalidConfiguration { .. }
+            | Self::UnmatchedInclude { .. }
             | Self::Cancelled
             | Self::ReplaceFailed(_)
             | Self::ReaderFormat(_) => None,

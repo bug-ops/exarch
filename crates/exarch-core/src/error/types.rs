@@ -657,6 +657,17 @@ pub enum ArchiveError {
         conflicts: Box<[PathBuf]>,
     },
 
+    /// An include pattern of the selection matched no entry of the archive.
+    ///
+    /// Raised after the whole archive was scanned, so an extraction that had
+    /// written entries reports it as [`Self::PartialExtraction`] wrapping this
+    /// error. Every pattern that matched nothing is named.
+    #[error("include pattern matched no entry: {}", UnmatchedPatterns(.patterns))]
+    UnmatchedInclude {
+        /// The include patterns that matched no entry.
+        patterns: Box<[crate::EntryPattern]>,
+    },
+
     /// A staged creation published its archive, but an empty reservation file
     /// it made at the output path is still there.
     #[error("an empty reservation file remains at {}: {error}", .path.display())]
@@ -1141,6 +1152,20 @@ impl ArchiveError {
             }
             other => other,
         }
+    }
+}
+
+/// Renders the patterns of [`ArchiveError::UnmatchedInclude`] separated by
+/// `, `.
+struct UnmatchedPatterns<'a>(&'a [crate::EntryPattern]);
+
+impl std::fmt::Display for UnmatchedPatterns<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut patterns = self.0.iter();
+        if let Some(first) = patterns.next() {
+            write!(f, "{first}")?;
+        }
+        patterns.try_for_each(|pattern| write!(f, ", {pattern}"))
     }
 }
 

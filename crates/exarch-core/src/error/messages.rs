@@ -658,6 +658,9 @@ impl ArchiveError {
             Self::InvalidConfiguration { setting, .. } => FfiKind::InvalidConfiguration {
                 setting: Some(*setting),
             },
+            Self::UnmatchedInclude { .. } => FfiKind::InvalidConfiguration {
+                setting: Some(ConfigSetting::EntryInclude),
+            },
             Self::ReaderFormat(_) => FfiKind::InvalidConfiguration { setting: None },
             Self::PartialExtraction(partial) => partial.cause().ffi_kind(),
         }
@@ -680,6 +683,7 @@ impl ArchiveError {
             | Self::ZipInconsistency(_)
             | Self::TarAmbiguity(_)
             | Self::TarTrailer(_)
+            | Self::UnmatchedInclude { .. }
             | Self::SecurityViolation { .. } => self.to_string(),
             Self::QuotaExceeded { resource } => resource.to_string(),
             Self::InvalidArchive(reason) => format!("invalid archive: {reason}"),

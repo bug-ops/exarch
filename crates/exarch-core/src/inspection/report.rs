@@ -1097,6 +1097,7 @@ impl VerificationIssue {
             ArchiveError::ReaderFormat(reason) => {
                 high_invalid_archive(format!("Reader format: {reason}"))
             }
+            ArchiveError::UnmatchedInclude { .. } => high_invalid_archive(error.to_string()),
             ArchiveError::Cancelled => medium_invalid_archive("Operation cancelled".to_owned()),
             ArchiveError::DestinationOccupied {
                 destination,

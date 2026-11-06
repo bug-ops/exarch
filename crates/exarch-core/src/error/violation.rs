@@ -352,6 +352,13 @@ pub enum Violation {
         /// The filesystem error, rendered.
         cause: Box<str>,
     },
+    /// A hardlink whose target entry the extraction does not write.
+    HardlinkTargetNotExtracted {
+        /// The hardlink entry path.
+        link: Box<str>,
+        /// The target path, as the archive names it.
+        target: Box<str>,
+    },
     /// A source path to archive lies outside the archive root.
     SourceOutsideRoot {
         /// The source path.
@@ -413,6 +420,7 @@ impl Violation {
             | Self::SymlinksUnsupported
             | Self::ConflictUnlessSkipped { .. }
             | Self::ConflictFails { .. }
+            | Self::HardlinkTargetNotExtracted { .. }
             | Self::SourceOutsideRoot { .. } => None,
         }
     }
@@ -439,6 +447,7 @@ impl Violation {
             | Self::LinkTargetMissing(_)
             | Self::LinkTargetUnread(_)
             | Self::LinkTargetUnreadable(_)
+            | Self::HardlinkTargetNotExtracted { .. }
             | Self::ReparsePointTarget { .. } => C::LinkTarget,
             Self::LinksNotAllowed(_) => C::LinkPolicy,
             Self::SymlinkComponent { .. }
@@ -620,6 +629,10 @@ impl fmt::Display for Violation {
             Self::ConflictFails { rel, cause } => {
                 write!(f, "extraction fails at {rel}: {cause}")
             }
+            Self::HardlinkTargetNotExtracted { link, target } => write!(
+                f,
+                "hardlink {link} points at {target}, which the selection does not extract"
+            ),
             Self::SourceOutsideRoot { path, root } => {
                 write!(f, "path {path} is not under root directory: {root}")
             }
@@ -839,6 +852,14 @@ mod tests {
                 None,
             ),
             (
+                Violation::HardlinkTargetNotExtracted {
+                    link: text("l"),
+                    target: text("t"),
+                },
+                C::LinkTarget,
+                None,
+            ),
+            (
                 Violation::SourceOutsideRoot {
                     path: text("p"),
                     root: text("r"),
@@ -861,7 +882,7 @@ mod tests {
     /// The text of each `one_of_each` row, in order; byte-identical to the
     /// pre-typing messages (verified by the security audit), and callers match
     /// on them, so a wording change must be a deliberate edit here.
-    const EXPECTED_TEXT: [&str; 44] = [
+    const EXPECTED_TEXT: [&str; 45] = [
         "empty path not allowed",
         "path contains null bytes: p",
         "path contains null bytes - potential security issue",
@@ -905,6 +926,7 @@ mod tests {
         "symlinks are not supported on this platform",
         "extraction can fail at r unless duplicates are skipped: c",
         "extraction fails at r: c",
+        "hardlink l points at t, which the selection does not extract",
         "path p is not under root directory: r",
     ];
 

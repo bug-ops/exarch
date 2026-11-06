@@ -4746,89 +4746,40 @@ fn test_extract_atomic_force_trailing_slash_destination_succeeds() {
     );
 }
 
-/// A destination of `.` is the working directory: core refuses to replace it.
+/// `.`, `./` and `..` name the working directory or one that contains it:
+/// core refuses to replace it and leaves the destination untouched.
 #[test]
 #[cfg(unix)]
-fn test_extract_atomic_force_dot_destination_is_refused_as_the_working_directory() {
-    let temp = TempDir::new().expect("failed to create temp dir");
-    let dest = temp.path().join("dest");
-    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
-    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+fn test_extract_atomic_force_refuses_the_working_directory_and_its_ancestors() {
+    for (destination, cwd_below_dest) in [(".", false), ("./", false), ("..", true)] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = temp.path().join("dest");
+        let cwd = if cwd_below_dest {
+            dest.join("subdir")
+        } else {
+            dest.clone()
+        };
+        std::fs::create_dir_all(&cwd).expect("create destination and cwd");
+        std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
 
-    exarch_cmd()
-        .current_dir(&dest)
-        .arg("extract")
-        .arg("--atomic")
-        .arg("--force")
-        .arg(fixture_path("sample.tar.gz"))
-        .arg(".")
-        .assert()
-        .code(1)
-        .stderr(predicate::str::contains(
-            "would replace the working directory or a directory that contains it",
-        ));
+        exarch_cmd()
+            .current_dir(&cwd)
+            .arg("extract")
+            .arg("--atomic")
+            .arg("--force")
+            .arg(fixture_path("sample.tar.gz"))
+            .arg(destination)
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(
+                "would replace the working directory or a directory that contains it",
+            ));
 
-    assert!(
-        dest.join("old.txt").exists(),
-        "a refused replace must leave the destination untouched"
-    );
-}
-
-/// `./` is refused like `.`.
-#[test]
-#[cfg(unix)]
-fn test_extract_atomic_force_dot_slash_destination_is_refused_as_the_working_directory() {
-    let temp = TempDir::new().expect("failed to create temp dir");
-    let dest = temp.path().join("dest");
-    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
-    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
-
-    exarch_cmd()
-        .current_dir(&dest)
-        .arg("extract")
-        .arg("--atomic")
-        .arg("--force")
-        .arg(fixture_path("sample.tar.gz"))
-        .arg("./")
-        .assert()
-        .code(1)
-        .stderr(predicate::str::contains(
-            "would replace the working directory or a directory that contains it",
-        ));
-
-    assert!(
-        dest.join("old.txt").exists(),
-        "a refused replace must leave the destination untouched"
-    );
-}
-
-/// `..` is a directory that contains the working directory: refused like `.`.
-#[test]
-#[cfg(unix)]
-fn test_extract_atomic_force_dotdot_destination_is_refused_as_the_working_directory() {
-    let temp = TempDir::new().expect("failed to create temp dir");
-    let dest = temp.path().join("dest");
-    let cwd = dest.join("subdir");
-    std::fs::create_dir_all(&cwd).expect("create pre-existing destination and cwd subdir");
-    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
-
-    exarch_cmd()
-        .current_dir(&cwd)
-        .arg("extract")
-        .arg("--atomic")
-        .arg("--force")
-        .arg(fixture_path("sample.tar.gz"))
-        .arg("..")
-        .assert()
-        .code(1)
-        .stderr(predicate::str::contains(
-            "would replace the working directory or a directory that contains it",
-        ));
-
-    assert!(
-        dest.join("old.txt").exists(),
-        "a refused replace must leave the destination untouched"
-    );
+        assert!(
+            dest.join("old.txt").exists(),
+            "{destination}: a refused replace must leave the destination untouched"
+        );
+    }
 }
 
 /// Regression test (N2): a destination whose parent doesn't exist yet

@@ -34,7 +34,7 @@ use crate::Violation;
 use crate::security::fs_view::LinkKind;
 use crate::security::validator::NodeKind;
 
-/// A glob-free entry pattern, with the grammar of creation excludes.
+/// A glob entry pattern, with the grammar of creation excludes.
 ///
 /// The same type as [`ExcludePattern`]: `create -x` and extraction share one
 /// parser, so a pattern means the same thing in both directions.
@@ -150,8 +150,8 @@ pub enum PathRewrite {
 /// An entry is selected when it matches at least one include pattern (or there
 /// are none) and no exclude pattern; an exclude pattern always wins. Patterns
 /// match the entry's normalized archive path before any stripping, compare raw
-/// component bytes and are case-sensitive on every host. A path pattern
-/// selects the named entry and everything below it.
+/// bytes and are case-sensitive on every host. A match selects the entry and
+/// everything below it.
 ///
 /// The default selects every entry and keeps every path.
 ///
@@ -297,6 +297,8 @@ impl EntrySelection {
         self
     }
 
+    // TODO(critic): compile include/exclude lists into one GlobSet each if
+    // per-pattern matching misses NFR-005
     /// Decides what happens to an entry whose name `original` already passed
     /// path validation (so it holds only normal components).
     ///

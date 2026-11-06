@@ -42,6 +42,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "glob"
+path = "fuzz_targets/glob.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "safe_path"
 path = "fuzz_targets/safe_path.rs"
 test = false

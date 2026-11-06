@@ -131,7 +131,7 @@ def test_properties_round_trip_and_rewrite_is_one_choice():
     ("method", "setting"),
     [("add_include_pattern", "entry_include"), ("add_exclude_pattern", "entry_exclude")],
 )
-@pytest.mark.parametrize("pattern", ["**/x", "a?b", "[x]", "", "a,b"])
+@pytest.mark.parametrize("pattern", ["a**b", "{x}", "[x", "!x", "", "a,b"])
 def test_a_refused_pattern_names_its_setting(method, setting, pattern):
     config = exarch.SecurityConfig()
 
@@ -148,7 +148,7 @@ def test_a_refused_pattern_through_the_property_names_its_setting():
     config.include_patterns = ["ok"]
 
     with pytest.raises(exarch.InvalidConfigurationError) as info:
-        config.include_patterns = ["fine", "**/x"]
+        config.include_patterns = ["fine", "a**b"]
 
     assert info.value.setting == "entry_include"
     assert config.include_patterns == ["ok"]

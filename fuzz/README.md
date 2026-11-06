@@ -32,6 +32,7 @@ code. It has its own `Cargo.toml`, `[workspace]` table, and committed
 | `zip` | ZIP parsing (central directory, per-entry headers) through `ListRequest` / `VerifyRequest` |
 | `sevenz` | 7z parsing (header, solid-block decode + memory cap — reachable since `allow_solid_archives` is enabled) |
 | `safe_path` | `SafePath::validate` directly, on raw entry-name bytes, with symlinks/hardlinks allowed so escape-detection logic is reachable |
+| `glob` | `ExcludePattern::try_from` on arbitrary pattern bytes and `matches` on arbitrary path bytes: no panic, `parse(display(p)) == p`, and a pattern without `/` or `**` matches a normal-component path only through one of its components |
 | `sink` | `SinkExtractRequest` into a `MemorySink` under both path models and both duplicate policies, with a check after every run (success or error) that no stored path sits below a stored symlink, that every stored symlink target stays inside the root when resolved through the other stored links, and that no stored path has a `..`, root or prefix component |
 | `detect` | `ArchiveReader::detect` restores the stream position from any offset; `detect_stream` replays the bytes it consumed, so the detected reader lists the same archive as one given the detected format explicitly |
 | `extract_archive` | The full pipeline: format detection (magic-byte path only, see below), decompression, all three handlers, real file writes (atomic extraction), with a containment check after every call so a successful path-traversal/symlink escape crashes the target instead of passing silently |

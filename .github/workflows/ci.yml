@@ -230,7 +230,7 @@ jobs:
           command: check
           command-arguments: advisories
 
-  # Scheduled fuzzing. Narrow but real: 5 targets x 300s weekly on a corpus
+  # Scheduled fuzzing. Narrow but real: 8 targets x 300s weekly on a corpus
   # that persists via actions/cache, layered on top of the existing
   # regression-test harness -- not a replacement for it. Deliberately not in
   # ci-success: non-blocking by design, only fuzz-build above gates PRs.
@@ -245,7 +245,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [safe_path, tar, zip, sevenz, extract_archive, sink, detect]
+        target: [safe_path, tar, zip, sevenz, extract_archive, sink, detect, glob]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 

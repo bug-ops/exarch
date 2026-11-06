@@ -610,21 +610,24 @@ export declare class CreationConfig {
   /**
    * Adds an exclude pattern.
    *
-   * Files matching this pattern will be skipped. Four shapes exist: `name`
-   * (a path component equal to it), `name*` (a component starting with it),
-   * `*name` (a component ending with it) and `dir/sub` (that path and its
-   * subtree). A pattern matches the entry's archive path, never the
-   * ancestors of a source directory, so write `build`, not `src/build`, for
-   * a source `src`.
+   * Files matching this pattern will be skipped. Patterns are globs: `*` and
+   * `?` match within one path component (`?` is exactly one byte), `[a-c]`
+   * is a positive ASCII class, `**` as a whole component spans directories.
+   * A name without `/` matches any path component, and so its subtree; a
+   * pattern with a `/` anywhere (a trailing one included) matches from the
+   * archive root and its subtree. A pattern matches the entry's archive
+   * path, never the ancestors of a source directory, so write `build`, not
+   * `src/build`, for a source `src`.
    *
    * # Errors
    *
    * Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
-   * other shape instead of silently excluding nothing: an empty pattern,
-   * one with a null byte, leading or trailing whitespace, a comma, any of
-   * `?`, `[`, `]`, `{`, `}` and `!`, a `*` elsewhere than first or last,
-   * `.` or `..` as a component, an absolute path or one over 255 bytes. A
-   * name holding such a character cannot be excluded by pattern.
+   * unsupported syntax instead of silently excluding nothing: an empty
+   * pattern, one with a null byte, leading or trailing whitespace, a comma,
+   * a leading `!`, `{` or `}`, `**` glued to other characters, a negated,
+   * POSIX or non-ASCII class, an unterminated class, a class range outside
+   * `0-9`, `a-z` and `A-Z`, `.` or `..` as a component, an absolute path or
+   * one over 255 bytes.
    */
   addExcludePattern(pattern: string): this
   /**
@@ -928,10 +931,9 @@ export declare class SecurityConfig {
    * no exclude pattern) are extracted, listed as extracted or verified as
    * extracted.
    *
-   * Four shapes exist, as for `CreationConfig.addExcludePattern`: `name`
-   * (a path component equal to it), `name*`, `*name` and `dir/sub` (that
-   * path and everything below it). A pattern is matched against the entry's
-   * archive path before any stripping, and is case-sensitive on every host.
+   * The syntax is that of `CreationConfig.addExcludePattern` (globs: `*`,
+   * `?`, `[a-c]`, `**`). A pattern is matched against the entry's archive
+   * path before any stripping, and is case-sensitive on every host.
    * An include pattern that matches no entry fails the extraction after the
    * scan with `INVALID_CONFIGURATION` (`setting` is `entry_include`) and
    * `unmatchedPatterns`.

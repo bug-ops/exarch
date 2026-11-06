@@ -402,14 +402,18 @@ const result = await extractArchiveWithProgress(
 ### Exclude patterns
 
 `CreationConfig.withExcludePatterns(patterns)` replaces the list (the defaults included)
-and `addExcludePattern(pattern)` appends one; both accept four shapes: `name` (a path
-component equal to it), `name*`, `*name` and `dir/sub` (that path and its
-subtree). Patterns match the entry's archive path, never the ancestors of a
-source directory, so for a source `src` write `build`, not `src/build`. Any
-other shape, such as `*.m*`, `?.txt`, `[a`, `{a,b}`, `!a.txt`, `a,b`, a pattern
-with leading or trailing whitespace, an empty one, `..` or an absolute path,
-throws `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'` instead of
-silently excluding nothing.
+and `addExcludePattern(pattern)` appends one; both accept glob patterns.
+Patterns are globs: `*` and `?` match within one path component (`?` is exactly
+one byte), `[a-c]` is a positive ASCII class, and `**` as a whole component
+spans directories (`src/**/*.rs`). A name without `/` (`build`, `*.tmp`) matches
+any path component, and so its subtree; a pattern with a `/` anywhere,
+a trailing one included (`target/`), matches from the archive root and its
+subtree. Patterns match the entry's archive path, never the
+ancestors of a source directory, so for a source `src` write `build`, not
+`src/build`. Unsupported syntax, such as `{a,b}`, `!a.txt`, `a**b`, `[!x]`, `[a`,
+`a,b`, a pattern with leading or trailing whitespace, an empty one, `..` or an
+absolute path, throws `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'`
+instead of silently excluding nothing.
 
 ### Create options
 
@@ -499,9 +503,8 @@ selection with the same code. Order of operations: the original entry name is
 validated first (an unsafe name is refused even when it is not selected), then
 include and exclude patterns select entries, matching the path **before**
 stripping, then `stripComponents` or `flatten` rewrite the name, which is
-validated again. Patterns have four shapes (`name`, `name*`, `*name` and
-`dir/sub`, which selects that path and everything below it), compare raw
-components and are case-sensitive on every host. An empty pattern list selects
+validated again. Patterns are globs (`*`, `?`, `[a-c]`, `**`; see exclude patterns above), match
+raw bytes and are case-sensitive on every host. An empty pattern list selects
 everything.
 
 - Entries left out are counted in `skipped` as `'not_selected'`, and entries

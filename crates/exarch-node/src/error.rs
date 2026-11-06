@@ -2430,6 +2430,19 @@ mod tests {
     }
 
     #[test]
+    fn test_ambiguous_hardlink_target_is_a_link_target_violation() {
+        let d = described(CoreError::from(CoreViolation::HardlinkTargetAmbiguous {
+            link: "h".into(),
+            target: "a.txt".into(),
+        }));
+        assert_eq!(d.props.code.as_str(), "SECURITY_VIOLATION");
+        assert_eq!(
+            d.props.sub_code.map(exarch_core::SubCode::as_str),
+            Some("LINK_TARGET")
+        );
+    }
+
+    #[test]
     fn test_native_failure_is_not_described() {
         let native = describe(Failure::Native(Error::from_reason("negative")))
             .expect_err("native errors bypass the builder");

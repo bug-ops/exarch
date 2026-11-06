@@ -132,6 +132,16 @@ describe('entry selection', () => {
       assert.strictEqual(config.flatten, false);
       config.setStripComponents(null);
       assert.strictEqual(config.stripComponents, null);
+      assert.strictEqual(config.flatten, false);
+    });
+
+    it('keeps flatten when the strip count is cleared', () => {
+      const config = new SecurityConfig().setFlatten(true);
+      config.setStripComponents(null);
+      assert.strictEqual(config.flatten, true);
+      config.setFlatten(false);
+      assert.strictEqual(config.flatten, false);
+      assert.strictEqual(config.stripComponents, null);
     });
 
     it('refuses an unusable strip count as INVALID_CONFIGURATION and keeps the old one', () => {
@@ -280,6 +290,21 @@ describe('entry selection', () => {
       const linksPath = path.join(tempDir, 'hard.tar');
       fs.writeFileSync(linksPath, links);
       const config = new SecurityConfig().setAllowHardlinks(true).addIncludePattern('h');
+      assert.throws(() => extractArchiveSync(linksPath, out, config), {
+        code: 'SECURITY_VIOLATION',
+        subCode: 'LINK_TARGET',
+      });
+    });
+
+    it('refuses a hardlink whose target several entries land on after stripping', () => {
+      const links = tarOf(
+        file('x/a.txt', 'one'),
+        file('y/a.txt', 'two'),
+        tarEntry('x/h', { type: '1', link: 'x/a.txt' })
+      );
+      const linksPath = path.join(tempDir, 'ambiguous.tar');
+      fs.writeFileSync(linksPath, links);
+      const config = new SecurityConfig().setAllowHardlinks(true).setStripComponents(1);
       assert.throws(() => extractArchiveSync(linksPath, out, config), {
         code: 'SECURITY_VIOLATION',
         subCode: 'LINK_TARGET',

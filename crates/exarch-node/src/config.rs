@@ -646,7 +646,8 @@ impl SecurityConfig {
     }
 
     /// Drops the first `count` leading path components of every extracted
-    /// entry, like `tar --strip-components`; `null` keeps every path.
+    /// entry, like `tar --strip-components`; `null` removes a strip count and
+    /// leaves `flatten` as it is.
     ///
     /// An entry with no component left is skipped and counted as
     /// `'stripped_away'`. Include and exclude patterns match the path before
@@ -675,7 +676,8 @@ impl SecurityConfig {
     /// Directory entries are skipped and counted as `'stripped_away'`; a
     /// symlink or hardlink entry is refused with `SECURITY_VIOLATION`
     /// (`subCode` is `LINK_POLICY`). Files that share a final name follow
-    /// `existingFiles`. Setting `flatten` replaces a strip count.
+    /// `existingFiles`. Setting `flatten` replaces a strip count, and
+    /// `setStripComponents(null)` leaves `flatten` as it is.
     #[napi(js_name = "setFlatten")]
     pub fn set_flatten(&mut self, flatten: bool) -> &Self {
         self.try_set_flatten(flatten);
@@ -1076,7 +1078,8 @@ impl SecurityConfig {
         Ok(())
     }
 
-    /// Env-free core of `setStripComponents`; `None` keeps every path.
+    /// Env-free core of `setStripComponents`; `None` drops a strip count and
+    /// leaves `flatten` as it is.
     fn try_set_strip_components(
         &mut self,
         count: Option<f64>,
@@ -1086,7 +1089,10 @@ impl SecurityConfig {
                 let count = positive_from_f64(ConfigSetting::StripComponents, count)?;
                 PathRewrite::Strip(StripComponents::new(count, self.inner.max_path_depth)?)
             }
-            None => PathRewrite::Keep,
+            None => match self.inner.selection.rewrite() {
+                PathRewrite::Flatten => PathRewrite::Flatten,
+                _ => PathRewrite::Keep,
+            },
         };
         self.inner.selection = std::mem::take(&mut self.inner.selection).with_rewrite(rewrite);
         Ok(())
@@ -2996,6 +3002,11 @@ mod tests {
         assert_eq!(config.as_core().selection.rewrite(), PathRewrite::Keep);
 
         config.try_set_flatten(true);
+        config.try_set_strip_components(None).unwrap();
+        assert!(
+            config.get_flatten(),
+            "clearing the strip count keeps flatten"
+        );
         config.try_set_flatten(false);
         assert_eq!(config.as_core().selection.rewrite(), PathRewrite::Keep);
     }

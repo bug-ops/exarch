@@ -479,7 +479,7 @@ const config = new SecurityConfig()
   .setBannedComponents(["__MACOSX"])         // Replace the banned components; [] bans nothing
   .addIncludePattern("src")                  // Extract only matching entries (repeatable, or setIncludePatterns([...]))
   .addExcludePattern("*.tmp")                // Never extract matching entries; wins over include (or setExcludePatterns([...]))
-  .setStripComponents(1)                     // Drop leading path components, like tar --strip-components; null keeps paths
+  .setStripComponents(1)                     // Drop leading path components, like tar --strip-components; null removes a count but keeps flatten
   .setFlatten(true)                          // Land every file under its final component (replaces a strip count)
   .setAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
   .setZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'

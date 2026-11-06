@@ -3,6 +3,7 @@
 use crate::cli::CreateArgs;
 use crate::commands::CommandResult;
 use crate::commands::Outcome;
+use crate::interrupt;
 use crate::operation::Operation;
 use crate::output::OutputFormatter;
 use crate::output::OutputMode;
@@ -22,6 +23,8 @@ pub fn execute(
     formatter: &mut dyn OutputFormatter,
     mode: OutputMode,
 ) -> CommandResult {
+    interrupt::install(&args.output);
+
     let max_file_size = match args.max_file_size {
         Some(size) => Limit::<NonZeroU64>::parse(ConfigSetting::MaxFileSize, size)?,
         None => Limit::Unbounded,

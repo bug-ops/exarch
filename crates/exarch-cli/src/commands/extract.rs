@@ -6,10 +6,12 @@ use crate::cli::ExtractArgs;
 use crate::cli::ListToken;
 use crate::commands::CommandResult;
 use crate::commands::Outcome;
+use crate::commands::security_config;
 use crate::error::ConflictAdvice;
 use crate::error::add_archive_context;
 use crate::error::convert_error;
 use crate::error::convert_error_with_advice;
+use crate::interrupt;
 use crate::operation::Flag;
 use crate::operation::Operation;
 use crate::output::OutputFormatter;
@@ -25,6 +27,7 @@ use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
 use exarch_core::DestinationCheck;
+use exarch_core::DestinationState;
 use exarch_core::ExistingFiles;
 use exarch_core::Extension;
 use exarch_core::ExtensionFilter;
@@ -42,9 +45,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::Staging as CoreStaging;
 use exarch_core::StoredTargets;
 use exarch_core::detect_format;
-use exarch_core::non_zero_usize;
 use std::env;
-use std::io;
 use std::path::Path;
 
 /// Parses the `--allowed-extensions` items into [`Extension`]s: blank items
@@ -143,26 +144,6 @@ fn list_for_extract(
         .map_err(|err| convert_error(Operation::Extract, err, archive))
 }
 
-/// Whether nothing can exist at `output_dir` yet and its parent is an existing
-/// directory.
-///
-/// Such a destination has no conflicts to look for and no pre-existing content
-/// a failed run could damage, so a TAR extraction skips the list pass (a full
-/// second decode of a compressed stream) and runs atomically instead: a
-/// refusal leaves nothing behind and creates no parent directory. An empty
-/// parent (`out/`) means the current directory.
-fn is_fresh_destination(output_dir: &Path) -> bool {
-    let absent = matches!(
-        output_dir.symlink_metadata(),
-        Err(ref e) if e.kind() == io::ErrorKind::NotFound
-    );
-    let parent = match output_dir.parent() {
-        Some(p) if !p.is_empty() => p,
-        _ => Path::new("."),
-    };
-    absent && parent.is_dir()
-}
-
 /// Whether `archive` is a TAR stream, the only family whose list pass costs a
 /// second decode; ZIP and 7z list from their headers, and their list pass also
 /// carries header-level diagnostics that extraction reports differently.
@@ -176,24 +157,6 @@ fn listed_entry_count(manifest: &ArchiveManifest, config: &SecurityConfig) -> us
         .landings(config)
         .filter(|landing| matches!(landing.kind(), LandingKind::Entry(_)))
         .count()
-}
-
-/// The configuration the size, count, depth and ratio flags describe; a value
-/// core refuses is returned as `InvalidConfiguration` naming the flag's
-/// setting.
-fn limited_config(args: &ExtractArgs) -> Result<SecurityConfig, ArchiveError> {
-    let config = args.parallel.apply(
-        args.zip.apply(
-            args.links
-                .apply(args.limits.apply(SecurityConfig::default())?),
-        ),
-    )?;
-    match args.max_path_depth {
-        Some(depth) => {
-            Ok(config.with_max_path_depth(non_zero_usize(ConfigSetting::MaxPathDepth, depth)?))
-        }
-        None => Ok(config),
-    }
 }
 
 /// How `--force` and `--atomic` combine, resolved once from the arguments.
@@ -264,7 +227,7 @@ enum ExtractPlan {
     /// Extraction from a listing whose destination was checked up front.
     Listed {
         listed: Box<ListedArchive>,
-        options: ExtractionOptions,
+        options: ListedExtractOptions,
     },
 }
 
@@ -288,12 +251,7 @@ impl ExtractPlan {
                 .with_options(options)
                 .with_progress(progress)
                 .extract(archive, output_dir),
-            Self::Listed { listed, options } => {
-                let listed_options = ListedExtractOptions::default()
-                    .with_staging(options.staging)
-                    .with_existing_files(options.existing_files);
-                (*listed).extract(output_dir, &listed_options, progress)
-            }
+            Self::Listed { listed, options } => (*listed).extract(output_dir, &options, progress),
         };
         add_archive_context(Operation::Extract, result, archive)
     }
@@ -315,7 +273,9 @@ fn plan_extraction(
 
     // A staged run refuses occupied paths on its own, and a fresh destination
     // has nothing to conflict with, so neither needs the list pass.
-    if is_tar_archive(&args.archive) && (mode.stages() || is_fresh_destination(output_dir)) {
+    if is_tar_archive(&args.archive)
+        && (mode.stages() || DestinationState::probe(output_dir) == DestinationState::Fresh)
+    {
         let staging = match mode.staging() {
             CoreStaging::InPlace => CoreStaging::Atomic,
             staged => staged,
@@ -333,7 +293,9 @@ fn plan_extraction(
     }
     Ok(ExtractPlan::Listed {
         listed: Box::new(listed),
-        options: options(mode.staging()),
+        options: ListedExtractOptions::default()
+            .with_staging(mode.staging())
+            .with_existing_files(mode.existing_files()),
     })
 }
 
@@ -347,19 +309,20 @@ pub fn execute(
         None => env::current_dir().context("failed to get current directory")?,
     };
 
+    interrupt::install(&output_dir);
+
     let allowed_extensions = parse_extensions(&args.allowed_extensions)?;
 
-    let config = limited_config(args)?
+    let base = SecurityConfig::default()
         .with_allow_absolute_paths(args.allow_absolute_paths)
         .with_allow_world_writable(args.allow_world_writable)
         .with_preserve_permissions(args.preserve_permissions)
         .with_allowed_extensions(allowed_extensions);
-
-    let config = match banned_components(&args.banned_components)? {
-        Some(components) => config.with_banned_path_components(components),
-        None => config,
+    let base = match banned_components(&args.banned_components)? {
+        Some(components) => base.with_banned_path_components(components),
+        None => base,
     };
-    let config = args.selection.apply(config)?;
+    let config = security_config(args, base)?;
 
     let plan = plan_extraction(args, WriteMode::of(args), &output_dir, &config)?;
     let length = plan.manifest().map_or(BarLength::Discover, |manifest| {

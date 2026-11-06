@@ -3,6 +3,7 @@
 use crate::cli::VerifyArgs;
 use crate::commands::CommandResult;
 use crate::commands::Outcome;
+use crate::commands::security_config;
 use crate::output::OutputFormatter;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
@@ -12,13 +13,7 @@ use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
 
 pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
-    let config = args.parallel.apply(
-        args.zip.apply(
-            args.links
-                .apply(args.limits.apply(SecurityConfig::default())?),
-        ),
-    )?;
-    let config = args.selection.apply(config)?;
+    let config = security_config(args, SecurityConfig::default())?;
 
     let options = if args.check_integrity {
         let budget = match args.decompression_budget {

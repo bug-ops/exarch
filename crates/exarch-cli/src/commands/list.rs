@@ -3,6 +3,7 @@
 use crate::cli::ListArgs;
 use crate::commands::CommandResult;
 use crate::commands::Outcome;
+use crate::commands::security_config;
 use crate::output::Dispositions;
 use crate::output::ManifestView;
 use crate::output::OutputFormatter;
@@ -22,10 +23,7 @@ const fn manifest_view(args: &ListArgs) -> ManifestView {
 }
 
 pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
-    let config = args.selection.apply(
-        args.zip
-            .apply(args.limits.apply(SecurityConfig::default())?),
-    )?;
+    let config = security_config(args, SecurityConfig::default())?;
 
     let stored_targets = if args.read_link_targets {
         StoredTargets::Read

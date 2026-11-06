@@ -1,5 +1,6 @@
 //! Progress bar implementation for CLI operations.
 
+use crate::interrupt::Interruptible;
 use crate::operation::Operation;
 use crate::output::OutputMode;
 use crate::output::Verbosity;
@@ -28,13 +29,14 @@ pub enum BarLength {
 
 /// The progress reporter `operation` runs with under `mode`: per-entry lines
 /// when verbose, a bar on a terminal, and nothing when quiet, in `--json`
-/// mode or when stdout is not a terminal.
+/// mode or when stdout is not a terminal. It also cancels the run once the
+/// process is asked to stop.
 pub fn progress_for(
     mode: OutputMode,
     length: BarLength,
     operation: Operation,
 ) -> Box<dyn ProgressCallback> {
-    match mode {
+    let reporter: Box<dyn ProgressCallback> = match mode {
         OutputMode::Json | OutputMode::Human(Verbosity::Quiet) => Box::new(NoopProgress),
         OutputMode::Human(Verbosity::Verbose) => Box::new(VerboseProgress::new(operation)),
         OutputMode::Human(Verbosity::Normal) => {
@@ -44,7 +46,8 @@ pub fn progress_for(
                 Box::new(NoopProgress)
             }
         }
-    }
+    };
+    Box::new(Interruptible::new(reporter))
 }
 
 const fn operation_label(operation: Operation) -> &'static str {
@@ -207,7 +210,7 @@ impl<W: Write> VerboseProgress<W> {
 
 impl<W: Write + Send> ProgressCallback for VerboseProgress<W> {
     fn on_entry_start(&mut self, path: &Path, _position: EntryPosition) {
-        emit_line(
+        let _ = emit_line(
             &mut self.writer,
             format_args!("  {}  {}", self.operation.name(), TerminalEntry::new(path)),
         );
@@ -223,26 +226,18 @@ impl<W: Write + Send> ProgressCallback for VerboseProgress<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::FailingWriter;
 
     fn position(current: usize, total: EntryTotal) -> EntryPosition {
         EntryPosition::at_index(current - 1, total)
     }
 
-    struct BrokenPipe;
-
-    impl Write for BrokenPipe {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::ErrorKind::BrokenPipe.into())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::ErrorKind::BrokenPipe.into())
-        }
-    }
-
     #[test]
     fn verbose_progress_ignores_a_failing_writer() {
-        let mut p = VerboseProgress::with_writer(Operation::Extract, BrokenPipe);
+        let mut p = VerboseProgress::with_writer(
+            Operation::Extract,
+            FailingWriter(std::io::ErrorKind::BrokenPipe),
+        );
         p.on_entry_start(
             Path::new("data/file.txt"),
             position(1, EntryTotal::Known(10)),

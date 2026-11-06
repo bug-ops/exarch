@@ -8,7 +8,7 @@ use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use super::formatter::SizeUnits;
 use super::humanize_bytes;
-use super::skip_breakdown;
+use super::skip_breakdown_lines;
 use super::terminal::TerminalEntry;
 use super::terminal::TerminalPath;
 use super::terminal::TerminalText;
@@ -31,6 +31,7 @@ use exarch_core::ManifestEntryKind;
 use exarch_core::Skips;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
+use std::io;
 use std::io::Write;
 use std::path::Path;
 
@@ -193,42 +194,46 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
     }
 
     /// Runs `write` unless the output is quiet.
-    fn unless_quiet(&mut self, write: impl FnOnce(&mut Self)) {
+    fn unless_quiet(&mut self, write: impl FnOnce(&mut Self) -> io::Result<()>) -> Result<()> {
         if self.verbosity != Verbosity::Quiet {
-            write(self);
+            write(self)?;
         }
+        Ok(())
     }
 
     /// A blank line, the warnings heading and one line per warning.
-    fn write_warnings(&mut self, warnings: &[impl std::fmt::Display]) {
-        emit_blank(&mut self.out);
+    fn write_warnings(&mut self, warnings: &[impl std::fmt::Display]) -> io::Result<()> {
+        emit_blank(&mut self.out)?;
         emit_line(
             &mut self.out,
             format_args!("{}", self.styler.warnings_heading()),
-        );
+        )?;
         for warning in warnings {
             emit_line(
                 &mut self.out,
                 format_args!("  - {}", TerminalText::new(&warning.to_string())),
-            );
+            )?;
         }
+        Ok(())
     }
 
     /// The skip total and, under it, one line per reason that occurred.
     /// `label` pads the total's label to the report's column.
-    fn write_skips(&mut self, label: &str, skips: &Skips) {
+    fn write_skips(&mut self, label: &str, skips: &Skips) -> io::Result<()> {
         if skips.is_empty() {
-            return;
+            return Ok(());
         }
-        emit_line(&mut self.out, format_args!("{label}{}", skips.total()));
-        for (kind, count) in skip_breakdown(skips) {
-            emit_line(&mut self.out, format_args!("    {kind}: {count}"));
+        emit_line(&mut self.out, format_args!("{label}{}", skips.total()))?;
+        for line in skip_breakdown_lines(skips) {
+            emit_line(&mut self.out, format_args!("{line}"))?;
         }
+        Ok(())
     }
 
-    /// Always shown on stderr, even in quiet mode.
+    /// Always shown on stderr, even in quiet mode. The command has already
+    /// failed, so a stderr that cannot be written has nothing left to change.
     fn emit_error_line(&mut self, message: &str) {
-        emit_line(
+        let _ = emit_line(
             &mut self.err,
             format_args!("{} {message}", self.styler.error_prefix()),
         );
@@ -251,7 +256,11 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
         result.chars().rev().collect()
     }
 
-    fn write_short_manifest(&mut self, manifest: &ArchiveManifest, dispositions: &Dispositions) {
+    fn write_short_manifest(
+        &mut self,
+        manifest: &ArchiveManifest,
+        dispositions: &Dispositions,
+    ) -> io::Result<()> {
         for (index, entry) in manifest.entries().iter().enumerate() {
             emit_line(
                 &mut self.out,
@@ -260,8 +269,9 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
                     TerminalEntry::new(&entry.path),
                     disposition_suffix(dispositions.get(index), &entry.path)
                 ),
-            );
+            )?;
         }
+        Ok(())
     }
 
     fn write_long_manifest(
@@ -269,7 +279,7 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
         manifest: &ArchiveManifest,
         units: SizeUnits,
         dispositions: &Dispositions,
-    ) {
+    ) -> io::Result<()> {
         for (index, entry) in manifest.entries().iter().enumerate() {
             let size_str = match units {
                 SizeUnits::Human => humanize_bytes(entry.size()),
@@ -298,10 +308,10 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
                     link_suffix(&entry.kind),
                     disposition_suffix(dispositions.get(index), &entry.path)
                 ),
-            );
+            )?;
         }
 
-        emit_blank(&mut self.out);
+        emit_blank(&mut self.out)?;
         emit_line(
             &mut self.out,
             format_args!(
@@ -309,7 +319,7 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
                 Self::format_number(manifest.total_entries()),
                 humanize_bytes(manifest.total_size())
             ),
-        );
+        )
     }
 }
 
@@ -335,38 +345,38 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             emit_line(
                 &mut f.out,
                 format_args!("{}", f.styler.done("Extraction complete")),
-            );
+            )?;
             emit_line(
                 &mut f.out,
                 format_args!("  Files extracted: {}", report.files_extracted),
-            );
+            )?;
             emit_line(
                 &mut f.out,
                 format_args!("  Directories: {}", report.directories_created),
-            );
+            )?;
             emit_line(
                 &mut f.out,
                 format_args!("  Total size: {}", humanize_bytes(report.bytes_written)),
-            );
+            )?;
 
-            f.write_skips("  Files skipped: ", &report.skipped);
+            f.write_skips("  Files skipped: ", &report.skipped)?;
 
             if f.verbosity == Verbosity::Verbose {
                 emit_line(
                     &mut f.out,
                     format_args!("  Symlinks: {}", report.symlinks_created),
-                );
+                )?;
                 emit_line(
                     &mut f.out,
                     format_args!("  Duration: {:?}", report.duration),
-                );
+                )?;
             }
 
             if report.has_warnings() {
-                f.write_warnings(&report.warnings);
+                f.write_warnings(&report.warnings)?;
             }
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     fn format_creation_result(
@@ -376,30 +386,30 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
     ) -> Result<()> {
         self.unless_quiet(|f| {
             let created = format!("Archive created: {}", TerminalPath::new(output_path));
-            emit_line(&mut f.out, format_args!("{}", f.styler.done(&created)));
+            emit_line(&mut f.out, format_args!("{}", f.styler.done(&created)))?;
 
-            emit_blank(&mut f.out);
+            emit_blank(&mut f.out)?;
             emit_line(
                 &mut f.out,
                 format_args!(
                     "  Files added:      {}",
                     Self::format_number(report.files_added)
                 ),
-            );
+            )?;
             emit_line(
                 &mut f.out,
                 format_args!(
                     "  Directories:      {}",
                     Self::format_number(report.directories_added)
                 ),
-            );
+            )?;
             emit_line(
                 &mut f.out,
                 format_args!(
                     "  Total size:       {}",
                     humanize_bytes(report.bytes_written)
                 ),
-            );
+            )?;
 
             if report.bytes_compressed > 0 {
                 emit_line(
@@ -408,23 +418,23 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                         "  Compressed size:  {}",
                         humanize_bytes(report.bytes_compressed)
                     ),
-                );
+                )?;
                 emit_line(
                     &mut f.out,
                     format_args!(
                         "  Compression:      {:.1}%",
                         report.compression_percentage()
                     ),
-                );
+                )?;
             }
 
-            f.write_skips("  Files skipped:    ", &report.skipped);
+            f.write_skips("  Files skipped:    ", &report.skipped)?;
 
             if report.has_warnings() {
-                f.write_warnings(&report.warnings);
+                f.write_warnings(&report.warnings)?;
             }
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     fn format_verification_failed(&mut self) {
@@ -449,8 +459,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
         self.unless_quiet(|f| match view {
             ManifestView::Short => f.write_short_manifest(manifest, dispositions),
             ManifestView::Long(units) => f.write_long_manifest(manifest, units, dispositions),
-        });
-        Ok(())
+        })
     }
 
     fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()> {
@@ -461,34 +470,34 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                     "Archive verification: {}",
                     f.styler.verification_status(report.status())
                 ),
-            );
+            )?;
 
             emit_line(
                 &mut f.out,
                 format_args!("  Integrity: {}", report.integrity_status()),
-            );
+            )?;
             emit_line(
                 &mut f.out,
                 format_args!("  Security: {}", report.security_status()),
-            );
+            )?;
             emit_line(
                 &mut f.out,
                 format_args!(
                     "  Total entries: {}",
                     Self::format_number(report.total_entries())
                 ),
-            );
+            )?;
 
             if report.suspicious_entries() > 0 {
                 emit_line(
                     &mut f.out,
                     format_args!("  Suspicious entries: {}", report.suspicious_entries()),
-                );
+                )?;
             }
 
             if !report.issues().is_empty() {
-                emit_blank(&mut f.out);
-                emit_line(&mut f.out, format_args!("Issues:"));
+                emit_blank(&mut f.out)?;
+                emit_line(&mut f.out, format_args!("Issues:"))?;
 
                 for issue in report.issues() {
                     let severity = f.styler.severity(issue.severity());
@@ -502,17 +511,17 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                                 TerminalEntry::new(path),
                                 TerminalText::new(&message)
                             ),
-                        );
+                        )?;
                     } else {
                         emit_line(
                             &mut f.out,
                             format_args!("  {} {}", severity, TerminalText::new(&message)),
-                        );
+                        )?;
                     }
                 }
             }
-        });
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -520,6 +529,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::test_support::FailingWriter;
     use exarch_core::Compressed;
     use exarch_core::Uncompressed;
 
@@ -1164,5 +1174,90 @@ mod tests {
         let mut f = formatter(Verbosity::Normal, false);
         f.format_error(Operation::Extract, &anyhow::anyhow!("a\nb"));
         assert_eq!(err_text(&f), "Error: a\\x0ab\n");
+    }
+
+    fn failing_formatter(kind: io::ErrorKind) -> HumanFormatter<FailingWriter, Vec<u8>> {
+        HumanFormatter::with_writers(FailingWriter(kind), Vec::new(), Verbosity::Normal, false)
+    }
+
+    #[test]
+    fn a_failed_stdout_write_fails_every_result_kind() {
+        let mut f = failing_formatter(io::ErrorKind::StorageFull);
+        assert!(
+            f.format_extraction_result(&sample_extraction_report())
+                .is_err()
+        );
+        assert!(
+            f.format_creation_result(Path::new("o.tar"), &sample_creation_report())
+                .is_err()
+        );
+        assert!(
+            f.format_manifest(
+                &sample_manifest(),
+                ManifestView::Short,
+                &Dispositions::none()
+            )
+            .is_err()
+        );
+        assert!(
+            f.format_manifest(
+                &sample_manifest(),
+                ManifestView::Long(SizeUnits::Bytes),
+                &Dispositions::none()
+            )
+            .is_err()
+        );
+        assert!(
+            f.format_verification_report(&sample_verification_report())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_closed_stdout_is_not_a_failure() {
+        let mut f = failing_formatter(io::ErrorKind::BrokenPipe);
+        assert!(
+            f.format_manifest(
+                &sample_manifest(),
+                ManifestView::Short,
+                &Dispositions::none()
+            )
+            .is_ok(),
+            "a reader that stopped reading is not an error"
+        );
+    }
+
+    #[test]
+    fn quiet_output_never_touches_a_failing_stdout() {
+        let mut f = HumanFormatter::with_writers(
+            FailingWriter(io::ErrorKind::StorageFull),
+            Vec::new(),
+            Verbosity::Quiet,
+            false,
+        );
+        assert!(
+            f.format_extraction_result(&sample_extraction_report())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn every_disposition_has_dedicated_text() {
+        let (manifest, config) = crate::test_support::selected_manifest();
+        let dispositions = Dispositions::of(&manifest, &config);
+        let mut seen = Vec::new();
+        for (index, entry) in manifest.entries().iter().enumerate() {
+            let disposition = dispositions.get(index).unwrap();
+            let text = disposition_suffix(Some(disposition), Path::new("renamed"));
+            assert!(!text.contains("unknown"), "{disposition:?}: {text}");
+            assert_eq!(
+                disposition_suffix(Some(disposition), &entry.path).is_empty(),
+                matches!(disposition, Disposition::Extract(_)),
+            );
+            seen.push(disposition.kind());
+        }
+        for kind in exarch_core::DispositionKind::ALL {
+            assert!(seen.contains(kind), "no fixture entry is {kind}");
+        }
     }
 }

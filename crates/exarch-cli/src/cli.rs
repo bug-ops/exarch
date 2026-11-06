@@ -8,10 +8,12 @@ use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
 use exarch_core::Limit;
 use exarch_core::ParallelDecode;
+use exarch_core::PathComponentName;
 use exarch_core::PathRewrite;
 use exarch_core::RatioLimit;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
+use exarch_core::SolidLimits;
 use exarch_core::StripComponents;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::non_zero_u64;
@@ -155,6 +157,54 @@ impl SelectionArgs {
     }
 }
 
+/// The ratio a whole solid 7z block is held to, spelled as in help and hints
+/// (`1000x`); fixed by core, not by a flag.
+pub fn solid_ratio_text() -> String {
+    format!("{}x", SolidLimits::DEFAULT.max_ratio.get())
+}
+
+/// Long help of `--banned-component`, naming the default list core applies.
+fn banned_component_help() -> String {
+    let defaults = SecurityConfig::default()
+        .banned_path_components
+        .iter()
+        .map(PathComponentName::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Banned path component; can be repeated or comma-separated.\n\nWhen specified, \
+         replaces the default ban list ({defaults}). Use an exactly empty value (\"\") to \
+         allow all components; a value that is only commas or blanks is an error."
+    )
+}
+
+/// The flags `extract`, `list` and `verify` share, as far as each declares
+/// them.
+///
+/// A flag a command does not declare is `None`;
+/// [`crate::commands::security_config`] is the one place that applies them, in
+/// the order that matters (the path-depth limit before the selection).
+pub trait PolicyFlags {
+    /// Quota and ratio flags.
+    fn limits(&self) -> LimitArgs;
+    /// ZIP structure policy.
+    fn zip(&self) -> ZipPolicyArgs;
+    /// Entry selection and path rewrite.
+    fn selection(&self) -> &SelectionArgs;
+    /// Link policy, for the commands that extract or check links.
+    fn links(&self) -> Option<LinkPolicyArgs> {
+        None
+    }
+    /// Lookahead memory, for the commands that decode 7z payloads.
+    fn parallel(&self) -> Option<ParallelDecodeArgs> {
+        None
+    }
+    /// `--max-path-depth`, for the command that declares it.
+    fn max_path_depth(&self) -> Option<usize> {
+        None
+    }
+}
+
 /// Quota and ratio flags shared by `extract`, `list` and `verify`.
 ///
 /// clap checks syntax only into raw values: a whole number, with a K/M/G/T
@@ -178,9 +228,16 @@ pub struct LimitArgs {
     #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
     pub max_file_size: Option<u64>,
 
-    /// Maximum compression ratio, fractions allowed (not applied to solid 7z
-    /// blocks, fixed 1000x)
-    #[arg(long, value_name = "RATIO", value_parser = parse_ratio)]
+    #[arg(
+        long,
+        value_name = "RATIO",
+        value_parser = parse_ratio,
+        help = format!(
+            "Maximum compression ratio, fractions allowed (not applied to solid 7z blocks, \
+             fixed {})",
+            solid_ratio_text()
+        )
+    )]
     pub max_compression_ratio: Option<f64>,
 
     /// Allow solid 7z archives (multiple files compressed as one block)
@@ -236,6 +293,15 @@ pub enum ZipConsistencyArg {
     Enforce,
     /// Use the central directory interpretation without structural findings
     Ignore,
+}
+
+impl ZipConsistencyArg {
+    /// The value as the command line spells it (`--zip-consistency <VALUE>`).
+    pub fn value_name(self) -> String {
+        use clap::ValueEnum as _;
+        self.to_possible_value()
+            .map_or_default(|value| value.get_name().to_owned())
+    }
 }
 
 impl From<ZipConsistencyArg> for ZipConsistencyPolicy {
@@ -373,16 +439,13 @@ pub struct ExtractArgs {
     #[arg(long, value_name = "DEPTH")]
     pub max_path_depth: Option<usize>,
 
-    /// Banned path component; can be repeated or comma-separated.
-    ///
-    /// When specified, replaces the default ban list (.git, .ssh, .gnupg,
-    /// .aws, .kube, .docker, .env). Use an exactly empty value ("") to allow
-    /// all components; a value that is only commas or blanks is an error.
     #[arg(
         long = "banned-component",
         value_name = "COMPONENT",
         value_delimiter = ',',
-        value_parser = parse_list_token
+        value_parser = parse_list_token,
+        help = "Banned path component; can be repeated or comma-separated",
+        long_help = banned_component_help()
     )]
     pub banned_components: Vec<ListToken>,
 
@@ -402,16 +465,17 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Extract atomically: use a temp dir, rename on success, clean up on
-    /// failure. When combined with --force to replace an existing
-    /// destination, the existing destination is renamed aside first, the
-    /// new content is renamed into its place second, and only once that
-    /// swap has succeeded is the old destination removed - never before, so
-    /// a failure at any point still leaves either the old or the new
-    /// content in place under the destination name. On Unix, --force also
-    /// requires read permission on the destination's parent directory (used
-    /// to pin it by file descriptor for the swap); the destination itself
-    /// does not need to be readable.
+    /// Extract atomically: stage in a private directory next to the
+    /// destination, rename on success, remove it on failure.
+    ///
+    /// With --force the existing destination directory is replaced as a whole:
+    /// it is renamed aside, the staged content is renamed into its place, and
+    /// only then is the old destination removed, so a failure at any point
+    /// leaves either the old or the new content under the destination name.
+    /// --atomic --force refuses --include, --exclude, --strip-components and
+    /// --flatten. On Unix, --force also needs read permission on the
+    /// destination's parent directory; the destination itself need not be
+    /// readable.
     #[arg(long)]
     pub atomic: bool,
 
@@ -428,6 +492,32 @@ pub struct ExtractArgs {
         value_parser = parse_list_token
     )]
     pub allowed_extensions: Vec<ListToken>,
+}
+
+impl PolicyFlags for ExtractArgs {
+    fn limits(&self) -> LimitArgs {
+        self.limits
+    }
+
+    fn zip(&self) -> ZipPolicyArgs {
+        self.zip
+    }
+
+    fn selection(&self) -> &SelectionArgs {
+        &self.selection
+    }
+
+    fn links(&self) -> Option<LinkPolicyArgs> {
+        Some(self.links)
+    }
+
+    fn parallel(&self) -> Option<ParallelDecodeArgs> {
+        Some(self.parallel)
+    }
+
+    fn max_path_depth(&self) -> Option<usize> {
+        self.max_path_depth
+    }
 }
 
 #[derive(clap::Args)]
@@ -505,6 +595,20 @@ pub struct ListArgs {
     pub zip: ZipPolicyArgs,
 }
 
+impl PolicyFlags for ListArgs {
+    fn limits(&self) -> LimitArgs {
+        self.limits
+    }
+
+    fn zip(&self) -> ZipPolicyArgs {
+        self.zip
+    }
+
+    fn selection(&self) -> &SelectionArgs {
+        &self.selection
+    }
+}
+
 #[derive(clap::Args)]
 pub struct VerifyArgs {
     /// Path to the archive file
@@ -548,6 +652,28 @@ pub struct VerifyArgs {
     /// Treat warnings as errors and exit with status code 3
     #[arg(long)]
     pub strict: bool,
+}
+
+impl PolicyFlags for VerifyArgs {
+    fn limits(&self) -> LimitArgs {
+        self.limits
+    }
+
+    fn zip(&self) -> ZipPolicyArgs {
+        self.zip
+    }
+
+    fn selection(&self) -> &SelectionArgs {
+        &self.selection
+    }
+
+    fn links(&self) -> Option<LinkPolicyArgs> {
+        Some(self.links)
+    }
+
+    fn parallel(&self) -> Option<ParallelDecodeArgs> {
+        Some(self.parallel)
+    }
 }
 
 /// One comma-separated item of a list flag, trimmed.

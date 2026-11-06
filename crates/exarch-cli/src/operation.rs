@@ -65,8 +65,11 @@ impl Operation {
             | Flag::MaxCompressionRatio => {
                 matches!(self, Self::Extract | Self::List | Self::Verify)
             }
-            Flag::MaxFileSize => true,
-            Flag::AllowedExtensions | Flag::BannedComponent | Flag::MaxPathDepth => {
+            Flag::Exclude | Flag::MaxFileSize => true,
+            Flag::Include | Flag::StripComponents | Flag::Flatten => {
+                matches!(self, Self::Extract | Self::List | Self::Verify)
+            }
+            Flag::AllowedExtensions | Flag::Atomic | Flag::BannedComponent | Flag::MaxPathDepth => {
                 matches!(self, Self::Extract)
             }
             Flag::Force => matches!(self, Self::Extract | Self::Create),
@@ -82,13 +85,18 @@ closed_list! {
         AllowHardlinks => "--allow-hardlinks",
         AllowSolidArchives => "--allow-solid-archives",
         AllowedExtensions => "--allowed-extensions",
+        Atomic => "--atomic",
         BannedComponent => "--banned-component",
+        Exclude => "--exclude",
+        Flatten => "--flatten",
         Force => "--force",
+        Include => "--include",
         MaxCompressionRatio => "--max-compression-ratio",
         MaxFiles => "--max-files",
         MaxFileSize => "--max-file-size",
         MaxPathDepth => "--max-path-depth",
         MaxTotalSize => "--max-total-size",
+        StripComponents => "--strip-components",
         ZipConsistency => "--zip-consistency",
     }
 }

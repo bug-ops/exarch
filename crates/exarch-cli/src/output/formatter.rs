@@ -5,10 +5,13 @@ use anyhow::Result;
 use exarch_core::ArchiveManifest;
 use exarch_core::ConfigSetting;
 use exarch_core::CreationReport;
+use exarch_core::CreationWarning;
 use exarch_core::Disposition;
 use exarch_core::ErrorCode;
 use exarch_core::ExtractionReport;
+use exarch_core::ExtractionWarning;
 use exarch_core::FfiKind;
+use exarch_core::IoKind;
 use exarch_core::PartialWrites;
 use exarch_core::PolicySetting;
 use exarch_core::SecurityConfig;
@@ -132,6 +135,7 @@ mod sealed {
     impl Sealed for exarch_core::PolicySetting {}
     impl Sealed for exarch_core::SubCode {}
     impl Sealed for exarch_core::ConfigSetting {}
+    impl Sealed for exarch_core::IoKind {}
 }
 
 /// A closed core enum whose `Display` is its stable identifier (`as_str`).
@@ -143,6 +147,7 @@ impl StableId for exarch_core::PartialWrites {}
 impl StableId for exarch_core::PolicySetting {}
 impl StableId for exarch_core::SubCode {}
 impl StableId for exarch_core::ConfigSetting {}
+impl StableId for exarch_core::IoKind {}
 
 /// Serializes a closed core enum as its stable identifier.
 #[derive(Debug, Clone, Copy)]
@@ -209,6 +214,10 @@ pub struct JsonDiscriminants {
     pub relaxable_by: Option<JsonId<PolicySetting>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setting: Option<JsonId<ConfigSetting>>,
+    /// The I/O failure class of an `IoError`, the token the Python and Node
+    /// bindings report as `io_kind`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_kind: Option<JsonId<IoKind>>,
 }
 
 impl From<&FfiKind> for JsonDiscriminants {
@@ -217,6 +226,10 @@ impl From<&FfiKind> for JsonDiscriminants {
             sub_code: kind.sub_code().map(JsonId),
             relaxable_by: kind.relaxable_by().map(JsonId),
             setting: kind.setting().map(JsonId),
+            io_kind: match kind {
+                FfiKind::Io(kind) => Some(JsonId(IoKind::from(*kind))),
+                _ => None,
+            },
         }
     }
 }
@@ -246,7 +259,7 @@ pub struct JsonSkip {
     pub kind: &'static str,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub io_kind: Option<String>,
+    pub io_kind: Option<JsonId<IoKind>>,
 }
 
 /// What an operation left out: the total, exact counts per reason (only the
@@ -273,9 +286,98 @@ impl From<&Skips> for JsonSkips {
                 .map(|skip| JsonSkip {
                     kind: skip.kind.as_str(),
                     path: path_text(&skip.path),
-                    io_kind: skip.io_kind.map(|kind| kind.as_str().to_owned()),
+                    io_kind: skip.io_kind.map(JsonId),
                 })
                 .collect(),
+        }
+    }
+}
+
+/// One warning of a report, keyed by the core's stable `kind` token, with the
+/// fields of its variant beside the display `message`.
+#[derive(Debug, Serialize)]
+pub struct JsonWarning {
+    kind: &'static str,
+    message: String,
+    #[serde(flatten)]
+    fields: Option<JsonWarningFields>,
+}
+
+/// The fields each warning variant carries, as the bindings report them.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum JsonWarningFields {
+    Count {
+        count: u64,
+    },
+    LeftoverBackup {
+        path: String,
+        identity: &'static str,
+        io_kind: JsonId<IoKind>,
+    },
+    ZipRatio {
+        entries: usize,
+        limit: f64,
+        needed_ratio: f64,
+    },
+    Reason {
+        reason: String,
+    },
+    IoKind {
+        io_kind: JsonId<IoKind>,
+    },
+}
+
+impl From<&ExtractionWarning> for JsonWarning {
+    fn from(warning: &ExtractionWarning) -> Self {
+        let fields = match warning {
+            ExtractionWarning::AntiItemsSkipped { count } => {
+                Some(JsonWarningFields::Count { count: *count })
+            }
+            ExtractionWarning::BackupCleanupFailed {
+                path,
+                identity,
+                io_kind,
+                ..
+            } => Some(JsonWarningFields::LeftoverBackup {
+                path: path_text(path),
+                identity: identity.as_str(),
+                io_kind: JsonId(*io_kind),
+            }),
+            _ => None,
+        };
+        Self {
+            kind: warning.kind().as_str(),
+            message: warning.to_string(),
+            fields,
+        }
+    }
+}
+
+impl From<&CreationWarning> for JsonWarning {
+    fn from(warning: &CreationWarning) -> Self {
+        let fields = match warning {
+            CreationWarning::ZipRatioOverDefaultLimit {
+                entries,
+                limit,
+                needed_ratio,
+            } => Some(JsonWarningFields::ZipRatio {
+                entries: *entries,
+                limit: *limit,
+                needed_ratio: *needed_ratio,
+            }),
+            CreationWarning::ZipRatioCheckFailed { reason } => Some(JsonWarningFields::Reason {
+                reason: reason.clone(),
+            }),
+            CreationWarning::DirectoryNotSynced { io_kind } => Some(JsonWarningFields::IoKind {
+                io_kind: JsonId(*io_kind),
+            }),
+            _ => None,
+        };
+        Self {
+            kind: warning.kind().as_str(),
+            message: warning.to_string(),
+            fields,
         }
     }
 }
@@ -290,7 +392,7 @@ pub struct JsonExtractionCounts {
     pub bytes_written: u64,
     #[serde(flatten)]
     pub skips: JsonSkips,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<JsonWarning>,
 }
 
 impl From<&ExtractionReport> for JsonExtractionCounts {
@@ -301,7 +403,7 @@ impl From<&ExtractionReport> for JsonExtractionCounts {
             symlinks_created: report.symlinks_created,
             bytes_written: report.bytes_written,
             skips: JsonSkips::from(&report.skipped),
-            warnings: report.warnings.iter().map(ToString::to_string).collect(),
+            warnings: report.warnings.iter().map(JsonWarning::from).collect(),
         }
     }
 }
@@ -325,17 +427,22 @@ pub struct JsonError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub partial_report: Option<JsonPartialReport>,
+    pub partial_report: Option<Box<JsonPartialReport>>,
     /// The archive-relative paths an occupied destination refused, for a
     /// `DestinationOccupied` error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflicts: Option<Vec<String>>,
+    /// A staging directory or reservation file the failed run left behind;
+    /// what the user must clean up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftover_path: Option<String>,
     /// `relaxable_by` is the stable id of the `SecurityConfig` setting whose
     /// current value refused the entry (only for a `SecurityViolation` a
     /// setting relaxes); `sub_code` the finer classification (always for a
     /// `SecurityViolation`, for a TAR `InvalidArchive`, absent otherwise);
     /// `setting` the configuration setting or input that was refused (only
-    /// for an `InvalidConfiguration` that names one).
+    /// for an `InvalidConfiguration` that names one); `io_kind` the I/O
+    /// failure class (only for an `IoError`).
     #[serde(flatten)]
     pub discriminants: Option<JsonDiscriminants>,
 }
@@ -348,6 +455,7 @@ impl JsonError {
             hint: None,
             partial_report: None,
             conflicts: None,
+            leftover_path: None,
             discriminants: None,
         }
     }
@@ -359,6 +467,12 @@ impl JsonError {
     }
 
     #[must_use]
+    pub fn with_leftover_path(mut self, path: Option<String>) -> Self {
+        self.leftover_path = path;
+        self
+    }
+
+    #[must_use]
     pub fn with_hint(mut self, hint: Option<String>) -> Self {
         self.hint = hint;
         self
@@ -366,7 +480,7 @@ impl JsonError {
 
     #[must_use]
     pub fn with_partial(mut self, report: JsonPartialReport) -> Self {
-        self.partial_report = Some(report);
+        self.partial_report = Some(Box::new(report));
         self
     }
 

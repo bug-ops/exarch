@@ -282,6 +282,10 @@ pub struct JsonError {
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial_report: Option<JsonPartialReport>,
+    /// The archive-relative paths an occupied destination refused, for a
+    /// `DestinationOccupied` error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflicts: Option<Vec<String>>,
     /// `relaxable_by` is the stable id of the `SecurityConfig` setting whose
     /// current value refused the entry (only for a `SecurityViolation` a
     /// setting relaxes); `sub_code` the finer classification (always for a
@@ -299,8 +303,15 @@ impl JsonError {
             message: message.into(),
             hint: None,
             partial_report: None,
+            conflicts: None,
             discriminants: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_conflicts(mut self, conflicts: Vec<String>) -> Self {
+        self.conflicts = Some(conflicts);
+        self
     }
 
     #[must_use]

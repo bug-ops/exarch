@@ -12,6 +12,7 @@ use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use crate::error::PartialExtractionContext;
 use crate::error::chain_hints;
+use crate::error::chain_text;
 use crate::error::raw;
 use crate::operation::Operation;
 use anyhow::Result;
@@ -261,7 +262,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         // The message and hints are the exact text: archive-derived parts are
         // escaped only when a terminal formatter renders them.
         let hints = chain_hints(error, raw);
-        let mut json_error = JsonError::new(kind, format!("{error:#}"))
+        let mut json_error = JsonError::new(kind, chain_text(error))
             .with_hint((!hints.is_empty()).then(|| hints.join("\n")));
 
         // `convert_error` makes the `PartialExtractionContext` the outermost
@@ -271,6 +272,13 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             json_error = json_error.with_partial(JsonPartialReport {
                 counts: JsonExtractionCounts::from(&ctx.report),
                 writes: JsonId(ctx.writes),
+            });
+        }
+        if let Some(ArchiveError::DestinationOccupied { conflicts, .. }) = extraction_err {
+            json_error = json_error.with_conflicts({
+                let mut names: Vec<_> = conflicts.iter().map(|c| path_text(c)).collect();
+                names.sort();
+                names
             });
         }
         if let Some(kind) = &ffi_kind {

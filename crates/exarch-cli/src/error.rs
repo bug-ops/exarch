@@ -18,13 +18,17 @@ use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveType;
 use exarch_core::CompressionRatio;
+use exarch_core::ConfigProblem;
 use exarch_core::ExtractionReport;
 use exarch_core::PartialWrites;
 use exarch_core::PathComponentName;
 use exarch_core::PolicySetting;
 use exarch_core::QuotaKind;
+use exarch_core::ReplaceFailure;
+use exarch_core::Restore;
 use exarch_core::SecurityConfig;
 use exarch_core::TarTrailerRefusal;
+use exarch_core::Violation;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
 use exarch_core::path_text;
@@ -117,6 +121,23 @@ pub fn cli_message<'a>(link: &'a (dyn std::error::Error + 'static)) -> Option<Co
     as_cli_message(link).map(CliMessage::parts)
 }
 
+/// The links of `error`'s chain that add text: the cause of a message that
+/// restates it is left out.
+pub fn visible_chain(error: &anyhow::Error) -> Vec<&(dyn std::error::Error + 'static)> {
+    let mut links = Vec::new();
+    let mut skip_cause = false;
+    for link in error.chain() {
+        if std::mem::take(&mut skip_cause) {
+            continue;
+        }
+        skip_cause = link
+            .downcast_ref::<CliContext>()
+            .is_some_and(|context| context.restates_source);
+        links.push(link);
+    }
+    links
+}
+
 /// The hints of every link of `error`'s chain, outermost first, each rendered
 /// by `render`.
 pub fn chain_hints(error: &anyhow::Error, render: fn(&[Part]) -> String) -> Vec<String> {
@@ -155,6 +176,7 @@ pub fn raw(parts: &[Part]) -> String {
 pub struct Message {
     parts: Vec<Part>,
     hint: Option<Vec<Part>>,
+    restates_source: bool,
 }
 
 impl Message {
@@ -196,11 +218,19 @@ impl Message {
         self
     }
 
+    /// Marks the message as already saying everything its cause says, so a
+    /// rendered chain leaves the cause out.
+    pub const fn restating_source(mut self) -> Self {
+        self.restates_source = true;
+        self
+    }
+
     /// The message with no cause behind it.
     pub fn into_context(self) -> CliContext {
         CliContext {
             parts: self.parts,
             hint: self.hint,
+            restates_source: self.restates_source,
             source: None,
         }
     }
@@ -279,6 +309,7 @@ fn dedicated_zip_bomb_hint(op: Operation, scope: ZipBombScope) -> Option<String>
 pub struct CliContext {
     parts: Vec<Part>,
     hint: Option<Vec<Part>>,
+    restates_source: bool,
     source: Option<ArchiveError>,
 }
 
@@ -399,6 +430,113 @@ impl fmt::Display for PartialExtractionContext {
 impl std::error::Error for PartialExtractionContext {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.inner.as_ref())
+    }
+}
+
+/// The visible links of `error`'s chain joined by `": "`, exactly as spelled.
+pub fn chain_text(error: &anyhow::Error) -> String {
+    visible_chain(error)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+/// What a destination conflict tells the user to do, which depends on the
+/// write mode that met it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictAdvice {
+    /// Existing files are refused: `--force` overwrites them.
+    UseForce,
+    /// `--force` is already on, and a file cannot be replaced by a directory.
+    ForceCannotReplace,
+}
+
+impl ConflictAdvice {
+    fn text(self) -> String {
+        let force = Flag::Force.long();
+        match self {
+            Self::UseForce => format!("use {force} to overwrite"),
+            Self::ForceCannotReplace => format!("{force} cannot replace it with a directory"),
+        }
+    }
+}
+
+/// Maximum number of conflicting destination paths listed individually in a
+/// conflict message before the remainder is collapsed into a single
+/// "... and N more" line.
+const MAX_LISTED_CONFLICTS: usize = 10;
+
+/// The message for a destination that holds paths the archive would write.
+///
+/// Caps the individually listed paths at [`MAX_LISTED_CONFLICTS`] so an
+/// archive with many same-named pre-existing files (up to `max_file_count`)
+/// cannot flood stderr with one line per conflict. `conflicts` is sorted
+/// before truncation so "first N shown" is a deterministic subset rather than
+/// whatever order the archive yielded.
+fn occupied_message(destination: &Path, conflicts: &[PathBuf], advice: ConflictAdvice) -> Message {
+    let count = conflicts.len();
+    let noun = if count == 1 { "file" } else { "files" };
+    let verb = if count == 1 { "exists" } else { "exist" };
+
+    let mut sorted: Vec<&PathBuf> = conflicts.iter().collect();
+    sorted.sort();
+
+    let remaining = count.saturating_sub(MAX_LISTED_CONFLICTS);
+    let advice = advice.text();
+    let mut message = if remaining == 0 {
+        Message::default().restating_source().text(format!(
+            "{count} destination {noun} already {verb} ({advice}):"
+        ))
+    } else {
+        Message::default().restating_source().text(format!(
+            "{count} destination {noun} already {verb} ({advice}); first \
+             {MAX_LISTED_CONFLICTS} shown:"
+        ))
+    };
+    // The destination keeps its native spelling; the entry part is rendered
+    // the way the archive names it.
+    let destination = destination.join("");
+    for path in sorted.into_iter().take(MAX_LISTED_CONFLICTS) {
+        message = message.lit("\n  ").path(&destination).entry(path);
+    }
+    if remaining > 0 {
+        message = message
+            .lit("\n  ... and ")
+            .text(remaining.to_string())
+            .lit(" more");
+    }
+    message
+}
+
+/// The message for a replace of the destination that failed part-way; the
+/// core error text names the paths, the hint says what to do about them.
+fn replace_failed_context(message: Message, failure: &ReplaceFailure) -> Message {
+    let message = message.lit("Failed to replace the destination");
+    match (&failure.restore, &failure.leftover) {
+        (Restore::Failed { .. }, _) => message.hint_lit(
+            "The original destination was moved aside and could not be put back; its content is \
+             at the backup path named above.",
+        ),
+        (_, Some(_)) => message.hint_lit(
+            "The original destination is intact. Remove the staging directory named above when \
+             you no longer need it.",
+        ),
+        (_, None) => message,
+    }
+}
+
+/// The advice for a refused configuration, by what was wrong with it.
+fn configuration_hint(problem: &ConfigProblem) -> &'static str {
+    match problem {
+        ConfigProblem::EntryNameCollision { .. } => {
+            "Rename or exclude one of the colliding sources, or strip a different prefix."
+        }
+        ConfigProblem::NotADirectory | ConfigProblem::IsSymlink => {
+            "Choose a destination that is a real directory, or one that does not exist yet."
+        }
+        ConfigProblem::ReplacesProtectedPath { .. } => "Choose a different destination directory.",
+        _ => "Check the flags you passed and their allowed value ranges.",
     }
 }
 
@@ -555,6 +693,17 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
 ///
 /// A `PartialExtraction` keeps the `writes` outcome core recorded.
 pub fn convert_error(op: Operation, err: ArchiveError, archive: &Path) -> anyhow::Error {
+    convert_error_with_advice(op, err, archive, ConflictAdvice::UseForce)
+}
+
+/// [`convert_error`] with the advice a destination conflict gets, for a
+/// caller that knows which write mode produced it.
+pub fn convert_error_with_advice(
+    op: Operation,
+    err: ArchiveError,
+    archive: &Path,
+    advice: ConflictAdvice,
+) -> anyhow::Error {
     // `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so
     // placing it in an anyhow chain directly would cause the inner error text
     // to appear twice in `{:#}` output. Converting the inner `source` first
@@ -571,13 +720,13 @@ pub fn convert_error(op: Operation, err: ArchiveError, archive: &Path) -> anyhow
             return anyhow::Error::new(PartialExtractionContext {
                 report,
                 writes,
-                inner: convert_error(op, cause, archive),
+                inner: convert_error_with_advice(op, cause, archive, advice),
             });
         }
         other => other,
     };
 
-    let context = context_message(op, &err, archive);
+    let context = context_message(op, &err, archive, advice);
     anyhow::Error::new(context.wrapping(err))
 }
 
@@ -601,8 +750,13 @@ fn zip_inconsistency_message(op: Operation, message: Message, archive: &Path) ->
 
 /// The message for `err`; the generic one for a variant added to
 /// `ArchiveError` after [`dedicated_context`] was written.
-fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message {
-    dedicated_context(op, err, archive).unwrap_or_else(|| {
+fn context_message(
+    op: Operation,
+    err: &ArchiveError,
+    archive: &Path,
+    advice: ConflictAdvice,
+) -> Message {
+    dedicated_context(op, err, archive, advice).unwrap_or_else(|| {
         Message::default()
             .lit("Error while processing '")
             .path(archive)
@@ -613,7 +767,12 @@ fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message
 /// The message of each known `ArchiveError` variant; `None` for a variant
 /// added after this match was written, which
 /// `every_archive_error_has_a_dedicated_context` rejects.
-fn dedicated_context(op: Operation, err: &ArchiveError, archive: &Path) -> Option<Message> {
+fn dedicated_context(
+    op: Operation,
+    err: &ArchiveError,
+    archive: &Path,
+    advice: ConflictAdvice,
+) -> Option<Message> {
     let message = Message::default();
     Some(match err {
         ArchiveError::PathTraversal { .. } => message
@@ -642,6 +801,15 @@ fn dedicated_context(op: Operation, err: &ArchiveError, archive: &Path) -> Optio
         ArchiveError::UnknownFormat { .. } => message
             .lit("Cannot determine archive format")
             .hint(Some(format!("Supported formats: {}", supported_formats()))),
+        ArchiveError::SecurityViolation {
+            kind: Violation::DestinationChanged,
+            ..
+        } => message
+            .lit("The destination changed while it was being replaced")
+            .hint_lit(
+                "Another process modified the destination during the replace, so nothing was \
+                 replaced. Re-run once the destination is no longer in use.",
+            ),
         ArchiveError::SecurityViolation { .. }
         | ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }) => message
             .lit("Security violation while processing '")
@@ -655,10 +823,9 @@ fn dedicated_context(op: Operation, err: &ArchiveError, archive: &Path) -> Optio
             .path(archive)
             .lit("'")
             .hint_lit("The archive may be corrupted or malformed."),
-        ArchiveError::InvalidConfiguration { setting, problem } => message
-            .lit("Invalid configuration: ")
-            .text(setting.describe(problem))
-            .hint_lit("Check the flags you passed and their allowed value ranges."),
+        ArchiveError::InvalidConfiguration { problem, .. } => message
+            .text(format!("Cannot {} with these settings", op.name()))
+            .hint_lit(configuration_hint(problem)),
         ArchiveError::SourceNotFound { .. } => {
             message.lit("Source path not found").hint_lit(match op {
                 Operation::Create => "Verify the source path exists and is readable.",
@@ -680,12 +847,14 @@ fn dedicated_context(op: Operation, err: &ArchiveError, archive: &Path) -> Optio
                 message
             }
         }
-        ArchiveError::OutputExists { .. } | ArchiveError::DestinationOccupied { .. } => {
-            message.lit("Output path already exists").hint(
-                op.accepts(Flag::Force)
-                    .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
-            )
-        }
+        ArchiveError::OutputExists { .. } => message.lit("Output path already exists").hint(
+            op.accepts(Flag::Force)
+                .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
+        ),
+        ArchiveError::DestinationOccupied {
+            destination,
+            conflicts,
+        } => occupied_message(destination, conflicts, advice),
         ArchiveError::InvalidPermissions { mode, .. } => message.text(format!(
             "Invalid permissions {:#o}: blocked by security policy.",
             mode.get()
@@ -695,9 +864,10 @@ fn dedicated_context(op: Operation, err: &ArchiveError, archive: &Path) -> Optio
         )),
 
         ArchiveError::Cancelled => message.lit("Operation cancelled"),
-        ArchiveError::OutputReservationLeft { .. } | ArchiveError::ReplaceFailed(_) => {
+        ArchiveError::OutputReservationLeft { .. } => {
             message.lit("Failed to finish writing the output")
         }
+        ArchiveError::ReplaceFailed(failure) => replace_failed_context(message, failure),
 
         ArchiveError::ReaderFormat(_) => message
             .lit("Cannot use the format of '")
@@ -731,7 +901,7 @@ mod tests {
 
     /// The message chain followed by its hints, as the terminal shows them.
     fn full_text(error: &anyhow::Error) -> String {
-        let mut text = format!("{error:#}");
+        let mut text = chain_text(error);
         for hint in chain_hints(error, raw) {
             text.push_str("\nHINT: ");
             text.push_str(&hint);
@@ -1574,10 +1744,116 @@ mod tests {
     fn every_archive_error_has_a_dedicated_context() {
         for err in every_archive_error_variant() {
             assert!(
-                dedicated_context(Operation::Extract, &err, Path::new("a.tar")).is_some(),
+                dedicated_context(
+                    Operation::Extract,
+                    &err,
+                    Path::new("a.tar"),
+                    ConflictAdvice::UseForce
+                )
+                .is_some(),
                 "{err:?} took the wildcard arm"
             );
         }
+    }
+
+    fn occupied_text(conflicts: &[PathBuf]) -> String {
+        terminal(
+            &occupied_message(Path::new(""), conflicts, ConflictAdvice::UseForce)
+                .into_context()
+                .parts(),
+        )
+    }
+
+    #[test]
+    fn occupied_message_escapes_hostile_paths() {
+        let msg = occupied_text(&[PathBuf::from("a\x1b[2J\nforged")]);
+        assert!(msg.ends_with("  a\\x1b[2J\\x0aforged"), "{msg:?}");
+    }
+
+    #[test]
+    fn occupied_message_singular() {
+        let msg = occupied_text(&[PathBuf::from("a.txt")]);
+        assert!(msg.starts_with("1 destination file already exists"));
+        assert!(msg.contains("a.txt"));
+        assert!(!msg.contains("more"));
+    }
+
+    #[test]
+    fn occupied_message_at_cap_lists_all_without_truncation_note() {
+        let conflicts: Vec<_> = (0..MAX_LISTED_CONFLICTS)
+            .map(|i| PathBuf::from(format!("f{i}.txt")))
+            .collect();
+        let msg = occupied_text(&conflicts);
+        assert!(msg.starts_with("10 destination files already exist"));
+        for i in 0..MAX_LISTED_CONFLICTS {
+            assert!(msg.contains(&format!("f{i}.txt")));
+        }
+        assert!(!msg.contains("more") && !msg.contains("first"));
+    }
+
+    #[test]
+    fn occupied_message_over_cap_shows_the_sorted_first_ten_and_summarizes() {
+        let conflicts: Vec<_> = (0..25)
+            .rev()
+            .map(|i| PathBuf::from(format!("f{i:02}.txt")))
+            .collect();
+        let msg = occupied_text(&conflicts);
+        assert!(msg.starts_with("25 destination files already exist"));
+        assert!(msg.contains("first 10 shown"));
+        for i in 0..10 {
+            assert!(msg.contains(&format!("f{i:02}.txt")));
+        }
+        for i in 10..25 {
+            assert!(!msg.contains(&format!("f{i:02}.txt")));
+        }
+        assert!(msg.contains("... and 15 more"));
+    }
+
+    #[test]
+    fn occupied_message_does_not_depend_on_discovery_order() {
+        let ascending: Vec<_> = (0..15)
+            .map(|i| PathBuf::from(format!("f{i:02}.txt")))
+            .collect();
+        let mut reversed = ascending.clone();
+        reversed.reverse();
+        assert_eq!(occupied_text(&ascending), occupied_text(&reversed));
+    }
+
+    #[test]
+    fn occupied_advice_follows_the_write_mode() {
+        let text = |advice| {
+            terminal(
+                &occupied_message(Path::new(""), &[PathBuf::from("a")], advice)
+                    .into_context()
+                    .parts(),
+            )
+        };
+        assert!(text(ConflictAdvice::UseForce).contains("(use --force to overwrite)"));
+        assert!(
+            text(ConflictAdvice::ForceCannotReplace)
+                .contains("(--force cannot replace it with a directory)")
+        );
+    }
+
+    #[test]
+    fn a_failed_replace_says_what_to_do_with_what_it_left() {
+        let hint = |restore, leftover| {
+            let failure =
+                ReplaceFailure::new(io::Error::from(io::ErrorKind::Other), restore, leftover);
+            let context = replace_failed_context(Message::default(), &failure).into_context();
+            context.hint().map(|h| raw(&h))
+        };
+        assert_eq!(hint(Restore::Restored, None), None);
+        assert!(
+            hint(
+                Restore::Failed {
+                    backup: PathBuf::from("b"),
+                    error: io::Error::from(io::ErrorKind::Other),
+                },
+                None
+            )
+            .is_some_and(|h| h.contains("backup path"))
+        );
     }
 
     fn hint_probes() -> Vec<ArchiveError> {

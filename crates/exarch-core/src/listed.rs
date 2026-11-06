@@ -380,6 +380,7 @@ fn extract_kept(
             return extract_staged(
                 output_dir,
                 options,
+                &config.selection,
                 Some(archive),
                 progress,
                 |dir, options, progress| zip.extract(dir, options, progress),
@@ -391,6 +392,7 @@ fn extract_kept(
     extract_staged(
         output_dir,
         options,
+        &config.selection,
         Some(archive),
         progress,
         |dir, options, progress| match spool {

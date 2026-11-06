@@ -173,8 +173,8 @@ use super::common::EntryCompleteGuard;
 use super::source_fault::ReadFamily;
 use super::source_fault::ReadFaults;
 use super::source_fault::SourceTap;
+use super::target::Admission;
 use super::target::ExtractTarget;
-use super::target::FileAdmission;
 use super::target::FileRequest;
 use super::target::HostTarget;
 use super::target::Tally;
@@ -827,13 +827,19 @@ impl<R: Read + Seek> ZipArchive<R> {
         let entry_kind = zip_entry_kind(zip_file.is_dir(), mode);
         if entry_kind == ZipEntryKind::Directory {
             drop(zip_file);
-            let safe_path = target.validate_directory(&path, size)?;
-            target.directory(&safe_path, &mut ctx.tally)?;
+            if let Admission::Admit(safe_path) =
+                target.validate_directory(&path, size, &mut ctx.tally)?
+            {
+                target.directory(&safe_path, &mut ctx.tally)?;
+            }
         } else if entry_kind == ZipEntryKind::Symlink {
             let link_target = ZipEntryAdapter::read_symlink_target(&mut zip_file)?;
             drop(zip_file);
-            let safe_symlink = target.validate_symlink(&path, &link_target, size)?;
-            target.symlink(&safe_symlink, &mut ctx.tally)?;
+            if let Admission::Admit(safe_symlink) =
+                target.validate_symlink(&path, &link_target, size, &mut ctx.tally)?
+            {
+                target.symlink(&safe_symlink, &mut ctx.tally)?;
+            }
         } else {
             // File: validate BEFORE writing (security invariant preserved),
             // then extract with the same zip_file (stream still at position 0)
@@ -842,7 +848,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 size,
                 mode: mode.map(RawMode::new),
             };
-            if let FileAdmission::Write(admitted) = target.validate_file(request, &mut ctx.tally)? {
+            if let Admission::Admit(admitted) = target.validate_file(request, &mut ctx.tally)? {
                 let written = match (reuse, claimed) {
                     (Some(store), Some((taken, key))) => match store.retained(taken, &key) {
                         Ok(retained) => target.file_retained(
@@ -956,6 +962,10 @@ impl<R: Read + Seek> ZipArchive<R> {
                 return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
             }
             guard.complete();
+        }
+
+        if let Err(e) = target.finish_scan() {
+            return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
         }
 
         progress.on_complete();

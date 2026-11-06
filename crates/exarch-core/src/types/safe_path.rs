@@ -13,6 +13,7 @@ use crate::security::fs_view::ModelRoot as _;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
 use crate::security::fs_view::paths_start_with;
+use crate::selection::Rewritten;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::marker::PhantomData;
@@ -396,6 +397,24 @@ impl<P: ParentCheck> SafePath<P> {
         }
 
         Ok(Self::new_unchecked(final_path.into_owned()))
+    }
+
+    /// Validates a path a selection rewrite produced as a landing.
+    ///
+    /// The one way a [`Rewritten`] becomes a `SafePath`, with every check an
+    /// archive name gets.
+    ///
+    /// # Errors
+    ///
+    /// Returns the validation error of the rewritten name.
+    pub(crate) fn validate_rewritten_in<V: FsView>(
+        rewritten: &Rewritten,
+        root: &V::Root,
+        config: &SecurityConfig,
+        ctx: &ValidationContext<'_, V, P>,
+        view: &V,
+    ) -> Result<Self> {
+        Self::validate_with_context_in(rewritten.as_path(), root, config, ctx, view)
     }
 
     /// The result of this module's own validation; no other module builds a

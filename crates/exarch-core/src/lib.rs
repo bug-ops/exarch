@@ -39,6 +39,7 @@ pub mod reader;
 pub mod report;
 mod request;
 pub mod security;
+mod selection;
 pub mod sink;
 mod staging;
 #[cfg(test)]
@@ -164,6 +165,10 @@ pub use request::OutputFormat;
 pub use request::OutputPolicy;
 pub use request::SinkExtractRequest;
 pub use request::VerifyRequest;
+pub use selection::EntryPattern;
+pub use selection::EntrySelection;
+pub use selection::PathRewrite;
+pub use selection::StripComponents;
 
 // Re-export creation types
 pub use creation::CreationConfig;
@@ -177,6 +182,7 @@ pub use writer::ArchiveWriter;
 pub use inspection::ArchiveEntry;
 pub use inspection::ArchiveManifest;
 pub use inspection::CheckStatus;
+pub use inspection::Disposition;
 pub use inspection::EntryCompression;
 pub use inspection::Finding;
 pub use inspection::Heuristic;

@@ -162,8 +162,8 @@ use super::tar_metadata_limit::CheckedTarEntry;
 use super::tar_metadata_limit::SkipLimits;
 use super::tar_metadata_limit::budgeted_reader_with;
 use super::tar_metadata_limit::budgeted_tar_entries;
+use super::target::Admission;
 use super::target::ExtractTarget;
-use super::target::FileAdmission;
 use super::target::FileRequest;
 use super::target::HostTarget;
 use super::target::Tally;
@@ -359,39 +359,43 @@ impl<R: Read> TarArchive<R> {
                     mode,
                 };
                 match target.validate_file(request, tally)? {
-                    FileAdmission::Write(admitted) => {
+                    Admission::Admit(admitted) => {
                         target.file(entry, faults, admitted, tally)?;
                         Ok(EntryOutcome::Done)
                     }
-                    FileAdmission::Skipped(_) => Ok(EntryOutcome::Skipped),
+                    Admission::Skipped(_) => Ok(EntryOutcome::Skipped),
                 }
             }
 
-            EntryType::Directory => {
-                let safe_path = target.validate_directory(&path, entry_size)?;
-                target.directory(&safe_path, tally)?;
-                Ok(EntryOutcome::Done)
-            }
+            EntryType::Directory => match target.validate_directory(&path, entry_size, tally)? {
+                Admission::Admit(safe_path) => {
+                    target.directory(&safe_path, tally)?;
+                    Ok(EntryOutcome::Done)
+                }
+                Admission::Skipped(_) => Ok(EntryOutcome::Skipped),
+            },
 
             EntryType::Symlink {
                 target: link_target,
-            } => {
-                let safe_symlink = target.validate_symlink(&path, link_target, entry_size)?;
-                target.symlink(&safe_symlink, tally)?;
-                Ok(EntryOutcome::Done)
-            }
+            } => match target.validate_symlink(&path, link_target, entry_size, tally)? {
+                Admission::Admit(safe_symlink) => {
+                    target.symlink(&safe_symlink, tally)?;
+                    Ok(EntryOutcome::Done)
+                }
+                Admission::Skipped(_) => Ok(EntryOutcome::Skipped),
+            },
 
             EntryType::Hardlink {
                 target: link_target,
-            } => {
-                let link = target.validate_hardlink(&path, link_target, entry_size)?;
+            } => match target.validate_hardlink(&path, link_target, entry_size, tally)? {
                 // Two-pass: defer hardlink creation until target files exist
-                Ok(EntryOutcome::Hardlink(HardlinkInfo {
+                Admission::Admit(link) => Ok(EntryOutcome::Hardlink(HardlinkInfo {
                     link_path: link.link,
                     target_path: link.target,
                     counted: link.counted,
-                }))
-            }
+                })),
+                Admission::Skipped(_) => Ok(EntryOutcome::Skipped),
+            },
         }
     }
 
@@ -489,7 +493,7 @@ impl<R: Read> TarArchive<R> {
             self.trailer
                 .enforce(&mut inner_archive.into_inner(), config)
         });
-        if let Err(e) = finished {
+        if let Err(e) = finished.and_then(|()| target.finish_scan()) {
             return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
         }
 
@@ -562,8 +566,9 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 enum EntryOutcome<P: ParentCheck> {
     /// The entry was written or needed nothing.
     Done,
-    /// A file was skipped (a duplicate or a disallowed extension); its data
-    /// is still to be read past, see `CheckedTarEntry::drain_skipped`.
+    /// An entry was skipped (a duplicate, a disallowed extension or left out
+    /// by the selection); its data is still to be read past, see
+    /// `CheckedTarEntry::drain_skipped`.
     Skipped,
     /// A hardlink to create once every file exists.
     Hardlink(HardlinkInfo<P>),
@@ -2018,13 +2023,16 @@ mod tests {
             let config = hardlink_config();
             let outcome = (|| -> std::result::Result<Result<()>, String> {
                 let mut target = HostTarget::create(&dest, &config).map_err(|e| e.to_string())?;
-                let validated = target
-                    .validate_hardlink(
+                let validated = crate::formats::target::with_tally(|tally| {
+                    target.validate_hardlink(
                         Path::new("loot.txt"),
                         Path::new("pipe"),
                         EntrySize::new(Uncompressed(0), None),
+                        tally,
                     )
-                    .map_err(|e| e.to_string())?;
+                })
+                .map_err(|e| e.to_string())?
+                .into_admitted();
                 let made = std::process::Command::new("mkfifo")
                     .arg(dest.join("pipe"))
                     .status()
@@ -2392,13 +2400,16 @@ mod tests {
         // escaping the destination — exactly the window pass one's
         // point-in-time check cannot see across.
         let mut target = HostTarget::create(temp.path(), &config).unwrap();
-        let validated = target
-            .validate_hardlink(
+        let validated = crate::formats::target::with_tally(|tally| {
+            target.validate_hardlink(
                 Path::new("loot.txt"),
                 Path::new("target.txt"),
                 EntrySize::new(Uncompressed(0), None),
+                tally,
             )
-            .unwrap();
+        })
+        .unwrap()
+        .into_admitted();
         let info = HardlinkInfo {
             link_path: validated.link,
             target_path: validated.target,

@@ -5,7 +5,10 @@ use std::num::NonZeroUsize;
 
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::EntryPattern;
+use crate::EntrySelection;
 use crate::Limit;
+use crate::PathRewrite;
 use crate::RatioLimit;
 use crate::closed_enum::closed_enum;
 use crate::non_zero;
@@ -673,6 +676,16 @@ pub struct SecurityConfig {
     /// treated as not allowed and will be skipped during extraction.
     pub allowed_extensions: ExtensionFilter,
 
+    /// Which entries are extracted and how their paths are rewritten.
+    ///
+    /// The default selects every entry and keeps every path. Selection is an
+    /// operational choice, not a security limit; it sits here so that
+    /// `extract`, `list`, `verify` and every sink read one value. Entries are
+    /// first validated under their archive path, then selected, then stripped,
+    /// and a stripped path is validated again, so a selection never admits a
+    /// name the plain extraction refuses. See [`EntrySelection`].
+    pub selection: EntrySelection,
+
     /// List of banned path components (e.g., ".git", ".ssh").
     pub banned_path_components: Vec<PathComponentName>,
 
@@ -818,6 +831,7 @@ impl Default for SecurityConfig {
     /// - `allowed`: All features refused (deny-by-default)
     /// - `permissions`: [`PermissionPolicy::Normalize`]
     /// - `allowed_extensions`: [`ExtensionFilter::Any`]
+    /// - `selection`: every entry, paths kept
     /// - `banned_path_components`: `[".git", ".ssh", ".gnupg", ".aws", ".kube",
     ///   ".docker", ".env"]`
     /// - `solid_archives`: [`SolidArchives::Refuse`] (solid archives rejected)
@@ -836,6 +850,7 @@ impl Default for SecurityConfig {
             allowed: AllowedFeatures::default(), // All false
             permissions: PermissionPolicy::Normalize,
             allowed_extensions: ExtensionFilter::Any,
+            selection: EntrySelection::default(),
             banned_path_components: default_banned_path_components(),
             solid_archives: SolidArchives::Refuse,
             max_tar_metadata_bytes: non_zero!(4 * 1024 * 1024), // 4 MiB
@@ -1122,6 +1137,97 @@ impl SecurityConfig {
         self.allowed_extensions =
             std::mem::take(&mut self.allowed_extensions).with_added(extension);
         Ok(self)
+    }
+
+    /// Replaces the whole entry selection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::EntrySelection;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_selection(EntrySelection::default());
+    /// assert!(config.selection.is_default());
+    /// ```
+    #[must_use]
+    pub fn with_selection(mut self, selection: EntrySelection) -> Self {
+        self.selection = selection;
+        self
+    }
+
+    /// Adds an include pattern, parsed with the grammar of `create -x`.
+    ///
+    /// Only entries that match an include pattern (and no exclude pattern) are
+    /// extracted. A pattern that matches nothing in the archive fails the
+    /// extraction after the scan with [`ArchiveError::UnmatchedInclude`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::EntryInclude`] when `pattern` is refused.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().try_add_include("src/main.rs")?;
+    /// assert_eq!(config.selection.include().len(), 1);
+    /// assert!(SecurityConfig::default().try_add_include("**/x").is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn try_add_include(mut self, pattern: &str) -> crate::Result<Self> {
+        let pattern = EntryPattern::parse_for(ConfigSetting::EntryInclude, pattern)?;
+        self.selection = self.selection.with_include(pattern);
+        Ok(self)
+    }
+
+    /// Adds an exclude pattern, parsed with the grammar of `create -x`.
+    ///
+    /// An exclude pattern always wins over an include pattern. One that
+    /// matches nothing is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::EntryExclude`] when `pattern` is refused.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().try_add_exclude("*.tmp")?;
+    /// assert_eq!(config.selection.exclude().len(), 1);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn try_add_exclude(mut self, pattern: &str) -> crate::Result<Self> {
+        let pattern = EntryPattern::parse_for(ConfigSetting::EntryExclude, pattern)?;
+        self.selection = self.selection.with_exclude(pattern);
+        Ok(self)
+    }
+
+    /// Sets how selected entries are rewritten, for example by dropping
+    /// leading path components.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::PathRewrite;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::StripComponents;
+    ///
+    /// let config = SecurityConfig::default();
+    /// let strip = StripComponents::new(exarch_core::non_zero!(1), config.max_path_depth)?;
+    /// let config = config.with_path_rewrite(PathRewrite::Strip(strip));
+    /// assert_eq!(config.selection.rewrite(), PathRewrite::Strip(strip));
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    #[must_use]
+    pub fn with_path_rewrite(mut self, rewrite: PathRewrite) -> Self {
+        self.selection = self.selection.with_rewrite(rewrite);
+        self
     }
 
     /// Appends one banned path component, parsed by [`PathComponentName`].

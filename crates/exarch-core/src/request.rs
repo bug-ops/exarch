@@ -176,6 +176,7 @@ impl<'a> ExtractRequest<'a> {
             extract_staged(
                 output_dir.as_ref(),
                 &options,
+                &config.selection,
                 Some(archive.as_ref()),
                 progress,
                 |dir, options, progress| {

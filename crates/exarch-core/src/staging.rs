@@ -25,6 +25,7 @@ use tempfile::TempDir;
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::EntrySelection;
 use crate::ExistingFiles;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
@@ -49,7 +50,9 @@ impl<F> StagedRun for F where
 /// or fills `output_dir` on success, as `options.staging` asks.
 ///
 /// `archive` is the archive file when the extraction reads one; a replace
-/// refuses a destination that contains it.
+/// refuses a destination that contains it. A replace also refuses any
+/// `selection` but the default one, because the swap would delete everything
+/// in the destination that the selected subset does not contain.
 ///
 /// # Errors
 ///
@@ -58,10 +61,17 @@ impl<F> StagedRun for F where
 pub fn extract_staged(
     output_dir: &Path,
     options: &ExtractionOptions,
+    selection: &EntrySelection,
     archive: Option<&Path>,
     progress: &mut dyn ProgressCallback,
     extract: impl StagedRun,
 ) -> Result<ExtractionReport> {
+    if options.staging == Staging::AtomicReplace && !selection.is_default() {
+        return Err(ArchiveError::InvalidConfiguration {
+            setting: ConfigSetting::EntrySelection,
+            problem: ConfigProblem::NotSupported,
+        });
+    }
     match options.staging {
         Staging::InPlace => extract(output_dir, options, progress),
         Staging::Atomic => extract_atomic(output_dir, options, progress, extract),

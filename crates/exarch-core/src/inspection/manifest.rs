@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::ArchiveError;
+use crate::EntrySelection;
 use crate::Malformation;
 use crate::Result;
 use crate::ZipEntryIndex;
@@ -44,6 +45,7 @@ pub struct ArchiveManifest {
     oversized: Vec<OversizedEntry>,
     total_size: u64,
     format: ArchiveType,
+    selection: EntrySelection,
 }
 
 /// The position of an entry in an [`ArchiveManifest`], only obtainable from
@@ -85,15 +87,35 @@ impl OversizedEntry {
 }
 
 impl ArchiveManifest {
-    /// Creates a new empty manifest.
+    /// Creates a new empty manifest that lists every entry as extracted.
     #[must_use]
     pub fn new(format: ArchiveType) -> Self {
+        Self::with_selection(format, EntrySelection::default())
+    }
+
+    /// Creates a new empty manifest for a listing made under `selection`.
+    ///
+    /// The manifest keeps the selection, so its landings and dispositions can
+    /// never disagree with the selection it was listed with.
+    #[must_use]
+    pub fn with_selection(format: ArchiveType, selection: EntrySelection) -> Self {
         Self {
             entries: Vec::new(),
             oversized: Vec::new(),
             total_size: 0,
             format,
+            selection,
         }
+    }
+
+    /// The selection this manifest was listed with.
+    ///
+    /// Every entry is listed whatever the selection is; the selection decides
+    /// which of them [`landings`](Self::landings) and
+    /// [`dispositions`](Self::dispositions) report as extracted.
+    #[must_use]
+    pub const fn selection(&self) -> &EntrySelection {
+        &self.selection
     }
 
     /// Records an entry dropped for its over-long path; its position counts

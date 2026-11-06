@@ -1,8 +1,10 @@
 //! Archive verification implementation.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use crate::ArchiveError;
+use crate::EntrySelection;
 use crate::IntegrityCheck;
 use crate::Malformation;
 use crate::NoopProgress;
@@ -37,6 +39,7 @@ use crate::inspection::report::VerificationReport;
 use crate::reader::SeekableFormat;
 use crate::security::RawMode;
 use crate::security::Uncompressed;
+use crate::security::context::ValidationContext;
 use crate::security::fs_view::CollisionKind;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::Conflict;
@@ -58,7 +61,10 @@ use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::QuotaTracker;
+use crate::security::validator::Gated;
+use crate::security::validator::route_validated;
 use crate::security::zipbomb::validate_entry_compression;
+use crate::selection::IncludeHits;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_symlink::require_symlinks_allowed;
@@ -117,6 +123,11 @@ fn verify_with_tree(
     let mut tree = make_tree(&root);
     let mut quota_tracker = QuotaTracker::new();
     let mut hardlink_tracker = HardlinkTracker::new();
+    let include_hits = IncludeHits::of(manifest.selection());
+    let routing = Routing {
+        selection: manifest.selection(),
+        hits: Some(&include_hits),
+    };
 
     let mut lists = Vec::with_capacity(manifest.entries().len());
     let mut deferred = Vec::new();
@@ -124,6 +135,7 @@ fn verify_with_tree(
         let outcome = verify_entry(
             entry,
             config,
+            &routing,
             &root,
             &mut tree,
             &mut quota_tracker,
@@ -133,14 +145,26 @@ fn verify_with_tree(
             deferred.push(index);
         }
         let mut issues = outcome.issues;
-        issues.extend(check_heuristics(entry));
+        if !outcome.left_out {
+            issues.extend(check_heuristics(entry));
+        }
         lists.push(issues);
     }
 
+    let deferred_routing = Routing {
+        selection: manifest.selection(),
+        hits: None,
+    };
     for index in deferred {
         let entry = &manifest.entries()[index];
-        let materialized =
-            verify_deferred_hardlink(entry, config, &root, &mut tree, &mut hardlink_tracker);
+        let materialized = verify_deferred_hardlink(
+            entry,
+            config,
+            &deferred_routing,
+            &root,
+            &mut tree,
+            &mut hardlink_tracker,
+        );
         lists[index].extend(collision_issues(&mut tree));
         if let Err(issue) = materialized {
             lists[index].push(issue);
@@ -150,6 +174,9 @@ fn verify_with_tree(
     let mut archive_issues = structure.refusals().to_vec();
     archive_issues.extend(oversized_entry_issues(manifest.oversized_entries()));
     archive_issues.extend(unread_targets_issue(manifest, config));
+    if let Err(error) = include_hits.require_all_matched(manifest.selection()) {
+        archive_issues.push(VerificationIssue::from_error(&error, None));
+    }
     let scope = match integrity {
         Some(outcome) => {
             debug_assert_eq!(outcome.entry_issues.len(), lists.len());
@@ -389,11 +416,65 @@ struct EntryOutcome {
     issues: Vec<VerificationIssue>,
     /// A hardlink that passed phase-one validation and awaits phase two.
     hardlink_pending: bool,
+    /// The selection leaves the entry out, so nothing of it lands.
+    left_out: bool,
+}
+
+/// The selection `verify` applies, shared by every entry it judges: the same
+/// decisions `extract` takes, on the manifest's own selection.
+struct Routing<'a> {
+    selection: &'a EntrySelection,
+    /// Where include matches are recorded; `None` for a second look at an
+    /// entry that was already counted.
+    hits: Option<&'a IncludeHits>,
+}
+
+impl Routing<'_> {
+    /// Validates the entry's name as the archive gives it, applies the
+    /// selection, and checks the landing's name lengths.
+    fn route(
+        &self,
+        entry: &ArchiveEntry,
+        config: &SecurityConfig,
+        dest: &VirtualRoot,
+        tree: &VirtualTree,
+    ) -> Result<Gated<SafePath>> {
+        let is_file = matches!(entry.kind, ManifestEntryKind::File { .. });
+        let name_limits = |path: &Path| {
+            check_entry_name_limits(PathModel::Host, path, is_file, config)
+                .map_err(ArchiveError::Io)
+        };
+        if self.selection.is_default() {
+            name_limits(&entry.path)?;
+            return SafePath::validate_in(&entry.path, dest, config, tree).map(Gated::Admit);
+        }
+        let original = SafePath::validate_in(&entry.path, dest, config, tree)?;
+        let ctx = ValidationContext::<VirtualTree>::new(config.allowed.symlinks.is_allowed());
+        let routed = route_validated(
+            self.selection,
+            self.hits,
+            original,
+            dest,
+            config,
+            &ctx,
+            tree,
+        )?;
+        if let Gated::Admit(landing) = &routed {
+            name_limits(landing.as_path())?;
+        }
+        Ok(routed)
+    }
+
+    /// The hardlink target to validate, mapped like an entry name.
+    fn link_target<'t>(&self, entry: &ArchiveEntry, target: &'t Path) -> Result<Cow<'t, Path>> {
+        self.selection.mapped_link_target(&entry.path, target)
+    }
 }
 
 fn verify_entry(
     entry: &ArchiveEntry,
     config: &SecurityConfig,
+    routing: &Routing<'_>,
     dest: &VirtualRoot,
     tree: &mut VirtualTree,
     quota_tracker: &mut QuotaTracker,
@@ -404,20 +485,24 @@ fn verify_entry(
 
     // Path validation — result cached to avoid repeated syscalls for
     // symlink/hardlink checks
-    let path_result = check_entry_name_limits(
-        PathModel::Host,
-        &entry.path,
-        matches!(entry.kind, ManifestEntryKind::File { .. }),
-        config,
-    )
-    .map_err(ArchiveError::Io)
-    .and_then(|()| SafePath::validate_in(&entry.path, dest, config, tree));
-    if let Err(ref e) = path_result {
+    let routed = routing.route(entry, config, dest, tree);
+    let left_out = matches!(routed, Ok(Gated::Skip(_)));
+    if let Err(ref e) = routed {
         issues.push(VerificationIssue::from_error(e, Some(entry.path.clone())));
     }
+    let path_result = routed.map(|gated| match gated {
+        Gated::Admit(path) => Some(path),
+        Gated::Skip(_) => None,
+    });
 
-    // Quota validation using reserve (combines all checks)
-    if let Err(e) = quota_tracker.reserve(entry.size(), config) {
+    // Quota validation using reserve (combines all checks); an entry the
+    // selection leaves out is charged to the file count alone, as `list` does.
+    let reserved = if left_out {
+        quota_tracker.reserve_count(config).map(drop)
+    } else {
+        quota_tracker.reserve(entry.size(), config).map(drop)
+    };
+    if let Err(e) = reserved {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
@@ -428,7 +513,7 @@ fn verify_entry(
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
-    if let Ok(ref safe_path) = path_result {
+    if let Ok(Some(ref safe_path)) = path_result {
         let link_result = match &entry.kind {
             ManifestEntryKind::Symlink { target } => Some(
                 // A target that is not read is never read when symlinks are
@@ -451,8 +536,9 @@ fn verify_entry(
             ManifestEntryKind::Hardlink { target } => Some(
                 usable_link_target(target, LinkKind::Hardlink).and_then(|t| {
                     check_target_lengths(t, LinkKind::Hardlink)?;
+                    let mapped = routing.link_target(entry, t)?;
                     hardlink_tracker
-                        .validate_hardlink_in(safe_path, t, dest, config, tree)
+                        .validate_hardlink_in(safe_path, &mapped, dest, config, tree)
                         .map(drop)
                 }),
             ),
@@ -483,6 +569,7 @@ fn verify_entry(
 
     // Extraction never applies a link entry's own recorded mode.
     if let Some(mode) = entry.mode
+        && !left_out
         && !entry.kind.is_link()
         && let Err(e) = check_permissions(&entry.path, mode, config)
     {
@@ -492,6 +579,7 @@ fn verify_entry(
     EntryOutcome {
         issues,
         hardlink_pending,
+        left_out,
     }
 }
 
@@ -604,6 +692,7 @@ fn record_entry(
 fn verify_deferred_hardlink(
     entry: &ArchiveEntry,
     config: &SecurityConfig,
+    routing: &Routing<'_>,
     dest: &VirtualRoot,
     tree: &mut VirtualTree,
     hardlink_tracker: &mut HardlinkTracker,
@@ -615,19 +704,22 @@ fn verify_deferred_hardlink(
         return Ok(());
     };
     let issue = |e: ArchiveError| VerificationIssue::from_error(&e, Some(entry.path.clone()));
-    let link_path = SafePath::validate_in(&entry.path, dest, config, tree).map_err(issue)?;
+    let Gated::Admit(link_path) = routing.route(entry, config, dest, tree).map_err(issue)? else {
+        return Ok(());
+    };
+    let target = routing.link_target(entry, target).map_err(issue)?;
     hardlink_tracker
-        .validate_hardlink_in(&link_path, target, dest, config, tree)
+        .validate_hardlink_in(&link_path, &target, dest, config, tree)
         .map(drop)
         .map_err(issue)?;
-    let target_full = dest.as_path().join(target);
+    let target_full = dest.as_path().join(&*target);
     if !tree.exists(&target_full) {
-        return Err(issue(hardlink_target_missing(target)));
+        return Err(issue(hardlink_target_missing(&target)));
     }
     if tree.resolves_to_dir(&target_full) {
         return Err(issue(ArchiveError::from(
             Malformation::HardlinkTargetDirectory {
-                target: target.clone(),
+                target: target.to_path_buf(),
             },
         )));
     }

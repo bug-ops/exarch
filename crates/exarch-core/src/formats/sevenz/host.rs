@@ -22,8 +22,8 @@ use crate::formats::common;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
+use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
-use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
 use crate::formats::target::HostParent;
 use crate::formats::target::HostTarget;
@@ -36,7 +36,7 @@ use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::hardlink::HardlinkTarget;
 use crate::security::validator::EntryPath;
-use crate::security::validator::FileScreen;
+use crate::security::validator::Gated;
 use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatorCore;
 use crate::types::DestDir;
@@ -142,14 +142,10 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         &mut self,
         request: FileRequest<'_>,
         tally: &mut Tally<'_>,
-    ) -> Result<FileAdmission<SevenZAdmittedFile>> {
-        let pending = match self.inner.screen_file(request)? {
-            FileScreen::DisallowedExtension => {
-                return tally
-                    .record_extension_skip(request.path)
-                    .map(FileAdmission::Skipped);
-            }
-            FileScreen::Pending(pending) => pending,
+    ) -> Result<Admission<SevenZAdmittedFile>> {
+        let pending = match tally.admission(self.inner.screen_file(request)?, request.path)? {
+            Admission::Admit(pending) => pending,
+            Admission::Skipped(skipped) => return Ok(Admission::Skipped(skipped)),
         };
         let safe_path = pending.path().clone();
         let (parent, leaf) = self
@@ -165,7 +161,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 ExistingFiles::Skip => {
                     return tally
                         .record_duplicate_skip(safe_path.as_path())
-                        .map(FileAdmission::Skipped);
+                        .map(Admission::Skipped);
                 }
                 ExistingFiles::Refuse => {
                     if self
@@ -176,7 +172,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                     {
                         return tally
                             .record_duplicate_skip(safe_path.as_path())
-                            .map(FileAdmission::Skipped);
+                            .map(Admission::Skipped);
                     }
                     return Err(common::destination_occupied(
                         self.inner.root().dest().as_path(),
@@ -191,15 +187,20 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         // Quota is reserved before anything is removed, so a refusal never
         // destroys a destination it could not replace.
         let file = self.inner.admit_file(pending)?;
-        Ok(FileAdmission::Write(SevenZAdmittedFile {
+        Ok(Admission::Admit(SevenZAdmittedFile {
             file,
             write_mode,
             parent,
         }))
     }
 
-    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath<HostParent>> {
-        self.inner.validate_directory(path, size)
+    fn validate_directory(
+        &mut self,
+        path: &Path,
+        size: EntrySize,
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafePath<HostParent>>> {
+        self.inner.validate_directory(path, size, tally)
     }
 
     fn validate_symlink(
@@ -207,8 +208,9 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<SafeSymlink<HostParent>> {
-        self.inner.validate_symlink(path, target, size)
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafeSymlink<HostParent>>> {
+        self.inner.validate_symlink(path, target, size, tally)
     }
 
     fn validate_hardlink(
@@ -216,8 +218,13 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<ValidatedHardlink<HostParent>> {
-        self.inner.validate_hardlink(path, target, size)
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<ValidatedHardlink<HostParent>>> {
+        self.inner.validate_hardlink(path, target, size, tally)
+    }
+
+    fn finish_scan(&mut self) -> Result<()> {
+        self.inner.finish_scan()
     }
 
     fn directory(&mut self, path: &SafePath<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
@@ -289,27 +296,22 @@ struct HostPrePass<'a> {
 }
 
 impl PrePass for HostPrePass<'_> {
-    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>> {
+    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<Gated<EntryPath<SafePath>>> {
         let ctx: ValidationContext<HostFs> = self.core.context();
         self.core
-            .validate_entry_path_in(path, kind, self.dest, &HostFs, &ctx)
+            .route_entry_in(path, kind, self.dest, &HostFs, &ctx)
     }
 
-    fn directory(&mut self, _path: &Path) -> Result<()> {
+    fn directory(&mut self, _landing: &SafePath) -> Result<()> {
         Ok(())
     }
 
-    fn symlink(
-        &mut self,
-        link: &SafePath,
-        _path: &Path,
-        file: &sevenz_rust2::ArchiveEntry,
-    ) -> Result<()> {
+    fn symlink(&mut self, link: &SafePath, file: &sevenz_rust2::ArchiveEntry) -> Result<()> {
         common::require_symlink_creation()?;
         refuse_undecoded_target_in(link, file, self.dest, self.config, &HostFs)
     }
 
-    fn file(&mut self, safe_path: &SafePath, _path: &Path) -> Result<FilePlan> {
+    fn file(&mut self, safe_path: &SafePath) -> Result<FilePlan> {
         let dest_path = self.dest.join(safe_path);
         let occupancy = DestOccupancy::probe_path(&dest_path)?;
         if occupancy.is_occupied() {

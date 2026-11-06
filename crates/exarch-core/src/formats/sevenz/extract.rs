@@ -37,13 +37,14 @@ use crate::formats::source_fault::ReadFamily;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::source_fault::SourceRead;
 use crate::formats::source_fault::SourceTap;
+use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
-use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
 use crate::formats::target::Tally;
 use crate::security::Uncompressed;
 use crate::security::admitted::EntrySize;
 use crate::security::validator::EntryPath;
+use crate::security::validator::Gated;
 use crate::security::validator::NodeKind;
 use crate::security::zipbomb::validate_entry_compression;
 use crate::types::SafePath;
@@ -96,22 +97,20 @@ pub enum FilePlan {
 /// differ; the order of the checks around them is fixed by
 /// [`SevenZArchive::run_pre_pass`].
 pub trait PrePass {
-    /// Validates an entry's path against the destination as it is now.
-    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>>;
+    /// Validates an entry's path against the destination as it is now and
+    /// applies the selection: the entry is skipped, or admitted at its
+    /// landing.
+    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<Gated<EntryPath<SafePath>>>;
 
-    /// Checks a directory entry.
-    fn directory(&mut self, path: &Path) -> Result<()>;
+    /// Checks a directory entry at its landing.
+    fn directory(&mut self, landing: &SafePath) -> Result<()>;
 
-    /// Checks a symlink entry whose target is still undecoded.
-    fn symlink(
-        &mut self,
-        link: &SafePath,
-        path: &Path,
-        file: &sevenz_rust2::ArchiveEntry,
-    ) -> Result<()>;
+    /// Checks a symlink entry, at its landing, whose target is still
+    /// undecoded.
+    fn symlink(&mut self, link: &SafePath, file: &sevenz_rust2::ArchiveEntry) -> Result<()>;
 
     /// Checks a file entry against what already occupies its destination.
-    fn file(&mut self, safe_path: &SafePath, path: &Path) -> Result<FilePlan>;
+    fn file(&mut self, safe_path: &SafePath) -> Result<FilePlan>;
 
     /// Reserves quota for a symlink.
     fn reserve_symlink(&mut self, size: u64) -> Result<()>;
@@ -175,6 +174,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         if total == 0 {
             let mut report = ExtractionReport::new();
             push_anti_item_warning(&mut report, anti_items);
+            target.finish_scan()?;
             return Ok(report);
         }
 
@@ -192,11 +192,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
             };
             let path = PathBuf::from(common::normalize_entry_name(&entry.name));
             let safe_path = match pre.validate_path(&path, kind.node_kind())? {
-                EntryPath::Root(_) => continue,
-                EntryPath::Child(safe_path) => safe_path,
+                Gated::Skip(_) | Gated::Admit(EntryPath::Root(_)) => continue,
+                Gated::Admit(EntryPath::Child(safe_path)) => safe_path,
             };
             match kind {
-                SevenZKind::Directory => pre.directory(&path)?,
+                SevenZKind::Directory => pre.directory(&safe_path)?,
                 SevenZKind::ReparsePoint => return Err(reparse_point_refusal(&entry.name)),
                 SevenZKind::UnixSymlink => {
                     validate_entry_compression(
@@ -205,7 +205,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         config,
                     )?;
                     require_symlinks_allowed(config)?;
-                    pre.symlink(&safe_path, &path, &self.header.files()[index])?;
+                    pre.symlink(&safe_path, &self.header.files()[index])?;
                     pre.reserve_symlink(entry.size)?;
                 }
                 SevenZKind::File => {
@@ -217,10 +217,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         Uncompressed(entry.size),
                         config,
                     )?;
-                    if !common::is_extension_allowed(&path, config) {
+                    if !common::is_extension_allowed(safe_path.as_path(), config) {
                         continue;
                     }
-                    if pre.file(&safe_path, &path)? == FilePlan::Reserve {
+                    if pre.file(&safe_path)? == FilePlan::Reserve {
                         pre.reserve_file(entry.size)?;
                     }
                 }
@@ -297,7 +297,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
         );
         push_anti_item_warning(&mut report, anti_items);
         match result {
-            Ok(()) => Ok(report),
+            Ok(()) => match target.finish_scan() {
+                Ok(()) => Ok(report),
+                Err(error) => Err(ArchiveError::partial_or(report, error)),
+            },
             Err(error) => Err(ArchiveError::partial_or(
                 report,
                 pending_error
@@ -328,20 +331,22 @@ pub(super) fn process_entry<T: ExtractTarget>(
                 }
                 Err(failure) => return Err(failure.into_extract_error(&entry.name)),
             };
-            let symlink = target.validate_symlink(path, &link_target, size)?;
-            target.symlink(&symlink, tally)
+            match target.validate_symlink(path, &link_target, size, tally)? {
+                Admission::Admit(symlink) => target.symlink(&symlink, tally),
+                Admission::Skipped(_) => Ok(()),
+            }
         }
-        SevenZKind::Directory => {
-            let safe_path = target.validate_directory(path, size)?;
-            target.directory(&safe_path, tally)
-        }
+        SevenZKind::Directory => match target.validate_directory(path, size, tally)? {
+            Admission::Admit(safe_path) => target.directory(&safe_path, tally),
+            Admission::Skipped(_) => Ok(()),
+        },
         SevenZKind::File => {
             let request = FileRequest {
                 path,
                 size,
                 mode: None,
             };
-            if let FileAdmission::Write(admitted) = target.validate_file(request, tally)? {
+            if let Admission::Admit(admitted) = target.validate_file(request, tally)? {
                 let mut reader = reader;
                 target.file(&mut reader, faults, admitted, tally)?;
             }

@@ -11,12 +11,15 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::EntrySelection;
 use crate::SecurityConfig;
+use crate::SkipKind;
 use crate::formats::common::is_extension_allowed;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
+use crate::security::context::ValidationContext;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::LandingLimits;
 use crate::security::fs_view::Node;
@@ -24,6 +27,8 @@ use crate::security::fs_view::NodeBudget;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
+use crate::security::validator::Gated;
+use crate::security::validator::route_validated;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 
@@ -79,6 +84,46 @@ impl AsRef<Path> for LandingPath {
     fn as_ref(&self) -> &Path {
         &self.0
     }
+}
+
+/// What extraction does with a listed entry that validation accepts.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveEntry;
+/// use exarch_core::ArchiveManifest;
+/// use exarch_core::ArchiveType;
+/// use exarch_core::Disposition;
+/// use exarch_core::ManifestEntryKind;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::SkipKind;
+/// use std::assert_matches;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = SecurityConfig::default().try_add_include("a")?;
+/// let mut manifest = ArchiveManifest::with_selection(ArchiveType::Tar, config.selection.clone());
+/// manifest.add_entry(ArchiveEntry::new(
+///     "a/x".into(),
+///     ManifestEntryKind::Directory,
+/// ))?;
+/// manifest.add_entry(ArchiveEntry::new(
+///     "b/y".into(),
+///     ManifestEntryKind::Directory,
+/// ))?;
+/// let dispositions: Vec<_> = manifest.dispositions(&config).map(|(_, d)| d).collect();
+/// assert_matches!(dispositions[0], Disposition::Extract(_));
+/// assert_matches!(dispositions[1], Disposition::Skip(SkipKind::NotSelected));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Disposition {
+    /// The entry is extracted and lands here.
+    Extract(LandingPath),
+    /// The entry is validated but not extracted, for this reason.
+    Skip(SkipKind),
 }
 
 /// What put a path in the landing set.
@@ -150,6 +195,32 @@ impl ArchiveManifest {
         &'a self,
         config: &SecurityConfig,
     ) -> impl Iterator<Item = (&'a ArchiveEntry, LandingPath)> + use<'a> {
+        self.dispositions(config)
+            .filter_map(|(entry, disposition)| match disposition {
+                Disposition::Extract(landing) => Some((entry, landing)),
+                Disposition::Skip(_) => None,
+            })
+    }
+
+    /// Every entry that validation accepts, with what extraction does with it:
+    /// where it lands, or why it is left out.
+    ///
+    /// The selection is the one the manifest was listed with
+    /// ([`selection`](Self::selection)), never one taken from `config`, so the
+    /// answer cannot disagree with the listing; `config` supplies the limits
+    /// and policies. An entry the validation refuses or that cannot be placed
+    /// is not reported, as in [`landing_paths`](Self::landing_paths), which
+    /// is the extracted subset of this.
+    ///
+    /// An entry is skipped as [`SkipKind::NotSelected`] when the selection
+    /// leaves it out, as [`SkipKind::StrippedAway`] when stripping removes its
+    /// whole path, and as [`SkipKind::ExtensionNotAllowed`] when it is a
+    /// regular file the allowlist excludes, under the first reason that
+    /// applies.
+    pub fn dispositions<'a>(
+        &'a self,
+        config: &SecurityConfig,
+    ) -> impl Iterator<Item = (&'a ArchiveEntry, Disposition)> + use<'a> {
         let root = VirtualRoot::new();
         let mut tree = VirtualTree::new(
             &root,
@@ -157,14 +228,15 @@ impl ArchiveManifest {
             NodeBudget::from_config(config),
             CollisionRecording::Discard,
         );
-        let landed: Vec<_> = self
+        let judged: Vec<_> = self
             .entries()
             .iter()
             .filter_map(|entry| {
-                land(entry, config, &root, &mut tree).map(|landing| (entry, landing))
+                land(entry, self.selection(), config, &root, &mut tree)
+                    .map(|disposition| (entry, disposition))
             })
             .collect();
-        landed.into_iter()
+        judged.into_iter()
     }
 
     /// Everything extraction would create, entries and the directories it
@@ -241,20 +313,29 @@ impl ArchiveManifest {
 
 fn land(
     entry: &ArchiveEntry,
+    selection: &EntrySelection,
     config: &SecurityConfig,
     root: &VirtualRoot,
     tree: &mut VirtualTree,
-) -> Option<LandingPath> {
+) -> Option<Disposition> {
+    let original = SafePath::validate_in(&entry.path, root, config, tree).ok()?;
+    let ctx = ValidationContext::<VirtualTree>::new(config.allowed.symlinks.is_allowed());
+    let safe = match route_validated(selection, None, original, root, config, &ctx, tree).ok()? {
+        Gated::Admit(safe) => safe,
+        Gated::Skip(kind) => return Some(Disposition::Skip(kind)),
+    };
     let is_file = matches!(entry.kind, ManifestEntryKind::File { .. });
-    if is_file && !is_extension_allowed(&entry.path, config) {
-        return None;
+    if is_file && !is_extension_allowed(safe.as_path(), config) {
+        return Some(Disposition::Skip(SkipKind::ExtensionNotAllowed));
     }
-    let safe = SafePath::validate_in(&entry.path, root, config, tree).ok()?;
     let node = match &entry.kind {
         ManifestEntryKind::File { .. } => Node::File,
-        ManifestEntryKind::Hardlink { .. } => {
+        ManifestEntryKind::Hardlink { target } => {
             if !config.allowed.hardlinks.is_allowed() {
                 return None;
+            }
+            if let LinkTarget::Recorded(target) = target {
+                selection.mapped_link_target(&entry.path, target).ok()?;
             }
             Node::File
         }
@@ -278,7 +359,7 @@ fn land(
     let landed = tree
         .project_landing(&safe, node, LandingLimits::Enforced)
         .ok()?;
-    Some(LandingPath(landed.into_path_buf()))
+    Some(Disposition::Extract(LandingPath(landed.into_path_buf())))
 }
 
 #[cfg(test)]

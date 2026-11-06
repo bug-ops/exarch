@@ -182,8 +182,8 @@ use crate::copy::CopyBuffer;
 use crate::copy::copy_bounded;
 use crate::formats::common;
 use crate::formats::source_fault::ReadFaults;
+use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
-use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
 use crate::formats::target::Tally;
 use crate::formats::zip_reuse::Retained;
@@ -210,7 +210,6 @@ use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::AdmittedSize;
 use crate::security::quota::EntryCount;
-use crate::security::validator::FileScreen;
 use crate::security::validator::ValidatorCore;
 use crate::types::CheckedLinkTarget;
 use crate::types::SafePath;
@@ -757,7 +756,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         &mut self,
         request: FileRequest<'_>,
         tally: &mut Tally<'_>,
-    ) -> Result<FileAdmission<ValidatedFile>> {
+    ) -> Result<Admission<ValidatedFile>> {
         let ctx = self.core.context();
         let screen = self.core.screen_file_path_in(
             request.path,
@@ -767,25 +766,31 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             &self.tree,
             &ctx,
         )?;
-        match screen {
-            FileScreen::DisallowedExtension => tally
-                .record_extension_skip(request.path)
-                .map(FileAdmission::Skipped),
-            FileScreen::Pending(pending) => {
+        match tally.admission(screen, request.path)? {
+            Admission::Admit(pending) => {
                 let file = self.core.admit_file(pending)?;
-                self.check_limits(request.path, None)?;
-                Ok(FileAdmission::Write(file))
+                self.check_limits(file.path().as_path(), None)?;
+                Ok(Admission::Admit(file))
             }
+            Admission::Skipped(skipped) => Ok(Admission::Skipped(skipped)),
         }
     }
 
-    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath> {
+    fn validate_directory(
+        &mut self,
+        path: &Path,
+        size: EntrySize,
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafePath>> {
         let ctx = self.core.context();
-        let safe_path = self
+        let gated = self
             .core
             .validate_directory_in(path, size, &self.root, &self.tree, &ctx)?;
-        self.check_limits(path, None)?;
-        Ok(safe_path)
+        let admission = tally.admission(gated, path)?;
+        if let Admission::Admit(safe_path) = &admission {
+            self.check_limits(safe_path.as_path(), None)?;
+        }
+        Ok(admission)
     }
 
     fn validate_symlink(
@@ -793,13 +798,17 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<SafeSymlink> {
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<SafeSymlink>> {
         let ctx = self.core.context();
-        let validated = self
+        let gated = self
             .core
             .validate_symlink_in(path, target, size, &self.root, &self.tree, &ctx)?;
-        self.check_limits(path, Some((target, LinkKind::Symlink)))?;
-        Ok(validated.symlink)
+        let admission = tally.admission(gated.map(|validated| validated.symlink), path)?;
+        if let Admission::Admit(symlink) = &admission {
+            self.check_limits(symlink.link().as_path(), Some((target, LinkKind::Symlink)))?;
+        }
+        Ok(admission)
     }
 
     fn validate_hardlink(
@@ -807,13 +816,24 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<ValidatedHardlink> {
+        tally: &mut Tally<'_>,
+    ) -> Result<Admission<ValidatedHardlink>> {
         let ctx = self.core.context();
-        let validated = self
+        let gated = self
             .core
             .validate_hardlink_in(path, target, size, &self.root, &self.tree, &ctx)?;
-        self.check_limits(path, Some((target, LinkKind::Hardlink)))?;
-        Ok(validated)
+        let admission = tally.admission(gated, path)?;
+        if let Admission::Admit(validated) = &admission {
+            self.check_limits(
+                validated.link.as_path(),
+                Some((validated.target.as_path(), LinkKind::Hardlink)),
+            )?;
+        }
+        Ok(admission)
+    }
+
+    fn finish_scan(&mut self) -> Result<()> {
+        self.core.finish_selection()
     }
 
     fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {

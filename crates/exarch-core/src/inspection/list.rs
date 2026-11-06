@@ -305,17 +305,22 @@ enum ListMode {
 /// Reserves quota for a listed entry; the pre-flight lifts only the per-file
 /// size limit.
 ///
-/// A regular file the extension allowlist excludes is skipped by extraction
-/// before it charges any bytes, so it is charged to `max_file_count` alone:
-/// the manifest stays bounded without counting bytes never written.
+/// An entry the selection leaves out, and a regular file the extension
+/// allowlist excludes, are skipped by extraction before they charge any bytes,
+/// so they are charged to `max_file_count` alone: the manifest stays bounded
+/// without counting bytes never written.
 fn reserve_entry(
     quota: &mut QuotaTracker,
     size: u64,
     config: &SecurityConfig,
     mode: ListMode,
-    file_at: Option<&Path>,
+    path: &Path,
+    is_file: bool,
 ) -> Result<Reservation> {
-    let skipped = file_at.is_some_and(|path| !is_extension_allowed(path, config));
+    let skipped = config
+        .selection
+        .lexical_landing(path)
+        .is_none_or(|landing| is_file && !is_extension_allowed(&landing, config));
     match (skipped, mode) {
         (true, _) => quota.reserve_count(config).map(|_| Reservation::Skipped),
         (false, ListMode::Strict) => quota.reserve(size, config).map(|_| Reservation::Charged),
@@ -408,7 +413,7 @@ fn list_tar_entries<R: std::io::Read>(
     trailer: TarTrailer,
 ) -> Result<ArchiveManifest> {
     let list_mode = listing.mode();
-    let mut manifest = ArchiveManifest::new(format);
+    let mut manifest = ArchiveManifest::with_selection(format, config.selection.clone());
     let mut quota = QuotaTracker::new();
     let skip_limits = SkipLimits::of(config);
 
@@ -448,9 +453,8 @@ fn list_tar_entries<R: std::io::Read>(
             // A rejection anywhere in this body abandons the entry (`settle`),
             // so the guard never decodes a refused entry to its end on the way
             // out.
-            let file_at = matches!(tar_node(entry.header().entry_type()), Ok(TarNode::File))
-                .then_some(path.as_path());
-            let reservation = reserve_entry(&mut quota, size, config, list_mode, file_at)?;
+            let is_file = matches!(tar_node(entry.header().entry_type()), Ok(TarNode::File));
+            let reservation = reserve_entry(&mut quota, size, config, list_mode, &path, is_file)?;
             // An integrity pass decodes the payload itself, below.
             if reservation == Reservation::Skipped {
                 if listing.integrity().is_none() {
@@ -474,14 +478,7 @@ fn list_tar_entries<R: std::io::Read>(
             require_non_empty_name(&path)?;
             let tar_type = effective_entry_type(entry)?;
             let kind = NodeKind::directory_if(tar_type == tar::EntryType::Directory);
-            if !admit_path(
-                &path,
-                kind,
-                file_at.is_some(),
-                config,
-                &mut manifest,
-                listing,
-            )? {
+            if !admit_path(&path, kind, is_file, config, &mut manifest, listing)? {
                 return Ok(());
             }
 
@@ -626,7 +623,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let list_mode = listing.mode();
-    let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
+    let mut manifest = ArchiveManifest::with_selection(ArchiveType::Zip, config.selection.clone());
     let mut quota = QuotaTracker::new();
     let reported = archive.structure().findings().to_vec();
     let archive = archive.reader_mut();
@@ -665,16 +662,9 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         };
         let kind = zip_node_kind(&path, &entry)?;
         let entry_type = convert_zip_entry_type(&entry, kind);
-        let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
-        reserve_entry(&mut quota, entry.size(), config, list_mode, file_at)?;
-        if !admit_path(
-            &path,
-            kind,
-            file_at.is_some(),
-            config,
-            &mut manifest,
-            listing,
-        )? {
+        let is_file = entry_type == ManifestEntryType::File;
+        reserve_entry(&mut quota, entry.size(), config, list_mode, &path, is_file)?;
+        if !admit_path(&path, kind, is_file, config, &mut manifest, listing)? {
             continue;
         }
 
@@ -915,7 +905,8 @@ fn list_sevenz_archive(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ListedSevenZ> {
     let list_mode = listing.mode();
-    let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
+    let mut manifest =
+        ArchiveManifest::with_selection(ArchiveType::SevenZ, config.selection.clone());
     let mut quota = QuotaTracker::new();
     let compression = sevenz_entry_compression(header, source_len)?;
     // One element per archive file: the integrity slot of the manifest entry it
@@ -944,8 +935,8 @@ fn list_sevenz_archive(
         // pre-existing divergence.
         let path = PathBuf::from(normalize_entry_name(&entry.name));
         let entry_type = kind.manifest_type();
-        let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
-        reserve_entry(&mut quota, entry.size, config, list_mode, file_at)?;
+        let is_file = entry_type == ManifestEntryType::File;
+        reserve_entry(&mut quota, entry.size, config, list_mode, &path, is_file)?;
 
         if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });
@@ -955,7 +946,7 @@ fn list_sevenz_archive(
         if !admit_path(
             &path,
             kind.node_kind(),
-            file_at.is_some(),
+            is_file,
             config,
             &mut manifest,
             listing,
@@ -1042,8 +1033,9 @@ fn list_sevenz(
 /// A root entry (`.`) whose `kind` is not a directory fails the listing in
 /// either mode, so no list handler can skip the root-entry rule.
 ///
-/// A file the extension allowlist skips is never created, so its length is
-/// not checked, as in extraction.
+/// A file the extension allowlist skips and an entry the selection leaves out
+/// are never created, so their length is not checked, as in extraction; an
+/// entry that is rewritten is checked at its landing.
 fn admit_path(
     path: &Path,
     kind: NodeKind,
@@ -1053,7 +1045,10 @@ fn admit_path(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<bool> {
     EntryPath::of(path).require_directory_root(kind)?;
-    if check_entry_name_limits(PathModel::Host, path, regular_file, config).is_ok() {
+    let Some(landing) = config.selection.lexical_landing(path) else {
+        return Ok(true);
+    };
+    if check_entry_name_limits(PathModel::Host, &landing, regular_file, config).is_ok() {
         return Ok(true);
     }
     if listing.mode() == ListMode::Strict {

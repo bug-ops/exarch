@@ -86,10 +86,20 @@ closed_enum! {
         /// Fail with [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
         /// for an occupant the current run did not create.
         ///
-        /// Until the write-time run record lands, every occupant is refused,
-        /// including an in-archive duplicate. A site that handles
-        /// [`ExistingFiles`] must never route `Refuse` into an overwrite
-        /// branch: a missed arm would replace a file the caller asked to keep.
+        /// An occupant the run created itself (a second archive entry for the
+        /// same path) is skipped and counted, as under [`Skip`](Self::Skip),
+        /// and a directory already present at a directory landing is accepted.
+        /// The run tracks what it created by file identity, and by landing path
+        /// where the host gives no identity (Windows), so there a duplicate that
+        /// differs only in case is refused. The record is bounded at 4 Mi
+        /// landings; past that every occupant counts as not created by the run.
+        /// Both limits fail closed.
+        ///
+        /// A site that handles [`ExistingFiles`] never routes `Refuse` into an
+        /// overwrite branch, whatever the record says: a file created behind the
+        /// run's back can only turn a refusal into a skip or the reverse, and the
+        /// creates themselves stay exclusive (`O_EXCL`), so `Refuse` cannot write
+        /// over a file it was asked to keep.
         Refuse => "refuse",
     }
 }
@@ -116,11 +126,47 @@ closed_enum! {
         /// Extract into a temporary sibling directory and rename it onto a
         /// destination that does not exist or is empty; delete it on failure.
         ///
+        /// A destination that holds content is refused with
+        /// [`ArchiveError::OutputExists`](crate::ArchiveError::OutputExists)
+        /// before anything is extracted, and one that is not a directory with
+        /// [`ConfigProblem::NotADirectory`].
+        /// A symlinked destination is resolved first, so the staging directory is
+        /// on the target's filesystem and the target is what is filled.
+        /// Cancellation is polled once more before the rename. The staging
+        /// directory is extracted under [`ExistingFiles::Refuse`] in place of
+        /// [`ExistingFiles::Skip`], so a file planted in it is refused and never
+        /// published; a duplicate entry of the archive is still skipped.
+        ///
         /// Cleanup is best-effort if the process is terminated via SIGKILL.
         Atomic => "atomic",
 
         /// Like [`Atomic`](Self::Atomic), and swap the staged tree over an
-        /// existing destination, replacing it as a whole.
+        /// existing destination directory, replacing it as a whole.
+        ///
+        /// The original is renamed aside only once extraction succeeded and
+        /// removed after the staged tree is in place; if moving the staged tree
+        /// fails the original is restored, and
+        /// [`ArchiveError::ReplaceFailed`](crate::ArchiveError::ReplaceFailed)
+        /// says whether that worked. A backup that cannot be removed is reported
+        /// as an [`ExtractionWarning::BackupCleanupFailed`](crate::ExtractionWarning::BackupCleanupFailed).
+        /// A destination that does not exist is created as under `Atomic`.
+        ///
+        /// The destination's parent is held by a directory handle, so replacing
+        /// one of its own parents with a symlink mid-swap cannot redirect the
+        /// swap, and the destination is checked to still be the directory that
+        /// was inspected right before the first rename; that recheck narrows but
+        /// does not close the window around the destination itself. Where the
+        /// platform has no inode identity (Windows) the recheck compares only
+        /// the kind, and the parent is named by path.
+        ///
+        /// A destination that is a symlink or not a directory is refused
+        /// ([`ConfigProblem::IsSymlink`],
+        /// [`ConfigProblem::NotADirectory`]),
+        /// as is one that is a filesystem root or contains the archive or the
+        /// working directory
+        /// ([`ConfigProblem::ReplacesProtectedPath`]).
+        /// Cancellation is polled once more before anything is displaced. Opening
+        /// the parent needs read permission on it.
         AtomicReplace => "atomic_replace",
     }
 }

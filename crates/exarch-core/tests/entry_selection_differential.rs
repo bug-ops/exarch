@@ -1,5 +1,6 @@
 //! Differential check of `--strip-components` against `bsdtar` on a crafted
-//! TAR corpus (spec 022 SC-001). Skipped where `bsdtar` is not installed.
+//! TAR corpus (spec 022 SC-001). Skipped locally where `bsdtar` is not
+//! installed; fails when `EXARCH_REQUIRE_BSDTAR` is set.
 //!
 //! Deliberate differences, recorded here so they are not silently chosen:
 //!
@@ -40,11 +41,22 @@ use sink_support::tar_hardlink;
 use sink_support::tar_symlink;
 use tempfile::TempDir;
 
+/// Whether `bsdtar` can be run. Without it the comparison cannot happen: a
+/// local run skips loudly, and a run that sets `EXARCH_REQUIRE_BSDTAR` (the CI
+/// test job) fails instead of passing vacuously.
 fn bsdtar_available() -> bool {
-    Command::new("bsdtar")
+    let available = Command::new("bsdtar")
         .arg("--version")
         .output()
-        .is_ok_and(|output| output.status.success())
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("EXARCH_REQUIRE_BSDTAR").is_none(),
+            "bsdtar is required (EXARCH_REQUIRE_BSDTAR is set) but was not found"
+        );
+        eprintln!("WARNING: bsdtar not found; the differential check did NOT run");
+    }
+    available
 }
 
 fn tar_dir(name: &str) -> Vec<u8> {
@@ -98,7 +110,6 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, String> {
 #[test]
 fn strip_components_extracts_what_bsdtar_extracts() {
     if !bsdtar_available() {
-        eprintln!("bsdtar not found; skipping");
         return;
     }
     let work = TempDir::new().unwrap();
@@ -147,7 +158,6 @@ fn strip_components_extracts_what_bsdtar_extracts() {
 #[test]
 fn a_leading_dot_slash_is_not_counted_unlike_bsdtar() {
     if !bsdtar_available() {
-        eprintln!("bsdtar not found; skipping");
         return;
     }
     let work = TempDir::new().unwrap();

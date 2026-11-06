@@ -1268,9 +1268,8 @@ fn test_verify_missing_archive_names_it_in_the_error() {
         .arg("does-not-exist.tar.gz")
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "Failed to process 'does-not-exist.tar.gz'",
-        ));
+        .stderr(predicates::str::contains("Source path not found"))
+        .stderr(predicates::str::contains("does-not-exist.tar.gz"));
 }
 
 #[test]

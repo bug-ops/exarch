@@ -7,6 +7,9 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
+use super::parent::FileIdentity;
+use super::parent::identity_of;
+use super::replace::is_within;
 use super::replace::protected_path;
 use super::staged_options;
 use crate::ArchiveError;
@@ -422,24 +425,88 @@ fn replace_refuses_a_destination_that_contains_the_archive() {
 fn a_destination_that_holds_the_working_directory_is_protected() {
     let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
     let parent = cwd.parent().unwrap();
+    let id = |path: &Path| identity_of(path).unwrap();
 
     assert_eq!(
-        protected_path(&cwd, None),
+        protected_path(&cwd, id(&cwd), None),
         Some(ProtectedPath::WorkingDirectory)
     );
     assert_eq!(
-        protected_path(parent, None),
+        protected_path(parent, id(parent), None),
         Some(ProtectedPath::WorkingDirectory)
     );
     assert_eq!(
-        protected_path(Path::new("/"), None),
+        protected_path(Path::new("/"), id(Path::new("/")), None),
         Some(ProtectedPath::FilesystemRoot)
     );
     let unrelated = tempfile::tempdir().unwrap();
-    assert_eq!(
-        protected_path(&unrelated.path().canonicalize().unwrap(), None),
-        None
+    let unrelated = unrelated.path().canonicalize().unwrap();
+    assert_eq!(protected_path(&unrelated, id(&unrelated), None), None);
+}
+
+#[test]
+fn the_guard_compares_identity_so_another_spelling_of_the_destination_is_caught() {
+    let fx = Fixture::new();
+    let dest = fx.with_old_destination();
+    let alias = fx.parent.join("alias");
+    symlink(&fx.parent, &alias).unwrap();
+    let archive = alias.join("dest/a.tar");
+    std::fs::copy(&fx.archive, &archive).unwrap();
+    let dest_id = identity_of(&dest).unwrap();
+
+    assert!(
+        !archive.starts_with(&dest),
+        "the text of the archive path does not contain the destination's"
     );
+    assert!(is_within(&dest, dest_id, &archive, identity_of));
+    assert!(!is_within(
+        &fx.parent.join("elsewhere"),
+        identity_of(&fx.parent).unwrap(),
+        &fx.root.path().join("a.tar"),
+        identity_of
+    ));
+}
+
+#[test]
+fn the_guard_follows_an_injected_identity_source_not_the_path_text() {
+    let known = |ino| Ok(FileIdentity::Known { dev: 1, ino });
+    let dest = Path::new("/p/dest");
+    let dest_id = FileIdentity::Known { dev: 1, ino: 7 };
+    // A case-insensitive volume: `/p/DEST` and `/p/dest` are one directory.
+    let case_insensitive = |path: &Path| match path.to_str().unwrap().to_lowercase().as_str() {
+        "/p/dest" => known(7),
+        "/p" => known(2),
+        "/" => known(1),
+        _ => known(9),
+    };
+
+    assert!(is_within(
+        dest,
+        dest_id,
+        Path::new("/p/DEST/a/b.tar"),
+        case_insensitive
+    ));
+    assert!(is_within(
+        dest,
+        dest_id,
+        Path::new("/p/Dest"),
+        case_insensitive
+    ));
+    assert!(!is_within(
+        dest,
+        dest_id,
+        Path::new("/p/other/b.tar"),
+        case_insensitive
+    ));
+    assert!(
+        is_within(dest, dest_id, Path::new("/p/other/b.tar"), |_| Err(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        )),
+        "an ancestor that cannot be identified refuses"
+    );
+    let unknown = |_: &Path| Ok(FileIdentity::Unknown);
+    assert!(is_within(dest, dest_id, Path::new("/p/dest/x"), unknown));
+    assert!(!is_within(dest, dest_id, Path::new("/p/destx/x"), unknown));
 }
 
 #[test]

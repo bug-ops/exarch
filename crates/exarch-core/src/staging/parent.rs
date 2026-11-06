@@ -319,6 +319,42 @@ mod imp {
 pub use imp::PinnedParent;
 pub use imp::current_path;
 
+/// The identity of the directory at `path`, following symlinks: the device and
+/// inode where the platform has them, [`FileIdentity::Unknown`] elsewhere.
+///
+/// # Errors
+///
+/// The I/O error of the lookup.
+#[cfg(unix)]
+#[allow(clippy::useless_conversion)] // `st_dev` is not `u64` on every target
+pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path)?;
+    Ok(FileIdentity::Known {
+        dev: u64::from(metadata.dev()),
+        ino: metadata.ino(),
+    })
+}
+
+/// WASI has no stable `MetadataExt`, so the directory is opened and its
+/// descriptor is stat'ed.
+#[cfg(target_os = "wasi")]
+pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
+    let stat = rustix::fs::fstat(std::fs::File::open(path)?)?;
+    Ok(FileIdentity::Known {
+        dev: stat.st_dev,
+        ino: stat.st_ino,
+    })
+}
+
+/// No identity is available on this target.
+#[cfg(not(any(unix, target_os = "wasi")))]
+#[allow(clippy::unnecessary_wraps)] // the identity-based arms can fail
+pub fn identity_of(path: &Path) -> io::Result<FileIdentity> {
+    std::fs::metadata(path).map(|_| FileIdentity::Unknown)
+}
+
 /// The path of a surviving staging or backup entry, resolved from the entry
 /// itself where the platform can and named logically otherwise.
 pub fn surviving_path(pin: &PinnedParent, name: &EntryName, parent_display: &Path) -> PathBuf {

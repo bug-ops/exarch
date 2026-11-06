@@ -31,6 +31,7 @@ use super::parent::EntryName;
 use super::parent::FileIdentity;
 use super::parent::IdentityCheck;
 use super::parent::PinnedParent;
+use super::parent::identity_of;
 use super::parent::is_absent;
 use super::parent::surviving_path;
 use super::staged_options;
@@ -168,7 +169,7 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
         DestEntryKind::Symlink => return Err(refuse(ConfigProblem::IsSymlink)),
         DestEntryKind::Other => return Err(refuse(ConfigProblem::NotADirectory)),
     }
-    if let Some(guard) = protected_path(&path, archive) {
+    if let Some(guard) = protected_path(&path, id, archive) {
         return Err(protected(guard));
     }
     Ok(Some(ReplaceTarget {
@@ -180,17 +181,30 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
     }))
 }
 
-/// Why replacing the canonical directory `dest` would destroy more than the
-/// destination, if it would.
+/// Why replacing the directory `dest`, identified by `dest_id`, would destroy
+/// more than the destination, if it would.
+///
+/// The archive and the working directory are compared by identity, not by
+/// path text: on a case- or normalization-insensitive volume (APFS by default,
+/// NTFS) the caller can spell the destination differently from the canonical
+/// path of what it holds, and a text comparison would let the replace delete
+/// the archive or the working directory. Only where the platform has no
+/// identity is the text compared (case-insensitively on Windows).
 ///
 /// An archive or working directory that cannot be resolved is not a reason to
 /// refuse: an archive that is missing fails the extraction, and a deleted
 /// working directory sits inside nothing.
-pub(super) fn protected_path(dest: &Path, archive: Option<&Path>) -> Option<ProtectedPath> {
+pub(super) fn protected_path(
+    dest: &Path,
+    dest_id: FileIdentity,
+    archive: Option<&Path>,
+) -> Option<ProtectedPath> {
     if dest.parent().is_none() {
         return Some(ProtectedPath::FilesystemRoot);
     }
-    let holds = |inner: Option<PathBuf>| inner.is_some_and(|inner| inner.starts_with(dest));
+    let holds = |inner: Option<PathBuf>| {
+        inner.is_some_and(|inner| is_within(dest, dest_id, &inner, identity_of))
+    };
     if holds(archive.and_then(|archive| archive.canonicalize().ok())) {
         return Some(ProtectedPath::ArchiveAncestor);
     }
@@ -202,6 +216,39 @@ pub(super) fn protected_path(dest: &Path, archive: Option<&Path>) -> Option<Prot
         return Some(ProtectedPath::WorkingDirectory);
     }
     None
+}
+
+/// Whether `inner`, or one of its ancestors, is the directory `dest_id`
+/// identifies. `identify` looks an ancestor up; one that cannot be looked up
+/// counts as a match, so an uncertain answer refuses.
+pub(super) fn is_within(
+    dest: &Path,
+    dest_id: FileIdentity,
+    inner: &Path,
+    identify: impl Fn(&Path) -> io::Result<FileIdentity>,
+) -> bool {
+    inner
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .any(|ancestor| {
+            identify(ancestor).map_or(true, |id| match id.check(dest_id) {
+                IdentityCheck::Same => true,
+                IdentityCheck::Different => false,
+                IdentityCheck::Unknown => same_text(ancestor, dest),
+            })
+        })
+}
+
+/// Path text equality, case-insensitive on Windows.
+#[cfg(windows)]
+fn same_text(a: &Path, b: &Path) -> bool {
+    use crate::security::fs_view::paths_start_with;
+    paths_start_with(a, b) && paths_start_with(b, a)
+}
+
+#[cfg(not(windows))]
+fn same_text(a: &Path, b: &Path) -> bool {
+    a == b
 }
 
 /// The staging directory, identified by the inode `entry_status` reported when

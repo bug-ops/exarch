@@ -608,6 +608,7 @@ fn a_racing_destination_flip_never_touches_a_planted_symlinks_target() {
                     ArchiveError::SecurityViolation { .. }
                         | ArchiveError::ReplaceFailed(_)
                         | ArchiveError::InvalidConfiguration { .. }
+                        | ArchiveError::OutputExists { .. }
                         | ArchiveError::Io(_)
                 ),
                 "{error}"

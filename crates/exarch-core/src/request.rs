@@ -550,9 +550,13 @@ closed_enum! {
     /// Whether a created archive is flushed to stable storage before it is
     /// reported as written.
     ///
-    /// `Synced` (the default) flushes the archive file and then its parent
-    /// directory entry, so a published archive survives a crash or power
-    /// loss.
+    /// `Synced` (the default) flushes the archive file and then, on Unix, its
+    /// parent directory entry, so a published archive survives a crash or
+    /// power loss. A directory that cannot be synced does not fail the
+    /// creation, since the archive is already published: it adds a
+    /// [`CreationWarning::DirectoryNotSynced`] to the report. On Windows and
+    /// WASI the directory entry is not flushed and no warning is raised; only
+    /// the file is.
     ///
     /// `Unsynced` skips both flushes and is faster, with these hazards:
     ///
@@ -803,12 +807,14 @@ impl<'a> CreateRequest<'a> {
         let Self { config, progress } = self;
         let format = resolve_output_format(output)?;
         let mut staged = StagedOutput::begin(output.path(), output.policy())?;
-        let report = progress.run(|progress| -> Result<CreationReport> {
+        let mut report = progress.run(|progress| -> Result<CreationReport> {
             let report = write_staged(&mut staged, format, sources, config, progress)?;
             check_cancelled(progress)?;
             Ok(report)
         })?;
-        staged.commit(output.durability())?;
+        if let Some(warning) = staged.commit(output.durability())? {
+            report.add_warning(warning);
+        }
         Ok(report)
     }
 

@@ -19,6 +19,7 @@ use tempfile::NamedTempFile;
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::CreationWarning;
 use crate::Result;
 use crate::request::Durability;
 use crate::request::OutputPolicy;
@@ -210,8 +211,12 @@ impl StagedOutput {
     }
 
     /// Publishes the archive at the target. Under [`Durability::Synced`] the
-    /// file is flushed first and the parent directory is synced afterwards on
-    /// a best-effort basis (Unix); [`Durability::Unsynced`] skips both.
+    /// file is flushed first and the parent directory is synced afterwards
+    /// (Unix only); [`Durability::Unsynced`] skips both.
+    ///
+    /// The directory sync happens after the archive is published, so its
+    /// failure does not fail the creation: it is returned as
+    /// [`CreationWarning::DirectoryNotSynced`].
     ///
     /// The mode of a replaced file is applied after the write, right before the
     /// rename. [`OutputPolicy::CreateNew`] never overwrites: a file that
@@ -221,11 +226,15 @@ impl StagedOutput {
     ///
     /// Returns an error if syncing, setting the mode or renaming fails; the
     /// temporary file is deleted and the target is untouched.
-    pub(crate) fn commit(self, durability: Durability) -> Result<()> {
+    pub(crate) fn commit(self, durability: Durability) -> Result<Option<CreationWarning>> {
         self.commit_with(durability, &HostFlush)
     }
 
-    fn commit_with(self, durability: Durability, flush: &impl Flush) -> Result<()> {
+    fn commit_with(
+        self,
+        durability: Durability,
+        flush: &impl Flush,
+    ) -> Result<Option<CreationWarning>> {
         let Self {
             temp,
             target,
@@ -246,10 +255,14 @@ impl StagedOutput {
                 .map_err(|failed| ArchiveError::Io(failed.error))?,
             OutputPolicy::CreateNew => publish_new(temp, &target)?,
         }
-        if durability == Durability::Synced {
-            flush.parent(&target);
+        if durability == Durability::Synced
+            && let Err(error) = flush.parent(&target)
+        {
+            return Ok(Some(CreationWarning::DirectoryNotSynced {
+                io_kind: error.kind().into(),
+            }));
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -259,8 +272,8 @@ trait Flush {
     /// Flushes the staged archive file to stable storage.
     fn file(&self, file: &File) -> io::Result<()>;
 
-    /// Flushes the directory entry of the published `target`, best effort.
-    fn parent(&self, target: &Path);
+    /// Flushes the directory entry of the published `target`.
+    fn parent(&self, target: &Path) -> io::Result<()>;
 }
 
 /// Flushes through the operating system.
@@ -271,29 +284,28 @@ impl Flush for HostFlush {
         file.sync_all()
     }
 
-    fn parent(&self, target: &Path) {
-        sync_parent(target);
+    fn parent(&self, target: &Path) -> io::Result<()> {
+        sync_parent(target)
     }
 }
 
 /// Flushes the directory entry of a published archive, so the rename survives
 /// a crash and not only the file contents.
 ///
-/// Best effort and Unix only: the archive is already published and complete,
-/// so a filesystem that cannot sync a directory (or a platform where a
-/// directory cannot be opened) does not fail the creation.
+/// Unix only: elsewhere this does nothing and reports success.
 #[cfg(unix)]
-fn sync_parent(target: &Path) {
-    if let Some(parent) = target.parent()
-        && let Ok(directory) = File::open(parent)
-        && directory.sync_all().is_err()
-    {
-        // The rename stays atomic; only its durability is not guaranteed.
+fn sync_parent(target: &Path) -> io::Result<()> {
+    match target.parent() {
+        Some(parent) => File::open(parent)?.sync_all(),
+        None => Ok(()),
     }
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_: &Path) {}
+#[expect(clippy::unnecessary_wraps, reason = "same signature as the Unix flush")]
+fn sync_parent(_: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 /// Renames `temp` to `target` unless something is there.
 fn publish_new(temp: NamedTempFile, target: &Path) -> Result<()> {
@@ -391,7 +403,7 @@ mod tests {
         durability: Durability,
     ) -> Result<()> {
         io::Write::write_all(staged.parts().0, bytes).unwrap();
-        staged.commit(durability)
+        staged.commit(durability).map(drop)
     }
 
     #[test]
@@ -420,8 +432,9 @@ mod tests {
             Ok(())
         }
 
-        fn parent(&self, _: &Path) {
+        fn parent(&self, _: &Path) -> io::Result<()> {
             self.0.borrow_mut().push("parent");
+            Ok(())
         }
     }
 
@@ -438,6 +451,47 @@ mod tests {
     #[test]
     fn synced_flushes_the_file_then_the_parent() {
         assert_eq!(flushes(Durability::Synced), ["file", "parent"]);
+    }
+
+    struct ParentSyncFails(io::ErrorKind);
+
+    impl Flush for ParentSyncFails {
+        fn file(&self, _: &File) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn parent(&self, _: &Path) -> io::Result<()> {
+            Err(self.0.into())
+        }
+    }
+
+    fn commit_with_failing_parent(durability: Durability) -> Option<CreationWarning> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = staged(dir.path(), "a.tar", OutputPolicy::CreateNew).unwrap();
+        io::Write::write_all(out.parts().0, b"new").unwrap();
+        let warning = out
+            .commit_with(
+                durability,
+                &ParentSyncFails(io::ErrorKind::PermissionDenied),
+            )
+            .unwrap();
+        assert_eq!(fs::read(dir.path().join("a.tar")).unwrap(), b"new");
+        warning
+    }
+
+    #[test]
+    fn a_parent_sync_failure_publishes_the_archive_and_warns() {
+        assert_matches!(
+            commit_with_failing_parent(Durability::Synced),
+            Some(CreationWarning::DirectoryNotSynced {
+                io_kind: crate::IoKind::PermissionDenied
+            })
+        );
+    }
+
+    #[test]
+    fn unsynced_never_warns_about_the_parent() {
+        assert_matches!(commit_with_failing_parent(Durability::Unsynced), None);
     }
 
     #[test]

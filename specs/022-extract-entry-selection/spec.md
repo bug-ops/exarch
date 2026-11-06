@@ -211,7 +211,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 |----|------------|----------|
 | FR-030 | THE SYSTEM SHALL NOT rewrite symlink target text; a symlink SHALL be validated at its rewritten landing with its original target, so a link whose target resolved inside the archive only because of the stripped prefix (`top/link -> ../other/x`, strip 1) is refused as `SymlinkEscape`, never silently re-pointed | must |
 | FR-031 | A hardlink target is an archive entry path; THE SYSTEM SHALL map it through the same selection and rewriting as entry names, and SHALL validate the mapped target as a `SafePath`; under a non-default selection a target that holds a `..` component cannot be matched lexically and SHALL be refused as `PathTraversal`; root, prefix, empty and NUL targets keep their plain typed errors | must |
-| FR-032 | WHEN a hardlink's target is not selected, is stripped away, or is not extracted for any other reason (including a pre-existing destination file the archive does not carry, under a strip), THE SYSTEM SHALL refuse the hardlink with `Violation::HardlinkTargetNotExtracted { link, target }` (sub-code `LinkTarget`); it SHALL NOT create a dangling hardlink, a copy of data it did not extract, or a link to a path outside the extraction | must |
+| FR-032 | WHEN a hardlink's target is not selected, is stripped away, or is not extracted for any other reason (including a pre-existing destination file the archive does not carry, under a strip), and a hardlink whose target several entries collided on under a strip SHALL be refused with `Violation::HardlinkTargetAmbiguous` (sub-code `LinkTarget`), THE SYSTEM SHALL refuse the hardlink with `Violation::HardlinkTargetNotExtracted { link, target }` (sub-code `LinkTarget`); it SHALL NOT create a dangling hardlink, a copy of data it did not extract, or a link to a path outside the extraction | must |
 | FR-033 | In-archive link projection (`VirtualTree::project_landing`) and placement checks SHALL run on rewritten landing paths, so an entry placed beneath a symlink is judged where it would really land | must |
 
 ### Quotas, skips and reporting
@@ -384,6 +384,8 @@ All sixteen questions from the research draft were resolved by the user's approv
 |-------|----------|
 | Differential corpus (SC-001) | Run against bsdtar 3.x for strip 0 to 3 (unix, skipped when bsdtar is missing); GNU tar, node-tar and cpython `tarfile` were not run. The test compares under `ExistingFiles::Overwrite` because bsdtar overwrites |
 | `max_path_depth` | A strip count is validated against `max_path_depth` when it is set; lowering the depth afterwards does not revalidate it |
+| Strip count validation | A strip count is validated against `max_path_depth` when it is built, so the call order of `max_path_depth` and the strip setter matters; the docs say so. Node `setStripComponents(null)` removes a strip and keeps a flatten, as Python `strip_components = None` does |
+| Known gaps | An absolute hardlink target under a strip is not mapped (#997); the binding selection helpers are duplicated between Python and Node (#998) |
 | Per-run state | `finish_scan` on `ExtractTarget` runs the unmatched-include check for TAR, ZIP and 7z, host and sinks, also on empty archives |
 | Selection and the extension allowlist | One gate (`ValidatorCore::route_entry_in`) validates the original `SafePath`, decides selection and rewrite, and revalidates a rewritten name only through `SafePath::validate_rewritten_in(&Rewritten)`; `land` and `verify` use the same step (`route_validated`) |
 

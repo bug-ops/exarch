@@ -18,9 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `--json` errors carry `error.hint` and `error.conflicts` (#982, #985, #999).
 - Python: `staging`, `existing_files`, typed warning classes, `io_kind`, errno and filename on source errors, `protected_path` and `collision` on `InvalidConfigurationError` (#962, #988, #989, #992, #999).
 - Node: `withStaging`, `withExistingFiles`, typed warnings, `unmatchedPatterns`, `protectedPath`, `collision`, `withBannedComponents`, `CreationConfig.withExcludePatterns` and `withAllowedExtensions(null)` (#988, #989, #991, #992, #999).
-- Core: `EntrySelection::{with_strip, with_flatten, with_include_list, with_exclude_list}`, `DispositionKind`, `DestinationState` and `ArchiveError::rolled_back_with`, so a failed run reports the staging directory it left (#995, #998, #1013, #PR).
-- CLI: `--json` errors carry `error.io_kind` and `error.leftover_path`, `backup_cleanup_failed` carries `reason`, and extract and create stop on SIGINT with exit 130 and remove their staging entry (#995, #1014, #1016, #PR).
-- Python: `ArchiveError.leftover_path`, `EntryDisposition.action`, `VerificationReport.suspicious_entries` and `format` (#1011, #PR).
+- Core: `EntrySelection::{with_strip, with_flatten, with_include_list, with_exclude_list}`, `DispositionKind`, `DestinationState` and `ArchiveError::rolled_back_with`, so a failed run reports the staging directory it left (#995, #998, #1013, #1019).
+- CLI: `--json` errors carry `error.io_kind` and `error.leftover_path`, `backup_cleanup_failed` carries `reason`, and extract and create stop on SIGINT with exit 130 and remove their staging entry (#995, #1014, #1016, #1019).
+- Python: `ArchiveError.leftover_path`, `EntryDisposition.action`, `VerificationReport.suspicious_entries` and `format` (#1011, #1019).
 
 ### Changed
 
@@ -33,17 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking (Node)**: `skipDuplicates` and `withAtomic` are replaced by `withExistingFiles` and `withStaging`, `allowedExtensions` is `null` for any and refuses `[]`, `warnings` are typed objects, a throwing progress callback stops the operation at the next entry and compression-level errors are `INVALID_COMPRESSION_LEVEL` (#972, #975, #988, #992, #999).
 - The `zip` requirement is `~9.4` instead of the exact `=9.2.2` pin (#971, #999).
 - Docs: specifications and the CLI skill follow the new behavior, and secret file patterns are gitignored with a `files` allowlist for the npm package (#966, #969, #999).
-- **Breaking (CLI)**: `--json` warnings are objects `{kind, message, ...}` instead of display strings, the `--force` advice moves from `message` to `error.hint` and follows the write mode, conflicts are sorted once in core and listed without duplicates, and human-mode output exits 1 when writing to stdout fails except on a closed pipe (#1008, #1013, #1015, #1017, #PR).
-- **Breaking (CLI)**: only SIGINT is handled; extract and create exit 130 and remove the staging entry, and a second signal exits at once with a hint naming any `.exarch-backup-*` entry (#1014, #PR).
-- **Breaking (Node)**: the 23 `set*` methods of `SecurityConfig` and `CreationConfig` are `with*`, disposition `kind` and `reason` are `action` and `kind`, report fields are typed string enums, and sizes clamp at 2^53-1 (#1009, #1011, #1012, #PR).
-- **Breaking (Python)**: `ArchiveManifest.dispositions` is an attribute, `InvalidConfigurationError.patterns` is `unmatched_patterns`, and the `durability` stub is `_Durability | None` (#1011, #1018, #PR).
-- Core: atomic staging is created at 0700 and published with the destination's mode, an existing empty destination keeps its mode but never takes the owner, and an interrupted or failed run reports the leftover directory (#1002, #995, #PR).
-- Core: absolute hardlink targets are stripped like entry names under selection when absolute paths are allowed, and every overwrite needs a `ReplacePermit` from `ExistingFiles` (#997, #1004, #PR).
-- Core: decoder read errors share one typed classifier for extract, list and verify, so verify of a TAR now reports an `Io` error for a source I/O fault instead of `IntegrityCheckFailed` (#1006, #PR).
-- **Breaking**: `ArchiveError::rolled_back_with` wraps non-partial errors (`Cancelled`, `OutputExists`, `DestinationChanged`) in `PartialExtraction` when a staging directory is left behind (#995, #PR).
-- **Breaking**: atomic and replace extraction need search permission on the destination's parent instead of read, and Windows `--atomic` onto an existing empty directory fails with `OutputExists` (#1005, #PR).
-- Core: modules expose only items reachable from the crate root, enforced by `unreachable_pub` (#1007, #PR).
-- Python and Node: the binding error and report fields are derived from core `FfiDetail`, which is exhaustive on purpose so a new detail fails to compile in both bindings (#1010, #PR).
+- **Breaking (CLI)**: `--json` warnings are objects `{kind, message, ...}` instead of display strings, the `--force` advice moves from `message` to `error.hint` and follows the write mode, conflicts are sorted once in core and listed without duplicates, and human-mode output exits 1 when writing to stdout fails except on a closed pipe (#1008, #1013, #1015, #1017, #1019).
+- **Breaking (CLI)**: only SIGINT is handled; extract and create exit 130 and remove the staging entry, and a second signal exits at once with a hint naming any `.exarch-backup-*` entry (#1014, #1019).
+- **Breaking (Node)**: the 23 `set*` methods of `SecurityConfig` and `CreationConfig` are `with*`, disposition `kind` and `reason` are `action` and `kind`, report fields are typed string enums, and sizes clamp at 2^53-1 (#1009, #1011, #1012, #1019).
+- **Breaking (Python)**: `ArchiveManifest.dispositions` is an attribute, `InvalidConfigurationError.patterns` is `unmatched_patterns`, and the `durability` stub is `_Durability | None` (#1011, #1018, #1019).
+- Core: atomic staging is created at 0700 and published with the destination's mode, an existing empty destination keeps its mode but never takes the owner, and an interrupted or failed run reports the leftover directory (#1002, #995, #1019).
+- Core: absolute hardlink targets are stripped like entry names under selection when absolute paths are allowed, and every overwrite needs a `ReplacePermit` from `ExistingFiles` (#997, #1004, #1019).
+- Core: decoder read errors share one typed classifier for extract, list and verify, so verify of a TAR now reports an `Io` error for a source I/O fault instead of `IntegrityCheckFailed` (#1006, #1019).
+- **Breaking**: `ArchiveError::rolled_back_with` wraps non-partial errors (`Cancelled`, `OutputExists`, `DestinationChanged`) in `PartialExtraction` when a staging directory is left behind (#995, #1019).
+- **Breaking**: atomic and replace extraction need search permission on the destination's parent instead of read, and Windows `--atomic` onto an existing empty directory fails with `OutputExists` (#1005, #1019).
+- Core: modules expose only items reachable from the crate root, enforced by `unreachable_pub` (#1007, #1019).
+- Python and Node: the binding error and report fields are derived from core `FfiDetail`, which is exhaustive on purpose so a new detail fails to compile in both bindings (#1010, #1019).
 
 ### Fixed
 
@@ -52,11 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: creation benches no longer discard errors and measure a real fsync (#993, #999).
 - Core: a TAR listing spool on tmpfs is charged to the decoder memory limit (#960, #999).
 - CLI: messages state each fact once, a rolled-back report is no longer joined to its cause with `.:` and the `.`, `..` and `./` protected destinations share one test (#982, #985, #986, #999).
-- Core: atomic replace keeps a private destination private, protects the archive path through 8.3 short names on Windows, and unifies its pinned-directory layer with extraction (#1002, #1003, #1005, #PR).
-- Core: a destination swapped during `AtomicReplace` is restored and refused with `DestinationChanged`, a 0555 destination no longer leaves its backup behind, and ZIP message classification applies to ZIP only (#1002, #1005, #1006, #PR).
-- CLI: the forced-exit hint after a second signal names what the interrupted command left behind (#1014, #PR).
-- Core: the run record keys a created file by its descriptor identity (#996, #PR).
-- Python and Node: `leftover_path` survives a cancelled progress callback (#995, #PR).
+- Core: atomic replace keeps a private destination private, protects the archive path through 8.3 short names on Windows, and unifies its pinned-directory layer with extraction (#1002, #1003, #1005, #1019).
+- Core: a destination swapped during `AtomicReplace` is restored and refused with `DestinationChanged`, a 0555 destination no longer leaves its backup behind, and ZIP message classification applies to ZIP only (#1002, #1005, #1006, #1019).
+- CLI: the forced-exit hint after a second signal names what the interrupted command left behind (#1014, #1019).
+- Core: the run record keys a created file by its descriptor identity (#996, #1019).
+- Python and Node: `leftover_path` survives a cancelled progress callback (#995, #1019).
 
 ## [0.9.0] - 2026-11-05
 

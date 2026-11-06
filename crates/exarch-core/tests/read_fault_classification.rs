@@ -253,17 +253,44 @@ fn a_truncated_zip_or_7z_is_a_malformed_archive() {
     }
 }
 
+/// The error a failing source raises: with an errno, as a file does, or
+/// without one, as a caller's reader or an FFI-backed one does.
+#[derive(Clone, Copy, Debug)]
+enum Fault {
+    Errno,
+    Other,
+}
+
+const OTHER_MESSAGE: &str = "injected source fault";
+
+impl Fault {
+    fn raise(self) -> io::Error {
+        match self {
+            Self::Errno => io::Error::from_raw_os_error(EIO),
+            Self::Other => io::Error::other(OTHER_MESSAGE),
+        }
+    }
+
+    fn is_raised_by(self, error: &io::Error) -> bool {
+        match self {
+            Self::Errno => error.raw_os_error() == Some(EIO),
+            Self::Other => error.raw_os_error().is_none() && error.to_string() == OTHER_MESSAGE,
+        }
+    }
+}
+
 /// Fails every read from the `fail_from`-th on, counting into `reads`.
 struct Flaky {
     inner: Cursor<Vec<u8>>,
     reads: Arc<AtomicUsize>,
     fail_from: usize,
+    fault: Fault,
 }
 
 impl Read for Flaky {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.reads.fetch_add(1, Ordering::Relaxed) >= self.fail_from {
-            return Err(io::Error::from_raw_os_error(EIO));
+            return Err(self.fault.raise());
         }
         self.inner.read(buf)
     }
@@ -275,60 +302,134 @@ impl Seek for Flaky {
     }
 }
 
-/// Sweeps a source fault over every read of a seekable archive: each position
-/// ends in success or in `Io` carrying the injected errno, never in a
-/// malformed-archive verdict, and at least one fault lands after the sink has
-/// started a file.
-fn assert_source_faults_are_io(bytes: &[u8], format: SeekableFormat) {
-    let run = |fail_from: usize| {
-        let reads = Arc::new(AtomicUsize::new(0));
-        let reader = ArchiveReader::seekable(
-            Flaky {
+/// Sweeps a source fault over every read of an archive: each position ends in
+/// success or in `Io` carrying the injected error, never in a malformed-archive
+/// verdict, and at least one fault lands after the sink has started a file.
+fn assert_source_faults_are_io(
+    label: &str,
+    bytes: &[u8],
+    open: impl Fn(Flaky) -> ArchiveReader<'static>,
+) {
+    for fault in [Fault::Errno, Fault::Other] {
+        let run = |fail_from: usize| {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let reader = open(Flaky {
                 inner: Cursor::new(bytes.to_vec()),
                 reads: Arc::clone(&reads),
                 fail_from,
-            },
-            format,
-        );
-        let mut sink = RecordingSink::default();
-        let result = extract_into(reader, &mut sink);
-        (
-            result,
-            reads.load(Ordering::Relaxed),
-            !sink.modes.is_empty(),
-        )
-    };
-    let (clean, total, _) = run(usize::MAX);
-    clean.unwrap();
-    let mut during_extraction = 0;
-    for fail_from in 0..=total {
-        let (result, _, started) = run(fail_from);
-        match result {
-            Ok(()) => {}
-            Err(error) => {
+                fault,
+            });
+            let mut sink = RecordingSink::default();
+            let result = extract_into(reader, &mut sink);
+            (
+                result,
+                reads.load(Ordering::Relaxed),
+                !sink.modes.is_empty(),
+            )
+        };
+        let (clean, total, _) = run(usize::MAX);
+        clean.unwrap();
+        let mut during_extraction = 0;
+        for fail_from in 0..=total {
+            let (result, _, started) = run(fail_from);
+            if let Err(error) = result {
                 assert_matches!(
                     root(&error),
-                    ArchiveError::Io(io) if io.raw_os_error() == Some(EIO),
-                    "{format:?} fault from read {fail_from}: {error:?}"
+                    ArchiveError::Io(io) if fault.is_raised_by(io),
+                    "{label} {fault:?} fault from read {fail_from}: {error:?}"
                 );
                 during_extraction += usize::from(started);
             }
         }
+        assert!(
+            during_extraction > 0,
+            "{label} {fault:?}: no fault reached the entry data"
+        );
     }
-    assert!(
-        during_extraction > 0,
-        "{format:?}: no fault reached the entry data"
-    );
 }
 
 #[test]
 fn a_zip_source_fault_is_io_wherever_it_lands() {
-    assert_source_faults_are_io(&large_zip_bytes(), SeekableFormat::Zip);
+    assert_source_faults_are_io("zip", &large_zip_bytes(), |source| {
+        ArchiveReader::seekable(source, SeekableFormat::Zip)
+    });
 }
 
 #[test]
 fn a_7z_source_fault_is_io_wherever_it_lands() {
-    assert_source_faults_are_io(&sevenz_bytes(), SeekableFormat::SevenZ);
+    assert_source_faults_are_io("7z", &sevenz_bytes(), |source| {
+        ArchiveReader::seekable(source, SeekableFormat::SevenZ)
+    });
+}
+
+fn large_tar_bytes() -> Vec<u8> {
+    let big = payload().repeat(40);
+    tar_archive(&[tar_file("a.bin", &big), tar_file("b.bin", &big)])
+}
+
+#[test]
+fn a_tar_source_fault_is_io_wherever_it_lands() {
+    assert_source_faults_are_io("tar", &large_tar_bytes(), |source| {
+        ArchiveReader::tar(source, None)
+    });
+    assert_source_faults_are_io("tar.gz", &gzip(&large_tar_bytes()), |source| {
+        ArchiveReader::tar(source, Some(CompressionCodec::Gzip))
+    });
+    assert_source_faults_are_io("tar.xz", &xz(&large_tar_bytes()), |source| {
+        ArchiveReader::tar(source, Some(CompressionCodec::Xz))
+    });
+}
+
+#[test]
+fn a_zip_symlink_target_source_fault_is_io() {
+    let bytes = zip_archive(vec![
+        RawEntry::stored("big.bin", &payload().repeat(40)),
+        sink_support::zip_symlink("l", &"t".repeat(500)),
+    ]);
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+    let mut seen_io = 0;
+    for fault in [Fault::Errno, Fault::Other] {
+        let total = {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let reader = ArchiveReader::seekable(
+                Flaky {
+                    inner: Cursor::new(bytes.clone()),
+                    reads: Arc::clone(&reads),
+                    fail_from: usize::MAX,
+                    fault,
+                },
+                SeekableFormat::Zip,
+            );
+            SinkExtractRequest::new(&config)
+                .with_options(SinkOptions::default())
+                .extract(reader, &mut RecordingSink::default())
+                .unwrap();
+            reads.load(Ordering::Relaxed)
+        };
+        for fail_from in 0..=total {
+            let reader = ArchiveReader::seekable(
+                Flaky {
+                    inner: Cursor::new(bytes.clone()),
+                    reads: Arc::new(AtomicUsize::new(0)),
+                    fail_from,
+                    fault,
+                },
+                SeekableFormat::Zip,
+            );
+            let result = SinkExtractRequest::new(&config)
+                .with_options(SinkOptions::default())
+                .extract(reader, &mut RecordingSink::default());
+            if let Err(error) = result {
+                assert_matches!(
+                    root(&error),
+                    ArchiveError::Io(io) if fault.is_raised_by(io),
+                    "{fault:?} fault from read {fail_from}: {error:?}"
+                );
+                seen_io += 1;
+            }
+        }
+    }
+    assert!(seen_io > 0);
 }
 
 /// A sink whose storage is full.
@@ -401,4 +502,47 @@ fn a_full_destination_stays_io_in_every_container() {
             "{name}: {error:?}"
         );
     }
+}
+
+/// A 7z archive of two LZMA2 files in separate blocks, the first of text that
+/// compresses well.
+fn sevenz_two_blocks() -> Vec<u8> {
+    let text: Vec<u8> = (0..20_000u32).map(|i| b'a' + (i % 7) as u8).collect();
+    let mut buffer = Cursor::new(Vec::new());
+    let mut writer = ArchiveWriter::new(&mut buffer).unwrap();
+    writer
+        .push_archive_entry(ArchiveEntry::new_file("skipped.bin"), Some(&text[..]))
+        .unwrap();
+    writer
+        .push_archive_entry(ArchiveEntry::new_file("kept.txt"), Some(&b"kept"[..]))
+        .unwrap();
+    writer.finish().unwrap();
+    buffer.into_inner()
+}
+
+/// The decoder of a block an extension filter skips is drained outside the
+/// per-entry callback: its data errors are decoder verdicts, never `Io`.
+#[test]
+fn a_7z_decoder_error_while_draining_a_skipped_entry_is_a_malformed_archive() {
+    let config = SecurityConfig::default()
+        .try_add_allowed_extension("txt")
+        .unwrap();
+    let clean = sevenz_two_blocks();
+    let mut malformed = 0;
+    for at in 33..120 {
+        let mut bytes = clean.clone();
+        bytes[at] ^= 0xFF;
+        let result = SinkExtractRequest::new(&config)
+            .with_options(SinkOptions::default())
+            .extract(
+                sevenz_reader(bytes),
+                &mut MemorySink::new(MemoryLimit::DEFAULT),
+            );
+        match result.as_ref().map_err(root) {
+            Err(ArchiveError::Io(error)) => panic!("byte {at}: {error:?}"),
+            Err(ArchiveError::InvalidArchive(_)) => malformed += 1,
+            _ => {}
+        }
+    }
+    assert!(malformed > 0);
 }

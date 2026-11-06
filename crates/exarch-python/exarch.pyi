@@ -45,6 +45,8 @@ _ZipConsistency = Literal["enforce", "ignore"]
 _Durability = Literal["synced", "unsynced"]
 _ExistingFiles = Literal["skip", "overwrite", "refuse"]
 _Staging = Literal["in_place", "atomic", "atomic_replace"]
+_Restore = Literal["not_needed", "restored", "failed"]
+_ProtectedPath = Literal["filesystem_root", "archive_ancestor", "working_directory"]
 _IoKind = Literal[
     "NotFound",
     "PermissionDenied",
@@ -2129,6 +2131,44 @@ def create_archive_to_bytes(
     """
     ...
 
+class _IOErrorAttributes(Protocol):
+    """
+    Attributes exarch sets on the builtin ``OSError`` it raises for an I/O
+    failure (``code == "IO_ERROR"``).
+
+    These errors are plain builtin ``OSError`` subclasses (``PermissionError``,
+    ``FileNotFoundError``, ... and a bare ``OSError`` for kinds Python has no
+    class for; an out-of-memory failure included), not ``ArchiveError``
+    subclasses, so type checkers see only ``OSError``. Read the attributes with
+    ``getattr``; only ``code`` and ``io_kind`` are always set, the others only
+    for the failure they describe.
+
+    Attributes:
+        code: Always ``"IO_ERROR"``.
+        io_kind: The stable kind of the failure, the same token as
+            ``Skip.io_kind``.
+        restore: On the error of a failed ``"atomic_replace"`` swap:
+            ``"not_needed"`` (the original destination was never moved),
+            ``"restored"`` (moved aside and back) or ``"failed"`` (it could not
+            be moved back and remains at ``backup``).
+        backup: With ``restore == "failed"``, where the original destination
+            remains, redacted like an exception message.
+        leftover: Where a staging directory the failed swap left behind
+            remains, redacted like an exception message.
+        filename: On the error of a creation that failed after reserving its
+            output, the empty reservation file left at that path (redacted).
+        writes: As on ``ArchiveError``, when extraction failed after recording
+            progress.
+    """
+
+    code: Literal["IO_ERROR"]
+    io_kind: _IoKind
+    restore: _Restore
+    backup: str | None
+    leftover: str | None
+    filename: str | None
+    writes: _PartialWrites
+
 class ArchiveError(Exception):
     """
     Base exception for all extraction errors.
@@ -2137,20 +2177,6 @@ class ArchiveError(Exception):
         code: The stable error code, the same on every exarch exception,
             including the builtin ``OSError`` subclasses raised for I/O
             failures.
-        io_kind: Set only on an I/O failure (``code == "IO_ERROR"``), which is
-            raised as a builtin ``OSError`` (an out-of-memory failure included)
-            rather than an ``ArchiveError`` subclass: its stable kind, the same
-            token as ``Skip.io_kind``.
-        restore: Set only on the ``OSError`` of a failed ``"atomic_replace"``
-            swap: ``"not_needed"`` (the original destination was never moved),
-            ``"restored"`` (moved aside and back) or ``"failed"`` (it could not
-            be moved back and remains at ``backup``).
-        backup: With ``restore == "failed"``, where the original destination
-            remains, redacted like an exception message; otherwise ``None``.
-        leftover: Where a staging directory the failed swap left behind remains,
-            redacted like an exception message; otherwise ``None``.
-        filename: On the ``OSError`` of a creation that failed after reserving
-            its output, the empty reservation file left at that path (redacted).
         writes: Set only when extraction failed after recording progress:
             ``"kept"`` if the written files remain on disk, ``"rolled_back"``
             if atomic extraction discarded them, ``"discarded"`` if an
@@ -2205,10 +2231,38 @@ class InvalidConfigurationError(ArchiveError, ValueError):
         setting: The refused setting, or ``None`` when the refusal names none.
         patterns: With ``setting == "entry_include"`` after an extraction, the
             include patterns that matched no entry; ``None`` otherwise.
+        protected_path: With ``setting == "output_path"`` when an
+            ``"atomic_replace"`` destination was refused, what it is:
+            ``"filesystem_root"``, ``"archive_ancestor"`` (the archive's own
+            directory or an ancestor of it) or ``"working_directory"``;
+            ``None`` otherwise.
+        collision: With ``setting == "source_paths"`` when two creation sources
+            map to one entry name, the colliding pair; ``None`` otherwise.
     """
 
     setting: _ConfigSetting | None
     patterns: list[str] | None
+    protected_path: _ProtectedPath | None
+    collision: NameCollision | None
+
+@final
+class NameCollision:
+    """Two creation sources that map to one entry name."""
+
+    @property
+    def name(self) -> str:
+        """The entry name both sources map to."""
+        ...
+
+    @property
+    def first(self) -> str:
+        """The first source, redacted like an exception message."""
+        ...
+
+    @property
+    def second(self) -> str:
+        """The second source, redacted like an exception message."""
+        ...
 
 class InvalidCompressionLevelError(ArchiveError, ValueError):
     """A compression level is out of range (``code == "INVALID_COMPRESSION_LEVEL"``)."""

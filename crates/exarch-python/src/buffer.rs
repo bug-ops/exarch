@@ -328,7 +328,7 @@ impl ReuseSetting {
 ///
 /// * `existing_files` - `"skip"` (default) skips an entry whose path an earlier
 ///   entry already holds and counts a duplicate; `"overwrite"` delivers it
-///   again; `"refuse"` fails with `DestinationOccupiedError`
+///   again; `"refuse"` fails with `OutputExistsError`
 /// * `decode_reuse` - `"off"` (default), `"memory"` or `"temp_file"`: where a
 ///   ZIP extraction keeps the output of its structural check so deflate entries
 ///   are decoded once instead of twice. `"temp_file"` writes the plaintext of

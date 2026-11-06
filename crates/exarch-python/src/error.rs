@@ -1,6 +1,7 @@
 //! Python exception types for archive extraction errors.
 
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::ConfigProblem;
 use exarch_core::ErrorCode;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
@@ -114,7 +115,7 @@ static SOURCE_NOT_ACCESSIBLE: DualClass =
 static INVALID_CONFIGURATION: DualClass = DualClass::new(
     "InvalidConfigurationError",
     PyValueError::type_object,
-    &["setting", "patterns"],
+    &["setting", "patterns", "protected_path", "collision"],
 );
 static INVALID_COMPRESSION_LEVEL: DualClass = DualClass::new(
     "InvalidCompressionLevelError",
@@ -180,6 +181,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
     let os_error = os_error_fields(&err);
     let conflicts = destination_conflicts(&err);
     let patterns = unmatched_patterns(&err);
+    let problem = ProblemDetails::of(&err);
     let non_utf8_entry_path = non_utf8_entry_path(&err);
     let io_details = IoDetails::of(&err);
     let FfiErrorMessage {
@@ -215,6 +217,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
         );
         set_attr(&err, "conflicts", conflicts);
         set_attr(&err, "patterns", patterns);
+        problem.attach(&err);
         set_attr(&err, "non_utf8_entry_path", non_utf8_entry_path);
         err
     };
@@ -313,6 +316,87 @@ fn destination_conflicts(err: &CoreError) -> Option<Vec<String>> {
         ),
         CoreError::PartialExtraction(partial) => destination_conflicts(partial.cause()),
         _ => None,
+    }
+}
+
+/// Two creation sources that map to one entry name.
+///
+/// # Attributes
+///
+/// * `name` - The entry name both sources map to
+/// * `first` - The first source, redacted like an exception message
+/// * `second` - The second source, redacted like an exception message
+#[pyclass(name = "NameCollision", frozen)]
+pub struct PyNameCollision {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    first: String,
+    #[pyo3(get)]
+    second: String,
+}
+
+#[pymethods]
+impl PyNameCollision {
+    fn __repr__(&self) -> String {
+        format!(
+            "NameCollision(name={:?}, first={:?}, second={:?})",
+            self.name, self.first, self.second
+        )
+    }
+}
+
+/// What an `InvalidConfiguration` refusal says beyond its setting: why an
+/// `atomic_replace` destination was refused, or which creation sources
+/// collided.
+#[derive(Default)]
+struct ProblemDetails {
+    protected_path: Option<&'static str>,
+    collision: Option<PyNameCollision>,
+}
+
+impl ProblemDetails {
+    fn of(err: &CoreError) -> Self {
+        match err {
+            CoreError::InvalidConfiguration {
+                problem: ConfigProblem::ReplacesProtectedPath { path },
+                ..
+            } => Self {
+                protected_path: Some(path.as_str()),
+                ..Self::default()
+            },
+            CoreError::InvalidConfiguration {
+                problem:
+                    ConfigProblem::EntryNameCollision {
+                        name,
+                        first,
+                        second,
+                    },
+                ..
+            } => Self {
+                collision: Some(PyNameCollision {
+                    name: name.clone(),
+                    first: sanitize_path_for_error(first),
+                    second: sanitize_path_for_error(second),
+                }),
+                ..Self::default()
+            },
+            CoreError::PartialExtraction(partial) => Self::of(partial.cause()),
+            _ => Self::default(),
+        }
+    }
+
+    fn attach(self, err: &PyErr) {
+        set_optional_str(err, "protected_path", self.protected_path);
+        if let Some(collision) = self.collision {
+            Python::attach(|py| {
+                if let Ok(object) = Py::new(py, collision) {
+                    // setattr failures are silenced to preserve the `PyErr`
+                    // signature.
+                    let _ = err.value(py).setattr("collision", object);
+                }
+            });
+        }
     }
 }
 
@@ -421,6 +505,7 @@ pub fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
 
 /// Registers all exception types with the Python module.
 pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyNameCollision>()?;
     m.add("ArchiveError", m.py().get_type::<ArchiveError>())?;
     m.add(
         "PathTraversalError",

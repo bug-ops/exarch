@@ -1662,6 +1662,11 @@ mod tests {
                 exarch_core::ExistingFiles::as_str,
             ),
             literal_line(
+                "_ProtectedPath",
+                exarch_core::ProtectedPath::ALL,
+                exarch_core::ProtectedPath::as_str,
+            ),
+            literal_line(
                 "_Staging",
                 exarch_core::Staging::ALL,
                 exarch_core::Staging::as_str,

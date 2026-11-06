@@ -1203,7 +1203,7 @@ impl PyCreationConfig {
 /// * `existing_files` - What to do with a file that already exists at a landing
 ///   path, or that an earlier entry created: `"skip"` (default) keeps it and
 ///   counts a duplicate, `"overwrite"` replaces it where the entry kinds allow,
-///   `"refuse"` fails with `DestinationOccupiedError` and never overwrites
+///   `"refuse"` fails with `OutputExistsError` and never overwrites
 /// * `staging` - Where files are written first: `"in_place"` (default) writes
 ///   into the destination, `"atomic"` extracts into a temporary sibling
 ///   directory and renames it onto a destination that is absent or empty,
@@ -1250,7 +1250,7 @@ impl PyExtractionOptions {
     ///
     /// `"skip"` (default) keeps the existing file and counts the entry as a
     /// duplicate skip; `"overwrite"` replaces it where the entry kinds allow;
-    /// `"refuse"` raises `DestinationOccupiedError` for any occupant and never
+    /// `"refuse"` raises `OutputExistsError` for any occupant and never
     /// overwrites. A kind conflict is refused under every value.
     ///
     /// # Errors

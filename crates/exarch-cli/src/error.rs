@@ -565,9 +565,23 @@ fn zip_inconsistency_message(op: Operation, message: Message, archive: &Path) ->
         )))
 }
 
+/// The message for `err`; the generic one for a variant added to
+/// `ArchiveError` after [`dedicated_context`] was written.
 fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message {
+    dedicated_context(op, err, archive).unwrap_or_else(|| {
+        Message::default()
+            .lit("Error while processing '")
+            .path(archive)
+            .lit("'")
+    })
+}
+
+/// The message of each known `ArchiveError` variant; `None` for a variant
+/// added after this match was written, which
+/// `every_archive_error_has_a_dedicated_context` rejects.
+fn dedicated_context(op: Operation, err: &ArchiveError, archive: &Path) -> Option<Message> {
     let message = Message::default();
-    match err {
+    Some(match err {
         ArchiveError::PathTraversal { .. } => message
             .lit("Security violation: Archive '")
             .path(archive)
@@ -649,14 +663,15 @@ fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message
             message.lit("Failed to finish writing the output")
         }
 
-        // Forward-compat: a variant added to ArchiveError after this match was
-        // written. #[non_exhaustive] requires this arm to compile against a
-        // newer exarch-core; there is no more specific context to add.
-        _ => message
-            .lit("Error while processing '")
+        ArchiveError::ReaderFormat(_) => message
+            .lit("Cannot use the format of '")
             .path(archive)
             .lit("'"),
-    }
+
+        // `#[non_exhaustive]` requires this arm to compile against a newer
+        // exarch-core.
+        _ => return None,
+    })
 }
 
 /// Adds context to a generic error about archive operations.
@@ -1441,6 +1456,78 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// One value of every `ArchiveError` variant `convert_error` reaches
+    /// `dedicated_context` with (a `PartialExtraction` is unwrapped first).
+    /// `ArchiveError` has no `ALL`, so a variant added to core needs a sample
+    /// here by hand.
+    fn every_archive_error_variant() -> Vec<ArchiveError> {
+        let path = || PathBuf::from("p");
+        vec![
+            ArchiveError::Io(io::Error::from(io::ErrorKind::Other)),
+            ArchiveError::InvalidArchive(exarch_core::Malformation::LinkTargetMissing(
+                LinkKind::Symlink,
+            )),
+            ArchiveError::TarAmbiguity(exarch_core::TarAmbiguity::MalformedRecord),
+            ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: 1 }),
+            ArchiveError::PathTraversal { path: path() },
+            ArchiveError::SymlinkEscape { path: path() },
+            ArchiveError::HardlinkEscape { path: path() },
+            ArchiveError::ZipBomb(ZipBombDetails::new(
+                ZipBombScope::Entry,
+                Compressed(1),
+                Uncompressed(1 << 30),
+            )),
+            ArchiveError::ZipInconsistency(exarch_core::ZipInconsistency::OverlappingEntries),
+            ArchiveError::InvalidPermissions {
+                path: path(),
+                mode: exarch_core::RawMode::new(0o4755),
+            },
+            ArchiveError::QuotaExceeded {
+                resource: exarch_core::QuotaResource::FileCount { current: 2, max: 1 },
+            },
+            ArchiveError::from(Violation::SolidArchive),
+            ArchiveError::SourceNotFound { path: path() },
+            ArchiveError::SourceNotAccessible {
+                path: path(),
+                error: io::Error::from(io::ErrorKind::PermissionDenied),
+            },
+            ArchiveError::OutputExists { path: path() },
+            ArchiveError::InvalidCompressionLevel {
+                level: exarch_core::RequestedLevel::OutOfRange,
+            },
+            ArchiveError::UnknownFormat { path: path() },
+            ArchiveError::ReaderFormat(exarch_core::ReaderFormatError::Unrecognized),
+            ArchiveError::InvalidConfiguration {
+                setting: exarch_core::ConfigSetting::OutputPath,
+                problem: exarch_core::ConfigProblem::Empty,
+            },
+            ArchiveError::Cancelled,
+            ArchiveError::DestinationOccupied {
+                destination: path(),
+                conflicts: Box::new([path()]),
+            },
+            ArchiveError::OutputReservationLeft {
+                path: path(),
+                error: io::Error::from(io::ErrorKind::Other),
+            },
+            ArchiveError::ReplaceFailed(exarch_core::ReplaceFailure::new(
+                io::Error::from(io::ErrorKind::Other),
+                exarch_core::Restore::NotNeeded,
+                None,
+            )),
+        ]
+    }
+
+    #[test]
+    fn every_archive_error_has_a_dedicated_context() {
+        for err in every_archive_error_variant() {
+            assert!(
+                dedicated_context(Operation::Extract, &err, Path::new("a.tar")).is_some(),
+                "{err:?} took the wildcard arm"
+            );
         }
     }
 

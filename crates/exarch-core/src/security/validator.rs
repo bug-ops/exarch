@@ -389,7 +389,11 @@ impl<'a> ValidatorCore<'a> {
         check_name_limits(view, &safe_path, false, self.config)?;
         size.check_ratio(self.config)?;
         require_hardlinks_allowed(self.config)?;
-        let target = self.config.selection.mapped_link_target(path, target)?;
+        let target = self.config.selection.mapped_link_target(
+            path,
+            target,
+            self.config.allowed.absolute_paths,
+        )?;
         let counted = self.quota_tracker.reserve_count(self.config)?;
 
         let target = self.hardlink_tracker.validate_hardlink_in(

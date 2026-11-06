@@ -389,7 +389,9 @@ fn land(
                 return None;
             }
             if let LinkTarget::Recorded(target) = target {
-                selection.mapped_link_target(&entry.path, target).ok()?;
+                selection
+                    .mapped_link_target(&entry.path, target, config.allowed.absolute_paths)
+                    .ok()?;
             }
             Node::File
         }

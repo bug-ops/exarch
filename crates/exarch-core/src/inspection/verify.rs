@@ -469,8 +469,14 @@ impl Routing<'_> {
     }
 
     /// The hardlink target to validate, mapped like an entry name.
-    fn link_target<'t>(&self, entry: &ArchiveEntry, target: &'t Path) -> Result<Cow<'t, Path>> {
-        self.selection.mapped_link_target(&entry.path, target)
+    fn link_target<'t>(
+        &self,
+        entry: &ArchiveEntry,
+        target: &'t Path,
+        config: &SecurityConfig,
+    ) -> Result<Cow<'t, Path>> {
+        self.selection
+            .mapped_link_target(&entry.path, target, config.allowed.absolute_paths)
     }
 }
 
@@ -547,7 +553,7 @@ fn verify_entry(
             ManifestEntryKind::Hardlink { target } => Some(
                 usable_link_target(target, LinkKind::Hardlink).and_then(|t| {
                     check_target_lengths(t, LinkKind::Hardlink)?;
-                    let mapped = routing.link_target(entry, t)?;
+                    let mapped = routing.link_target(entry, t, config)?;
                     hardlink_tracker
                         .validate_hardlink_in(safe_path, &mapped, dest, config, tree)
                         .map(drop)
@@ -718,7 +724,7 @@ fn verify_deferred_hardlink(
     let Gated::Admit(link_path) = routing.route(entry, config, dest, tree).map_err(issue)? else {
         return Ok(());
     };
-    let target = routing.link_target(entry, target).map_err(issue)?;
+    let target = routing.link_target(entry, target, config).map_err(issue)?;
     routing
         .claims
         .require_unambiguous(&entry.path, &target)

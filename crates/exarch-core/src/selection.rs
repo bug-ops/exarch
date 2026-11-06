@@ -23,6 +23,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::Admit;
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
@@ -387,8 +388,9 @@ impl EntrySelection {
         &self,
         link: &Path,
         target: &'t Path,
+        absolute: Admit,
     ) -> Result<Cow<'t, Path>> {
-        match self.map_link_target(target)? {
+        match self.map_link_target(target, absolute)? {
             TargetMapping::Unchanged => Ok(Cow::Borrowed(target)),
             TargetMapping::Mapped(mapped) => Ok(Cow::Owned(mapped)),
             TargetMapping::NotExtracted => Err(target_not_extracted(link, target)),
@@ -398,16 +400,18 @@ impl EntrySelection {
     /// Maps the target of a hardlink, an archive path, as the entry names are
     /// mapped, without recording include hits.
     ///
-    /// A root or drive prefix is kept and only the normal components are
-    /// selected and rewritten, so the validator still applies its absolute-path
-    /// policy to the result. A target with no normal component is returned
-    /// unchanged for its own validation to refuse with the same typed error.
+    /// Where `absolute` admits absolute paths, a root or drive prefix is
+    /// dropped, as it is from an entry name, so the target lands where the
+    /// entry of that name does and is selected and rewritten with it. Elsewhere
+    /// the root is kept and the validator refuses the target as it does without
+    /// a selection. A target with no normal component is returned unchanged for
+    /// its own validation to refuse with the same typed error.
     ///
     /// # Errors
     ///
     /// Returns [`ArchiveError::PathTraversal`] for a target holding `..`, which
     /// cannot be matched against patterns or stripped lexically.
-    pub(crate) fn map_link_target(&self, target: &Path) -> Result<TargetMapping> {
+    pub(crate) fn map_link_target(&self, target: &Path, absolute: Admit) -> Result<TargetMapping> {
         if self.is_default() {
             return Ok(TargetMapping::Unchanged);
         }
@@ -416,13 +420,15 @@ impl EntrySelection {
         for component in target.components() {
             match component {
                 Component::Normal(name) => normalized.push(name),
-                Component::CurDir => {}
                 Component::ParentDir => {
                     return Err(ArchiveError::PathTraversal {
                         path: target.to_path_buf(),
                     });
                 }
-                Component::RootDir | Component::Prefix(_) => root.push(component.as_os_str()),
+                Component::RootDir | Component::Prefix(_) if !absolute.is_allowed() => {
+                    root.push(component.as_os_str());
+                }
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
             }
         }
         if normalized.is_empty() {
@@ -809,50 +815,62 @@ mod tests {
             .with_exclude(pattern("hidden"))
             .with_rewrite(PathRewrite::Strip(strip));
         assert_matches!(
-            selection.map_link_target(Path::new("./top/orig")).unwrap(),
+            selection.map_link_target(Path::new("./top/orig"), Admit::Refuse).unwrap(),
             TargetMapping::Mapped(path) if path == Path::new("orig")
         );
         assert_matches!(
-            selection.map_link_target(Path::new("top")).unwrap(),
-            TargetMapping::NotExtracted
-        );
-        assert_matches!(
             selection
-                .map_link_target(Path::new("top/hidden/x"))
+                .map_link_target(Path::new("top"), Admit::Refuse)
                 .unwrap(),
             TargetMapping::NotExtracted
         );
         assert_matches!(
-            selection.map_link_target(Path::new("top/../x")),
-            Err(ArchiveError::PathTraversal { .. })
-        );
-        assert_matches!(
-            selection.map_link_target(Path::new("/abs")).unwrap(),
+            selection
+                .map_link_target(Path::new("top/hidden/x"), Admit::Refuse)
+                .unwrap(),
             TargetMapping::NotExtracted
         );
         assert_matches!(
-            selection.map_link_target(Path::new("/")).unwrap(),
+            selection.map_link_target(Path::new("top/../x"), Admit::Refuse),
+            Err(ArchiveError::PathTraversal { .. })
+        );
+        assert_matches!(
+            selection
+                .map_link_target(Path::new("/abs"), Admit::Refuse)
+                .unwrap(),
+            TargetMapping::NotExtracted
+        );
+        assert_matches!(
+            selection
+                .map_link_target(Path::new("/"), Admit::Refuse)
+                .unwrap(),
             TargetMapping::Unchanged
         );
     }
 
     #[test]
-    fn absolute_link_target_keeps_its_root_and_maps_the_rest() {
+    fn absolute_link_target_is_relocated_only_where_absolute_paths_are_admitted() {
         let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
         let selection = EntrySelection::default()
             .with_include(pattern("top"))
             .with_rewrite(PathRewrite::Strip(strip));
         assert_matches!(
-            selection.map_link_target(Path::new("/top/orig")).unwrap(),
-            TargetMapping::Mapped(path) if path == Path::new("/orig")
+            selection.map_link_target(Path::new("/top/orig"), Admit::Allow).unwrap(),
+            TargetMapping::Mapped(path) if path == Path::new("orig")
         );
         assert_matches!(
-            selection.map_link_target(Path::new("/other/orig")).unwrap(),
+            selection
+                .map_link_target(Path::new("/other/orig"), Admit::Allow)
+                .unwrap(),
             TargetMapping::NotExtracted
         );
         assert_matches!(
-            selection.map_link_target(Path::new("/top/../x")),
+            selection.map_link_target(Path::new("/top/../x"), Admit::Allow),
             Err(ArchiveError::PathTraversal { .. })
+        );
+        assert_matches!(
+            selection.map_link_target(Path::new("/top/orig"), Admit::Refuse).unwrap(),
+            TargetMapping::Mapped(path) if path == Path::new("/orig")
         );
     }
 }

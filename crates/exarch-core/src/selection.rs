@@ -46,9 +46,10 @@ pub type EntryPattern = ExcludePattern;
 /// anything of a valid path is refused when it is built.
 ///
 /// The bound is checked only in [`StripComponents::new`], against the depth
-/// passed then. Lowering [`SecurityConfig::max_path_depth`](crate::SecurityConfig::max_path_depth) afterwards does not
-/// re-check an existing value (a count above the new depth strips every entry
-/// away), so build the count after the depth is final.
+/// passed then. Lowering
+/// [`SecurityConfig::max_path_depth`](crate::SecurityConfig::max_path_depth)
+/// afterwards does not re-check an existing value (a count above the new depth
+/// strips every entry away), so build the count after the depth is final.
 ///
 /// # Examples
 ///

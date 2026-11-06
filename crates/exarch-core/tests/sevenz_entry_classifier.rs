@@ -437,26 +437,28 @@ fn solid_with_anti_item(dir: &TempDir, anti_at: usize) -> PathBuf {
     path
 }
 
-/// The writer gives the anti item a sub-stream of its own. In front of or
-/// between the payloads it shifts the sizes of the files after it, so the block
-/// is refused; after them it only leaves a spare empty sub-stream.
+/// The writer gives an anti item no sub-stream, so in front of or between the
+/// payloads it leaves the files after it on their own data and is skipped. The
+/// shape with a sub-stream of its own is refused at open
+/// (`sevenz_substream_count.rs`).
 #[test]
-fn anti_item_inside_a_solid_block_fails_closed_before_any_write() {
-    for (anti_at, refusal) in [
-        (0, "block declares more sub-streams"),
-        (1, "do not account for"),
-    ] {
+fn anti_item_inside_a_solid_block_does_not_shift_the_payloads() {
+    for anti_at in [0, 1] {
         let dir = TempDir::new().unwrap();
         let archive = solid_with_anti_item(&dir, anti_at);
         let out = TempDir::new().unwrap();
         let config = SecurityConfig::default().with_allow_solid_archives(true);
 
-        let err = extract_archive(&archive, out.path(), &config).unwrap_err();
+        extract_archive(&archive, out.path(), &config).unwrap();
 
-        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().contains(refusal),
-            "anti item at {anti_at}: {err:?}"
+        assert_eq!(
+            dir_names(&out),
+            ["a.txt", "b.txt"],
+            "anti item at {anti_at}"
         );
-        assert!(dir_names(&out).is_empty(), "anti item at {anti_at}");
+        for (name, payload) in ["a.txt", "b.txt"].into_iter().zip(SOLID_PAYLOADS) {
+            assert_eq!(std::fs::read(out.path().join(name)).unwrap(), payload);
+        }
     }
 }
 

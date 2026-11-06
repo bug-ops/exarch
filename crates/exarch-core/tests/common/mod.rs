@@ -89,6 +89,9 @@ pub enum RawEntry<'a> {
     File(&'a str, &'a [u8]),
     Link(&'a str, &'a [u8]),
     Dir(&'a str),
+    /// A directory that still owns a zero-size sub-stream, the shape the
+    /// `sevenz-rust2` 0.24 writer produced (#769).
+    DirWithSubStream(&'a str),
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -118,14 +121,16 @@ fn bit_vector(flags: &[bool]) -> Vec<u8> {
 
 /// Writes a stored (Copy) 7z archive with one solid block holding a sub-stream
 /// per file or link, and a stream-less entry for every directory, wherever it
-/// stands in the entry order, as 7-Zip lays it out. The `sevenz-rust2` writer
-/// cannot do this: it gives a directory in a solid block a sub-stream of its
-/// own.
+/// stands in the entry order, as 7-Zip lays it out.
+/// [`RawEntry::DirWithSubStream`] writes the malformed shape instead: a
+/// directory with a sub-stream of its own, which no `sevenz-rust2` 0.25 writer
+/// produces.
 pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
     let streamed: Vec<&[u8]> = entries
         .iter()
         .filter_map(|e| match e {
             RawEntry::File(_, data) | RawEntry::Link(_, data) => Some(*data),
+            RawEntry::DirWithSubStream(_) => Some(&[][..]),
             RawEntry::Dir(_) => None,
         })
         .collect();
@@ -155,7 +160,7 @@ pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
 
     let empty_stream: Vec<bool> = entries
         .iter()
-        .map(|e| matches!(e, RawEntry::Dir(_)))
+        .map(|e| matches!(e, RawEntry::Dir(_) | RawEntry::DirWithSubStream(_)))
         .collect();
     if empty_stream.contains(&true) {
         let bits = bit_vector(&empty_stream);
@@ -170,7 +175,9 @@ pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
         let (name, attribute) = match entry {
             RawEntry::File(name, _) => (name, 0x20 | 0x8000 | (0o100_644u32 << 16)),
             RawEntry::Link(name, _) => (name, 0x8000 | (0o120_777u32 << 16)),
-            RawEntry::Dir(name) => (name, 0x10 | 0x8000 | (0o040_755u32 << 16)),
+            RawEntry::Dir(name) | RawEntry::DirWithSubStream(name) => {
+                (name, 0x10 | 0x8000 | (0o040_755u32 << 16))
+            }
         };
         for unit in name.encode_utf16().chain([0]) {
             names.extend(unit.to_le_bytes());

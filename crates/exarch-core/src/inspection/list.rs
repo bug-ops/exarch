@@ -762,7 +762,7 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
     config: &SecurityConfig,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let header = read_sevenz_header(&mut source)?;
+    let header = read_sevenz_header(&mut source, config.max_decoder_memory)?;
     list_sevenz_parsed(&header, source, config, listing)
 }
 

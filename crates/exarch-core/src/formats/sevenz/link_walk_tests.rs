@@ -3,6 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use super::UNLIMITED;
 use super::admit::sevenz_entry_compression;
 use super::links::LinkOutcome;
 use super::links::LinkReadFailure;
@@ -67,7 +68,7 @@ struct Parsed {
 }
 
 fn parse(bytes: &[u8]) -> Parsed {
-    let header = read_sevenz_header(&mut Cursor::new(bytes)).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(bytes), UNLIMITED).unwrap();
     let compression = sevenz_entry_compression(&header, bytes.len() as u64).unwrap();
     Parsed {
         header,

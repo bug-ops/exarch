@@ -5,14 +5,18 @@ use exarch_core::ArchiveError;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::DecompressionBudget;
+use exarch_core::ExistingFiles;
 use exarch_core::Extension;
+use exarch_core::ExtensionFilter;
 use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::Limit;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
+use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
+use exarch_core::Staging;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::creation::CompressionLevel;
@@ -178,6 +182,22 @@ fn parse_exclude_patterns(patterns: &[String]) -> PyResult<Vec<exarch_core::Excl
             exarch_core::ExcludePattern::try_from(pattern.as_str()).map_err(convert_error)
         })
         .collect()
+}
+
+const fn existing_files_of(skip: bool) -> ExistingFiles {
+    if skip {
+        ExistingFiles::Skip
+    } else {
+        ExistingFiles::Overwrite
+    }
+}
+
+const fn staging_of(atomic: bool) -> Staging {
+    if atomic {
+        Staging::Atomic
+    } else {
+        Staging::InPlace
+    }
 }
 
 /// Parses a Python integer of any size into a [`CompressionLevel`], so every
@@ -423,7 +443,7 @@ impl PySecurityConfig {
         mut slf: PyRefMut<'_, Self>,
         preserve: bool,
     ) -> PyRefMut<'_, Self> {
-        slf.inner.preserve_permissions = preserve;
+        slf.inner.permissions = PermissionPolicy::from_preserve(preserve);
         slf
     }
 
@@ -439,7 +459,8 @@ impl PySecurityConfig {
         ext: &str,
     ) -> PyResult<PyRefMut<'a, Self>> {
         let ext = Extension::try_from(ext).map_err(convert_error)?;
-        slf.inner.allowed_extensions.push(ext);
+        slf.inner.allowed_extensions =
+            std::mem::take(&mut slf.inner.allowed_extensions).with_added(ext);
         Ok(slf)
     }
 
@@ -537,12 +558,12 @@ impl PySecurityConfig {
 
     #[getter]
     fn get_preserve_permissions(&self) -> bool {
-        self.inner.preserve_permissions
+        self.inner.permissions.preserves()
     }
 
     #[setter]
     fn set_preserve_permissions(&mut self, value: bool) {
-        self.inner.preserve_permissions = value;
+        self.inner.permissions = PermissionPolicy::from_preserve(value);
     }
 
     /// Returns whether symlinks are allowed.
@@ -626,9 +647,14 @@ impl PySecurityConfig {
     fn get_allowed_extensions(&self) -> Vec<String> {
         self.inner
             .allowed_extensions
-            .iter()
-            .map(|ext| ext.as_str().to_owned())
-            .collect()
+            .as_only()
+            .map_or_default(|extensions| {
+                extensions
+                    .as_slice()
+                    .iter()
+                    .map(|ext| ext.as_str().to_owned())
+                    .collect()
+            })
     }
 
     #[setter]
@@ -637,11 +663,16 @@ impl PySecurityConfig {
         reason = "PyO3 setters receive the extracted list by value"
     )]
     fn set_allowed_extensions(&mut self, value: Vec<String>) -> PyResult<()> {
-        self.inner.allowed_extensions = value
+        let extensions = value
             .iter()
             .map(|ext| Extension::try_from(ext.as_str()))
-            .collect::<Result<_, _>>()
+            .collect::<Result<Vec<_>, _>>()
             .map_err(convert_error)?;
+        self.inner.allowed_extensions = if extensions.is_empty() {
+            ExtensionFilter::Any
+        } else {
+            ExtensionFilter::only(extensions).map_err(convert_error)?
+        };
         Ok(())
     }
 
@@ -793,7 +824,7 @@ impl PyCreationConfig {
         mut slf: PyRefMut<'_, Self>,
         preserve: bool,
     ) -> PyRefMut<'_, Self> {
-        slf.inner.preserve_permissions = preserve;
+        slf.inner.permissions = PermissionPolicy::from_preserve(preserve);
         slf
     }
 
@@ -868,12 +899,12 @@ impl PyCreationConfig {
 
     #[getter]
     fn get_preserve_permissions(&self) -> bool {
-        self.inner.preserve_permissions
+        self.inner.permissions.preserves()
     }
 
     #[setter]
     fn set_preserve_permissions(&mut self, value: bool) {
-        self.inner.preserve_permissions = value;
+        self.inner.permissions = PermissionPolicy::from_preserve(value);
     }
 
     #[getter]
@@ -928,7 +959,7 @@ impl PyCreationConfig {
         format!(
             "CreationConfig(compression_level={:?}, preserve_permissions={}, follow_symlinks={}, include_hidden={})",
             self.inner.compression_level,
-            self.inner.preserve_permissions,
+            self.inner.permissions.preserves(),
             self.inner.follow_symlinks,
             self.inner.include_hidden
         )
@@ -996,7 +1027,7 @@ impl PyExtractionOptions {
     /// report. When `False`, a duplicate entry causes an error.
     #[pyo3(signature = (skip=true))]
     fn with_skip_duplicates(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
-        slf.inner.skip_duplicates = skip;
+        slf.inner.existing_files = existing_files_of(skip);
         slf
     }
 
@@ -1025,7 +1056,7 @@ impl PyExtractionOptions {
     #[pyo3(name = "with_atomic")]
     #[pyo3(signature = (atomic=true))]
     fn with_atomic(mut slf: PyRefMut<'_, Self>, atomic: bool) -> PyRefMut<'_, Self> {
-        slf.inner.atomic = atomic;
+        slf.inner.staging = staging_of(atomic);
         slf
     }
 
@@ -1036,29 +1067,30 @@ impl PyExtractionOptions {
 
     #[getter]
     fn get_skip_duplicates(&self) -> bool {
-        self.inner.skip_duplicates
+        self.inner.existing_files == ExistingFiles::Skip
     }
 
     #[setter]
     fn set_skip_duplicates(&mut self, value: bool) {
-        self.inner.skip_duplicates = value;
+        self.inner.existing_files = existing_files_of(value);
     }
 
     #[getter]
     fn get_atomic(&self) -> bool {
-        self.inner.atomic
+        self.inner.staging == Staging::Atomic
     }
 
     #[setter]
     fn set_atomic(&mut self, value: bool) {
-        self.inner.atomic = value;
+        self.inner.staging = staging_of(value);
     }
 
     /// Returns a debug string representation.
     fn __repr__(&self) -> String {
         format!(
             "ExtractionOptions(skip_duplicates={}, atomic={})",
-            self.inner.skip_duplicates, self.inner.atomic
+            self.inner.existing_files == ExistingFiles::Skip,
+            self.inner.staging == Staging::Atomic
         )
     }
 }

@@ -99,8 +99,8 @@ impl From<MemoryEntry> for CallbackEntry {
 ///
 /// # Delivery rules
 ///
-/// - Under overwrite (`skip_duplicates = false`) one path can be delivered more
-///   than once, and a hardlink refers to the most recent delivery of its
+/// - Under overwrite (`ExistingFiles::Overwrite`) one path can be delivered
+///   more than once, and a hardlink refers to the most recent delivery of its
 ///   target.
 /// - Implicit parent directories are not delivered; only directories the
 ///   archive names are.

@@ -4,6 +4,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use exarch_core::ArchiveError;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractionOptions;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
@@ -496,8 +497,9 @@ fn test_7z_partial_extraction_accurate_report() {
     );
 }
 
-/// Regression test for #323: `skip_duplicates=false` must overwrite an existing
-/// file rather than returning an error, matching TAR/ZIP handler behaviour.
+/// Regression test for #323: `ExistingFiles::Overwrite` must overwrite an
+/// existing file rather than returning an error, matching TAR/ZIP handler
+/// behaviour.
 #[test]
 fn test_7z_force_overwrite_duplicate_entry() {
     let mut buf = std::io::Cursor::new(Vec::<u8>::new());
@@ -524,7 +526,7 @@ fn test_7z_force_overwrite_duplicate_entry() {
     let archive = SevenZArchive::new(cursor, &SecurityConfig::default()).unwrap();
     let out_temp = TempDir::new().unwrap();
 
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
     let report = archive
         .extract(out_temp.path(), &options, &mut exarch_core::NoopProgress)
         .expect("force-overwrite must succeed, not return an error");
@@ -761,7 +763,7 @@ fn sevenz_ratio_check_runs_before_duplicate_skip() {
 
     let result = archive.extract(
         out.path(),
-        &ExtractionOptions::default().with_skip_duplicates(true),
+        &ExtractionOptions::default().with_existing_files(ExistingFiles::Skip),
         &mut exarch_core::NoopProgress,
     );
 

@@ -91,7 +91,7 @@ impl OptionalProgress<'_> {
 /// let config = SecurityConfig::default();
 /// let mut progress = NoopProgress;
 /// let report = ExtractRequest::new(&config)
-///     .with_options(ExtractionOptions::default().with_atomic(true))
+///     .with_options(ExtractionOptions::default().with_staging(crate::Staging::Atomic))
 ///     .with_progress(&mut progress)
 ///     .extract("archive.tar.gz", "/tmp/output")?;
 /// println!("Extracted {} files", report.files_extracted);

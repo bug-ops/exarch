@@ -140,6 +140,7 @@ impl JsonKind {
                 ErrorCode::InvalidCompressionLevel => "InvalidCompressionLevel",
                 ErrorCode::UnknownFormat => "UnknownFormat",
                 ErrorCode::InvalidConfiguration => "InvalidConfiguration",
+                ErrorCode::Cancelled => "Cancelled",
                 // Wildcard only for `#[non_exhaustive]`;
                 // `every_error_code_has_a_kind_name` fails if it is ever taken.
                 _ => "Error",

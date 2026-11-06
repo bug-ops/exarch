@@ -19,6 +19,8 @@ pub mod safe_path;
 pub mod safe_symlink;
 
 pub use config_entry::Extension;
+pub use config_entry::ExtensionFilter;
+pub use config_entry::Extensions;
 pub use config_entry::PathComponentName;
 pub use dest_dir::DestDir;
 pub(crate) use entry_type::EntryType;

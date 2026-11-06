@@ -258,6 +258,9 @@ pub enum Violation {
         /// The blocking parent.
         parent: Box<str>,
     },
+    /// The destination changed between the check that vetted it and the
+    /// replace that acts on it.
+    DestinationChanged,
     /// The entry would replace an existing symlink.
     ReplacesSymlink {
         /// The entry path.
@@ -405,6 +408,7 @@ impl Violation {
             | Self::DeclaredSizeExceeded { .. }
             | Self::DeclaredSizeMismatch { .. }
             | Self::HardlinkTargetChanged
+            | Self::DestinationChanged
             | Self::TarSyntheticBudget { .. }
             | Self::SymlinksUnsupported
             | Self::ConflictUnlessSkipped { .. }
@@ -451,7 +455,7 @@ impl Violation {
             Self::DeclaredSizeExceeded { .. } | Self::DeclaredSizeMismatch { .. } => {
                 C::DeclaredSize
             }
-            Self::HardlinkTargetChanged => C::ConcurrentChange,
+            Self::HardlinkTargetChanged | Self::DestinationChanged => C::ConcurrentChange,
             Self::TarMetadataBudget { .. } | Self::TarSyntheticBudget { .. } => C::TarMetadata,
             Self::SymlinksUnsupported => C::Platform,
             Self::ConflictUnlessSkipped { .. } | Self::ConflictFails { .. } => C::OutputConflict,
@@ -602,6 +606,9 @@ impl fmt::Display for Violation {
             ),
             Self::HardlinkTargetChanged => {
                 f.write_str("hardlink target changed while it was being copied")
+            }
+            Self::DestinationChanged => {
+                f.write_str("the destination changed while it was being replaced")
             }
             Self::TarMetadataBudget { limit } => fmt_tar_read_budget(f, *limit),
             Self::TarSyntheticBudget { limit } => fmt_tar_synthetic_budget(f, *limit),
@@ -803,6 +810,7 @@ mod tests {
                 None,
             ),
             (Violation::HardlinkTargetChanged, C::ConcurrentChange, None),
+            (Violation::DestinationChanged, C::ConcurrentChange, None),
             (
                 Violation::TarMetadataBudget { limit: 1 },
                 C::TarMetadata,

@@ -8,6 +8,7 @@ mod sink_support;
 use std::path::Path;
 
 use exarch_core::Extension;
+use exarch_core::ExtensionFilter;
 use exarch_core::ExtractRequest;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
@@ -61,8 +62,9 @@ fn a_refused_entry_is_completed() {
 #[test]
 fn a_skipped_entry_is_completed() {
     let entries = [tar_file("a.txt", b"x"), tar_file("b.bin", b"y")];
-    let config = SecurityConfig::default()
-        .with_allowed_extensions(vec![Extension::try_from("txt").unwrap()]);
+    let config = SecurityConfig::default().with_allowed_extensions(
+        ExtensionFilter::only(vec![Extension::try_from("txt").unwrap()]).unwrap(),
+    );
 
     let (progress, ok) = extract(&entries, &config);
 

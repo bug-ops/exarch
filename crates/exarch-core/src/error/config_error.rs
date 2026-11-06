@@ -86,6 +86,18 @@ closed_enum! {
         SkipKind => "skip_kind",
         /// The durability of a created archive file.
         Durability => "durability",
+        /// The occupied-destination policy of an extraction.
+        ExistingFiles => "existing_files",
+        /// The staging mode of an extraction.
+        Staging => "staging",
+        /// The entry selection of an extraction.
+        EntrySelection => "entry_selection",
+        /// An entry include pattern of an extraction.
+        EntryInclude => "entry_include",
+        /// An entry exclude pattern of an extraction.
+        EntryExclude => "entry_exclude",
+        /// The number of leading path components stripped from entries.
+        StripComponents => "strip_components",
     }
 }
 
@@ -131,6 +143,12 @@ impl ConfigSetting {
             Self::DecodeReuse => "decode reuse",
             Self::DecodeReuseLimit => "decode reuse limit",
             Self::SkipKind => "skip kind",
+            Self::ExistingFiles => "existing files policy",
+            Self::Staging => "staging",
+            Self::EntrySelection => "entry selection",
+            Self::EntryInclude => "entry include pattern",
+            Self::EntryExclude => "entry exclude pattern",
+            Self::StripComponents => "strip components",
             Self::MaxFileSize
             | Self::MaxTotalSize
             | Self::MaxFileCount
@@ -227,6 +245,58 @@ pub enum ConfigProblem {
         /// Why the pattern is refused.
         reason: ExcludeRefusal,
     },
+    /// The path exists and is not a directory.
+    NotADirectory,
+    /// The path is a symbolic link.
+    IsSymlink,
+    /// Two sources map to the same entry name.
+    EntryNameCollision {
+        /// The entry name both sources map to.
+        name: String,
+        /// The first source that maps to it.
+        first: PathBuf,
+        /// The second source that maps to it.
+        second: PathBuf,
+    },
+    /// Replacing this path as a whole would destroy something that must stay.
+    ReplacesProtectedPath {
+        /// What the destination is.
+        path: ProtectedPath,
+    },
+}
+
+closed_enum! {
+    /// What makes a destination too important to replace as a whole.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ProtectedPath;
+    ///
+    /// assert_eq!(ProtectedPath::FilesystemRoot.as_str(), "filesystem_root");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum ProtectedPath {
+        /// The destination is a filesystem root.
+        FilesystemRoot => "filesystem_root",
+        /// The destination is, or contains, the archive being extracted.
+        ArchiveAncestor => "archive_ancestor",
+        /// The destination is, or contains, the process working directory.
+        WorkingDirectory => "working_directory",
+    }
+}
+
+impl ProtectedPath {
+    /// A short explanation for a message.
+    #[must_use]
+    pub const fn explanation(self) -> &'static str {
+        match self {
+            Self::FilesystemRoot => "a filesystem root",
+            Self::ArchiveAncestor => "the archive or a directory that contains it",
+            Self::WorkingDirectory => "the working directory or a directory that contains it",
+        }
+    }
 }
 
 closed_enum! {
@@ -342,6 +412,21 @@ impl fmt::Display for ConfigProblem {
             Self::ContainsNul => f.write_str("contains null bytes - potential security issue"),
             Self::ExcludePatternRefused { pattern, reason } => {
                 write!(f, "{pattern:?} {}", reason.explanation())
+            }
+            Self::NotADirectory => f.write_str("is not a directory"),
+            Self::IsSymlink => f.write_str("is a symbolic link"),
+            Self::EntryNameCollision {
+                name,
+                first,
+                second,
+            } => write!(
+                f,
+                "entry name {name:?} is produced by both {} and {}",
+                first.display(),
+                second.display()
+            ),
+            Self::ReplacesProtectedPath { path } => {
+                write!(f, "would replace {}", path.explanation())
             }
         }
     }

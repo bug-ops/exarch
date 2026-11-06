@@ -42,11 +42,13 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::DecodeReuse;
+use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::ListOptions;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Staging;
 use crate::api::extract_staged;
 use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
@@ -137,42 +139,45 @@ struct Spool {
 /// ```
 /// use exarch_core::ListedExtractOptions;
 ///
-/// let options = ListedExtractOptions::default().with_atomic(true);
-/// assert!(options.atomic);
-/// assert!(options.skip_duplicates);
+/// use exarch_core::ExistingFiles;
+/// use exarch_core::Staging;
+///
+/// let options = ListedExtractOptions::default().with_staging(Staging::Atomic);
+/// assert_eq!(options.staging, Staging::Atomic);
+/// assert_eq!(options.existing_files, ExistingFiles::Skip);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ListedExtractOptions {
-    /// Extract atomically; see [`ExtractionOptions::atomic`].
-    pub atomic: bool,
-    /// Skip duplicate entries silently instead of aborting; see
-    /// [`ExtractionOptions::skip_duplicates`].
-    pub skip_duplicates: bool,
+    /// How the output is staged; see [`ExtractionOptions::staging`].
+    pub staging: Staging,
+    /// What to do with an occupied destination path; see
+    /// [`ExtractionOptions::existing_files`].
+    pub existing_files: ExistingFiles,
 }
 
 impl Default for ListedExtractOptions {
     fn default() -> Self {
         let options = ExtractionOptions::default();
         Self {
-            atomic: options.atomic,
-            skip_duplicates: options.skip_duplicates,
+            staging: options.staging,
+            existing_files: options.existing_files,
         }
     }
 }
 
 impl ListedExtractOptions {
-    /// Enables or disables atomic extraction.
+    /// Chooses how the output is staged.
     #[must_use]
-    pub const fn with_atomic(mut self, atomic: bool) -> Self {
-        self.atomic = atomic;
+    pub const fn with_staging(mut self, staging: Staging) -> Self {
+        self.staging = staging;
         self
     }
 
-    /// Enables or disables skipping duplicate entries silently.
+    /// Chooses what happens to an occupied destination path.
     #[must_use]
-    pub const fn with_skip_duplicates(mut self, skip: bool) -> Self {
-        self.skip_duplicates = skip;
+    pub const fn with_existing_files(mut self, existing_files: ExistingFiles) -> Self {
+        self.existing_files = existing_files;
         self
     }
 }
@@ -282,8 +287,8 @@ impl ListedArchive {
             ..
         } = self;
         let extraction = ExtractionOptions::default()
-            .with_atomic(options.atomic)
-            .with_skip_duplicates(options.skip_duplicates)
+            .with_staging(options.staging)
+            .with_existing_files(options.existing_files)
             .with_decode_reuse(reuse);
         debug_assert!(
             kept.serves(&config),
@@ -642,7 +647,7 @@ mod tests {
         let listed = list(&archive, REPLAY_LIMIT);
         std::fs::remove_file(&archive).unwrap();
         let out = dir.path().join("out");
-        let options = ListedExtractOptions::default().with_atomic(true);
+        let options = ListedExtractOptions::default().with_staging(Staging::Atomic);
 
         listed.extract(&out, &options, &mut NoopProgress).unwrap();
 

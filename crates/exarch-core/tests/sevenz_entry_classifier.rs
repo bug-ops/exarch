@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::IssueSeverity;
@@ -187,7 +188,7 @@ fn anti_item_never_truncates_an_existing_file_even_with_overwrite() {
     let archive = write_archive(&dir, vec![file("a.txt", b"hi"), anti_item("gone.txt")]);
     let out = TempDir::new().unwrap();
     std::fs::write(out.path().join("gone.txt"), b"precious").unwrap();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     ExtractRequest::new(&SecurityConfig::default())
         .with_options(options)
@@ -295,7 +296,7 @@ fn anti_item_warning_survives_a_failing_extract() {
     );
     let out = TempDir::new().unwrap();
     std::fs::create_dir(out.path().join("b.txt")).unwrap();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     let err = ExtractRequest::new(&SecurityConfig::default())
         .with_options(options)

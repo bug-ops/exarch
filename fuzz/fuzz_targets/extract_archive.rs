@@ -3,6 +3,7 @@
 use std::io::Write as _;
 
 use exarch_core::ExtractRequest;
+use exarch_core::Staging;
 use exarch_core::ExtractionOptions;
 use libfuzzer_sys::fuzz_target;
 use tempfile::NamedTempFile;
@@ -16,7 +17,7 @@ fuzz_target!(|data: &[u8]| {
     // Atomic extraction (rename-into-place) is also this pipeline's default
     // in most callers and was the path GHSA-x8wr lived in; exercise it here
     // rather than only the non-atomic write-in-place path.
-    let options = ExtractionOptions::default().with_atomic(true);
+    let options = ExtractionOptions::default().with_staging(Staging::Atomic);
 
     // Extensionless by construction: format detection must fall through to
     // magic-byte sniffing, and raw fixture bytes seed this target unmodified.

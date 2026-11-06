@@ -112,6 +112,137 @@ impl fmt::Display for Extension {
     }
 }
 
+/// A non-empty list of allowed [`Extension`]s.
+///
+/// The only way to build one is [`Extensions::new`], which refuses an empty
+/// list, so an allowlist that admits nothing cannot be mistaken for "no
+/// allowlist".
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::Extension;
+/// use exarch_core::Extensions;
+///
+/// let extensions = Extensions::new(vec![Extension::try_from("txt")?])?;
+/// assert!(extensions.matches("TXT"));
+/// assert!(Extensions::new(Vec::new()).is_err());
+/// # Ok::<(), exarch_core::ArchiveError>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Extensions(Vec<Extension>);
+
+impl Extensions {
+    /// Wraps a list of extensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::AllowedExtension`] with [`ConfigProblem::Empty`] for an
+    /// empty list.
+    pub fn new(extensions: Vec<Extension>) -> Result<Self> {
+        if extensions.is_empty() {
+            return Err(invalid(Extension::SETTING, ConfigProblem::Empty));
+        }
+        Ok(Self(extensions))
+    }
+
+    /// The extensions, in the order they were given.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Extension] {
+        &self.0
+    }
+
+    /// Whether `extension`, as `Path::extension` yields it, is one of them.
+    #[must_use]
+    pub fn matches(&self, extension: &str) -> bool {
+        self.0.iter().any(|allowed| allowed.matches(extension))
+    }
+
+    fn pushed(mut self, extension: Extension) -> Self {
+        self.0.push(extension);
+        self
+    }
+}
+
+/// Which file extensions extraction admits.
+///
+/// [`Any`](Self::Any) is the default and admits every file, with or without an
+/// extension. [`Only`](Self::Only) admits just the listed extensions and skips
+/// files without one. The two states are variants, so an allowlist that came up
+/// empty is refused by [`ExtensionFilter::only`] instead of silently admitting
+/// everything.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::Extension;
+/// use exarch_core::ExtensionFilter;
+///
+/// let filter = ExtensionFilter::only(vec![Extension::try_from("txt")?])?;
+/// assert!(filter.allows(Some("txt")));
+/// assert!(!filter.allows(None));
+/// assert!(ExtensionFilter::Any.allows(None));
+/// assert!(ExtensionFilter::only(Vec::new()).is_err());
+/// # Ok::<(), exarch_core::ArchiveError>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExtensionFilter {
+    /// Every file is extracted.
+    #[default]
+    Any,
+    /// Only files with one of these extensions are extracted.
+    Only(Extensions),
+}
+
+impl ExtensionFilter {
+    /// An allowlist of `extensions`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidConfiguration`] with
+    /// [`ConfigProblem::Empty`] for an empty list.
+    pub fn only(extensions: Vec<Extension>) -> Result<Self> {
+        Extensions::new(extensions).map(Self::Only)
+    }
+
+    /// Whether every file is admitted.
+    #[must_use]
+    pub const fn is_any(&self) -> bool {
+        matches!(self, Self::Any)
+    }
+
+    /// The allowlist, or `None` when every file is admitted.
+    #[must_use]
+    pub const fn as_only(&self) -> Option<&Extensions> {
+        match self {
+            Self::Any => None,
+            Self::Only(extensions) => Some(extensions),
+        }
+    }
+
+    /// Whether a file whose extension is `extension` is admitted. A file
+    /// without an extension is admitted only by [`Any`](Self::Any).
+    #[must_use]
+    pub fn allows(&self, extension: Option<&str>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Only(allowed) => extension.is_some_and(|ext| allowed.matches(ext)),
+        }
+    }
+
+    /// This filter with `extension` admitted too; [`Any`](Self::Any) becomes an
+    /// allowlist of just that extension.
+    #[must_use]
+    pub fn with_added(self, extension: Extension) -> Self {
+        match self {
+            Self::Any => Self::Only(Extensions(vec![extension])),
+            Self::Only(allowed) => Self::Only(allowed.pushed(extension)),
+        }
+    }
+}
+
 /// One normal path component that archive entries may not contain.
 ///
 /// Built only through [`TryFrom<&str>`]. The value is never empty, holds no

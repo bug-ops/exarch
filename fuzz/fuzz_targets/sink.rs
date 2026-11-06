@@ -38,12 +38,12 @@ const MAX_HOPS: usize = 40;
 fuzz_target!(|data: &[u8]| {
     let config = common::config();
     for model in [PathModel::Host, PathModel::Portable] {
-        for skip_duplicates in [true, false] {
+        for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
             let Ok(reader) = ArchiveReader::from_bytes(data, None) else {
                 return;
             };
             let mut sink = MemorySink::new(MemoryLimit::from_config(config)).with_path_model(model);
-            let options = SinkOptions::default().with_skip_duplicates(skip_duplicates);
+            let options = SinkOptions::default().with_existing_files(existing_files);
             let _ = SinkExtractRequest::new(config)
                 .with_options(options)
                 .extract(reader, &mut sink);

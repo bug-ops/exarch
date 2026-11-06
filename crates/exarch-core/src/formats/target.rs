@@ -13,6 +13,7 @@ use std::path::Path;
 use super::zip_reuse::Retained;
 
 use crate::ArchiveError;
+use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::Malformation;
 use crate::ProgressCallback;
@@ -37,7 +38,6 @@ use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::validator::FileScreen;
 use crate::security::validator::ValidatorCore;
-use crate::sink::DuplicatePolicy;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -446,12 +446,20 @@ impl ExtractTarget for HostTarget<'_> {
         let link_file = match link_dir.create_new(link_leaf, link_mode) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-                    return common::record_duplicate_skip(tally.report, link.as_path());
-                }
-                return Err(ArchiveError::from(Malformation::DuplicateEntry {
-                    path: link.as_path().to_path_buf(),
-                }));
+                return match tally.options.existing_files {
+                    ExistingFiles::Skip => {
+                        common::record_duplicate_skip(tally.report, link.as_path())
+                    }
+                    ExistingFiles::Refuse => Err(common::destination_occupied(
+                        self.root.dest().as_path(),
+                        link.as_path(),
+                    )),
+                    ExistingFiles::Overwrite => {
+                        Err(ArchiveError::from(Malformation::DuplicateEntry {
+                            path: link.as_path().to_path_buf(),
+                        }))
+                    }
+                };
             }
             Err(e) => return Err(ArchiveError::Io(e)),
         };

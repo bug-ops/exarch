@@ -30,7 +30,9 @@ use exarch_core::ArchiveManifest;
 use exarch_core::ArchiveType;
 use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
+use exarch_core::ExistingFiles;
 use exarch_core::Extension;
+use exarch_core::ExtensionFilter;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
@@ -44,6 +46,7 @@ use exarch_core::ManifestEntryKind;
 use exarch_core::PathComponentName;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
+use exarch_core::Staging as CoreStaging;
 use exarch_core::StoredTargets;
 use exarch_core::Violation;
 use exarch_core::detect_format;
@@ -88,8 +91,8 @@ fn run_extraction(
             .extract(archive, output_dir),
         Source::Listed(listed) => {
             let listed_options = ListedExtractOptions::default()
-                .with_atomic(options.atomic)
-                .with_skip_duplicates(options.skip_duplicates);
+                .with_staging(options.staging)
+                .with_existing_files(options.existing_files);
             listed.extract(output_dir, &listed_options, progress)
         }
     }
@@ -826,7 +829,10 @@ fn resolve_atomic_force_replace(
 /// can never match (for example `tar.gz` or `a/b`), and an error when values
 /// were given but hold no extension at all (an empty list would allow every
 /// extension).
-fn parse_extensions(tokens: &[ListToken]) -> Result<Vec<Extension>> {
+fn parse_extensions(tokens: &[ListToken]) -> Result<ExtensionFilter> {
+    if tokens.is_empty() {
+        return Ok(ExtensionFilter::Any);
+    }
     let parsed = items(tokens)
         .map(|ext| {
             Extension::try_from(ext).with_context(|| {
@@ -834,10 +840,8 @@ fn parse_extensions(tokens: &[ListToken]) -> Result<Vec<Extension>> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    if parsed.is_empty() && !tokens.is_empty() {
-        anyhow::bail!("{} names no extension", Flag::AllowedExtensions.long());
-    }
-    Ok(parsed)
+    ExtensionFilter::only(parsed)
+        .map_err(|_| anyhow::anyhow!("{} names no extension", Flag::AllowedExtensions.long()))
 }
 
 fn items(tokens: &[ListToken]) -> impl Iterator<Item = &str> {
@@ -1001,7 +1005,7 @@ fn is_extracted_file(entry: &ArchiveEntry, config: &SecurityConfig) -> bool {
 /// Number of entries the progress bar counts: every listed entry, or only the
 /// files with an allowed extension when an extension filter is active.
 fn listed_entry_count(manifest: &ArchiveManifest, config: &SecurityConfig) -> usize {
-    if config.allowed_extensions.is_empty() {
+    if config.allowed_extensions.is_any() {
         manifest.entries().len()
     } else {
         manifest
@@ -1316,23 +1320,33 @@ fn plan_extraction(
     // `run_atomic_force_extraction`.
     let target = resolve_atomic_force_replace(mode, output_dir)?;
 
-    let options = |atomic: bool| {
+    let existing_files = if mode.overwrites() {
+        ExistingFiles::Overwrite
+    } else {
+        ExistingFiles::Skip
+    };
+    let options = |staging: CoreStaging| {
         ExtractionOptions::default()
-            .with_atomic(atomic)
-            .with_skip_duplicates(!mode.overwrites())
+            .with_staging(staging)
+            .with_existing_files(existing_files)
             .with_decode_reuse(reuse)
     };
     Ok(match (target, listing) {
         (Some(target), listing) => ExtractPlan::Replace {
             target,
             source: listing.map_or(Source::Archive, |(listed, _)| Source::Listed(listed)),
-            options: options(false),
+            options: options(CoreStaging::InPlace),
         },
         (None, Some((listed, conflicts))) => {
-            ExtractPlan::listed(listed, options(mode.stages()), conflicts)
+            let staging = if mode.stages() {
+                CoreStaging::Atomic
+            } else {
+                CoreStaging::InPlace
+            };
+            ExtractPlan::listed(listed, options(staging), conflicts)
         }
         (None, None) => ExtractPlan::Stream {
-            options: options(true),
+            options: options(CoreStaging::Atomic),
         },
     })
 }
@@ -1735,9 +1749,14 @@ mod tests {
     fn extension_names(raw: &[&str]) -> Vec<String> {
         parse_extensions(&tokens(raw))
             .unwrap()
-            .iter()
-            .map(|e| e.as_str().to_owned())
-            .collect()
+            .as_only()
+            .map_or_default(|extensions| {
+                extensions
+                    .as_slice()
+                    .iter()
+                    .map(|e| e.as_str().to_owned())
+                    .collect()
+            })
     }
 
     #[test]

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use exarch_core::CheckStatus;
 use exarch_core::ErrorCode;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
@@ -120,11 +121,14 @@ impl Fixture {
         self.root.path().join("out")
     }
 
-    fn extract(&self, skip_duplicates: bool) -> exarch_core::Result<exarch_core::ExtractionReport> {
+    fn extract(
+        &self,
+        existing_files: ExistingFiles,
+    ) -> exarch_core::Result<exarch_core::ExtractionReport> {
         let config = SecurityConfig::default()
             .with_allow_symlinks(true)
             .with_allow_hardlinks(true);
-        let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
+        let options = ExtractionOptions::default().with_existing_files(existing_files);
         ExtractRequest::new(&config)
             .with_options(options)
             .extract(&self.archive, self.out())
@@ -183,7 +187,7 @@ fn symlink_target_with_unresolvable_parent_component_is_rejected() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Link("a", "d/.."), Link("d", ".")]);
         assert_eq!(
-            code(fixture.extract(true)),
+            code(fixture.extract(ExistingFiles::Skip)),
             ErrorCode::SymlinkEscape,
             "{format:?}"
         );
@@ -201,7 +205,7 @@ fn symlink_target_leaving_dest_through_link_is_rejected() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Link("d", "."), Link("a", "d/..")]);
         assert_eq!(
-            code(fixture.extract(true)),
+            code(fixture.extract(ExistingFiles::Skip)),
             ErrorCode::SymlinkEscape,
             "{format:?}"
         );
@@ -219,7 +223,7 @@ fn symlink_target_with_two_unresolvable_parent_components_is_rejected() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Link("a", "d/e/../../f"), Dir("d/e/")]);
         assert_eq!(
-            code(fixture.extract(true)),
+            code(fixture.extract(ExistingFiles::Skip)),
             ErrorCode::SymlinkEscape,
             "{format:?}"
         );
@@ -236,7 +240,7 @@ fn hardlink_target_with_unresolvable_parent_component_is_rejected() {
     for format in TAR_ONLY {
         let fixture = Fixture::new(format, &[File("f"), Hardlink("h", "d/../f"), Dir("d/")]);
         assert_eq!(
-            code(fixture.extract(true)),
+            code(fixture.extract(ExistingFiles::Skip)),
             ErrorCode::HardlinkEscape,
             "{format:?}"
         );
@@ -252,7 +256,7 @@ fn hardlink_target_with_unresolvable_parent_component_is_rejected() {
 fn hardlink_target_through_existing_directory_extracts() {
     for format in TAR_ONLY {
         let fixture = Fixture::new(format, &[File("f"), Dir("d/"), Hardlink("h", "d/../f")]);
-        fixture.extract(true).unwrap();
+        fixture.extract(ExistingFiles::Skip).unwrap();
         assert!(fixture.out().join("h").exists(), "{format:?}");
     }
 }
@@ -261,7 +265,7 @@ fn hardlink_target_through_existing_directory_extracts() {
 fn symlink_target_through_existing_directory_extracts() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Dir("d/"), Link("x", "d/../f")]);
-        let report = fixture.extract(true).unwrap();
+        let report = fixture.extract(ExistingFiles::Skip).unwrap();
         assert_eq!(report.symlinks_created, 1, "{format:?}");
         assert_eq!(
             std::fs::read_link(fixture.out().join("x")).unwrap(),
@@ -280,7 +284,7 @@ fn symlink_target_parent_component_must_resolve_in_entry_order() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Link("x", "d/../f"), Dir("d/")]);
         assert_eq!(
-            code(fixture.extract(true)),
+            code(fixture.extract(ExistingFiles::Skip)),
             ErrorCode::SymlinkEscape,
             "{format:?}"
         );
@@ -296,7 +300,7 @@ fn symlink_target_parent_component_must_resolve_in_entry_order() {
 fn symlink_target_leaving_own_parent_directories_extracts() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Link("sub/l", "../x"), Link("a/b/l", "../../x")]);
-        let report = fixture.extract(true).unwrap();
+        let report = fixture.extract(ExistingFiles::Skip).unwrap();
         assert_eq!(report.symlinks_created, 2, "{format:?}");
         assert_eq!(
             fixture.verify_status(),
@@ -346,7 +350,7 @@ fn resolves_to(fixture: &Fixture, link: &str, expected: &str) {
 #[test]
 fn existing_symlink_at_link_path_is_not_replaced() {
     for format in TAR_ONLY {
-        for skip_duplicates in [true, false] {
+        for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
             let fixture = Fixture::new(
                 format,
                 &[
@@ -357,8 +361,8 @@ fn existing_symlink_at_link_path_is_not_replaced() {
                     Link("x", "."),
                 ],
             );
-            let result = fixture.extract(skip_duplicates);
-            if skip_duplicates {
+            let result = fixture.extract(existing_files);
+            if existing_files == ExistingFiles::Skip {
                 result.unwrap();
             } else {
                 assert_symlink_refused(result);
@@ -374,7 +378,7 @@ fn existing_symlink_at_link_path_is_not_replaced() {
 #[test]
 fn existing_symlink_in_chain_is_not_replaced() {
     for format in TAR_ONLY {
-        for skip_duplicates in [true, false] {
+        for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
             let fixture = Fixture::new(
                 format,
                 &[
@@ -385,8 +389,8 @@ fn existing_symlink_in_chain_is_not_replaced() {
                     Link("y", "."),
                 ],
             );
-            let result = fixture.extract(skip_duplicates);
-            if skip_duplicates {
+            let result = fixture.extract(existing_files);
+            if existing_files == ExistingFiles::Skip {
                 result.unwrap();
             } else {
                 assert_symlink_refused(result);
@@ -448,11 +452,11 @@ fn repointing_a_link_that_an_earlier_link_resolved_through_is_refused() {
         ),
     ];
     for (name, nodes) in archives {
-        for skip_duplicates in [true, false] {
+        for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
             let fixture = Fixture::new(Format::Tar, nodes);
-            let result = fixture.extract(skip_duplicates);
-            let label = format!("{name} skip_duplicates={skip_duplicates}");
-            if skip_duplicates {
+            let result = fixture.extract(existing_files);
+            let label = format!("{name} existing_files={existing_files}");
+            if existing_files == ExistingFiles::Skip {
                 assert!(result.is_ok(), "{label}: {result:?}");
             } else {
                 assert!(result.is_err(), "{label}");
@@ -475,7 +479,7 @@ fn zip_repointing_through_an_earlier_link_never_escapes() {
         Link("e", "dQ/../.."),
         Link("dR", "sub"),
     ];
-    for skip_duplicates in [true, false] {
+    for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
         let fixture = Fixture::new(Format::Zip, &nodes);
         let mut bytes = std::fs::read(&fixture.archive).unwrap();
         let mut renamed = 0;
@@ -488,7 +492,7 @@ fn zip_repointing_through_an_earlier_link_never_escapes() {
         assert!(renamed >= 2, "local header and central directory");
         std::fs::write(&fixture.archive, bytes).unwrap();
 
-        let _ = fixture.extract(skip_duplicates);
+        let _ = fixture.extract(existing_files);
         assert_links_resolve_in_dest(&fixture.out());
     }
 }
@@ -502,7 +506,7 @@ fn existing_symlink_with_differently_cased_name_is_not_replaced() {
         return;
     }
     for format in TAR_ONLY {
-        for skip_duplicates in [true, false] {
+        for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
             let fixture = Fixture::new(
                 format,
                 &[
@@ -513,7 +517,7 @@ fn existing_symlink_with_differently_cased_name_is_not_replaced() {
                     Link("X", "."),
                 ],
             );
-            let _ = fixture.extract(skip_duplicates);
+            let _ = fixture.extract(existing_files);
             assert_links_resolve_in_dest(&fixture.out());
             resolves_to(&fixture, "x", "p/q");
             assert_ne!(
@@ -529,8 +533,8 @@ fn existing_symlink_with_differently_cased_name_is_not_replaced() {
 fn rerun_with_overwrite_keeps_unchanged_symlinks() {
     for target in ["missing.so.1", "f"] {
         let fixture = Fixture::new(Format::Tar, &[File("f"), Link("lib.so", target)]);
-        fixture.extract(false).unwrap();
-        fixture.extract(false).unwrap();
+        fixture.extract(ExistingFiles::Overwrite).unwrap();
+        fixture.extract(ExistingFiles::Overwrite).unwrap();
         assert_eq!(
             std::fs::read_link(fixture.out().join("lib.so")).unwrap(),
             Path::new(target)
@@ -540,7 +544,7 @@ fn rerun_with_overwrite_keeps_unchanged_symlinks() {
 
 #[test]
 fn hardlink_over_an_earlier_link_is_refused_and_keeps_the_link() {
-    for skip_duplicates in [true, false] {
+    for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
         let fixture = Fixture::new(
             Format::Tar,
             &[
@@ -552,7 +556,7 @@ fn hardlink_over_an_earlier_link_is_refused_and_keeps_the_link() {
                 Hardlink("x", "t"),
             ],
         );
-        let _ = fixture.extract(skip_duplicates);
+        let _ = fixture.extract(existing_files);
         assert_links_resolve_in_dest(&fixture.out());
         resolves_to(&fixture, "x", "p/q");
         resolves_to(&fixture, "a", "p");
@@ -567,7 +571,7 @@ fn normalization_variant_of_an_existing_symlink_is_not_replaced() {
     if !probe.path().join("cafe\u{301}").exists() {
         return;
     }
-    for skip_duplicates in [true, false] {
+    for existing_files in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
         let fixture = Fixture::new(
             Format::Tar,
             &[
@@ -578,7 +582,7 @@ fn normalization_variant_of_an_existing_symlink_is_not_replaced() {
                 Link("cafe\u{301}", "."),
             ],
         );
-        let _ = fixture.extract(skip_duplicates);
+        let _ = fixture.extract(existing_files);
         assert_links_resolve_in_dest(&fixture.out());
         resolves_to(&fixture, "caf\u{e9}", "p/q");
         assert_ne!(fixture.verify_status(), Some(CheckStatus::Pass));
@@ -589,7 +593,7 @@ fn normalization_variant_of_an_existing_symlink_is_not_replaced() {
 fn dangling_symlink_at_link_path_is_skipped_or_refused_by_policy() {
     for format in TAR_ONLY {
         let skipped = Fixture::new(format, &[Link("x", "gone"), Link("x", "other")]);
-        let report = skipped.extract(true).unwrap();
+        let report = skipped.extract(ExistingFiles::Skip).unwrap();
         assert_eq!(report.symlinks_created, 1, "{format:?}");
         assert_eq!(
             std::fs::read_link(skipped.out().join("x")).unwrap(),
@@ -597,7 +601,7 @@ fn dangling_symlink_at_link_path_is_skipped_or_refused_by_policy() {
         );
 
         let refused = Fixture::new(format, &[Link("x", "gone"), Link("x", "other")]);
-        assert_symlink_refused(refused.extract(false));
+        assert_symlink_refused(refused.extract(ExistingFiles::Overwrite));
         assert_eq!(
             std::fs::read_link(refused.out().join("x")).unwrap(),
             Path::new("gone")

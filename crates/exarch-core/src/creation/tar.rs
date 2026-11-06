@@ -138,7 +138,7 @@ fn add_directory_to_tar<W: Write>(
     header.set_entry_type(tar::EntryType::Directory);
     header.set_size(0);
 
-    if config.preserve_permissions {
+    if config.permissions.preserves() {
         let metadata = std::fs::metadata(dir_path).map_err(|e| source_error(dir_path, e))?;
         set_permissions(&mut header, &metadata);
     } else {
@@ -178,7 +178,7 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
     header.set_size(size);
     header.set_cksum();
 
-    if config.preserve_permissions {
+    if config.permissions.preserves() {
         set_permissions(&mut header, &metadata);
     }
 

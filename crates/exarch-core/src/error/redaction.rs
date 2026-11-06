@@ -202,7 +202,7 @@ impl ArchiveError {
     /// };
     /// assert_eq!(err.redacted_path().as_deref(), Some("../../etc/passwd"));
     ///
-    /// let err = ArchiveError::InvalidCompressionLevel { level: 0 };
+    /// let err = ArchiveError::Cancelled;
     /// assert_eq!(err.redacted_path(), None);
     /// ```
     #[must_use]
@@ -216,6 +216,10 @@ impl ArchiveError {
             Self::SourceNotFound { path }
             | Self::SourceNotAccessible { path, .. }
             | Self::OutputExists { path }
+            | Self::OutputReservationLeft { path, .. }
+            | Self::DestinationOccupied {
+                destination: path, ..
+            }
             | Self::UnknownFormat { path } => Some(sanitize_path_for_error(path)),
 
             Self::PartialExtraction(partial) => partial.cause().redacted_path(),
@@ -230,6 +234,8 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::InvalidConfiguration { .. }
+            | Self::Cancelled
+            | Self::ReplaceFailed(_)
             | Self::ReaderFormat(_) => None,
         }
     }
@@ -394,7 +400,9 @@ mod tests {
             )),
             ArchiveError::unclassified("bad header"),
             ArchiveError::from(Violation::EncryptedArchive),
-            ArchiveError::InvalidCompressionLevel { level: 0 },
+            ArchiveError::InvalidCompressionLevel {
+                level: crate::RequestedLevel::Integer(0),
+            },
             ArchiveError::InvalidConfiguration {
                 setting: crate::ConfigSetting::OutputPath,
                 problem: crate::ConfigProblem::NotSet,

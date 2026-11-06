@@ -640,6 +640,18 @@ fn context_message(op: Operation, err: &ArchiveError, archive: &Path) -> Message
             "Invalid compression level {level}: must be between 1 and 9."
         )),
 
+        ArchiveError::Cancelled => message.lit("Operation cancelled"),
+        ArchiveError::DestinationOccupied { .. } => message
+            .lit("The destination already holds files the archive would write")
+            .hint(
+                op.accepts(Flag::Force)
+                    .then(|| format!("Use {} to overwrite.", Flag::Force.long())),
+            ),
+        ArchiveError::OutputReservationLeft { .. } => {
+            message.lit("An empty reservation file was left at the output path")
+        }
+        ArchiveError::ReplaceFailed(_) => message.lit("Failed to replace the destination"),
+
         // Forward-compat: a variant added to ArchiveError after this match was
         // written. #[non_exhaustive] requires this arm to compile against a
         // newer exarch-core; there is no more specific context to add.
@@ -898,7 +910,9 @@ mod tests {
 
     #[test]
     fn test_invalid_compression_level_contains_level() {
-        let err = ArchiveError::InvalidCompressionLevel { level: 0 };
+        let err = ArchiveError::InvalidCompressionLevel {
+            level: exarch_core::RequestedLevel::Integer(0),
+        };
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains('0'), "level missing: {msg}");

@@ -329,7 +329,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         let config = Arc::clone(&self.config);
         self.admit(&config)?.extract_with(
             |config| SevenZHostTarget::create(output_dir, config),
-            SinkOptions::duplicates_of(options),
+            SinkOptions::existing_files_of(options),
             progress,
         )
     }

@@ -7,12 +7,15 @@ use std::num::NonZeroUsize;
 use exarch_core::ArchiveError as CoreError;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
+use exarch_core::ExistingFiles;
 use exarch_core::Extension;
 use exarch_core::Limit;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
+use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
 use exarch_core::SecurityConfig as CoreConfig;
+use exarch_core::Staging;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
 use exarch_core::creation::CompressionLevel;
 use exarch_core::positive_from_f64;
@@ -75,6 +78,22 @@ fn bounded_bytes(limit: Limit<NonZeroU64>) -> Option<i64> {
     clippy::cast_sign_loss,
     reason = "the value is a whole number in 0..=u32::MAX here"
 )]
+const fn existing_files_of(skip: bool) -> ExistingFiles {
+    if skip {
+        ExistingFiles::Skip
+    } else {
+        ExistingFiles::Overwrite
+    }
+}
+
+const fn staging_of(atomic: bool) -> Staging {
+    if atomic {
+        Staging::Atomic
+    } else {
+        Staging::InPlace
+    }
+}
+
 fn compression_level(level: f64) -> std::result::Result<CompressionLevel, Failure> {
     let whole =
         level.is_finite() && level.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&level);
@@ -356,7 +375,7 @@ impl SecurityConfig {
     /// Sets whether to preserve permissions from archive.
     #[napi(js_name = "setPreservePermissions")]
     pub fn set_preserve_permissions(&mut self, preserve: bool) -> &Self {
-        self.inner.preserve_permissions = preserve;
+        self.inner.permissions = PermissionPolicy::from_preserve(preserve);
         self
     }
 
@@ -465,7 +484,7 @@ impl SecurityConfig {
     /// Whether to preserve permissions from archive.
     #[napi(getter)]
     pub fn get_preserve_permissions(&self) -> bool {
-        self.inner.preserve_permissions
+        self.inner.permissions.preserves()
     }
 
     /// Whether symlinks are allowed.
@@ -538,15 +557,23 @@ impl SecurityConfig {
     pub fn get_allowed_extensions(&self) -> Vec<String> {
         self.inner
             .allowed_extensions
-            .iter()
-            .map(|ext| ext.as_str().to_owned())
-            .collect()
+            .as_only()
+            .map_or_default(|extensions| {
+                extensions
+                    .as_slice()
+                    .iter()
+                    .map(|ext| ext.as_str().to_owned())
+                    .collect()
+            })
     }
 
     /// Returns the number of allowed extensions.
     #[napi]
     pub fn get_allowed_extensions_count(&self) -> u32 {
-        saturating_u32(self.inner.allowed_extensions.len())
+        self.inner
+            .allowed_extensions
+            .as_only()
+            .map_or_default(|extensions| saturating_u32(extensions.as_slice().len()))
     }
 
     /// Checks if a specific extension is in the allowed list.
@@ -556,8 +583,12 @@ impl SecurityConfig {
         reason = "napi passes JavaScript arguments by value"
     )]
     pub fn has_allowed_extension(&self, ext: String) -> bool {
-        Extension::try_from(ext.as_str())
-            .is_ok_and(|ext| self.inner.allowed_extensions.contains(&ext))
+        Extension::try_from(ext.as_str()).is_ok_and(|ext| {
+            self.inner
+                .allowed_extensions
+                .as_only()
+                .is_some_and(|extensions| extensions.as_slice().contains(&ext))
+        })
     }
 
     /// List of banned path components.
@@ -661,7 +692,8 @@ impl SecurityConfig {
     /// without a JS environment.
     fn try_add_allowed_extension(&mut self, ext: &str) -> std::result::Result<(), CoreError> {
         let ext = Extension::try_from(ext)?;
-        self.inner.allowed_extensions.push(ext);
+        self.inner.allowed_extensions =
+            std::mem::take(&mut self.inner.allowed_extensions).with_added(ext);
         Ok(())
     }
 
@@ -734,7 +766,7 @@ impl CreationConfig {
     /// Default: true.
     #[napi(js_name = "setPreservePermissions")]
     pub fn set_preserve_permissions(&mut self, preserve: bool) -> &Self {
-        self.inner.preserve_permissions = preserve;
+        self.inner.permissions = PermissionPolicy::from_preserve(preserve);
         self
     }
 
@@ -823,7 +855,7 @@ impl CreationConfig {
     /// Whether to preserve permissions.
     #[napi(getter)]
     pub fn get_preserve_permissions(&self) -> bool {
-        self.inner.preserve_permissions
+        self.inner.permissions.preserves()
     }
 
     /// Whether to follow symlinks.
@@ -929,7 +961,7 @@ impl ExtractionOptions {
     /// report. When `false`, a duplicate entry causes an error.
     #[napi(js_name = "withSkipDuplicates")]
     pub fn with_skip_duplicates(&mut self, skip: bool) -> &Self {
-        self.inner.skip_duplicates = skip;
+        self.inner.existing_files = existing_files_of(skip);
         self
     }
 
@@ -946,7 +978,7 @@ impl ExtractionOptions {
     /// existing directory without error.
     #[napi(js_name = "withAtomic")]
     pub fn with_atomic(&mut self, atomic: bool) -> &Self {
-        self.inner.atomic = atomic;
+        self.inner.staging = staging_of(atomic);
         self
     }
 
@@ -959,13 +991,13 @@ impl ExtractionOptions {
     /// Whether duplicate entries are skipped silently.
     #[napi(getter)]
     pub fn get_skip_duplicates(&self) -> bool {
-        self.inner.skip_duplicates
+        self.inner.existing_files == ExistingFiles::Skip
     }
 
     /// Whether atomic extraction is enabled.
     #[napi(getter)]
     pub fn get_atomic(&self) -> bool {
-        self.inner.atomic
+        self.inner.staging == Staging::Atomic
     }
 }
 
@@ -1010,14 +1042,14 @@ impl SinkOptions {
     /// `false`, a duplicate entry causes an error.
     #[napi(js_name = "setSkipDuplicates")]
     pub fn set_skip_duplicates(&mut self, skip: bool) -> &Self {
-        self.inner = self.inner.with_skip_duplicates(skip);
+        self.inner = self.inner.with_existing_files(existing_files_of(skip));
         self
     }
 
     /// Whether duplicate entries are skipped silently.
     #[napi(getter)]
     pub fn get_skip_duplicates(&self) -> bool {
-        self.inner.skip_duplicates
+        self.inner.existing_files == ExistingFiles::Skip
     }
 }
 
@@ -1932,7 +1964,7 @@ mod tests {
         assert_matches!(
             config.try_set_compression_level(10.0),
             Err(Failure::Core(CoreError::InvalidCompressionLevel {
-                level: 10
+                level: exarch_core::RequestedLevel::Integer(10)
             }))
         );
         assert_eq!(config.get_compression_level(), 6);

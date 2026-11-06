@@ -218,7 +218,7 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     }
 
     // Configure options with permissions if needed
-    let file_options = if config.preserve_permissions {
+    let file_options = if config.permissions.preserves() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

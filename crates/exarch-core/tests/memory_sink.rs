@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
 use exarch_core::EntrySink as _;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::MemoryEntry;
@@ -28,6 +29,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
 use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
+use exarch_core::Staging;
 use exarch_core::extract_reader_to_memory;
 use sink_support::tar_archive;
 use sink_support::tar_dir;
@@ -224,7 +226,7 @@ fn a_declared_size_over_the_limit_is_refused_before_any_allocation() {
 fn overwriting_a_file_near_the_limit_releases_the_old_bytes() {
     let one = charge("a", 9);
     let mut sink = MemorySink::new(limit(one + 4));
-    let options = SinkOptions::default().with_skip_duplicates(false);
+    let options = SinkOptions::default().with_existing_files(ExistingFiles::Overwrite);
     run_tar(
         &[tar_file("a", b"123456789"), tar_file("a", b"abcdefghi")],
         &mut sink,
@@ -239,7 +241,7 @@ fn overwriting_a_file_near_the_limit_releases_the_old_bytes() {
 #[test]
 fn a_symlink_over_a_file_frees_the_file_bytes() {
     let mut sink = MemorySink::new(limit(KIB));
-    let options = SinkOptions::default().with_skip_duplicates(false);
+    let options = SinkOptions::default().with_existing_files(ExistingFiles::Overwrite);
     run_tar(
         &[tar_file("l", &[7; 50]), tar_symlink("l", "t")],
         &mut sink,
@@ -518,21 +520,25 @@ fn extract_reader_to_memory_applies_the_request_options() {
 
     assert_eq!(data_of(&MemoryExtractRequest::default()), b"first");
     let overwrite = MemoryExtractRequest::default()
-        .with_options(SinkOptions::default().with_skip_duplicates(false));
+        .with_options(SinkOptions::default().with_existing_files(ExistingFiles::Overwrite));
     assert_eq!(data_of(&overwrite), b"second");
 }
 
 #[test]
 fn sink_options_keep_the_duplicate_policy_and_refuse_atomic() {
-    let overwrite = ExtractionOptions::default().with_skip_duplicates(false);
-    assert!(!SinkOptions::try_from(&overwrite).unwrap().skip_duplicates);
-    assert!(
+    let overwrite = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
+    assert_eq!(
+        SinkOptions::try_from(&overwrite).unwrap().existing_files,
+        ExistingFiles::Overwrite
+    );
+    assert_eq!(
         SinkOptions::try_from(&ExtractionOptions::default())
             .unwrap()
-            .skip_duplicates
+            .existing_files,
+        ExistingFiles::Skip
     );
     assert_matches!(
-        SinkOptions::try_from(&ExtractionOptions::default().with_atomic(true)),
+        SinkOptions::try_from(&ExtractionOptions::default().with_staging(Staging::Atomic)),
         Err(ArchiveError::InvalidConfiguration { .. })
     );
 }

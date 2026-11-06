@@ -13,6 +13,7 @@ use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::PartialWrites;
 use exarch_core::SecurityConfig;
+use exarch_core::Staging;
 use exarch_core::extract_archive;
 use std::assert_matches;
 use tempfile::TempDir;
@@ -141,7 +142,7 @@ fn atomic_failure_reports_writes_rolled_back() {
     let parent = TempDir::new().unwrap();
     let dest = parent.path().join("out");
     let config = SecurityConfig::default().with_allow_symlinks(true);
-    let options = ExtractionOptions::default().with_atomic(true);
+    let options = ExtractionOptions::default().with_staging(Staging::Atomic);
 
     let writes = partial_writes_of(
         ExtractRequest::new(&config)

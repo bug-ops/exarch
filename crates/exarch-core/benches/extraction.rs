@@ -25,6 +25,7 @@ use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
 use criterion::measurement::WallTime;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationOptions;
@@ -817,7 +818,8 @@ fn benchmark_sevenz_overwrite(c: &mut Criterion) {
         exarch_core::SolidLimits::DEFAULT
             .with_max_block_memory(exarch_core::non_zero!(256 * 1024 * 1024)),
     ));
-    let overwrite_options = ExtractionOptions::default().with_skip_duplicates(false);
+    let overwrite_options =
+        ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     for fixture_name in ["small_files.7z", "medium_files.7z"] {
         let Some(fixture) = get_fixture(fixture_name) else {

@@ -65,6 +65,8 @@ closed_enum! {
         UnknownFormat => "UNKNOWN_FORMAT",
         /// [`ArchiveError::InvalidConfiguration`].
         InvalidConfiguration => "INVALID_CONFIGURATION",
+        /// [`ArchiveError::Cancelled`].
+        Cancelled => "CANCELLED",
     }
 }
 
@@ -333,6 +335,8 @@ pub enum FfiKind {
     Io(std::io::ErrorKind),
     /// Invalid permission bits.
     InvalidPermissions,
+    /// The operation was cancelled by its progress callback.
+    Cancelled,
     /// Creation source does not exist.
     SourceNotFound,
     /// Creation source cannot be read.
@@ -368,6 +372,7 @@ impl FfiKind {
             | Self::InvalidArchive { .. }
             | Self::Io(_)
             | Self::InvalidPermissions
+            | Self::Cancelled
             | Self::SourceNotFound
             | Self::SourceNotAccessible
             | Self::OutputExists
@@ -404,6 +409,7 @@ impl FfiKind {
             | Self::ZipInconsistency
             | Self::Io(_)
             | Self::InvalidPermissions
+            | Self::Cancelled
             | Self::SourceNotFound
             | Self::SourceNotAccessible
             | Self::OutputExists
@@ -427,6 +433,7 @@ impl FfiKind {
             Self::InvalidArchive { .. } => ErrorCode::InvalidArchive,
             Self::Io(_) => ErrorCode::IoError,
             Self::InvalidPermissions => ErrorCode::InvalidPermissions,
+            Self::Cancelled => ErrorCode::Cancelled,
             Self::SourceNotFound => ErrorCode::SourceNotFound,
             Self::SourceNotAccessible => ErrorCode::SourceNotAccessible,
             Self::OutputExists => ErrorCode::OutputExists,
@@ -638,6 +645,10 @@ impl ArchiveError {
             }
             Self::Io(io_err) => FfiKind::Io(io_err.kind()),
             Self::InvalidPermissions { .. } => FfiKind::InvalidPermissions,
+            Self::Cancelled => FfiKind::Cancelled,
+            Self::OutputReservationLeft { error, .. } => FfiKind::Io(error.kind()),
+            Self::ReplaceFailed(failure) => FfiKind::Io(failure.error.kind()),
+            Self::DestinationOccupied { .. } => FfiKind::OutputExists,
             Self::SourceNotFound { .. } => FfiKind::SourceNotFound,
             Self::SourceNotAccessible { .. } => FfiKind::SourceNotAccessible,
             Self::OutputExists { .. } => FfiKind::OutputExists,
@@ -677,6 +688,16 @@ impl ArchiveError {
             Self::InvalidPermissions { mode, .. } => {
                 format!("invalid permissions for {path}: {:#o}", mode.get())
             }
+            Self::Cancelled => "operation cancelled".to_string(),
+            Self::OutputReservationLeft { error, .. } => format!(
+                "an empty reservation file remains at {path}: {}",
+                sanitize_io_error_for_error(error)
+            ),
+            Self::ReplaceFailed(failure) => failure.redacted_description(),
+            Self::DestinationOccupied { conflicts, .. } => format!(
+                "destination {path} already holds {} of the paths to extract",
+                conflicts.len()
+            ),
             Self::SourceNotFound { .. } => format!("source path not found: {path}"),
             Self::SourceNotAccessible { error, .. } => {
                 format!(
@@ -874,7 +895,9 @@ mod tests {
             ArchiveError::OutputExists {
                 path: PathBuf::from("test"),
             },
-            ArchiveError::InvalidCompressionLevel { level: 10 },
+            ArchiveError::InvalidCompressionLevel {
+                level: crate::RequestedLevel::Integer(10),
+            },
             ArchiveError::UnknownFormat {
                 path: PathBuf::from("test"),
             },

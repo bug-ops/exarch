@@ -7,6 +7,7 @@ use thiserror::Error;
 use super::config_error::ConfigProblem;
 use super::config_error::ConfigSetting;
 use super::malformation::Malformation;
+use super::replace::ReplaceFailure;
 use super::tar_ambiguity::TarAmbiguity;
 use super::tar_trailer::TarTrailerRefusal;
 use super::violation::Violation;
@@ -81,6 +82,41 @@ closed_enum! {
         WindowsReservedNames => "windows_reserved_names",
         /// `SecurityConfig::with_max_tar_metadata_bytes`.
         MaxTarMetadataBytes => "max_tar_metadata_bytes",
+    }
+}
+
+/// A compression level exactly as the caller asked for it.
+///
+/// Carries what a refused level looked like, including values a `u32` cannot
+/// hold, so a front end can echo `-3`, `1.5` or `2^40` back.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::RequestedLevel;
+///
+/// assert_eq!(RequestedLevel::Integer(-3).to_string(), "-3");
+/// assert_eq!(RequestedLevel::Fractional(1.5).to_string(), "1.5");
+/// assert_eq!(RequestedLevel::NonFinite.to_string(), "a non-finite number");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum RequestedLevel {
+    /// A whole number.
+    Integer(i128),
+    /// A finite number with a fractional part.
+    Fractional(f64),
+    /// NaN or an infinity.
+    NonFinite,
+}
+
+impl std::fmt::Display for RequestedLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Integer(level) => write!(f, "{level}"),
+            Self::Fractional(level) => write!(f, "{level}"),
+            Self::NonFinite => f.write_str("a non-finite number"),
+        }
     }
 }
 
@@ -565,8 +601,8 @@ pub enum ArchiveError {
     /// Invalid compression level.
     #[error("invalid compression level {level}, must be 1-9")]
     InvalidCompressionLevel {
-        /// The invalid compression level.
-        level: u32,
+        /// The level that was asked for.
+        level: RequestedLevel,
     },
 
     /// Cannot determine archive format.
@@ -588,6 +624,43 @@ pub enum ArchiveError {
         /// Why it was refused.
         problem: ConfigProblem,
     },
+
+    /// The operation was cancelled through
+    /// [`ProgressCallback::is_cancelled`](crate::ProgressCallback::is_cancelled).
+    ///
+    /// An extraction that had already recorded progress is reported as
+    /// [`Self::PartialExtraction`] wrapping this error.
+    #[error("operation cancelled")]
+    Cancelled,
+
+    /// The destination holds paths that the occupied-path policy refuses to
+    /// touch.
+    ///
+    /// Raised for [`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse) and
+    /// by
+    /// [`ListedArchive::check_destination`](crate::ListedArchive::check_destination).
+    /// `destination` is a host path and is redacted like any other.
+    #[error("destination {} already holds {} of the paths to extract", .destination.display(), .conflicts.len())]
+    DestinationOccupied {
+        /// The extraction destination.
+        destination: PathBuf,
+        /// The archive-relative paths that are occupied.
+        conflicts: Box<[PathBuf]>,
+    },
+
+    /// A staged creation published its archive, but an empty reservation file
+    /// it made at the output path is still there.
+    #[error("an empty reservation file remains at {}: {error}", .path.display())]
+    OutputReservationLeft {
+        /// The output path that holds the leftover file.
+        path: PathBuf,
+        /// The failure that left it.
+        error: std::io::Error,
+    },
+
+    /// Replacing an existing destination as a whole failed.
+    #[error("{0}")]
+    ReplaceFailed(ReplaceFailure),
 
     /// Extraction stopped mid-archive after recording progress.
     ///
@@ -1371,14 +1444,18 @@ mod tests {
 
     #[test]
     fn test_invalid_compression_level_error() {
-        let err = ArchiveError::InvalidCompressionLevel { level: 0 };
+        let err = ArchiveError::InvalidCompressionLevel {
+            level: RequestedLevel::Integer(0),
+        };
         let display = err.to_string();
         assert!(display.contains("invalid compression level"));
         assert!(display.contains('0'));
         assert!(display.contains("must be 1-9"));
         assert!(!err.is_security_violation());
 
-        let err = ArchiveError::InvalidCompressionLevel { level: 10 };
+        let err = ArchiveError::InvalidCompressionLevel {
+            level: RequestedLevel::Integer(10),
+        };
         let display = err.to_string();
         assert!(display.contains("10"));
     }

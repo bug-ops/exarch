@@ -13,6 +13,7 @@ use crate::OutputFormat;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Staging;
 use crate::config::ExtractionOptions;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
@@ -112,10 +113,13 @@ pub(crate) fn extract_staged(
     options: &ExtractionOptions,
     extract: impl FnOnce(&Path) -> Result<ExtractionReport>,
 ) -> Result<ExtractionReport> {
-    if options.atomic {
-        extract_atomic(output_dir, extract)
-    } else {
-        extract(output_dir)
+    match options.staging {
+        Staging::InPlace => extract(output_dir),
+        Staging::Atomic => extract_atomic(output_dir, extract),
+        Staging::AtomicReplace => Err(ArchiveError::InvalidConfiguration {
+            setting: crate::ConfigSetting::Staging,
+            problem: crate::ConfigProblem::NotSupported,
+        }),
     }
 }
 
@@ -661,8 +665,8 @@ mod tests {
     fn test_extract_archive_with_options_and_progress_non_atomic_delegates_to_normal() {
         let dest = tempfile::TempDir::new().unwrap();
         let options = ExtractionOptions {
-            atomic: false,
-            skip_duplicates: true,
+            staging: crate::Staging::InPlace,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())
@@ -676,8 +680,8 @@ mod tests {
     fn test_extract_archive_with_options_delegates() {
         let dest = tempfile::TempDir::new().unwrap();
         let options = ExtractionOptions {
-            atomic: false,
-            skip_duplicates: true,
+            staging: crate::Staging::InPlace,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())
@@ -704,8 +708,8 @@ mod tests {
         let output_dir = parent.path().join("extracted");
 
         let options = ExtractionOptions {
-            atomic: true,
-            skip_duplicates: true,
+            staging: crate::Staging::Atomic,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())
@@ -729,8 +733,8 @@ mod tests {
         let output_dir = parent.path().join("extracted");
 
         let options = ExtractionOptions {
-            atomic: true,
-            skip_duplicates: true,
+            staging: crate::Staging::Atomic,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())
@@ -767,8 +771,8 @@ mod tests {
         create_archive(&archive_path, &[src_dir.path()], &CreationConfig::default()).unwrap();
 
         let options = ExtractionOptions {
-            atomic: true,
-            skip_duplicates: true,
+            staging: crate::Staging::Atomic,
+            existing_files: crate::ExistingFiles::Skip,
             ..ExtractionOptions::default()
         };
         let result = ExtractRequest::new(&SecurityConfig::default())

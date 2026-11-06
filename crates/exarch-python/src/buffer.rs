@@ -396,7 +396,11 @@ impl PySinkOptions {
 impl PySinkOptions {
     fn as_core(&self) -> exarch_core::SinkOptions {
         exarch_core::SinkOptions::default()
-            .with_skip_duplicates(self.skip_duplicates)
+            .with_existing_files(if self.skip_duplicates {
+                exarch_core::ExistingFiles::Skip
+            } else {
+                exarch_core::ExistingFiles::Overwrite
+            })
             .with_decode_reuse(self.reuse.as_core())
     }
 }

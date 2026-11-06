@@ -522,7 +522,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         self.extract_into(
             &mut target,
             &config,
-            SinkOptions::duplicates_of(options),
+            SinkOptions::existing_files_of(options),
             progress,
         )
     }
@@ -2257,7 +2257,7 @@ mod tests {
     /// hardlink's destination path used to bypass the old `Path::exists()`
     /// duplicate check (which returns `false` for a dangling symlink) and a
     /// subsequent `fs::copy` followed it, writing archive content outside
-    /// the extraction root. With `skip_duplicates=true` (the default), the
+    /// the extraction root. With `ExistingFiles::Skip` (the default), the
     /// pre-existing path at `hardlink.txt` must now be treated as a
     /// duplicate and skipped instead of being written through.
     #[test]
@@ -2282,7 +2282,7 @@ mod tests {
         let report = archive
             .extract(
                 temp.path(),
-                &ExtractionOptions::default(), // skip_duplicates = true
+                &ExtractionOptions::default(), // ExistingFiles::Skip
                 &mut crate::NoopProgress,
             )
             .expect("extraction should succeed by skipping the duplicate");
@@ -2300,7 +2300,7 @@ mod tests {
     }
 
     /// Companion to [`test_hardlink_dangling_symlink_at_destination_skipped`]
-    /// with `skip_duplicates=false`: the pre-planted symlink must still be
+    /// with `ExistingFiles::Overwrite`: the pre-planted symlink must still be
     /// rejected as a duplicate-entry error rather than followed.
     #[test]
     #[cfg(unix)]
@@ -2318,8 +2318,8 @@ mod tests {
         config.allowed.hardlinks = crate::Admit::Allow;
         let archive = TarArchive::new(Cursor::new(tar_data), &config);
         let options = ExtractionOptions {
-            atomic: false,
-            skip_duplicates: false,
+            staging: crate::Staging::InPlace,
+            existing_files: crate::ExistingFiles::Overwrite,
             ..ExtractionOptions::default()
         };
 
@@ -2798,7 +2798,7 @@ mod tests {
         let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
-        let options = ExtractionOptions::default(); // skip_duplicates = true
+        let options = ExtractionOptions::default(); // ExistingFiles::Skip
 
         let report = archive
             .extract(temp.path(), &options, &mut crate::NoopProgress)
@@ -2824,8 +2824,8 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let options = ExtractionOptions {
-            atomic: false,
-            skip_duplicates: false,
+            staging: crate::Staging::InPlace,
+            existing_files: crate::ExistingFiles::Overwrite,
             ..ExtractionOptions::default()
         };
 
@@ -2866,7 +2866,7 @@ mod tests {
         let report = archive
             .extract(
                 temp.path(),
-                &ExtractionOptions::default(), // skip_duplicates = true
+                &ExtractionOptions::default(), // ExistingFiles::Skip
                 &mut crate::NoopProgress,
             )
             .unwrap();
@@ -2928,7 +2928,7 @@ mod tests {
         let report = archive
             .extract(
                 temp.path(),
-                &ExtractionOptions::default(), // skip_duplicates = true
+                &ExtractionOptions::default(), // ExistingFiles::Skip
                 &mut crate::NoopProgress,
             )
             .unwrap();
@@ -3151,7 +3151,7 @@ mod tests {
         let report = TarArchive::new(Cursor::new(tar_data), &config)
             .extract(
                 temp.path(),
-                &ExtractionOptions::default(), // skip_duplicates = true
+                &ExtractionOptions::default(), // ExistingFiles::Skip
                 &mut NoopProgress,
             )
             .unwrap();

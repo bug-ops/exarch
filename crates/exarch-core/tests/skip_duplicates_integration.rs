@@ -1,4 +1,4 @@
-//! Integration tests for `ExtractionOptions::skip_duplicates`.
+//! Integration tests for `ExtractionOptions::existing_files`.
 //!
 //! Covers both the default behavior (skip=true, first entry wins) and the
 //! opt-in overwrite behavior (skip=false, last entry wins) using TAR archives
@@ -13,6 +13,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::disallowed_methods)]
 
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
@@ -62,7 +63,7 @@ fn make_tar_single(path: &str, content: &[u8]) -> Vec<u8> {
     builder.into_inner().unwrap()
 }
 
-/// `skip_duplicates=true` (the default): the second entry is skipped and the
+/// `ExistingFiles::Skip` (the default): the second entry is skipped and the
 /// file on disk retains the content of the first entry.
 #[test]
 fn tar_skip_duplicates_true_keeps_first_entry() {
@@ -70,12 +71,12 @@ fn tar_skip_duplicates_true_keeps_first_entry() {
     let archive = write_tar(&data);
     let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default(); // skip_duplicates = true
+    let options = ExtractionOptions::default(); // ExistingFiles::Skip
 
     let report = ExtractRequest::new(&config)
         .with_options(options)
         .extract(archive.path(), dest.path())
-        .expect("extraction with skip_duplicates=true must succeed");
+        .expect("extraction with ExistingFiles::Skip must succeed");
 
     assert_eq!(
         report.files_extracted, 1,
@@ -94,7 +95,7 @@ fn tar_skip_duplicates_true_keeps_first_entry() {
     assert_eq!(content, b"first", "first entry content must be preserved");
 }
 
-/// `skip_duplicates=false`: both entries are processed; the second entry
+/// `ExistingFiles::Overwrite`: both entries are processed; the second entry
 /// overwrites the first, so the file on disk contains the content of the
 /// second entry.
 #[test]
@@ -103,12 +104,12 @@ fn tar_skip_duplicates_false_overwrites_with_last_entry() {
     let archive = write_tar(&data);
     let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     let report = ExtractRequest::new(&config)
         .with_options(options)
         .extract(archive.path(), dest.path())
-        .expect("extraction with skip_duplicates=false must succeed");
+        .expect("extraction with ExistingFiles::Overwrite must succeed");
 
     assert_eq!(
         report.files_extracted, 2,
@@ -179,19 +180,19 @@ fn make_sevenz_two_entries(
     f
 }
 
-/// `skip_duplicates=true` (default): first entry extracted, second skipped.
+/// `ExistingFiles::Skip` (default): first entry extracted, second skipped.
 /// The file on disk must contain the content of the FIRST entry.
 #[test]
 fn sevenz_skip_duplicates_true_keeps_first_entry() {
     let archive = make_sevenz_with_duplicate("file.txt", b"first", b"second");
     let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default(); // skip_duplicates = true
+    let options = ExtractionOptions::default(); // ExistingFiles::Skip
 
     let report = ExtractRequest::new(&config)
         .with_options(options)
         .extract(archive.path(), dest.path())
-        .expect("extraction with skip_duplicates=true must succeed");
+        .expect("extraction with ExistingFiles::Skip must succeed");
 
     assert_eq!(
         report.files_extracted, 1,
@@ -210,19 +211,19 @@ fn sevenz_skip_duplicates_true_keeps_first_entry() {
     assert_eq!(content, b"first", "first entry content must be preserved");
 }
 
-/// `skip_duplicates=false`: both entries processed; second overwrites first.
+/// `ExistingFiles::Overwrite`: both entries processed; second overwrites first.
 /// The file on disk must contain the content of the SECOND entry.
 #[test]
 fn sevenz_skip_duplicates_false_overwrites_with_last_entry() {
     let archive = make_sevenz_with_duplicate("file.txt", b"first", b"second");
     let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     let report = ExtractRequest::new(&config)
         .with_options(options)
         .extract(archive.path(), dest.path())
-        .expect("extraction with skip_duplicates=false must succeed");
+        .expect("extraction with ExistingFiles::Overwrite must succeed");
 
     assert_eq!(
         report.files_extracted, 2,
@@ -237,8 +238,8 @@ fn sevenz_skip_duplicates_false_overwrites_with_last_entry() {
     );
 }
 
-/// `skip_duplicates=false` with a nested path: verifies parent directories are
-/// created correctly and the overwrite path works for entries under
+/// `ExistingFiles::Overwrite` with a nested path: verifies parent directories
+/// are created correctly and the overwrite path works for entries under
 /// subdirectories.
 #[test]
 fn tar_skip_duplicates_false_overwrites_nested_path() {
@@ -246,12 +247,12 @@ fn tar_skip_duplicates_false_overwrites_nested_path() {
     let archive = write_tar(&data);
     let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     let report = ExtractRequest::new(&config)
         .with_options(options)
         .extract(archive.path(), dest.path())
-        .expect("extraction with skip_duplicates=false must succeed for nested paths");
+        .expect("extraction with ExistingFiles::Overwrite must succeed for nested paths");
 
     assert_eq!(report.files_extracted, 2);
     assert_eq!(report.files_skipped(), 0);
@@ -275,7 +276,7 @@ fn tar_skip_duplicates_false_overwrites_nested_path() {
 // symlink (dangling or not) without following it, on both `skip_duplicates`
 // values.
 
-/// `skip_duplicates=true` (default): a dangling symlink at the destination
+/// `ExistingFiles::Skip` (default): a dangling symlink at the destination
 /// path must be treated as an existing entry and skipped — not followed.
 #[cfg(unix)]
 #[test]
@@ -297,12 +298,12 @@ fn tar_dangling_symlink_at_destination_skipped_not_followed() {
     let data = make_tar_single("file.txt", b"payload");
     let archive = write_tar(&data);
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default(); // skip_duplicates = true (default)
+    let options = ExtractionOptions::default(); // ExistingFiles::Skip (default)
 
     let report = ExtractRequest::new(&config)
         .with_options(options)
         .extract(archive.path(), dest.path())
-        .expect("skip_duplicates=true must skip the symlinked path, not error");
+        .expect("ExistingFiles::Skip must skip the symlinked path, not error");
 
     assert_eq!(
         report.files_skipped(),
@@ -325,7 +326,7 @@ fn tar_dangling_symlink_at_destination_skipped_not_followed() {
     );
 }
 
-/// `skip_duplicates=false`: a symlink at the destination path must still be
+/// `ExistingFiles::Overwrite`: a symlink at the destination path must still be
 /// rejected rather than followed and overwritten-through.
 #[cfg(unix)]
 #[test]
@@ -345,7 +346,7 @@ fn tar_dangling_symlink_at_destination_rejected_when_overwrite_requested() {
     let data = make_tar_single("file.txt", b"payload");
     let archive = write_tar(&data);
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     let result = ExtractRequest::new(&config)
         .with_options(options)
@@ -369,14 +370,14 @@ fn tar_dangling_symlink_at_destination_rejected_when_overwrite_requested() {
 // O_EXCL/O_NOFOLLOW open, and validated quota before checking for a
 // duplicate at the destination. Two bugs followed:
 //
-// - #477: `skip_duplicates=false` against a pre-existing symlink at the
+// - #477: `ExistingFiles::Overwrite` against a pre-existing symlink at the
 //   destination silently unlinked and replaced it (`rename()` doesn't follow
 //   symlinks), where TAR/ZIP fail with `ELOOP`.
 // - #478: quota was reserved before the duplicate-skip check, so a skipped
 //   entry permanently consumed its quota allotment (`QuotaPermit` has no `Drop`
 //   impl to release it).
 
-/// `skip_duplicates=false`: a pre-existing (dangling) symlink at the
+/// `ExistingFiles::Overwrite`: a pre-existing (dangling) symlink at the
 /// destination path must be rejected, not silently unlinked and replaced by
 /// the temp+rename write (issue #477).
 #[cfg(unix)]
@@ -396,7 +397,7 @@ fn sevenz_dangling_symlink_at_destination_rejected_when_overwrite_requested() {
 
     let archive = make_sevenz_single("file.txt", b"payload");
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     let result = ExtractRequest::new(&config)
         .with_options(options)
@@ -421,7 +422,7 @@ fn sevenz_dangling_symlink_at_destination_rejected_when_overwrite_requested() {
     );
 }
 
-/// `skip_duplicates=true` (default): a dangling symlink at the destination
+/// `ExistingFiles::Skip` (default): a dangling symlink at the destination
 /// path is skipped like any other duplicate, and — unlike before the #478
 /// fix — the skipped entry must never reserve quota in the first place (it
 /// is never released, because it was never reserved). Proven here by
@@ -444,7 +445,7 @@ fn sevenz_dangling_symlink_at_destination_quota_not_consumed_when_skipped() {
 
     let archive = make_sevenz_two_entries("link.txt", b"payload", "other.txt", b"second-file");
     let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(1));
-    let options = ExtractionOptions::default(); // skip_duplicates = true (default)
+    let options = ExtractionOptions::default(); // ExistingFiles::Skip (default)
 
     let report = ExtractRequest::new(&config)
         .with_options(options)
@@ -468,7 +469,7 @@ fn sevenz_dangling_symlink_at_destination_quota_not_consumed_when_skipped() {
     );
 }
 
-/// `skip_duplicates=false`: a pre-existing *regular file* (not a symlink) at
+/// `ExistingFiles::Overwrite`: a pre-existing *regular file* (not a symlink) at
 /// the destination must still be overwritten, guarding against the ELOOP
 /// rejection above over-firing for ordinary duplicates — only a symlink at
 /// dest is special-cased.
@@ -479,7 +480,7 @@ fn sevenz_regular_file_at_destination_still_overwritten_when_overwrite_requested
 
     let archive = make_sevenz_single("file.txt", b"payload");
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     let report = ExtractRequest::new(&config)
         .with_options(options)
@@ -491,7 +492,7 @@ fn sevenz_regular_file_at_destination_still_overwritten_when_overwrite_requested
     assert_eq!(content, b"payload", "regular file must be overwritten");
 }
 
-/// `skip_duplicates=false`: a *live* (non-dangling) symlink at the
+/// `ExistingFiles::Overwrite`: a *live* (non-dangling) symlink at the
 /// destination must be rejected the same way a dangling one is — the ELOOP
 /// check is not specific to dangling links.
 #[cfg(unix)]
@@ -509,7 +510,7 @@ fn sevenz_live_symlink_at_destination_rejected_when_overwrite_requested() {
 
     let archive = make_sevenz_single("file.txt", b"payload");
     let config = SecurityConfig::default();
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
 
     let result = ExtractRequest::new(&config)
         .with_options(options)

@@ -963,7 +963,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     ) -> Result<ExtractionReport> {
         self.check_structure(config)?.extract_with(
             |config| HostTarget::create(output_dir, config),
-            SinkOptions::duplicates_of(options),
+            SinkOptions::existing_files_of(options),
             progress,
         )
     }
@@ -2453,7 +2453,7 @@ mod tests {
         let archive = ZipArchive::new(Cursor::new(zip_data.clone()), &enforcing).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let options = ExtractionOptions::default(); // skip_duplicates = true
+        let options = ExtractionOptions::default(); // ExistingFiles::Skip
 
         let rejected = archive
             .extract(temp.path(), &options, &mut crate::NoopProgress)
@@ -2504,7 +2504,7 @@ mod tests {
         let report = archive
             .extract(
                 temp.path(),
-                &ExtractionOptions::default(), // skip_duplicates = true
+                &ExtractionOptions::default(), // ExistingFiles::Skip
                 &mut crate::NoopProgress,
             )
             .unwrap();
@@ -2735,7 +2735,7 @@ mod tests {
             .unwrap()
             .extract(
                 temp.path(),
-                &ExtractionOptions::default(), // skip_duplicates = true
+                &ExtractionOptions::default(), // ExistingFiles::Skip
                 &mut NoopProgress,
             )
             .unwrap();

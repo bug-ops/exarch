@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
@@ -43,7 +44,7 @@ fn zip_archive(dir: &TempDir, name: &str) -> PathBuf {
 
 fn force(archive: &Path, out: &Path) {
     ExtractRequest::new(&SecurityConfig::default())
-        .with_options(ExtractionOptions::default().with_skip_duplicates(false))
+        .with_options(ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite))
         .extract(archive, out)
         .unwrap();
 }

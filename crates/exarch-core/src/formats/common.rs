@@ -29,6 +29,7 @@ use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::EntryPosition;
+use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::Malformation;
 use crate::ProgressCallback;
@@ -57,7 +58,6 @@ use crate::security::fs_view::blocked_parent_error;
 use crate::security::fs_view::normalized_display;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
-use crate::sink::DuplicatePolicy;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -412,7 +412,7 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     options: SinkOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
-    let duplicates = options.duplicate_policy();
+    let duplicates = options.existing_files;
 
     let (parent, leaf) = dirs.ensure_parent(root, safe_path)?;
 
@@ -427,7 +427,14 @@ pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     let Some(OutputSlot {
         file: output_file,
         written_at,
-    }) = open_output_slot(&parent, leaf, safe_path.as_path(), mode, duplicates)?
+    }) = open_output_slot(
+        &parent,
+        leaf,
+        safe_path.as_path(),
+        mode,
+        duplicates,
+        root.dest().as_path(),
+    )?
     else {
         return record_duplicate_skip(report, safe_path.as_path());
     };
@@ -544,35 +551,47 @@ struct OutputSlot {
 /// A free name is created in place with `O_EXCL`. When an entry already
 /// exists, overwrite mode writes a fresh sibling temp file that the caller
 /// renames over the entry, so other hardlinks to the old inode keep their
-/// content. Returns `None` when the entry exists and `duplicates` is `Skip`.
+/// content. Returns `None` when the entry exists and `duplicates` is `Skip`,
+/// and fails with `DestinationOccupied` under `Refuse`.
 fn open_output_slot(
     dir: &VettedDir,
     leaf: Leaf<'_>,
     rel: &Path,
     mode: Option<SanitizedMode>,
-    duplicates: DuplicatePolicy,
+    duplicates: ExistingFiles,
+    destination: &Path,
 ) -> Result<Option<OutputSlot>> {
     match dir.create_new(leaf, mode) {
         Ok(file) => Ok(Some(OutputSlot {
             file,
             written_at: WrittenAt::Final,
         })),
-        Err(e)
-            if e.kind() == std::io::ErrorKind::AlreadyExists
-                && duplicates == DuplicatePolicy::Skip =>
-        {
-            Ok(None)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            refuse_non_file_occupant(dir, leaf, rel)?;
-            let (temp, file) = create_temp_sibling(dir, leaf, mode, TempLeaf::next)
-                .map_err(|e| replace_error(rel, &e))?;
-            Ok(Some(OutputSlot {
-                file,
-                written_at: WrittenAt::Temp(temp),
-            }))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match duplicates {
+            ExistingFiles::Skip => Ok(None),
+            ExistingFiles::Refuse => Err(destination_occupied(destination, rel)),
+            ExistingFiles::Overwrite => {
+                refuse_non_file_occupant(dir, leaf, rel)?;
+                let (temp, file) = create_temp_sibling(dir, leaf, mode, TempLeaf::next)
+                    .map_err(|e| replace_error(rel, &e))?;
+                Ok(Some(OutputSlot {
+                    file,
+                    written_at: WrittenAt::Temp(temp),
+                }))
+            }
+        },
         Err(e) => Err(name_occupant_on_open_error(dir, leaf, rel, e).into()),
+    }
+}
+
+/// The refusal of an occupied path under [`ExistingFiles::Refuse`].
+///
+/// Every site that decides what to do with an occupant must route `Refuse` here
+/// and never into an overwrite branch: a missed arm would replace a file the
+/// caller asked to keep.
+pub(crate) fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveError {
+    ArchiveError::DestinationOccupied {
+        destination: destination.to_path_buf(),
+        conflicts: Box::new([rel.to_path_buf()]),
     }
 }
 
@@ -728,7 +747,8 @@ fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Re
 /// - Platform does not support symlinks
 /// - Parent directory creation fails
 /// - Symlink creation fails (including when target path already exists)
-/// - Removing an existing path fails when `skip_duplicates` is false
+/// - Removing an existing path fails when the policy is
+///   `ExistingFiles::Overwrite`
 /// - A symlink with a different target occupies the path and `skip_duplicates`
 ///   is false (one with the same target is skipped as unchanged)
 #[allow(unused_variables)]
@@ -746,7 +766,7 @@ pub fn create_symlink<P: ParentCheck>(
     dirs: DirWalker,
     options: SinkOptions,
 ) -> Result<()> {
-    let duplicates = options.duplicate_policy();
+    let duplicates = options.existing_files;
     #[cfg(unix)]
     {
         let target_path = safe_symlink.target_path();
@@ -754,8 +774,17 @@ pub fn create_symlink<P: ParentCheck>(
         let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link())?;
 
         if let Some(existing) = parent.probe(leaf)? {
-            if duplicates == DuplicatePolicy::Skip {
-                return record_duplicate_skip(report, safe_symlink.link().as_path());
+            match duplicates {
+                ExistingFiles::Skip => {
+                    return record_duplicate_skip(report, safe_symlink.link().as_path());
+                }
+                ExistingFiles::Refuse => {
+                    return Err(destination_occupied(
+                        root.dest().as_path(),
+                        safe_symlink.link().as_path(),
+                    ));
+                }
+                ExistingFiles::Overwrite => {}
             }
             if existing == Occupant::Symlink {
                 // An unchanged link re-points nothing; a different target could
@@ -1401,7 +1430,7 @@ mod tests {
         );
     }
 
-    /// With `skip_duplicates = false` (`--force`), an aborted forged-size
+    /// With `ExistingFiles::Overwrite` (`--force`), an aborted forged-size
     /// entry must leave the pre-existing destination file untouched and no
     /// temp file behind.
     #[test]
@@ -1435,7 +1464,7 @@ mod tests {
             &mut report,
             &mut copy_buffer,
             dirs,
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
             &mut NoopProgress,
         );
 
@@ -1758,7 +1787,7 @@ mod tests {
             &pinned(&dest),
             &mut report,
             dirs,
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
         )
         .expect("first create_symlink should succeed");
         assert_eq!(report.symlinks_created, 1);
@@ -1769,7 +1798,7 @@ mod tests {
             &pinned(&dest),
             &mut report,
             dirs,
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
         )
         .expect("an identical link is an unchanged duplicate");
         assert_eq!(report.symlinks_created, unchanged);
@@ -1784,7 +1813,7 @@ mod tests {
             &pinned(&dest),
             &mut report,
             dirs,
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
         )
         .expect_err("a link with another target must not be replaced");
         assert_matches!(
@@ -1824,7 +1853,7 @@ mod tests {
             &pinned(&dest),
             &mut report,
             test_walker(),
-            SinkOptions::default().with_skip_duplicates(false),
+            SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
         )
         .expect("a file is replaced");
         assert_eq!(report.symlinks_created, 1);

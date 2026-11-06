@@ -9,6 +9,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ErrorCode;
+use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
@@ -39,7 +40,7 @@ fn write_tar(dir: &TempDir, entries: &[Vec<u8>]) -> PathBuf {
 }
 
 fn force_options() -> ExtractionOptions {
-    ExtractionOptions::default().with_skip_duplicates(false)
+    ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite)
 }
 
 fn extract_forced(archive: &Path, out: &TempDir, config: &SecurityConfig) -> String {

@@ -14,6 +14,7 @@ use super::write::lstat_dest;
 use super::write::refuse_undecoded_target_in;
 use super::write::write_file_direct;
 use super::write::write_file_with_permit;
+use crate::ExistingFiles;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
@@ -37,7 +38,6 @@ use crate::security::validator::EntryPath;
 use crate::security::validator::FileScreen;
 use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatorCore;
-use crate::sink::DuplicatePolicy;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -159,10 +159,21 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let parent = parent.into_owned()?;
 
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
-        if occupancy.is_occupied() && tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-            return tally
-                .record_duplicate_skip(safe_path.as_path())
-                .map(FileAdmission::Skipped);
+        if occupancy.is_occupied() {
+            match tally.options.existing_files {
+                ExistingFiles::Skip => {
+                    return tally
+                        .record_duplicate_skip(safe_path.as_path())
+                        .map(FileAdmission::Skipped);
+                }
+                ExistingFiles::Refuse => {
+                    return Err(common::destination_occupied(
+                        self.inner.root().dest().as_path(),
+                        safe_path.as_path(),
+                    ));
+                }
+                ExistingFiles::Overwrite => {}
+            }
         }
         let write_mode = occupancy.write_mode(safe_path.as_path())?;
 
@@ -273,8 +284,17 @@ impl PrePass for HostPrePass<'_> {
     fn file(&mut self, safe_path: &SafePath, _path: &Path) -> Result<FilePlan> {
         let dest_path = self.dest.join(safe_path);
         let occupancy = DestOccupancy::probe_path(&dest_path)?;
-        if occupancy.is_occupied() && self.options.duplicate_policy() == DuplicatePolicy::Skip {
-            return Ok(FilePlan::Skip);
+        if occupancy.is_occupied() {
+            match self.options.existing_files {
+                ExistingFiles::Skip => return Ok(FilePlan::Skip),
+                ExistingFiles::Refuse => {
+                    return Err(common::destination_occupied(
+                        self.dest.as_path(),
+                        safe_path.as_path(),
+                    ));
+                }
+                ExistingFiles::Overwrite => {}
+            }
         }
         // Fail here too, before any entry is written, so the pre-pass keeps
         // its no-partial-extraction guarantee for this refusal.

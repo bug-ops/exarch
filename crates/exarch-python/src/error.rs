@@ -380,7 +380,9 @@ mod tests {
                 "INVALID_CONFIGURATION",
             ),
             (
-                CoreError::InvalidCompressionLevel { level: 99 },
+                CoreError::InvalidCompressionLevel {
+                    level: exarch_core::RequestedLevel::Integer(99),
+                },
                 &INVALID_COMPRESSION_LEVEL,
                 "INVALID_COMPRESSION_LEVEL",
             ),

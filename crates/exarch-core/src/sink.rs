@@ -23,7 +23,7 @@
 //!   platform on every host and suits a sink whose storage is read elsewhere.
 //! - Validation assumes an EMPTY namespace: the sink must start empty. Entries
 //!   the sink already holds are invisible to it.
-//! - Duplicates follow [`SinkOptions`] `skip_duplicates` exactly as the
+//! - Occupied paths follow [`SinkOptions`] `existing_files` exactly as the
 //!   path-based API does: skipped entries are never delivered, and with
 //!   overwrite a later file replaces an earlier one (a second `create_file` for
 //!   the same path) and a later symlink replaces an earlier file.
@@ -171,11 +171,13 @@ use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::DecodeReuse;
+use crate::ExistingFiles;
 use crate::ExtractionOptions;
 use crate::Malformation;
 use crate::QuotaResource;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Staging;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::formats::common;
@@ -214,42 +216,35 @@ use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::Resolved;
 
-/// What extraction does with an entry whose destination an earlier entry
-/// already holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DuplicatePolicy {
-    /// Leave the earlier entry and count the skip.
-    Skip,
-    /// Replace the earlier entry where the kinds allow it, else fail.
-    Overwrite,
-}
-
 /// What a sink extraction honours of [`ExtractionOptions`].
 ///
 /// Atomic extraction renames a directory, which a sink does not have, so the
-/// only setting that carries over from path-based options is the duplicate
-/// policy. [`decode_reuse`](Self::decode_reuse) is never carried over: a sink
-/// keeps nothing between the structural check and the write unless it is asked
-/// to here.
+/// only setting that carries over from path-based options is the
+/// occupied-path policy. [`decode_reuse`](Self::decode_reuse) is never carried
+/// over: a sink keeps nothing between the structural check and the write unless
+/// it is asked to here.
 ///
 /// # Examples
 ///
 /// ```
+/// use exarch_core::ExistingFiles;
 /// use exarch_core::ExtractionOptions;
 /// use exarch_core::SinkOptions;
+/// use exarch_core::Staging;
 ///
-/// let options = SinkOptions::default().with_skip_duplicates(false);
-/// assert!(!options.skip_duplicates);
+/// let options = SinkOptions::default().with_existing_files(ExistingFiles::Overwrite);
+/// assert_eq!(options.existing_files, ExistingFiles::Overwrite);
 ///
-/// let atomic = ExtractionOptions::default().with_atomic(true);
+/// let atomic = ExtractionOptions::default().with_staging(Staging::Atomic);
 /// assert!(SinkOptions::try_from(&atomic).is_err());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SinkOptions {
-    /// Skip an entry whose destination path an earlier entry already holds
-    /// (the default) instead of failing.
-    pub skip_duplicates: bool,
+    /// What to do with an entry whose destination path is already occupied.
+    ///
+    /// Defaults to [`ExistingFiles::Skip`].
+    pub existing_files: ExistingFiles,
 
     /// Where a ZIP extraction keeps the output its structural check already
     /// decoded, so deflate entries are decoded once instead of twice.
@@ -289,17 +284,17 @@ pub struct SinkOptions {
 impl Default for SinkOptions {
     fn default() -> Self {
         Self {
-            skip_duplicates: true,
+            existing_files: ExistingFiles::Skip,
             decode_reuse: DecodeReuse::Off,
         }
     }
 }
 
 impl SinkOptions {
-    /// Sets whether a duplicate entry is skipped or fails the extraction.
+    /// Sets what happens to an entry whose destination path is occupied.
     #[must_use]
-    pub const fn with_skip_duplicates(mut self, skip: bool) -> Self {
-        self.skip_duplicates = skip;
+    pub const fn with_existing_files(mut self, existing_files: ExistingFiles) -> Self {
+        self.existing_files = existing_files;
         self
     }
 
@@ -328,20 +323,11 @@ impl SinkOptions {
 }
 
 impl SinkOptions {
-    /// The duplicate policy these options select.
-    pub(crate) const fn duplicate_policy(self) -> DuplicatePolicy {
-        if self.skip_duplicates {
-            DuplicatePolicy::Skip
-        } else {
-            DuplicatePolicy::Overwrite
-        }
-    }
-
-    /// The duplicate policy of path-based options, for extraction paths that
-    /// handle `atomic` themselves.
-    pub(crate) const fn duplicates_of(options: &ExtractionOptions) -> Self {
+    /// The occupied-path policy of path-based options, for extraction paths
+    /// that handle staging themselves.
+    pub(crate) const fn existing_files_of(options: &ExtractionOptions) -> Self {
         Self {
-            skip_duplicates: options.skip_duplicates,
+            existing_files: options.existing_files,
             decode_reuse: DecodeReuse::Off,
         }
     }
@@ -350,21 +336,24 @@ impl SinkOptions {
 impl TryFrom<&ExtractionOptions> for SinkOptions {
     type Error = ArchiveError;
 
-    /// Carries the duplicate policy over from path-based options.
+    /// Carries the occupied-path policy over from path-based options.
     ///
     /// # Errors
     ///
-    /// Returns [`ArchiveError::InvalidConfiguration`] for `atomic`, which needs
-    /// a directory to rename.
+    /// Returns [`ArchiveError::InvalidConfiguration`] for any staging other
+    /// than [`Staging::InPlace`], which needs a directory to rename.
     fn try_from(options: &ExtractionOptions) -> Result<Self> {
-        if options.atomic {
-            return Err(ArchiveError::InvalidConfiguration {
-                setting: crate::ConfigSetting::AtomicExtraction,
-                problem: crate::ConfigProblem::CannotTargetSink,
-            });
+        match options.staging {
+            Staging::InPlace => {}
+            Staging::Atomic | Staging::AtomicReplace => {
+                return Err(ArchiveError::InvalidConfiguration {
+                    setting: crate::ConfigSetting::AtomicExtraction,
+                    problem: crate::ConfigProblem::CannotTargetSink,
+                });
+            }
         }
         Ok(Self {
-            skip_duplicates: options.skip_duplicates,
+            existing_files: options.existing_files,
             decode_reuse: DecodeReuse::Off,
         })
     }
@@ -433,9 +422,9 @@ impl std::error::Error for SinkFull {}
 /// - Every `Err` a method returns ends the extraction with [`ArchiveError::Io`]
 ///   if no entry was delivered yet, and with
 ///   [`ArchiveError::PartialExtraction`] wrapping it afterwards.
-/// - Under overwrite (`skip_duplicates = false`) a later `create_file` for a
-///   path replaces the earlier one, and a hardlink reads the size of the most
-///   recent write at its target.
+/// - Under [`ExistingFiles::Overwrite`] a later `create_file` for a path
+///   replaces the earlier one, and a hardlink reads the size of the most recent
+///   write at its target.
 /// - A hardlink is delivered after every other entry. The sink copies the bytes
 ///   it holds for `target`; the pipeline has already charged the quota for
 ///   them.
@@ -637,18 +626,21 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
         common::checked_add_bytes(tally.report.bytes_written, size.get())?;
 
         let rel = path.as_path();
-        match (self.tree.occupant(rel), tally.options.duplicate_policy()) {
-            (Some(_), DuplicatePolicy::Skip) => {
+        match (self.tree.occupant(rel), tally.options.existing_files) {
+            (Some(_), ExistingFiles::Skip) => {
                 tally.record_duplicate_skip(rel)?;
                 return Ok(None);
             }
+            (Some(_), ExistingFiles::Refuse) => {
+                return Err(common::destination_occupied(self.root.as_path(), rel));
+            }
             (
                 Some(occupant @ (Occupant::Directory | Occupant::Symlink)),
-                DuplicatePolicy::Overwrite,
+                ExistingFiles::Overwrite,
             ) => {
                 return Err(common::occupant_at_dest_error(rel, occupant).into());
             }
-            (Some(Occupant::File) | None, _) => {}
+            (Some(Occupant::File) | None, ExistingFiles::Overwrite) | (None, _) => {}
         }
 
         let path = self.place(&path, Node::File)?;
@@ -872,12 +864,15 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         let rel = link.as_path();
         let target = symlink.target_path();
         let occupant = self.tree.occupant(rel);
-        match (occupant, tally.options.duplicate_policy()) {
-            (Some(_), DuplicatePolicy::Skip) => return tally.record_duplicate_skip(rel).map(drop),
-            (Some(Occupant::Directory), DuplicatePolicy::Overwrite) => {
+        match (occupant, tally.options.existing_files) {
+            (Some(_), ExistingFiles::Skip) => return tally.record_duplicate_skip(rel).map(drop),
+            (Some(_), ExistingFiles::Refuse) => {
+                return Err(common::destination_occupied(self.root.as_path(), rel));
+            }
+            (Some(Occupant::Directory), ExistingFiles::Overwrite) => {
                 return Err(common::occupant_at_dest_error(rel, Occupant::Directory).into());
             }
-            (Some(Occupant::Symlink), DuplicatePolicy::Overwrite) => {
+            (Some(Occupant::Symlink), ExistingFiles::Overwrite) => {
                 // An unchanged link re-points nothing; any other target is
                 // refused by the tree.
                 let unchanged = self.tree.project_landing(
@@ -893,7 +888,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                     Err(error) => Err(place_error(error)),
                 };
             }
-            (Some(Occupant::File) | None, _) => {}
+            (Some(Occupant::File), ExistingFiles::Overwrite) | (None, _) => {}
         }
 
         let node = Node::Symlink(target.to_path_buf());
@@ -944,12 +939,16 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             }));
         }
         if self.tree.occupant(link.as_path()).is_some() {
-            if tally.options.duplicate_policy() == DuplicatePolicy::Skip {
-                return common::record_duplicate_skip(tally.report, link.as_path());
-            }
-            return Err(ArchiveError::from(Malformation::DuplicateEntry {
-                path: link.as_path().to_path_buf(),
-            }));
+            return match tally.options.existing_files {
+                ExistingFiles::Skip => common::record_duplicate_skip(tally.report, link.as_path()),
+                ExistingFiles::Refuse => Err(common::destination_occupied(
+                    self.root.as_path(),
+                    link.as_path(),
+                )),
+                ExistingFiles::Overwrite => Err(ArchiveError::from(Malformation::DuplicateEntry {
+                    path: link.as_path().to_path_buf(),
+                })),
+            };
         }
 
         let resolved_target = self.resolved_target(link.as_path(), target.as_path())?;

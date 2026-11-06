@@ -1103,6 +1103,33 @@ impl VerificationIssue {
             ArchiveError::ReaderFormat(reason) => {
                 high_invalid_archive(format!("Reader format: {reason}"))
             }
+            ArchiveError::Cancelled => (
+                IssueSeverity::Medium,
+                IssueCategory::InvalidArchive,
+                "Operation cancelled".to_string(),
+            ),
+            ArchiveError::DestinationOccupied {
+                destination,
+                conflicts,
+            } => (
+                IssueSeverity::Medium,
+                IssueCategory::InvalidArchive,
+                format!(
+                    "Destination occupied: {} holds {} of the paths to extract",
+                    destination.display(),
+                    conflicts.len()
+                ),
+            ),
+            ArchiveError::OutputReservationLeft { path, .. } => (
+                IssueSeverity::High,
+                IssueCategory::InvalidArchive,
+                format!("Empty reservation file left at: {}", path.display()),
+            ),
+            ArchiveError::ReplaceFailed(failure) => (
+                IssueSeverity::High,
+                IssueCategory::InvalidArchive,
+                failure.to_string(),
+            ),
             ArchiveError::PartialExtraction(partial) => {
                 return Self::from_error(partial.cause(), entry_path);
             }
@@ -2000,7 +2027,9 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_invalid_compression_level() {
-        let error = ArchiveError::InvalidCompressionLevel { level: 0 };
+        let error = ArchiveError::InvalidCompressionLevel {
+            level: crate::RequestedLevel::Integer(0),
+        };
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity(), IssueSeverity::Medium);
         assert_eq!(issue.category(), IssueCategory::InvalidArchive);

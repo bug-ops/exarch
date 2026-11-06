@@ -493,8 +493,11 @@ fn verify_entry(
     });
 
     // Quota validation using reserve (combines all checks); an entry the
-    // selection leaves out is charged to the file count alone, as `list` does.
-    let reserved = if left_out {
+    // selection leaves out and a file the allowlist skips are charged to the
+    // file count alone, as `list` does and extraction does not charge at all.
+    let allowlist_skipped = matches!(entry.kind, ManifestEntryKind::File { .. })
+        && matches!(&path_result, Ok(Some(path)) if !is_extension_allowed(path.as_path(), config));
+    let reserved = if left_out || allowlist_skipped {
         quota_tracker.reserve_count(config).map(drop)
     } else {
         quota_tracker.reserve(entry.size(), config).map(drop)

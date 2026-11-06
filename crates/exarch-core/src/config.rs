@@ -1160,7 +1160,8 @@ impl SecurityConfig {
     ///
     /// Only entries that match an include pattern (and no exclude pattern) are
     /// extracted. A pattern that matches nothing in the archive fails the
-    /// extraction after the scan with [`ArchiveError::UnmatchedInclude`].
+    /// extraction after the scan with
+    /// [`crate::ArchiveError::UnmatchedInclude`].
     ///
     /// # Errors
     ///

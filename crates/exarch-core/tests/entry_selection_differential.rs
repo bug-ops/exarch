@@ -16,6 +16,7 @@
 //! - exarch refuses a symlink whose target escapes the destination at its
 //!   stripped landing; `bsdtar` creates it. The corpus keeps links inside.
 
+#![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
 

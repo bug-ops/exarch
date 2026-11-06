@@ -448,6 +448,77 @@ fn a_refused_original_path_stays_refused_under_every_selection() {
     }
 }
 
+/// Every archive the plain extraction refuses stays refused when its names
+/// sit below a stripped wrapper, under a pattern that selects the entry and
+/// under flatten (spec 022 SC-006, NFR-002).
+#[test]
+fn archives_refused_plainly_stay_refused_under_every_selection() {
+    let hostile: Vec<(&str, Vec<Item<'_>>)> = vec![
+        ("traversal", vec![Item::File("../x", b"x")]),
+        ("nested traversal", vec![Item::File("a/../../x", b"x")]),
+        ("absolute", vec![Item::File("/abs/x", b"x")]),
+        ("symlink escape", vec![Item::Symlink("l", "../../outside")]),
+        (
+            "symlink chain",
+            vec![Item::Symlink("l1", "l2"), Item::Symlink("l2", "..")],
+        ),
+        (
+            "hardlink escape",
+            vec![Item::File("f", b"f"), Item::Hardlink("h", "../x")],
+        ),
+        (
+            "hardlink absolute",
+            vec![Item::File("f", b"f"), Item::Hardlink("h", "/etc/passwd")],
+        ),
+    ];
+    let wrapped_under = |items: &[Item<'_>], prefix: &str| -> Vec<Vec<u8>> {
+        items
+            .iter()
+            .map(|item| match *item {
+                Item::File(name, data) => sink_support::tar_file(&format!("{prefix}{name}"), data),
+                Item::Symlink(name, target) => {
+                    sink_support::tar_symlink(&format!("{prefix}{name}"), target)
+                }
+                Item::Hardlink(name, target) => {
+                    sink_support::tar_hardlink(&format!("{prefix}{name}"), target)
+                }
+                Item::Dir(name) => sink_support::tar_dir(&format!("{prefix}{name}")),
+            })
+            .collect()
+    };
+
+    for (label, items) in hostile {
+        let plain = extract(Format::Tar, &items, &base());
+        assert!(plain.result.is_err(), "{label}: refused plainly");
+
+        let run = |config: &SecurityConfig, prefix: &str| {
+            let work = TempDir::new().unwrap();
+            let archive = work.path().join("a.tar");
+            std::fs::write(
+                &archive,
+                sink_support::tar_archive(&wrapped_under(&items, prefix)),
+            )
+            .unwrap();
+            let dest = work.path().join("out");
+            let result = ExtractRequest::new(config).extract(&archive, &dest);
+            (work, dest, result)
+        };
+
+        // A wrapper in front of an absolute name makes it a relative one.
+        if label != "absolute" {
+            let stripped = base().with_path_rewrite(strip(1));
+            let (work, _, result) = run(&stripped, "top/");
+            assert!(result.is_err(), "{label}: stripped");
+            assert!(!work.path().join("x").exists(), "{label}: stripped write");
+        }
+
+        let included = base().try_add_exclude("nothing").unwrap();
+        let (work, _, result) = run(&included, "");
+        assert!(result.is_err(), "{label}: filtered");
+        assert!(!work.path().join("x").exists(), "{label}: filtered write");
+    }
+}
+
 #[test]
 fn a_name_that_would_leave_the_destination_after_stripping_is_refused() {
     for format in FORMATS {
@@ -624,6 +695,32 @@ fn list_counts_a_skipped_entry_toward_the_file_limit_only() {
             }),
             "{format:?}"
         );
+    }
+}
+
+#[test]
+fn verify_charges_a_skipped_file_to_the_file_count_alone() {
+    for format in FORMATS {
+        let work = TempDir::new().unwrap();
+        let archive = format.write(
+            work.path(),
+            &[
+                Item::File("keep/a.txt", b"hi"),
+                Item::File("big.bin", &[7; 2_000]),
+            ],
+        );
+        let tight = |config: SecurityConfig| {
+            config
+                .with_max_file_size(exarch_core::non_zero!(100))
+                .with_max_total_size(exarch_core::non_zero!(100))
+        };
+        for config in [
+            tight(base().try_add_include("keep").unwrap()),
+            tight(base().try_add_allowed_extension("txt").unwrap()),
+        ] {
+            let report = verify_archive(&archive, &config).unwrap();
+            assert_eq!(report.status(), VerificationStatus::Pass, "{format:?}");
+        }
     }
 }
 

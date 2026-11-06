@@ -284,6 +284,49 @@ fn benchmark_many_small_files(c: &mut Criterion) {
     group.finish();
 }
 
+/// Cost of leaving every entry of a 10,000-file ZIP out, by the extension
+/// allowlist and by an exclude pattern: the selection gate must stay within
+/// 10% of the allowlist skip (spec 022 NFR-006).
+fn benchmark_skipped_entries(c: &mut Criterion) {
+    const ENTRIES: usize = 10_000;
+    let zip_data = create_many_small_files_zip(ENTRIES);
+    let mut group = c.benchmark_group("skipped_entries");
+    group.throughput(Throughput::Elements(ENTRIES as u64));
+
+    let allowlist = SecurityConfig::default()
+        .try_add_allowed_extension("md")
+        .unwrap();
+    let excluded = SecurityConfig::default().try_add_exclude("*.txt").unwrap();
+    for (name, config) in [
+        ("extension_allowlist", allowlist),
+        ("exclude_pattern", excluded),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let temp = TempDir::new().unwrap();
+
+                    let start = Instant::now();
+                    let cursor = Cursor::new(zip_data.clone());
+                    let archive = ZipArchive::new(cursor, &config).unwrap();
+                    archive
+                        .extract(
+                            temp.path(),
+                            &ExtractionOptions::default(),
+                            &mut exarch_core::NoopProgress,
+                        )
+                        .unwrap();
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// Cost of opening, listing and verifying a 10,000-entry ZIP (SC-008).
 ///
 /// `baseline_plain_scan` is the work opening did before the structural census:
@@ -876,6 +919,7 @@ criterion_group!(
     benches,
     benchmark_security_config,
     benchmark_many_small_files,
+    benchmark_skipped_entries,
     benchmark_zip_inspection,
     benchmark_large_files,
     benchmark_nested_directories,

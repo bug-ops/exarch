@@ -132,7 +132,7 @@ pub enum Admission<A> {
 
 impl<A> Admission<A> {
     /// The admitted value; panics when the entry was skipped.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn into_admitted(self) -> A {
         match self {
             Self::Admit(admitted) => admitted,
@@ -142,7 +142,7 @@ impl<A> Admission<A> {
 }
 
 /// Runs `f` with a throwaway tally, for tests that drive a target directly.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn with_tally<R>(f: impl FnOnce(&mut Tally<'_>) -> R) -> R {
     let mut report = ExtractionReport::new();
     let mut progress = crate::NoopProgress;

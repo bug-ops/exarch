@@ -104,7 +104,7 @@ describe('7z symlink targets and link counting', () => {
   it('extractArchive counts symlinks against maxFileCount', () => {
     const archive = path.join(tempDir, 'links.tar');
     fs.writeFileSync(archive, tarWithSymlinks(3));
-    const config = new SecurityConfig().setAllowSymlinks(true).setMaxFileCount(2);
+    const config = new SecurityConfig().withAllowSymlinks(true).withMaxFileCount(2);
 
     assert.throws(() => extractArchiveSync(archive, path.join(tempDir, 'out'), config));
   });
@@ -112,7 +112,7 @@ describe('7z symlink targets and link counting', () => {
   it('extractArchive accepts symlinks at maxFileCount', () => {
     const archive = path.join(tempDir, 'links.tar');
     fs.writeFileSync(archive, tarWithSymlinks(2));
-    const config = new SecurityConfig().setAllowSymlinks(true).setMaxFileCount(2);
+    const config = new SecurityConfig().withAllowSymlinks(true).withMaxFileCount(2);
 
     extractArchiveSync(archive, path.join(tempDir, 'out'), config);
 

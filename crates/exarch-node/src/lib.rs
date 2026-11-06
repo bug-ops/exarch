@@ -96,6 +96,7 @@ mod error;
     allow(dead_code, reason = "napi registers its functions outside test builds")
 )]
 mod memory;
+mod mirror;
 mod report;
 mod stream;
 mod utils;
@@ -117,6 +118,7 @@ use report::CreationReport;
 use report::Durability;
 use report::ExtractionReport;
 use report::VerificationReport;
+use report::saturating_usize;
 use utils::boundary_path;
 use utils::boundary_paths;
 use utils::path_text;
@@ -211,7 +213,7 @@ const _: () = assert!(
 /// console.log(`Extracted ${report.filesExtracted} files`);
 ///
 /// // Customize security settings
-/// const config = new SecurityConfig().setMaxFileSize(100 * 1024 * 1024);
+/// const config = new SecurityConfig().withMaxFileSize(100 * 1024 * 1024);
 /// const report = await extractArchive('archive.tar.gz', '/tmp/output', config);
 ///
 /// // Customize extraction options
@@ -289,7 +291,7 @@ fn extract_core(
 /// console.log(`Extracted ${report.filesExtracted} files`);
 ///
 /// // Customize security settings
-/// const config = new SecurityConfig().setMaxFileSize(100 * 1024 * 1024);
+/// const config = new SecurityConfig().withMaxFileSize(100 * 1024 * 1024);
 /// const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
 /// ```
 #[napi]
@@ -377,7 +379,7 @@ fn output_file(output_path: &BoundaryPath, options: &CreateOptions) -> exarch_co
 /// console.log(`Created archive with ${report.filesAdded} files`);
 ///
 /// // Customize configuration
-/// const config = new CreationConfig().setCompressionLevel(9);
+/// const config = new CreationConfig().withCompressionLevel(9);
 /// const report = await createArchive('output.tar.gz', ['src/'], config);
 /// ```
 #[napi]
@@ -1047,10 +1049,9 @@ pub(crate) type ProgressArgs = (String, Option<i64>, i64, i64);
 ///
 /// Shared by extraction and creation. The JavaScript callback receives `(err:
 /// Error | null, [path, total, current, bytesWritten])`. `bytesWritten` is
-/// always `0`: only `on_entry_start` dispatches a call, and it resets
-/// `current_entry_bytes` to `0` immediately before doing so. `on_bytes_written`
-/// does accumulate per-chunk writes (during creation; extraction also emits
-/// these events for some formats), but never triggers a dispatch of its own.
+/// always `0`: only `on_entry_start` dispatches a call, and no byte of that
+/// entry has been written yet. Reporting the bytes of the preceding entry
+/// instead would be the stale value #285 removed from the Python binding.
 ///
 /// If the JavaScript callback throws, the exception is captured into
 /// `callback_error` instead of being routed through `napi_fatal_exception`
@@ -1062,7 +1063,6 @@ pub(crate) type ProgressArgs = (String, Option<i64>, i64, i64);
 struct NodeProgressAdapter {
     tsfn: ThreadsafeFunction<ProgressArgs>,
     dispatch: ProgressDispatch,
-    current_entry_bytes: i64,
     callback_error: Option<Error>,
     abort: AbortHandle,
 }
@@ -1122,7 +1122,6 @@ impl NodeProgressAdapter {
             abort,
             tsfn,
             dispatch,
-            current_entry_bytes: 0,
             callback_error: None,
         }
     }
@@ -1141,11 +1140,10 @@ impl exarch_core::ProgressCallback for NodeProgressAdapter {
         if self.callback_error.is_some() || self.abort.check().is_err() {
             return;
         }
-        self.current_entry_bytes = 0;
         let path_str = path_text(path);
-        let total_i64 = total.map(|total| i64::try_from(total).unwrap_or(i64::MAX));
-        let current_i64 = i64::try_from(current).unwrap_or(i64::MAX);
-        let value = Ok((path_str, total_i64, current_i64, self.current_entry_bytes));
+        let total_i64 = total.map(saturating_usize);
+        let current_i64 = saturating_usize(current);
+        let value = Ok((path_str, total_i64, current_i64, 0));
         match self.dispatch {
             // `call_async_catch` clears and captures a JS throw into `Err`
             // rather than routing it through `napi_fatal_exception`. `block_on`
@@ -1169,9 +1167,7 @@ impl exarch_core::ProgressCallback for NodeProgressAdapter {
         }
     }
 
-    fn on_bytes_written(&mut self, bytes: u64) {
-        self.current_entry_bytes = self.current_entry_bytes.saturating_add(bytes.cast_signed());
-    }
+    fn on_bytes_written(&mut self, _bytes: u64) {}
 
     fn on_entry_complete(&mut self, _path: &std::path::Path) {}
 

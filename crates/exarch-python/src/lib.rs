@@ -375,7 +375,7 @@ fn list_archive(
         py.detach(|| ListRequest::new(&config).list(&archive_path))
     })?;
 
-    Ok(PyArchiveManifest::from(manifest))
+    Ok(PyArchiveManifest::new(manifest, &config))
 }
 
 /// Verify archive security.
@@ -780,8 +780,8 @@ impl exarch_core::ProgressCallback for PyProgressAdapter {
 
     /// A callback that raised (`KeyboardInterrupt` included) cancels the
     /// operation, so a creation does not commit its staged archive. The
-    /// recorded exception, not the core's `Interrupted` error, is what the
-    /// caller sees (see `merge_progress_result`).
+    /// recorded exception, not the core's `ArchiveError::Cancelled`, is what
+    /// the caller sees (see `merge_progress_result`).
     fn is_cancelled(&mut self) -> bool {
         self.callback_error.is_some()
     }

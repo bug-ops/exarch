@@ -35,6 +35,7 @@ use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
 use crate::error::IntoJsError;
+use crate::report::MAX_SAFE_INTEGER;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
 use crate::report::unknown_variant;
@@ -79,7 +80,9 @@ fn bounded_bytes(limit: Limit<NonZeroU64>) -> Option<i64> {
     reason = "the value is clamped to 2^53 - 1, which an f64 holds exactly"
 )]
 fn exact_f64(value: usize) -> f64 {
-    u64::try_from(value).unwrap_or(u64::MAX).min((1 << 53) - 1) as f64
+    u64::try_from(value)
+        .unwrap_or(u64::MAX)
+        .min(MAX_SAFE_INTEGER) as f64
 }
 
 /// How ZIP archives with ambiguous structure are handled.
@@ -315,8 +318,8 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
     /// not a positive whole number up to 2^53 - 1 (zero, negative, fractional,
     /// `NaN` and infinite values are refused, never wrapped).
-    #[napi(js_name = "setMaxFileSize")]
-    pub fn set_max_file_size(&mut self, env: Env, size: f64) -> Result<&Self> {
+    #[napi(js_name = "withMaxFileSize")]
+    pub fn with_max_file_size(&mut self, env: Env, size: f64) -> Result<&Self> {
         self.try_set_max_file_size(size)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -328,8 +331,8 @@ impl SecurityConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_total_size`) if size
     /// is negative or zero.
-    #[napi(js_name = "setMaxTotalSize")]
-    pub fn set_max_total_size(&mut self, env: Env, size: f64) -> Result<&Self> {
+    #[napi(js_name = "withMaxTotalSize")]
+    pub fn with_max_total_size(&mut self, env: Env, size: f64) -> Result<&Self> {
         self.try_set_max_total_size(size)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -344,8 +347,8 @@ impl SecurityConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_compression_ratio`) if
     /// ratio is not a positive finite number.
-    #[napi(js_name = "setMaxCompressionRatio")]
-    pub fn set_max_compression_ratio(&mut self, env: Env, ratio: f64) -> Result<&Self> {
+    #[napi(js_name = "withMaxCompressionRatio")]
+    pub fn with_max_compression_ratio(&mut self, env: Env, ratio: f64) -> Result<&Self> {
         self.try_set_max_compression_ratio(ratio)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -360,8 +363,8 @@ impl SecurityConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_count`) if count
     /// is not a positive whole number up to 2^53 - 1.
-    #[napi(js_name = "setMaxFileCount")]
-    pub fn set_max_file_count(&mut self, env: Env, count: f64) -> Result<&Self> {
+    #[napi(js_name = "withMaxFileCount")]
+    pub fn with_max_file_count(&mut self, env: Env, count: f64) -> Result<&Self> {
         self.try_set_max_file_count(count)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -373,37 +376,37 @@ impl SecurityConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_path_depth`) if depth
     /// is not a positive whole number up to 2^53 - 1.
-    #[napi(js_name = "setMaxPathDepth")]
-    pub fn set_max_path_depth(&mut self, env: Env, depth: f64) -> Result<&Self> {
+    #[napi(js_name = "withMaxPathDepth")]
+    pub fn with_max_path_depth(&mut self, env: Env, depth: f64) -> Result<&Self> {
         self.try_set_max_path_depth(depth)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
 
     /// Allows or denies symlinks.
-    #[napi(js_name = "setAllowSymlinks")]
-    pub fn set_allow_symlinks(&mut self, allow: bool) -> &Self {
+    #[napi(js_name = "withAllowSymlinks")]
+    pub fn with_allow_symlinks(&mut self, allow: bool) -> &Self {
         self.inner.allowed.symlinks = exarch_core::Admit::from_allowed(allow);
         self
     }
 
     /// Allows or denies hardlinks.
-    #[napi(js_name = "setAllowHardlinks")]
-    pub fn set_allow_hardlinks(&mut self, allow: bool) -> &Self {
+    #[napi(js_name = "withAllowHardlinks")]
+    pub fn with_allow_hardlinks(&mut self, allow: bool) -> &Self {
         self.inner.allowed.hardlinks = exarch_core::Admit::from_allowed(allow);
         self
     }
 
     /// Allows or denies absolute paths.
-    #[napi(js_name = "setAllowAbsolutePaths")]
-    pub fn set_allow_absolute_paths(&mut self, allow: bool) -> &Self {
+    #[napi(js_name = "withAllowAbsolutePaths")]
+    pub fn with_allow_absolute_paths(&mut self, allow: bool) -> &Self {
         self.inner.allowed.absolute_paths = exarch_core::Admit::from_allowed(allow);
         self
     }
 
     /// Allows or denies world-writable files.
-    #[napi(js_name = "setAllowWorldWritable")]
-    pub fn set_allow_world_writable(&mut self, allow: bool) -> &Self {
+    #[napi(js_name = "withAllowWorldWritable")]
+    pub fn with_allow_world_writable(&mut self, allow: bool) -> &Self {
         self.inner.allowed.world_writable = exarch_core::Admit::from_allowed(allow);
         self
     }
@@ -413,15 +416,15 @@ impl SecurityConfig {
     /// Solid archives require reading all preceding entries to decompress any
     /// entry, which may allow a crafted archive to consume excessive
     /// memory. Disabled by default.
-    #[napi(js_name = "setAllowSolidArchives")]
-    pub fn set_allow_solid_archives(&mut self, allow: bool) -> &Self {
+    #[napi(js_name = "withAllowSolidArchives")]
+    pub fn with_allow_solid_archives(&mut self, allow: bool) -> &Self {
         self.inner.solid_archives = self.inner.solid_archives.with_allowed(allow);
         self
     }
 
     /// Sets how ZIP archives with ambiguous structure are handled.
-    #[napi(js_name = "setZipConsistency")]
-    pub fn set_zip_consistency(&mut self, policy: ZipConsistencyPolicy) -> &Self {
+    #[napi(js_name = "withZipConsistency")]
+    pub fn with_zip_consistency(&mut self, policy: ZipConsistencyPolicy) -> &Self {
         self.inner.zip_consistency = policy.into();
         self
     }
@@ -439,8 +442,8 @@ impl SecurityConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `parallel_decode_memory`)
     /// if `size` is not a positive whole number of bytes.
-    #[napi(js_name = "setParallelDecodeMemory")]
-    pub fn set_parallel_decode_memory(&mut self, env: Env, size: Option<f64>) -> Result<&Self> {
+    #[napi(js_name = "withParallelDecodeMemory")]
+    pub fn with_parallel_decode_memory(&mut self, env: Env, size: Option<f64>) -> Result<&Self> {
         self.try_set_parallel_decode_memory(size)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -450,22 +453,22 @@ impl SecurityConfig {
     ///
     /// The limit bounds the decoded volume of each solid block, not resident
     /// memory. It exists only while solid archives are allowed, so call
-    /// `setAllowSolidArchives(true)` first. Default: 512 MB.
+    /// `withAllowSolidArchives(true)` first. Default: 512 MB.
     ///
     /// # Errors
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_solid_block_memory`)
     /// if size is negative or zero, or while solid archives are not allowed.
-    #[napi(js_name = "setMaxSolidBlockMemory")]
-    pub fn set_max_solid_block_memory(&mut self, env: Env, size: f64) -> Result<&Self> {
+    #[napi(js_name = "withMaxSolidBlockMemory")]
+    pub fn with_max_solid_block_memory(&mut self, env: Env, size: f64) -> Result<&Self> {
         self.try_set_max_solid_block_memory(size)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
 
     /// Sets whether to preserve permissions from archive.
-    #[napi(js_name = "setPreservePermissions")]
-    pub fn set_preserve_permissions(&mut self, preserve: bool) -> &Self {
+    #[napi(js_name = "withPreservePermissions")]
+    pub fn with_preserve_permissions(&mut self, preserve: bool) -> &Self {
         self.inner.permissions = PermissionPolicy::from_preserve(preserve);
         self
     }
@@ -510,8 +513,8 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `allowed_extension`) for
     /// an empty array, which would otherwise read as "allow everything", and
     /// for any value `addAllowedExtension` refuses.
-    #[napi(js_name = "setAllowedExtensions")]
-    pub fn set_allowed_extensions(
+    #[napi(js_name = "withAllowedExtensions")]
+    pub fn with_allowed_extensions(
         &mut self,
         env: Env,
         extensions: Either<Vec<String>, Null>,
@@ -534,8 +537,8 @@ impl SecurityConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `banned_path_component`)
     /// for any value `addBannedComponent` refuses.
-    #[napi(js_name = "setBannedComponents")]
-    pub fn set_banned_components(&mut self, env: Env, components: Vec<String>) -> Result<&Self> {
+    #[napi(js_name = "withBannedComponents")]
+    pub fn with_banned_components(&mut self, env: Env, components: Vec<String>) -> Result<&Self> {
         self.try_set_banned_components(&components)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -577,8 +580,8 @@ impl SecurityConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_include`) for a
     /// pattern shape that is refused.
-    #[napi(js_name = "setIncludePatterns")]
-    pub fn set_include_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
+    #[napi(js_name = "withIncludePatterns")]
+    pub fn with_include_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
         self.try_set_include_patterns(Some(&patterns), SelectionEdit::Replace)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -610,8 +613,8 @@ impl SecurityConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `entry_exclude`) for a
     /// pattern shape that is refused.
-    #[napi(js_name = "setExcludePatterns")]
-    pub fn set_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
+    #[napi(js_name = "withExcludePatterns")]
+    pub fn with_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
         self.try_set_exclude_patterns(&patterns, SelectionEdit::Replace)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -631,8 +634,8 @@ impl SecurityConfig {
     /// Throws `INVALID_CONFIGURATION` (`setting` is `strip_components`) if
     /// `count` is not a positive whole number up to 2^53 - 1 or exceeds
     /// `maxPathDepth`.
-    #[napi(js_name = "setStripComponents")]
-    pub fn set_strip_components(&mut self, env: Env, count: Either<f64, Null>) -> Result<&Self> {
+    #[napi(js_name = "withStripComponents")]
+    pub fn with_strip_components(&mut self, env: Env, count: Either<f64, Null>) -> Result<&Self> {
         let count = match count {
             Either::A(count) => Some(count),
             Either::B(_) => None,
@@ -649,9 +652,9 @@ impl SecurityConfig {
     /// symlink or hardlink entry is refused with `SECURITY_VIOLATION`
     /// (`subCode` is `LINK_POLICY`). Files that share a final name follow
     /// `existingFiles`. Setting `flatten` replaces a strip count, and
-    /// `setStripComponents(null)` leaves `flatten` as it is.
-    #[napi(js_name = "setFlatten")]
-    pub fn set_flatten(&mut self, flatten: bool) -> &Self {
+    /// `withStripComponents(null)` leaves `flatten` as it is.
+    #[napi(js_name = "withFlatten")]
+    pub fn with_flatten(&mut self, flatten: bool) -> &Self {
         self.try_set_flatten(flatten);
         self
     }
@@ -896,39 +899,39 @@ impl SecurityConfig {
         &self.inner
     }
 
-    /// Env-free core of `setMaxFileSize`.
+    /// Env-free core of `withMaxFileSize`.
     fn try_set_max_file_size(&mut self, size: f64) -> std::result::Result<(), CoreError> {
         self.inner.max_file_size = byte_limit(ConfigSetting::MaxFileSize, size)?;
         Ok(())
     }
 
-    /// Env-free core of `setMaxTotalSize`.
+    /// Env-free core of `withMaxTotalSize`.
     fn try_set_max_total_size(&mut self, size: f64) -> std::result::Result<(), CoreError> {
         self.inner.max_total_size = byte_limit(ConfigSetting::MaxTotalSize, size)?;
         Ok(())
     }
 
-    /// Env-free core of `setMaxCompressionRatio`.
+    /// Env-free core of `withMaxCompressionRatio`.
     fn try_set_max_compression_ratio(&mut self, ratio: f64) -> std::result::Result<(), CoreError> {
         self.inner.max_compression_ratio =
             RatioLimit::parse(ConfigSetting::MaxCompressionRatio, ratio)?;
         Ok(())
     }
 
-    /// Env-free core of `setMaxFileCount`.
+    /// Env-free core of `withMaxFileCount`.
     fn try_set_max_file_count(&mut self, count: f64) -> std::result::Result<(), CoreError> {
         self.inner.max_file_count =
             Limit::Bounded(count_value(ConfigSetting::MaxFileCount, count)?);
         Ok(())
     }
 
-    /// Env-free core of `setMaxPathDepth`.
+    /// Env-free core of `withMaxPathDepth`.
     fn try_set_max_path_depth(&mut self, depth: f64) -> std::result::Result<(), CoreError> {
         self.inner.max_path_depth = count_value(ConfigSetting::MaxPathDepth, depth)?;
         Ok(())
     }
 
-    /// Env-free core of `setParallelDecodeMemory`.
+    /// Env-free core of `withParallelDecodeMemory`.
     fn try_set_parallel_decode_memory(
         &mut self,
         size: Option<f64>,
@@ -940,7 +943,7 @@ impl SecurityConfig {
         Ok(())
     }
 
-    /// Env-free core of `setMaxSolidBlockMemory`.
+    /// Env-free core of `withMaxSolidBlockMemory`.
     fn try_set_max_solid_block_memory(&mut self, size: f64) -> std::result::Result<(), CoreError> {
         let max_block_memory = byte_count(ConfigSetting::MaxSolidBlockMemory, size)?;
         self.inner.solid_archives = self
@@ -966,7 +969,7 @@ impl SecurityConfig {
         Ok(())
     }
 
-    /// Env-free core of `setAllowedExtensions`; `None` lifts the allowlist.
+    /// Env-free core of `withAllowedExtensions`; `None` lifts the allowlist.
     fn try_set_allowed_extensions(
         &mut self,
         extensions: Option<&[String]>,
@@ -982,7 +985,7 @@ impl SecurityConfig {
         Ok(())
     }
 
-    /// Env-free core of `setBannedComponents`.
+    /// Env-free core of `withBannedComponents`.
     fn try_set_banned_components(
         &mut self,
         components: &[String],
@@ -994,75 +997,59 @@ impl SecurityConfig {
         Ok(())
     }
 
-    /// Env-free core of `addIncludePattern` and `setIncludePatterns`.
+    /// Env-free core of `addIncludePattern` and `withIncludePatterns`.
     fn try_set_include_patterns(
         &mut self,
         patterns: Option<&[String]>,
         edit: SelectionEdit,
     ) -> std::result::Result<(), CoreError> {
         let parsed = parse_patterns(ConfigSetting::EntryInclude, patterns.unwrap_or_default())?;
-        let selection = &self.inner.selection;
-        let kept = match edit {
-            SelectionEdit::Append => selection.include().to_vec(),
-            SelectionEdit::Replace => Vec::new(),
+        let selection = std::mem::take(&mut self.inner.selection);
+        self.inner.selection = match edit {
+            SelectionEdit::Append => parsed
+                .into_iter()
+                .fold(selection, EntrySelection::with_include),
+            SelectionEdit::Replace => selection.with_include_list(parsed),
         };
-        self.inner.selection = rebuilt(
-            selection,
-            [kept, parsed].concat(),
-            selection.exclude().to_vec(),
-        );
         Ok(())
     }
 
-    /// Env-free core of `addExcludePattern` and `setExcludePatterns`.
+    /// Env-free core of `addExcludePattern` and `withExcludePatterns`.
     fn try_set_exclude_patterns(
         &mut self,
         patterns: &[String],
         edit: SelectionEdit,
     ) -> std::result::Result<(), CoreError> {
         let parsed = parse_patterns(ConfigSetting::EntryExclude, patterns)?;
-        let selection = &self.inner.selection;
-        let kept = match edit {
-            SelectionEdit::Append => selection.exclude().to_vec(),
-            SelectionEdit::Replace => Vec::new(),
+        let selection = std::mem::take(&mut self.inner.selection);
+        self.inner.selection = match edit {
+            SelectionEdit::Append => parsed
+                .into_iter()
+                .fold(selection, EntrySelection::with_exclude),
+            SelectionEdit::Replace => selection.with_exclude_list(parsed),
         };
-        self.inner.selection = rebuilt(
-            selection,
-            selection.include().to_vec(),
-            [kept, parsed].concat(),
-        );
         Ok(())
     }
 
-    /// Env-free core of `setStripComponents`; `None` drops a strip count and
+    /// Env-free core of `withStripComponents`; `None` drops a strip count and
     /// leaves `flatten` as it is.
     fn try_set_strip_components(
         &mut self,
         count: Option<f64>,
     ) -> std::result::Result<(), CoreError> {
-        let rewrite = match count {
-            Some(count) => {
+        let strip = count
+            .map(|count| {
                 let count = positive_from_f64(ConfigSetting::StripComponents, count)?;
-                PathRewrite::Strip(StripComponents::new(count, self.inner.max_path_depth)?)
-            }
-            None => match self.inner.selection.rewrite() {
-                PathRewrite::Flatten => PathRewrite::Flatten,
-                _ => PathRewrite::Keep,
-            },
-        };
-        self.inner.selection = std::mem::take(&mut self.inner.selection).with_rewrite(rewrite);
+                StripComponents::new(count, self.inner.max_path_depth)
+            })
+            .transpose()?;
+        self.inner.selection = std::mem::take(&mut self.inner.selection).with_strip(strip);
         Ok(())
     }
 
-    /// Env-free core of `setFlatten`.
+    /// Env-free core of `withFlatten`.
     fn try_set_flatten(&mut self, flatten: bool) {
-        let current = self.inner.selection.rewrite();
-        let rewrite = match (flatten, current) {
-            (true, _) => PathRewrite::Flatten,
-            (false, PathRewrite::Flatten) => PathRewrite::Keep,
-            (false, other) => other,
-        };
-        self.inner.selection = std::mem::take(&mut self.inner.selection).with_rewrite(rewrite);
+        self.inner.selection = std::mem::take(&mut self.inner.selection).with_flatten(flatten);
     }
 }
 
@@ -1082,21 +1069,6 @@ fn parse_patterns(
         .iter()
         .map(|pattern| EntryPattern::parse_for(setting, pattern))
         .collect()
-}
-
-/// `selection` with its pattern lists replaced and its rewrite kept.
-fn rebuilt(
-    selection: &EntrySelection,
-    include: Vec<EntryPattern>,
-    exclude: Vec<EntryPattern>,
-) -> EntrySelection {
-    let with_include = include
-        .into_iter()
-        .fold(EntrySelection::default(), EntrySelection::with_include);
-    exclude
-        .into_iter()
-        .fold(with_include, EntrySelection::with_exclude)
-        .with_rewrite(selection.rewrite())
 }
 
 /// Configuration for archive creation operations.
@@ -1148,8 +1120,8 @@ impl CreationConfig {
     /// Throws `INVALID_COMPRESSION_LEVEL` if level is not a whole number from 1
     /// to 9 (a fraction, `NaN`, a negative or an out-of-range number is
     /// refused, never wrapped).
-    #[napi(js_name = "setCompressionLevel")]
-    pub fn set_compression_level(&mut self, env: Env, level: f64) -> Result<&Self> {
+    #[napi(js_name = "withCompressionLevel")]
+    pub fn with_compression_level(&mut self, env: Env, level: f64) -> Result<&Self> {
         self.try_set_compression_level(level)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -1158,8 +1130,8 @@ impl CreationConfig {
     /// Sets whether to preserve file permissions from source.
     ///
     /// Default: true.
-    #[napi(js_name = "setPreservePermissions")]
-    pub fn set_preserve_permissions(&mut self, preserve: bool) -> &Self {
+    #[napi(js_name = "withPreservePermissions")]
+    pub fn with_preserve_permissions(&mut self, preserve: bool) -> &Self {
         self.inner.permissions = PermissionPolicy::from_preserve(preserve);
         self
     }
@@ -1170,8 +1142,8 @@ impl CreationConfig {
     ///
     /// Security note: Following symlinks may include unintended files
     /// from outside the source directory.
-    #[napi(js_name = "setFollowSymlinks")]
-    pub fn set_follow_symlinks(&mut self, follow: bool) -> &Self {
+    #[napi(js_name = "withFollowSymlinks")]
+    pub fn with_follow_symlinks(&mut self, follow: bool) -> &Self {
         self.inner.follow_symlinks = follow;
         self
     }
@@ -1179,8 +1151,8 @@ impl CreationConfig {
     /// Sets whether to include hidden files (files starting with '.').
     ///
     /// Default: false.
-    #[napi(js_name = "setIncludeHidden")]
-    pub fn set_include_hidden(&mut self, include: bool) -> &Self {
+    #[napi(js_name = "withIncludeHidden")]
+    pub fn with_include_hidden(&mut self, include: bool) -> &Self {
         self.inner.include_hidden = include;
         self
     }
@@ -1193,8 +1165,8 @@ impl CreationConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
     /// negative or zero. Pass `null` to remove the limit.
-    #[napi(js_name = "setMaxFileSize")]
-    pub fn set_max_file_size(&mut self, env: Env, size: Either<f64, Null>) -> Result<&Self> {
+    #[napi(js_name = "withMaxFileSize")]
+    pub fn with_max_file_size(&mut self, env: Env, size: Either<f64, Null>) -> Result<&Self> {
         let size = match size {
             Either::A(bytes) => Some(bytes),
             Either::B(_) => None,
@@ -1237,8 +1209,8 @@ impl CreationConfig {
     ///
     /// Throws `INVALID_CONFIGURATION` (`setting` is `exclude_pattern`) for any
     /// pattern `addExcludePattern` refuses.
-    #[napi(js_name = "setExcludePatterns")]
-    pub fn set_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
+    #[napi(js_name = "withExcludePatterns")]
+    pub fn with_exclude_patterns(&mut self, env: Env, patterns: Vec<String>) -> Result<&Self> {
         self.try_set_exclude_patterns(&patterns)
             .map_err(|err| err.into_js_error(env))?;
         Ok(self)
@@ -1304,7 +1276,7 @@ impl CreationConfig {
         Ok(())
     }
 
-    /// Env-free core of `setExcludePatterns`.
+    /// Env-free core of `withExcludePatterns`.
     fn try_set_exclude_patterns(
         &mut self,
         patterns: &[String],
@@ -1316,7 +1288,7 @@ impl CreationConfig {
         Ok(())
     }
 
-    /// Env-free core of `setMaxFileSize`; `None` removes the limit.
+    /// Env-free core of `withMaxFileSize`; `None` removes the limit.
     fn try_set_max_file_size(&mut self, size: Option<f64>) -> std::result::Result<(), CoreError> {
         self.inner.max_file_size = match size {
             Some(bytes) => byte_limit(ConfigSetting::MaxFileSize, bytes)?,
@@ -1325,7 +1297,7 @@ impl CreationConfig {
         Ok(())
     }
 
-    /// Env-free core of `setCompressionLevel`, so the validation is testable
+    /// Env-free core of `withCompressionLevel`, so the validation is testable
     /// without a JS environment.
     fn try_set_compression_level(&mut self, level: f64) -> std::result::Result<(), CoreError> {
         self.inner.compression_level = CompressionLevel::from_f64(level)?;
@@ -1687,7 +1659,7 @@ mod tests {
     }
 
     #[test]
-    fn test_size_getters_clamp_values_above_i64_max() {
+    fn test_size_getters_clamp_values_above_max_safe_integer() {
         let mut config = SecurityConfig::new();
         config.inner.max_file_size = exarch_core::Limit::Unbounded;
         config.inner.max_total_size = exarch_core::Limit::Unbounded;
@@ -1696,11 +1668,11 @@ mod tests {
         );
         assert_eq!(config.get_max_file_size(), None);
         assert_eq!(config.get_max_total_size(), None);
-        assert_eq!(config.get_max_solid_block_memory(), Some(i64::MAX));
+        assert_eq!(config.get_max_solid_block_memory(), Some(MAX_SAFE_INT));
 
         let mut creation = CreationConfig::new();
         creation.inner.max_file_size = exarch_core::Limit::Bounded(NonZeroU64::MAX);
-        assert_eq!(creation.get_max_file_size(), Some(i64::MAX));
+        assert_eq!(creation.get_max_file_size(), Some(MAX_SAFE_INT));
     }
 
     #[test]
@@ -1960,7 +1932,7 @@ mod tests {
         config.try_set_max_compression_ratio(250.0).unwrap();
         config.try_set_max_file_count(50_000.0).unwrap();
         config.try_set_max_path_depth(64.0).unwrap();
-        config.set_preserve_permissions(true);
+        config.with_preserve_permissions(true);
 
         assert_eq!(
             config.get_max_file_size(),
@@ -2002,7 +1974,7 @@ mod tests {
         );
 
         let mut config = SecurityConfig::new();
-        config.set_allow_solid_archives(true);
+        config.with_allow_solid_archives(true);
         assert!(
             config.get_allow_solid_archives(),
             "allow_solid_archives getter should reflect setter value"
@@ -2017,7 +1989,7 @@ mod tests {
             None,
             "no limit is reported while solid archives are refused"
         );
-        config.set_allow_solid_archives(true);
+        config.with_allow_solid_archives(true);
         assert_eq!(
             config.get_max_solid_block_memory(),
             Some(512 * 1024 * 1024),
@@ -2041,18 +2013,18 @@ mod tests {
     #[test]
     fn test_disallowing_solid_archives_drops_the_limit() {
         let mut config = SecurityConfig::new();
-        config.set_allow_solid_archives(true);
+        config.with_allow_solid_archives(true);
         config.try_set_max_solid_block_memory(1024.0).unwrap();
-        config.set_allow_solid_archives(true);
+        config.with_allow_solid_archives(true);
         assert_eq!(config.get_max_solid_block_memory(), Some(1024));
-        config.set_allow_solid_archives(false);
+        config.with_allow_solid_archives(false);
         assert_eq!(config.get_max_solid_block_memory(), None);
     }
 
     #[test]
     fn test_max_solid_block_memory_round_trip() {
         let mut config = SecurityConfig::new();
-        config.set_allow_solid_archives(true);
+        config.with_allow_solid_archives(true);
         let result = config.try_set_max_solid_block_memory(256.0 * 1024.0 * 1024.0);
         assert!(result.is_ok());
         assert_eq!(
@@ -2083,7 +2055,7 @@ mod tests {
     #[test]
     fn test_max_solid_block_memory_accepts_one_byte() {
         let mut config = SecurityConfig::new();
-        config.set_allow_solid_archives(true);
+        config.with_allow_solid_archives(true);
         let result = config.try_set_max_solid_block_memory(1.0);
         assert!(result.is_ok(), "1 byte should be accepted");
         assert_eq!(config.get_max_solid_block_memory(), Some(1));
@@ -2382,9 +2354,9 @@ mod tests {
     fn test_creation_config_builder() {
         let mut config = CreationConfig::new();
         config.try_set_compression_level(9.0).unwrap();
-        config.set_preserve_permissions(false);
-        config.set_follow_symlinks(true);
-        config.set_include_hidden(true);
+        config.with_preserve_permissions(false);
+        config.with_follow_symlinks(true);
+        config.with_include_hidden(true);
         config.try_set_max_file_size(Some(1_000_000.0)).unwrap();
 
         assert_eq!(config.get_compression_level(), 9);
@@ -2565,7 +2537,7 @@ mod tests {
             ZipConsistencyPolicy::Enforce
         );
 
-        config.set_zip_consistency(ZipConsistencyPolicy::Ignore);
+        config.with_zip_consistency(ZipConsistencyPolicy::Ignore);
         assert_eq!(
             config.get_zip_consistency().unwrap(),
             ZipConsistencyPolicy::Ignore

@@ -189,7 +189,7 @@ def test_an_unmatched_include_fails_after_the_scan_and_names_the_patterns(projec
         exarch.extract_archive(project, out, config)
 
     assert info.value.setting == "entry_include"
-    assert info.value.patterns == ["nope"]
+    assert info.value.unmatched_patterns == ["nope"]
     assert info.value.writes == "kept"
     assert (out / "proj" / "README.md").exists()
 
@@ -202,7 +202,7 @@ def test_an_unmatched_include_under_atomic_commits_nothing(project, temp_dir):
     with pytest.raises(exarch.InvalidConfigurationError) as info:
         exarch.extract_archive(project, out, config, options)
 
-    assert info.value.patterns == ["nope"]
+    assert info.value.unmatched_patterns == ["nope"]
     assert not out.exists()
 
 
@@ -256,7 +256,7 @@ def test_list_reports_the_disposition_of_every_entry(project):
     config = exarch.SecurityConfig().add_include_pattern("proj/src").with_strip_components(1)
 
     manifest = exarch.list_archive(project, config)
-    dispositions = {str(d.path): d for d in manifest.dispositions(config)}
+    dispositions = {str(d.path): d for d in manifest.dispositions}
 
     assert manifest.total_entries == 6
     extracted = {
@@ -283,15 +283,17 @@ def test_list_reports_the_disposition_of_every_entry(project):
 def test_a_manifest_keeps_the_selection_it_was_listed_with(project):
     listed_with = exarch.SecurityConfig().add_include_pattern("proj/README.md")
     manifest = exarch.list_archive(project, listed_with)
+    listed_with.include_patterns = ["proj/src"]
 
-    other = exarch.SecurityConfig().add_include_pattern("proj/src")
-    kinds = {
-        str(d.path): type(d).__name__
-        for d in manifest.dispositions(other)
+    actions = {
+        str(d.path): d.action
+        for d in manifest.dispositions
         if str(d.path) in {"proj/README.md", "proj/src/main.rs"}
     }
 
-    assert kinds == {"proj/README.md": "ExtractDisposition", "proj/src/main.rs": "SkipDisposition"}
+    assert actions == {"proj/README.md": "extract", "proj/src/main.rs": "skip"}
+    assert exarch.ExtractDisposition.action == "extract"
+    assert exarch.SkipDisposition.action == "skip"
 
 
 def test_verify_applies_the_same_selection(project):
@@ -329,7 +331,7 @@ def test_an_unmatched_include_fails_a_memory_extraction(project):
     with pytest.raises(exarch.InvalidConfigurationError) as info:
         exarch.extract_archive_to_memory(project.read_bytes(), config)
 
-    assert info.value.patterns == ["nope"]
+    assert info.value.unmatched_patterns == ["nope"]
     assert info.value.writes == "discarded"
 
 

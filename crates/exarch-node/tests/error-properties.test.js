@@ -94,7 +94,7 @@ describe('setter errors', () => {
 
   it('binding-native errors keep napi status and carry no typed properties', () => {
     assert.throws(
-      () => new SecurityConfig().setMaxFileSize('not a number'),
+      () => new SecurityConfig().withMaxFileSize('not a number'),
       (err) => {
         assert.strictEqual(err.code, 'NumberExpected');
         assert.strictEqual(err.setting, undefined);
@@ -125,7 +125,7 @@ describe('extraction error properties', () => {
   });
 
   it('a kept partial extraction carries typed counters and a warnings array', async () => {
-    const config = new SecurityConfig().setMaxFileCount(1);
+    const config = new SecurityConfig().withMaxFileCount(1);
     await assert.rejects(extractArchive(archivePath, path.join(tempDir, 'out'), config), (err) => {
       assert.strictEqual(err.code, 'QUOTA_EXCEEDED');
       assert.strictEqual(err.subCode, 'FILE_COUNT');
@@ -141,7 +141,7 @@ describe('extraction error properties', () => {
   });
 
   it('a rolled-back atomic extraction reports writes without counters', async () => {
-    const config = new SecurityConfig().setMaxFileCount(1);
+    const config = new SecurityConfig().withMaxFileCount(1);
     const options = new ExtractionOptions().withStaging('atomic');
     await assert.rejects(
       extractArchive(archivePath, path.join(tempDir, 'atomic-out'), config, options),
@@ -160,6 +160,8 @@ describe('extraction error properties', () => {
   it('a failure before any write has no writes property', async () => {
     await assert.rejects(listArchive(path.join(tempDir, 'missing.tar')), (err) => {
       assert.strictEqual(err.code, 'SOURCE_NOT_FOUND');
+      assert.strictEqual(path.basename(err.path), 'missing.tar');
+      assert.strictEqual(err.leftoverPath, undefined);
       assert.strictEqual(err.writes, undefined);
       assertDescriptionOnly(err);
       return true;

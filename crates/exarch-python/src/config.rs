@@ -8,7 +8,6 @@ use exarch_core::ConfigSetting;
 use exarch_core::CreationConfig as CoreCreationConfig;
 use exarch_core::DecompressionBudget;
 use exarch_core::EntryPattern;
-use exarch_core::EntrySelection;
 use exarch_core::ExistingFiles;
 use exarch_core::Extension;
 use exarch_core::ExtensionFilter;
@@ -797,8 +796,7 @@ impl PySecurityConfig {
     )]
     fn set_include_patterns(&mut self, value: Vec<String>) -> PyResult<()> {
         let include = parse_entry_patterns(ConfigSetting::EntryInclude, &value)?;
-        let exclude = self.inner.selection.exclude().to_vec();
-        self.inner.selection = rebuilt_selection(&self.inner.selection, include, exclude);
+        self.inner.selection = std::mem::take(&mut self.inner.selection).with_include_list(include);
         Ok(())
     }
 
@@ -821,8 +819,7 @@ impl PySecurityConfig {
     )]
     fn set_exclude_patterns(&mut self, value: Vec<String>) -> PyResult<()> {
         let exclude = parse_entry_patterns(ConfigSetting::EntryExclude, &value)?;
-        let include = self.inner.selection.include().to_vec();
-        self.inner.selection = rebuilt_selection(&self.inner.selection, include, exclude);
+        self.inner.selection = std::mem::take(&mut self.inner.selection).with_exclude_list(exclude);
         Ok(())
     }
 
@@ -883,21 +880,6 @@ fn parse_entry_patterns(
         .collect()
 }
 
-/// A selection with the rewrite of `current` and the given patterns.
-fn rebuilt_selection(
-    current: &EntrySelection,
-    include: Vec<EntryPattern>,
-    exclude: Vec<EntryPattern>,
-) -> EntrySelection {
-    let selection = EntrySelection::default().with_rewrite(current.rewrite());
-    let selection = include
-        .into_iter()
-        .fold(selection, EntrySelection::with_include);
-    exclude
-        .into_iter()
-        .fold(selection, EntrySelection::with_exclude)
-}
-
 /// Maps the Python value of `parallel_decode_memory` (`None` or a positive
 /// byte count) to the core mode.
 fn parse_parallel_decode_memory(value: Option<PyInteger>) -> PyResult<ParallelDecode> {
@@ -933,29 +915,19 @@ impl PySecurityConfig {
     /// Shared by the builder and the property setter of `strip_components`.
     /// `None` removes a strip; a flatten is left alone.
     fn try_set_strip_components(&mut self, count: Option<PyInteger>) -> PyResult<()> {
-        let rewrite = match count {
-            Some(count) => {
+        let strip = count
+            .map(|count| {
                 let count = count.positive(ConfigSetting::StripComponents)?;
-                PathRewrite::Strip(
-                    StripComponents::new(count, self.inner.max_path_depth)
-                        .map_err(convert_error)?,
-                )
-            }
-            None if self.inner.selection.rewrite() == PathRewrite::Flatten => PathRewrite::Flatten,
-            None => PathRewrite::Keep,
-        };
-        self.inner.selection = self.inner.selection.clone().with_rewrite(rewrite);
+                StripComponents::new(count, self.inner.max_path_depth).map_err(convert_error)
+            })
+            .transpose()?;
+        self.inner.selection = std::mem::take(&mut self.inner.selection).with_strip(strip);
         Ok(())
     }
 
     /// Shared by the builder and the property setter of `flatten`.
     fn set_flatten(&mut self, flatten: bool) {
-        let rewrite = match (flatten, self.inner.selection.rewrite()) {
-            (true, _) => PathRewrite::Flatten,
-            (false, PathRewrite::Flatten) => PathRewrite::Keep,
-            (false, other) => other,
-        };
-        self.inner.selection = self.inner.selection.clone().with_rewrite(rewrite);
+        self.inner.selection = std::mem::take(&mut self.inner.selection).with_flatten(flatten);
     }
 
     /// Shared by the builder and the property setter of

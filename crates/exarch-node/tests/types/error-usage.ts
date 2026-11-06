@@ -25,7 +25,12 @@ import type {
   StoredMemoryEntry,
   ZipBombSubCode,
 } from '../../index'
-import type { ArchiveEntry, MemoryExtraction, VerificationIssue } from '../../index'
+import type {
+  ArchiveEntry,
+  EntryDisposition,
+  MemoryExtraction,
+  VerificationIssue,
+} from '../../index'
 
 export function describeListed(entry: ArchiveEntry): string {
   switch (entry.entryType) {
@@ -230,4 +235,16 @@ export function abortableCalls(data: Uint8Array): Promise<unknown>[] {
     listArchiveBytes(data, null, null, structural),
     listArchiveBytes(data, null, null, undefined),
   ]
+}
+
+export function pathOfARefusedSource(err: ExarchCoreError): string | undefined {
+  if (err.code === 'SOURCE_NOT_FOUND' || err.code === 'OUTPUT_EXISTS') {
+    const path: string = err.path
+    return path
+  }
+  return err.leftoverPath
+}
+
+export function dispositionOutcome(disposition: EntryDisposition): string {
+  return disposition.action === 'skip' ? disposition.kind : disposition.landing
 }

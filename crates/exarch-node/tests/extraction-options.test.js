@@ -186,6 +186,8 @@ describe('extractArchiveSync with ExtractionOptions', () => {
         () => extractWith('refuse'),
         (err) => {
           assert.strictEqual(err.code, 'OUTPUT_EXISTS');
+          assert.strictEqual(path.basename(err.path), path.basename(outputDir));
+          assert.deepStrictEqual(err.conflicts, ['hello.txt']);
           return true;
         }
       );

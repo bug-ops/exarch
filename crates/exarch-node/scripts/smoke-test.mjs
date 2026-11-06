@@ -74,7 +74,7 @@ async function main() {
       console.log(`SMOKE_WARN: progress callback failed under ${runtime}: ${progressError.message}`);
     }
 
-    const quotaConfig = new SecurityConfig().setMaxFileSize(1);
+    const quotaConfig = new SecurityConfig().withMaxFileSize(1);
     const quotaOutputDir = join(tempDir, 'output-quota');
     mkdirSync(quotaOutputDir);
     let quotaError = null;

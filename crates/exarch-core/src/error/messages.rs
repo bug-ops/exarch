@@ -5,10 +5,13 @@
 //! description and the fate of partial output. Python, Node.js and the CLI
 //! consume [`FfiErrorMessage`] instead of re-matching [`ArchiveError`].
 
+use super::config_error::ConfigProblem;
 use super::config_error::ConfigSetting;
 use super::config_error::ProtectedPath;
+use super::redaction::format_entry_path_for_error;
 use super::redaction::sanitize_io_error_for_error;
 use super::redaction::sanitize_path_for_error;
+use super::replace::Restore;
 use super::replace::RestoreKind;
 use super::types::ArchiveError;
 use super::types::PartialWrites;
@@ -606,13 +609,11 @@ impl FfiRestore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FfiNameCollision {
-    // ASSUMPTION: `name` is the stable text of the collision kind; the bindings
-    // track fixes it.
-    /// The collision kind, which sets how serious the collision is.
+    /// The entry name both sources map to.
     pub name: String,
-    /// The entry that was there first.
+    /// The first source that maps to it, redacted.
     pub first: String,
-    /// The entry that collided with it.
+    /// The second source that maps to it, redacted.
     pub second: String,
 }
 
@@ -706,6 +707,7 @@ impl ArchiveError {
         let mut msg = FfiErrorMessage::new(self.ffi_kind(), self.ffi_description());
         msg.path = self.ffi_path();
         msg.leftover_path = self.ffi_leftover_path();
+        msg.detail = self.ffi_detail();
         if let Self::SourceNotAccessible { error, .. } = &self {
             msg.source_fault = Some(FfiSourceFault {
                 raw_os_error: error.raw_os_error(),
@@ -810,6 +812,51 @@ impl ArchiveError {
                 .as_ref()
                 .map(|leftover| sanitize_path_for_error(&leftover.path)),
             _ => None,
+        }
+    }
+
+    /// The [`FfiErrorMessage::detail`] of a non-partial error.
+    fn ffi_detail(&self) -> FfiDetail {
+        match self {
+            Self::DestinationOccupied { conflicts, .. } => FfiDetail::Occupied {
+                conflicts: conflicts
+                    .iter()
+                    .map(|path| format_entry_path_for_error(path))
+                    .collect(),
+            },
+            Self::ReplaceFailed(failure) => FfiDetail::Replace(match &failure.restore {
+                Restore::NotNeeded => FfiRestore::NotNeeded,
+                Restore::Restored => FfiRestore::Restored,
+                Restore::Failed { backup, .. } => FfiRestore::Failed {
+                    backup_path: sanitize_path_for_error(backup),
+                },
+            }),
+            Self::InvalidConfiguration {
+                problem: ConfigProblem::ReplacesProtectedPath { path },
+                ..
+            } => FfiDetail::ProtectedPath(*path),
+            Self::InvalidConfiguration {
+                problem:
+                    ConfigProblem::EntryNameCollision {
+                        name,
+                        first,
+                        second,
+                    },
+                ..
+            } => FfiDetail::NameCollision(FfiNameCollision {
+                name: name.clone(),
+                first: sanitize_path_for_error(first),
+                second: sanitize_path_for_error(second),
+            }),
+            Self::UnmatchedInclude { patterns } => FfiDetail::UnmatchedInclude {
+                patterns: patterns.iter().map(ToString::to_string).collect(),
+            },
+            Self::InvalidArchive(crate::Malformation::EntryPathNotUtf8 { path }) => {
+                FfiDetail::NonUtf8EntryPath {
+                    path: format_entry_path_for_error(path),
+                }
+            }
+            _ => FfiDetail::None,
         }
     }
 
@@ -1248,7 +1295,7 @@ mod tests {
                 .is_some_and(|p| p.contains(".exarch-2"))
         );
         assert!(replace.path.is_none());
-        assert_eq!(replace.detail, FfiDetail::None);
+        assert_eq!(replace.detail, FfiDetail::Replace(FfiRestore::Restored));
     }
 
     #[test]
@@ -1259,6 +1306,71 @@ mod tests {
 
         assert_matches!(msg.partial, Some(PartialOutcome::RolledBack));
         assert!(msg.leftover_path.is_some_and(|p| p.contains(".exarch-3")));
+    }
+
+    #[test]
+    fn details_are_built_once_and_unwrapped_through_a_partial() {
+        let occupied = ArchiveError::DestinationOccupied {
+            destination: PathBuf::from("dest"),
+            conflicts: Box::new([PathBuf::from("b"), PathBuf::from("a")]),
+        }
+        .rolled_back();
+        assert_eq!(
+            occupied.into_ffi_message().detail,
+            FfiDetail::Occupied {
+                conflicts: Box::new(["b".to_string(), "a".to_string()])
+            }
+        );
+
+        let failed = ArchiveError::ReplaceFailed(crate::ReplaceFailure::new(
+            std::io::Error::other("x"),
+            Restore::Failed {
+                backup: PathBuf::from("out/.exarch-backup"),
+                error: std::io::Error::other("y"),
+            },
+            None,
+        ))
+        .into_ffi_message();
+        assert_matches!(
+            failed.detail,
+            FfiDetail::Replace(FfiRestore::Failed { ref backup_path })
+                if backup_path.contains(".exarch-backup")
+        );
+
+        let protected = ArchiveError::InvalidConfiguration {
+            setting: ConfigSetting::OutputPath,
+            problem: ConfigProblem::ReplacesProtectedPath {
+                path: ProtectedPath::WorkingDirectory,
+            },
+        }
+        .into_ffi_message();
+        assert_eq!(
+            protected.detail,
+            FfiDetail::ProtectedPath(ProtectedPath::WorkingDirectory)
+        );
+
+        let collision = ArchiveError::InvalidConfiguration {
+            setting: ConfigSetting::OutputPath,
+            problem: ConfigProblem::EntryNameCollision {
+                name: "a.txt".into(),
+                first: PathBuf::from("one/a.txt"),
+                second: PathBuf::from("two/a.txt"),
+            },
+        }
+        .into_ffi_message();
+        assert_matches!(
+            collision.detail,
+            FfiDetail::NameCollision(ref c) if c.name == "a.txt"
+        );
+
+        let non_utf8 = ArchiveError::from(crate::Malformation::EntryPathNotUtf8 {
+            path: PathBuf::from("bad"),
+        })
+        .into_ffi_message();
+        assert_eq!(
+            non_utf8.detail,
+            FfiDetail::NonUtf8EntryPath { path: "bad".into() }
+        );
     }
 
     #[test]

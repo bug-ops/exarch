@@ -132,8 +132,8 @@ async function benchmarkTarExtraction(archivePath, iterations = 3) {
     const tmpdir = createTempDir();
     try {
       const config = new exarch.SecurityConfig()
-        .setMaxFileSize(500 * 1024 * 1024)
-        .setMaxTotalSize(1024 * 1024 * 1024);
+        .withMaxFileSize(500 * 1024 * 1024)
+        .withMaxTotalSize(1024 * 1024 * 1024);
       exarch.extractArchiveSync(archivePath, tmpdir, config);
     } finally {
       removeDir(tmpdir);
@@ -187,8 +187,8 @@ async function benchmarkZipExtraction(archivePath, iterations = 3) {
     const tmpdir = createTempDir();
     try {
       const config = new exarch.SecurityConfig()
-        .setMaxFileSize(500 * 1024 * 1024)
-        .setMaxTotalSize(1024 * 1024 * 1024);
+        .withMaxFileSize(500 * 1024 * 1024)
+        .withMaxTotalSize(1024 * 1024 * 1024);
       exarch.extractArchiveSync(archivePath, tmpdir, config);
     } finally {
       removeDir(tmpdir);

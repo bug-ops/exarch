@@ -20,7 +20,7 @@ importable at runtime as typing objects.
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal, Protocol, final
+from typing import ClassVar, Literal, Protocol, final
 
 __version__: str
 
@@ -107,6 +107,7 @@ _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
 _DecodeReuse = Literal["off", "memory", "temp_file"]
 _LinkState = Literal["recorded", "missing", "unread", "unreadable", "oversized"]
+_DispositionKind = Literal["extract", "skip"]
 _SkipKind = Literal[
     "duplicate",
     "extension_not_allowed",
@@ -355,7 +356,7 @@ class SecurityConfig:
         ``CreationConfig`` exclude patterns and match the normalized archive
         path before any stripping. An include pattern that matches nothing fails
         the extraction after the scan with ``InvalidConfigurationError``
-        (``setting == "entry_include"``, the unmatched ``patterns``); the files
+        (``setting == "entry_include"``, the ``unmatched_patterns``); the files
         already written stay (or are rolled back under an atomic ``staging``).
 
         Order of operations: the name is validated, matched on its original
@@ -1280,17 +1281,20 @@ class ArchiveManifest:
         """Archive format."""
         ...
 
-    def dispositions(self, config: SecurityConfig | None = None) -> list[AnyEntryDisposition]:
+    @property
+    def dispositions(self) -> list[AnyEntryDisposition]:
         """
         What extraction would do with each entry the validation accepts: where it
-        lands, or why it is left out. The selection is the one the manifest was
-        listed with; ``config`` supplies only limits and policies (default: the
-        secure defaults). An entry the validation refuses is not reported.
+        lands, or why it is left out. Computed when the archive was listed, under
+        that call's ``SecurityConfig`` (selection, limits and policies). An entry
+        the validation refuses is not reported.
         """
         ...
 
 class EntryDisposition:
     """What extraction does with one listed entry (see ``AnyEntryDisposition``)."""
+
+    action: ClassVar[_DispositionKind]
 
     @property
     def path(self) -> str:
@@ -1301,6 +1305,8 @@ class EntryDisposition:
 class ExtractDisposition(EntryDisposition):
     """An entry that extraction writes."""
 
+    action: ClassVar[Literal["extract"]]
+
     @property
     def landing(self) -> str:
         """Where it lands, relative to the destination, after any strip or flatten."""
@@ -1309,6 +1315,8 @@ class ExtractDisposition(EntryDisposition):
 @final
 class SkipDisposition(EntryDisposition):
     """An entry that is validated but not extracted."""
+
+    action: ClassVar[Literal["skip"]]
 
     @property
     def kind(self) -> _SkipKind:
@@ -1350,7 +1358,11 @@ class VerificationIssue:
         ...
 
     @property
-    def sub_code(self) -> str | None:
+    def sub_code(
+        self,
+    ) -> (
+        _InvalidArchiveSubCode | _SecurityViolationSubCode | _QuotaSubCode | _ZipBombSubCode | None
+    ):
         """The sub-code of the refusal (a security, invalid-archive, quota or zip bomb code)."""
         ...
 
@@ -1442,8 +1454,18 @@ class VerificationReport:
         ...
 
     @property
+    def suspicious_entries(self) -> int:
+        """Entries flagged as suspicious."""
+        ...
+
+    @property
     def total_size(self) -> int:
         """Total uncompressed size."""
+        ...
+
+    @property
+    def format(self) -> _ArchiveType:
+        """Archive format."""
         ...
 
     @property
@@ -1638,7 +1660,7 @@ def create_archive(
     config: CreationConfig | None = None,
     format: _CreatableFormat | None = None,
     overwrite: bool = True,
-    durability: _Durability = "synced",
+    durability: _Durability | None = None,
 ) -> CreationReport:
     """
     Create an archive from source files and directories.
@@ -1656,7 +1678,7 @@ def create_archive(
             "Zip" for a ``.whl``); None detects it from the extension
         overwrite: Replace an existing regular file or symlink, keeping its
             permission bits (default); False refuses any existing output
-        durability: "synced" (default) flushes the archive and its directory
+        durability: "synced" (the default, also for ``None``) flushes the archive and its directory
             entry before returning. "unsynced" skips both: faster, but after a
             crash or power loss a replaced output can be empty or truncated and
             a new output can be empty, and write-back errors (network
@@ -1681,7 +1703,7 @@ def create_archive_with_progress(
     progress: ProgressCallbackFn | None = None,
     format: _CreatableFormat | None = None,
     overwrite: bool = True,
-    durability: _Durability = "synced",
+    durability: _Durability | None = None,
 ) -> CreationReport:
     """
     Create an archive with progress reporting.
@@ -2140,8 +2162,9 @@ class _IOErrorAttributes(Protocol):
     ``FileNotFoundError``, ... and a bare ``OSError`` for kinds Python has no
     class for; an out-of-memory failure included), not ``ArchiveError``
     subclasses, so type checkers see only ``OSError``. Read the attributes with
-    ``getattr``; only ``code`` and ``io_kind`` are always set, the others only
-    for the failure they describe.
+    ``getattr``; ``code``, ``io_kind``, ``restore``, ``backup_path``,
+    ``leftover_path`` and ``filename`` are always set (``None`` when they do not
+    apply), ``writes`` only after an extraction recorded progress.
 
     Attributes:
         code: Always ``"IO_ERROR"``.
@@ -2153,8 +2176,8 @@ class _IOErrorAttributes(Protocol):
             be moved back and remains at ``backup_path``).
         backup_path: With ``restore == "failed"``, where the original destination
             remains, redacted like an exception message.
-        leftover_path: Where a staging directory the failed swap left behind
-            remains, redacted like an exception message.
+        leftover_path: Where a staging directory or reservation file the
+            failure left behind remains, redacted like an exception message.
         filename: On the error of a creation that failed after reserving its
             output, the empty reservation file left at that path (redacted).
         writes: As on ``ArchiveError``, when extraction failed after recording
@@ -2163,7 +2186,7 @@ class _IOErrorAttributes(Protocol):
 
     code: Literal["IO_ERROR"]
     io_kind: _IoKind
-    restore: _Restore
+    restore: _Restore | None
     backup_path: str | None
     leftover_path: str | None
     filename: str | None
@@ -2177,6 +2200,9 @@ class ArchiveError(Exception):
         code: The stable error code, the same on every exarch exception,
             including the builtin ``OSError`` subclasses raised for I/O
             failures.
+        leftover_path: Where a staging directory the failure left behind
+            remains, redacted like an exception message; ``None`` when nothing
+            was left.
         writes: Set only when extraction failed after recording progress:
             ``"kept"`` if the written files remain on disk, ``"rolled_back"``
             if atomic extraction discarded them, ``"discarded"`` if an
@@ -2186,6 +2212,7 @@ class ArchiveError(Exception):
     # Set on each instance when the error is raised; the class has no default,
     # so `ArchiveError.code` itself raises AttributeError.
     code: _ErrorCode
+    leftover_path: str | None
     writes: _PartialWrites
 
 class OutputExistsError(ArchiveError, FileExistsError):
@@ -2229,7 +2256,7 @@ class InvalidConfigurationError(ArchiveError, ValueError):
 
     Attributes:
         setting: The refused setting, or ``None`` when the refusal names none.
-        patterns: With ``setting == "entry_include"`` after an extraction, the
+        unmatched_patterns: With ``setting == "entry_include"`` after an extraction, the
             include patterns that matched no entry; ``None`` otherwise.
         protected_path: With ``setting == "output_path"`` when an
             ``"atomic_replace"`` destination was refused, what it is:
@@ -2241,7 +2268,7 @@ class InvalidConfigurationError(ArchiveError, ValueError):
     """
 
     setting: _ConfigSetting | None
-    patterns: list[str] | None
+    unmatched_patterns: list[str] | None
     protected_path: _ProtectedPath | None
     collision: NameCollision | None
 

@@ -137,7 +137,7 @@ describe('verifyArchive integrity check', () => {
     assert.deepStrictEqual(report.integrityGaps.counts, [{ reason: 'solid_policy', count: 10 }]);
     assert.strictEqual(verifyArchiveSync(solid).integrityGaps, undefined);
 
-    const config = new SecurityConfig().setAllowSolidArchives(true);
+    const config = new SecurityConfig().withAllowSolidArchives(true);
     const allowed = await verifyArchive(solid, config, options);
     assert.strictEqual(allowed.integrityStatus, 'OK');
   });

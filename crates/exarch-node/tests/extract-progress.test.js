@@ -148,7 +148,7 @@ describe('extractArchiveWithProgress', () => {
   // throw is reported alongside it. The oversized file fails on the same entry
   // the callback threw for, before the next cancellation poll.
   it('surfaces the core error when the callback also throws', async () => {
-    const config = new SecurityConfig().setMaxFileSize(5);
+    const config = new SecurityConfig().withMaxFileSize(5);
 
     await assert.rejects(
       () =>

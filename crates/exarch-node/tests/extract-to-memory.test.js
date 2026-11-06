@@ -112,7 +112,7 @@ describe('extractArchiveToMemory', () => {
 
   it('extracts a 7z archive', async () => {
     const bytes = fs.readFileSync(path.join(FIXTURES, 'solid.7z'));
-    const config = new SecurityConfig().setAllowSolidArchives(true);
+    const config = new SecurityConfig().withAllowSolidArchives(true);
     const result = await extractArchiveToMemory(bytes, config);
     assert.ok(result.report.filesExtracted > 0);
     assert.ok(result.entries.some((entry) => entry.kind === 'file' && entry.data.length > 0));
@@ -124,7 +124,7 @@ describe('extractArchiveToMemory', () => {
   });
 
   it('defaults the cap to maxTotalSize', async () => {
-    const config = new SecurityConfig().setMaxTotalSize(6);
+    const config = new SecurityConfig().withMaxTotalSize(6);
     await assert.rejects(extractArchiveToMemory(tarGz, config), { code: 'QUOTA_EXCEEDED' });
   });
 

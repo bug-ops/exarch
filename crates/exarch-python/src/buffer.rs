@@ -654,7 +654,7 @@ pub fn list_archive_bytes_with_progress(
     );
     let manifest = slot.surface(result)?;
 
-    Ok(PyArchiveManifest::from(manifest))
+    Ok(PyArchiveManifest::new(manifest, &config))
 }
 
 /// Verify the security of an archive held in memory, with a progress callback.
@@ -1047,7 +1047,7 @@ pub fn list_archive_bytes(
     });
     let manifest = slot.surface(result)?;
 
-    Ok(PyArchiveManifest::from(manifest))
+    Ok(PyArchiveManifest::new(manifest, &config))
 }
 
 /// Verify the security of an archive held in memory.

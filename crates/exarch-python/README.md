@@ -332,7 +332,7 @@ config = config.with_parallel_decode_memory(
 # lookahead, so concurrent calls multiply both.
 ```
 
-**Entry selection.** Include and exclude patterns, `strip_components` and `flatten` live in `SecurityConfig`, so `extract_archive*`, `list_archive*` and `verify_archive*` apply them identically (`manifest.dispositions()` shows where each listed entry lands or why it is skipped). Order of operations: the entry name is validated, matched against the patterns on its original (pre-strip) path, stripped or flattened, and the new name is validated again. An exclude pattern wins over an include pattern, an include pattern that matches nothing fails the extraction (`InvalidConfigurationError`, `setting == "entry_include"`, `patterns`), and `staging="atomic_replace"` refuses a selection.
+**Entry selection.** Include and exclude patterns, `strip_components` and `flatten` live in `SecurityConfig`, so `extract_archive*`, `list_archive*` and `verify_archive*` apply them identically (`manifest.dispositions` shows where each listed entry lands or why it is skipped, under the config passed to `list_archive*`). Order of operations: the entry name is validated, matched against the patterns on its original (pre-strip) path, stripped or flattened, and the new name is validated again. An exclude pattern wins over an include pattern, an include pattern that matches nothing fails the extraction (`InvalidConfigurationError`, `setting == "entry_include"`, `unmatched_patterns`), and `staging="atomic_replace"` refuses a selection.
 
 ## Security Features
 

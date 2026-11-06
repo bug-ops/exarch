@@ -20,12 +20,17 @@ use napi::Result;
 use napi_derive::napi;
 
 use crate::CoreResult;
+use crate::error::ConfigSetting;
+use crate::error::ErrorCode;
 use crate::error::Failure;
 use crate::error::IoKind;
+use crate::error::PolicySetting;
+use crate::error::SubCodeValue;
+use crate::error::sub_code_value;
+use crate::mirror::mirror_from_core;
 use crate::utils::path_text;
 use crate::utils::utf8_path;
 use exarch_core::ArchiveError as CoreError;
-use exarch_core::sanitize_path_for_error;
 use napi::bindgen_prelude::Either;
 use napi::bindgen_prelude::Either3;
 use napi::bindgen_prelude::Either4;
@@ -35,13 +40,23 @@ pub fn saturating_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// Whole milliseconds of `duration`, clamped to `i64::MAX`.
+/// The largest integer a JavaScript number holds exactly, `2^53 - 1`.
+pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+/// Whole milliseconds of `duration`, clamped to [`MAX_SAFE_INTEGER`].
 pub fn saturating_millis(duration: std::time::Duration) -> i64 {
-    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+    saturating_i64(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// [`saturating_i64`] for a `usize`.
+pub fn saturating_usize(n: usize) -> i64 {
+    saturating_i64(u64::try_from(n).unwrap_or(u64::MAX))
+}
+
+/// `n` as a JavaScript size or count, clamped to [`MAX_SAFE_INTEGER`] so the
+/// number is exact.
 pub fn saturating_i64(n: u64) -> i64 {
-    i64::try_from(n).unwrap_or(i64::MAX)
+    i64::try_from(n.min(MAX_SAFE_INTEGER)).unwrap_or(i64::MAX)
 }
 
 pub fn unknown_variant(what: &str, wire: &str) -> Error {
@@ -534,8 +549,7 @@ impl TryFrom<CoreIssueCategory> for IssueCategory {
 }
 
 /// Why an entry was left out of an extraction or a creation.
-// Generates the TypeScript union only; runtime values come from core's
-// `SkipKind::as_str`, guarded by a unit test.
+// Values must equal `exarch_core::SkipKind::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipKind {
@@ -568,13 +582,29 @@ pub enum SkipKind {
     Unreadable,
 }
 
+mirror_from_core!(
+    SkipKind,
+    exarch_core::SkipKind,
+    "skip kind",
+    [
+        Duplicate,
+        ExtensionNotAllowed,
+        NotSelected,
+        StrippedAway,
+        Excluded,
+        Hidden,
+        OverMaxFileSize,
+        SymlinkUnsupported,
+        Unreadable
+    ]
+);
+
 /// How many entries were skipped for one reason.
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct SkipCount {
     /// Why the entries were skipped.
-    #[napi(ts_type = "SkipKind")]
-    pub kind: String,
+    pub kind: SkipKind,
     /// How many entries, saturated at `2^32 - 1`.
     pub count: u32,
 }
@@ -587,8 +617,7 @@ pub struct SkippedEntry {
     /// backslash is `\x5C` and each invalid byte is `\xNN`.
     pub path: String,
     /// Why the entry was skipped.
-    #[napi(ts_type = "SkipKind")]
-    pub kind: String,
+    pub kind: SkipKind,
     /// The I/O failure behind an `'unreadable'` skip.
     pub io_kind: Option<IoKind>,
 }
@@ -604,29 +633,35 @@ pub struct SkippedSummary {
     pub sample: Vec<SkippedEntry>,
 }
 
-impl From<&exarch_core::Skips> for SkippedSummary {
-    fn from(skips: &exarch_core::Skips) -> Self {
-        Self {
+impl TryFrom<&exarch_core::Skips> for SkippedSummary {
+    type Error = Error;
+
+    fn try_from(skips: &exarch_core::Skips) -> Result<Self> {
+        Ok(Self {
             counts: exarch_core::SkipKind::ALL
                 .iter()
                 .filter_map(|kind| {
                     let count = skips.count(*kind);
-                    (count > 0).then(|| SkipCount {
-                        kind: kind.as_str().to_owned(),
-                        count: saturating_u32(count),
+                    (count > 0).then(|| {
+                        Ok(SkipCount {
+                            kind: SkipKind::try_from(*kind)?,
+                            count: saturating_u32(count),
+                        })
                     })
                 })
-                .collect(),
+                .collect::<Result<_>>()?,
             sample: skips
                 .sample()
                 .iter()
-                .map(|skip| SkippedEntry {
-                    path: path_text(&skip.path),
-                    kind: skip.kind.as_str().to_owned(),
-                    io_kind: skip.io_kind.map(IoKind::from),
+                .map(|skip| {
+                    Ok(SkippedEntry {
+                        path: path_text(&skip.path),
+                        kind: SkipKind::try_from(skip.kind)?,
+                        io_kind: skip.io_kind.map(IoKind::from),
+                    })
                 })
-                .collect(),
-        }
+                .collect::<Result<_>>()?,
+        })
     }
 }
 
@@ -687,6 +722,8 @@ pub struct BackupCleanupFailedWarning {
     pub identity: BackupIdentity,
     /// The kind of the removal failure.
     pub io_kind: IoKind,
+    /// The removal failure's text, redacted like an I/O error message.
+    pub reason: String,
 }
 
 type ExtractionWarning = Either<AntiItemsSkippedWarning, BackupCleanupFailedWarning>;
@@ -700,7 +737,8 @@ fn backup_identity(identity: CoreBackupIdentity) -> Result<BackupIdentity> {
 }
 
 pub fn extraction_warning(warning: &CoreExtractionWarning) -> Result<ExtractionWarning> {
-    match warning {
+    let warning = warning.redacted();
+    match &warning {
         CoreExtractionWarning::AntiItemsSkipped { count } => {
             Ok(Either::A(AntiItemsSkippedWarning {
                 kind: ExtractionWarningKind::AntiItemsSkipped,
@@ -713,21 +751,14 @@ pub fn extraction_warning(warning: &CoreExtractionWarning) -> Result<ExtractionW
             identity,
             io_kind,
             message,
-        } => {
-            let redacted = CoreExtractionWarning::BackupCleanupFailed {
-                path: sanitize_path_for_error(path).into(),
-                identity: *identity,
-                io_kind: *io_kind,
-                message: message.clone(),
-            };
-            Ok(Either::B(BackupCleanupFailedWarning {
-                kind: ExtractionWarningKind::BackupCleanupFailed,
-                message: redacted.to_string(),
-                path: sanitize_path_for_error(path),
-                identity: backup_identity(*identity)?,
-                io_kind: IoKind::from(*io_kind),
-            }))
-        }
+        } => Ok(Either::B(BackupCleanupFailedWarning {
+            kind: ExtractionWarningKind::BackupCleanupFailed,
+            message: warning.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            identity: backup_identity(*identity)?,
+            io_kind: IoKind::from(*io_kind),
+            reason: message.to_string(),
+        })),
         other => Err(unknown_variant("extraction warning", other.kind().as_str())),
     }
 }
@@ -867,7 +898,7 @@ impl TryFrom<CoreReport> for ExtractionReport {
             bytes_written: saturating_i64(report.bytes_written),
             duration_ms: saturating_millis(report.duration),
             files_skipped: saturating_u32(report.files_skipped()),
-            skipped: SkippedSummary::from(&report.skipped),
+            skipped: SkippedSummary::try_from(&report.skipped)?,
             warnings: report
                 .warnings
                 .iter()
@@ -918,7 +949,7 @@ impl TryFrom<exarch_core::CreationReport> for CreationReport {
             bytes_compressed: saturating_i64(report.bytes_compressed),
             duration_ms: saturating_millis(report.duration),
             files_skipped: saturating_u32(report.files_skipped()),
-            skipped: SkippedSummary::from(&report.skipped),
+            skipped: SkippedSummary::try_from(&report.skipped)?,
             warnings: report
                 .warnings
                 .iter()
@@ -985,7 +1016,7 @@ impl ArchiveManifest {
 }
 
 /// Which way extraction goes with a listed entry.
-// Values must equal the `kind` of the matching disposition interface.
+// Values must equal `exarch_core::DispositionKind::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispositionKind {
@@ -997,13 +1028,20 @@ pub enum DispositionKind {
     Skip,
 }
 
+mirror_from_core!(
+    DispositionKind,
+    exarch_core::DispositionKind,
+    "disposition kind",
+    [Extract, Skip]
+);
+
 /// An entry that extraction writes.
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct ExtractDisposition {
     /// Always `'extract'`.
     #[napi(ts_type = "'extract'")]
-    pub kind: DispositionKind,
+    pub action: DispositionKind,
     /// The entry's path in the archive.
     pub path: String,
     /// Where it lands, relative to the destination, after any strip or
@@ -1017,12 +1055,11 @@ pub struct ExtractDisposition {
 pub struct SkipDisposition {
     /// Always `'skip'`.
     #[napi(ts_type = "'skip'")]
-    pub kind: DispositionKind,
+    pub action: DispositionKind,
     /// The entry's path in the archive.
     pub path: String,
     /// Why it is left out, for example `'not_selected'` or `'stripped_away'`.
-    #[napi(ts_type = "SkipKind")]
-    pub reason: String,
+    pub kind: SkipKind,
 }
 
 type EntryDisposition = Either<ExtractDisposition, SkipDisposition>;
@@ -1032,16 +1069,17 @@ fn entry_disposition(
     disposition: exarch_core::Disposition,
 ) -> CoreResult<EntryDisposition> {
     let path = utf8_path(path)?;
+    let action = DispositionKind::try_from(disposition.kind()).map_err(Failure::Native)?;
     match disposition {
         exarch_core::Disposition::Extract(landing) => Ok(Either::A(ExtractDisposition {
-            kind: DispositionKind::Extract,
+            action,
             path,
             landing: utf8_path(landing.as_path())?,
         })),
         exarch_core::Disposition::Skip(kind) => Ok(Either::B(SkipDisposition {
-            kind: DispositionKind::Skip,
+            action,
             path,
-            reason: kind.as_str().to_owned(),
+            kind: SkipKind::try_from(kind).map_err(Failure::Native)?,
         })),
         _ => Err(Failure::Native(unknown_variant(
             "entry disposition",
@@ -1392,19 +1430,16 @@ pub struct VerificationIssue {
     /// Human-readable description.
     pub message: String,
     /// The `ErrorCode` extraction would fail with, for a refusal.
-    #[napi(ts_type = "ErrorCode")]
-    pub code: Option<String>,
+    pub code: Option<ErrorCode>,
     /// Finer classification of the refusal.
     #[napi(
         ts_type = "InvalidArchiveSubCode | SecurityViolationSubCode | QuotaSubCode | ZipBombSubCode"
     )]
-    pub sub_code: Option<String>,
+    pub sub_code: Option<SubCodeValue>,
     /// The `SecurityConfig` setting that relaxes the refusal.
-    #[napi(ts_type = "PolicySetting")]
-    pub relaxable_by: Option<String>,
+    pub relaxable_by: Option<PolicySetting>,
     /// The configuration setting an `INVALID_CONFIGURATION` refusal names.
-    #[napi(ts_type = "ConfigSetting")]
-    pub setting: Option<String>,
+    pub setting: Option<ConfigSetting>,
     /// The kind of an `IO_ERROR` refusal.
     pub io_kind: Option<IoKind>,
     /// The permission bits (raw archive mode) of an `'Invalid Permissions'`
@@ -1422,14 +1457,18 @@ impl TryFrom<exarch_core::VerificationIssue> for VerificationIssue {
             category: issue.category().try_into()?,
             entry_path: issue.entry_path().map(path_text),
             message: issue.message(),
-            code: kind.map(|kind| kind.code().as_str().to_owned()),
-            sub_code: issue.sub_code().map(|code| code.as_str().to_owned()),
+            code: kind
+                .map(|kind| ErrorCode::try_from(kind.code()))
+                .transpose()?,
+            sub_code: issue.sub_code().map(sub_code_value).transpose()?,
             relaxable_by: kind
                 .and_then(exarch_core::FfiKind::relaxable_by)
-                .map(|setting| setting.as_str().to_owned()),
+                .map(PolicySetting::try_from)
+                .transpose()?,
             setting: kind
                 .and_then(exarch_core::FfiKind::setting)
-                .map(|setting| setting.as_str().to_owned()),
+                .map(ConfigSetting::try_from)
+                .transpose()?,
             io_kind: match kind {
                 Some(exarch_core::FfiKind::Io(io_kind)) => Some(IoKind::from(*io_kind)),
                 _ => None,
@@ -1446,6 +1485,8 @@ impl TryFrom<exarch_core::VerificationIssue> for VerificationIssue {
     reason = "tests assert by panicking"
 )]
 mod tests {
+    const MAX_SAFE: i64 = 9_007_199_254_740_991;
+
     use super::*;
     use crate::utils::union_line;
     use std::assert_matches;
@@ -1604,16 +1645,16 @@ mod tests {
         unreadable.io_kind = Some(exarch_core::IoKind::PermissionDenied);
         skips.record(unreadable).unwrap();
 
-        let summary = SkippedSummary::from(&skips);
+        let summary = SkippedSummary::try_from(&skips).unwrap();
 
-        let counts: Vec<(&str, u32)> = summary
-            .counts
-            .iter()
-            .map(|c| (c.kind.as_str(), c.count))
-            .collect();
-        assert_eq!(counts, [("duplicate", 2), ("unreadable", 1)]);
+        let counts: Vec<(SkipKind, u32)> =
+            summary.counts.iter().map(|c| (c.kind, c.count)).collect();
+        assert_eq!(
+            counts,
+            [(SkipKind::Duplicate, 2), (SkipKind::Unreadable, 1)]
+        );
         assert_eq!(summary.sample.len(), 3);
-        assert_eq!(summary.sample[2].kind, "unreadable");
+        assert_eq!(summary.sample[2].kind, SkipKind::Unreadable);
         assert_eq!(summary.sample[2].io_kind, Some(IoKind::PermissionDenied));
         assert_eq!(summary.sample[0].io_kind, None);
     }
@@ -1900,7 +1941,7 @@ mod tests {
         let Either::A(extract) = &manifest.dispositions[0] else {
             panic!("the selected file extracts");
         };
-        assert_eq!(extract.kind, DispositionKind::Extract);
+        assert_eq!(extract.action, DispositionKind::Extract);
         assert_eq!(
             (extract.path.as_str(), extract.landing.as_str()),
             ("keep/a/b.txt", "b.txt")
@@ -1908,10 +1949,10 @@ mod tests {
         let Either::B(skip) = &manifest.dispositions[1] else {
             panic!("the other file is left out");
         };
-        assert_eq!(skip.kind, DispositionKind::Skip);
+        assert_eq!(skip.action, DispositionKind::Skip);
         assert_eq!(
-            (skip.path.as_str(), skip.reason.as_str()),
-            ("other.txt", "not_selected")
+            (skip.path.as_str(), skip.kind),
+            ("other.txt", SkipKind::NotSelected)
         );
     }
 
@@ -1996,8 +2037,8 @@ mod tests {
         assert_eq!(issue.category, IssueCategory::PathTraversal);
         assert_eq!(issue.entry_path, Some("../etc/passwd".to_string()));
         assert_eq!(issue.message, "Path traversal detected: ../etc/passwd");
-        assert_eq!(issue.code.as_deref(), Some("PATH_TRAVERSAL"));
-        assert_eq!(issue.sub_code, None);
+        assert_eq!(issue.code, Some(ErrorCode::PathTraversal));
+        assert!(issue.sub_code.is_none());
         assert_eq!(issue.relaxable_by, None);
     }
 
@@ -2005,8 +2046,13 @@ mod tests {
     fn test_policy_refusal_issue_carries_sub_code_and_setting() {
         let issue = VerificationIssue::try_from(policy_issue()).unwrap();
 
-        assert_eq!(issue.code.as_deref(), Some("SECURITY_VIOLATION"));
-        assert_eq!(issue.sub_code.as_deref(), Some("ENCRYPTED"));
+        assert_eq!(issue.code, Some(ErrorCode::SecurityViolation));
+        assert_matches!(
+            issue.sub_code,
+            Some(Either4::B(
+                crate::error::SecurityViolationSubCode::Encrypted
+            ))
+        );
         assert_eq!(issue.relaxable_by, None);
     }
 
@@ -2046,7 +2092,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(issue.code, None);
-        assert_eq!(issue.sub_code, None);
+        assert!(issue.sub_code.is_none());
         assert_eq!(issue.io_kind, None);
     }
 
@@ -2067,33 +2113,31 @@ mod tests {
     }
 
     #[test]
-    fn test_extraction_report_saturates_bytes_written_at_i64_max() {
+    fn test_extraction_report_saturates_bytes_written_at_max_safe_integer() {
         let mut core_report = CoreReport::new();
-        // Set to value > i64::MAX
+        // Set to value > MAX_SAFE
         core_report.bytes_written = u64::MAX;
 
         let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(
-            report.bytes_written,
-            i64::MAX,
-            "bytes_written should saturate to i64::MAX"
+            report.bytes_written, MAX_SAFE,
+            "bytes_written should saturate to MAX_SAFE"
         );
     }
 
     #[test]
-    fn test_extraction_report_saturates_duration_ms_at_i64_max() {
+    fn test_extraction_report_saturates_duration_ms_at_max_safe_integer() {
         let mut core_report = CoreReport::new();
-        // Create a very large duration that exceeds i64::MAX milliseconds
-        // i64::MAX ms is about 292 million years, so use u64::MAX seconds
+        // Create a very large duration that exceeds MAX_SAFE milliseconds
+        // MAX_SAFE ms is about 292 million years, so use u64::MAX seconds
         core_report.duration = Duration::from_secs(u64::MAX);
 
         let report = ExtractionReport::try_from(core_report).unwrap();
 
         assert_eq!(
-            report.duration_ms,
-            i64::MAX,
-            "duration_ms should saturate to i64::MAX"
+            report.duration_ms, MAX_SAFE,
+            "duration_ms should saturate to MAX_SAFE"
         );
     }
 
@@ -2112,30 +2156,28 @@ mod tests {
     }
 
     #[test]
-    fn test_creation_report_saturates_bytes_written_at_i64_max() {
+    fn test_creation_report_saturates_bytes_written_at_max_safe_integer() {
         let mut core_report = exarch_core::CreationReport::new();
         core_report.bytes_written = u64::MAX;
 
         let report = CreationReport::try_from(core_report).unwrap();
 
         assert_eq!(
-            report.bytes_written,
-            i64::MAX,
-            "bytes_written should saturate to i64::MAX"
+            report.bytes_written, MAX_SAFE,
+            "bytes_written should saturate to MAX_SAFE"
         );
     }
 
     #[test]
-    fn test_creation_report_saturates_bytes_compressed_at_i64_max() {
+    fn test_creation_report_saturates_bytes_compressed_at_max_safe_integer() {
         let mut core_report = exarch_core::CreationReport::new();
         core_report.bytes_compressed = u64::MAX;
 
         let report = CreationReport::try_from(core_report).unwrap();
 
         assert_eq!(
-            report.bytes_compressed,
-            i64::MAX,
-            "bytes_compressed should saturate to i64::MAX"
+            report.bytes_compressed, MAX_SAFE,
+            "bytes_compressed should saturate to MAX_SAFE"
         );
     }
 
@@ -2146,13 +2188,13 @@ mod tests {
     }
 
     #[test]
-    fn test_saturating_i64_clamps_at_i64_max() {
+    fn test_saturating_i64_clamps_at_max_safe_integer() {
         assert_eq!(saturating_i64(7), 7);
-        assert_eq!(saturating_i64(u64::MAX), i64::MAX);
+        assert_eq!(saturating_i64(u64::MAX), MAX_SAFE);
     }
 
     #[test]
-    fn test_archive_manifest_saturates_total_size_at_i64_max() {
+    fn test_archive_manifest_saturates_total_size_at_max_safe_integer() {
         let mut core_manifest = exarch_core::ArchiveManifest::new(CoreArchiveType::TarGz);
         core_manifest
             .add_entry(sized_entry("big", u64::MAX))
@@ -2163,25 +2205,24 @@ mod tests {
                 .unwrap();
 
         assert_eq!(
-            manifest.total_size,
-            i64::MAX,
-            "total_size should saturate to i64::MAX"
+            manifest.total_size, MAX_SAFE,
+            "total_size should saturate to MAX_SAFE"
         );
     }
 
     #[test]
-    fn test_archive_entry_saturates_size_at_i64_max() {
+    fn test_archive_entry_saturates_size_at_max_safe_integer() {
         let core_entry = sized_entry("test.txt", u64::MAX);
 
         let Either4::A(entry) = archive_entry(&core_entry).unwrap() else {
             panic!("a regular file converts to a file entry");
         };
 
-        assert_eq!(entry.size, i64::MAX, "size should saturate to i64::MAX");
+        assert_eq!(entry.size, MAX_SAFE, "size should saturate to MAX_SAFE");
     }
 
     #[test]
-    fn test_archive_entry_saturates_compressed_size_at_i64_max() {
+    fn test_archive_entry_saturates_compressed_size_at_max_safe_integer() {
         let mut core_entry = sized_entry("test.txt", 1024);
         core_entry.compression = exarch_core::EntryCompression::Entry(Compressed(u64::MAX));
 
@@ -2191,8 +2232,8 @@ mod tests {
 
         assert_eq!(
             entry.compressed_size,
-            Some(i64::MAX),
-            "compressed_size should saturate to i64::MAX"
+            Some(MAX_SAFE),
+            "compressed_size should saturate to MAX_SAFE"
         );
     }
 

@@ -66,8 +66,8 @@ describe('createArchive (async)', () => {
 
   it('should accept custom CreationConfig', async () => {
     const config = new CreationConfig();
-    config.setCompressionLevel(9);
-    config.setIncludeHidden(false);
+    config.withCompressionLevel(9);
+    config.withIncludeHidden(false);
 
     const report = await createArchive(outputPath, [sourceDir], config);
 
@@ -120,7 +120,7 @@ describe('createArchiveSync', () => {
 
   it('should accept custom CreationConfig', () => {
     const config = new CreationConfig();
-    config.setCompressionLevel(1);
+    config.withCompressionLevel(1);
     const report = createArchiveSync(outputPath, [sourceDir], config);
 
     assert.ok(report.filesAdded > 0);
@@ -212,9 +212,14 @@ describe('createArchive output handling', () => {
   it('overwrite: false refuses an existing output with OUTPUT_EXISTS', async () => {
     const outputPath = path.join(tempDir, 'exists.tar.gz');
     fs.writeFileSync(outputPath, 'previous');
-    assert.throws(() => createArchiveSync(outputPath, [sourceDir], null, { overwrite: false }), {
-      code: 'OUTPUT_EXISTS',
-    });
+    assert.throws(
+      () => createArchiveSync(outputPath, [sourceDir], null, { overwrite: false }),
+      (err) => {
+        assert.strictEqual(err.code, 'OUTPUT_EXISTS');
+        assert.strictEqual(path.basename(err.path), 'exists.tar.gz');
+        return true;
+      }
+    );
     await assert.rejects(createArchive(outputPath, [sourceDir], null, { overwrite: false }), {
       code: 'OUTPUT_EXISTS',
     });

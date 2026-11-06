@@ -83,7 +83,7 @@ impl From<&crate::cli::Cli> for OutputMode {
 /// Renders `args` to a line and issues a single [`Write::write_all`] call.
 ///
 /// `write!`/`writeln!` on a multi-argument format string invoke the
-/// underlying writer once per formatted fragment; for [`Term`], each of
+/// underlying writer once per formatted fragment; for `console::Term`, each of
 /// those calls flushes independently (`console::Term`'s `Write` impl has no
 /// internal buffering), turning one logical line into several syscalls.
 /// Formatting into a `String` first and writing it in one call restores the

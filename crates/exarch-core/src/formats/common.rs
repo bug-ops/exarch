@@ -2084,3 +2084,106 @@ mod spool_tests {
         assert_eq!(SpoolBacking::of(&file), SpoolBacking::Ram);
     }
 }
+
+/// `Refuse` when the occupant probe and the run record disagree, in both
+/// directions: whichever is wrong, the outcome is a refusal or a skip, never a
+/// write or a rename.
+#[cfg(all(test, unix))]
+mod refuse_probe_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::formats::pinned_dir::support::leaf;
+    use std::assert_matches;
+    use tempfile::TempDir;
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn open(root: &PinnedRoot, name: &str) -> Result<Option<()>> {
+        open_output_slot(
+            root.dir(),
+            leaf(name),
+            Path::new(name),
+            None,
+            ExistingFiles::Refuse,
+            root,
+        )
+        .map(|slot| slot.map(drop))
+    }
+
+    fn assert_untouched(dir: &Path, expected: &[(&str, &str)]) {
+        let listed: Vec<_> = expected
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+        assert_eq!(names(dir), listed, "no temp file, no rename");
+        for (name, content) in expected {
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), *content);
+        }
+    }
+
+    #[test]
+    fn a_file_the_run_made_but_the_record_lacks_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "ours").unwrap();
+
+        let outcome = open(&root, "f");
+
+        assert_matches!(outcome, Err(ArchiveError::DestinationOccupied { .. }));
+        assert_untouched(temp.path(), &[("f", "ours")]);
+    }
+
+    #[test]
+    fn a_file_the_run_made_is_refused_once_the_record_is_saturated() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "ours").unwrap();
+        root.created()
+            .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
+        root.created().saturate();
+
+        let outcome = open(&root, "f");
+
+        assert_matches!(outcome, Err(ArchiveError::DestinationOccupied { .. }));
+        assert_untouched(temp.path(), &[("f", "ours")]);
+    }
+
+    #[test]
+    fn a_foreign_occupant_the_record_vouches_for_is_skipped() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "ours").unwrap();
+        root.created()
+            .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
+        std::fs::hard_link(temp.path().join("f"), temp.path().join("g")).unwrap();
+
+        let outcome = open(&root, "g");
+
+        assert_matches!(outcome, Ok(None));
+        assert_untouched(temp.path(), &[("f", "ours"), ("g", "ours")]);
+    }
+
+    #[test]
+    fn a_foreign_occupant_the_record_does_not_know_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let root = PinnedRoot::open_for_test(temp.path()).unwrap();
+        std::fs::write(temp.path().join("f"), "ours").unwrap();
+        root.created()
+            .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
+        std::fs::remove_file(temp.path().join("f")).unwrap();
+        std::fs::write(temp.path().join("f"), "foreign").unwrap();
+
+        let outcome = open(&root, "f");
+
+        assert_matches!(outcome, Err(ArchiveError::DestinationOccupied { .. }));
+        assert_untouched(temp.path(), &[("f", "foreign")]);
+    }
+}

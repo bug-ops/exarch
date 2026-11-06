@@ -7,6 +7,7 @@ use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use super::formatter::SizeUnits;
 use super::humanize_bytes;
+use super::skip_breakdown;
 use super::terminal::TerminalEntry;
 use super::terminal::TerminalPath;
 use super::terminal::TerminalText;
@@ -23,7 +24,6 @@ use exarch_core::ExtractionReport;
 use exarch_core::IssueSeverity;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
-use exarch_core::SkipKind;
 use exarch_core::Skips;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
@@ -202,11 +202,8 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
             return;
         }
         emit_line(&mut self.out, format_args!("{label}{}", skips.total()));
-        for kind in SkipKind::ALL {
-            let count = skips.count(*kind);
-            if count > 0 {
-                emit_line(&mut self.out, format_args!("    {kind}: {count}"));
-            }
+        for (kind, count) in skip_breakdown(skips) {
+            emit_line(&mut self.out, format_args!("    {kind}: {count}"));
         }
     }
 

@@ -9,6 +9,8 @@ pub use formatter::ManifestView;
 pub use formatter::OutputFormatter;
 pub use formatter::SizeUnits;
 
+use exarch_core::SkipKind;
+use exarch_core::Skips;
 use human::HumanFormatter;
 use json::JsonFormatter;
 use std::io::Write;
@@ -18,15 +20,6 @@ use std::io::Write;
 /// Replaces the CLI's `--verbose`/`--quiet` flags — two independent
 /// booleans — with a single value, so formatter constructors can no longer
 /// be handed the nonsensical `verbose: true, quiet: true` combination.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_cli::output::Verbosity;
-///
-/// let level = Verbosity::from_flags(true, false);
-/// assert_eq!(level, Verbosity::Verbose);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verbosity {
     /// Suppress all non-error output.
@@ -47,15 +40,6 @@ impl Verbosity {
     /// with a subcommand-level `--quiet` — or the reverse, e.g. `exarch
     /// --verbose extract archive.tar.gz out --quiet` — bypasses that check
     /// entirely, so both fields can genuinely be `true` at once.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use exarch_cli::output::Verbosity;
-    ///
-    /// assert_eq!(Verbosity::from_flags(false, false), Verbosity::Normal);
-    /// assert_eq!(Verbosity::from_flags(false, true), Verbosity::Quiet);
-    /// ```
     #[must_use]
     pub fn from_flags(verbose: bool, quiet: bool) -> Self {
         if quiet {
@@ -115,6 +99,15 @@ pub(crate) fn emit_line<W: Write>(writer: &mut W, args: std::fmt::Arguments<'_>)
 /// Writes a single blank line in one call. See [`emit_line`].
 pub(crate) fn emit_blank<W: Write>(writer: &mut W) {
     let _ = writer.write_all(b"\n");
+}
+
+/// The reasons entries were skipped for and how many were, in the fixed order
+/// of [`SkipKind::ALL`]; reasons that did not occur are left out.
+pub fn skip_breakdown(skips: &Skips) -> impl Iterator<Item = (SkipKind, usize)> + '_ {
+    SkipKind::ALL
+        .iter()
+        .map(|&kind| (kind, skips.count(kind)))
+        .filter(|&(_, count)| count > 0)
 }
 
 /// Creates the output formatter for `mode`.

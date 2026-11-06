@@ -3,7 +3,6 @@
 use crate::cli::CreateArgs;
 use crate::commands::CommandResult;
 use crate::commands::Outcome;
-use crate::error::convert_error;
 use crate::operation::Operation;
 use crate::output::OutputFormatter;
 use crate::output::OutputMode;
@@ -24,8 +23,7 @@ pub fn execute(
     mode: OutputMode,
 ) -> CommandResult {
     let max_file_size = match args.max_file_size {
-        Some(size) => Limit::<NonZeroU64>::parse(ConfigSetting::MaxFileSize, size)
-            .map_err(|err| convert_error(Operation::Create, err, &args.output))?,
+        Some(size) => Limit::<NonZeroU64>::parse(ConfigSetting::MaxFileSize, size)?,
         None => Limit::Unbounded,
     };
 
@@ -37,15 +35,13 @@ pub fn execute(
         .with_max_file_size(max_file_size)
         .with_preserve_permissions(args.preserve_permissions);
     if let Some(level) = args.compression_level {
-        let level = CompressionLevel::try_from(level)
-            .map_err(|err| convert_error(Operation::Create, err, &args.output))?;
+        let level = CompressionLevel::try_from(level)?;
         config = config.with_compression_level(level);
     }
 
     // Add user exclude patterns to defaults
     for pattern in &args.exclude {
-        let pattern = ExcludePattern::try_from(pattern.as_str())
-            .map_err(|err| convert_error(Operation::Create, err, &args.output))?;
+        let pattern = ExcludePattern::try_from(pattern.as_str())?;
         config.exclude_patterns.push(pattern);
     }
 

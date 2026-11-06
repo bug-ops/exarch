@@ -10,6 +10,7 @@
 
 use crate::operation::Flag;
 use crate::operation::Operation;
+use crate::output::skip_breakdown;
 use crate::output::terminal::TerminalEntry;
 use crate::output::terminal::TerminalPath;
 use crate::output::terminal::TerminalText;
@@ -23,7 +24,6 @@ use exarch_core::PathComponentName;
 use exarch_core::PolicySetting;
 use exarch_core::QuotaKind;
 use exarch_core::SecurityConfig;
-use exarch_core::SkipKind;
 use exarch_core::TarTrailerRefusal;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
@@ -348,11 +348,8 @@ impl PartialExtractionContext {
                     message = message
                         .lit("\nFiles skipped: ")
                         .text(r.files_skipped().to_string());
-                    for &kind in SkipKind::ALL {
-                        let count = r.skipped.count(kind);
-                        if count > 0 {
-                            message = message.lit("\n    ").text(format!("{kind}: {count}"));
-                        }
+                    for (kind, count) in skip_breakdown(&r.skipped) {
+                        message = message.lit("\n    ").text(format!("{kind}: {count}"));
                     }
                 }
                 if !r.warnings.is_empty() {

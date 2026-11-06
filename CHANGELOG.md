@@ -9,35 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Core: entry selection with `EntrySelection`, `PathRewrite`, `StripComponents` and include and exclude patterns on `SecurityConfig`, shared by extract, list, verify and sinks, plus `ArchiveManifest::dispositions`; the CLI gains `--include`, `--exclude`, `--strip-components` and `--flatten`, Python and Node expose the same options (#967).
-- Core: `Staging::{InPlace, Atomic, AtomicReplace}` replaces the CLI-side atomic `--force` swap, with the `ReplacesProtectedPath` guard comparing directory identity, restore on failure and `DestinationChanged`; `ListedArchive::check_destination` replaces the CLI conflict pre-check (#977, #983, #984, #985).
-- Core: `ExistingFiles::{Skip, Overwrite, Refuse}` with a per-run record refuses a file this run did not create and never overwrites under `Refuse` (#975, #982).
-- Core: `ArchiveError::Cancelled` stops extract, list, verify and create at the next entry and before the atomic rename (#973, #990).
-- Core: typed `ZipHeaderField` findings for every zip 9.4 header refusal and a weekly `zip-drift.yml` workflow (#971).
-- Core: `CreationWarning::DirectoryNotSynced`, `Violation::HardlinkTargetAmbiguous` and `ArchiveError::UnmatchedInclude` (#967, #976).
-- CLI: `--json` errors carry `error.hint` and `error.conflicts` (#982, #985).
-- Python: `staging`, `existing_files`, typed warning classes, `io_kind`, errno and filename on source errors, `protected_path` and `collision` on `InvalidConfigurationError` (#962, #988, #989, #992).
-- Node: `withStaging`, `withExistingFiles`, typed warnings, `unmatchedPatterns`, `protectedPath`, `collision`, `setBannedComponents`, `CreationConfig.setExcludePatterns` and `setAllowedExtensions(null)` (#988, #989, #991, #992).
+- Core: entry selection with `EntrySelection`, `PathRewrite`, `StripComponents` and include and exclude patterns on `SecurityConfig`, shared by extract, list, verify and sinks, plus `ArchiveManifest::dispositions`; the CLI gains `--include`, `--exclude`, `--strip-components` and `--flatten`, Python and Node expose the same options (#967, #999).
+- Core: `Staging::{InPlace, Atomic, AtomicReplace}` replaces the CLI-side atomic `--force` swap, with the `ReplacesProtectedPath` guard comparing directory identity, restore on failure and `DestinationChanged`; `ListedArchive::check_destination` replaces the CLI conflict pre-check (#977, #983, #984, #985, #999).
+- Core: `ExistingFiles::{Skip, Overwrite, Refuse}` with a per-run record refuses a file this run did not create and never overwrites under `Refuse` (#975, #982, #999).
+- Core: `ArchiveError::Cancelled` stops extract, list, verify and create at the next entry and before the atomic rename (#973, #990, #999).
+- Core: typed `ZipHeaderField` findings for every zip 9.4 header refusal and a weekly `zip-drift.yml` workflow (#971, #999).
+- Core: `CreationWarning::DirectoryNotSynced`, `Violation::HardlinkTargetAmbiguous` and `ArchiveError::UnmatchedInclude` (#967, #976, #999).
+- CLI: `--json` errors carry `error.hint` and `error.conflicts` (#982, #985, #999).
+- Python: `staging`, `existing_files`, typed warning classes, `io_kind`, errno and filename on source errors, `protected_path` and `collision` on `InvalidConfigurationError` (#962, #988, #989, #992, #999).
+- Node: `withStaging`, `withExistingFiles`, typed warnings, `unmatchedPatterns`, `protectedPath`, `collision`, `setBannedComponents`, `CreationConfig.setExcludePatterns` and `setAllowedExtensions(null)` (#988, #989, #991, #992, #999).
 
 ### Changed
 
-- **Breaking**: `with_atomic` and `with_skip_duplicates` are replaced by `with_staging` and `with_existing_files`, and the extension allowlist is an `ExtensionFilter` whose empty list refuses instead of allowing all (#972, #975).
-- **Breaking**: every `exarch_core` module is private and its public items are re-exported once from the crate root; the concrete format handlers, `ZIP_FAMILY_ALIASES` and the creation filter functions are no longer public (#978).
-- **Breaking**: a corrupt or truncated payload in ZIP, 7z, tar.xz and TAR is `InvalidArchive` whatever the destination state, while source and destination faults stay `Io` and a forged declared size stays `SecurityViolation` (#964, #965).
-- **Breaking**: `create` refuses two sources that map to one entry name before writing, and ZIP directory entries keep the source mode (#968, #970).
-- **Breaking (CLI)**: the default extract mode refuses existing destination files with `OutputExists` and a sorted `error.conflicts`, `--atomic` refuses a non-empty directory, `--atomic --force` refuses `.`, `..`, the archive's directory, the working directory and `/`, `error.message` no longer embeds the hint, a closed stdout exits 0 and `-v` survives a closed stderr (#977, #981, #982, #984, #985).
-- **Breaking (Python)**: `skip_duplicates` and `atomic` are replaced by `existing_files` and `staging`, `allowed_extensions` is `None` for any and refuses `[]`, and `warnings` are typed objects (#972, #975, #988).
-- **Breaking (Node)**: `skipDuplicates` and `withAtomic` are replaced by `withExistingFiles` and `withStaging`, `allowedExtensions` is `null` for any and refuses `[]`, `warnings` are typed objects, a throwing progress callback stops the operation at the next entry and compression-level errors are `INVALID_COMPRESSION_LEVEL` (#972, #975, #988, #992).
-- The `zip` requirement is `~9.4` instead of the exact `=9.2.2` pin (#971).
-- Docs: specifications and the CLI skill follow the new behavior, and secret file patterns are gitignored with a `files` allowlist for the npm package (#966, #969).
+- **Breaking**: `with_atomic` and `with_skip_duplicates` are replaced by `with_staging` and `with_existing_files`, and the extension allowlist is an `ExtensionFilter` whose empty list refuses instead of allowing all (#972, #975, #999).
+- **Breaking**: every `exarch_core` module is private and its public items are re-exported once from the crate root; the concrete format handlers, `ZIP_FAMILY_ALIASES` and the creation filter functions are no longer public (#978, #999).
+- **Breaking**: a corrupt or truncated payload in ZIP, 7z, tar.xz and TAR is `InvalidArchive` whatever the destination state, while source and destination faults stay `Io` and a forged declared size stays `SecurityViolation` (#964, #965, #999).
+- **Breaking**: `create` refuses two sources that map to one entry name before writing, and ZIP directory entries keep the source mode (#968, #970, #999).
+- **Breaking (CLI)**: the default extract mode refuses existing destination files with `OutputExists` and a sorted `error.conflicts`, `--atomic` refuses a non-empty directory, `--atomic --force` refuses `.`, `..`, the archive's directory, the working directory and `/`, `error.message` no longer embeds the hint, a closed stdout exits 0 and `-v` survives a closed stderr (#977, #981, #982, #984, #985, #999).
+- **Breaking (Python)**: `skip_duplicates` and `atomic` are replaced by `existing_files` and `staging`, `allowed_extensions` is `None` for any and refuses `[]`, and `warnings` are typed objects (#972, #975, #988, #999).
+- **Breaking (Node)**: `skipDuplicates` and `withAtomic` are replaced by `withExistingFiles` and `withStaging`, `allowedExtensions` is `null` for any and refuses `[]`, `warnings` are typed objects, a throwing progress callback stops the operation at the next entry and compression-level errors are `INVALID_COMPRESSION_LEVEL` (#972, #975, #988, #992, #999).
+- The `zip` requirement is `~9.4` instead of the exact `=9.2.2` pin (#971, #999).
+- Docs: specifications and the CLI skill follow the new behavior, and secret file patterns are gitignored with a `files` allowlist for the npm package (#966, #969, #999).
 
 ### Fixed
 
-- Core: a destination that is a symlink to an empty directory works with `--atomic`, and a failed parent directory sync is reported (#976, #977).
-- Core: a hardlink to a target that selection collided on is refused instead of copying the winner's bytes (#967).
-- Core: creation benches no longer discard errors and measure a real fsync (#993).
-- Core: a TAR listing spool on tmpfs is charged to the decoder memory limit (#960).
-- CLI: messages state each fact once, a rolled-back report is no longer joined to its cause with `.:` and the `.`, `..` and `./` protected destinations share one test (#982, #985, #986).
+- Core: a destination that is a symlink to an empty directory works with `--atomic`, and a failed parent directory sync is reported (#976, #977, #999).
+- Core: a hardlink to a target that selection collided on is refused instead of copying the winner's bytes (#967, #999).
+- Core: creation benches no longer discard errors and measure a real fsync (#993, #999).
+- Core: a TAR listing spool on tmpfs is charged to the decoder memory limit (#960, #999).
+- CLI: messages state each fact once, a rolled-back report is no longer joined to its cause with `.:` and the `.`, `..` and `./` protected destinations share one test (#982, #985, #986, #999).
 
 ## [0.9.0] - 2026-11-05
 

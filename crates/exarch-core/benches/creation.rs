@@ -19,14 +19,13 @@ use criterion::Criterion;
 use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
+use exarch_core::CompressionLevel;
 use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
+use exarch_core::CreationConfig;
 use exarch_core::Durability;
+use exarch_core::ExcludePattern;
 use exarch_core::OutputFile;
-use exarch_core::creation::CompressionLevel;
-use exarch_core::creation::CreationConfig;
-use exarch_core::creation::ExcludePattern;
-use exarch_core::creation::filters;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
@@ -363,18 +362,8 @@ fn benchmark_directory_walker(c: &mut Criterion) {
 fn benchmark_path_filtering(c: &mut Criterion) {
     let mut group = c.benchmark_group("path_filtering");
 
-    let visible_path = Path::new("src/main.rs");
     let hidden_path = Path::new(".gitignore");
     let temp_path = Path::new("file.tmp");
-
-    // Benchmark is_hidden
-    group.bench_function("is_hidden_visible", |b| {
-        b.iter(|| filters::is_hidden(black_box(visible_path)));
-    });
-
-    group.bench_function("is_hidden_hidden", |b| {
-        b.iter(|| filters::is_hidden(black_box(hidden_path)));
-    });
 
     // Benchmark ExcludePattern::matches
     let exact = ExcludePattern::try_from(".gitignore").unwrap();
@@ -390,21 +379,6 @@ fn benchmark_path_filtering(c: &mut Criterion) {
 
     group.bench_function("matches_pattern_prefix", |b| {
         b.iter(|| prefix.matches(black_box(temp_path)));
-    });
-
-    // Benchmark skip_reason
-    let config = CreationConfig::default();
-
-    group.bench_function("skip_reason_visible", |b| {
-        b.iter(|| filters::skip_reason(black_box(visible_path), black_box(&config)));
-    });
-
-    group.bench_function("skip_reason_hidden", |b| {
-        b.iter(|| filters::skip_reason(black_box(hidden_path), black_box(&config)));
-    });
-
-    group.bench_function("skip_reason_excluded", |b| {
-        b.iter(|| filters::skip_reason(black_box(temp_path), black_box(&config)));
     });
 
     group.finish();

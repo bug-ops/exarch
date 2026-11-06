@@ -124,9 +124,9 @@ impl HardlinkTarget {
 ///
 /// ```ignore
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::security::HardlinkTracker;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::SafePath;
+/// use exarch_core::HardlinkTracker;
+/// use exarch_core::DestDir;
+/// use exarch_core::SafePath;
 /// use std::path::Path;
 /// use std::path::PathBuf;
 ///
@@ -176,9 +176,9 @@ impl HardlinkTracker {
     ///
     /// ```ignore
     /// use exarch_core::SecurityConfig;
-    /// use exarch_core::security::HardlinkTracker;
-    /// use exarch_core::types::DestDir;
-    /// use exarch_core::types::SafePath;
+    /// use exarch_core::HardlinkTracker;
+    /// use exarch_core::DestDir;
+    /// use exarch_core::SafePath;
     /// use std::path::Path;
     /// use std::path::PathBuf;
     ///

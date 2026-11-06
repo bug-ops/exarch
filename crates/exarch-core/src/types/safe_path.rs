@@ -56,9 +56,9 @@ pub(crate) use super::parent_check::Walked;
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::DestDir;
+/// use exarch_core::SafePath;
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::SafePath;
 /// use std::path::PathBuf;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -132,9 +132,9 @@ impl SafePath {
     /// # Examples
     ///
     /// ```no_run
+    /// use exarch_core::DestDir;
+    /// use exarch_core::SafePath;
     /// use exarch_core::SecurityConfig;
-    /// use exarch_core::types::DestDir;
-    /// use exarch_core::types::SafePath;
     /// use std::path::PathBuf;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -591,7 +591,7 @@ pub(crate) fn stream_separator_error(comp: &str) -> ArchiveError {
 /// # Examples
 ///
 /// ```
-/// use exarch_core::types::safe_path::is_windows_reserved_component;
+/// use exarch_core::is_windows_reserved_component;
 /// use std::ffi::OsStr;
 ///
 /// assert!(is_windows_reserved_component(OsStr::new("NUL.tar.gz")));

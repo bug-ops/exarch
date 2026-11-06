@@ -44,7 +44,7 @@ use std::path::PathBuf;
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::ExcludePattern;
+/// use exarch_core::ExcludePattern;
 /// use std::path::Path;
 ///
 /// let tmp = ExcludePattern::try_from("*.tmp")?;
@@ -289,26 +289,6 @@ impl fmt::Display for ExcludePattern {
 /// An entry is left out when it is hidden and `include_hidden` is false, or
 /// when it matches an exclude pattern. The size limit is checked separately,
 /// where the size is known.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::SkipKind;
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::filters;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// assert_eq!(
-///     filters::skip_reason(Path::new(".gitignore"), &config),
-///     Some(SkipKind::Hidden)
-/// );
-/// assert_eq!(
-///     filters::skip_reason(Path::new("a.tmp"), &config),
-///     Some(SkipKind::Excluded)
-/// );
-/// assert_eq!(filters::skip_reason(Path::new("main.rs"), &config), None);
-/// ```
 #[must_use]
 pub fn skip_reason(archive_path: &Path, config: &CreationConfig) -> Option<SkipKind> {
     if !config.include_hidden && is_hidden(archive_path) {
@@ -325,18 +305,6 @@ pub fn skip_reason(archive_path: &Path, config: &CreationConfig) -> Option<SkipK
 ///
 /// On Unix-like systems, files starting with '.' are considered hidden.
 /// This function checks the file name component, not the full path.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::creation::filters;
-/// use std::path::Path;
-///
-/// assert!(filters::is_hidden(Path::new(".gitignore")));
-/// assert!(filters::is_hidden(Path::new("dir/.hidden")));
-/// assert!(!filters::is_hidden(Path::new("visible.txt")));
-/// assert!(!filters::is_hidden(Path::new("dir/normal.rs")));
-/// ```
 #[must_use]
 pub fn is_hidden(path: &Path) -> bool {
     path.file_name()
@@ -354,21 +322,6 @@ pub fn is_hidden(path: &Path) -> bool {
 ///
 /// A `strip_prefix` that does not match the computed relative path is
 /// ignored; the unstripped relative path is used.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::filters;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let root = Path::new("/home/user/project");
-/// let source = Path::new("/home/user/project/src/main.rs");
-///
-/// let archive_path = filters::compute_archive_path(source, root, &config).unwrap();
-/// assert_eq!(archive_path, Path::new("src/main.rs"));
-/// ```
 pub fn compute_archive_path(
     source_path: &Path,
     root: &Path,

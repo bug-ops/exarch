@@ -17,16 +17,16 @@ use std::path::PathBuf;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveType;
 use exarch_core::Compressed;
+use exarch_core::DestDir;
+use exarch_core::HardlinkTracker;
 use exarch_core::QuotaResource;
+use exarch_core::QuotaTracker;
+use exarch_core::SafePath;
+use exarch_core::SafeSymlink;
 use exarch_core::SecurityConfig;
 use exarch_core::Uncompressed;
 use exarch_core::detect_format;
-use exarch_core::security::HardlinkTracker;
-use exarch_core::security::QuotaTracker;
-use exarch_core::types::DestDir;
-use exarch_core::types::SafePath;
-use exarch_core::types::SafeSymlink;
-use exarch_core::types::safe_path::is_windows_reserved_component;
+use exarch_core::is_windows_reserved_component;
 use proptest::prelude::*;
 use tempfile::TempDir;
 
@@ -397,7 +397,7 @@ proptest! {
         compressed in 1u64..1_000_000,
         ratio in 1.0f64..100.0
     ) {
-        use exarch_core::security::validate_compression_ratio;
+        use exarch_core::validate_compression_ratio;
 
         let config = SecurityConfig::default(); // max_compression_ratio = 1000.0
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -417,7 +417,7 @@ proptest! {
     fn prop_compression_zero_compressed_nonzero_uncompressed(
         uncompressed in 1u64..1_000_000
     ) {
-        use exarch_core::security::validate_compression_ratio;
+        use exarch_core::validate_compression_ratio;
 
         let config = SecurityConfig::default();
         let result = validate_compression_ratio(Compressed(0), Uncompressed(uncompressed), &config);
@@ -435,7 +435,7 @@ proptest! {
     /// Both zero should always succeed (empty file).
     #[test]
     fn prop_compression_both_zero(_dummy in 0..100) {
-        use exarch_core::security::validate_compression_ratio;
+        use exarch_core::validate_compression_ratio;
 
         let config = SecurityConfig::default();
         let result = validate_compression_ratio(Compressed(0), Uncompressed(0), &config);
@@ -449,7 +449,7 @@ proptest! {
         compressed in 1u64..1000,
         multiplier in 2000u64..10_000
     ) {
-        use exarch_core::security::validate_compression_ratio;
+        use exarch_core::validate_compression_ratio;
 
         let config = SecurityConfig::default(); // max = 1000.0
         let uncompressed = compressed.saturating_mul(multiplier);

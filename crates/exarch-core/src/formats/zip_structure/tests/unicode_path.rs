@@ -150,7 +150,7 @@ fn list_verify_and_extract_agree() {
 
         let listed = open_bytes(built.bytes.clone(), &enforce()).list();
         let report = open_bytes(built.bytes.clone(), &enforce())
-            .verify(&VerificationOptions::default())
+            .verify(VerificationOptions::default())
             .unwrap();
         let extracted = open_bytes(built.bytes, &enforce()).extract(
             &dest,

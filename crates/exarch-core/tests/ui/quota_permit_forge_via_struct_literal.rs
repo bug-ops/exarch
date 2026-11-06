@@ -3,7 +3,7 @@
 //! `QuotaPermit { bytes: .. }` cannot compile outside `exarch_core` — the only
 //! producer of a real `QuotaPermit` is `QuotaTracker::reserve`.
 
-use exarch_core::security::QuotaPermit;
+use exarch_core::QuotaPermit;
 
 #[allow(unreachable_code)]
 fn main() {

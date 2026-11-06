@@ -17,7 +17,7 @@ use std::path::PathBuf;
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::CompressionLevel;
+/// use exarch_core::CompressionLevel;
 ///
 /// let level = CompressionLevel::try_from(9u8)?;
 /// assert_eq!(level.get(), 9);
@@ -84,7 +84,7 @@ impl CompressionLevel {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CompressionLevel;
+    /// use exarch_core::CompressionLevel;
     ///
     /// assert_eq!(CompressionLevel::from_i128(9)?.get(), 9);
     /// assert!(CompressionLevel::from_i128(-3).is_err());
@@ -113,7 +113,7 @@ impl CompressionLevel {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CompressionLevel;
+    /// use exarch_core::CompressionLevel;
     ///
     /// assert_eq!(CompressionLevel::from_f64(6.0)?.get(), 6);
     /// assert!(CompressionLevel::from_f64(1.5).is_err());
@@ -147,8 +147,8 @@ impl CompressionLevel {
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::CompressionLevel;
-/// use exarch_core::creation::CreationConfig;
+/// use exarch_core::CompressionLevel;
+/// use exarch_core::CreationConfig;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Use secure defaults
@@ -266,7 +266,7 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CreationConfig;
     ///
     /// let config = CreationConfig::default().with_follow_symlinks(true);
     /// assert!(config.follow_symlinks);
@@ -282,7 +282,7 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CreationConfig;
     ///
     /// let config = CreationConfig::default().with_include_hidden(true);
     /// assert!(config.include_hidden);
@@ -300,8 +300,8 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
+    /// use exarch_core::CreationConfig;
     /// use exarch_core::Limit;
-    /// use exarch_core::creation::CreationConfig;
     ///
     /// let config = CreationConfig::default().with_max_file_size(exarch_core::non_zero!(1024 * 1024));
     /// assert!(config.max_file_size.admits(1024 * 1024));
@@ -321,8 +321,8 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
-    /// use exarch_core::creation::ExcludePattern;
+    /// use exarch_core::CreationConfig;
+    /// use exarch_core::ExcludePattern;
     ///
     /// let log = ExcludePattern::try_from("*.log")?;
     /// let config = CreationConfig::default().with_exclude_patterns(vec![log.clone()]);
@@ -340,7 +340,7 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CreationConfig;
     /// use std::path::PathBuf;
     ///
     /// let config = CreationConfig::default().with_strip_prefix(Some(PathBuf::from("/base")));
@@ -357,8 +357,8 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CompressionLevel;
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CompressionLevel;
+    /// use exarch_core::CreationConfig;
     ///
     /// let level = CompressionLevel::try_from(9u8)?;
     /// let config = CreationConfig::default().with_compression_level(level);
@@ -376,7 +376,7 @@ impl CreationConfig {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationConfig;
+    /// use exarch_core::CreationConfig;
     ///
     /// let config = CreationConfig::default().with_preserve_permissions(false);
     /// assert!(!config.permissions.preserves());

@@ -2,8 +2,10 @@
 //! `ExtractionOptions`, and `VerificationOptions`.
 
 use exarch_core::ArchiveError;
+use exarch_core::CompressionLevel;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
+use exarch_core::CreationConfig as CoreCreationConfig;
 use exarch_core::DecompressionBudget;
 use exarch_core::EntryPattern;
 use exarch_core::EntrySelection;
@@ -24,8 +26,6 @@ use exarch_core::Staging;
 use exarch_core::StripComponents;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
-use exarch_core::creation::CompressionLevel;
-use exarch_core::creation::CreationConfig as CoreCreationConfig;
 use exarch_core::positive_from_i128;
 use pyo3::exceptions::PyOverflowError;
 use pyo3::exceptions::PyTypeError;

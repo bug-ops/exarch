@@ -17,8 +17,8 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+use exarch_core::CreationConfig;
 use exarch_core::create_archive;
-use exarch_core::creation::CreationConfig;
 use std::fs;
 
 fn create_test_directory(root: &std::path::Path, file_count: usize, file_size: usize) {

@@ -152,7 +152,7 @@ fn xl_type_divergence_is_fatal_under_enforce_and_reported_by_verify() {
             .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),
     ] {
         let report = open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
-            .verify(&options)
+            .verify(options)
             .unwrap();
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert!(report.issues().iter().any(|i| {

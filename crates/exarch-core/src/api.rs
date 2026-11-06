@@ -201,8 +201,8 @@ fn extract_7z(
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::CreationConfig;
 /// use exarch_core::create_archive;
-/// use exarch_core::creation::CreationConfig;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = CreationConfig::default();

@@ -82,7 +82,7 @@ fn stored_dd_in_data_header_is_fatal_under_enforce_with_plain_verify() {
         ))
     );
     let report = open_bytes(bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert_eq!(hidden_issues(&report).len(), 1);

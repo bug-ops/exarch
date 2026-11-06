@@ -1,6 +1,6 @@
 //! Helpers shared by the integration tests.
 
-#![allow(dead_code, clippy::expect_used)]
+#![allow(dead_code, clippy::expect_used, clippy::disallowed_methods)]
 
 /// Extensions that name a ZIP container with extra structure; detection reads
 /// them as ZIP and creation refuses them. Mirrors the crate's private alias

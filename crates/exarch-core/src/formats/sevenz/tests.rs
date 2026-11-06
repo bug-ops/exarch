@@ -1366,7 +1366,7 @@ fn test_verify_clean_sevenz_is_safe() {
     let archive = SevenZArchive::new(Cursor::new(data), &config).unwrap();
 
     let report = archive
-        .verify(&crate::VerificationOptions::default())
+        .verify(crate::VerificationOptions::default())
         .unwrap();
 
     assert!(report.is_safe());

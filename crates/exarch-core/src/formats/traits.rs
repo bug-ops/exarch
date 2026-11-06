@@ -76,7 +76,7 @@ pub trait ArchiveFormat: sealed::Sealed {
     /// With integrity requested in `options`, TAR entry content that fails to
     /// decode is also an error.
     #[cfg(test)]
-    fn verify(self, options: &VerificationOptions) -> Result<VerificationReport>;
+    fn verify(self, options: VerificationOptions) -> Result<VerificationReport>;
 }
 
 #[cfg(test)]
@@ -102,7 +102,7 @@ mod tests {
             Ok(ArchiveManifest::new(ArchiveType::Tar))
         }
 
-        fn verify(self, _options: &VerificationOptions) -> Result<VerificationReport> {
+        fn verify(self, _options: VerificationOptions) -> Result<VerificationReport> {
             let config = crate::SecurityConfig::default();
             let manifest = self.list()?;
             Ok(crate::inspection::verify::verify_manifest(
@@ -136,7 +136,7 @@ mod tests {
     fn test_trait_verify_returns_clean_report_for_empty_archive() {
         let format = TestFormat;
         let report = format
-            .verify(&crate::VerificationOptions::default())
+            .verify(crate::VerificationOptions::default())
             .unwrap();
         assert_eq!(report.total_entries(), 0);
         assert!(report.is_safe());

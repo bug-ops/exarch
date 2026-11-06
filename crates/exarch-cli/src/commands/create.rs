@@ -8,13 +8,13 @@ use crate::output::OutputFormatter;
 use crate::output::OutputMode;
 use crate::progress::BarLength;
 use crate::progress::progress_for;
+use exarch_core::CompressionLevel;
 use exarch_core::ConfigSetting;
 use exarch_core::CreateRequest;
 use exarch_core::CreationConfig;
 use exarch_core::ExcludePattern;
 use exarch_core::Limit;
 use exarch_core::OutputFile;
-use exarch_core::creation::CompressionLevel;
 use std::num::NonZeroU64;
 
 pub fn execute(

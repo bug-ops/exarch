@@ -5,8 +5,8 @@
 //! its own fields, under a base class every warning shares.
 
 use exarch_core::BackupIdentity;
+use exarch_core::CreationWarning;
 use exarch_core::ExtractionWarning;
-use exarch_core::creation::CreationWarning;
 use exarch_core::sanitize_path_for_error;
 use pyo3::prelude::*;
 use pyo3::types::PyList;

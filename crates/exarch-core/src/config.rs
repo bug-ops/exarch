@@ -985,8 +985,8 @@ impl SecurityConfig {
     /// # Examples
     ///
     /// ```
+    /// use exarch_core::AllowedFeatures;
     /// use exarch_core::SecurityConfig;
-    /// use exarch_core::config::AllowedFeatures;
     ///
     /// let features = AllowedFeatures::default();
     /// let config = SecurityConfig::default().with_allowed(features);

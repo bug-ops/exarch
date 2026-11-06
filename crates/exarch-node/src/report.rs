@@ -2,19 +2,19 @@
 
 use exarch_core::ArchiveType as CoreArchiveType;
 use exarch_core::BackupIdentity as CoreBackupIdentity;
+use exarch_core::CheckStatus as CoreCheckStatus;
 use exarch_core::CreatableFormat as CoreCreatableFormat;
 use exarch_core::CreationWarning as CoreCreationWarning;
 use exarch_core::Durability as CoreDurability;
 use exarch_core::ExtractionReport as CoreReport;
 use exarch_core::ExtractionWarning as CoreExtractionWarning;
-use exarch_core::inspection::CheckStatus as CoreCheckStatus;
-use exarch_core::inspection::IntegrityGaps as CoreIntegrityGaps;
-use exarch_core::inspection::IntegrityStatus as CoreIntegrityStatus;
-use exarch_core::inspection::IssueCategory as CoreIssueCategory;
-use exarch_core::inspection::IssueSeverity as CoreIssueSeverity;
-use exarch_core::inspection::ManifestEntryType as CoreManifestEntryType;
-use exarch_core::inspection::UnverifiedReason as CoreUnverifiedReason;
-use exarch_core::inspection::VerificationStatus as CoreVerificationStatus;
+use exarch_core::IntegrityGaps as CoreIntegrityGaps;
+use exarch_core::IntegrityStatus as CoreIntegrityStatus;
+use exarch_core::IssueCategory as CoreIssueCategory;
+use exarch_core::IssueSeverity as CoreIssueSeverity;
+use exarch_core::ManifestEntryType as CoreManifestEntryType;
+use exarch_core::UnverifiedReason as CoreUnverifiedReason;
+use exarch_core::VerificationStatus as CoreVerificationStatus;
 use napi::Error;
 use napi::Result;
 use napi_derive::napi;
@@ -177,7 +177,7 @@ impl From<Durability> for CoreDurability {
 }
 
 /// Manifest entry type.
-// Values must equal `exarch_core::inspection::ManifestEntryType::as_str`.
+// Values must equal `exarch_core::ManifestEntryType::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestEntryType {
@@ -207,7 +207,7 @@ impl From<CoreManifestEntryType> for ManifestEntryType {
 }
 
 /// Overall verification status.
-// Values must equal `exarch_core::inspection::VerificationStatus::as_str`.
+// Values must equal `exarch_core::VerificationStatus::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationStatus {
@@ -233,7 +233,7 @@ impl From<CoreVerificationStatus> for VerificationStatus {
 }
 
 /// Status of a single check category.
-// Values must equal `exarch_core::inspection::CheckStatus::as_str`.
+// Values must equal `exarch_core::CheckStatus::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
@@ -263,7 +263,7 @@ impl From<CoreCheckStatus> for CheckStatus {
 }
 
 /// Result of the payload integrity check.
-// Values must equal `exarch_core::inspection::IntegrityStatus::as_str`.
+// Values must equal `exarch_core::IntegrityStatus::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrityStatus {
@@ -296,7 +296,7 @@ impl TryFrom<CoreIntegrityStatus> for IntegrityStatus {
 }
 
 /// Why part of the payload was not verified by the integrity check.
-// Values must equal `exarch_core::inspection::UnverifiedReason::as_str`.
+// Values must equal `exarch_core::UnverifiedReason::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnverifiedReason {
@@ -411,7 +411,7 @@ impl TryFrom<&CoreIntegrityGaps> for IntegrityGaps {
 }
 
 /// Issue severity.
-// Values must equal `exarch_core::inspection::IssueSeverity::as_str`.
+// Values must equal `exarch_core::IssueSeverity::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueSeverity {
@@ -445,7 +445,7 @@ impl From<CoreIssueSeverity> for IssueSeverity {
 }
 
 /// Issue category.
-// Values must equal `exarch_core::inspection::IssueCategory::as_str`.
+// Values must equal `exarch_core::IssueCategory::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueCategory {
@@ -906,10 +906,10 @@ pub struct CreationReport {
     pub warnings: Vec<CreationWarning>,
 }
 
-impl TryFrom<exarch_core::creation::CreationReport> for CreationReport {
+impl TryFrom<exarch_core::CreationReport> for CreationReport {
     type Error = Error;
 
-    fn try_from(report: exarch_core::creation::CreationReport) -> Result<Self> {
+    fn try_from(report: exarch_core::CreationReport) -> Result<Self> {
         Ok(Self {
             files_added: saturating_u32(report.files_added),
             directories_added: saturating_u32(report.directories_added),
@@ -960,7 +960,7 @@ impl ArchiveManifest {
     /// Returns the failure of a conversion that cannot represent an entry, a
     /// path that is not valid UTF-8 or a value newer than this binding.
     pub fn from_core(
-        manifest: exarch_core::inspection::ArchiveManifest,
+        manifest: exarch_core::ArchiveManifest,
         config: &exarch_core::SecurityConfig,
     ) -> CoreResult<Self> {
         let total_entries = saturating_u32(manifest.total_entries());
@@ -1130,8 +1130,8 @@ type LinkTarget = Either5<
     OversizedLinkTarget,
 >;
 
-fn link_target(target: &exarch_core::inspection::LinkTarget) -> CoreResult<LinkTarget> {
-    use exarch_core::inspection::LinkTarget as Core;
+fn link_target(target: &exarch_core::LinkTarget) -> CoreResult<LinkTarget> {
+    use exarch_core::LinkTarget as Core;
 
     Ok(match target {
         Core::Recorded(path) => Either5::A(RecordedLinkTarget {
@@ -1244,7 +1244,7 @@ struct EntryCommon {
     modified: Option<i64>,
 }
 
-fn entry_common(entry: &exarch_core::inspection::ArchiveEntry) -> CoreResult<EntryCommon> {
+fn entry_common(entry: &exarch_core::ArchiveEntry) -> CoreResult<EntryCommon> {
     Ok(EntryCommon {
         path: entry
             .utf8_path()
@@ -1260,8 +1260,8 @@ fn entry_common(entry: &exarch_core::inspection::ArchiveEntry) -> CoreResult<Ent
     })
 }
 
-fn archive_entry(entry: &exarch_core::inspection::ArchiveEntry) -> CoreResult<ArchiveEntry> {
-    use exarch_core::inspection::ManifestEntryKind as Kind;
+fn archive_entry(entry: &exarch_core::ArchiveEntry) -> CoreResult<ArchiveEntry> {
+    use exarch_core::ManifestEntryKind as Kind;
 
     let EntryCommon {
         path,
@@ -1334,12 +1334,10 @@ pub struct VerificationReport {
     pub format: ArchiveType,
 }
 
-impl TryFrom<exarch_core::inspection::VerificationReport> for VerificationReport {
+impl TryFrom<exarch_core::VerificationReport> for VerificationReport {
     type Error = Failure;
 
-    fn try_from(
-        report: exarch_core::inspection::VerificationReport,
-    ) -> std::result::Result<Self, Failure> {
+    fn try_from(report: exarch_core::VerificationReport) -> std::result::Result<Self, Failure> {
         let status = report.status().into();
         let integrity_status = report
             .integrity_status()
@@ -1414,10 +1412,10 @@ pub struct VerificationIssue {
     pub mode: Option<u32>,
 }
 
-impl TryFrom<exarch_core::inspection::VerificationIssue> for VerificationIssue {
+impl TryFrom<exarch_core::VerificationIssue> for VerificationIssue {
     type Error = Error;
 
-    fn try_from(issue: exarch_core::inspection::VerificationIssue) -> Result<Self> {
+    fn try_from(issue: exarch_core::VerificationIssue) -> Result<Self> {
         let kind = issue.ffi_kind();
         Ok(Self {
             severity: issue.severity().into(),
@@ -1518,7 +1516,7 @@ mod tests {
 
     #[test]
     fn test_creation_warnings_are_typed() {
-        use exarch_core::creation::CreationWarning as Core;
+        use exarch_core::CreationWarning as Core;
         let over = creation_warning(&Core::ZipRatioOverDefaultLimit {
             entries: 2,
             limit: 100.0,
@@ -1576,7 +1574,7 @@ mod tests {
             CreationWarningKind::DirectoryNotSynced => "directory_not_synced",
         })
         .collect();
-        assert_eq!(creation, exarch_core::creation::CreationWarningKind::NAMES);
+        assert_eq!(creation, exarch_core::CreationWarningKind::NAMES);
 
         let identity =
             [BackupIdentity::Verified, BackupIdentity::Unverified].map(|identity| match identity {
@@ -1754,7 +1752,7 @@ mod tests {
     // CreationReport tests
     #[test]
     fn test_creation_report_conversion() {
-        let mut core_report = exarch_core::creation::CreationReport::new();
+        let mut core_report = exarch_core::CreationReport::new();
         core_report.files_added = 10;
         core_report.directories_added = 5;
         core_report.symlinks_added = 2;
@@ -1762,7 +1760,7 @@ mod tests {
         core_report.bytes_compressed = 512;
         core_report.duration = std::time::Duration::from_millis(500);
         core_report.skipped = skipped(1);
-        let warning = exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
+        let warning = exarch_core::CreationWarning::ZipRatioCheckFailed {
             reason: "Test warning".to_string(),
         };
         let expected = warning.to_string();
@@ -1781,18 +1779,18 @@ mod tests {
         assert_eq!(creation_message(&report.warnings[0]), expected);
     }
 
-    fn sized_entry(name: &str, size: u64) -> exarch_core::inspection::ArchiveEntry {
-        exarch_core::inspection::ArchiveEntry::new(
+    fn sized_entry(name: &str, size: u64) -> exarch_core::ArchiveEntry {
+        exarch_core::ArchiveEntry::new(
             std::path::PathBuf::from(name),
-            exarch_core::inspection::ManifestEntryKind::File {
+            exarch_core::ManifestEntryKind::File {
                 size: exarch_core::Uncompressed(size),
             },
         )
     }
 
-    fn policy_issue() -> exarch_core::inspection::VerificationIssue {
+    fn policy_issue() -> exarch_core::VerificationIssue {
         let error = exarch_core::ArchiveError::from(exarch_core::Violation::EncryptedArchive);
-        exarch_core::inspection::VerificationIssue::from_error(&error, None)
+        exarch_core::VerificationIssue::from_error(&error, None)
     }
 
     // ArchiveEntry tests
@@ -1801,9 +1799,9 @@ mod tests {
         use std::path::PathBuf;
         use std::time::UNIX_EPOCH;
 
-        let mut core_entry = exarch_core::inspection::ArchiveEntry::new(
+        let mut core_entry = exarch_core::ArchiveEntry::new(
             PathBuf::from("test/file.txt"),
-            exarch_core::inspection::ManifestEntryKind::File {
+            exarch_core::ManifestEntryKind::File {
                 size: exarch_core::Uncompressed(1024),
             },
         );
@@ -1825,11 +1823,11 @@ mod tests {
 
     #[test]
     fn test_symlink_entry_carries_a_typed_target() {
-        use exarch_core::inspection::LinkTarget as Core;
-        use exarch_core::inspection::ManifestEntryKind;
+        use exarch_core::LinkTarget as Core;
+        use exarch_core::ManifestEntryKind;
 
         let entry = |target| {
-            exarch_core::inspection::ArchiveEntry::new(
+            exarch_core::ArchiveEntry::new(
                 std::path::PathBuf::from("ln"),
                 ManifestEntryKind::Symlink { target },
             )
@@ -1861,9 +1859,9 @@ mod tests {
     fn test_non_utf8_entry_path_is_refused_not_rendered_lossily() {
         use std::os::unix::ffi::OsStrExt;
 
-        let core_entry = exarch_core::inspection::ArchiveEntry::new(
+        let core_entry = exarch_core::ArchiveEntry::new(
             std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"a\xFFb")),
-            exarch_core::inspection::ManifestEntryKind::Directory,
+            exarch_core::ManifestEntryKind::Directory,
         );
         let failure = archive_entry(&core_entry).unwrap_err();
         assert_matches!(failure, Failure::Core(CoreError::InvalidArchive(_)));
@@ -1883,10 +1881,8 @@ mod tests {
                 .unwrap(),
             )
             .with_rewrite(exarch_core::PathRewrite::Flatten);
-        let mut core_manifest = exarch_core::inspection::ArchiveManifest::with_selection(
-            CoreArchiveType::TarGz,
-            selection,
-        );
+        let mut core_manifest =
+            exarch_core::ArchiveManifest::with_selection(CoreArchiveType::TarGz, selection);
         core_manifest
             .add_entry(sized_entry("keep/a/b.txt", 1))
             .unwrap();
@@ -1920,8 +1916,7 @@ mod tests {
 
     #[test]
     fn test_archive_manifest_conversion() {
-        let mut core_manifest =
-            exarch_core::inspection::ArchiveManifest::new(CoreArchiveType::TarGz);
+        let mut core_manifest = exarch_core::ArchiveManifest::new(CoreArchiveType::TarGz);
         for i in 0..10 {
             core_manifest
                 .add_entry(sized_entry(&format!("f{i}"), 500))
@@ -1940,17 +1935,14 @@ mod tests {
     // VerificationReport tests
     #[test]
     fn test_verification_report_conversion() {
-        let mut core_manifest =
-            exarch_core::inspection::ArchiveManifest::new(CoreArchiveType::TarGz);
+        let mut core_manifest = exarch_core::ArchiveManifest::new(CoreArchiveType::TarGz);
         for i in 0..10 {
             core_manifest
                 .add_entry(sized_entry(&format!("f{i}"), 500))
                 .unwrap();
         }
         let core_report =
-            exarch_core::inspection::VerificationReport::from_entry_issues(&core_manifest, |_| {
-                Vec::new()
-            });
+            exarch_core::VerificationReport::from_entry_issues(&core_manifest, |_| Vec::new());
 
         let report = VerificationReport::try_from(core_report).unwrap();
 
@@ -1969,20 +1961,17 @@ mod tests {
         let issue = VerificationIssue::try_from(core_issue).unwrap();
         assert_eq!(issue.category, IssueCategory::SecurityPolicy);
 
-        let mut manifest =
-            exarch_core::inspection::ArchiveManifest::new(exarch_core::ArchiveType::Tar);
+        let mut manifest = exarch_core::ArchiveManifest::new(exarch_core::ArchiveType::Tar);
         manifest
-            .add_entry(exarch_core::inspection::ArchiveEntry::new(
+            .add_entry(exarch_core::ArchiveEntry::new(
                 std::path::PathBuf::from("link"),
-                exarch_core::inspection::ManifestEntryKind::File {
+                exarch_core::ManifestEntryKind::File {
                     size: exarch_core::Uncompressed(0),
                 },
             ))
             .unwrap();
         let core_report =
-            exarch_core::inspection::VerificationReport::from_entry_issues(&manifest, |_| {
-                vec![policy_issue()]
-            });
+            exarch_core::VerificationReport::from_entry_issues(&manifest, |_| vec![policy_issue()]);
         let report = VerificationReport::try_from(core_report).unwrap();
         assert_eq!(report.security_status, CheckStatus::Fail);
     }
@@ -1995,7 +1984,7 @@ mod tests {
         let error = exarch_core::ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
-        let core_issue = exarch_core::inspection::VerificationIssue::from_error(
+        let core_issue = exarch_core::VerificationIssue::from_error(
             &error,
             Some(PathBuf::from("../etc/passwd")),
         );
@@ -2026,7 +2015,7 @@ mod tests {
             path: std::path::PathBuf::from("a"),
             mode: exarch_core::RawMode::new(0o4755),
         };
-        let core_issue = exarch_core::inspection::VerificationIssue::from_error(&error, None);
+        let core_issue = exarch_core::VerificationIssue::from_error(&error, None);
 
         let issue = VerificationIssue::try_from(core_issue).unwrap();
 
@@ -2035,8 +2024,8 @@ mod tests {
 
     #[test]
     fn test_executable_heuristic_carries_the_raw_mode() {
-        let issue = VerificationIssue::try_from(exarch_core::inspection::VerificationIssue::new(
-            exarch_core::inspection::IssueSeverity::Low,
+        let issue = VerificationIssue::try_from(exarch_core::VerificationIssue::new(
+            exarch_core::IssueSeverity::Low,
             exarch_core::Finding::Heuristic(exarch_core::Heuristic::ExecutableFile {
                 mode: exarch_core::RawMode::new(0o755),
             }),
@@ -2049,8 +2038,8 @@ mod tests {
 
     #[test]
     fn test_heuristic_issue_carries_no_refusal_properties() {
-        let issue = VerificationIssue::try_from(exarch_core::inspection::VerificationIssue::new(
-            exarch_core::inspection::IssueSeverity::Low,
+        let issue = VerificationIssue::try_from(exarch_core::VerificationIssue::new(
+            exarch_core::IssueSeverity::Low,
             exarch_core::Finding::Heuristic(exarch_core::Heuristic::SuspiciousExtension),
         ))
         .unwrap();
@@ -2109,7 +2098,7 @@ mod tests {
 
     #[test]
     fn test_creation_report_saturates_files_added_at_u32_max() {
-        let mut core_report = exarch_core::creation::CreationReport::new();
+        let mut core_report = exarch_core::CreationReport::new();
         core_report.files_added = (u32::MAX as usize) + 1000;
 
         let report = CreationReport::try_from(core_report).unwrap();
@@ -2123,7 +2112,7 @@ mod tests {
 
     #[test]
     fn test_creation_report_saturates_bytes_written_at_i64_max() {
-        let mut core_report = exarch_core::creation::CreationReport::new();
+        let mut core_report = exarch_core::CreationReport::new();
         core_report.bytes_written = u64::MAX;
 
         let report = CreationReport::try_from(core_report).unwrap();
@@ -2137,7 +2126,7 @@ mod tests {
 
     #[test]
     fn test_creation_report_saturates_bytes_compressed_at_i64_max() {
-        let mut core_report = exarch_core::creation::CreationReport::new();
+        let mut core_report = exarch_core::CreationReport::new();
         core_report.bytes_compressed = u64::MAX;
 
         let report = CreationReport::try_from(core_report).unwrap();
@@ -2163,8 +2152,7 @@ mod tests {
 
     #[test]
     fn test_archive_manifest_saturates_total_size_at_i64_max() {
-        let mut core_manifest =
-            exarch_core::inspection::ArchiveManifest::new(CoreArchiveType::TarGz);
+        let mut core_manifest = exarch_core::ArchiveManifest::new(CoreArchiveType::TarGz);
         core_manifest
             .add_entry(sized_entry("big", u64::MAX))
             .unwrap();
@@ -2350,8 +2338,8 @@ mod tests {
             ),
             union_line(
                 "CreationWarningKind",
-                exarch_core::creation::CreationWarningKind::ALL,
-                exarch_core::creation::CreationWarningKind::as_str,
+                exarch_core::CreationWarningKind::ALL,
+                exarch_core::CreationWarningKind::as_str,
             ),
             union_line(
                 "BackupIdentity",

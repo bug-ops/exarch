@@ -496,7 +496,7 @@ fn verify_reports_findings_and_the_true_entry_count() {
     .bytes;
 
     let report = open_bytes(duplicate.clone(), &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 2);
     assert_ne!(report.status(), VerificationStatus::Pass);
@@ -508,7 +508,7 @@ fn verify_reports_findings_and_the_true_entry_count() {
     );
 
     let report = open_bytes(duplicate, &config(ZipConsistencyPolicy::Ignore))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 2);
     assert_eq!(report.status(), VerificationStatus::Pass);
@@ -519,7 +519,7 @@ fn uncounted_records_are_visible_to_verify() {
     let mut zip = two_files();
     zip.end_count = Some(1);
     let report = open_bytes(zip.build().bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 2);
     assert!(
@@ -541,7 +541,7 @@ fn header_mismatch_counts_once_with_the_entrys_own_issues() {
     let mut built = RawZip::new(vec![setuid, RawEntry::stored("b.txt", b"world")]).build();
     patch(&mut built, 0, 30, b"x");
     let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 2);
     assert_eq!(report.suspicious_entries(), 1);
@@ -576,7 +576,7 @@ fn raw_record_count_is_limited_whatever_the_policy() {
         };
         expected(
             open_bytes(bytes.clone(), &config)
-                .verify(&VerificationOptions::default())
+                .verify(VerificationOptions::default())
                 .map(drop),
         );
         expected(open_bytes(bytes.clone(), &config).list().map(drop));
@@ -777,7 +777,7 @@ fn omitted_findings_are_reported_by_verify() {
         patch(&mut built, entry, 30, b"g");
     }
     let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert!(
         report
@@ -816,7 +816,7 @@ fn every_structural_finding_is_ignored_under_the_ignore_policy() {
         let archive = open_bytes(bytes.clone(), &ignore);
         archive.list().unwrap();
         let report = open_bytes(bytes, &ignore)
-            .verify(&VerificationOptions::default())
+            .verify(VerificationOptions::default())
             .unwrap();
         assert!(report.issues().iter().all(|i| !matches!(
             i.category(),
@@ -857,7 +857,7 @@ fn unparseable_local_header_is_rejected_by_every_operation_under_enforce() {
     );
     assert!(!dest.exists());
     let report = open_bytes(ut_archive(), &enforce)
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(
@@ -889,7 +889,7 @@ fn unparseable_local_header_extracts_as_before_under_ignore() {
     );
     assert_eq!(
         open_bytes(ut_archive(), &ignore)
-            .verify(&VerificationOptions::default())
+            .verify(VerificationOptions::default())
             .unwrap()
             .status(),
         VerificationStatus::Pass
@@ -1034,7 +1034,7 @@ fn many_mismatches() -> Vec<u8> {
 #[test]
 fn ignore_policy_adds_no_omitted_findings_note() {
     let report = open_bytes(many_mismatches(), &config(ZipConsistencyPolicy::Ignore))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert!(report.issues().is_empty(), "{:?}", report.issues());
 }
@@ -1044,7 +1044,7 @@ fn suspicious_entries_never_exceed_the_entries() {
     let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
     zip.before_directory = unmapped_local().repeat(20);
     let report = open_bytes(zip.build().bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.total_entries(), 1);
     assert!(report.suspicious_entries() <= report.total_entries());
@@ -1279,7 +1279,7 @@ fn self_extractor_stub_is_not_a_hidden_header() {
         let mut archive = open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce));
         assert_eq!(archive.reader_mut().len(), 2, "{label}");
         assert!(archive.structure().findings().is_empty(), "{label}");
-        let report = archive.verify(&VerificationOptions::default()).unwrap();
+        let report = archive.verify(VerificationOptions::default()).unwrap();
         assert_eq!(report.status(), VerificationStatus::Pass, "{label}");
     }
 }
@@ -1417,7 +1417,7 @@ fn descriptor_entry(method: u16, payload: &[u8], tail: &[u8]) -> RawEntry {
 fn verify_with_integrity(bytes: Vec<u8>) -> crate::VerificationReport {
     open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
         .verify(
-            &VerificationOptions::default()
+            VerificationOptions::default()
                 .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),
         )
         .unwrap()
@@ -1458,7 +1458,7 @@ fn header_hidden_behind_a_compressed_stream_is_found_with_integrity() {
         assert_eq!(report.status(), VerificationStatus::Fail);
 
         let plain = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
-            .verify(&VerificationOptions::default())
+            .verify(VerificationOptions::default())
             .unwrap();
         assert_eq!(hidden_issues(&plain).len(), 1, "method {method}");
     }
@@ -1477,7 +1477,7 @@ fn header_hidden_inside_stored_data_is_found_with_integrity() {
         let built = RawZip::new(vec![descriptor_entry(0, &whole, &[])]).build();
         let expected = built.local_offsets[0] + 30 + 5 + filler + 16;
         let plain = open_bytes(built.bytes.clone(), &config(ZipConsistencyPolicy::Enforce))
-            .verify(&VerificationOptions::default())
+            .verify(VerificationOptions::default())
             .unwrap();
         assert_eq!(hidden_issues(&plain).len(), 1, "{filler}");
         let report = verify_with_integrity(built.bytes);
@@ -1705,7 +1705,7 @@ fn descriptor_tail_check_is_off_under_the_ignore_policy() {
     let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
     let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Ignore))
         .verify(
-            &VerificationOptions::default()
+            VerificationOptions::default()
                 .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),
         )
         .unwrap();
@@ -1895,7 +1895,7 @@ fn stray_central_record_is_fatal_under_enforce_and_reported_by_verify() {
         ))
     );
     let report = open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(report.issues().iter().any(|i| {
@@ -1911,7 +1911,7 @@ fn descriptor_tail_the_budget_cannot_cover_is_listed_with_its_own_reason() {
     let built = RawZip::new(vec![descriptor_entry(12, payload, &descriptor(payload, 0))]).build();
     let report = open_bytes(built.bytes, &config(ZipConsistencyPolicy::Enforce))
         .verify(
-            &VerificationOptions::default().with_integrity(IntegrityCheck::DecodeToEof(
+            VerificationOptions::default().with_integrity(IntegrityCheck::DecodeToEof(
                 DecompressionBudget::try_from_bytes(payload.len() as u64).unwrap(),
             )),
         )

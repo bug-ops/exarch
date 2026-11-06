@@ -1175,14 +1175,11 @@ mod tests {
         let _ = exc.setattr("bytes_written", report.bytes_written);
     }
 
-    /// Attaches `exarch_core::creation::CreationReport` counters onto a
+    /// Attaches `exarch_core::CreationReport` counters onto a
     /// callback exception, matching the closure passed to
     /// `merge_progress_result` at the real `create_archive_with_progress`
     /// call site.
-    fn attach_creation_attrs(
-        exc: &Bound<'_, PyAny>,
-        report: &exarch_core::creation::CreationReport,
-    ) {
+    fn attach_creation_attrs(exc: &Bound<'_, PyAny>, report: &exarch_core::CreationReport) {
         let _ = exc.setattr("files_added", report.files_added);
         let _ = exc.setattr("bytes_written", report.bytes_written);
     }
@@ -1299,7 +1296,7 @@ mod tests {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let report = {
-                let mut r = exarch_core::creation::CreationReport::new();
+                let mut r = exarch_core::CreationReport::new();
                 r.files_added = 2;
                 r.bytes_written = 17;
                 r
@@ -1362,7 +1359,7 @@ mod tests {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let report = {
-                let mut r = exarch_core::creation::CreationReport::new();
+                let mut r = exarch_core::CreationReport::new();
                 r.files_added = 1;
                 r
             };

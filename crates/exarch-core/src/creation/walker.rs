@@ -35,8 +35,8 @@ use walkdir::WalkDir;
 /// # Examples
 ///
 /// ```ignore
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::walker::FilteredWalker;
+/// use exarch_core::CreationConfig;
+/// use exarch_core::FilteredWalker;
 /// use std::path::Path;
 ///
 /// let config = CreationConfig::default();
@@ -62,8 +62,8 @@ impl<'a> FilteredWalker<'a> {
     /// # Examples
     ///
     /// ```ignore
-    /// use exarch_core::creation::CreationConfig;
-    /// use exarch_core::creation::walker::FilteredWalker;
+    /// use exarch_core::CreationConfig;
+    /// use exarch_core::FilteredWalker;
     /// use std::path::Path;
     ///
     /// let config = CreationConfig::default();
@@ -346,7 +346,7 @@ pub enum EntryType {
 /// # Examples
 ///
 /// ```ignore
-/// use exarch_core::creation::CreationConfig;
+/// use exarch_core::CreationConfig;
 /// use exarch_core::creation::walker::collect_entries;
 /// use std::path::Path;
 ///

@@ -21,31 +21,33 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+// `pub(crate)` states intent inside the private modules; the lint would flatten it to `pub`.
+#![allow(clippy::redundant_pub_crate)]
 
-pub mod api;
+mod api;
 pub(crate) mod closed_enum;
-pub mod config;
+mod config;
 pub(crate) mod copy;
-pub mod creation;
-pub mod error;
-pub(crate) mod formats;
-pub mod inspection;
+mod creation;
+mod error;
+mod formats;
+mod inspection;
 mod limit;
 mod listed;
 mod path_text;
 #[cfg(test)]
 use exarch_testkit::raw_zip;
-pub mod reader;
-pub mod report;
+mod reader;
+mod report;
 mod request;
-pub mod security;
+mod security;
 mod selection;
-pub mod sink;
+mod sink;
 mod staging;
 #[cfg(test)]
 pub(crate) mod test_utils;
-pub mod types;
-pub mod writer;
+mod types;
+mod writer;
 
 // Re-export main API types
 pub use api::create_archive;
@@ -54,6 +56,7 @@ pub use api::list_archive;
 pub use api::verify_archive;
 pub use closed_enum::ClosedEnum;
 pub use config::Admit;
+pub use config::AllowedFeatures;
 pub use config::DecodeReuse;
 pub use config::DecodeReuseKind;
 pub use config::DecompressionBudget;
@@ -136,6 +139,7 @@ pub use error::redaction::sanitize_path_for_error;
 pub use formats::CompressionCodec;
 pub use formats::detect::ArchiveType;
 pub use formats::detect::CreatableFormat;
+pub use formats::detect::ExtractOnlyFormat;
 pub use formats::detect::detect_format;
 pub use limit::Limit;
 pub use limit::RatioLimit;
@@ -171,6 +175,7 @@ pub use selection::PathRewrite;
 pub use selection::StripComponents;
 
 // Re-export creation types
+pub use creation::CompressionLevel;
 pub use creation::CreationConfig;
 pub use creation::CreationReport;
 pub use creation::CreationWarning;
@@ -216,8 +221,10 @@ pub use listed::ListedArchive;
 pub use listed::ListedExtractOptions;
 pub use security::AdmittedSize;
 pub use security::Compressed;
+pub use security::EntryCount;
 pub use security::EntrySize;
 pub use security::HardlinkTarget;
+pub use security::QuotaPermit;
 pub use security::RawMode;
 pub use security::SanitizedMode;
 pub use security::Uncompressed;
@@ -256,3 +263,20 @@ pub use types::CheckedLinkTarget;
 pub use types::DestDir;
 pub use types::SafePath;
 pub use types::SafeSymlink;
+
+#[cfg(feature = "testing")]
+pub use security::HardlinkTracker;
+#[cfg(feature = "testing")]
+pub use security::QuotaTracker;
+#[cfg(feature = "testing")]
+pub use security::sanitize_permissions;
+#[cfg(feature = "testing")]
+pub use security::validate_compression_ratio;
+#[cfg(feature = "testing")]
+pub use security::validate_path;
+#[cfg(feature = "testing")]
+pub use security::validate_symlink;
+#[cfg(all(feature = "testing", any(unix, target_os = "wasi")))]
+pub use types::Walked;
+#[cfg(feature = "testing")]
+pub use types::safe_path::is_windows_reserved_component;

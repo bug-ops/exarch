@@ -418,9 +418,8 @@ impl<'a> VerifyRequest<'a> {
 ///
 /// Every entry passes the validation pipeline of [`ExtractRequest`] and is then
 /// delivered to the sink instead of being written under a directory. See the
-/// [`sink`](crate::sink) module for what the sink may rely on and what it must
-/// do. The optional [`ProgressCallback`] sees the events of a directory
-/// extraction.
+/// [`EntrySink`] for what the sink may rely on and what it must do. The
+/// optional [`ProgressCallback`] sees the events of a directory extraction.
 ///
 /// A 7z source is read in two phases: everything the file table can refuse
 /// (admission, ratios, quotas, link policy, paths, name lengths) is refused

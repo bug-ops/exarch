@@ -1,19 +1,19 @@
 //! Python bindings for report types.
 
+use exarch_core::ArchiveEntry;
+use exarch_core::ArchiveManifest;
 use exarch_core::ConfigSetting;
+use exarch_core::CreationReport as CoreCreationReport;
 use exarch_core::Disposition;
 use exarch_core::ExtractionReport as CoreExtractionReport;
+use exarch_core::IntegrityGaps;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
 use exarch_core::Skip as CoreSkip;
 use exarch_core::SkipKind;
 use exarch_core::Skips as CoreSkips;
-use exarch_core::creation::CreationReport as CoreCreationReport;
-use exarch_core::inspection::IntegrityGaps;
-use exarch_core::inspection::manifest::ArchiveEntry;
-use exarch_core::inspection::manifest::ArchiveManifest;
-use exarch_core::inspection::report::VerificationIssue;
-use exarch_core::inspection::report::VerificationReport;
+use exarch_core::VerificationIssue;
+use exarch_core::VerificationReport;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
@@ -1089,7 +1089,7 @@ mod tests {
         skips
     }
     use exarch_core::Compressed;
-    use exarch_core::inspection::manifest::ManifestEntryKind;
+    use exarch_core::ManifestEntryKind;
     use std::time::Duration;
 
     #[test]
@@ -1275,7 +1275,7 @@ mod tests {
 
     #[test]
     fn test_creation_report_properties() {
-        use exarch_core::creation::CreationReport;
+        use exarch_core::CreationReport;
 
         let mut core_report = CreationReport::new();
         core_report.files_added = 20;
@@ -1285,11 +1285,9 @@ mod tests {
         core_report.bytes_compressed = 1024;
         core_report.duration = Duration::from_millis(750);
         core_report.skipped = skipped(2);
-        core_report.add_warning(
-            exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
-                reason: "Skipped file".to_string(),
-            },
-        );
+        core_report.add_warning(exarch_core::CreationWarning::ZipRatioCheckFailed {
+            reason: "Skipped file".to_string(),
+        });
 
         let py_report = PyCreationReport::from(core_report);
 
@@ -1326,7 +1324,7 @@ mod tests {
 
     #[test]
     fn test_creation_report_str() {
-        use exarch_core::creation::CreationReport;
+        use exarch_core::CreationReport;
 
         let core_report = CreationReport::new();
         let py_report = PyCreationReport::from(core_report);
@@ -1559,11 +1557,15 @@ mod tests {
     #[test]
     fn test_pyi_literal_aliases_match_core_enums() {
         use exarch_core::ArchiveType;
+        use exarch_core::CheckStatus;
         use exarch_core::ConfigSetting;
         use exarch_core::CreatableFormat;
         use exarch_core::ErrorCode;
         use exarch_core::IntegrityStatus;
         use exarch_core::InvalidArchiveSubCode;
+        use exarch_core::IssueCategory;
+        use exarch_core::IssueSeverity;
+        use exarch_core::ManifestEntryType;
         use exarch_core::MemoryEntryKind;
         use exarch_core::PartialWrites;
         use exarch_core::PathModel;
@@ -1572,12 +1574,8 @@ mod tests {
         use exarch_core::SkipKind;
         use exarch_core::SubCode;
         use exarch_core::UnverifiedReason;
+        use exarch_core::VerificationStatus;
         use exarch_core::ZipConsistencyPolicy;
-        use exarch_core::inspection::CheckStatus;
-        use exarch_core::inspection::IssueCategory;
-        use exarch_core::inspection::IssueSeverity;
-        use exarch_core::inspection::VerificationStatus;
-        use exarch_core::inspection::manifest::ManifestEntryType;
 
         let pyi = include_str!("../exarch.pyi");
         let expected = [
@@ -1685,8 +1683,8 @@ mod tests {
             ),
             literal_line(
                 "_CreationWarningKind",
-                exarch_core::creation::CreationWarningKind::ALL,
-                exarch_core::creation::CreationWarningKind::as_str,
+                exarch_core::CreationWarningKind::ALL,
+                exarch_core::CreationWarningKind::as_str,
             ),
         ];
         let flat = flatten_literals(pyi);
@@ -1700,7 +1698,7 @@ mod tests {
 
     #[test]
     fn test_pyi_has_one_class_per_manifest_entry_type_and_link_state() {
-        use exarch_core::inspection::manifest::ManifestEntryType;
+        use exarch_core::ManifestEntryType;
 
         let pyi = include_str!("../exarch.pyi");
         for kind in ManifestEntryType::ALL {

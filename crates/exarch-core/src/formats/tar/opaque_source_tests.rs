@@ -2,6 +2,8 @@
 //! these paths differ from the file-based request API and are exercised
 //! directly.
 
+#![allow(clippy::unwrap_used)]
+
 use std::assert_matches;
 use std::io::Cursor;
 use std::io::Write;
@@ -104,14 +106,14 @@ fn verify_over_a_plain_reader_reads_the_trailer_within_the_cap() {
     tar.extend(std::iter::repeat_n(0x55u8, 4096));
 
     let report = TarArchive::new(Cursor::new(tar.clone()), &config)
-        .verify(&integrity(1024))
+        .verify(integrity(1024))
         .unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
 
     tar.extend(std::iter::repeat_n(0x55u8, cap));
     let refused = TarArchive::new(Cursor::new(tar), &config)
         .verify(
-            &VerificationOptions::default()
+            VerificationOptions::default()
                 .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),
         )
         .unwrap_err();

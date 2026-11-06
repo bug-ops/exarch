@@ -3,7 +3,7 @@
 //! `HardlinkTarget(..)` cannot compile outside `exarch_core` — the only
 //! producer of a real `HardlinkTarget` is `HardlinkTracker` validation.
 
-use exarch_core::security::HardlinkTarget;
+use exarch_core::HardlinkTarget;
 
 fn main() {
     let _target = HardlinkTarget(std::path::PathBuf::from("/etc/passwd"));

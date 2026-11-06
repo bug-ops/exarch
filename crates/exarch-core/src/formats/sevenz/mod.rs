@@ -292,10 +292,10 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     #[cfg(test)]
     fn verify(
         mut self,
-        options: &VerificationOptions,
+        options: VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
         let config = Arc::clone(&self.config);
-        self.verify_with_progress(&config, *options, &mut crate::NoopProgress)
+        self.verify_with_progress(&config, options, &mut crate::NoopProgress)
     }
 }
 

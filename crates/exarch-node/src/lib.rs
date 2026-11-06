@@ -395,8 +395,7 @@ pub fn create_archive<'env>(
     config: Option<&CreationConfig>,
     options: Option<CreateOptions>,
 ) -> Result<PromiseRaw<'env, CreationReport>> {
-    let config_owned: exarch_core::creation::CreationConfig =
-        config.map_or_default(|c| c.as_core().clone());
+    let config_owned: exarch_core::CreationConfig = config.map_or_default(|c| c.as_core().clone());
     let options = options.unwrap_or_default();
 
     spawn_blocking_promise(
@@ -417,9 +416,9 @@ fn boundary_create_paths(
 fn create_core(
     output_path: &str,
     sources: &[String],
-    config: &exarch_core::creation::CreationConfig,
+    config: &exarch_core::CreationConfig,
     options: &CreateOptions,
-) -> CoreResult<exarch_core::creation::CreationReport> {
+) -> CoreResult<exarch_core::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
     let output = output_file(&output_path, options);
     Ok(exarch_core::CreateRequest::new(config).create(&output, &sources)?)
@@ -464,7 +463,7 @@ pub fn create_archive_sync(
     config: Option<&CreationConfig>,
     options: Option<CreateOptions>,
 ) -> Result<CreationReport> {
-    let default_config = exarch_core::creation::CreationConfig::default();
+    let default_config = exarch_core::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let options = options.unwrap_or_default();
 
@@ -675,8 +674,7 @@ pub fn create_archive_with_progress<'env>(
     progress: Option<ProgressCallback>,
     options: Option<CreateOptions>,
 ) -> Result<PromiseRaw<'env, CreationReport>> {
-    let config_owned: exarch_core::creation::CreationConfig =
-        config.map_or_default(|c| c.as_core().clone());
+    let config_owned: exarch_core::CreationConfig = config.map_or_default(|c| c.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
     let options = options.unwrap_or_default();
 
@@ -700,11 +698,11 @@ pub fn create_archive_with_progress<'env>(
 fn create_with_progress_core(
     output_path: &str,
     sources: &[String],
-    config: &exarch_core::creation::CreationConfig,
+    config: &exarch_core::CreationConfig,
     options: &CreateOptions,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
-) -> CoreResult<exarch_core::creation::CreationReport> {
+) -> CoreResult<exarch_core::CreationReport> {
     let (output_path, sources) = boundary_create_paths(output_path, sources)?;
     let output = output_file(&output_path, options);
     run_with_optional_progress(
@@ -1260,8 +1258,8 @@ mod tests {
         exarch_core::ExtractionOptions::default()
     }
 
-    fn creation() -> exarch_core::creation::CreationConfig {
-        exarch_core::creation::CreationConfig::default()
+    fn creation() -> exarch_core::CreationConfig {
+        exarch_core::CreationConfig::default()
     }
 
     #[test]

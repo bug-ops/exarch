@@ -116,7 +116,7 @@ println!("Created {} files", report.files_added);
 
 ```rust
 use exarch_core::{CreateRequest, CreationConfig, ExcludePattern, OutputFile};
-use exarch_core::creation::CompressionLevel;
+use exarch_core::CompressionLevel;
 
 let config = CreationConfig::default()
     .with_compression_level(CompressionLevel::try_from(9u8)?)

@@ -28,7 +28,7 @@ use std::path::PathBuf;
 /// # Examples
 ///
 /// ```no_run
-/// use exarch_core::types::DestDir;
+/// use exarch_core::DestDir;
 /// use std::path::PathBuf;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -106,7 +106,7 @@ impl DestDir {
     /// # Examples
     ///
     /// ```no_run
-    /// use exarch_core::types::DestDir;
+    /// use exarch_core::DestDir;
     /// use std::path::PathBuf;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -240,9 +240,9 @@ impl DestDir {
     /// # Examples
     ///
     /// ```no_run
+    /// use exarch_core::DestDir;
+    /// use exarch_core::SafePath;
     /// use exarch_core::SecurityConfig;
-    /// use exarch_core::types::DestDir;
-    /// use exarch_core::types::SafePath;
     /// use std::path::PathBuf;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {

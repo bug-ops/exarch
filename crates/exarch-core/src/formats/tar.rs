@@ -473,14 +473,11 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     /// integrity requested the stream is read to decoder EOF within the budget
     /// after the end marker.
     #[cfg(test)]
-    fn verify(
-        self,
-        options: &VerificationOptions,
-    ) -> Result<crate::inspection::VerificationReport> {
+    fn verify(self, options: VerificationOptions) -> Result<crate::inspection::VerificationReport> {
         let config = Arc::clone(&self.config);
         crate::inspection::verify::verify_with(
             &config,
-            *options,
+            options,
             &mut crate::NoopProgress,
             |listing| self.list_with_pass(&config, listing),
         )
@@ -2767,7 +2764,7 @@ mod tests {
         let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let report = archive
-            .verify(&crate::VerificationOptions::default())
+            .verify(crate::VerificationOptions::default())
             .unwrap();
 
         assert!(report.is_safe());

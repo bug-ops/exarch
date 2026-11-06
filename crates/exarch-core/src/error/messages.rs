@@ -549,7 +549,7 @@ impl ArchiveError {
     /// Converts the error into the data every binding consumes.
     ///
     /// Path and I/O-error text is redacted per the shared policy in
-    /// [`super::redaction`] — see [`Self::redacted_path`] and
+    /// the redaction module — see [`Self::redacted_path`] and
     /// [`sanitize_io_error_for_error`]. A [`Self::PartialExtraction`] yields
     /// its source's message with [`FfiErrorMessage::partial`] set.
     ///

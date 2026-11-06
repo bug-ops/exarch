@@ -131,7 +131,7 @@ closed_enum! {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::formats::detect::ExtractOnlyFormat;
+    /// use exarch_core::ExtractOnlyFormat;
     ///
     /// assert_eq!(ExtractOnlyFormat::SevenZ.extension(), "7z");
     /// ```

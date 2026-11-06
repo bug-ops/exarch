@@ -904,7 +904,7 @@ mod tests {
     /// Regression test for #453 follow-up: in release builds, a
     /// host-derived path variant must be reduced to the filename, not leak
     /// the full host path. The redaction primitives themselves are tested
-    /// directly in `exarch_core::error::redaction`; this exercises the
+    /// directly in `exarch-core`'s redaction module; this exercises the
     /// binding's end-to-end `convert_error` path.
     #[test]
     #[cfg(not(debug_assertions))]

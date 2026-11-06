@@ -38,7 +38,7 @@ use std::path::Path;
 /// ```ignore
 /// use exarch_core::EntryPosition;
 /// use exarch_core::ProgressCallback;
-/// use exarch_core::creation::progress::ProgressTracker;
+/// use exarch_core::ProgressTracker;
 /// use std::path::Path;
 ///
 /// struct SimpleProgress;
@@ -85,7 +85,7 @@ impl<'a> ProgressTracker<'a> {
     /// ```ignore
     /// use exarch_core::EntryPosition;
     /// use exarch_core::ProgressCallback;
-    /// use exarch_core::creation::progress::ProgressTracker;
+    /// use exarch_core::ProgressTracker;
     /// use std::path::Path;
     ///
     /// # struct DummyProgress;
@@ -164,7 +164,7 @@ impl<'a> ProgressTracker<'a> {
 ///
 /// ```ignore
 /// use exarch_core::ProgressCallback;
-/// use exarch_core::creation::progress::ProgressReader;
+/// use exarch_core::ProgressReader;
 /// use std::fs::File;
 /// use std::io::Read;
 /// use std::path::Path;
@@ -215,7 +215,7 @@ impl<'a, R> ProgressReader<'a, R> {
     ///
     /// ```ignore
     /// use exarch_core::ProgressCallback;
-    /// use exarch_core::creation::progress::ProgressReader;
+    /// use exarch_core::ProgressReader;
     /// use std::fs::File;
     /// use std::path::Path;
     ///
@@ -253,7 +253,7 @@ impl<'a, R> ProgressReader<'a, R> {
     ///
     /// ```ignore
     /// use exarch_core::ProgressCallback;
-    /// use exarch_core::creation::progress::ProgressReader;
+    /// use exarch_core::ProgressReader;
     /// use std::fs::File;
     /// use std::path::Path;
     ///

@@ -37,10 +37,10 @@ use crate::security::fs_view::ModelRoot as _;
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::DestDir;
+/// use exarch_core::SafePath;
+/// use exarch_core::SafeSymlink;
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::types::DestDir;
-/// use exarch_core::types::SafePath;
-/// use exarch_core::types::SafeSymlink;
 /// use std::path::PathBuf;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -107,10 +107,10 @@ impl SafeSymlink {
     /// # Examples
     ///
     /// ```no_run
+    /// use exarch_core::DestDir;
+    /// use exarch_core::SafePath;
+    /// use exarch_core::SafeSymlink;
     /// use exarch_core::SecurityConfig;
-    /// use exarch_core::types::DestDir;
-    /// use exarch_core::types::SafePath;
-    /// use exarch_core::types::SafeSymlink;
     /// use std::path::PathBuf;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {

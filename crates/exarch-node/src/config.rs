@@ -5,6 +5,7 @@ use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::CompressionLevel;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
@@ -25,7 +26,6 @@ use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::Staging as CoreStaging;
 use exarch_core::StripComponents;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
-use exarch_core::creation::CompressionLevel;
 use exarch_core::positive_from_f64;
 use napi::Env;
 use napi::bindgen_prelude::Either;
@@ -1155,7 +1155,7 @@ fn rebuilt(
 #[napi]
 #[derive(Debug, Clone)]
 pub struct CreationConfig {
-    inner: exarch_core::creation::CreationConfig,
+    inner: exarch_core::CreationConfig,
 }
 
 #[napi]
@@ -1164,7 +1164,7 @@ impl CreationConfig {
     #[napi(constructor)]
     pub fn new() -> Self {
         Self {
-            inner: exarch_core::creation::CreationConfig::default(),
+            inner: exarch_core::CreationConfig::default(),
         }
     }
 
@@ -1345,7 +1345,7 @@ impl CreationConfig {
 impl CreationConfig {
     /// Env-free core of `addExcludePattern`.
     fn try_add_exclude_pattern(&mut self, pattern: &str) -> std::result::Result<(), CoreError> {
-        let pattern = exarch_core::creation::ExcludePattern::try_from(pattern)?;
+        let pattern = exarch_core::ExcludePattern::try_from(pattern)?;
         self.inner.exclude_patterns.push(pattern);
         Ok(())
     }
@@ -1357,7 +1357,7 @@ impl CreationConfig {
     ) -> std::result::Result<(), CoreError> {
         self.inner.exclude_patterns = patterns
             .iter()
-            .map(|pattern| exarch_core::creation::ExcludePattern::try_from(pattern.as_str()))
+            .map(|pattern| exarch_core::ExcludePattern::try_from(pattern.as_str()))
             .collect::<std::result::Result<_, _>>()?;
         Ok(())
     }
@@ -1379,7 +1379,7 @@ impl CreationConfig {
     }
 
     /// Returns a reference to the inner `CoreCreationConfig`.
-    pub fn as_core(&self) -> &exarch_core::creation::CreationConfig {
+    pub fn as_core(&self) -> &exarch_core::CreationConfig {
         &self.inner
     }
 }

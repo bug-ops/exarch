@@ -3,11 +3,11 @@
 //! The core reports are `#[non_exhaustive]`, so a test cannot write a struct
 //! literal; these keep the call sites short.
 
+use exarch_core::CreationWarning;
 use exarch_core::ExtractionWarning;
 use exarch_core::Skip;
 use exarch_core::SkipKind;
 use exarch_core::Skips;
-use exarch_core::creation::CreationWarning;
 use std::path::PathBuf;
 
 /// `count` skipped duplicates.

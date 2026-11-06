@@ -39,6 +39,7 @@ use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::CreationReport as CoreCreationReport;
 use exarch_core::ErrorCode as CoreErrorCode;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::FfiErrorMessage;
@@ -49,7 +50,6 @@ use exarch_core::PolicySetting as CorePolicySetting;
 use exarch_core::ProtectedPath as CoreProtectedPath;
 use exarch_core::Restore as CoreRestore;
 use exarch_core::SubCode;
-use exarch_core::creation::CreationReport as CoreCreationReport;
 use napi::Env;
 use napi::Error;
 use napi::Status;

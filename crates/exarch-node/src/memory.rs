@@ -388,7 +388,7 @@ pub struct CreatedArchive {
 fn create_to_bytes_core(
     sources: &[String],
     format: CreatableFormat,
-    config: &exarch_core::creation::CreationConfig,
+    config: &exarch_core::CreationConfig,
 ) -> CoreResult<CreatedArchive> {
     let sources = boundary_paths(sources)?;
     let (bytes, report) =
@@ -435,8 +435,7 @@ pub fn create_archive_to_bytes<'env>(
     format: CreatableFormat,
     config: Option<&CreationConfig>,
 ) -> Result<PromiseRaw<'env, CreatedArchive>> {
-    let config_owned: exarch_core::creation::CreationConfig =
-        config.map_or_default(|c| c.as_core().clone());
+    let config_owned: exarch_core::CreationConfig = config.map_or_default(|c| c.as_core().clone());
 
     spawn_blocking_promise(
         env,
@@ -479,7 +478,7 @@ pub fn create_archive_to_bytes_sync(
     format: CreatableFormat,
     config: Option<&CreationConfig>,
 ) -> Result<CreatedArchive> {
-    let default_config = exarch_core::creation::CreationConfig::default();
+    let default_config = exarch_core::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
     run_sync(env, "archive creation", || {

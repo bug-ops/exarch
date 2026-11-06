@@ -11,7 +11,7 @@
 //! cargo run --example dhat_extraction --release -- tar
 //! ```
 
-#![allow(unsafe_code, clippy::unwrap_used)]
+#![allow(unsafe_code, clippy::unwrap_used, clippy::disallowed_methods)]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

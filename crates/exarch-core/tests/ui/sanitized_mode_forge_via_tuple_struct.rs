@@ -3,7 +3,7 @@
 //! `SanitizedMode(todo!())` cannot compile outside `exarch_core` — the only
 //! producer of a real `SanitizedMode` is `sanitize_permissions`.
 
-use exarch_core::security::SanitizedMode;
+use exarch_core::SanitizedMode;
 
 #[allow(unreachable_code)]
 fn main() {

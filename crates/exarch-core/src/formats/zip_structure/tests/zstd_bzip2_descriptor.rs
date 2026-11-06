@@ -67,7 +67,7 @@ fn skippable_frame(body: &[u8]) -> Vec<u8> {
 
 fn plain_verify_status(bytes: Vec<u8>) -> VerificationStatus {
     open_bytes(bytes, &config(ZipConsistencyPolicy::Enforce))
-        .verify(&VerificationOptions::default())
+        .verify(VerificationOptions::default())
         .unwrap()
         .status()
 }
@@ -212,7 +212,7 @@ fn a_zstd_window_log_of_27_is_accepted_and_28_refused_with_a_typed_error_everywh
                 let extracted = extract_to_temp(built.bytes.clone(), policy);
                 let listed = open_bytes(built.bytes.clone(), &config(policy)).list();
                 let verified = open_bytes(built.bytes.clone(), &config(policy))
-                    .verify(&VerificationOptions::default());
+                    .verify(VerificationOptions::default());
                 if accepted {
                     extracted.unwrap();
                     listed.unwrap();
@@ -330,7 +330,7 @@ fn the_census_does_not_decode_a_zstd_window_above_the_limit_it_runs_under() {
     assert!(archive.structure().findings().is_empty());
     assert_decoder_memory_refusal(&extract_with(archive), "extract");
     assert_decoder_memory_refusal(&open().list(), "list");
-    assert_decoder_memory_refusal(&open().verify(&VerificationOptions::default()), "verify");
+    assert_decoder_memory_refusal(&open().verify(VerificationOptions::default()), "verify");
 }
 
 #[test]
@@ -405,15 +405,13 @@ fn zip_handles_apply_the_limit_of_the_config_they_are_opened_under() {
         assert_refused_at(extract_with(open(&strict)), at - 1, "extract");
         assert_refused_at(open(&strict).list(), at - 1, "list");
         assert_refused_at(
-            open(&strict).verify(&VerificationOptions::default()),
+            open(&strict).verify(VerificationOptions::default()),
             at - 1,
             "verify",
         );
 
         open(&loose).list().unwrap();
-        open(&loose)
-            .verify(&VerificationOptions::default())
-            .unwrap();
+        open(&loose).verify(VerificationOptions::default()).unwrap();
         extract_with(open(&loose)).unwrap();
     }
 }

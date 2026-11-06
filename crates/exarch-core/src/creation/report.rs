@@ -14,8 +14,8 @@ closed_enum! {
     ///
     /// ```
     /// use exarch_core::IoKind;
-    /// use exarch_core::creation::CreationWarning;
-    /// use exarch_core::creation::CreationWarningKind;
+    /// use exarch_core::CreationWarning;
+    /// use exarch_core::CreationWarningKind;
     ///
     /// let warning = CreationWarning::DirectoryNotSynced {
     ///     io_kind: IoKind::PermissionDenied,
@@ -40,7 +40,7 @@ closed_enum! {
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::CreationWarning;
+/// use exarch_core::CreationWarning;
 ///
 /// let warning = CreationWarning::ZipRatioCheckFailed {
 ///     reason: "invalid Zip archive".into(),
@@ -130,7 +130,7 @@ impl fmt::Display for CreationWarning {
 /// # Examples
 ///
 /// ```
-/// use exarch_core::creation::CreationReport;
+/// use exarch_core::CreationReport;
 ///
 /// let mut report = CreationReport::default();
 /// report.files_added = 10;
@@ -180,8 +180,8 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
-    /// use exarch_core::creation::CreationWarning;
+    /// use exarch_core::CreationReport;
+    /// use exarch_core::CreationWarning;
     ///
     /// let mut report = CreationReport::new();
     /// report.add_warning(CreationWarning::ZipRatioCheckFailed {
@@ -198,7 +198,7 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// assert_eq!(CreationReport::new().files_skipped(), 0);
     /// ```
@@ -212,16 +212,14 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// let mut report = CreationReport::new();
     /// assert!(!report.has_warnings());
     ///
-    /// report.add_warning(
-    ///     exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
-    ///         reason: "test".into(),
-    ///     },
-    /// );
+    /// report.add_warning(exarch_core::CreationWarning::ZipRatioCheckFailed {
+    ///     reason: "test".into(),
+    /// });
     /// assert!(report.has_warnings());
     /// ```
     #[must_use]
@@ -236,7 +234,7 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// let mut report = CreationReport::new();
     /// report.bytes_written = 1000;
@@ -268,7 +266,7 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// let mut report = CreationReport::new();
     /// report.bytes_written = 1000;
@@ -300,7 +298,7 @@ impl CreationReport {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::creation::CreationReport;
+    /// use exarch_core::CreationReport;
     ///
     /// let mut report = CreationReport::new();
     /// report.files_added = 10;

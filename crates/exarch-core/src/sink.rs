@@ -1,149 +1,4 @@
 //! Extraction into caller-owned storage instead of a directory.
-//!
-//! [`SinkExtractRequest`](crate::SinkExtractRequest) runs the same validation
-//! pipeline as [`extract_archive`](crate::extract_archive) (quotas, ratio
-//! limits, path and link checks, the per-format gates) but hands each entry to
-//! an [`EntrySink`], so an archive can be unpacked into memory, an object
-//! store or a virtual filesystem without touching the host's.
-//!
-//! # What a sink may rely on
-//!
-//! - Every path is relative, normalized, free of `..`, a root or a prefix, and
-//!   already resolved through the symlinks of earlier entries: no parent
-//!   component is a symlink, and two spellings of one name (on hosts that fold
-//!   case) arrive as one path.
-//! - Parent directories are not announced. A file under `a/b` arrives without a
-//!   `create_directory` for `a` or `b`; create them on demand.
-//! - Link targets are validated not to escape the root. Validation uses the
-//!   sink's [`PathModel`], [`EntrySink::path_model`]. The default, `Host`,
-//!   follows the platform running the extraction: names fold case only on macOS
-//!   and Windows, and the Windows component checks run only on Windows, so a
-//!   sink that writes to a system with another model must not assume the checks
-//!   hold there. `Portable` applies the strictest rules of every supported
-//!   platform on every host and suits a sink whose storage is read elsewhere.
-//! - Validation assumes an EMPTY namespace: the sink must start empty. Entries
-//!   the sink already holds are invisible to it.
-//! - Occupied paths follow [`SinkOptions`] `existing_files` exactly as the
-//!   path-based API does: skipped entries are never delivered, and with
-//!   overwrite a later file replaces an earlier one (a second `create_file` for
-//!   the same path) and a later symlink replaces an earlier file.
-//! - Quotas, ratio limits and declared-size enforcement count the bytes the
-//!   archive produces, not what the sink stores.
-//!
-//! # Differences from the path-based API
-//!
-//! - Symlinks are delivered on every platform, including hosts where the
-//!   path-based API refuses to create them: a sink stores a link as data.
-//! - A sink failure ends the extraction. When an entry was already delivered,
-//!   the error is a `PartialExtraction` wrapping [`ArchiveError::Io`].
-//! - The model is stricter than the host in a few shapes, and fails closed: a
-//!   hardlink to a directory is `InvalidArchive` (the host fails in the copy),
-//!   and that check runs before a duplicate hardlink is skipped; a directory or
-//!   file entry through a dangling symlink, or over one, is refused.
-//! - Under case folding (macOS, Windows, and every host with `Portable`) two
-//!   spellings of a name are one name, and the path delivered is the spelling
-//!   stored first.
-//! - With `Host` the sink inherits the path-length limits of the platform
-//!   running the extraction, not its own; `Portable` uses fixed limits. In both
-//!   models symlink targets and other names are limited, but 8.3 short names
-//!   and the legacy 260-unit `MAX_PATH` are not modelled.
-//! - A path that leaves the root and comes back (a symlink to `..` followed by
-//!   the root's own name) is refused as an escape, though the host would
-//!   resolve it inside.
-//!
-//! # Memory used by validation
-//!
-//! The model that validates paths holds every name the archive spells, charged
-//! to a budget of `max_file_count * max_path_depth + 1` names (a directory
-//! entry and each differently spelled alias of a name cost one name, whatever
-//! the entry type); an archive that passes it fails with
-//! [`QuotaResource::TreeNodes`]. With the
-//! default limits that is 320001 names. Measured on macOS in a release build,
-//! 320000 directory entries into a sink that stores nothing peaked at 176 MB
-//! resident with 7-byte names and 223 MB with 99-byte names (about 1.6 bytes
-//! per name byte on top of about 550 bytes per name), so names of 255 bytes
-//! reach roughly 300 MB. [`MemoryLimit`] counts the payload, the path bytes and
-//! a fixed 256 bytes per entry, but not this overhead.
-//!
-//! A sink that writes to a real filesystem loses the per-component symlink
-//! vetting, `O_NOFOLLOW` and `create_new` defences the path-based API relies
-//! on (the pre-existing destination symlink class). Use
-//! [`extract_archive`](crate::extract_archive) for that.
-//!
-//! # Examples
-//!
-//! ```
-//! use std::collections::BTreeMap;
-//! use std::io;
-//! use std::path::Path;
-//! use std::path::PathBuf;
-//!
-//! use exarch_core::AdmittedSize;
-//! use exarch_core::ArchiveReader;
-//! use exarch_core::CheckedLinkTarget;
-//! use exarch_core::EntrySink;
-//! use exarch_core::SafePath;
-//! use exarch_core::SanitizedMode;
-//! use exarch_core::SecurityConfig;
-//! use exarch_core::SinkExtractRequest;
-//! use exarch_core::SinkOptions;
-//!
-//! #[derive(Default)]
-//! struct MapSink(BTreeMap<PathBuf, Vec<u8>>);
-//!
-//! impl EntrySink for MapSink {
-//!     type File = Vec<u8>;
-//!
-//!     fn create_directory(&mut self, _: &SafePath) -> io::Result<()> {
-//!         Ok(())
-//!     }
-//!
-//!     fn create_file(
-//!         &mut self,
-//!         _: &SafePath,
-//!         _: Option<SanitizedMode>,
-//!         size: AdmittedSize,
-//!     ) -> io::Result<Vec<u8>> {
-//!         Ok(Vec::with_capacity(
-//!             usize::try_from(size.get().min(1 << 16)).unwrap_or(0),
-//!         ))
-//!     }
-//!
-//!     fn finish_file(&mut self, path: &SafePath, file: Vec<u8>) -> io::Result<()> {
-//!         self.0.insert(path.as_path().to_path_buf(), file);
-//!         Ok(())
-//!     }
-//!
-//!     fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
-//!         Ok(())
-//!     }
-//!
-//!     fn create_hardlink(&mut self, link: &SafePath, target: &SafePath) -> io::Result<()> {
-//!         let bytes = self.0.get(target.as_path()).cloned().unwrap_or_default();
-//!         self.0.insert(link.as_path().to_path_buf(), bytes);
-//!         Ok(())
-//!     }
-//! }
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut builder = tar::Builder::new(Vec::new());
-//! let mut header = tar::Header::new_gnu();
-//! header.set_size(5);
-//! header.set_mode(0o644);
-//! builder.append_data(&mut header, "docs/hello.txt", &b"hello"[..])?;
-//! let archive = builder.into_inner()?;
-//!
-//! let mut sink = MapSink::default();
-//! let reader = ArchiveReader::tar(io::Cursor::new(archive), None);
-//! let config = SecurityConfig::default();
-//! let report = SinkExtractRequest::new(&config)
-//!     .with_options(SinkOptions::default())
-//!     .extract(reader, &mut sink)?;
-//! assert_eq!(report.files_extracted, 1);
-//! assert_eq!(sink.0[Path::new("docs/hello.txt")], b"hello");
-//! # Ok(())
-//! # }
-//! ```
 
 mod callback;
 mod memory;
@@ -406,9 +261,78 @@ impl std::error::Error for SinkFull {}
 
 /// Receives the validated entries of an archive in extraction order.
 ///
-/// See the [module documentation](self) for what every path and target
-/// guarantees. The pipeline calls a sink from a single thread, one entry at a
-/// time.
+/// [`SinkExtractRequest`](crate::SinkExtractRequest) runs the same validation
+/// pipeline as [`extract_archive`](crate::extract_archive) (quotas, ratio
+/// limits, path and link checks, the per-format gates) but hands each entry to
+/// an [`EntrySink`], so an archive can be unpacked into memory, an object
+/// store or a virtual filesystem without touching the host's.
+///
+/// # What a sink may rely on
+///
+/// - Every path is relative, normalized, free of `..`, a root or a prefix, and
+///   already resolved through the symlinks of earlier entries: no parent
+///   component is a symlink, and two spellings of one name (on hosts that fold
+///   case) arrive as one path.
+/// - Parent directories are not announced. A file under `a/b` arrives without a
+///   `create_directory` for `a` or `b`; create them on demand.
+/// - Link targets are validated not to escape the root. Validation uses the
+///   sink's [`PathModel`], [`EntrySink::path_model`]. The default, `Host`,
+///   follows the platform running the extraction: names fold case only on macOS
+///   and Windows, and the Windows component checks run only on Windows, so a
+///   sink that writes to a system with another model must not assume the checks
+///   hold there. `Portable` applies the strictest rules of every supported
+///   platform on every host and suits a sink whose storage is read elsewhere.
+/// - Validation assumes an EMPTY namespace: the sink must start empty. Entries
+///   the sink already holds are invisible to it.
+/// - Occupied paths follow [`SinkOptions`] `existing_files` exactly as the
+///   path-based API does: skipped entries are never delivered, and with
+///   overwrite a later file replaces an earlier one (a second `create_file` for
+///   the same path) and a later symlink replaces an earlier file.
+/// - Quotas, ratio limits and declared-size enforcement count the bytes the
+///   archive produces, not what the sink stores.
+///
+/// # Differences from the path-based API
+///
+/// - Symlinks are delivered on every platform, including hosts where the
+///   path-based API refuses to create them: a sink stores a link as data.
+/// - A sink failure ends the extraction. When an entry was already delivered,
+///   the error is a `PartialExtraction` wrapping [`ArchiveError::Io`].
+/// - The model is stricter than the host in a few shapes, and fails closed: a
+///   hardlink to a directory is `InvalidArchive` (the host fails in the copy),
+///   and that check runs before a duplicate hardlink is skipped; a directory or
+///   file entry through a dangling symlink, or over one, is refused.
+/// - Under case folding (macOS, Windows, and every host with `Portable`) two
+///   spellings of a name are one name, and the path delivered is the spelling
+///   stored first.
+/// - With `Host` the sink inherits the path-length limits of the platform
+///   running the extraction, not its own; `Portable` uses fixed limits. In both
+///   models symlink targets and other names are limited, but 8.3 short names
+///   and the legacy 260-unit `MAX_PATH` are not modelled.
+/// - A path that leaves the root and comes back (a symlink to `..` followed by
+///   the root's own name) is refused as an escape, though the host would
+///   resolve it inside.
+///
+/// # Memory used by validation
+///
+/// The model that validates paths holds every name the archive spells, charged
+/// to a budget of `max_file_count * max_path_depth + 1` names (a directory
+/// entry and each differently spelled alias of a name cost one name, whatever
+/// the entry type); an archive that passes it fails with
+/// [`QuotaResource::TreeNodes`]. With the
+/// default limits that is 320001 names. Measured on macOS in a release build,
+/// 320000 directory entries into a sink that stores nothing peaked at 176 MB
+/// resident with 7-byte names and 223 MB with 99-byte names (about 1.6 bytes
+/// per name byte on top of about 550 bytes per name), so names of 255 bytes
+/// reach roughly 300 MB. [`MemoryLimit`] counts the payload, the path bytes
+/// and a fixed 256 bytes per entry, but not this overhead.
+///
+/// A sink that writes to a real filesystem loses the per-component symlink
+/// vetting, `O_NOFOLLOW` and `create_new` defences the path-based API relies
+/// on (the pre-existing destination symlink class). Use
+/// [`extract_archive`](crate::extract_archive) for that.
+///
+///
+/// The pipeline calls a sink from a single thread, one entry at a time.
 ///
 /// # Contract
 ///
@@ -428,6 +352,81 @@ impl std::error::Error for SinkFull {}
 /// - A hardlink is delivered after every other entry. The sink copies the bytes
 ///   it holds for `target`; the pipeline has already charged the quota for
 ///   them.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use std::io;
+/// use std::path::Path;
+/// use std::path::PathBuf;
+///
+/// use exarch_core::AdmittedSize;
+/// use exarch_core::ArchiveReader;
+/// use exarch_core::CheckedLinkTarget;
+/// use exarch_core::EntrySink;
+/// use exarch_core::SafePath;
+/// use exarch_core::SanitizedMode;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::SinkExtractRequest;
+/// use exarch_core::SinkOptions;
+///
+/// #[derive(Default)]
+/// struct MapSink(BTreeMap<PathBuf, Vec<u8>>);
+///
+/// impl EntrySink for MapSink {
+///     type File = Vec<u8>;
+///
+///     fn create_directory(&mut self, _: &SafePath) -> io::Result<()> {
+///         Ok(())
+///     }
+///
+///     fn create_file(
+///         &mut self,
+///         _: &SafePath,
+///         _: Option<SanitizedMode>,
+///         size: AdmittedSize,
+///     ) -> io::Result<Vec<u8>> {
+///         Ok(Vec::with_capacity(
+///             usize::try_from(size.get().min(1 << 16)).unwrap_or(0),
+///         ))
+///     }
+///
+///     fn finish_file(&mut self, path: &SafePath, file: Vec<u8>) -> io::Result<()> {
+///         self.0.insert(path.as_path().to_path_buf(), file);
+///         Ok(())
+///     }
+///
+///     fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
+///         Ok(())
+///     }
+///
+///     fn create_hardlink(&mut self, link: &SafePath, target: &SafePath) -> io::Result<()> {
+///         let bytes = self.0.get(target.as_path()).cloned().unwrap_or_default();
+///         self.0.insert(link.as_path().to_path_buf(), bytes);
+///         Ok(())
+///     }
+/// }
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(5);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "docs/hello.txt", &b"hello"[..])?;
+/// let archive = builder.into_inner()?;
+///
+/// let mut sink = MapSink::default();
+/// let reader = ArchiveReader::tar(io::Cursor::new(archive), None);
+/// let config = SecurityConfig::default();
+/// let report = SinkExtractRequest::new(&config)
+///     .with_options(SinkOptions::default())
+///     .extract(reader, &mut sink)?;
+/// assert_eq!(report.files_extracted, 1);
+/// assert_eq!(sink.0[Path::new("docs/hello.txt")], b"hello");
+/// # Ok(())
+/// # }
+/// ```
 pub trait EntrySink {
     /// The writer a file's bytes stream into.
     type File: Write;

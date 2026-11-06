@@ -964,10 +964,10 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
     #[cfg(test)]
     fn verify(
         mut self,
-        options: &VerificationOptions,
+        options: VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
         let config = Arc::clone(&self.config);
-        self.verify_with_progress(&config, *options, &mut crate::NoopProgress)
+        self.verify_with_progress(&config, options, &mut crate::NoopProgress)
     }
 }
 
@@ -2601,7 +2601,7 @@ mod tests {
         let archive = ZipArchive::new(Cursor::new(zip_data), &config).unwrap();
 
         let report = archive
-            .verify(&crate::VerificationOptions::default())
+            .verify(crate::VerificationOptions::default())
             .unwrap();
 
         assert!(report.is_safe());

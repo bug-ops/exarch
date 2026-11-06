@@ -182,7 +182,7 @@ describe('createArchive output handling', () => {
     );
   });
 
-  for (const shape of ['*.m*', '?.txt', '[a', '{a,b}', '!a.txt', ' .env', 'a,b', '', '../x']) {
+  for (const shape of ['a**b', '[!x]', '[a', '{a,b}', '!a.txt', ' .env', 'a,b', '', '../x']) {
     it(`refuses the exclude pattern ${JSON.stringify(shape)} instead of silently excluding nothing`, () => {
       const config = new CreationConfig();
       const before = config.excludePatterns;
@@ -196,7 +196,7 @@ describe('createArchive output handling', () => {
 
   it('accepts the documented exclude pattern shapes', () => {
     const config = new CreationConfig();
-    for (const shape of ['.git', 'temp*', '*.tmp', 'build/out']) {
+    for (const shape of ['.git', 'temp*', '*.tmp', 'build/out', 'src/**/*.rs', 'a?b', '[a-c]*']) {
       config.addExcludePattern(shape);
     }
     assert.ok(config.excludePatterns.includes('build/out'));

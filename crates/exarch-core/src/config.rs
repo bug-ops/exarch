@@ -1191,7 +1191,8 @@ impl SecurityConfig {
         self
     }
 
-    /// Adds an include pattern, parsed with the grammar of `create -x`.
+    /// Adds an include glob pattern, parsed with the grammar of `create -x`
+    /// (see [`ExcludePattern`](crate::ExcludePattern)).
     ///
     /// Only entries that match an include pattern (and no exclude pattern) are
     /// extracted. A pattern that matches nothing in the archive fails the
@@ -1210,7 +1211,7 @@ impl SecurityConfig {
     ///
     /// let config = SecurityConfig::default().try_add_include("src/main.rs")?;
     /// assert_eq!(config.selection.include().len(), 1);
-    /// assert!(SecurityConfig::default().try_add_include("**/x").is_err());
+    /// assert!(SecurityConfig::default().try_add_include("a**b").is_err());
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn try_add_include(mut self, pattern: &str) -> crate::Result<Self> {
@@ -1219,7 +1220,8 @@ impl SecurityConfig {
         Ok(self)
     }
 
-    /// Adds an exclude pattern, parsed with the grammar of `create -x`.
+    /// Adds an exclude glob pattern, parsed with the grammar of `create -x`
+    /// (see [`ExcludePattern`](crate::ExcludePattern)).
     ///
     /// An exclude pattern always wins over an include pattern. One that
     /// matches nothing is not an error.

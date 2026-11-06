@@ -81,13 +81,13 @@ def test_tar_progress_total_is_none_and_zip_total_is_known(tmp_path, source):
         ".",
         "..",
         "/abs",
-        "*",
-        "a*b",
+        "a**b",
         "**x",
-        "build/*",
-        "?.txt",
         "[a",
+        "[!x]",
+        "[.-9]",
         "{a,b}",
+        "{a}",
         "!a.txt",
         " .env",
         "a,b",
@@ -103,6 +103,7 @@ def test_unsupported_exclude_patterns_are_refused(pattern):
 
 
 def test_supported_exclude_patterns_round_trip():
-    config = exarch.CreationConfig().with_exclude_patterns(["*.tmp", "tmp*", "docs/build", "x"])
+    patterns = ["*.tmp", "tmp*", "docs/build", "x", "src/**/*.rs", "a?b", "[a-c]*", "target/"]
+    config = exarch.CreationConfig().with_exclude_patterns(patterns)
 
-    assert sorted(config.exclude_patterns) == sorted(["*.tmp", "tmp*", "docs/build", "x"])
+    assert sorted(config.exclude_patterns) == sorted(patterns)

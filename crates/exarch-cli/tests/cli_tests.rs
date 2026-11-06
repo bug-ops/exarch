@@ -1957,7 +1957,7 @@ fn test_skips_are_reported_per_kind_in_text_and_json() {
 /// matched against nothing (#916).
 #[test]
 fn test_create_refuses_unsupported_exclude_patterns() {
-    for pattern in ["build/*", "a*b", "*", "..", ""] {
+    for pattern in ["a**b", "[!x]", "{a}", "..", ""] {
         let temp = TempDir::new().expect("failed to create temp dir");
         let out = temp.path().join("o.tar.gz");
         let output = exarch_cmd()
@@ -2202,12 +2202,12 @@ fn test_create_errors_name_the_pattern_and_the_source_once() {
     exarch_cmd()
         .arg("create")
         .arg("-x")
-        .arg("build/*")
+        .arg("a**b")
         .arg(temp.path().join("o.tar.gz"))
         .arg(fixture_path("sample.txt"))
         .assert()
         .code(1)
-        .stderr(predicates::str::contains("exclude pattern \"build/*\""));
+        .stderr(predicates::str::contains("exclude pattern \"a**b\""));
 
     let missing = temp.path().join("missing-source");
     let output = exarch_cmd()
@@ -2466,10 +2466,12 @@ fn test_verify_json_reports_the_mode_of_an_invalid_permissions_refusal() {
 #[test]
 fn test_create_refuses_each_exclude_shape_with_the_core_reason() {
     for (pattern, reason) in [
-        ("?.txt", "not glob syntax"),
-        ("[a", "not glob syntax"),
+        ("{a}", "alternation"),
+        ("[a", "without a closing"),
         ("{a,b}", "contains a comma"),
-        ("!a.txt", "not glob syntax"),
+        ("!a.txt", "cannot be negated"),
+        ("a**b", "glues"),
+        ("[!x]", "negated"),
         (" .env", "whitespace"),
         ("a,b", "contains a comma"),
     ] {
@@ -2537,6 +2539,63 @@ fn test_exclude_pattern_matches_a_non_utf8_name() {
     let text = String::from_utf8(listing).expect("utf-8 listing");
     assert!(text.contains("ok.txt"), "{text}");
     assert!(!text.contains(".key"), "{text}");
+}
+
+/// Glob excludes and includes select the same entries through the CLI as the
+/// core does: `**` spans directories, `?` is one byte, `*` stops at `/`.
+#[test]
+fn test_glob_patterns_select_entries_on_create_and_extract() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let src = temp.path().join("src");
+    for (name, body) in [
+        ("keep.rs", "k"),
+        ("logs/a.log", "a"),
+        ("logs/deep/b.log", "b"),
+        ("logs/notes.txt", "n"),
+        ("c/two.rs", "2"),
+        ("c/tho.rs.bak", "3"),
+    ] {
+        let path = src.join(name);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+        std::fs::write(path, body).expect("source file");
+    }
+
+    let archive = temp.path().join("o.tar");
+    exarch_cmd()
+        .arg("create")
+        .arg("-x")
+        .arg("logs/**/*.log")
+        .arg(&archive)
+        .arg(&src)
+        .assert()
+        .success();
+    let listing = exarch_cmd()
+        .arg("list")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(listing).expect("utf-8 listing");
+    assert!(
+        text.contains("logs/notes.txt") && text.contains("keep.rs"),
+        "{text}"
+    );
+    assert!(!text.contains(".log"), "{text}");
+
+    let out = temp.path().join("out");
+    exarch_cmd()
+        .arg("extract")
+        .arg("--include")
+        .arg("c/t?o.rs")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+    assert!(out.join("c/two.rs").is_file());
+    assert!(!out.join("c/tho.rs.bak").exists());
+    assert!(!out.join("keep.rs").exists());
 }
 
 #[test]
@@ -7687,8 +7746,8 @@ fn test_extract_selection_values_are_validated_by_core() {
         ("--strip-components", "0", "strip_components"),
         ("--strip-components", "-2", "strip_components"),
         ("--strip-components", "9999", "strip_components"),
-        ("--include", "**/x", "entry_include"),
-        ("--exclude", "a/*", "entry_exclude"),
+        ("--include", "a**b", "entry_include"),
+        ("--exclude", "{a}", "entry_exclude"),
     ] {
         let stdout = exarch_cmd()
             .arg("extract")

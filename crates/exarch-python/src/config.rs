@@ -1028,15 +1028,19 @@ impl PyCreationConfig {
 
     /// Sets exclude patterns, matched against the archive entry path.
     ///
-    /// A name, `name*` or `*name` matches one path component at any depth; a
-    /// pattern with a separator matches that path from the archive root and its
-    /// subtree.
+    /// Patterns are globs: `*` and `?` match within one path component (`?` is
+    /// exactly one byte), `[a-c]` is a positive ASCII class, `**` as a whole
+    /// component spans directories. A name without `/` matches any path
+    /// component at any depth, and so its subtree; a pattern with a `/`
+    /// anywhere matches from the archive root and its subtree.
     ///
     /// # Errors
     ///
-    /// `InvalidConfigurationError` (`setting == "exclude_pattern"`) for any
-    /// other shape, including glob look-alikes (`?`, `[`, `]`, `{`, `}`, `!`),
-    /// commas and edge whitespace.
+    /// `InvalidConfigurationError` (`setting == "exclude_pattern"`) for syntax
+    /// the matcher does not support: a leading `!`, `{`/`}`, `**` glued to
+    /// other characters, negated, POSIX or non-ASCII classes, an unterminated
+    /// class, a class range outside `0-9`/`a-z`/`A-Z`, commas and edge
+    /// whitespace.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "pyo3 passes the extracted list by value"

@@ -152,6 +152,7 @@ fn class_for(code: ErrorCode) -> Option<NewErr> {
         ErrorCode::InvalidCompressionLevel => |d| INVALID_COMPRESSION_LEVEL.error(d),
         ErrorCode::InvalidConfiguration => |d| INVALID_CONFIGURATION.error(d),
         ErrorCode::UnknownFormat => |d| UnknownFormatError::new_err(d),
+        ErrorCode::Cancelled => new_base_error,
         _ => return None,
     };
     Some(ctor)

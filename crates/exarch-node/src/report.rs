@@ -538,6 +538,12 @@ pub enum SkipKind {
     /// A file refused by the extension allowlist.
     #[napi(value = "extension_not_allowed")]
     ExtensionNotAllowed,
+    /// An entry that the extraction selection leaves out.
+    #[napi(value = "not_selected")]
+    NotSelected,
+    /// An entry whose whole path was removed by stripping leading components.
+    #[napi(value = "stripped_away")]
+    StrippedAway,
     /// An entry matched by a creation exclude pattern.
     #[napi(value = "excluded")]
     Excluded,

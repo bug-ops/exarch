@@ -74,6 +74,8 @@ _LinkState = Literal["recorded", "missing", "unread", "unreadable", "oversized"]
 _SkipKind = Literal[
     "duplicate",
     "extension_not_allowed",
+    "not_selected",
+    "stripped_away",
     "excluded",
     "hidden",
     "over_max_file_size",
@@ -97,6 +99,7 @@ _ErrorCode = Literal[
     "INVALID_COMPRESSION_LEVEL",
     "UNKNOWN_FORMAT",
     "INVALID_CONFIGURATION",
+    "CANCELLED",
 ]
 _ConfigSetting = Literal[
     "max_file_size",
@@ -127,6 +130,12 @@ _ConfigSetting = Literal[
     "decode_reuse_limit",
     "skip_kind",
     "durability",
+    "existing_files",
+    "staging",
+    "entry_selection",
+    "entry_include",
+    "entry_exclude",
+    "strip_components",
 ]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 

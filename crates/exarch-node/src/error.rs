@@ -126,6 +126,9 @@ pub enum ErrorCode {
     /// Configuration value rejected.
     #[napi(value = "INVALID_CONFIGURATION")]
     InvalidConfiguration,
+    /// The operation was cancelled by its progress callback.
+    #[napi(value = "CANCELLED")]
+    Cancelled,
     /// A JS progress callback threw while the operation itself succeeded.
     #[napi(value = "PROGRESS_CALLBACK_ERROR")]
     ProgressCallbackError,
@@ -352,6 +355,24 @@ pub enum ConfigSetting {
     /// `durability`.
     #[napi(value = "durability")]
     Durability,
+    /// `existing_files`.
+    #[napi(value = "existing_files")]
+    ExistingFiles,
+    /// `staging`.
+    #[napi(value = "staging")]
+    Staging,
+    /// `entry_selection`.
+    #[napi(value = "entry_selection")]
+    EntrySelection,
+    /// `entry_include`.
+    #[napi(value = "entry_include")]
+    EntryInclude,
+    /// `entry_exclude`.
+    #[napi(value = "entry_exclude")]
+    EntryExclude,
+    /// `strip_components`.
+    #[napi(value = "strip_components")]
+    StripComponents,
 }
 
 /// Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
@@ -1384,6 +1405,8 @@ mod tests {
         [
             Duplicate,
             ExtensionNotAllowed,
+            NotSelected,
+            StrippedAway,
             Excluded,
             Hidden,
             OverMaxFileSize,
@@ -1551,7 +1574,13 @@ mod tests {
             DecodeReuse,
             DecodeReuseLimit,
             SkipKind,
-            Durability
+            Durability,
+            ExistingFiles,
+            Staging,
+            EntrySelection,
+            EntryInclude,
+            EntryExclude,
+            StripComponents
         ]
     );
 

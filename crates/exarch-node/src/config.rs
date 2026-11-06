@@ -65,19 +65,6 @@ fn bounded_bytes(limit: Limit<NonZeroU64>) -> Option<i64> {
     }
 }
 
-/// Parses a JavaScript compression level: only a whole number from 1 to 9 is
-/// accepted, whatever `napi` would make of it as an integer.
-///
-/// A whole number that fits `u32` outside 1..=9 is core's
-/// `INVALID_COMPRESSION_LEVEL` and names the level exactly. Any other number
-/// (a fraction, `NaN`, an infinity, a negative or a value above `u32::MAX`)
-/// has no exact level to name, so it is a plain `InvalidArg` that reports the
-/// number as given instead of a different level.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the value is a whole number in 0..=u32::MAX here"
-)]
 const fn existing_files_of(skip: bool) -> ExistingFiles {
     if skip {
         ExistingFiles::Skip
@@ -94,6 +81,19 @@ const fn staging_of(atomic: bool) -> Staging {
     }
 }
 
+/// Parses a JavaScript compression level: only a whole number from 1 to 9 is
+/// accepted, whatever `napi` would make of it as an integer.
+///
+/// A whole number that fits `u32` outside 1..=9 is core's
+/// `INVALID_COMPRESSION_LEVEL` and names the level exactly. Any other number
+/// (a fraction, `NaN`, an infinity, a negative or a value above `u32::MAX`)
+/// has no exact level to name, so it is a plain `InvalidArg` that reports the
+/// number as given instead of a different level.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is a whole number in 0..=u32::MAX here"
+)]
 fn compression_level(level: f64) -> std::result::Result<CompressionLevel, Failure> {
     let whole =
         level.is_finite() && level.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&level);

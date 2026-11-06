@@ -829,7 +829,7 @@ export type ArchiveType = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components'
 
 /** Archive format that can be created: `ArchiveType` without `'SevenZ'`. */
 export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip'
@@ -1124,7 +1124,7 @@ export type Durability = 'synced' | 'unsynced'
  * Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
  * callback that threw over a successful operation.
  */
-export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR' | 'ABORT_ERR'
+export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'CANCELLED' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR' | 'ABORT_ERR'
 
 /**
  * Extract an archive to the specified directory (async).
@@ -2045,7 +2045,7 @@ export interface SkipCount {
 }
 
 /** Why an entry was left out of an extraction or a creation. */
-export type SkipKind = 'duplicate' | 'extension_not_allowed' | 'excluded' | 'hidden' | 'over_max_file_size' | 'symlink_unsupported' | 'unreadable'
+export type SkipKind = 'duplicate' | 'extension_not_allowed' | 'not_selected' | 'stripped_away' | 'excluded' | 'hidden' | 'over_max_file_size' | 'symlink_unsupported' | 'unreadable'
 
 /** One skipped entry. */
 export interface SkippedEntry {

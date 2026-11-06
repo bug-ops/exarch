@@ -545,8 +545,9 @@ messages) escapes control and invisible format characters in entry paths and lin
 and C1 written as `\xHH`; Unicode format characters such as bidirectional controls U+202A..U+202E
 and U+2066..U+2069, zero-width characters, and U+2028/U+2029 written as `\xHH` up to U+00FF and
 `\u{hhhh}` above), so an archive cannot clear the screen, retitle the terminal, repaint the verdict
-or disguise an extension (`evil\u{202e}gpj.exe`) with an entry name. A backslash is not escaped, so
-an escape cannot be told apart from a name that literally contains that text; strong right-to-left
+or disguise an extension (`evil\u{202e}gpj.exe`) with an entry name. Every backslash is written `\x5C`,
+so an escape cannot be confused with a name that literally contains that text (a file named
+`a\x1bb` prints as `a\x5Cx1bb`, a real ESC byte as `a\x1bb`); strong right-to-left
 letters can still reorder neighbouring neutral characters, and invisible characters outside the
 format category are escaped as well: all Unicode 16.0 `Default_Ignorable_Code_Point` characters
 (for example U+034F, U+115F/U+1160, U+17B4/U+17B5, U+3164, U+FFA0 and the tag characters) print as

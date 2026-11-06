@@ -138,8 +138,8 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--max-files` | 10000 | Maximum number of entries to extract (files, symlinks, hardlinks and directories) |
-| `--max-total-size` | 500M | Maximum total extracted size (supports K/M/G/T suffixes) |
-| `--max-file-size` | 50M | Maximum single file size (supports K/M/G/T suffixes) |
+| `--max-total-size` | 500M | Maximum total extracted size (supports K/M/G/T suffixes, either case) |
+| `--max-file-size` | 50M | Maximum single file size (supports K/M/G/T suffixes, either case) |
 | `--max-compression-ratio` | 100 | Maximum compression ratio (zip bomb protection); does not apply to solid 7z blocks, which use a fixed 1000x limit |
 | `--allowed-extensions` | — | Extract only entries whose extension is in the allowlist (repeatable; comma-separated values accepted; leading dots optional) |
 | `--max-path-depth` | 32 | Maximum path depth for extracted entries |
@@ -154,7 +154,11 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 | `--allow-world-writable` | false | Allow world-writable files in extracted archives |
 | `--preserve-permissions` | false | Preserve file permissions from archive |
 | `--force` | false | Overwrite existing files |
-| `--atomic` | false | Extract atomically: write to a temp directory and rename into place on success, cleaning up on failure. Combined with `--force`, the existing destination is renamed aside first, the new content renamed into its place second, and only once that swap succeeds is the old destination removed — a failure at any point leaves either the old or the new content in place under the destination name. |
+| `--atomic` | false | Extract atomically: write to a temp directory and rename into place on success, cleaning up on failure. The destination must be missing or empty (a non-empty one is refused with `OutputExists`). Combined with `--force`, the existing destination is renamed aside first, the new content renamed into its place second, and only once that swap succeeds is the old destination removed — a failure at any point leaves either the old or the new content in place under the destination name. |
+| `--include` | — | Act only on entries matching the pattern (repeatable; a component, a `tmp*` prefix, a `*.rs` suffix or a relative path); a pattern that matches no entry is an error. Also accepted by `list` and `verify` |
+| `--exclude` | — | Leave out entries matching the pattern (repeatable, same grammar, applied after `--include`; also accepted by `list` and `verify`) |
+| `--strip-components` | — | Drop the first N path components of every entry; shorter entries are skipped (also accepted by `list` and `verify`) |
+| `--flatten` | false | Land every file directly in the destination under its final name; directories are skipped and links are refused. Conflicts with `--strip-components` (also accepted by `list` and `verify`) |
 
 > [!CAUTION]
 > Only use `--allow-symlinks` and `--allow-hardlinks` with archives from trusted sources. These options can be exploited by malicious archives.
@@ -163,7 +167,7 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 > A TAR extracted into a destination that does not exist yet, under an existing parent directory, is read once and extracted atomically without `--atomic`: a refused archive leaves nothing behind and reports `writes: rolled_back`.
 
 > [!IMPORTANT]
-> `--atomic --force` rejects a destination that is itself a symlink (or, on Windows, a junction/reparse point) — pass the resolved target path instead. On Unix it also requires read permission on the destination's parent directory (used to pin it by file descriptor for the swap); the destination itself does not need to be readable.
+> `--atomic --force` rejects a destination that is itself a symlink (or, on Windows, a junction/reparse point) — pass the resolved target path instead. It also refuses `.`, `..`, any directory that contains the working directory or the archive, a filesystem root, and any use of `--include`, `--exclude`, `--strip-components` or `--flatten`. On Unix it also requires read permission on the destination's parent directory (used to pin it by file descriptor for the swap); the destination itself does not need to be readable.
 
 ## Create Command
 
@@ -207,6 +211,9 @@ exarch create -f backup.tar.gz ./src
 | `--max-file-size` | — | Skip source files larger than this threshold (supports K/M/G/T suffixes) |
 | `--preserve-permissions` | true | Store Unix permissions in the archive; pass `--preserve-permissions=false` for a portable archive |
 | `--force` | `-f` | Overwrite existing file |
+
+> [!NOTE]
+> Two sources that would produce the same entry name (for example `create out.tar c1 c2` where both hold `same.txt`) are refused before anything is written.
 | `--quiet` | `-q` | Suppress output |
 | `--json` | | Output JSON format |
 
@@ -230,6 +237,7 @@ exarch list [OPTIONS] <ARCHIVE>
 | `--human-readable`, `-H` | Show sizes in human-readable format (requires `--long`) |
 | `--read-link-targets` | Read 7z symlink targets, which decodes the blocks that hold them; without it a 7z link shows `(target not read)` |
 | `--zip-consistency` | `enforce` (default) rejects ZIP archives whose headers disagree; `ignore` keeps the central directory interpretation |
+| `--include`, `--exclude`, `--strip-components`, `--flatten` | Preview what `extract` would do: each entry is annotated `[lands at <path>]` or `[skipped: <kind>]`, and `--json` adds a `disposition` per entry |
 | `--max-files`, `--max-total-size`, `--max-file-size` | Limits applied while listing |
 | `--allow-solid-archives` | Allow solid 7z archives (higher memory usage during listing) |
 | `--json`, `-j` | Output results in JSON format |
@@ -352,7 +360,8 @@ A failed operation prints an error envelope. For a `SecurityViolation` that a `S
   "status": "error",
   "error": {
     "kind": "SecurityViolation",
-    "message": "Security violation while processing 'archive.tar'\nHINT: If this archive is from a trusted source, pass --allow-symlinks.: operation denied by security policy: symlinks not allowed",
+    "message": "Security violation while processing 'archive.tar': operation denied by security policy: symlinks not allowed",
+    "hint": "If this archive is from a trusted source, pass --allow-symlinks.",
     "relaxable_by": "symlinks"
   }
 }

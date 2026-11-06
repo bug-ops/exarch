@@ -669,15 +669,13 @@ fn a_racing_destination_flip_never_touches_a_planted_symlinks_target() {
         attacker.join().unwrap();
 
         if let Err(error) = &outcome {
-            assert!(
-                matches!(
-                    error,
-                    ArchiveError::SecurityViolation { .. }
-                        | ArchiveError::ReplaceFailed(_)
-                        | ArchiveError::InvalidConfiguration { .. }
-                        | ArchiveError::OutputExists { .. }
-                        | ArchiveError::Io(_)
-                ),
+            assert_matches!(
+                error,
+                ArchiveError::SecurityViolation { .. }
+                    | ArchiveError::ReplaceFailed(_)
+                    | ArchiveError::InvalidConfiguration { .. }
+                    | ArchiveError::OutputExists { .. }
+                    | ArchiveError::Io(_),
                 "{error}"
             );
         }

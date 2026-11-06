@@ -560,6 +560,8 @@ fn target_not_extracted(link: &Path, target: &Path) -> ArchiveError {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
     use crate::non_zero;
 
@@ -591,10 +593,10 @@ mod tests {
     fn default_selects_everything_unchanged() {
         let selection = EntrySelection::default();
         assert!(selection.is_default());
-        assert!(matches!(
+        assert_matches!(
             decide(&selection, "a/b"),
             Decision::Extract(Placement::Unchanged)
-        ));
+        );
     }
 
     #[test]
@@ -674,13 +676,13 @@ mod tests {
     fn strip_count_is_bounded_by_the_path_depth() {
         assert!(StripComponents::new(non_zero!(32), non_zero!(32)).is_ok());
         let refused = StripComponents::new(non_zero!(33), non_zero!(32));
-        assert!(matches!(
+        assert_matches!(
             refused,
             Err(ArchiveError::InvalidConfiguration {
                 setting: ConfigSetting::StripComponents,
                 problem: ConfigProblem::TooLarge { max: 32 },
             })
-        ));
+        );
     }
 
     #[test]
@@ -707,27 +709,27 @@ mod tests {
         let selection = EntrySelection::default()
             .with_exclude(pattern("hidden"))
             .with_rewrite(PathRewrite::Strip(strip));
-        assert!(matches!(
+        assert_matches!(
             selection.map_link_target(Path::new("./top/orig")).unwrap(),
             TargetMapping::Mapped(path) if path == Path::new("orig")
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             selection.map_link_target(Path::new("top")).unwrap(),
             TargetMapping::NotExtracted
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             selection
                 .map_link_target(Path::new("top/hidden/x"))
                 .unwrap(),
             TargetMapping::NotExtracted
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             selection.map_link_target(Path::new("top/../x")),
             Err(ArchiveError::PathTraversal { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             selection.map_link_target(Path::new("/abs")).unwrap(),
             TargetMapping::Unchanged
-        ));
+        );
     }
 }

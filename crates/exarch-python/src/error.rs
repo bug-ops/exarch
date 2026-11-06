@@ -1003,7 +1003,7 @@ mod tests {
     #[cfg(not(debug_assertions))]
     fn test_source_not_found_strips_directory_in_release() {
         let err = CoreError::SourceNotFound {
-            path: PathBuf::from("/srv/secret/app/x.txt"),
+            path: PathBuf::from("/srv/internal/app/x.txt"),
         };
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
@@ -1013,7 +1013,7 @@ mod tests {
             err_str
         );
         assert!(
-            !err_str.contains("/srv/secret"),
+            !err_str.contains("/srv/internal"),
             "Expected host directory to be redacted, got: {}",
             err_str
         );
@@ -1055,13 +1055,13 @@ mod tests {
     fn test_io_error_conversion_redacts_message_in_release() {
         let io_err = std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "directory is not writable: /srv/secret/app/private-output",
+            "directory is not writable: /srv/internal/app/private-output",
         );
         let err = CoreError::Io(io_err);
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
         assert!(
-            !err_str.contains("/srv/secret/app"),
+            !err_str.contains("/srv/internal/app"),
             "Expected host path to be redacted, got: {}",
             err_str
         );

@@ -1492,7 +1492,7 @@ mod tests {
     #[test]
     fn test_backup_cleanup_warning_is_typed_and_redacts_the_path_like_errors() {
         let core = exarch_core::ExtractionWarning::BackupCleanupFailed {
-            path: std::path::PathBuf::from("/srv/secret/app/.backup-123"),
+            path: std::path::PathBuf::from("/srv/internal/app/.backup-123"),
             identity: CoreBackupIdentity::Unverified,
             io_kind: exarch_core::IoKind::PermissionDenied,
             message: "denied".into(),
@@ -1506,13 +1506,13 @@ mod tests {
         assert_eq!(
             typed.path,
             exarch_core::sanitize_path_for_error(std::path::Path::new(
-                "/srv/secret/app/.backup-123"
+                "/srv/internal/app/.backup-123"
             ))
         );
         assert!(typed.path.ends_with(".backup-123"));
         assert!(typed.message.contains(&typed.path), "{}", typed.message);
         #[cfg(not(debug_assertions))]
-        assert!(!typed.message.contains("secret"), "{}", typed.message);
+        assert!(!typed.message.contains("internal"), "{}", typed.message);
     }
 
     #[test]

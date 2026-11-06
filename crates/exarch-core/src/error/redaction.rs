@@ -42,7 +42,7 @@ use super::types::ArchiveError;
 ///
 /// // Debug builds keep the full path; release builds keep only the
 /// // filename — either way the filename itself is always present.
-/// let redacted = sanitize_path_for_error(Path::new("/srv/secret/app/x.txt"));
+/// let redacted = sanitize_path_for_error(Path::new("/srv/internal/app/x.txt"));
 /// assert!(redacted.ends_with("x.txt"));
 /// ```
 #[cfg(debug_assertions)]
@@ -70,7 +70,7 @@ pub fn sanitize_path_for_error(path: &Path) -> String {
 ///
 /// // Debug builds keep the full path; release builds keep only the
 /// // filename — either way the filename itself is always present.
-/// let redacted = sanitize_path_for_error(Path::new("/srv/secret/app/x.txt"));
+/// let redacted = sanitize_path_for_error(Path::new("/srv/internal/app/x.txt"));
 /// assert!(redacted.ends_with("x.txt"));
 /// ```
 #[cfg(not(debug_assertions))]
@@ -262,46 +262,46 @@ mod tests {
         use crate::StagingLeftover;
 
         let occupied = ArchiveError::DestinationOccupied {
-            destination: PathBuf::from("/srv/secret/dest"),
+            destination: PathBuf::from("/srv/internal/dest"),
             conflicts: Box::new([PathBuf::from("a/b")]),
         };
         assert_eq!(occupied.redacted_path().as_deref(), Some("dest"));
-        assert!(!occupied.into_ffi_message().description.contains("secret"));
+        assert!(!occupied.into_ffi_message().description.contains("internal"));
 
         let left = ArchiveError::OutputReservationLeft {
-            path: PathBuf::from("/srv/secret/out.tar"),
+            path: PathBuf::from("/srv/internal/out.tar"),
             error: std::io::Error::other("x"),
         };
-        assert!(!left.into_ffi_message().description.contains("secret"));
+        assert!(!left.into_ffi_message().description.contains("internal"));
 
         let mut failure = ReplaceFailure::new(
             std::io::Error::other("x"),
             Restore::Failed {
-                backup: PathBuf::from("/srv/secret/backup"),
+                backup: PathBuf::from("/srv/internal/backup"),
                 error: std::io::Error::other("y"),
             },
             None,
         );
         failure.leftover = Some(StagingLeftover {
-            path: PathBuf::from("/srv/secret/stage"),
+            path: PathBuf::from("/srv/internal/stage"),
         });
         let text = ArchiveError::ReplaceFailed(failure)
             .into_ffi_message()
             .description;
-        assert!(!text.contains("secret"), "{text}");
+        assert!(!text.contains("internal"), "{text}");
     }
 
     #[test]
     #[cfg(debug_assertions)]
     fn test_sanitize_path_for_error_keeps_full_path_in_debug() {
-        let path = PathBuf::from("/srv/secret/app/x.txt");
-        assert_eq!(sanitize_path_for_error(&path), "/srv/secret/app/x.txt");
+        let path = PathBuf::from("/srv/internal/app/x.txt");
+        assert_eq!(sanitize_path_for_error(&path), "/srv/internal/app/x.txt");
     }
 
     #[test]
     #[cfg(not(debug_assertions))]
     fn test_sanitize_path_for_error_strips_directory_in_release() {
-        let path = PathBuf::from("/srv/secret/app/x.txt");
+        let path = PathBuf::from("/srv/internal/app/x.txt");
         assert_eq!(sanitize_path_for_error(&path), "x.txt");
     }
 
@@ -316,11 +316,11 @@ mod tests {
     fn test_sanitize_io_error_for_error_keeps_message_in_debug() {
         let err = std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "directory is not writable: /srv/secret/app/private-output",
+            "directory is not writable: /srv/internal/app/private-output",
         );
         assert_eq!(
             sanitize_io_error_for_error(&err),
-            "directory is not writable: /srv/secret/app/private-output"
+            "directory is not writable: /srv/internal/app/private-output"
         );
     }
 
@@ -329,10 +329,10 @@ mod tests {
     fn test_sanitize_io_error_for_error_redacts_message_in_release() {
         let err = std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "directory is not writable: /srv/secret/app/private-output",
+            "directory is not writable: /srv/internal/app/private-output",
         );
         let msg = sanitize_io_error_for_error(&err);
-        assert!(!msg.contains("/srv/secret/app"));
+        assert!(!msg.contains("/srv/internal/app"));
         assert!(msg.contains("permission denied"));
     }
 
@@ -344,7 +344,7 @@ mod tests {
     fn test_sanitize_io_error_for_error_surfaces_io_context_in_release() {
         let err = std::io::Error::other(crate::IoContext::new(
             "failed to read entry metadata",
-            "/srv/secret/app/x.txt: permission denied",
+            "/srv/internal/app/x.txt: permission denied",
         ));
         let msg = sanitize_io_error_for_error(&err);
         assert_eq!(msg, "failed to read entry metadata");
@@ -355,11 +355,11 @@ mod tests {
     fn test_sanitize_io_error_for_error_keeps_io_context_detail_in_debug() {
         let err = std::io::Error::other(crate::IoContext::new(
             "failed to read entry metadata",
-            "/srv/secret/app/x.txt: permission denied",
+            "/srv/internal/app/x.txt: permission denied",
         ));
         assert_eq!(
             sanitize_io_error_for_error(&err),
-            "failed to read entry metadata: /srv/secret/app/x.txt: permission denied"
+            "failed to read entry metadata: /srv/internal/app/x.txt: permission denied"
         );
     }
 
@@ -399,7 +399,7 @@ mod tests {
     /// release builds (and kept in full in debug builds).
     #[test]
     fn test_host_path_variants_follow_profile_policy() {
-        let host_path = PathBuf::from("/srv/secret/app/x.txt");
+        let host_path = PathBuf::from("/srv/internal/app/x.txt");
         let host_derived = [
             ArchiveError::SourceNotFound {
                 path: host_path.clone(),
@@ -422,7 +422,7 @@ mod tests {
             );
             #[cfg(not(debug_assertions))]
             assert!(
-                !redacted.contains("/srv/secret"),
+                !redacted.contains("/srv/internal"),
                 "expected host directory to be redacted for {err:?}, got {redacted:?}"
             );
         }

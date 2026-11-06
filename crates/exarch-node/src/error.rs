@@ -1980,10 +1980,10 @@ mod tests {
     #[test]
     fn test_source_not_found_strips_directory_in_release() {
         let d = described(CoreError::SourceNotFound {
-            path: PathBuf::from("/srv/secret/app/x.txt"),
+            path: PathBuf::from("/srv/internal/app/x.txt"),
         });
         assert!(d.description.contains("x.txt"), "{d:?}");
-        assert!(!d.description.contains("/srv/secret"), "{d:?}");
+        assert!(!d.description.contains("/srv/internal"), "{d:?}");
     }
 
     /// Regression test for #453 follow-up: `Io` messages can embed a host path
@@ -1993,9 +1993,9 @@ mod tests {
     fn test_io_error_redacts_message_in_release() {
         let d = described(CoreError::Io(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "directory is not writable: /srv/secret/app/private-output",
+            "directory is not writable: /srv/internal/app/private-output",
         )));
-        assert!(!d.description.contains("/srv/secret/app"), "{d:?}");
+        assert!(!d.description.contains("/srv/internal/app"), "{d:?}");
         assert!(d.description.contains("permission denied"), "{d:?}");
     }
 
@@ -2229,26 +2229,26 @@ mod tests {
     #[test]
     fn test_destination_occupied_is_output_exists_and_redacts_the_destination() {
         let d = described(CoreError::DestinationOccupied {
-            destination: PathBuf::from("/srv/secret/app/out"),
+            destination: PathBuf::from("/srv/internal/app/out"),
             conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
         });
         assert_eq!(d.props.code.as_str(), "OUTPUT_EXISTS");
         assert!(d.description.contains("out"), "{}", d.description);
         #[cfg(not(debug_assertions))]
-        assert!(!d.description.contains("secret"), "{}", d.description);
+        assert!(!d.description.contains("internal"), "{}", d.description);
     }
 
     #[test]
     fn test_output_reservation_left_is_an_io_error_that_redacts_the_path() {
         let d = described(CoreError::OutputReservationLeft {
-            path: PathBuf::from("/srv/secret/app/out.tar"),
+            path: PathBuf::from("/srv/internal/app/out.tar"),
             error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         });
         assert_eq!(d.props.code.as_str(), "IO_ERROR");
         assert_eq!(d.props.io_kind, Some(IoKind::PermissionDenied));
         assert!(d.description.contains("out.tar"), "{}", d.description);
         #[cfg(not(debug_assertions))]
-        assert!(!d.description.contains("secret"), "{}", d.description);
+        assert!(!d.description.contains("internal"), "{}", d.description);
     }
 
     #[test]
@@ -2256,7 +2256,7 @@ mod tests {
         let failure = exarch_core::ReplaceFailure::new(
             std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             CoreRestore::Failed {
-                backup: PathBuf::from("/srv/secret/app/.backup-1"),
+                backup: PathBuf::from("/srv/internal/app/.backup-1"),
                 error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             },
             None,
@@ -2270,8 +2270,8 @@ mod tests {
         assert!(d.props.output.leftover_path.is_none());
         #[cfg(not(debug_assertions))]
         {
-            assert!(!backup.contains("secret"), "{backup}");
-            assert!(!d.description.contains("secret"), "{}", d.description);
+            assert!(!backup.contains("internal"), "{backup}");
+            assert!(!d.description.contains("internal"), "{}", d.description);
         }
     }
 
@@ -2290,7 +2290,7 @@ mod tests {
     #[test]
     fn test_output_reservation_left_names_the_leftover() {
         let d = described(CoreError::OutputReservationLeft {
-            path: PathBuf::from("/srv/secret/app/out.tar"),
+            path: PathBuf::from("/srv/internal/app/out.tar"),
             error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         });
         let leftover = d
@@ -2305,7 +2305,7 @@ mod tests {
     #[test]
     fn test_destination_occupied_lists_the_conflicting_entries() {
         let d = described(CoreError::DestinationOccupied {
-            destination: PathBuf::from("/srv/secret/app/out"),
+            destination: PathBuf::from("/srv/internal/app/out"),
             conflicts: vec![PathBuf::from("a.txt"), PathBuf::from("d/b.txt")].into_boxed_slice(),
         });
         assert_eq!(
@@ -2346,15 +2346,15 @@ mod tests {
             setting: exarch_core::ConfigSetting::SourcePaths,
             problem: exarch_core::ConfigProblem::EntryNameCollision {
                 name: "a.txt".to_owned(),
-                first: PathBuf::from("/srv/secret/one/a.txt"),
-                second: PathBuf::from("/srv/secret/two/a.txt"),
+                first: PathBuf::from("/srv/internal/one/a.txt"),
+                second: PathBuf::from("/srv/internal/two/a.txt"),
             },
         });
         let collision = d.props.output.collision.expect("the collision is named");
         assert_eq!(collision.name, "a.txt");
         assert!(collision.first.ends_with("a.txt") && collision.second.ends_with("a.txt"));
         #[cfg(not(debug_assertions))]
-        assert!(!collision.first.contains("secret"), "{}", collision.first);
+        assert!(!collision.first.contains("internal"), "{}", collision.first);
     }
 
     #[test]

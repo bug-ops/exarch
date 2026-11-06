@@ -349,3 +349,34 @@ mod unix {
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
     }
 }
+
+#[test]
+fn sources_with_the_same_entry_name_are_refused_before_anything_is_written() {
+    for name in OUTPUTS {
+        let src = TempDir::new().unwrap();
+        let (first, second) = (src.path().join("proj"), src.path().join("other"));
+        for dir in [&first, &second] {
+            fs::create_dir(dir).unwrap();
+            fs::write(dir.join("a.txt"), b"x").unwrap();
+        }
+        let out = TempDir::new().unwrap();
+        let output = out.path().join(name);
+
+        let err = create_archive(
+            &output,
+            &[first.as_path(), second.as_path()],
+            &CreationConfig::default(),
+        )
+        .unwrap_err();
+
+        assert_matches!(
+            err,
+            ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::SourcePaths,
+                problem: ConfigProblem::EntryNameCollision { .. },
+            },
+            "{name}"
+        );
+        assert!(dir_names(out.path()).is_empty(), "{name}");
+    }
+}

@@ -15,6 +15,7 @@ use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
 use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
+use exarch_core::RequestedLevel;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::Staging;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
@@ -31,7 +32,6 @@ use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
 use crate::buffer::parse_one;
-use crate::error::compression_level_error;
 use crate::error::convert_error;
 
 /// A Python `int` as a setter receives it: `bool` is refused, and an integer
@@ -184,12 +184,9 @@ fn parse_exclude_patterns(patterns: &[String]) -> PyResult<Vec<exarch_core::Excl
         .collect()
 }
 
-const fn existing_files_of(skip: bool) -> ExistingFiles {
-    if skip {
-        ExistingFiles::Skip
-    } else {
-        ExistingFiles::Overwrite
-    }
+/// Parses the string form shared with `ExistingFiles::as_str`.
+pub fn parse_existing_files(value: &str) -> PyResult<ExistingFiles> {
+    parse_one(ConfigSetting::ExistingFiles, value)
 }
 
 const fn staging_of(atomic: bool) -> Staging {
@@ -204,15 +201,13 @@ const fn staging_of(atomic: bool) -> Staging {
 /// out-of-range value is an `InvalidCompressionLevelError` rather than an
 /// `OverflowError`.
 fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
-    let out_of_range = |shown: String| {
-        compression_level_error(format!("invalid compression level {shown}, must be 1-9"))
-    };
     match level {
-        PyInteger::Fits(level) => u32::try_from(level)
-            .map_err(|_| out_of_range(level.to_string()))
-            .and_then(|level| CompressionLevel::try_from(level).map_err(convert_error)),
-        PyInteger::Beyond { .. } => Err(out_of_range("(out of range)".to_owned())),
+        PyInteger::Fits(level) => CompressionLevel::from_i128(level),
+        PyInteger::Beyond { .. } => Err(ArchiveError::InvalidCompressionLevel {
+            level: RequestedLevel::OutOfRange,
+        }),
     }
+    .map_err(convert_error)
 }
 
 /// Security configuration for archive extraction.
@@ -232,7 +227,9 @@ fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
 /// * `max_path_depth` - Maximum path depth allowed (default: 32)
 /// * `preserve_permissions` - Preserve file permissions from archive (default:
 ///   False)
-/// * `allowed_extensions` - List of allowed file extensions (empty = allow all)
+/// * `allowed_extensions` - List of allowed file extensions, or `None` to allow
+///   every extension (the default); an empty list is refused, and assigning
+///   `None` is the only way to clear the list
 /// * `banned_path_components` - List of banned path components
 ///
 /// # Examples
@@ -637,41 +634,42 @@ impl PySecurityConfig {
         self.try_set_max_solid_block_memory(value)
     }
 
-    /// Returns a copy of the allowed extensions list.
+    /// Returns a copy of the allowed extensions list, or `None` when every
+    /// extension is allowed.
     ///
     /// # Performance
     ///
     /// This method clones the entire list on each access. If you need to access
     /// the extensions multiple times, cache the result in a local variable.
     #[getter]
-    fn get_allowed_extensions(&self) -> Vec<String> {
-        self.inner
-            .allowed_extensions
-            .as_only()
-            .map_or_default(|extensions| {
-                extensions
-                    .as_slice()
-                    .iter()
-                    .map(|ext| ext.as_str().to_owned())
-                    .collect()
-            })
+    fn get_allowed_extensions(&self) -> Option<Vec<String>> {
+        self.inner.allowed_extensions.as_only().map(|extensions| {
+            extensions
+                .as_slice()
+                .iter()
+                .map(|ext| ext.as_str().to_owned())
+                .collect()
+        })
     }
 
+    /// Replaces the allowed extensions; `None` allows every extension.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "allowed_extension"`) for an
+    /// empty list or a malformed extension.
     #[setter]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "PyO3 setters receive the extracted list by value"
-    )]
-    fn set_allowed_extensions(&mut self, value: Vec<String>) -> PyResult<()> {
-        let extensions = value
-            .iter()
-            .map(|ext| Extension::try_from(ext.as_str()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(convert_error)?;
-        self.inner.allowed_extensions = if extensions.is_empty() {
-            ExtensionFilter::Any
-        } else {
-            ExtensionFilter::only(extensions).map_err(convert_error)?
+    fn set_allowed_extensions(&mut self, value: Option<Vec<String>>) -> PyResult<()> {
+        self.inner.allowed_extensions = match value {
+            None => ExtensionFilter::Any,
+            Some(values) => ExtensionFilter::only(
+                values
+                    .iter()
+                    .map(|ext| Extension::try_from(ext.as_str()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(convert_error)?,
+            )
+            .map_err(convert_error)?,
         };
         Ok(())
     }
@@ -692,7 +690,7 @@ impl PySecurityConfig {
     }
 
     #[setter]
-    #[allow(
+    #[expect(
         clippy::needless_pass_by_value,
         reason = "PyO3 setters receive the extracted list by value"
     )]
@@ -744,6 +742,15 @@ impl PySecurityConfig {
     /// API.
     pub fn as_core(&self) -> &CoreSecurityConfig {
         &self.inner
+    }
+
+    /// A copy of the inner `CoreSecurityConfig`, or the secure default.
+    ///
+    /// Taken as an owned value so no borrow of the Python object is held while
+    /// the GIL is released: a concurrent setter would otherwise raise
+    /// `RuntimeError: Already borrowed`.
+    pub fn snapshot(config: Option<PyRef<'_, Self>>) -> CoreSecurityConfig {
+        config.map_or_else(CoreSecurityConfig::default, |c| c.inner.clone())
     }
 
     /// Shared by the builder and the property setter of
@@ -853,7 +860,10 @@ impl PyCreationConfig {
     /// `InvalidConfigurationError` (`setting == "exclude_pattern"`) for any
     /// other shape, including glob look-alikes (`?`, `[`, `]`, `{`, `}`, `!`),
     /// commas and edge whitespace.
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pyo3 passes the extracted list by value"
+    )]
     fn with_exclude_patterns(
         mut slf: PyRefMut<'_, Self>,
         patterns: Vec<String>,
@@ -937,7 +947,10 @@ impl PyCreationConfig {
     }
 
     #[setter]
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 setters receive the extracted list by value"
+    )]
     fn set_exclude_patterns(&mut self, value: Vec<String>) -> PyResult<()> {
         self.inner.exclude_patterns = parse_exclude_patterns(&value)?;
         Ok(())
@@ -967,21 +980,25 @@ impl PyCreationConfig {
 }
 
 impl PyCreationConfig {
-    /// Returns a reference to the inner `CoreCreationConfig`.
-    pub fn as_core(&self) -> &CoreCreationConfig {
-        &self.inner
+    /// A copy of the inner `CoreCreationConfig`, or the default; see
+    /// [`PySecurityConfig::snapshot`] for why it is owned.
+    pub fn snapshot(config: Option<PyRef<'_, Self>>) -> CoreCreationConfig {
+        config.map_or_else(CoreCreationConfig::default, |c| c.inner.clone())
     }
 }
 
 /// Options controlling extraction behavior (non-security).
 ///
 /// Separate from `SecurityConfig` to keep security settings focused.
-/// These options control operational behavior such as duplicate handling.
+/// These options control operational behavior such as how existing files are
+/// treated.
 ///
 /// # Attributes
 ///
-/// * `skip_duplicates` - Skip duplicate entries silently instead of aborting
-///   (default: `True`)
+/// * `existing_files` - What to do with a file that already exists at a landing
+///   path, or that an earlier entry created: `"skip"` (default) keeps it and
+///   counts a duplicate, `"overwrite"` replaces it where the entry kinds allow,
+///   `"refuse"` fails with `DestinationOccupiedError` and never overwrites
 /// * `atomic` - Extract to a temp dir then rename atomically on success
 ///   (default: `False`)
 ///
@@ -991,8 +1008,8 @@ impl PyCreationConfig {
 /// # Use defaults
 /// opts = ExtractionOptions()
 ///
-/// # Disable duplicate skipping
-/// opts = ExtractionOptions().with_skip_duplicates(False)
+/// # Refuse to touch anything that already exists
+/// opts = ExtractionOptions().with_existing_files("refuse")
 ///
 /// # Enable atomic extraction
 /// opts = ExtractionOptions().with_atomic(True)
@@ -1021,14 +1038,23 @@ impl PyExtractionOptions {
         Self::new()
     }
 
-    /// Sets whether duplicate archive entries are skipped silently.
+    /// Sets how an existing file at a landing path is treated.
     ///
-    /// When `True` (default), duplicate entries produce a warning in the
-    /// report. When `False`, a duplicate entry causes an error.
-    #[pyo3(signature = (skip=true))]
-    fn with_skip_duplicates(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
-        slf.inner.existing_files = existing_files_of(skip);
-        slf
+    /// `"skip"` (default) keeps the existing file and counts the entry as a
+    /// duplicate skip; `"overwrite"` replaces it where the entry kinds allow;
+    /// `"refuse"` raises `DestinationOccupiedError` for any occupant and never
+    /// overwrites. A kind conflict is refused under every value.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "existing_files"`) for any
+    /// other string.
+    fn with_existing_files<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner.existing_files = parse_existing_files(value)?;
+        Ok(slf)
     }
 
     /// Sets whether extraction uses a temporary directory for atomic commits.
@@ -1066,13 +1092,14 @@ impl PyExtractionOptions {
     }
 
     #[getter]
-    fn get_skip_duplicates(&self) -> bool {
-        self.inner.existing_files == ExistingFiles::Skip
+    fn get_existing_files(&self) -> &'static str {
+        self.inner.existing_files.as_str()
     }
 
     #[setter]
-    fn set_skip_duplicates(&mut self, value: bool) {
-        self.inner.existing_files = existing_files_of(value);
+    fn set_existing_files(&mut self, value: &str) -> PyResult<()> {
+        self.inner.existing_files = parse_existing_files(value)?;
+        Ok(())
     }
 
     #[getter]
@@ -1088,17 +1115,18 @@ impl PyExtractionOptions {
     /// Returns a debug string representation.
     fn __repr__(&self) -> String {
         format!(
-            "ExtractionOptions(skip_duplicates={}, atomic={})",
-            self.inner.existing_files == ExistingFiles::Skip,
+            "ExtractionOptions(existing_files={:?}, atomic={})",
+            self.inner.existing_files.as_str(),
             self.inner.staging == Staging::Atomic
         )
     }
 }
 
 impl PyExtractionOptions {
-    /// Returns a reference to the inner `CoreExtractionOptions`.
-    pub fn as_core(&self) -> &CoreExtractionOptions {
-        &self.inner
+    /// A copy of the inner `CoreExtractionOptions`, taken so no borrow of the
+    /// Python object outlives the call that reads it.
+    pub fn snapshot(options: Option<PyRef<'_, Self>>) -> CoreExtractionOptions {
+        options.map_or_else(CoreExtractionOptions::default, |o| o.inner.clone())
     }
 }
 
@@ -1199,9 +1227,10 @@ impl PyVerificationOptions {
 }
 
 impl PyVerificationOptions {
-    /// Returns a reference to the inner `CoreVerificationOptions`.
-    pub fn as_core(&self) -> &CoreVerificationOptions {
-        &self.inner
+    /// A copy of the inner `CoreVerificationOptions`, or the default; see
+    /// [`PySecurityConfig::snapshot`] for why it is owned.
+    pub fn snapshot(options: Option<PyRef<'_, Self>>) -> CoreVerificationOptions {
+        options.map_or_else(CoreVerificationOptions::default, |o| o.inner)
     }
 }
 
@@ -1474,7 +1503,7 @@ mod tests {
 
             let extensions = py_config.borrow(py).get_allowed_extensions();
             assert!(
-                extensions.contains(&"txt".to_string()),
+                extensions.is_some_and(|list| list.contains(&"txt".to_string())),
                 "Extension should be added to list"
             );
         });
@@ -1633,12 +1662,37 @@ mod tests {
     }
 
     #[test]
-    fn test_is_extension_allowed_empty_list() {
+    fn test_is_extension_allowed_without_a_list() {
         let config = PySecurityConfig::new();
         assert!(
             config.is_extension_allowed("txt"),
-            "Empty allowed_extensions list should allow all extensions"
+            "no allowlist should allow all extensions"
         );
+        assert_eq!(config.get_allowed_extensions(), None);
+    }
+
+    #[test]
+    fn test_empty_allowed_extensions_is_refused_and_none_clears() {
+        pyo3::Python::initialize();
+        let mut config = PySecurityConfig::new();
+        assert!(config.set_allowed_extensions(Some(vec![])).is_err());
+        assert_eq!(config.get_allowed_extensions(), None);
+
+        config
+            .set_allowed_extensions(Some(vec!["txt".to_owned()]))
+            .expect("one extension");
+        assert_eq!(
+            config.get_allowed_extensions(),
+            Some(vec!["txt".to_owned()])
+        );
+        assert!(config.set_allowed_extensions(Some(vec![])).is_err());
+        assert_eq!(
+            config.get_allowed_extensions(),
+            Some(vec!["txt".to_owned()])
+        );
+
+        config.set_allowed_extensions(None).expect("None clears");
+        assert_eq!(config.get_allowed_extensions(), None);
     }
 
     #[test]

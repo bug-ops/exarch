@@ -65,7 +65,7 @@ def test_duplicate_hardlink_is_duplicate_entry(temp_dir):
         ]
     )
     config = exarch.SecurityConfig().with_allow_hardlinks()
-    options = exarch.ExtractionOptions().with_skip_duplicates(False)
+    options = exarch.ExtractionOptions().with_existing_files("overwrite")
 
     error = _extract(temp_dir, "dup.tar", data, config, options)
 

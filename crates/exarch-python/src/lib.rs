@@ -5,6 +5,7 @@
 //! and other common vulnerabilities.
 
 use pyo3::prelude::*;
+use std::ffi::OsString;
 use std::path::Path;
 
 mod buffer;
@@ -12,11 +13,13 @@ mod config;
 mod error;
 mod report;
 mod stream;
+mod warning;
 
 use config::PyCreationConfig;
 use config::PyExtractionOptions;
 use config::PySecurityConfig;
 use config::PyVerificationOptions;
+use error::attach_partial;
 use error::convert_error;
 use error::register_exceptions;
 use exarch_core::BoundaryPath;
@@ -116,7 +119,7 @@ const _: () = assert!(
 /// report = extract_archive("archive.tar.gz", "/tmp/output", config)
 ///
 /// # Customize extraction options
-/// opts = ExtractionOptions().with_skip_duplicates(False)
+/// opts = ExtractionOptions().with_existing_files("overwrite")
 /// report = extract_archive("archive.tar.gz", "/tmp/output", None, opts)
 /// ```
 #[pyfunction]
@@ -125,18 +128,13 @@ fn extract_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     output_dir: &Bound<'_, PyAny>,
-    config: Option<&PySecurityConfig>,
-    options: Option<&PyExtractionOptions>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
+    options: Option<PyRef<'_, PyExtractionOptions>>,
 ) -> PyResult<PyExtractionReport> {
-    // Convert Path-like objects to strings
     let archive_path = path_to_boundary(py, archive_path)?;
     let output_dir = path_to_boundary(py, output_dir)?;
-
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
-
-    let default_options = exarch_core::ExtractionOptions::default();
-    let options_ref = options.map_or(&default_options, |o| o.as_core());
+    let config = PySecurityConfig::snapshot(config);
+    let options = PyExtractionOptions::snapshot(options);
 
     // Release GIL during I/O-heavy extraction
     // NOTE: TOCTOU race condition - archive contents can change between check
@@ -144,8 +142,8 @@ fn extract_archive(
     // for performance.
     let report = catch_panic_as_py_err("extraction", || {
         py.detach(|| {
-            ExtractRequest::new(config_ref)
-                .with_options(options_ref.clone())
+            ExtractRequest::new(&config)
+                .with_options(options)
                 .extract(&archive_path, &output_dir)
         })
     })?;
@@ -153,30 +151,23 @@ fn extract_archive(
     Ok(PyExtractionReport::from(report))
 }
 
-/// Converts a Path-like object to a string with validation.
+/// Converts a Path-like object to a validated host path.
 ///
-/// Accepts both strings and `pathlib.Path` objects by calling `os.fspath()`.
+/// Accepts `str`, `bytes` and `os.PathLike` objects through `os.fsdecode`, and
+/// reads the result back as the exact bytes of the host path, so a path that is
+/// not valid UTF-8 (a surrogate-escaped `str` or a `bytes` path) reaches core
+/// unchanged instead of failing with an untyped `UnicodeEncodeError`.
 ///
 /// # Security
 ///
 /// Delegates to the shared boundary check in `exarch_core`; see
-/// [`exarch_core::BoundaryPath::parse`] for the exact rules (null bytes,
+/// [`exarch_core::BoundaryPath::parse_os`] for the exact rules (null bytes,
 /// maximum length). Errors are routed through [`convert_error`] so they
 /// surface as `SecurityViolationError`, the same exception type used for
 /// every other security-policy rejection raised by this module.
 fn path_to_boundary(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<BoundaryPath> {
-    // Try direct string extraction first
-    let path_str = if let Ok(s) = path.extract::<String>() {
-        s
-    } else {
-        // Try os.fspath() for Path objects
-        let os = py.import("os")?;
-        let fspath = os.getattr("fspath")?;
-        let result = fspath.call1((path,))?;
-        result.extract()?
-    };
-
-    BoundaryPath::parse(path_str).map_err(convert_error)
+    let decoded = py.import("os")?.call_method1("fsdecode", (path,))?;
+    BoundaryPath::parse_os(decoded.extract::<OsString>()?).map_err(convert_error)
 }
 
 /// Runs `f`, converting a Rust panic into a `PyRuntimeError` instead of
@@ -271,7 +262,7 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
 /// print(f"Created archive with {report.files_added} files")
 ///
 /// # Customize configuration
-/// config = CreationConfig().compression_level(9)
+/// config = CreationConfig().with_compression_level(9)
 /// report = create_archive("output.tar.gz", ["src/"], config)
 /// ```
 #[pyfunction]
@@ -284,22 +275,14 @@ fn create_archive(
     py: Python<'_>,
     output_path: &Bound<'_, PyAny>,
     sources: &Bound<'_, PyAny>,
-    config: Option<&PyCreationConfig>,
+    config: Option<PyRef<'_, PyCreationConfig>>,
     format: Option<String>,
     overwrite: bool,
     durability: Option<String>,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_boundary(py, output_path)?;
-
-    // Convert sources to Vec<String>
-    let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
-    let source_paths: Vec<BoundaryPath> = sources_list
-        .iter()
-        .map(|s| path_to_boundary(py, s))
-        .collect::<PyResult<_>>()?;
-
-    let default_config = exarch_core::creation::CreationConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let source_paths = source_boundary_paths(py, sources)?;
+    let config = PyCreationConfig::snapshot(config);
     let output = output_file(
         &output_path,
         overwrite,
@@ -308,10 +291,22 @@ fn create_archive(
     )?;
 
     let report = catch_panic_as_py_err("archive creation", || {
-        py.detach(|| CreateRequest::new(config_ref).create(&output, &source_paths))
+        py.detach(|| CreateRequest::new(&config).create(&output, &source_paths))
     })?;
 
     Ok(PyCreationReport::from(report))
+}
+
+/// Validates every creation source path.
+pub(crate) fn source_boundary_paths(
+    py: Python<'_>,
+    sources: &Bound<'_, PyAny>,
+) -> PyResult<Vec<BoundaryPath>> {
+    let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
+    sources_list
+        .iter()
+        .map(|source| path_to_boundary(py, source))
+        .collect()
 }
 
 /// The output file of a creation: replaced or refused when it exists, in the
@@ -370,15 +365,13 @@ fn output_file(
 fn list_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
-    config: Option<&PySecurityConfig>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
 ) -> PyResult<PyArchiveManifest> {
     let archive_path = path_to_boundary(py, archive_path)?;
-
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let config = PySecurityConfig::snapshot(config);
 
     let manifest = catch_panic_as_py_err("archive listing", || {
-        py.detach(|| ListRequest::new(config_ref).list(&archive_path))
+        py.detach(|| ListRequest::new(&config).list(&archive_path))
     })?;
 
     Ok(PyArchiveManifest::from(manifest))
@@ -425,20 +418,17 @@ fn list_archive(
 fn verify_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
-    config: Option<&PySecurityConfig>,
-    options: Option<&PyVerificationOptions>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
+    options: Option<PyRef<'_, PyVerificationOptions>>,
 ) -> PyResult<PyVerificationReport> {
     let archive_path = path_to_boundary(py, archive_path)?;
-
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let default_options = exarch_core::VerificationOptions::default();
-    let options_ref = options.map_or(&default_options, |o| o.as_core());
+    let config = PySecurityConfig::snapshot(config);
+    let options = PyVerificationOptions::snapshot(options);
 
     let report = catch_panic_as_py_err("archive verification", || {
         py.detach(|| {
-            VerifyRequest::new(config_ref)
-                .with_options(*options_ref)
+            VerifyRequest::new(&config)
+                .with_options(options)
                 .verify(&archive_path)
         })
     })?;
@@ -510,24 +500,15 @@ fn create_archive_with_progress(
     py: Python<'_>,
     output_path: &Bound<'_, PyAny>,
     sources: &Bound<'_, PyAny>,
-    config: Option<&PyCreationConfig>,
+    config: Option<PyRef<'_, PyCreationConfig>>,
     progress: Option<Py<PyAny>>,
     format: Option<String>,
     overwrite: bool,
     durability: Option<String>,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_boundary(py, output_path)?;
-
-    // Convert sources to Vec<String>
-    let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
-    let source_paths: Vec<BoundaryPath> = sources_list
-        .iter()
-        .map(|s| path_to_boundary(py, s))
-        .collect::<PyResult<_>>()?;
-
-    let default_config = exarch_core::creation::CreationConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
-
+    let source_paths = source_boundary_paths(py, sources)?;
+    let config = PyCreationConfig::snapshot(config);
     let output = output_file(
         &output_path,
         overwrite,
@@ -535,46 +516,48 @@ fn create_archive_with_progress(
         durability.as_deref(),
     )?;
 
-    let report = catch_panic_as_py_result("archive creation with progress", || {
-        run_create_with_optional_progress(py, &output, &source_paths, config_ref, progress)
-    })?;
+    let report = run_with_optional_progress(
+        py,
+        "archive creation with progress",
+        progress,
+        |progress| {
+            CreateRequest::new(&config)
+                .with_progress(progress)
+                .create(&output, &source_paths)
+        },
+        |exc, report| {
+            let _ = exc.setattr("files_added", report.files_added);
+            let _ = exc.setattr("bytes_written", report.bytes_written);
+        },
+    )?;
 
     Ok(PyCreationReport::from(report))
 }
 
-/// Runs a `CreateRequest` routed to the Python callback when
-/// present, or with the GIL released and a no-op reporter when absent.
-fn run_create_with_optional_progress(
+/// Runs `run` with the Python callback `progress`, or with a no-op reporter
+/// when `progress` is absent. The GIL is released either way; the callback's
+/// adapter takes it back for each call.
+///
+/// A raising callback is merged with the result by `merge_progress_result`;
+/// `attach` adds counters to the callback's exception when the run succeeded
+/// (the successful value is discarded).
+pub(crate) fn run_with_optional_progress<T: Send>(
     py: Python<'_>,
-    output: &OutputFile,
-    source_paths: &[BoundaryPath],
-    config: &exarch_core::creation::CreationConfig,
+    context: &str,
     progress: Option<Py<PyAny>>,
-) -> PyResult<exarch_core::creation::CreationReport> {
-    progress.map_or_else(
-        || {
-            // No progress callback - can release GIL
-            let mut noop = exarch_core::NoopProgress;
-            py.detach(|| {
-                CreateRequest::new(config)
-                    .with_progress(&mut noop)
-                    .create(output, source_paths)
-            })
-            .map_err(convert_error)
-        },
-        |py_callback| {
-            // CRITICAL: Do NOT release GIL when using Python callback!
-            // Python callback requires GIL to call into Python.
-            let mut callback = PyProgressAdapter::new(py_callback);
-            let result = CreateRequest::new(config)
-                .with_progress(&mut callback)
-                .create(output, source_paths);
-            merge_progress_result(py, result, callback.into_callback_error(), |exc, report| {
-                let _ = exc.setattr("files_added", report.files_added);
-                let _ = exc.setattr("bytes_written", report.bytes_written);
-            })
-        },
-    )
+    run: impl FnOnce(&mut dyn exarch_core::ProgressCallback) -> exarch_core::Result<T> + Send,
+    attach: impl FnOnce(&Bound<'_, PyAny>, &T),
+) -> PyResult<T> {
+    match progress {
+        None => catch_panic_as_py_err(context, || {
+            py.detach(|| run(&mut exarch_core::NoopProgress))
+        }),
+        Some(callback) => {
+            let mut adapter = PyProgressAdapter::new(callback);
+            let result = catch_panic_as_py_result(context, || Ok(py.detach(|| run(&mut adapter))))?;
+            merge_progress_result(py, result, adapter.into_callback_error(), attach)
+        }
+    }
 }
 
 /// Merges a creation/extraction result with an exception captured from a
@@ -614,7 +597,10 @@ fn merge_progress_result<T>(
         (Err(error), Some(cb_err)) if error.is_cancelled() => {
             // The core stopped because the callback asked it to (see
             // `PyProgressAdapter::is_cancelled`); the callback's own exception
-            // wins.
+            // wins and says what the stop left behind.
+            if let Some(outcome) = error.into_ffi_message().partial {
+                attach_partial(&cb_err, outcome);
+            }
             let _ = cb_err.value(py).setattr("progress_callback_error", true);
             Err(cb_err)
         }
@@ -665,34 +651,32 @@ fn merge_progress_result<T>(
 ///
 /// ## GIL Release and TOCTOU
 ///
-/// When a progress callback is provided the GIL is held during extraction so
-/// that the callback can safely call into Python. Without a callback the GIL
-/// is released for performance, but the TOCTOU caveat from `extract_archive`
-/// still applies.
+/// The GIL is released during extraction whether or not a callback is given;
+/// the callback takes it back for each call. The TOCTOU caveat from
+/// `extract_archive` still applies.
 ///
-/// ## A raising `progress` propagates instead of being swallowed
+/// ## A raising `progress` cancels the extraction
 ///
-/// Extraction has already run to completion (or failure) by the time the
-/// exception is observed: the underlying `ProgressCallback` contract has no
-/// cancellation signal, so a raising `progress` cannot abort extraction early
-/// (the same constraint documented on the Node binding's
-/// `extractArchiveWithProgress`, see issues #465/#485/#489). Once `progress`
-/// raises, it is no longer called for the remaining entries.
+/// If `progress` raises (`KeyboardInterrupt` included), extraction stops at the
+/// next entry and `progress` is not called again. What was written stays on
+/// disk (or is rolled back under `atomic`), exactly as for any other late
+/// failure.
 ///
-/// - If extraction otherwise succeeds, the callback's exception is what
-///   propagates. `files_extracted` and `bytes_written` attributes describing
-///   what was written are attached on a best-effort basis (`setattr` can fail,
-///   e.g. for an exception class using `__slots__`), together with a
-///   `progress_callback_error = True` marker attribute. The marker exists
-///   because `files_extracted`/`bytes_written` are the *same* attribute names a
-///   genuine partial extraction carries (see `extract_archive`'s own
-///   partial-extraction note) — check `progress_callback_error` first to tell
-///   the two apart, rather than assuming their mere presence means extraction
-///   failed partway through.
-/// - If extraction also fails, the core error takes priority (a raising
-///   callback can never mask a security error such as `SymlinkEscapeError`) and
-///   the callback's exception is chained onto it via `__cause__`. This error
-///   does not carry the `progress_callback_error` marker.
+/// - The callback's own exception is what propagates, with a
+///   `progress_callback_error = True` marker attribute and `writes` (and, while
+///   the files remain on disk, `files_extracted`, `bytes_written`,
+///   `files_skipped`, `skipped` and `warnings`) describing what was written.
+///   Attribute attachment is best-effort (`setattr` can fail, e.g. for an
+///   exception class using `__slots__`). The marker exists because those
+///   counters are the *same* attribute names a genuine partial extraction
+///   carries — check `progress_callback_error` first to tell the two apart.
+/// - If the last entry raised and extraction otherwise succeeded, the same
+///   exception propagates with the counters of the finished extraction.
+/// - If extraction fails for its own reason first, the core error takes
+///   priority (a raising callback can never mask a security error such as
+///   `SymlinkEscapeError`) and the callback's exception is chained onto it via
+///   `__cause__`. This error does not carry the `progress_callback_error`
+///   marker.
 ///
 /// # Examples
 ///
@@ -712,93 +696,50 @@ fn extract_archive_with_progress(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     output_dir: &Bound<'_, PyAny>,
-    config: Option<&PySecurityConfig>,
+    config: Option<PyRef<'_, PySecurityConfig>>,
     progress: Option<Py<PyAny>>,
-    options: Option<&PyExtractionOptions>,
+    options: Option<PyRef<'_, PyExtractionOptions>>,
 ) -> PyResult<PyExtractionReport> {
     let archive_path = path_to_boundary(py, archive_path)?;
     let output_dir = path_to_boundary(py, output_dir)?;
+    let config = PySecurityConfig::snapshot(config);
+    let options = PyExtractionOptions::snapshot(options);
 
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
-
-    let default_options = exarch_core::ExtractionOptions::default();
-    let options_ref = options.map_or(&default_options, |o| o.as_core());
-
-    let report = catch_panic_as_py_result("archive extraction with progress", || {
-        run_extract_with_optional_progress(
-            py,
-            &archive_path,
-            &output_dir,
-            config_ref,
-            options_ref,
-            progress,
-        )
-    })?;
+    let report = run_with_optional_progress(
+        py,
+        "archive extraction with progress",
+        progress,
+        |progress| {
+            ExtractRequest::new(&config)
+                .with_options(options)
+                .with_progress(progress)
+                .extract(&archive_path, &output_dir)
+        },
+        |exc, report| {
+            let _ = exc.setattr("files_extracted", report.files_extracted);
+            let _ = exc.setattr("bytes_written", report.bytes_written);
+        },
+    )?;
 
     Ok(PyExtractionReport::from(report))
-}
-
-/// Runs an `ExtractRequest` routed to the Python
-/// callback when present, or with the GIL released and a no-op reporter when
-/// absent.
-fn run_extract_with_optional_progress(
-    py: Python<'_>,
-    archive_path: &BoundaryPath,
-    output_dir: &BoundaryPath,
-    config: &exarch_core::SecurityConfig,
-    options: &exarch_core::ExtractionOptions,
-    progress: Option<Py<PyAny>>,
-) -> PyResult<exarch_core::ExtractionReport> {
-    progress.map_or_else(
-        || {
-            // No progress callback - can release GIL
-            let mut noop = exarch_core::NoopProgress;
-            py.detach(|| {
-                ExtractRequest::new(config)
-                    .with_options(options.clone())
-                    .with_progress(&mut noop)
-                    .extract(archive_path, output_dir)
-            })
-            .map_err(convert_error)
-        },
-        |py_callback| {
-            // CRITICAL: Do NOT release GIL when using Python callback!
-            // Python callback requires GIL to call into Python.
-            let mut callback = PyProgressAdapter::new(py_callback);
-            let result = ExtractRequest::new(config)
-                .with_options(options.clone())
-                .with_progress(&mut callback)
-                .extract(archive_path, output_dir);
-            merge_progress_result(py, result, callback.into_callback_error(), |exc, report| {
-                let _ = exc.setattr("files_extracted", report.files_extracted);
-                let _ = exc.setattr("bytes_written", report.bytes_written);
-            })
-        },
-    )
 }
 
 /// Adapter that calls Python callback from Rust.
 ///
 /// The Python callback receives `(path: str, total: int | None, current: int,
 /// bytes_written: int)` (`total` is `None` for an unknown count) where
-/// `bytes_written` is the number of bytes written **for the current entry so
-/// far** (starts at 0 when the entry begins, grows as chunks are flushed to
-/// disk).
+/// `bytes_written` is always 0: the core reports byte counts per chunk, which
+/// the binding does not forward.
 ///
 /// If the callback raises, the exception is captured into `callback_error`
-/// instead of being discarded (see issue #489). The
-/// [`exarch_core::ProgressCallback`] contract has no cancellation signal —
-/// the same constraint the Node binding documents for `NodeProgressAdapter`
-/// (issues #465/#485) — so extraction/creation keeps running to completion;
-/// once a raise has been captured, further dispatches are skipped, since
-/// there is no value in repeatedly invoking a callback already known to be
-/// broken. The caller retrieves the captured exception via
+/// instead of being discarded (see issue #489) and
+/// [`is_cancelled`](exarch_core::ProgressCallback::is_cancelled) turns true, so
+/// the core stops at the next entry; once a raise has been captured, further
+/// dispatches are skipped. The caller retrieves the captured exception via
 /// [`into_callback_error`](Self::into_callback_error) once the core
 /// operation returns, and raises it to the Python caller.
 struct PyProgressAdapter {
     callback: Py<PyAny>,
-    current_entry_bytes: u64,
     callback_error: Option<PyErr>,
 }
 
@@ -806,7 +747,6 @@ impl PyProgressAdapter {
     fn new(callback: Py<PyAny>) -> Self {
         Self {
             callback,
-            current_entry_bytes: 0,
             callback_error: None,
         }
     }
@@ -825,19 +765,18 @@ impl exarch_core::ProgressCallback for PyProgressAdapter {
         if self.callback_error.is_some() {
             return;
         }
-        self.current_entry_bytes = 0;
         Python::attach(|py| {
-            if let Err(err) = self.callback.call1(
-                py,
-                (path.as_os_str(), total, current, self.current_entry_bytes),
-            ) {
+            if let Err(err) = self
+                .callback
+                .call1(py, (path.as_os_str(), total, current, 0_u64))
+            {
                 self.callback_error = Some(err);
             }
         });
     }
 
-    fn on_bytes_written(&mut self, bytes: u64) {
-        self.current_entry_bytes += bytes;
+    fn on_bytes_written(&mut self, _bytes: u64) {
+        // No-op: the callback's `bytes_written` is always 0
     }
 
     fn on_entry_complete(&mut self, _path: &std::path::Path) {
@@ -921,6 +860,13 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyUnverifiedEntry>()?;
     m.add_class::<report::PySkips>()?;
     m.add_class::<report::PySkip>()?;
+    m.add_class::<warning::PyExtractionWarning>()?;
+    m.add_class::<warning::PyAntiItemsSkippedWarning>()?;
+    m.add_class::<warning::PyBackupCleanupFailedWarning>()?;
+    m.add_class::<warning::PyCreationWarning>()?;
+    m.add_class::<warning::PyZipRatioOverDefaultLimitWarning>()?;
+    m.add_class::<warning::PyZipRatioCheckFailedWarning>()?;
+    m.add_class::<warning::PyDirectoryNotSyncedWarning>()?;
     m.add_class::<buffer::PySinkOptions>()?;
     m.add_class::<buffer::PyMemoryEntry>()?;
     m.add_class::<buffer::PyMemoryFile>()?;
@@ -967,6 +913,18 @@ fn register_type_aliases(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "ArchiveDirectory",
             "ArchiveSymlink",
             "ArchiveHardlink",
+        ])?,
+    )?;
+    m.add(
+        "AnyExtractionWarning",
+        union_of(&["AntiItemsSkippedWarning", "BackupCleanupFailedWarning"])?,
+    )?;
+    m.add(
+        "AnyCreationWarning",
+        union_of(&[
+            "ZipRatioOverDefaultLimitWarning",
+            "ZipRatioCheckFailedWarning",
+            "DirectoryNotSyncedWarning",
         ])?,
     )?;
     m.add(
@@ -1408,6 +1366,44 @@ mod tests {
                     .files_added,
                 1
             );
+        });
+    }
+
+    /// A cancellation seen through `PartialExtraction`: the callback's own
+    /// exception wins and says what the stop left on disk.
+    #[test]
+    fn test_merge_cancelled_partial_extraction_keeps_callback_error_with_writes() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let report = {
+                let mut r = exarch_core::ExtractionReport::new();
+                r.files_extracted = 2;
+                r.bytes_written = 9;
+                r
+            };
+            let cancelled =
+                exarch_core::ArchiveError::PartialExtraction(exarch_core::Partial::new(
+                    exarch_core::ArchiveError::Cancelled,
+                    report,
+                    exarch_core::PartialWrites::Kept,
+                ));
+            let cb_err = PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("callback boom");
+
+            let err =
+                merge_progress_result(py, Err(cancelled), Some(cb_err), attach_extraction_attrs)
+                    .expect_err("callback exception must propagate");
+
+            assert!(err.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
+            let value = err.value(py);
+            let marker: bool = value
+                .getattr("progress_callback_error")
+                .unwrap()
+                .extract()
+                .unwrap();
+            let writes: String = value.getattr("writes").unwrap().extract().unwrap();
+            let files: usize = value.getattr("files_extracted").unwrap().extract().unwrap();
+            assert!(marker);
+            assert_eq!((writes.as_str(), files), ("kept", 2));
         });
     }
 }

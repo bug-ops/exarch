@@ -15,12 +15,15 @@ use exarch_core::inspection::report::VerificationIssue;
 use exarch_core::inspection::report::VerificationReport;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::path::PathBuf;
 
 use crate::buffer::parse_one;
+use crate::warning::creation_warnings;
+use crate::warning::extraction_warnings;
 
 /// One entry an operation left out.
 ///
@@ -30,8 +33,8 @@ use crate::buffer::parse_one;
 ///   `"excluded"`, `"hidden"`, `"over_max_file_size"`, `"symlink_unsupported"`
 ///   or `"unreadable"`)
 /// * `path` - The entry's path as the operation names it
-/// * `io_kind` - The description of the I/O failure behind an `"unreadable"`
-///   skip, else `None`
+/// * `io_kind` - The stable kind of the I/O failure behind an `"unreadable"`
+///   skip (`"PermissionDenied"`, ...), else `None`
 #[pyclass(name = "Skip", frozen)]
 pub struct PySkip {
     kind: SkipKind,
@@ -143,7 +146,7 @@ impl From<CoreSkips> for PySkips {
 /// * `duration_ms` - Extraction duration in milliseconds
 /// * `files_skipped` - Number of entries skipped
 /// * `skipped` - The skipped entries by kind
-/// * `warnings` - List of warning messages
+/// * `warnings` - List of typed warnings
 #[pyclass(name = "ExtractionReport")]
 #[derive(Clone)]
 pub struct PyExtractionReport {
@@ -194,19 +197,16 @@ impl PyExtractionReport {
         PySkips::from(self.inner.skipped.clone())
     }
 
-    /// Returns a copy of the warning messages list.
+    /// Returns the typed warnings (`AntiItemsSkippedWarning`,
+    /// `BackupCleanupFailedWarning`).
     ///
     /// # Performance
     ///
-    /// This method clones the entire list on each access. If you need to access
-    /// the warnings multiple times, cache the result in a local variable.
+    /// This method builds a new list on each access. If you need to access the
+    /// warnings multiple times, cache the result in a local variable.
     #[getter]
-    fn warnings(&self) -> Vec<String> {
-        self.inner
-            .warnings
-            .iter()
-            .map(ToString::to_string)
-            .collect()
+    fn warnings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        extraction_warnings(py, &self.inner.warnings)
     }
 
     /// Returns total number of items processed.
@@ -266,7 +266,7 @@ impl From<CoreExtractionReport> for PyExtractionReport {
 /// * `bytes_compressed` - Total compressed bytes
 /// * `duration_ms` - Creation duration in milliseconds
 /// * `files_skipped` - Number of files skipped
-/// * `warnings` - List of warning messages
+/// * `warnings` - List of typed warnings
 #[pyclass(name = "CreationReport")]
 #[derive(Clone)]
 pub struct PyCreationReport {
@@ -316,12 +316,8 @@ impl PyCreationReport {
     }
 
     #[getter]
-    fn warnings(&self) -> Vec<String> {
-        self.inner
-            .warnings
-            .iter()
-            .map(ToString::to_string)
-            .collect()
+    fn warnings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        creation_warnings(py, &self.inner.warnings)
     }
 
     fn total_items(&self) -> usize {
@@ -772,6 +768,16 @@ impl PyVerificationIssue {
             .map(exarch_core::ConfigSetting::as_str)
     }
 
+    /// The stable kind of the I/O failure of an `IO_ERROR` refusal, else
+    /// `None`.
+    #[getter]
+    fn io_kind(&self) -> Option<&'static str> {
+        match self.inner.ffi_kind() {
+            Some(exarch_core::FfiKind::Io(kind)) => Some(exarch_core::IoKind::from(*kind).as_str()),
+            _ => None,
+        }
+    }
+
     /// The permission bits the finding is about (an invalid-permissions
     /// refusal or an executable file), else `None`.
     #[getter]
@@ -1018,7 +1024,7 @@ mod tests {
         assert_eq!(py_report.total_items(), 17, "total_items should be 17");
         assert!(py_report.has_warnings(), "should have warnings");
         assert_eq!(
-            py_report.warnings().len(),
+            warning_count(&py_report),
             1,
             "warnings list should have 1 item"
         );
@@ -1064,7 +1070,7 @@ mod tests {
             "should not have warnings by default"
         );
         assert_eq!(
-            py_report.warnings().len(),
+            warning_count(&py_report),
             0,
             "warnings list should be empty"
         );
@@ -1123,25 +1129,42 @@ mod tests {
         );
     }
 
+    fn warning_count(report: &PyExtractionReport) -> usize {
+        pyo3::Python::initialize();
+        Python::attach(|py| report.warnings(py).expect("warnings build").len())
+    }
+
     #[test]
-    fn test_warnings_clone_behavior() {
+    fn test_warnings_are_typed_and_rebuilt_on_each_access() {
+        pyo3::Python::initialize();
         let mut core_report = CoreExtractionReport::new();
         core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 });
         core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 2 });
-
         let py_report = PyExtractionReport::from(core_report);
 
-        // Get warnings twice to verify clone behavior
-        let warnings1 = py_report.warnings();
-        let warnings2 = py_report.warnings();
-
-        assert_eq!(warnings1.len(), 2, "First call should return 2 warnings");
-        assert_eq!(
-            warnings2.len(),
-            2,
-            "Second call should also return 2 warnings"
-        );
-        assert_eq!(warnings1, warnings2, "Both calls should return equal lists");
+        Python::attach(|py| {
+            for _ in 0..2 {
+                let warnings = py_report.warnings(py).expect("warnings build");
+                assert_eq!(warnings.len(), 2);
+                let second = warnings.get_item(1).expect("second warning");
+                assert!(
+                    second
+                        .cast::<crate::warning::PyAntiItemsSkippedWarning>()
+                        .is_ok()
+                );
+                let count: u64 = second
+                    .getattr("count")
+                    .expect("count")
+                    .extract()
+                    .expect("u64");
+                let kind: String = second
+                    .getattr("kind")
+                    .expect("kind")
+                    .extract()
+                    .expect("str");
+                assert_eq!((count, kind.as_str()), (2, "anti_items_skipped"));
+            }
+        });
     }
 
     #[test]
@@ -1514,6 +1537,45 @@ mod tests {
                 "_DecodeReuse",
                 exarch_core::DecodeReuseKind::ALL,
                 exarch_core::DecodeReuseKind::as_str,
+            ),
+        ];
+        let flat = flatten_literals(pyi);
+        for line in expected {
+            assert!(
+                flat.lines().any(|l| l == flatten_literals(&line).trim()),
+                "exarch.pyi is out of sync with exarch-core, expected alias:\n{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pyi_literal_aliases_match_core_option_and_warning_enums() {
+        let pyi = include_str!("../exarch.pyi");
+        let expected = [
+            literal_line(
+                "_ExistingFiles",
+                exarch_core::ExistingFiles::ALL,
+                exarch_core::ExistingFiles::as_str,
+            ),
+            literal_line(
+                "_IoKind",
+                exarch_core::IoKind::ALL,
+                exarch_core::IoKind::as_str,
+            ),
+            literal_line(
+                "_BackupIdentity",
+                exarch_core::BackupIdentity::ALL,
+                exarch_core::BackupIdentity::as_str,
+            ),
+            literal_line(
+                "_ExtractionWarningKind",
+                exarch_core::ExtractionWarningKind::ALL,
+                exarch_core::ExtractionWarningKind::as_str,
+            ),
+            literal_line(
+                "_CreationWarningKind",
+                exarch_core::creation::CreationWarningKind::ALL,
+                exarch_core::creation::CreationWarningKind::as_str,
             ),
         ];
         let flat = flatten_literals(pyi);

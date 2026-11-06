@@ -15,6 +15,11 @@ the `progress_callback_error` marker (not just `files_extracted`/
 apart from a genuine partial extraction/creation.
 """
 
+import io
+import tarfile
+import threading
+import time
+
 import pytest
 
 import exarch
@@ -114,3 +119,152 @@ def test_create_archive_with_progress_callback_error_propagates(temp_dir):
     # counters describe a finished archive.
     assert not hasattr(err, "files_added")
     assert not archive.exists()
+
+
+def _tar_gz_of(temp_dir, entries):
+    archive = temp_dir / "entries.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for name, data in entries:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return archive
+
+
+def test_raising_callback_stops_extraction_before_the_next_entry(temp_dir):
+    """A raise cancels the extraction instead of running to completion (#973)."""
+    archive = _tar_gz_of(temp_dir, [("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c")])
+    output = temp_dir / "output"
+    output.mkdir()
+    seen = []
+
+    def callback(path, total, current, bytes_written):
+        seen.append(path)
+        if current == 2:
+            raise RuntimeError("stop")
+
+    with pytest.raises(RuntimeError, match="stop") as info:
+        exarch.extract_archive_with_progress(archive, output, None, callback)
+
+    assert seen == ["a.txt", "b.txt"]
+    assert info.value.progress_callback_error is True
+    assert info.value.writes == "kept"
+    assert info.value.files_extracted == 2
+    assert (output / "b.txt").exists()
+    assert not (output / "c.txt").exists()
+
+
+def test_raising_callback_under_atomic_rolls_the_output_back(temp_dir):
+    archive = _tar_gz_of(temp_dir, [("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c")])
+    output = temp_dir / "output"
+    options = exarch.ExtractionOptions().with_atomic(True)
+
+    def callback(path, total, current, bytes_written):
+        if current == 2:
+            raise RuntimeError("stop")
+
+    with pytest.raises(RuntimeError, match="stop") as info:
+        exarch.extract_archive_with_progress(archive, output, None, callback, options)
+
+    assert info.value.progress_callback_error is True
+    assert getattr(info.value, "writes", "rolled_back") == "rolled_back"
+    assert not output.exists()
+
+
+def test_progress_variants_do_not_hold_a_borrow_of_the_config(temp_dir):
+    """A config setter in another thread works while a progress run is under way (#987)."""
+    archive = _tar_gz_of(temp_dir, [("a.txt", b"a"), ("b.txt", b"b")])
+    config = exarch.SecurityConfig()
+    errors = []
+
+    def mutate():
+        try:
+            config.max_file_size = 1024
+            config.allowed_extensions = ["txt"]
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def callback(path, total, current, bytes_written):
+        worker = threading.Thread(target=mutate)
+        worker.start()
+        worker.join()
+
+    output = temp_dir / "output"
+    output.mkdir()
+    exarch.extract_archive_with_progress(archive, output, config, callback)
+    assert errors == []
+    assert config.max_file_size == 1024
+
+    errors.clear()
+    with open(archive, "rb") as handle:
+        exarch.extract_archive_to_memory_with_progress(handle.read(), config, callback)
+    assert errors == []
+
+    errors.clear()
+    created = temp_dir / "created.tar.gz"
+    source = temp_dir / "src"
+    source.mkdir()
+    (source / "f.txt").write_bytes(b"f")
+    creation = exarch.CreationConfig()
+
+    def mutate_creation():
+        try:
+            creation.compression_level = 3
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def creation_callback(path, total, current, bytes_written):
+        worker = threading.Thread(target=mutate_creation)
+        worker.start()
+        worker.join()
+
+    exarch.create_archive_with_progress(created, [source], creation, creation_callback)
+    assert errors == []
+    assert creation.compression_level == 3
+
+
+def test_other_threads_run_while_a_progress_extraction_decodes(temp_dir):
+    """The GIL is released between callbacks, as it is without a callback (#987)."""
+    size = 128 * 1024 * 1024
+    archive = _tar_gz_of(temp_dir, [("big.bin", bytes(size)), ("after.txt", b"x")])
+    output = temp_dir / "output"
+    output.mkdir()
+    stop = threading.Event()
+    armed = threading.Event()
+    first_run = []
+    marks = []
+
+    def spin():
+        while not stop.is_set():
+            if armed.is_set() and not first_run:
+                first_run.append(time.perf_counter())
+
+    worker = threading.Thread(target=spin)
+
+    def callback(path, total, current, bytes_written):
+        if current == 1:
+            worker.start()
+            marks.append(time.perf_counter())
+            armed.set()
+        else:
+            marks.append(time.perf_counter())
+
+    config = (
+        exarch.SecurityConfig()
+        .with_max_file_size(size * 2)
+        .with_max_total_size(size * 2)
+        .with_max_compression_ratio(1e9)
+    )
+    try:
+        exarch.extract_archive_with_progress(archive, output, config, callback)
+    finally:
+        stop.set()
+        if worker.is_alive():
+            worker.join()
+
+    window = marks[1] - marks[0]
+    assert window > 0.02, "the first entry decoded too fast to observe a second thread"
+    assert first_run, "the thread never ran"
+    assert first_run[0] - marks[0] < window / 2, (
+        "the thread had to wait for the extraction to finish: the GIL was held"
+    )

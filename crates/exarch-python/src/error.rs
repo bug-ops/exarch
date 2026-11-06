@@ -5,9 +5,11 @@ use exarch_core::ErrorCode;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
 use exarch_core::FfiSourceFault;
+use exarch_core::IoKind;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting;
 use exarch_core::SubCode;
+use exarch_core::format_entry_path_for_error;
 use pyo3::PyTypeInfo;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -19,6 +21,8 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyDict;
 use pyo3::types::PyType;
+
+use crate::warning::extraction_warnings;
 
 // Base exception for all extraction errors
 create_exception!(exarch, ArchiveError, PyException);
@@ -96,8 +100,11 @@ impl DualClass {
     }
 }
 
-static OUTPUT_EXISTS: DualClass =
-    DualClass::new("OutputExistsError", PyFileExistsError::type_object, &[]);
+static OUTPUT_EXISTS: DualClass = DualClass::new(
+    "OutputExistsError",
+    PyFileExistsError::type_object,
+    &["conflicts"],
+);
 static SOURCE_NOT_FOUND: DualClass =
     DualClass::new("SourceNotFoundError", PyFileNotFoundError::type_object, &[]);
 static SOURCE_NOT_ACCESSIBLE: DualClass =
@@ -168,6 +175,9 @@ fn class_for(code: ErrorCode) -> Option<NewErr> {
 /// This function is a workaround for Rust's orphan rules, which prevent
 /// implementing `From<CoreError> for PyErr` directly.
 pub fn convert_error(err: CoreError) -> PyErr {
+    let os_error = os_error_fields(&err);
+    let conflicts = destination_conflicts(&err);
+    let non_utf8_entry_path = non_utf8_entry_path(&err);
     let FfiErrorMessage {
         kind,
         description,
@@ -177,11 +187,14 @@ pub fn convert_error(err: CoreError) -> PyErr {
     } = err.into_ffi_message();
     let code = kind.code();
     let py_err = if let FfiKind::Io(io_kind) = kind {
-        PyErr::from(std::io::Error::new(io_kind, description))
+        io_error(io_kind, description)
     } else {
         let err = class_for(kind.code()).unwrap_or(new_base_error)(description);
         if let Some(fault) = source_fault {
             set_os_error_fields(&err, &fault);
+        }
+        if let Some(fields) = os_error {
+            set_errno_fields(&err, &fields);
         }
         set_optional_str(
             &err,
@@ -194,6 +207,8 @@ pub fn convert_error(err: CoreError) -> PyErr {
             "setting",
             kind.setting().map(exarch_core::ConfigSetting::as_str),
         );
+        set_attr(&err, "conflicts", conflicts);
+        set_attr(&err, "non_utf8_entry_path", non_utf8_entry_path);
         err
     };
     set_optional_str(&py_err, "code", Some(code.as_str()));
@@ -203,16 +218,92 @@ pub fn convert_error(err: CoreError) -> PyErr {
     py_err
 }
 
-/// The `InvalidCompressionLevelError` for a level a binding refused before
-/// the core saw it, with the same `code` the core error would carry.
-pub fn compression_level_error(description: String) -> PyErr {
-    let err = INVALID_COMPRESSION_LEVEL.error(description);
-    set_optional_str(
-        &err,
-        "code",
-        Some(ErrorCode::InvalidCompressionLevel.as_str()),
-    );
+/// The builtin `OSError` of an I/O failure, carrying its stable `io_kind`.
+///
+/// `ErrorKind::OutOfMemory` becomes a plain `OSError` instead of the
+/// `MemoryError` `PyO3` would pick, so every I/O failure is an `OSError`.
+fn io_error(kind: std::io::ErrorKind, description: String) -> PyErr {
+    let err = if kind == std::io::ErrorKind::OutOfMemory {
+        PyOSError::new_err(description)
+    } else {
+        PyErr::from(std::io::Error::new(kind, description))
+    };
+    set_optional_str(&err, "io_kind", Some(IoKind::from(kind).as_str()));
     err
+}
+
+/// The `errno` name and redacted file name of a refusal that is also a
+/// builtin `OSError` (`FileNotFoundError`, `FileExistsError`).
+struct OsErrorFields {
+    errno: &'static str,
+    filename: String,
+}
+
+fn os_error_fields(err: &CoreError) -> Option<OsErrorFields> {
+    let errno = match err.ffi_kind() {
+        FfiKind::SourceNotFound => "ENOENT",
+        FfiKind::OutputExists => "EEXIST",
+        _ => return None,
+    };
+    err.redacted_path()
+        .map(|filename| OsErrorFields { errno, filename })
+}
+
+/// The archive-relative paths a `DestinationOccupied` refusal names.
+fn destination_conflicts(err: &CoreError) -> Option<Vec<String>> {
+    match err {
+        CoreError::DestinationOccupied { conflicts, .. } => Some(
+            conflicts
+                .iter()
+                .map(|path| format_entry_path_for_error(path))
+                .collect(),
+        ),
+        CoreError::PartialExtraction(partial) => destination_conflicts(partial.cause()),
+        _ => None,
+    }
+}
+
+/// The injective rendering of the entry path a listing or in-memory extraction
+/// refused for not being valid UTF-8.
+fn non_utf8_entry_path(err: &CoreError) -> Option<String> {
+    match err {
+        CoreError::InvalidArchive(exarch_core::Malformation::EntryPathNotUtf8 { path }) => {
+            Some(format_entry_path_for_error(path))
+        }
+        CoreError::PartialExtraction(partial) => non_utf8_entry_path(partial.cause()),
+        _ => None,
+    }
+}
+
+/// Sets `errno`, `strerror` and `filename` the way `open()` fills them for the
+/// same failure.
+fn set_errno_fields(err: &PyErr, fields: &OsErrorFields) {
+    Python::attach(|py| {
+        let fill = || -> PyResult<()> {
+            let errno: i32 = py.import("errno")?.getattr(fields.errno)?.extract()?;
+            let strerror = py.import("os")?.call_method1("strerror", (errno,))?;
+            let value = err.value(py);
+            value.setattr("errno", errno)?;
+            value.setattr("strerror", strerror)?;
+            value.setattr("filename", fields.filename.as_str())
+        };
+        // Best-effort, like the other attributes: the exception is raised
+        // either way.
+        let _ = fill();
+    });
+}
+
+/// Sets `name` on the exception when `value` is present.
+fn set_attr<T>(err: &PyErr, name: &str, value: Option<T>)
+where
+    for<'py> T: IntoPyObject<'py>,
+{
+    if let Some(value) = value {
+        Python::attach(|py| {
+            // setattr failures are silenced to preserve the `PyErr` signature.
+            let _ = err.value(py).setattr(name, value);
+        });
+    }
 }
 
 /// Sets `name` on the exception when `value` is present; otherwise the class
@@ -243,7 +334,7 @@ fn set_os_error_fields(err: &PyErr, fault: &FfiSourceFault) {
 
 /// Attaches `writes`, and while the writes remain on disk the report counters
 /// (#210, #508), to the concrete exception of a partial extraction.
-fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
+pub fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
     Python::attach(|py| {
         let exc_value = err.value(py);
         // setattr failures are silenced to preserve the `PyErr` signature; the
@@ -257,14 +348,9 @@ fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
                 "skipped",
                 crate::report::PySkips::from(report.skipped.clone()),
             );
-            let _ = exc_value.setattr(
-                "warnings",
-                report
-                    .warnings
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<String>>(),
-            );
+            if let Ok(warnings) = extraction_warnings(py, &report.warnings) {
+                let _ = exc_value.setattr("warnings", warnings);
+            }
         }
     });
 }
@@ -311,6 +397,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SecurityViolationError", security_violation)?;
     let invalid_archive = m.py().get_type::<InvalidArchiveError>();
     invalid_archive.setattr("sub_code", m.py().None())?;
+    invalid_archive.setattr("non_utf8_entry_path", m.py().None())?;
     m.add("InvalidArchiveError", invalid_archive)?;
     for dual in DUAL_CLASSES {
         m.add(dual.name, dual.class(m.py())?)?;
@@ -830,14 +917,15 @@ mod tests {
 
     #[test]
     fn test_source_not_found_conversion() {
+        pyo3::Python::initialize();
         let err = CoreError::SourceNotFound {
             path: PathBuf::from("missing_source.tar.gz"),
         };
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
         assert!(
-            err_str.contains("source path not found"),
-            "Expected 'source path not found' in error message, got: {}",
+            err_str.contains("No such file or directory"),
+            "Expected the errno text in error message, got: {}",
             err_str
         );
         assert!(
@@ -992,16 +1080,21 @@ mod tests {
                 .expect("files_skipped missing")
                 .extract()
                 .expect("files_skipped not usize");
-            let warnings: Vec<String> = exc_value
-                .getattr("warnings")
-                .expect("warnings missing")
-                .extract()
-                .expect("warnings not list[str]");
+            let warnings = exc_value.getattr("warnings").expect("warnings missing");
             assert_eq!(files_skipped, 2);
-            assert_eq!(
-                warnings,
-                vec!["skipped 2 7z anti-items (deletion markers are not applied)"]
+            assert_eq!(warnings.len().expect("a list"), 1);
+            let warning = warnings.get_item(0).expect("one warning");
+            let (kind, message, count): (String, String, u64) = (
+                warning.getattr("kind").unwrap().extract().unwrap(),
+                warning.getattr("message").unwrap().extract().unwrap(),
+                warning.getattr("count").unwrap().extract().unwrap(),
             );
+            assert_eq!(kind, "anti_items_skipped");
+            assert_eq!(
+                message,
+                "skipped 2 7z anti-items (deletion markers are not applied)"
+            );
+            assert_eq!(count, 2);
         });
     }
 
@@ -1168,5 +1261,101 @@ mod tests {
 
         let py_err = convert_error(err);
         assert_partial_extraction_report::<SecurityViolationError>(&py_err, 2, 512);
+    }
+
+    fn attr_str(err: &PyErr, name: &str) -> Option<String> {
+        Python::attach(|py| {
+            err.value(py)
+                .getattr(name)
+                .ok()
+                .and_then(|value| value.extract().ok())
+        })
+    }
+
+    #[test]
+    fn test_io_error_carries_io_kind_and_out_of_memory_is_an_oserror() {
+        pyo3::Python::initialize();
+        for (kind, expected) in [
+            (std::io::ErrorKind::PermissionDenied, "PermissionDenied"),
+            (std::io::ErrorKind::StorageFull, "StorageFull"),
+            (std::io::ErrorKind::OutOfMemory, "OutOfMemory"),
+        ] {
+            let py_err = convert_error(CoreError::Io(std::io::Error::from(kind)));
+            Python::attach(|py| {
+                assert!(
+                    py_err.is_instance_of::<PyOSError>(py),
+                    "{kind:?} must be an OSError"
+                );
+            });
+            assert_eq!(attr_str(&py_err, "io_kind").as_deref(), Some(expected));
+            assert_eq!(attr_str(&py_err, "code").as_deref(), Some("IO_ERROR"));
+        }
+    }
+
+    #[test]
+    fn test_source_not_found_and_output_exists_carry_os_error_fields() {
+        pyo3::Python::initialize();
+        let cases = [
+            (
+                CoreError::SourceNotFound {
+                    path: PathBuf::from("dir/nothere"),
+                },
+                2_i32,
+            ),
+            (
+                CoreError::OutputExists {
+                    path: PathBuf::from("dir/ex.tar"),
+                },
+                17,
+            ),
+        ];
+        for (err, errno) in cases {
+            let filename = err.redacted_path();
+            let py_err = convert_error(err);
+            Python::attach(|py| {
+                let value = py_err.value(py);
+                let raised: i32 = value.getattr("errno").unwrap().extract().unwrap();
+                assert_eq!(raised, errno);
+                let name: String = value.getattr("filename").unwrap().extract().unwrap();
+                assert_eq!(Some(name), filename);
+                let strerror: String = value.getattr("strerror").unwrap().extract().unwrap();
+                assert!(!strerror.is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn test_destination_occupied_names_its_conflicts() {
+        pyo3::Python::initialize();
+        let err = CoreError::DestinationOccupied {
+            destination: PathBuf::from("/srv/out"),
+            conflicts: vec![PathBuf::from("a/b.txt")].into_boxed_slice(),
+        };
+        let py_err = convert_error(err);
+        Python::attach(|py| {
+            let class = OUTPUT_EXISTS.class(py).unwrap();
+            assert!(py_err.matches(py, class).unwrap());
+            let conflicts: Vec<String> = py_err
+                .value(py)
+                .getattr("conflicts")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(conflicts, vec!["a/b.txt"]);
+        });
+        assert_eq!(attr_str(&py_err, "code").as_deref(), Some("OUTPUT_EXISTS"));
+    }
+
+    #[test]
+    fn test_non_utf8_entry_path_is_attached() {
+        pyo3::Python::initialize();
+        let err = CoreError::from(exarch_core::Malformation::EntryPathNotUtf8 {
+            path: PathBuf::from("a/b.txt"),
+        });
+        let py_err = convert_error(err);
+        assert_eq!(
+            attr_str(&py_err, "non_utf8_entry_path").as_deref(),
+            Some("a/b.txt")
+        );
     }
 }

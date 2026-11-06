@@ -1455,9 +1455,9 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * relative to the link. A `'hardlink'` entry is delivered by reference after
  * every other entry: its `target` is the root-relative resolved path of an
  * entry already delivered, a file or an earlier hardlink (a chain is
- * delivered link by link). With `existingFiles` set to `'overwrite'` one path can be delivered
- * more than once and a hardlink refers to the latest delivery. Implicit
- * parent directories are not delivered.
+ * delivered link by link). With `existingFiles` set to `'overwrite'` one path
+ * can be delivered more than once and a hardlink refers to the latest
+ * delivery. Implicit parent directories are not delivered.
  *
  * # Arguments
  *
@@ -1727,8 +1727,8 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * - The callback's throw stopped the extraction, or the last entry's callback
  *   threw after it succeeded: `code` is `PROGRESS_CALLBACK_ERROR`, `writes` is
  *   `'kept'` (or `'rolled_back'` for an atomic extraction) and, when kept,
- *   `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped` and
- *   `warnings` are set, so the caller can still see what was written to disk.
+ *   `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped` and `warnings`
+ *   are set, so the caller can still see what was written to disk.
  * - Extraction also failed on its own: the core error stays primary and keeps
  *   its `code`; the callback's throw is attached as `cause`. A throwing
  *   callback can never mask a security error such as `SYMLINK_ESCAPE`.

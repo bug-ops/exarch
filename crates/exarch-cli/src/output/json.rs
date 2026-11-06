@@ -400,8 +400,11 @@ mod tests {
     #[test]
     fn a_closed_stdout_is_not_a_failure() {
         let mut f = JsonFormatter::with_writer(FailingWriter(io::ErrorKind::BrokenPipe));
-        f.format_manifest(&sample_manifest(), ManifestView::Short)
-            .expect("a reader that stopped reading is not an error");
+        assert!(
+            f.format_manifest(&sample_manifest(), ManifestView::Short)
+                .is_ok(),
+            "a reader that stopped reading is not an error"
+        );
     }
 
     #[test]

@@ -88,7 +88,7 @@ impl From<&crate::cli::Cli> for OutputMode {
 /// internal buffering), turning one logical line into several syscalls.
 /// Formatting into a `String` first and writing it in one call restores the
 /// single-write-per-line behavior of the old `Term::write_line`.
-pub(crate) fn emit_line<W: Write>(writer: &mut W, args: std::fmt::Arguments<'_>) {
+pub fn emit_line<W: Write>(writer: &mut W, args: std::fmt::Arguments<'_>) {
     use std::fmt::Write as _;
     let mut line = String::new();
     let _ = line.write_fmt(args);
@@ -97,7 +97,7 @@ pub(crate) fn emit_line<W: Write>(writer: &mut W, args: std::fmt::Arguments<'_>)
 }
 
 /// Writes a single blank line in one call. See [`emit_line`].
-pub(crate) fn emit_blank<W: Write>(writer: &mut W) {
+pub fn emit_blank<W: Write>(writer: &mut W) {
     let _ = writer.write_all(b"\n");
 }
 

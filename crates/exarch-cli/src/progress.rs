@@ -256,8 +256,10 @@ mod tests {
     fn verbose_progress_writes_one_line_per_entry() {
         let mut p = VerboseProgress::with_writer(Operation::Extract, Vec::new());
         p.on_entry_start(Path::new("a/b.txt"), position(1, EntryTotal::Unknown));
-        let line = String::from_utf8(p.writer).expect("utf-8");
-        assert_eq!(line, format!("  {}  a/b.txt\n", Operation::Extract.name()));
+        assert_eq!(
+            p.writer,
+            format!("  {}  a/b.txt\n", Operation::Extract.name()).into_bytes()
+        );
     }
 
     #[test]

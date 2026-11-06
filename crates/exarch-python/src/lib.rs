@@ -611,9 +611,7 @@ fn merge_progress_result<T>(
             let _ = exc_value.setattr("progress_callback_error", true);
             Err(err)
         }
-        (Err(exarch_core::ArchiveError::Io(io)), Some(cb_err))
-            if io.kind() == std::io::ErrorKind::Interrupted =>
-        {
+        (Err(error), Some(cb_err)) if error.is_cancelled() => {
             // The core stopped because the callback asked it to (see
             // `PyProgressAdapter::is_cancelled`); the callback's own exception
             // wins.
@@ -1059,7 +1057,8 @@ mod tests {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let path = PyString::new(py, "/tmp/test.tar.gz").into_any();
-            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
+            let result = path_to_boundary(py, &path.as_borrowed())
+                .map(|path| path.as_path().display().to_string());
             assert!(
                 result.is_ok(),
                 "Failed to convert string path: {:?}",
@@ -1074,7 +1073,8 @@ mod tests {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let path = PyString::new(py, "").into_any();
-            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
+            let result = path_to_boundary(py, &path.as_borrowed())
+                .map(|path| path.as_path().display().to_string());
             assert!(
                 result.is_ok(),
                 "Failed to convert empty path: {:?}",
@@ -1093,7 +1093,8 @@ mod tests {
             let path = path_class
                 .call1(("/tmp/test.tar.gz",))
                 .expect("Failed to create Path object");
-            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
+            let result = path_to_boundary(py, &path.as_borrowed())
+                .map(|path| path.as_path().display().to_string());
             assert!(
                 result.is_ok(),
                 "Failed to convert Path object: {:?}",
@@ -1108,7 +1109,8 @@ mod tests {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let path = PyString::new(py, "/tmp/test\0malicious.tar.gz").into_any();
-            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
+            let result = path_to_boundary(py, &path.as_borrowed())
+                .map(|path| path.as_path().display().to_string());
             assert!(result.is_err(), "Should reject path with null bytes");
             let err_str = result.unwrap_err().to_string();
             assert!(
@@ -1125,7 +1127,8 @@ mod tests {
         Python::attach(|py| {
             let long_path = "x".repeat(MAX_PATH_LENGTH + 1);
             let path = PyString::new(py, &long_path).into_any();
-            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
+            let result = path_to_boundary(py, &path.as_borrowed())
+                .map(|path| path.as_path().display().to_string());
             assert!(result.is_err(), "Should reject excessively long path");
             let err_str = result.unwrap_err().to_string();
             assert!(
@@ -1142,7 +1145,8 @@ mod tests {
         Python::attach(|py| {
             let max_path = "x".repeat(MAX_PATH_LENGTH);
             let path = PyString::new(py, &max_path).into_any();
-            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
+            let result = path_to_boundary(py, &path.as_borrowed())
+                .map(|path| path.as_path().display().to_string());
             assert!(
                 result.is_ok(),
                 "Should accept path at maximum length: {:?}",

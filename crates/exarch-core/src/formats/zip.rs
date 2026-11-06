@@ -912,7 +912,10 @@ impl<R: Read + Seek> ZipArchive<R> {
                 }
             };
             let position = EntryPosition::at_index(i, EntryTotal::Known(entry_count));
-            let mut guard = EntryCompleteGuard::start(progress, &entry_path, position);
+            let mut guard = match EntryCompleteGuard::try_start(progress, &entry_path, position) {
+                Ok(guard) => guard,
+                Err(e) => return Err(ArchiveError::partial_or(std::mem::take(&mut report), e)),
+            };
 
             let mut ctx = ZipExtractionContext {
                 tally: Tally {

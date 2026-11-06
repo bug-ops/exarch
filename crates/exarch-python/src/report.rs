@@ -70,7 +70,7 @@ impl From<&CoreSkip> for PySkip {
         Self {
             kind: skip.kind,
             path: skip.path.clone(),
-            io_kind: skip.io_kind.map(|kind| kind.to_string()),
+            io_kind: skip.io_kind.map(|kind| kind.as_str().to_owned()),
         }
     }
 }

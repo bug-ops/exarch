@@ -280,11 +280,7 @@ impl ArchiveEntry {
     /// # Ok::<(), exarch_core::Malformation>(())
     /// ```
     pub fn utf8_path(&self) -> std::result::Result<&str, Malformation> {
-        self.path
-            .to_str()
-            .ok_or_else(|| Malformation::EntryPathNotUtf8 {
-                path: self.path.clone(),
-            })
+        crate::utf8_entry_path(&self.path)
     }
 
     /// Returns the uncompressed size in bytes: the size of a regular file, and

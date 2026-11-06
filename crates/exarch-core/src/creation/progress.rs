@@ -59,7 +59,7 @@ use std::path::Path;
 /// let total_entries = 10;
 /// let mut tracker = ProgressTracker::new(&mut progress, total_entries);
 ///
-/// let mut entry = tracker.begin(Path::new("file1.txt"));
+/// let mut entry = tracker.begin(Path::new("file1.txt"))?;
 /// // ... process entry, passing `entry.progress_mut()` to helpers ...
 /// entry.complete();
 /// ```
@@ -111,11 +111,16 @@ impl<'a> ProgressTracker<'a> {
     /// completion when completed or dropped, including on an early `?` return.
     ///
     /// Automatically increments the current entry counter.
-    pub fn begin<'p>(&'p mut self, path: &'p Path) -> EntryCompleteGuard<'p> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::Cancelled`](crate::ArchiveError::Cancelled)
+    /// without announcing the entry when the callback asks to stop.
+    pub fn begin<'p>(&'p mut self, path: &'p Path) -> crate::Result<EntryCompleteGuard<'p>> {
         let position =
             EntryPosition::at_index(self.current_entry, EntryTotal::Known(self.total_entries));
         self.current_entry += 1;
-        EntryCompleteGuard::start(&mut *self.progress, path, position)
+        EntryCompleteGuard::try_start(&mut *self.progress, path, position)
     }
 
     /// Reports that the entire operation completed.
@@ -131,7 +136,8 @@ impl<'a> ProgressTracker<'a> {
     ///
     /// # Errors
     ///
-    /// Returns an [`ArchiveError::Io`] of kind `Interrupted` when cancelled.
+    /// Returns [`ArchiveError::Cancelled`](crate::ArchiveError::Cancelled) when
+    /// cancelled.
     pub fn check_cancelled(&mut self) -> crate::Result<()> {
         check_cancelled(&mut *self.progress)
     }
@@ -311,17 +317,15 @@ impl<R> Drop for ProgressReader<'_, R> {
     }
 }
 
-/// The error of a creation a progress callback cancelled.
+/// Polls `progress` for a cancellation.
 ///
 /// # Errors
 ///
-/// Returns it when `progress` is cancelled.
+/// Returns [`ArchiveError::Cancelled`](crate::ArchiveError::Cancelled) when
+/// `progress` is cancelled.
 pub fn check_cancelled(progress: &mut dyn ProgressCallback) -> crate::Result<()> {
     if progress.is_cancelled() {
-        return Err(crate::ArchiveError::Io(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "creation cancelled by the progress callback",
-        )));
+        return Err(crate::ArchiveError::Cancelled);
     }
     Ok(())
 }
@@ -365,8 +369,8 @@ mod tests {
         let mut progress = TestProgress::default();
         let mut tracker = ProgressTracker::new(&mut progress, 3);
 
-        tracker.begin(Path::new("file1.txt")).complete();
-        drop(tracker.begin(Path::new("file2.txt")));
+        tracker.begin(Path::new("file1.txt")).unwrap().complete();
+        drop(tracker.begin(Path::new("file2.txt")).unwrap());
 
         tracker.on_complete();
 

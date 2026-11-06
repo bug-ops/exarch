@@ -213,7 +213,7 @@ impl From<&Skips> for JsonSkips {
                 .map(|skip| JsonSkip {
                     kind: skip.kind.as_str(),
                     path: path_text(&skip.path),
-                    io_kind: skip.io_kind.map(|kind| kind.to_string()),
+                    io_kind: skip.io_kind.map(|kind| kind.as_str().to_owned()),
                 })
                 .collect(),
         }

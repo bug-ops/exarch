@@ -240,7 +240,7 @@ fn a_cancelling_progress_callback_discards_the_staged_file_and_keeps_the_previou
             .create(&OutputFile::replace(&output), &[src.path()])
             .unwrap_err();
 
-        assert_matches!(err, ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::Interrupted);
+        assert_matches!(err, ArchiveError::Cancelled);
         assert_eq!(fs::read(&output).unwrap(), before, "{name}");
         assert_eq!(dir_names(dir.path()), [name], "{name}");
     }

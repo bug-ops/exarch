@@ -1,6 +1,9 @@
 //! Validated destination directory type.
 
 use crate::ArchiveError;
+use crate::ConfigProblem;
+use crate::ConfigSetting;
+use crate::IoContext;
 use crate::Result;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView as _;
@@ -117,23 +120,29 @@ impl DestDir {
         if !path.exists() {
             return Err(ArchiveError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("destination directory does not exist: {}", path.display()),
+                IoContext::new(
+                    "destination directory does not exist",
+                    path.display().to_string(),
+                ),
             )));
         }
 
         // Verify it's a directory
         if !path.is_dir() {
-            return Err(ArchiveError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("path is not a directory: {}", path.display()),
-            )));
+            return Err(ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::OutputPath,
+                problem: ConfigProblem::NotADirectory,
+            });
         }
 
         // Canonicalize to absolute path
         let canonical = path.canonicalize().map_err(|e| {
             ArchiveError::Io(std::io::Error::new(
                 e.kind(),
-                format!("failed to canonicalize path {}: {}", path.display(), e),
+                IoContext::new(
+                    "failed to canonicalize path",
+                    format!("{}: {e}", path.display()),
+                ),
             ))
         })?;
 
@@ -160,7 +169,7 @@ impl DestDir {
             if result != 0 {
                 return Err(ArchiveError::Io(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    format!("directory is not writable: {}", canonical.display()),
+                    IoContext::new("directory is not writable", canonical.display().to_string()),
                 )));
             }
         }
@@ -193,10 +202,9 @@ impl DestDir {
         std::fs::create_dir_all(&path).map_err(|e| {
             ArchiveError::Io(std::io::Error::new(
                 e.kind(),
-                format!(
-                    "failed to create destination directory '{}': {}",
-                    path.display(),
-                    e
+                IoContext::new(
+                    "failed to create destination directory",
+                    format!("{}: {e}", path.display()),
                 ),
             ))
         })?;

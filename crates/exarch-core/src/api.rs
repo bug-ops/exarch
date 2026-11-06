@@ -8,6 +8,7 @@ use crate::CreateRequest;
 use crate::EntrySink;
 use crate::ExtractRequest;
 use crate::ExtractionReport;
+use crate::IoContext;
 use crate::OutputFile;
 use crate::OutputFormat;
 use crate::ProgressCallback;
@@ -19,6 +20,7 @@ use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
+use crate::formats::common::open_archive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::CreatableFormat;
@@ -155,9 +157,9 @@ fn extract_atomic(
         .map_err(|e| {
             ArchiveError::Io(std::io::Error::new(
                 e.kind(),
-                format!(
-                    "failed to create temp directory in {}: {e}",
-                    parent.display()
+                IoContext::new(
+                    "failed to create temp directory",
+                    format!("{}: {e}", parent.display()),
                 ),
             ))
         })?;
@@ -179,7 +181,10 @@ fn extract_atomic(
                 } else {
                     ArchiveError::Io(std::io::Error::new(
                         e.kind(),
-                        format!("failed to rename temp dir to {}: {e}", output_dir.display()),
+                        IoContext::new(
+                            "failed to rename temp dir into place",
+                            format!("{}: {e}", output_dir.display()),
+                        ),
                     ))
                 }
             })?;
@@ -246,9 +251,7 @@ fn extract_zip(
 ) -> Result<ExtractionReport> {
     use crate::formats::ZipArchive;
     use crate::formats::traits::ArchiveFormat;
-    use std::fs::File;
-
-    let file = File::open(archive_path)?;
+    let file = open_archive(archive_path)?;
     let archive = ZipArchive::for_extraction(file, config, options.decode_reuse)?;
     archive.extract(output_dir, options, progress)
 }
@@ -262,9 +265,7 @@ fn extract_7z(
 ) -> Result<ExtractionReport> {
     use crate::formats::SevenZArchive;
     use crate::formats::traits::ArchiveFormat;
-    use std::fs::File;
-
-    let file = File::open(archive_path)?;
+    let file = open_archive(archive_path)?;
     let archive = SevenZArchive::new(file, config)?;
     archive.extract(output_dir, options, progress)
 }

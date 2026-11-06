@@ -143,10 +143,12 @@ pub use limit::positive_from_f64;
 pub use limit::positive_from_i128;
 pub use reader::ArchiveReader;
 pub use reader::SeekableFormat;
+pub use report::BackupIdentity;
 pub use report::EntryPosition;
 pub use report::EntryTotal;
 pub use report::ExtractionReport;
 pub use report::ExtractionWarning;
+pub use report::ExtractionWarningKind;
 pub use report::NoopProgress;
 pub use report::ProgressCallback;
 pub use report::Skip;
@@ -166,6 +168,7 @@ pub use request::VerifyRequest;
 pub use creation::CreationConfig;
 pub use creation::CreationReport;
 pub use creation::CreationWarning;
+pub use creation::CreationWarningKind;
 pub use creation::ExcludePattern;
 pub use writer::ArchiveWriter;
 
@@ -197,6 +200,7 @@ pub use inspection::VerificationReport;
 pub use inspection::VerificationStatus;
 pub use path_text::bytes_text;
 pub use path_text::path_text;
+pub use path_text::utf8_entry_path;
 pub use security::fs_view::LinkKind;
 
 // Re-export security types

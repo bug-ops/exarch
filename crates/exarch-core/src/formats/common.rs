@@ -139,6 +139,19 @@ impl TempSpool {
     }
 }
 
+/// Opens the archive at `path` for reading.
+///
+/// A missing archive is [`ArchiveError::SourceNotFound`] and any other failure
+/// is [`ArchiveError::SourceNotAccessible`], the classification creation
+/// already gives its sources, so every front end can point at the archive path.
+///
+/// # Errors
+///
+/// See above.
+pub(crate) fn open_archive(path: &Path) -> Result<File> {
+    File::open(path).map_err(|error| crate::creation::source::source_error(path, error))
+}
+
 /// Opens the anonymous spool, or `None` where none can be created.
 ///
 /// WASI has no temporary directory and `std::env::temp_dir` panics there, so
@@ -154,9 +167,13 @@ pub fn open_spool() -> Option<TempSpool> {
 
 /// RAII guard that calls `on_entry_complete` when dropped.
 ///
-/// The only way to build one is [`EntryCompleteGuard::start`], which fires
+/// The only way to build one is [`EntryCompleteGuard::try_start`], which fires
 /// `on_entry_start`, so `on_entry_complete` is paired with it on every path,
 /// including an early `?` return.
+///
+/// `try_start` is the single per-entry cancellation hook of extraction,
+/// listing, verification and creation: it polls
+/// [`ProgressCallback::is_cancelled`] before announcing an entry.
 pub struct EntryCompleteGuard<'a> {
     progress: &'a mut dyn ProgressCallback,
     path: &'a std::path::Path,
@@ -166,17 +183,25 @@ pub struct EntryCompleteGuard<'a> {
 impl<'a> EntryCompleteGuard<'a> {
     /// Fires `on_entry_start` and returns the guard that will fire
     /// `on_entry_complete` on drop unless [`complete`](Self::complete) ran.
-    pub fn start(
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::Cancelled`] without announcing the entry when
+    /// the callback asks to stop.
+    pub fn try_start(
         progress: &'a mut dyn ProgressCallback,
         path: &'a std::path::Path,
         position: EntryPosition,
-    ) -> Self {
+    ) -> Result<Self> {
+        if progress.is_cancelled() {
+            return Err(ArchiveError::Cancelled);
+        }
         progress.on_entry_start(path, position);
-        Self {
+        Ok(Self {
             progress,
             path,
             fired: false,
-        }
+        })
     }
 
     /// Returns a mutable reference to the underlying progress callback.
@@ -514,9 +539,12 @@ pub fn create_temp_sibling(
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
-        format!(
-            "failed to create a unique temp file for {} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
-            crate::path_text(Path::new(entry.as_os_str()))
+        crate::IoContext::new(
+            "failed to create a unique temp file",
+            format!(
+                "{} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
+                crate::path_text(Path::new(entry.as_os_str()))
+            ),
         ),
     ))
 }
@@ -614,9 +642,9 @@ fn commit_output(
 fn replace_error(rel: &Path, err: &std::io::Error) -> std::io::Error {
     std::io::Error::new(
         err.kind(),
-        format!(
-            "cannot replace the existing file at {}: {err}",
-            crate::path_text(rel)
+        crate::IoContext::new(
+            "cannot replace the existing file",
+            format!("{}: {err}", crate::path_text(rel)),
         ),
     )
 }
@@ -1946,11 +1974,12 @@ mod tests {
         let mut progress = Panicking(0);
         let path = PathBuf::from("f");
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            EntryCompleteGuard::start(
+            EntryCompleteGuard::try_start(
                 &mut progress,
                 &path,
                 crate::EntryPosition::at_index(0, crate::EntryTotal::Known(1)),
             )
+            .unwrap()
             .complete();
         }));
         assert!(outcome.is_err());

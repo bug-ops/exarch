@@ -15,6 +15,7 @@ use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::common::check_entry_name_limits;
 use crate::formats::common::is_extension_allowed;
+use crate::formats::common::open_archive;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::inspection::integrity::IntegrityOutcome;
@@ -369,11 +370,11 @@ pub(crate) fn verify_archive_with_progress<P: AsRef<Path>>(
     let format = detect_format(archive_path)?;
     let report = match format.family() {
         FormatFamily::Seekable(SeekableFormat::Zip) => {
-            let file = std::fs::File::open(archive_path)?;
+            let file = open_archive(archive_path)?;
             ZipArchive::new(file, config)?.verify_with_progress(config, options, progress)?
         }
         FormatFamily::Seekable(SeekableFormat::SevenZ) => {
-            let file = std::fs::File::open(archive_path)?;
+            let file = open_archive(archive_path)?;
             SevenZArchive::new(file, config)?.verify_with_progress(config, options, progress)?
         }
         FormatFamily::Tar(_) => verify_with(config, options, progress, |listing| {
@@ -502,7 +503,7 @@ fn oversized_entry_issues(oversized: &[OversizedEntry]) -> Vec<VerificationIssue
     let name_too_long_issue = |detail: String| {
         let error = ArchiveError::Io(std::io::Error::new(
             name_too_long().kind(),
-            format!("{}: {detail}", name_too_long()),
+            crate::IoContext::new("file name too long", detail),
         ));
         VerificationIssue::from_error(&error, None)
     };

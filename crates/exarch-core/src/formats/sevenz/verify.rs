@@ -98,7 +98,7 @@ pub fn verify_sevenz_blocks<R: Read + Seek>(
                     capture.mark_unreadable(header, indices());
                 }
                 mark_files(pass, header, refusal.unverified(), indices());
-                announce_skipped(progress, header, indices());
+                announce_skipped(progress, header, indices())?;
                 return Ok(());
             }
             RefusalScope::Block(index) => refused[index.get()] = Some(refusal.unverified()),
@@ -119,7 +119,7 @@ pub fn verify_sevenz_blocks<R: Read + Seek>(
                 capture.mark_unreadable(header, indices());
             }
             mark_files(pass, header, reason, indices());
-            announce_skipped(progress, header, indices());
+            announce_skipped(progress, header, indices())?;
         } else {
             let capture = links.as_mut().map(|capture| LinkCapture {
                 links: capture.links,
@@ -146,10 +146,11 @@ fn announce_skipped(
     progress: &mut Progress<'_>,
     header: &SevenZHeader,
     indices: impl Iterator<Item = usize>,
-) {
+) -> Result<()> {
     for index in indices {
-        progress.begin(&file_path(header, index)).complete();
+        progress.begin(&file_path(header, index))?.complete();
     }
+    Ok(())
 }
 
 /// Marks the archive files at `indices` as unverified for `reason`.
@@ -227,7 +228,13 @@ fn visit_announced(
         return scan.visit(file, reader);
     }
     let path = file_path(header, index);
-    let in_flight = progress.begin(&path);
+    let in_flight = match progress.begin(&path) {
+        Ok(guard) => guard,
+        Err(error) => {
+            scan.stop = Some(BlockStop::Fatal(error));
+            return false;
+        }
+    };
     let keep_going = scan.visit(file, reader);
     in_flight.complete();
     keep_going
@@ -259,13 +266,13 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
 
     if payload.iter().any(|&(_, slot)| !pass.is_admitted(slot)) {
         mark_files(pass, header, UnverifiedReason::ResourceLimit, all.clone());
-        announce_skipped(progress, header, all);
+        announce_skipped(progress, header, all)?;
         return Ok(());
     }
 
     if !pass.try_charge(block_charge(block)) {
         mark_files(pass, header, UnverifiedReason::OverBudget, all.clone());
-        announce_skipped(progress, header, all);
+        announce_skipped(progress, header, all)?;
         return Ok(());
     }
 
@@ -293,7 +300,7 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
     let (stop, visited) = (scan.stop.take(), scan.visited);
 
     let unvisited: Vec<usize> = all.filter(|index| !visited.contains(index)).collect();
-    announce_skipped(progress, header, unvisited.iter().copied());
+    announce_skipped(progress, header, unvisited.iter().copied())?;
     match (stop, result) {
         (Some(BlockStop::Fatal(e)), _) => return Err(e),
         (Some(BlockStop::Abandoned(reason)), _) => {

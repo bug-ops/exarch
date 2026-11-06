@@ -1,6 +1,5 @@
 //! Archive listing implementation.
 
-use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -26,6 +25,7 @@ use crate::formats::common::check_entry_name_limits;
 use crate::formats::common::encrypted_archive_error;
 use crate::formats::common::is_extension_allowed;
 use crate::formats::common::normalize_entry_name;
+use crate::formats::common::open_archive;
 use crate::formats::common::symlink_target_too_large;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
@@ -228,14 +228,19 @@ impl Progress<'_> {
 
     /// Announces the entry at `path`; the guard closes it when completed or
     /// dropped, including on an early `?` return.
-    pub(crate) fn begin<'p>(&'p mut self, path: &'p Path) -> EntryCompleteGuard<'p> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::Cancelled`] without announcing the entry when
+    /// the callback asks to stop.
+    pub(crate) fn begin<'p>(&'p mut self, path: &'p Path) -> Result<EntryCompleteGuard<'p>> {
         let position = crate::EntryPosition::at_index(self.started, self.total);
         self.started += 1;
         let callback: &'p mut dyn ProgressCallback = match &mut self.reporter {
             Reporter::Noop(noop) => noop,
             Reporter::Callback(callback) => &mut **callback,
         };
-        EntryCompleteGuard::start(callback, path, position)
+        EntryCompleteGuard::try_start(callback, path, position)
     }
 }
 
@@ -500,7 +505,7 @@ fn list_tar_entries<R: std::io::Read>(
                 mode: pass_mode,
                 progress,
             } = &mut *listing;
-            let in_flight = progress.begin(&archive_entry.path);
+            let in_flight = progress.begin(&archive_entry.path)?;
             if let Some(pass) = pass_mode.integrity() {
                 let slot = pass.begin_entry(size, &archive_entry.compression);
                 if entry_type == ManifestEntryType::File && size > 0 {
@@ -583,7 +588,7 @@ fn list_zip(
     config: &SecurityConfig,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let file = File::open(archive_path)?;
+    let file = open_archive(archive_path)?;
     ZipArchive::new(file, config)?.list_with(config, listing)
 }
 
@@ -691,7 +696,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             mode: pass_mode,
             progress,
         } = &mut *listing;
-        let in_flight = progress.begin(&path);
+        let in_flight = progress.begin(&path)?;
         let mut tracked = pass_mode.integrity().map(|pass| {
             let slot = pass.begin_entry(size, &compression);
             (pass, slot)
@@ -974,7 +979,7 @@ fn list_sevenz_archive(
         slots.push(slot);
         // A payload with a slot is announced from its block decode instead.
         if !is_decode_announced(header, index, slot.is_some()) {
-            progress.begin(&path).complete();
+            progress.begin(&path)?.complete();
         }
 
         let target = if kind == SevenZKind::ReparsePoint {
@@ -1021,7 +1026,7 @@ fn list_sevenz(
     config: &SecurityConfig,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let mut file = File::open(archive_path)?;
+    let mut file = open_archive(archive_path)?;
     list_sevenz_reader(&mut file, config, listing)
 }
 

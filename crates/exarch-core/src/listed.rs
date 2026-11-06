@@ -53,6 +53,7 @@ use crate::api::extract_staged;
 use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
 use crate::config::ExtractionOptions;
+use crate::formats::common::open_archive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::FormatFamily;
@@ -417,7 +418,7 @@ fn list_with_limit(
             (manifest, kept)
         }
         FormatFamily::Seekable(SeekableFormat::Zip) => {
-            let mut zip = ZipArchive::for_extraction(File::open(archive)?, config, reuse)?;
+            let mut zip = ZipArchive::for_extraction(open_archive(archive)?, config, reuse)?;
             let manifest = zip.list_with(config, &mut pass)?;
             (manifest, Kept::Zip(Box::new(zip)))
         }

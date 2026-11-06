@@ -250,7 +250,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
             let path = PathBuf::from(common::normalize_entry_name(&entry.name));
             let position = EntryPosition::at_index(index, EntryTotal::Known(total));
             index = index.saturating_add(1);
-            let mut guard = EntryCompleteGuard::start(&mut *progress, &path, position);
+            let mut guard = EntryCompleteGuard::try_start(&mut *progress, &path, position)
+                .map_err(|error| abort_with(&mut pending_error, error))?;
 
             let outcome = {
                 let mut tally = Tally {

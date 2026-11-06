@@ -28,6 +28,7 @@ use exarch_core::ArchiveEntry;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::ArchiveType;
+use exarch_core::BackupIdentity;
 use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
 use exarch_core::ExistingFiles;
@@ -37,6 +38,7 @@ use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::ExtractionWarning;
+use exarch_core::IoKind;
 use exarch_core::LandingKind;
 use exarch_core::ListOptions;
 use exarch_core::ListRequest;
@@ -52,6 +54,7 @@ use exarch_core::Violation;
 use exarch_core::detect_format;
 use exarch_core::non_zero_usize;
 use exarch_core::path_text;
+use exarch_core::sanitize_io_error_for_error;
 use std::cell::Cell;
 use std::env;
 use std::io;
@@ -409,15 +412,16 @@ impl<'a> DisplacedDestination<'a> {
         let Ok((_, observed)) = self.pin.entry_status(&self.backup_name) else {
             return;
         };
-        let identity_unverified = match observed.check(backup_id) {
-            IdentityCheck::Same => false,
-            IdentityCheck::Unknown => true,
+        let identity = match observed.check(backup_id) {
+            IdentityCheck::Same => BackupIdentity::Verified,
+            IdentityCheck::Unknown => BackupIdentity::Unverified,
             IdentityCheck::Different => return,
         };
         report.add_warning(ExtractionWarning::BackupCleanupFailed {
             path: self.backup_path.clone(),
-            identity_unverified,
-            error: cleanup_err.to_string(),
+            identity,
+            io_kind: IoKind::from(cleanup_err.kind()),
+            message: sanitize_io_error_for_error(&cleanup_err).into(),
         });
     }
 }

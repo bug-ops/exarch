@@ -894,6 +894,26 @@ impl ArchiveError {
         }
     }
 
+    /// Whether this error is a [`Self::Cancelled`], looking through
+    /// [`Self::PartialExtraction`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    ///
+    /// assert!(ArchiveError::Cancelled.is_cancelled());
+    /// assert!(!ArchiveError::UnknownFormat { path: "a".into() }.is_cancelled());
+    /// ```
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Cancelled => true,
+            Self::PartialExtraction(partial) => partial.cause().is_cancelled(),
+            _ => false,
+        }
+    }
+
     /// Returns the typed refusal of a [`Self::SecurityViolation`], looking
     /// through [`Self::PartialExtraction`].
     ///

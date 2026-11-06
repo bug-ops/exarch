@@ -77,8 +77,7 @@
 //! use exarch_core::SecurityConfig;
 //! use exarch_core::formats::TarArchive;
 //! use exarch_core::formats::traits::ArchiveFormat;
-//! use std::fs::File;
-//! use std::path::Path;
+//! //! use std::path::Path;
 //!
 //! let file = File::open("archive.tar")?;
 //! let config = SecurityConfig::default();
@@ -100,8 +99,7 @@
 //! use exarch_core::formats::TarArchive;
 //! use exarch_core::formats::traits::ArchiveFormat;
 //! use flate2::read::GzDecoder;
-//! use std::fs::File;
-//! use std::path::Path;
+//! //! use std::path::Path;
 //!
 //! let file = File::open("archive.tar.gz")?;
 //! let decoder = GzDecoder::new(file);
@@ -115,7 +113,6 @@
 //! # Ok::<(), exarch_core::ArchiveError>(())
 //! ```
 
-use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
@@ -155,6 +152,7 @@ use crate::types::SafePath;
 use crate::types::safe_path::ParentCheck;
 
 use super::common::EntryCompleteGuard;
+use super::common::open_archive;
 use super::compression::CompressionCodec;
 use super::source_fault::TapSource;
 use super::tar_metadata_limit::CheckedTarEntry;
@@ -188,9 +186,7 @@ use crate::reader::decode_tar_stream;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::formats::TarArchive;
 /// use exarch_core::formats::traits::ArchiveFormat;
-/// use std::fs::File;
-/// use std::path::Path;
-///
+/// /// use std::path::Path;
 /// let file = File::open("archive.tar")?;
 /// let config = SecurityConfig::default();
 /// let mut archive = TarArchive::new(file, &config);
@@ -260,9 +256,7 @@ impl<R: Read> TarArchive<R> {
     /// ```no_run
     /// use exarch_core::SecurityConfig;
     /// use exarch_core::formats::TarArchive;
-    /// use std::fs::File;
-    /// use std::io::BufReader;
-    ///
+    /// /// use std::io::BufReader;
     /// let file = File::open("archive.tar")?;
     /// let reader = BufReader::new(file);
     /// let archive = TarArchive::new(reader, &SecurityConfig::default());
@@ -452,7 +446,8 @@ impl<R: Read> TarArchive<R> {
             let position = EntryPosition::at_index(started, EntryTotal::Unknown);
             started = started.saturating_add(1);
             let mut progress_guard =
-                EntryCompleteGuard::start(&mut *progress, &entry_path, position);
+                EntryCompleteGuard::try_start(&mut *progress, &entry_path, position)
+                    .map_err(|e| ArchiveError::partial_or(std::mem::take(&mut report), e))?;
 
             let settled = {
                 let mut tally = Tally {
@@ -746,7 +741,7 @@ pub(crate) fn open_tar_stream(
     codec: Option<CompressionCodec>,
     limits: DecoderLimits,
 ) -> Result<TarStream<'static>> {
-    decode_tar_stream(File::open(path)?, codec, limits)
+    decode_tar_stream(open_archive(path)?, codec, limits)
 }
 
 /// Opens `path` as a TAR archive whose trailer is read to decoder EOF, the

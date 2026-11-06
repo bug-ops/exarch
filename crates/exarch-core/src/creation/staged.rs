@@ -337,20 +337,14 @@ fn publish_through_reservation(
     };
     match temp.persist(target) {
         Ok(_) => Ok(()),
-        Err(failed) => Err(ArchiveError::Io(
-            if release_reservation(&reservation, target) {
-                failed.error
-            } else {
-                io::Error::new(
-                    failed.error.kind(),
-                    format!(
-                        "{}; an empty reservation file remains at {}",
-                        failed.error,
-                        target.display()
-                    ),
-                )
-            },
-        )),
+        Err(failed) => Err(if release_reservation(&reservation, target) {
+            ArchiveError::Io(failed.error)
+        } else {
+            ArchiveError::OutputReservationLeft {
+                path: target.to_path_buf(),
+                error: failed.error,
+            }
+        }),
     }
 }
 

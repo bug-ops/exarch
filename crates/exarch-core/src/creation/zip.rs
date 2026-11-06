@@ -71,7 +71,7 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
     let mut buffer = vec![0u8; 64 * 1024];
 
     for entry in &entries {
-        let mut guard = tracker.begin(&entry.archive_path);
+        let mut guard = tracker.begin(&entry.archive_path)?;
         match &entry.entry_type {
             EntryType::File => add_file_to_zip_with_progress_and_buffer(
                 &mut zip,
@@ -114,8 +114,8 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
             }
         }
         guard.complete();
-        tracker.check_cancelled()?;
     }
+    tracker.check_cancelled()?;
 
     // Finish writing ZIP
     let mut writer = zip.finish().map_err(|e| {

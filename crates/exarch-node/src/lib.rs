@@ -339,9 +339,9 @@ pub struct CreateOptions {
 /// The output of a creation as the core request takes it.
 fn output_file(output_path: &BoundaryPath, options: &CreateOptions) -> exarch_core::OutputFile {
     let file = if options.overwrite.unwrap_or(true) {
-        exarch_core::OutputFile::replace(output_path.as_str())
+        exarch_core::OutputFile::replace(output_path.as_path())
     } else {
-        exarch_core::OutputFile::create_new(output_path.as_str())
+        exarch_core::OutputFile::create_new(output_path.as_path())
     };
     let file = match options.format {
         Some(format) => file.with_format(format.into()),
@@ -749,9 +749,7 @@ fn run_create_with_optional_progress(
                         report,
                     }))
                 }
-                (Err(exarch_core::ArchiveError::Io(io)), Some(source))
-                    if io.kind() == std::io::ErrorKind::Interrupted =>
-                {
+                (Err(error), Some(source)) if error.is_cancelled() => {
                     Err(Box::new(ProgressCallbackError::CreationCancelled {
                         source,
                     }))

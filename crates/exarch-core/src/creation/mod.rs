@@ -21,3 +21,4 @@ pub use config::CreationConfig;
 pub use filters::ExcludePattern;
 pub use report::CreationReport;
 pub use report::CreationWarning;
+pub use report::CreationWarningKind;

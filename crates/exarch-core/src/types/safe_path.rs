@@ -348,7 +348,10 @@ impl<P: ParentCheck> SafePath<P> {
                         blocked_parent_error(view, root, &final_path).unwrap_or_else(|| {
                             ArchiveError::Io(std::io::Error::new(
                                 e.kind(),
-                                format!("failed to canonicalize parent: {e}"),
+                                crate::IoContext::new(
+                                    "failed to canonicalize parent",
+                                    e.to_string(),
+                                ),
                             ))
                         }),
                     );
@@ -377,7 +380,7 @@ impl<P: ParentCheck> SafePath<P> {
                         blocked_parent_error(view, root, &final_path).unwrap_or_else(|| {
                             ArchiveError::Io(std::io::Error::new(
                                 e.kind(),
-                                format!("failed to canonicalize path: {e}"),
+                                crate::IoContext::new("failed to canonicalize path", e.to_string()),
                             ))
                         }),
                     );

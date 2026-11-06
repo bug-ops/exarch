@@ -24,8 +24,9 @@ pub fn skips(count: usize) -> Skips {
 pub fn extraction_warning(text: &str) -> ExtractionWarning {
     ExtractionWarning::BackupCleanupFailed {
         path: PathBuf::from("backup"),
-        identity_unverified: false,
-        error: text.to_string(),
+        identity: exarch_core::BackupIdentity::Verified,
+        io_kind: exarch_core::IoKind::Other,
+        message: text.into(),
     }
 }
 

@@ -1183,7 +1183,7 @@ mod tests {
             ))
             .unwrap();
         let mut unreadable = exarch_core::Skip::new(exarch_core::SkipKind::Unreadable, "c");
-        unreadable.io_kind = Some(std::io::ErrorKind::PermissionDenied);
+        unreadable.io_kind = Some(exarch_core::IoKind::PermissionDenied);
         skips.record(unreadable).unwrap();
 
         let summary = SkippedSummary::from(&skips);

@@ -536,6 +536,15 @@ impl IoKind {
     }
 }
 
+impl From<exarch_core::IoKind> for IoKind {
+    fn from(kind: exarch_core::IoKind) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == kind.as_str())
+            .unwrap_or(Self::Other)
+    }
+}
+
 impl From<std::io::ErrorKind> for IoKind {
     fn from(kind: std::io::ErrorKind) -> Self {
         use std::io::ErrorKind as K;

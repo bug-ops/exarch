@@ -407,7 +407,7 @@ impl From<sevenz_rust2::Error> for ArchiveError {
             sevenz_rust2::Error::Io(io_err, _) => Self::Io(io_err),
             sevenz_rust2::Error::FileOpen(io_err, path) => Self::Io(std::io::Error::new(
                 io_err.kind(),
-                format!("{path}: {io_err}"),
+                crate::IoContext::new("failed to open a 7z file", format!("{path}: {io_err}")),
             )),
             other => Self::from(Malformation::SevenZLibraryError {
                 detail: other.to_string().into(),

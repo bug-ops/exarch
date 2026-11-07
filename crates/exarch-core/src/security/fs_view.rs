@@ -3098,3 +3098,41 @@ mod host_fs_tests {
         );
     }
 }
+
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+mod strip_prefix_folded_tests {
+    use super::strip_prefix_folded;
+    use std::path::Path;
+
+    #[test]
+    fn the_remainder_follows_a_case_insensitive_prefix() {
+        assert_eq!(
+            strip_prefix_folded(Path::new("/Dest/a/b"), Path::new("/dest")),
+            Some(Path::new("a/b"))
+        );
+    }
+
+    #[test]
+    fn equal_paths_leave_an_empty_remainder() {
+        assert_eq!(
+            strip_prefix_folded(Path::new("/dest"), Path::new("/DEST")),
+            Some(Path::new(""))
+        );
+    }
+
+    #[test]
+    fn a_base_longer_than_the_path_is_no_prefix() {
+        assert_eq!(
+            strip_prefix_folded(Path::new("/dest"), Path::new("/dest/a")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_sibling_sharing_a_name_prefix_is_no_prefix() {
+        assert_eq!(
+            strip_prefix_folded(Path::new("/destevil/a"), Path::new("/dest")),
+            None
+        );
+    }
+}

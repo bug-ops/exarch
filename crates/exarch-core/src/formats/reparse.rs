@@ -286,6 +286,38 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_print_name_never_changes_the_result() {
+        let mut buf = symlink(0, r"\??\C:\inside");
+        set_u16(&mut buf, 12, 0xFFFE);
+        set_u16(&mut buf, 14, 0xFFFF);
+
+        assert_eq!(
+            parse(&buf).unwrap(),
+            ReparseTarget::Absolute(units_of(r"\\?\C:\inside"))
+        );
+    }
+
+    #[test]
+    fn a_name_ending_exactly_at_the_data_end_is_accepted_and_one_unit_more_is_not() {
+        let mut buf = buffer(SYMLINK_TAG, Some(1), "name", "");
+        assert_eq!(
+            parse(&buf).unwrap(),
+            ReparseTarget::Relative(units_of("name"))
+        );
+
+        set_u16(&mut buf, 10, 10);
+        assert_matches!(parse(&buf), Err(ReparseError::Truncated));
+    }
+
+    #[test]
+    fn the_largest_declared_data_length_on_a_short_buffer_is_truncated() {
+        let mut buf = symlink(1, "name");
+        set_u16(&mut buf, 4, u16::MAX);
+
+        assert_matches!(parse(&buf), Err(ReparseError::Truncated));
+    }
+
+    #[test]
     fn data_beyond_the_declared_length_is_ignored() {
         let mut buf = symlink(1, "name");
         buf.extend([0xFF; 8]);

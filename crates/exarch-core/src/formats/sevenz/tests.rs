@@ -768,7 +768,7 @@ fn test_empty_archive_extract() {
 fn parse_fixture(name: &str) -> (SevenZHeader, u64) {
     let data = load_fixture(name);
     let len = data.len() as u64;
-    let header = read_sevenz_header(&mut Cursor::new(data), UNLIMITED).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(data), HeaderLimit::UNLIMITED).unwrap();
     (header, len)
 }
 
@@ -875,7 +875,7 @@ fn test_compression_block_uncompressed_overflow_is_rejected() {
 fn test_compression_empty_files_are_unknown() {
     let data = make_sevenz_archive_with_empty_file();
     let len = data.len() as u64;
-    let header = read_sevenz_header(&mut Cursor::new(data), UNLIMITED).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(data), HeaderLimit::UNLIMITED).unwrap();
     let compression = sevenz_entry_compression(&header, len).unwrap();
     for (file, compression) in header.files().iter().zip(&compression) {
         if file.size == 0 {
@@ -1647,7 +1647,7 @@ fn compressed_solid_copies(copies: usize) -> Vec<u8> {
 }
 
 fn solid_block_ratio(data: &[u8]) -> f64 {
-    let header = read_sevenz_header(&mut Cursor::new(data), UNLIMITED).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(data), HeaderLimit::UNLIMITED).unwrap();
     let compression = sevenz_entry_compression(&header, data.len() as u64).unwrap();
     compression
         .iter()
@@ -2473,7 +2473,8 @@ fn visit(
 #[test]
 fn test_stream_less_entry_before_a_block_is_admitted() {
     let bytes = make_sevenz_archive_with_empty_file();
-    let header = read_sevenz_header(&mut Cursor::new(bytes.clone()), UNLIMITED).unwrap();
+    let header =
+        read_sevenz_header(&mut Cursor::new(bytes.clone()), HeaderLimit::UNLIMITED).unwrap();
 
     assert!(block_refusals(&header).is_empty());
     let (visited, result) = visit(&header, bytes);
@@ -2487,7 +2488,8 @@ fn test_stream_less_entry_before_a_block_is_admitted() {
 #[test]
 fn test_stream_less_entry_inside_a_block_is_admitted_and_every_file_is_visited() {
     let bytes = load_fixture("interleaved-empty.7z");
-    let header = read_sevenz_header(&mut Cursor::new(bytes.clone()), UNLIMITED).unwrap();
+    let header =
+        read_sevenz_header(&mut Cursor::new(bytes.clone()), HeaderLimit::UNLIMITED).unwrap();
     let names: Vec<_> = header.files().iter().map(|f| f.name.clone()).collect();
 
     assert!(block_refusals(&header).is_empty());

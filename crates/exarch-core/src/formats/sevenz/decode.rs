@@ -13,6 +13,7 @@ use super::lzma2::with_parallel_reader;
 use crate::ParallelDecode;
 use sevenz_rust2::BlockDecoder;
 use sevenz_rust2::Password;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::io;
 use std::io::Read;
@@ -58,8 +59,8 @@ impl<R: Read> Read for CrcChecked<R> {
     }
 }
 
-/// Reader that records the message of a checksum mismatch the decoder under it
-/// failed a read with.
+/// Reader that records the message of a checksum mismatch it failed a read
+/// with, whether raised by the decoder under it or by an entry check above.
 struct FailureTap<'a, R> {
     inner: R,
     mismatch: &'a RefCell<Option<String>>,
@@ -79,10 +80,11 @@ impl<R: Read> Read for FailureTap<'_, R> {
 /// entry's CRC here so a mismatch does not end the block (see
 /// [`SevenZHeader::unchecked_crc_archive`]).
 ///
-/// The decoder repeats a block checksum mismatch the callback already saw when
-/// it drains the entry afterwards, as a plain I/O error with the same message;
-/// that repeat is swallowed, since `each` handled the mismatch. Any other
-/// failure, and a mismatch the callback never saw, still propagates.
+/// When it drains an entry after the callback, the decoder repeats a checksum
+/// mismatch the callback already saw, as a plain I/O error that has lost its
+/// type but keeps its message. That repeat, and only that, is swallowed:
+/// `each` handled the mismatch. A different error, a mismatch the callback
+/// never saw, and any error `each` returned itself still propagate.
 fn sequential_block<R: Read + Seek>(
     source: &mut R,
     header: &SevenZHeader,
@@ -91,6 +93,7 @@ fn sequential_block<R: Read + Seek>(
 ) -> EntryResult {
     let password = Password::empty();
     let mismatch = RefCell::new(None);
+    let callback_failed = Cell::new(false);
     let mut next_file = header.block_first_file(block_index);
     let result = BlockDecoder::new(
         1,
@@ -102,20 +105,21 @@ fn sequential_block<R: Read + Seek>(
     .for_each_entries(&mut |_, reader| {
         let file = &header.files()[next_file];
         next_file += 1;
-        let tapped = FailureTap {
-            inner: reader,
+        let mut entry: Box<dyn Read + '_> = if file.has_stream && file.has_crc {
+            Box::new(CrcChecked::new(reader, file.size, file.crc))
+        } else {
+            Box::new(reader)
+        };
+        let mut tapped = FailureTap {
+            inner: entry.as_mut(),
             mismatch: &mismatch,
         };
-        let mut entry: Box<dyn Read + '_> = if file.has_stream && file.has_crc {
-            Box::new(CrcChecked::new(tapped, file.size, file.crc))
-        } else {
-            Box::new(tapped)
-        };
-        each(file, &mut entry)
+        each(file, &mut tapped).inspect_err(|_| callback_failed.set(true))
     });
     match result {
         Err(sevenz_rust2::Error::Io(e, _))
-            if mismatch.borrow().as_deref() == Some(e.to_string().as_str()) =>
+            if !callback_failed.get()
+                && mismatch.borrow().as_deref() == Some(e.to_string().as_str()) =>
         {
             Ok(true)
         }

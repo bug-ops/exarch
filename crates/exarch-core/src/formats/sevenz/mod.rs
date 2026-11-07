@@ -105,11 +105,12 @@
 //! that table too. A refusal of the size derived from `max_file_count` is
 //! `QuotaExceeded { HeaderSize }`, any other `QuotaExceeded { DecoderMemory }`.
 //! Not bounded: the buffer that receives the decoded header (about twice the
-//! limit at most), and the table of a header within the limit, which takes
-//! up to about a hundred times the limit. Unlike a block, whose window is
-//! charged as `min(dictionary, 2 * unpack size)`, the header coder is charged
-//! its declared dictionary, so a very small `max_decoder_memory` refuses most
-//! 7-Zip archives at open (see [`crate::SecurityConfig::max_decoder_memory`]).
+//! limit at most), and the entry table of a header within the limit, whose
+//! memory grows with the number of permitted files. Unlike a block, whose
+//! window is charged as `min(dictionary, 2 * unpack size)`, the header coder is
+//! charged its declared dictionary, so a very small `max_decoder_memory`
+//! refuses most 7-Zip archives at open (see
+//! [`crate::SecurityConfig::max_decoder_memory`]).
 //!
 //! # Examples
 //!

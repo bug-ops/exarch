@@ -87,7 +87,7 @@ A 7z archive whose parsed stream map does not cover every block is rejected with
 ### Out of Scope
 
 - Fixing or forking `sevenz-rust2`; bumping it (the fix is unreleased)
-- Other 7z hardening (encoded-header memory limit #674, dropped stream file #675); separate issues. Update: #674 (header bounded by `max_decoder_memory` through `read_with_memory_limit`) and #769 (fewer streamed files than sub-streams, refused by sevenz-rust2 0.25 at read) are specified in [[002-format-handlers/spec]] FR-069 (the header read is held to `max_decoder_memory` and to an entry budget of `max_file_count * 512 bytes + 64 KiB`; the decoded-header buffer and the table built from a header inside the cap are not separately bounded) and FR-070
+- Other 7z hardening (encoded-header memory limit #674, dropped stream file #675); separate issues. Update: #674 (header bounded by `max_decoder_memory` through `read_with_memory_limit`) and #769 (fewer streamed files than sub-streams, refused by sevenz-rust2 0.25 at read) are specified in [[002-format-handlers/spec]] FR-069 (the header read is held to `max_decoder_memory` and to an entry budget of `max_file_count * 256 bytes + 64 KiB`; the decoded-header buffer and the table built from a header inside the cap are not separately bounded) and FR-070
 - Rewriting the 7z handler beyond what the typed wrapper requires
 - Changing the CLI, Python or Node public surface (no new flags, options or types)
 - Auditing every other `sevenz-rust2` panic class (this spec covers the stream-map invariant only)

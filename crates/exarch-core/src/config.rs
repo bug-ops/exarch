@@ -808,17 +808,17 @@ pub struct SecurityConfig {
     ///   of an encoded header and that header coder's declared dictionary or
     ///   model. A header larger than 512 bytes per
     ///   [`max_file_count`](Self::max_file_count) entry plus 64 KiB is refused
-    ///   too, so the entry table built from it stays proportional to the
-    ///   permitted file count; a header inside that cap can still cost memory
-    ///   in proportion to its size (about 96 bytes per header byte for the
-    ///   entry table). A refusal is `QuotaExceeded { DecoderMemory }` from
+    ///   too, so the table built from it stays proportional to the permitted
+    ///   file count. The buffer that receives a decoded header (about twice the
+    ///   limit) and the table of a header inside the cap are not capped
+    ///   separately. A refusal is `QuotaExceeded { DecoderMemory }` from
     ///   `list`, `verify` and `extract`. Blocks are charged the smaller of
     ///   their dictionary and twice their unpack size instead. 7-Zip sizes the
     ///   header dictionary to the header (4 KiB for a few files, 192 KiB at
     ///   3,000 files, 1 MiB at 60,000) and the LZMA model adds about 22 KiB, so
     ///   a limit below roughly 26 KiB refuses every 7z archive with an encoded
     ///   header, `list` included; archives with a plain header are held only to
-    ///   the header's own size.
+    ///   the header's own size and the entry cap.
     ///
     /// Other codecs are bounded by their format (bzip2 blocks of at most
     /// 900 KB). Not exposed through the CLI or language bindings.

@@ -166,6 +166,7 @@ impl Bytes<'_> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::io::Cursor;
 
     const SIMPLE: &[u8] = include_bytes!("../../../../../tests/fixtures/simple.7z");
@@ -178,10 +179,10 @@ mod tests {
 
     #[test]
     fn an_encoded_header_declares_its_decoded_size() {
-        assert!(matches!(
+        assert_matches!(
             probed(SIMPLE),
             DeclaredHeader::Encoded { decoded } if decoded > 0 && decoded < 4096
-        ));
+        );
     }
 
     #[test]

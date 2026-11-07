@@ -100,15 +100,22 @@ fn crc32(data: &[u8]) -> u32 {
     crc.sum()
 }
 
-/// A 7z number below 0x4000.
-fn number(value: usize) -> Vec<u8> {
-    assert!(value < 0x4000, "number too large for the helper");
-    let [high, low] = u16::try_from(value).expect("below 0x4000").to_be_bytes();
-    if value < 0x80 {
-        vec![low]
-    } else {
-        vec![0x80 | high, low]
+/// A 7z variable-length number (the leading byte's high bits give the count
+/// of extra bytes).
+pub fn number(value: usize) -> Vec<u8> {
+    let value = u64::try_from(value).expect("fits in u64");
+    for extra in 0..8u32 {
+        if value < 1 << (7 * (extra + 1)) {
+            let mask = !(0xFFu8 >> extra);
+            let high = u8::try_from(value >> (8 * extra)).expect("fits the leading byte");
+            let mut out = vec![mask | high];
+            out.extend_from_slice(&value.to_le_bytes()[..extra as usize]);
+            return out;
+        }
     }
+    let mut out = vec![0xFF];
+    out.extend_from_slice(&value.to_le_bytes());
+    out
 }
 
 fn bit_vector(flags: &[bool]) -> Vec<u8> {

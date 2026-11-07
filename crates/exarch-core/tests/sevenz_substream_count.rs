@@ -42,8 +42,8 @@ fn assert_refused_at_open(err: &ArchiveError) {
     assert_matches!(err, ArchiveError::InvalidArchive(m) if m.to_string().contains(REFUSAL), "{err:?}");
 }
 
-fn shapes() -> [(&'static str, Vec<RawEntry<'static>>); 3] {
-    [
+fn shapes() -> Vec<(&'static str, Vec<RawEntry<'static>>)> {
+    vec![
         (
             "directory between payloads",
             vec![
@@ -58,6 +58,23 @@ fn shapes() -> [(&'static str, Vec<RawEntry<'static>>); 3] {
                 RawEntry::DirWithSubStream("d"),
                 RawEntry::File("a.txt", b"AAAA"),
                 RawEntry::File("b.txt", b"BBBB"),
+            ],
+        ),
+        (
+            "two consecutive directories",
+            vec![
+                RawEntry::File("a.txt", b"AAAA"),
+                RawEntry::DirWithSubStream("d1"),
+                RawEntry::DirWithSubStream("d2"),
+                RawEntry::File("b.txt", b"BBBB"),
+            ],
+        ),
+        (
+            "sizes sum to the block size while the files would shift",
+            vec![
+                RawEntry::File("a.txt", b"AAA"),
+                RawEntry::DirWithSubStream("d"),
+                RawEntry::File("b.txt", b"BBBBB"),
             ],
         ),
         (

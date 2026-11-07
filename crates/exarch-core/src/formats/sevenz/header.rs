@@ -243,15 +243,40 @@ impl HeaderLimit {
         }
     }
 
-    /// The most a plain or decoded header may take.
-    fn header_cap(self) -> NonZeroU64 {
-        self.memory.min(self.entry_bytes)
+    /// The most a plain or decoded header may take, and the limit it comes
+    /// from.
+    fn header_cap(self) -> HeaderCap {
+        if self.entry_bytes < self.memory {
+            HeaderCap::EntryBudget(self.entry_bytes)
+        } else {
+            HeaderCap::Memory(self.memory)
+        }
+    }
+}
+
+/// The limit a header size is held to, named by where it comes from so that a
+/// refusal says which limit was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderCap {
+    /// `max_decoder_memory`.
+    Memory(NonZeroU64),
+    /// The header bytes `max_file_count` entries may take.
+    EntryBudget(NonZeroU64),
+}
+
+impl HeaderCap {
+    const fn bytes(self) -> NonZeroU64 {
+        match self {
+            Self::Memory(bytes) | Self::EntryBudget(bytes) => bytes,
+        }
     }
 
-    fn refusal(limit: NonZeroU64) -> ArchiveError {
-        ArchiveError::QuotaExceeded {
-            resource: QuotaResource::DecoderMemory { max: limit.get() },
-        }
+    fn refusal(self) -> ArchiveError {
+        let resource = match self {
+            Self::Memory(bytes) => QuotaResource::DecoderMemory { max: bytes.get() },
+            Self::EntryBudget(bytes) => QuotaResource::HeaderSize { max: bytes.get() },
+        };
+        ArchiveError::QuotaExceeded { resource }
     }
 }
 
@@ -282,8 +307,10 @@ fn kib(limit: NonZeroU64) -> usize {
 ///
 /// Returns [`ArchiveError::InvalidArchive`] for a header that does not parse
 /// or that lists pack streams without a stream-map offset for each, and
-/// [`ArchiveError::QuotaExceeded`] with [`QuotaResource::DecoderMemory`] when
-/// the header needs more than the limit.
+/// [`ArchiveError::QuotaExceeded`] with [`QuotaResource::HeaderSize`] when the
+/// header is larger than `max_file_count` permits and
+/// [`QuotaResource::DecoderMemory`] when it needs more than
+/// `max_decoder_memory`.
 pub(crate) fn read_sevenz_header<R: Read + Seek>(
     source: &mut R,
     limit: HeaderLimit,
@@ -291,10 +318,10 @@ pub(crate) fn read_sevenz_header<R: Read + Seek>(
     let cap = limit.header_cap();
     let parse_limit = match probe(source) {
         DeclaredHeader::Plain { bytes: size } | DeclaredHeader::Encoded { decoded: size } => {
-            if size > cap.get() {
-                return Err(HeaderLimit::refusal(cap));
+            if size > cap.bytes().get() {
+                return Err(cap.refusal());
             }
-            limit.memory
+            HeaderCap::Memory(limit.memory)
         }
         DeclaredHeader::Unrecognized => cap,
     };
@@ -303,7 +330,7 @@ pub(crate) fn read_sevenz_header<R: Read + Seek>(
     let parsed = Archive::read_with_memory_limit(
         &mut SourceRead::new(&mut *source, tap.clone()),
         &Password::empty(),
-        kib(parse_limit),
+        kib(parse_limit.bytes()),
     );
     match parsed {
         Ok(archive) => SevenZHeader::check(archive),
@@ -317,15 +344,13 @@ fn header_failure<R: Read + Seek>(
     error: &sevenz_rust2::Error,
     tap: &SourceTap,
     source: &mut R,
-    limit: NonZeroU64,
+    limit: HeaderCap,
 ) -> Result<SevenZHeader> {
     if let Some(fault) = tap.fault() {
         return Err(ArchiveError::Io(fault));
     }
     if matches!(error, sevenz_rust2::Error::MaxMemLimited { .. }) {
-        return Err(ArchiveError::QuotaExceeded {
-            resource: QuotaResource::DecoderMemory { max: limit.get() },
-        });
+        return Err(limit.refusal());
     }
     if super::is_password_error(error) {
         return Err(common::encrypted_archive_error());
@@ -407,7 +432,10 @@ mod tests {
             1000 * HEADER_BYTES_PER_ENTRY + HEADER_BYTES_BASE
         );
         assert_eq!(limit.memory, memory);
-        assert_eq!(limit.header_cap(), limit.entry_bytes);
+        assert_eq!(
+            limit.header_cap(),
+            HeaderCap::EntryBudget(limit.entry_bytes)
+        );
         let zero = HeaderLimit::from_limits(memory, 0);
         assert_eq!(zero.entry_bytes.get(), HEADER_BYTES_BASE);
     }
@@ -416,7 +444,7 @@ mod tests {
     fn the_header_cap_is_the_lower_of_memory_and_entry_bytes() {
         let small = NonZeroU64::new(100 * 1024).unwrap();
         let limit = HeaderLimit::from_limits(small, 1_000_000);
-        assert_eq!(limit.header_cap(), small);
+        assert_eq!(limit.header_cap(), HeaderCap::Memory(small));
     }
 
     #[test]
@@ -424,7 +452,7 @@ mod tests {
         let memory = NonZeroU64::new(256 << 20).unwrap();
         let limit = HeaderLimit::from_limits(memory, u64::MAX);
         assert_eq!(limit.entry_bytes, NonZeroU64::MAX);
-        assert_eq!(limit.header_cap(), memory);
+        assert_eq!(limit.header_cap(), HeaderCap::Memory(memory));
     }
 
     #[test]

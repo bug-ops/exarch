@@ -129,7 +129,7 @@ fn opens(path: &Path, config: &SecurityConfig) -> bool {
     match list_archive(path, config) {
         Ok(_) => true,
         Err(ArchiveError::QuotaExceeded {
-            resource: QuotaResource::DecoderMemory { .. },
+            resource: QuotaResource::DecoderMemory { .. } | QuotaResource::HeaderSize { .. },
         }) => false,
         Err(other) => panic!("neither opened nor refused on memory: {other:?}"),
     }
@@ -194,7 +194,7 @@ fn a_header_declaring_more_entries_than_max_file_count_allows_is_refused_unparse
     let decoded = entry_count_only_header(200_000, 200_000);
     let path = write(&dir, &stored_header_archive(&decoded));
     let config = SecurityConfig::default().with_max_file_count(non_zero!(10));
-    let by_entries = config.max_decoder_memory.get();
+    let memory = config.max_decoder_memory.get();
 
     for err in [
         list_archive(&path, &config).unwrap_err(),
@@ -203,8 +203,8 @@ fn a_header_declaring_more_entries_than_max_file_count_allows_is_refused_unparse
     ] {
         assert_matches!(
             err,
-            ArchiveError::QuotaExceeded { resource: QuotaResource::DecoderMemory { max } }
-                if max < by_entries && max >= 64 * KIB,
+            ArchiveError::QuotaExceeded { resource: QuotaResource::HeaderSize { max } }
+                if max < memory && max >= 64 * KIB,
             "{err:?}"
         );
     }
@@ -307,4 +307,24 @@ fn paths_of_two_hundred_characters_at_the_file_cap_are_over_the_budget() {
         &path,
         &config.with_max_file_count(exarch_core::Limit::Unbounded)
     ));
+}
+
+#[test]
+fn directories_count_toward_the_header_budget_though_extraction_counts_only_files() {
+    let dir = TempDir::new().unwrap();
+    let path = long_name_archive(&dir);
+    let few = SecurityConfig::default().with_max_file_count(non_zero!(100));
+    let out = TempDir::new().unwrap();
+
+    let err = extract_archive(&path, out.path(), &few).unwrap_err();
+    assert_matches!(
+        err,
+        ArchiveError::QuotaExceeded {
+            resource: QuotaResource::HeaderSize { max }
+        } if max == 100 * 256 + 64 * KIB
+    );
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+
+    let enough = SecurityConfig::default().with_max_file_count(non_zero!(2000));
+    extract_archive(&path, out.path(), &enough).unwrap();
 }

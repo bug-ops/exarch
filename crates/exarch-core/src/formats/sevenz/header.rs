@@ -8,6 +8,8 @@
 //! check at the call site. The one gap upstream leaves, pack streams without
 //! blocks, is closed in `SevenZHeader::check`.
 
+use super::header_probe::DeclaredHeader;
+use super::header_probe::probe;
 use crate::ArchiveError;
 use crate::Malformation;
 use crate::QuotaResource;
@@ -40,6 +42,12 @@ const EMPTY_ARCHIVE_SIZE: u64 = 32;
 pub(crate) struct BlockIndex(usize);
 
 impl BlockIndex {
+    /// The first block, for tests.
+    #[cfg(test)]
+    pub(crate) const fn first() -> Self {
+        Self(0)
+    }
+
     /// The position of the block in the archive's block list.
     pub(crate) const fn get(self) -> usize {
         self.0
@@ -181,23 +189,89 @@ impl SevenZHeader {
     }
 }
 
-/// The header limit in KiB, rounded down so a limit below 1 KiB refuses every
-/// header, and saturated where `usize` is narrower than the limit.
-fn header_limit_kib(limit: NonZeroU64) -> usize {
+/// Header bytes a 7z archive may spend per permitted entry (`max_file_count`).
+///
+/// Measured on 7-Zip 26.05 archives a decoded header holds about 100 bytes
+/// per entry for 36-character names with times and attributes, and names
+/// dominate it (2 bytes per character), so 512 admits an average name of
+/// over 200 characters. The parser allocates about 96 bytes for every
+/// header byte that declares an entry, so this budget bounds the table it
+/// builds.
+const HEADER_BYTES_PER_ENTRY: u64 = 512;
+
+/// Header bytes allowed on top of the per-entry budget: stream and folder
+/// descriptions.
+const HEADER_BYTES_BASE: u64 = 64 * 1024;
+
+/// What the parse of a 7z header may use.
+///
+/// `memory` is what sevenz-rust2 holds the raw and decoded header sizes and
+/// the header coder's declared dictionary or model to, in whole KiB.
+/// `entry_bytes` additionally caps the plain or decoded header, whose size
+/// bounds the entry table; it is checked here from the declared sizes
+/// ([`probe`]) so that it does not also cap the header dictionary, which some
+/// writers set to 8 MiB or more for small archives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeaderLimit {
+    memory: NonZeroU64,
+    entry_bytes: NonZeroU64,
+}
+
+impl HeaderLimit {
+    /// A limit that never refuses, for tests of other behaviour.
+    #[cfg(test)]
+    pub(crate) const UNLIMITED: Self = Self {
+        memory: NonZeroU64::MAX,
+        entry_bytes: NonZeroU64::MAX,
+    };
+
+    /// The limit of `config`: `max_decoder_memory`, and the header bytes its
+    /// `max_file_count` entries may take.
+    pub(crate) fn from_config(config: &crate::SecurityConfig) -> Self {
+        let files = u64::try_from(config.max_file_count.ceiling()).unwrap_or(u64::MAX);
+        Self::from_limits(config.max_decoder_memory, files)
+    }
+
+    fn from_limits(max_decoder_memory: NonZeroU64, max_file_count: u64) -> Self {
+        let entry_bytes = max_file_count
+            .saturating_mul(HEADER_BYTES_PER_ENTRY)
+            .saturating_add(HEADER_BYTES_BASE);
+        Self {
+            memory: max_decoder_memory,
+            entry_bytes: NonZeroU64::new(entry_bytes).unwrap_or(NonZeroU64::MAX),
+        }
+    }
+
+    /// The most a plain or decoded header may take.
+    fn header_cap(self) -> NonZeroU64 {
+        self.memory.min(self.entry_bytes)
+    }
+
+    fn refusal(limit: NonZeroU64) -> ArchiveError {
+        ArchiveError::QuotaExceeded {
+            resource: QuotaResource::DecoderMemory { max: limit.get() },
+        }
+    }
+}
+
+/// `limit` in KiB, rounded down so a limit below 1 KiB refuses every header,
+/// and saturated where `usize` is narrower than the limit.
+fn kib(limit: NonZeroU64) -> usize {
     usize::try_from(limit.get() / 1024).unwrap_or(usize::MAX)
 }
 
-/// A header limit that never refuses, for tests of other behaviour.
-#[cfg(test)]
-pub(crate) const UNLIMITED: NonZeroU64 = NonZeroU64::MAX;
-
 /// Opens the 7z header of `source`, the only place one is parsed.
 ///
-/// `max_decoder_memory` bounds what an encoded header may allocate: the plain
-/// and decoded header sizes and, for the header coder, its declared
-/// dictionary (not the output-bounded window that blocks are charged). Block
-/// decoding is not limited here; admission estimates each block's window
-/// separately.
+/// A plain header, or an encoded header's declared decoded size, over
+/// [`HeaderLimit`]'s entry cap is refused before the parse; the entry table
+/// sevenz-rust2 builds grows with that size. The parse itself is held to
+/// `max_decoder_memory` on the raw header size, the decoded header size and
+/// the header coder's declared dictionary or model (not the output-bounded
+/// window that blocks are charged). Not bounded: the buffer that receives the
+/// decoded header (about twice its limit at most), the table of a header
+/// within the limit (about 96 bytes per header byte), and block decoding,
+/// whose windows admission estimates separately. A header the probe does not
+/// recognise is held to the entry cap on every quantity.
 ///
 /// A password requirement is [`common::encrypted_archive_error`]. The valid
 /// 32-byte empty archive, which `sevenz-rust2` reports as `UnexpectedEof`,
@@ -208,20 +282,31 @@ pub(crate) const UNLIMITED: NonZeroU64 = NonZeroU64::MAX;
 /// Returns [`ArchiveError::InvalidArchive`] for a header that does not parse
 /// or that lists pack streams without a stream-map offset for each, and
 /// [`ArchiveError::QuotaExceeded`] with [`QuotaResource::DecoderMemory`] when
-/// the header needs more than `max_decoder_memory`.
+/// the header needs more than the limit.
 pub(crate) fn read_sevenz_header<R: Read + Seek>(
     source: &mut R,
-    max_decoder_memory: NonZeroU64,
+    limit: HeaderLimit,
 ) -> Result<SevenZHeader> {
+    let cap = limit.header_cap();
+    let parse_limit = match probe(source) {
+        DeclaredHeader::Plain { bytes: size } | DeclaredHeader::Encoded { decoded: size } => {
+            if size > cap.get() {
+                return Err(HeaderLimit::refusal(cap));
+            }
+            limit.memory
+        }
+        DeclaredHeader::Unrecognized => cap,
+    };
+    source.seek(SeekFrom::Start(0)).map_err(ArchiveError::Io)?;
     let tap = SourceTap::default();
     let parsed = Archive::read_with_memory_limit(
         &mut SourceRead::new(&mut *source, tap.clone()),
         &Password::empty(),
-        header_limit_kib(max_decoder_memory),
+        kib(parse_limit),
     );
     match parsed {
         Ok(archive) => SevenZHeader::check(archive),
-        Err(error) => header_failure(&error, &tap, source, max_decoder_memory),
+        Err(error) => header_failure(&error, &tap, source, parse_limit),
     }
 }
 
@@ -231,16 +316,14 @@ fn header_failure<R: Read + Seek>(
     error: &sevenz_rust2::Error,
     tap: &SourceTap,
     source: &mut R,
-    max_decoder_memory: NonZeroU64,
+    limit: NonZeroU64,
 ) -> Result<SevenZHeader> {
     if let Some(fault) = tap.fault() {
         return Err(ArchiveError::Io(fault));
     }
     if matches!(error, sevenz_rust2::Error::MaxMemLimited { .. }) {
         return Err(ArchiveError::QuotaExceeded {
-            resource: QuotaResource::DecoderMemory {
-                max: max_decoder_memory.get(),
-            },
+            resource: QuotaResource::DecoderMemory { max: limit.get() },
         });
     }
     if super::is_password_error(error) {
@@ -315,8 +398,37 @@ mod tests {
     }
 
     #[test]
+    fn the_entry_cap_follows_max_file_count_and_leaves_the_memory_limit() {
+        let memory = NonZeroU64::new(1 << 30).unwrap();
+        let limit = HeaderLimit::from_limits(memory, 1000);
+        assert_eq!(
+            limit.entry_bytes.get(),
+            1000 * HEADER_BYTES_PER_ENTRY + HEADER_BYTES_BASE
+        );
+        assert_eq!(limit.memory, memory);
+        assert_eq!(limit.header_cap(), limit.entry_bytes);
+        let zero = HeaderLimit::from_limits(memory, 0);
+        assert_eq!(zero.entry_bytes.get(), HEADER_BYTES_BASE);
+    }
+
+    #[test]
+    fn the_header_cap_is_the_lower_of_memory_and_entry_bytes() {
+        let small = NonZeroU64::new(100 * 1024).unwrap();
+        let limit = HeaderLimit::from_limits(small, 1_000_000);
+        assert_eq!(limit.header_cap(), small);
+    }
+
+    #[test]
+    fn an_unbounded_entry_count_saturates_instead_of_overflowing() {
+        let memory = NonZeroU64::new(256 << 20).unwrap();
+        let limit = HeaderLimit::from_limits(memory, u64::MAX);
+        assert_eq!(limit.entry_bytes, NonZeroU64::MAX);
+        assert_eq!(limit.header_cap(), memory);
+    }
+
+    #[test]
     fn header_limit_rounds_down_to_whole_kib_and_saturates() {
-        let kib = |bytes| header_limit_kib(NonZeroU64::new(bytes).unwrap());
+        let kib = |bytes| kib(NonZeroU64::new(bytes).unwrap());
         assert_eq!(kib(1), 0);
         assert_eq!(kib(1023), 0);
         assert_eq!(kib(1024), 1);
@@ -345,7 +457,7 @@ mod tests {
     #[test]
     fn check_rejects_pack_streams_without_blocks() {
         let bytes = archive_with_pack_stream_and_no_blocks();
-        let err = read_sevenz_header(&mut Cursor::new(bytes), UNLIMITED).unwrap_err();
+        let err = read_sevenz_header(&mut Cursor::new(bytes), HeaderLimit::UNLIMITED).unwrap_err();
         assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().starts_with("failed to open 7z archive: "),
             "{err:?}"
         );
@@ -377,7 +489,8 @@ mod tests {
 
     #[test]
     fn read_header_rejects_the_vector_as_invalid_archive() {
-        let err = read_sevenz_header(&mut Cursor::new(NO_FILES_INFO), UNLIMITED).unwrap_err();
+        let err = read_sevenz_header(&mut Cursor::new(NO_FILES_INFO), HeaderLimit::UNLIMITED)
+            .unwrap_err();
         assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().starts_with("failed to open 7z archive: "),
             "{err:?}"
         );
@@ -386,7 +499,8 @@ mod tests {
     #[test]
     fn read_header_opens_the_empty_archive() {
         let bytes = include_bytes!("../../../../../tests/fixtures/empty.7z");
-        let header = read_sevenz_header(&mut Cursor::new(&bytes[..]), UNLIMITED).unwrap();
+        let header =
+            read_sevenz_header(&mut Cursor::new(&bytes[..]), HeaderLimit::UNLIMITED).unwrap();
         assert!(header.files().is_empty());
         assert_eq!(header.block_count(), 0);
     }

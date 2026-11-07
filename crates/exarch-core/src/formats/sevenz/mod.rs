@@ -96,13 +96,18 @@
 //! top. sevenz-rust2's own multi-threaded reader is not used because it buffers
 //! whole runs with no output bound.
 //!
-//! The encoded (compressed) archive header is decoded under
-//! `max_decoder_memory` as well: the raw header size, the decoded header size
-//! and the header coder's declared dictionary or model are each held to it, and
-//! a refusal is `QuotaExceeded { DecoderMemory }`. Unlike a block, whose window
-//! is charged as `min(dictionary, 2 * unpack size)`, the header coder is
-//! charged its declared dictionary, so a very small limit refuses most 7-Zip
-//! archives at open (see [`crate::SecurityConfig::max_decoder_memory`]).
+//! The archive header is read under a byte limit, the lower of
+//! `max_decoder_memory` and 512 bytes per `max_file_count` entry plus 64 KiB.
+//! The limit holds the raw header size, the decoded size of an encoded header
+//! and that header coder's declared dictionary or model, and, because the
+//! entry table sevenz-rust2 builds grows with the decoded header, it bounds
+//! that table too. A refusal is `QuotaExceeded { DecoderMemory }`. Not
+//! bounded: the buffer that receives the decoded header (about twice the
+//! limit at most), and the table of a header within the limit, which takes
+//! up to about a hundred times the limit. Unlike a block, whose window is
+//! charged as `min(dictionary, 2 * unpack size)`, the header coder is charged
+//! its declared dictionary, so a very small `max_decoder_memory` refuses most
+//! 7-Zip archives at open (see [`crate::SecurityConfig::max_decoder_memory`]).
 //!
 //! # Examples
 //!
@@ -204,7 +209,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// - Archive header is invalid
     /// - Format is not recognized
     pub(crate) fn new(mut source: R, config: &SecurityConfig) -> Result<Self> {
-        let header = read_sevenz_header(&mut source, config.max_decoder_memory)?;
+        let header = read_sevenz_header(&mut source, HeaderLimit::from_config(config))?;
 
         let source_len = source.seek(SeekFrom::End(0)).map_err(ArchiveError::Io)?;
         let compression = sevenz_entry_compression(&header, source_len)?;
@@ -369,16 +374,18 @@ mod link_walk_tests;
 #[cfg(test)]
 mod parallel_tests;
 
+#[cfg(test)]
+mod sequential_crc_tests;
+
 pub(crate) use admit::iter_sevenz_refusals;
 pub(crate) use admit::refusal_issues;
 pub(crate) use admit::sevenz_entry_compression;
 pub(crate) use admit::sevenz_refusals;
 pub(crate) use classify::SevenZClass;
 pub(crate) use classify::SevenZKind;
+pub(crate) use header::HeaderLimit;
 pub(crate) use header::SEVENZ_MAGIC;
 pub(crate) use header::SevenZHeader;
-#[cfg(test)]
-pub(crate) use header::UNLIMITED;
 pub(crate) use header::read_sevenz_header;
 use host::SevenZHostTarget;
 pub(crate) use links::LinkCapture;
@@ -395,6 +402,7 @@ mod classify;
 mod decode;
 mod extract;
 mod header;
+mod header_probe;
 mod host;
 mod links;
 mod lzma2;

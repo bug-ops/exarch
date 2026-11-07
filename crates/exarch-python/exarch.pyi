@@ -756,7 +756,7 @@ class CreationConfig:
         ...
 
     def with_exclude_patterns(self, patterns: list[str]) -> CreationConfig:
-        """
+        r"""
         Sets exclude patterns, matched against the archive entry path.
 
         Patterns are globs: ``*`` and ``?`` match within one path component

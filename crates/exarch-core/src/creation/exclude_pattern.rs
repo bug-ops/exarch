@@ -301,6 +301,12 @@ fn refuse(setting: ConfigSetting, text: &str, reason: ExcludeRefusal) -> Archive
     }
 }
 
+/// `C:`-style prefix; refused on every host so a pattern means the same
+/// thing wherever it is parsed.
+fn has_drive_prefix(segment: &str) -> bool {
+    matches!(segment.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
+}
+
 fn is_blank(c: char) -> bool {
     c.is_ascii_whitespace() || c.is_ascii_control()
 }
@@ -343,9 +349,12 @@ fn parse_shape(text: &str) -> std::result::Result<Shape, ExcludeRefusal> {
     if segments.contains(&"..") {
         return Err(ExcludeRefusal::DotEntry);
     }
-    if !Path::new(&segments.join("/"))
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
+    if segments
+        .first()
+        .is_some_and(|first| has_drive_prefix(first))
+        || !Path::new(&segments.join("/"))
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
     {
         return Err(ExcludeRefusal::Absolute);
     }
@@ -880,6 +889,16 @@ mod tests {
         assert_eq!(MAX_CONFIG_ENTRY_LENGTH, 255);
         assert!(ExcludePattern::try_from(at_limit.as_str()).is_ok());
         assert_eq!(refusal(&format!("{at_limit}x")), ExcludeRefusal::TooLong);
+    }
+
+    #[test]
+    fn a_drive_prefix_is_refused_on_every_host() {
+        for text in ["C:x", "c:", "C:/x", "C:\\x", "./C:x"] {
+            assert_eq!(refusal(text), ExcludeRefusal::Absolute, "{text}");
+        }
+        assert!(ExcludePattern::try_from("**/C:x").is_ok());
+        assert!(ExcludePattern::try_from("ab:c").is_ok());
+        assert!(ExcludePattern::try_from("x/C:y").is_ok());
     }
 
     #[cfg(windows)]

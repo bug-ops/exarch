@@ -219,6 +219,7 @@ impl SubCode {
         Self::Quota(QuotaKind::TreeNodes),
         Self::Quota(QuotaKind::SinkCapacity),
         Self::Quota(QuotaKind::SolidBlockMemory),
+        Self::Quota(QuotaKind::HeaderSize),
     ];
     /// Every sub-code of a zip-bomb error, in [`ZipBombScope::ALL`] order.
     pub const ZIP_BOMB_ALL: &'static [Self] = &[
@@ -252,6 +253,7 @@ const fn quota_sub_code(kind: QuotaKind) -> &'static str {
         QuotaKind::TreeNodes => "TREE_NODES",
         QuotaKind::SinkCapacity => "SINK_CAPACITY",
         QuotaKind::SolidBlockMemory => "SOLID_BLOCK_MEMORY",
+        QuotaKind::HeaderSize => "HEADER_SIZE",
     }
 }
 
@@ -1462,6 +1464,21 @@ mod tests {
         assert_eq!(
             quota.ffi_kind().sub_code().map(SubCode::as_str),
             Some("SOLID_BLOCK_MEMORY")
+        );
+    }
+
+    #[test]
+    fn a_header_size_refusal_names_the_file_count_limit_it_derives_from() {
+        let resource = QuotaResource::HeaderSize { max: 4096 };
+        assert_eq!(resource.kind(), QuotaKind::HeaderSize);
+        assert_eq!(
+            resource.to_string(),
+            "quota exceeded: archive header size (> 4096 bytes, derived from max_file_count)"
+        );
+        let err = ArchiveError::QuotaExceeded { resource };
+        assert_eq!(
+            err.ffi_kind().sub_code().map(SubCode::as_str),
+            Some("HEADER_SIZE")
         );
     }
 

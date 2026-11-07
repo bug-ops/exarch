@@ -745,10 +745,8 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
             .path(archive)
             .lit(
                 "'\nThe archive declares a decompression dictionary or window larger than the \
-                 allowed limit. For a 7z archive, a header too large for the permitted file count \
-                 is refused the same way (256 bytes per permitted file plus 64 KiB). --max-files raises \
-                 that cap, and with it the memory a header of that size may need (about 24 KiB \
-                 per permitted file). No CLI flag relaxes the memory limit itself. Rust API only: SecurityConfig::with_max_decoder_memory.",
+                 allowed limit. No CLI flag relaxes this. Rust API only: \
+                 SecurityConfig::with_max_decoder_memory.",
             ),
         QuotaKind::CompressedMembers => message
             .lit("Compressed member limit exceeded for '")
@@ -776,6 +774,14 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
             .lit("In-memory sink capacity exceeded for '")
             .path(archive)
             .lit("'\nNo CLI flag relaxes this. Rust API only: the sink's capacity limit."),
+        QuotaKind::HeaderSize => message
+            .lit("Archive header too large for '")
+            .path(archive)
+            .lit(
+                "'\nThe header of this 7z archive is larger than 256 bytes per permitted file \
+                 (--max-files) plus 64 KiB. --max-files raises that size, and with it the memory \
+                 a header of that size may need (about 24 KiB per permitted file).",
+            ),
         QuotaKind::SolidBlockMemory => message
             .lit("Solid block size limit exceeded for '")
             .path(archive)

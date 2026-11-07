@@ -102,8 +102,9 @@
 //! The limit holds the raw header size, the decoded size of an encoded header
 //! and that header coder's declared dictionary or model, and, because the
 //! entry table sevenz-rust2 builds grows with the decoded header, it bounds
-//! that table too. A refusal is `QuotaExceeded { DecoderMemory }`. Not
-//! bounded: the buffer that receives the decoded header (about twice the
+//! that table too. A refusal of the size derived from `max_file_count` is
+//! `QuotaExceeded { HeaderSize }`, any other `QuotaExceeded { DecoderMemory }`.
+//! Not bounded: the buffer that receives the decoded header (about twice the
 //! limit at most), and the table of a header within the limit, which takes
 //! up to about a hundred times the limit. Unlike a block, whose window is
 //! charged as `min(dictionary, 2 * unpack size)`, the header coder is charged

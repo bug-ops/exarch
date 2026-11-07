@@ -66,19 +66,19 @@ struct SeenMismatch {
     message: String,
 }
 
-/// Reader that records the checksum mismatch it failed a read with, whether
-/// raised by the decoder under it or by an entry check above, against the
-/// entry being read.
+/// Reader that records, against the entry being read, the checksum mismatch it
+/// failed a read with, when `arms` is set.
 struct FailureTap<'a, R> {
     inner: R,
     entry: usize,
+    arms: bool,
     mismatch: &'a RefCell<Option<SeenMismatch>>,
 }
 
 impl<R: Read> Read for FailureTap<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf).inspect_err(|e| {
-            if is_entry_checksum_error(e) {
+            if self.arms && is_entry_checksum_error(e) {
                 *self.mismatch.borrow_mut() = Some(SeenMismatch {
                     entry: self.entry,
                     message: e.to_string(),
@@ -95,7 +95,10 @@ impl<R: Read> Read for FailureTap<'_, R> {
 /// When it drains an entry after the callback, the decoder repeats a checksum
 /// mismatch the callback already saw, as a plain I/O error that has lost its
 /// type but keeps its message. That repeat, and only that, is swallowed:
-/// `each` handled the mismatch of that same entry. A different error, a
+/// `each` handled the mismatch of that same entry. A mismatch armed the
+/// swallow when the decoder raised it, or when this module's own entry check
+/// raised it on the block's last entry, where the decoder's repeat can only
+/// concern that entry. A different error, a
 /// mismatch of another entry or one the callback never saw, and any error
 /// `each` returned itself still propagate.
 fn sequential_block<R: Read + Seek>(
@@ -108,6 +111,9 @@ fn sequential_block<R: Read + Seek>(
     let mismatch = RefCell::new(None);
     let callback_failed = Cell::new(false);
     let last_entry = Cell::new(0);
+    let last_streamed = block_span(header, block_index)
+        .rev()
+        .find(|&i| header.files()[i].has_stream);
     let mut next_file = header.block_first_file(block_index);
     let result = BlockDecoder::new(
         1,
@@ -121,14 +127,21 @@ fn sequential_block<R: Read + Seek>(
         let file = &header.files()[index];
         next_file += 1;
         last_entry.set(index);
+        let below = FailureTap {
+            inner: reader,
+            entry: index,
+            arms: true,
+            mismatch: &mismatch,
+        };
         let mut entry: Box<dyn Read + '_> = if file.has_stream && file.has_crc {
-            Box::new(CrcChecked::new(reader, file.size, file.crc))
+            Box::new(CrcChecked::new(below, file.size, file.crc))
         } else {
-            Box::new(reader)
+            Box::new(below)
         };
         let mut tapped = FailureTap {
             inner: entry.as_mut(),
             entry: index,
+            arms: last_streamed == Some(index),
             mismatch: &mismatch,
         };
         each(file, &mut tapped).inspect_err(|_| callback_failed.set(true))

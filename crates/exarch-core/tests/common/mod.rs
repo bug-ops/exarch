@@ -94,7 +94,7 @@ pub enum RawEntry<'a> {
     DirWithSubStream(&'a str),
 }
 
-fn crc32(data: &[u8]) -> u32 {
+pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = flate2::Crc::new();
     crc.update(data);
     crc.sum()
@@ -133,6 +133,18 @@ fn bit_vector(flags: &[bool]) -> Vec<u8> {
 /// directory with a sub-stream of its own, which no `sevenz-rust2` 0.25 writer
 /// produces.
 pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
+    solid_copy_7z_with_crcs(entries, &[], None)
+}
+
+/// [`solid_copy_7z`] with declared checksums: `file_crcs` for the streamed
+/// entries in order (`None` leaves one without; a shorter slice leaves the
+/// rest without) and `block_crc` for the whole block. The checksums are
+/// written as given, so a wrong one makes a corrupt-looking archive.
+pub fn solid_copy_7z_with_crcs(
+    entries: &[RawEntry<'_>],
+    file_crcs: &[Option<u32>],
+    block_crc: Option<u32>,
+) -> Vec<u8> {
     let streamed: Vec<&[u8]> = entries
         .iter()
         .filter_map(|e| match e {
@@ -154,12 +166,31 @@ pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
     h.extend(number(1));
     h.extend([0x01, 0x00, 0x0C]);
     h.extend(number(data.len()));
+    if let Some(crc) = block_crc {
+        h.extend([0x0A, 0x01]);
+        h.extend(crc.to_le_bytes());
+    }
     h.extend([0x00, 0x08, 0x0D]);
     h.extend(number(streamed.len()));
     if streamed.len() > 1 {
         h.push(0x09);
         for part in &streamed[..streamed.len() - 1] {
             h.extend(number(part.len()));
+        }
+    }
+    let defined: Vec<bool> = (0..streamed.len())
+        .map(|i| file_crcs.get(i).copied().flatten().is_some())
+        .collect();
+    if defined.contains(&true) {
+        h.push(0x0A);
+        if defined.iter().all(|d| *d) {
+            h.push(0x01);
+        } else {
+            h.push(0x00);
+            h.extend(bit_vector(&defined));
+        }
+        for crc in file_crcs.iter().flatten() {
+            h.extend(crc.to_le_bytes());
         }
     }
     h.extend([0x00, 0x00, 0x05]);

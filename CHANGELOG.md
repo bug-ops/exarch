@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `EntrySelection::{with_strip, with_flatten, with_include_list, with_exclude_list}`, `DispositionKind`, `DestinationState` and `ArchiveError::rolled_back_with`, so a failed run reports the staging directory it left (#995, #998, #1013, #1019).
 - CLI: `--json` errors carry `error.io_kind` and `error.leftover_path`, `backup_cleanup_failed` carries `reason`, and extract and create stop on SIGINT with exit 130 and remove their staging entry (#995, #1014, #1016, #1019).
 - Python: `ArchiveError.leftover_path`, `EntryDisposition.action`, `VerificationReport.suspicious_entries` and `format` (#1011, #1019).
+- Core: `*`, `?`, `[...]` and a whole-component `**` in include and exclude patterns and in `create` excludes, matched by `globset` behind the opaque `ExcludePattern`, with a `glob` fuzz target (#1000, #1024).
+- Core: `QuotaResource::HeaderSize` and the `HEADER_SIZE` quota sub-code for a 7z header over the size derived from `max_file_count`, in the CLI, Python and Node (#674, #1024).
+- Core: FreeBSD and macOS tmpfs mounts and FreeBSD `md` disks are charged to the decoder memory limit like Linux tmpfs (#959, #1024).
+- Docs: specifications 023 (glob entry selection) and 024 (encrypted ZIP and 7z, draft) (#1000, #1001, #1024).
 
 ### Changed
 
@@ -44,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking**: atomic and replace extraction need search permission on the destination's parent instead of read, and Windows `--atomic` onto an existing empty directory fails with `OutputExists` (#1005, #1019).
 - Core: modules expose only items reachable from the crate root, enforced by `unreachable_pub` (#1007, #1019).
 - Python and Node: the binding error and report fields are derived from core `FfiDetail`, which is exhaustive on purpose so a new detail fails to compile in both bindings (#1010, #1019).
+- **Breaking**: `ExcludePattern` is an opaque struct instead of an enum, and `ExcludeRefusal` drops `WildcardWithSeparator` and `GlobMetacharacter`, so the `wildcard_with_separator` and `glob_metacharacter` codes disappear from `--json` and the bindings (#1000, #1024).
+- **Breaking**: `ExcludePattern::matches` is false for rooted, prefixed and `..` paths, an anchored single segment displays with a trailing `/`, `-x '*'` is accepted, and a drive-prefixed pattern is refused on every host, including a floating `a:b` on Unix (#1000, #1024).
+- **Breaking**: `max_decoder_memory` also applies when a 7z archive is opened, and the header size is capped at `max_file_count` x 256 B + 64 KiB, so an archive with many entries or directories may need a higher `--max-files` (#674, #1024).
+- **Breaking (Windows)**: link and hardlink targets resolve handle-relatively, so targets through `SUBST`, mapped drives, 8.3 names or volume GUIDs, `\x` and `C:x` targets and reparse points other than symlinks and junctions are refused, and the result no longer depends on the destination's absolute length (#958, #1024).
+- Dependencies: `sevenz-rust2` 0.25.0 and `lzma-rust2` 0.25 (#674, #769, #1024).
 
 ### Fixed
 
@@ -57,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: the forced-exit hint after a second signal names what the interrupted command left behind (#1014, #1019).
 - Core: the run record keys a created file by its descriptor identity (#996, #1019).
 - Python and Node: `leftover_path` survives a cancelled progress callback (#995, #1019).
+- Core: a 7z archive whose stream map would shift file contents is refused when it is opened by list, verify and extract (#769, #1024).
 
 ## [0.9.0] - 2026-11-05
 

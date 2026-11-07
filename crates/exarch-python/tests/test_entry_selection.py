@@ -78,9 +78,7 @@ def test_include_and_exclude_select_on_the_original_path(project, temp_dir):
 def test_glob_patterns_select_entries(project, temp_dir):
     out = temp_dir / "out"
     config = (
-        exarch.SecurityConfig()
-        .add_include_pattern("proj/**/*.rs")
-        .add_exclude_pattern("l?b.rs")
+        exarch.SecurityConfig().add_include_pattern("proj/**/*.rs").add_exclude_pattern("l?b.rs")
     )
 
     exarch.extract_archive(project, out, config)

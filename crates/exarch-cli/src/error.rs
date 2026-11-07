@@ -774,6 +774,14 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
             .lit("In-memory sink capacity exceeded for '")
             .path(archive)
             .lit("'\nNo CLI flag relaxes this. Rust API only: the sink's capacity limit."),
+        QuotaKind::HeaderSize => message
+            .lit("Archive header too large for '")
+            .path(archive)
+            .lit(
+                "'\nThe header of this 7z archive is larger than 256 bytes per permitted file \
+                 (--max-files) plus 64 KiB. --max-files raises that size, and with it the memory \
+                 a header's entry table may need.",
+            ),
         QuotaKind::SolidBlockMemory => message
             .lit("Solid block size limit exceeded for '")
             .path(archive)

@@ -77,8 +77,9 @@
 //! any byte is decoded, every block's coder memory (LZMA/LZMA2 dictionary,
 //! `PPMd` memory) is checked against `max_decoder_memory`, and blocks with an
 //! unknown coder, AES content encryption, or whose files do not add up
-//! to the decoded size (an orphan block, or sub-streams shifted by an
-//! entry without data) are refused.
+//! to the decoded size are refused. A header whose sub-stream count differs
+//! from its number of streamed files (a directory that owns a sub-stream, an
+//! orphan block) is refused when the archive is opened, by `list` as well.
 //!
 //! # Parallel LZMA2 Decoding
 //!
@@ -95,11 +96,21 @@
 //! top. sevenz-rust2's own multi-threaded reader is not used because it buffers
 //! whole runs with no output bound.
 //!
-//! **Residual (upstream)**: an encoded (compressed) archive header is decoded
-//! inside `Archive::read` with sevenz-rust2's unlimited memory limit, before
-//! exarch sees any block, so a `PPMd` or LZMA2 header coder can allocate up to
-//! about 4 GiB. `max_decoder_memory` does not cover it until sevenz-rust2
-//! exposes a limit on `Archive::read`.
+//! The archive header is read under a byte limit, the lower of
+//! `max_decoder_memory` and 256 bytes per `max_file_count` entry plus 64 KiB
+//! (with an unbounded `max_file_count`, `max_decoder_memory` alone).
+//! The limit holds the raw header size, the decoded size of an encoded header
+//! and that header coder's declared dictionary or model, and, because the
+//! entry table sevenz-rust2 builds grows with the decoded header, it bounds
+//! that table too. A refusal of the size derived from `max_file_count` is
+//! `QuotaExceeded { HeaderSize }`, any other `QuotaExceeded { DecoderMemory }`.
+//! Not bounded: the buffer that receives the decoded header (about twice the
+//! limit at most), and the entry table of a header within the limit, whose
+//! memory grows with the number of permitted files. Unlike a block, whose
+//! window is charged as `min(dictionary, 2 * unpack size)`, the header coder is
+//! charged its declared dictionary, so a very small `max_decoder_memory`
+//! refuses most 7-Zip archives at open (see
+//! [`crate::SecurityConfig::max_decoder_memory`]).
 //!
 //! # Examples
 //!
@@ -201,7 +212,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// - Archive header is invalid
     /// - Format is not recognized
     pub(crate) fn new(mut source: R, config: &SecurityConfig) -> Result<Self> {
-        let header = read_sevenz_header(&mut source)?;
+        let header = read_sevenz_header(&mut source, HeaderLimit::from_config(config))?;
 
         let source_len = source.seek(SeekFrom::End(0)).map_err(ArchiveError::Io)?;
         let compression = sevenz_entry_compression(&header, source_len)?;
@@ -366,12 +377,16 @@ mod link_walk_tests;
 #[cfg(test)]
 mod parallel_tests;
 
+#[cfg(test)]
+mod sequential_crc_tests;
+
 pub(crate) use admit::iter_sevenz_refusals;
 pub(crate) use admit::refusal_issues;
 pub(crate) use admit::sevenz_entry_compression;
 pub(crate) use admit::sevenz_refusals;
 pub(crate) use classify::SevenZClass;
 pub(crate) use classify::SevenZKind;
+pub(crate) use header::HeaderLimit;
 pub(crate) use header::SEVENZ_MAGIC;
 pub(crate) use header::SevenZHeader;
 pub(crate) use header::read_sevenz_header;
@@ -390,6 +405,7 @@ mod classify;
 mod decode;
 mod extract;
 mod header;
+mod header_probe;
 mod host;
 mod links;
 mod lzma2;

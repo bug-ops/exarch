@@ -281,11 +281,12 @@ pub(super) fn lzma2_dict_size(props: &[u8]) -> Option<u32> {
 
 /// Decoder memory a coder needs, estimated from its properties.
 ///
-/// sevenz-rust2 applies no memory limit of its own, so the limit is enforced
-/// here from the coder properties. LZMA and LZMA2 grow their window
-/// geometrically up to the dictionary size, so the estimate is
-/// `min(dict, 2 * unpack)`. `None` means the method is unknown or its
-/// properties cannot be parsed, and the caller must fail closed.
+/// Blocks are decoded without a sevenz-rust2 memory limit, which would check
+/// the declared dictionary and refuse an admitted block (a small file under a
+/// large dictionary), so the limit is enforced here from the coder properties.
+/// LZMA and LZMA2 grow their window geometrically up to the dictionary size,
+/// so the estimate is `min(dict, 2 * unpack)`. `None` means the method is
+/// unknown or its properties cannot be parsed, and the caller must fail closed.
 pub(super) fn coder_memory(coder: &sevenz_rust2::Coder, unpack_size: u64) -> Option<u64> {
     use sevenz_rust2::EncoderMethod;
 
@@ -399,8 +400,6 @@ pub(super) fn admit_sevenz_block(
             },
         ));
     }
-    // TODO(#769): compare stream files with sub-streams once sevenz-rust2
-    // exposes the count; the size sum misses zero-size shifts
     if declared_size != Some(block.get_unpack_size()) {
         return Err(not_decodable(ArchiveError::from(
             Malformation::BlockSizeUnaccounted,

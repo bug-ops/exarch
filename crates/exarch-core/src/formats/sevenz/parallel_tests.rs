@@ -4,6 +4,7 @@
 
 use super::decode::decode_archive_entries;
 use super::decode::parallel_stream;
+use super::header::HeaderLimit;
 use super::lzma2::DecodeKnobs;
 use crate::ParallelDecode;
 use std::io::Cursor;
@@ -83,7 +84,7 @@ fn run(
     knobs: DecodeKnobs,
     stop_after: usize,
 ) -> (Events, String) {
-    let header = read_sevenz_header(&mut Cursor::new(bytes)).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(bytes), HeaderLimit::UNLIMITED).unwrap();
     run_archive(&header, bytes, parallel, knobs, stop_after)
 }
 
@@ -120,7 +121,7 @@ fn forced(threads: usize) -> DecodeKnobs {
 }
 
 fn uses_the_parallel_path(bytes: &[u8], knobs: DecodeKnobs) -> bool {
-    let header = read_sevenz_header(&mut Cursor::new(bytes)).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(bytes), HeaderLimit::UNLIMITED).unwrap();
     let block = header.block_indices().next().unwrap();
     parallel_stream(&header, block, 0..header.files().len(), knobs.min_unit).is_some()
 }
@@ -200,7 +201,7 @@ fn test_parallel_decode_reports_a_corrupt_stream_like_sequential() {
 type FileView = (String, Vec<u8>, bool);
 
 fn run_in_steps(bytes: &[u8], parallel: ParallelDecode, knobs: DecodeKnobs) -> Vec<FileView> {
-    let header = read_sevenz_header(&mut Cursor::new(bytes)).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(bytes), HeaderLimit::UNLIMITED).unwrap();
     let mut views = Vec::new();
     let _ = decode_archive_entries(
         &mut Cursor::new(bytes.to_vec()),

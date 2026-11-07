@@ -803,7 +803,34 @@ pub struct SecurityConfig {
     ///   always admitted, and the decoder's fixed state is not counted.
     /// - 7z: also admits the 7z decoder window; the lookahead of parallel 7z
     ///   decoding is budgeted separately by
-    ///   [`parallel_decode`](Self::parallel_decode).
+    ///   [`parallel_decode`](Self::parallel_decode). The limit also applies
+    ///   when the archive is opened: to the raw header size, the decoded size
+    ///   of an encoded header and that header coder's declared dictionary or
+    ///   model. A header larger than 256 bytes per
+    ///   [`max_file_count`](Self::max_file_count) entry plus 64 KiB is refused
+    ///   too, as `QuotaExceeded { HeaderSize }`, which holds the table built
+    ///   from it in proportion to the permitted file count. Every entry of the
+    ///   header counts toward that size, directories and links included, though
+    ///   extraction counts only files against `max_file_count`: an archive with
+    ///   many directories may need a higher `max_file_count` to open. The
+    ///   memory the header's entry table needs grows with the number of
+    ///   permitted files, so a higher `max_file_count` raises the memory a
+    ///   header may need. With an unbounded `max_file_count`
+    ///   (`Limit::Unbounded`; `None` in the Python and Node bindings) only this
+    ///   limit caps the header. The buffer that receives a decoded header
+    ///   (about twice the limit) is not capped separately. The dictionary is
+    ///   held to `max_decoder_memory` alone for the usual header layout (one
+    ///   coder, a record under 4 KiB); for any other layout (two coders, such
+    ///   as a filter plus LZMA, or encrypted headers) it is held to the
+    ///   stricter of the two caps. The memory checks are `QuotaExceeded {
+    ///   DecoderMemory }`. Both come from `list`, `verify` and `extract`, with
+    ///   the limit that was exceeded as `max`. Blocks are charged the smaller
+    ///   of their dictionary and twice their unpack size instead. 7-Zip sizes
+    ///   the header dictionary to the header (4 KiB for a few files, 192 KiB at
+    ///   3,000 files, 1 MiB at 60,000) and the LZMA model adds about 22 KiB, so
+    ///   a limit below roughly 26 KiB refuses every 7z archive with an encoded
+    ///   header, `list` included; archives with a plain header are held only to
+    ///   the header's own size and the entry cap.
     ///
     /// Other codecs are bounded by their format (bzip2 blocks of at most
     /// 900 KB). Not exposed through the CLI or language bindings.
@@ -1191,7 +1218,8 @@ impl SecurityConfig {
         self
     }
 
-    /// Adds an include pattern, parsed with the grammar of `create -x`.
+    /// Adds an include glob pattern, parsed with the grammar of `create -x`
+    /// (see [`ExcludePattern`](crate::ExcludePattern)).
     ///
     /// Only entries that match an include pattern (and no exclude pattern) are
     /// extracted. A pattern that matches nothing in the archive fails the
@@ -1210,7 +1238,7 @@ impl SecurityConfig {
     ///
     /// let config = SecurityConfig::default().try_add_include("src/main.rs")?;
     /// assert_eq!(config.selection.include().len(), 1);
-    /// assert!(SecurityConfig::default().try_add_include("**/x").is_err());
+    /// assert!(SecurityConfig::default().try_add_include("a**b").is_err());
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn try_add_include(mut self, pattern: &str) -> crate::Result<Self> {
@@ -1219,7 +1247,8 @@ impl SecurityConfig {
         Ok(self)
     }
 
-    /// Adds an exclude pattern, parsed with the grammar of `create -x`.
+    /// Adds an exclude glob pattern, parsed with the grammar of `create -x`
+    /// (see [`ExcludePattern`](crate::ExcludePattern)).
     ///
     /// An exclude pattern always wins over an include pattern. One that
     /// matches nothing is not an error.
@@ -1722,8 +1751,11 @@ pub enum DecodeReuse {
     /// plaintext of the archive until the extraction ends. When no temporary
     /// file can be created, or on WASI, nothing is kept.
     ///
-    /// On Linux and Android a file that lands on a tmpfs or ramfs is detected
-    /// and charged like [`Memory`](Self::Memory): its length counts against
+    /// A file that lands on a Linux or Android tmpfs or ramfs, a FreeBSD tmpfs
+    /// or `md` memory disk (`/dev/mdN`, with any suffix such as `md0p1` or
+    /// `md0.eli`; a vnode-backed `md` disk is charged too, conservatively), or
+    /// a macOS tmpfs mount is detected and charged like
+    /// [`Memory`](Self::Memory): its length counts against
     /// the shared decoder-memory budget, and when an extraction into a sink
     /// needs room the latest kept entries are cut off the end of the file and
     /// decoded again. The bytes of entries already extracted are not released
@@ -1731,9 +1763,11 @@ pub enum DecodeReuse {
     /// conservatively: evicting an entry below the one currently being read
     /// frees nothing, because the file is never cut lower than that entry's
     /// end. The Linux detection is compiled and exercised only by CI; it has
-    /// not been run on a Linux host. On every other target the file is assumed
-    /// to be on disk, so a temporary directory that is a RAM disk (FreeBSD
-    /// tmpfs, a macOS RAM disk) holds the spool in memory outside the budget.
+    /// not been run on a Linux host, and the FreeBSD arm is run by no CI job.
+    /// Everything else is assumed to be on disk, so a temporary directory on
+    /// a macOS `hdiutil` RAM disk, on a FreeBSD nullfs or unionfs over a
+    /// tmpfs, or on ZFS over an `md` disk holds the spool in memory outside
+    /// the budget.
     ///
     /// Writing the spool and reading it back is paid in kernel time on every
     /// byte kept. Measured (2026-11, macOS, release CLI, a shared host at a

@@ -321,6 +321,86 @@ fn an_exclude_removes_a_subtree_and_wins_over_an_include() {
     }
 }
 
+fn glob_tree() -> Vec<Item<'static>> {
+    vec![
+        Item::File("src/lib.rs", b"1"),
+        Item::File("src/c/one.rs", b"2"),
+        Item::File("src/c/two.rs", b"3"),
+        Item::File("src/c/two.txt", b"4"),
+        Item::File("src/c/deep/three.rs", b"5"),
+        Item::File("src/d/two.rs", b"6"),
+        Item::File("docs/readme.md", b"7"),
+        Item::File("apple", b"8"),
+        Item::File("dog", b"9"),
+    ]
+}
+
+#[test]
+fn glob_include_patterns_select_as_bsdtar_would() {
+    let cases: [(&str, &[&str]); 6] = [
+        ("src/c/*.rs", &["src/c/one.rs", "src/c/two.rs"]),
+        (
+            "src/**/*.rs",
+            &[
+                "src/c/deep/three.rs",
+                "src/c/one.rs",
+                "src/c/two.rs",
+                "src/d/two.rs",
+                "src/lib.rs",
+            ],
+        ),
+        ("src/*/two.rs", &["src/c/two.rs", "src/d/two.rs"]),
+        ("src/c/t?o.rs", &["src/c/two.rs"]),
+        (
+            "[a-c]*",
+            &[
+                "apple",
+                "src/c/deep/three.rs",
+                "src/c/one.rs",
+                "src/c/two.rs",
+                "src/c/two.txt",
+            ],
+        ),
+        ("*.md", &["docs/readme.md"]),
+    ];
+    for format in FORMATS {
+        for (pattern, expected) in cases {
+            let config = base().try_add_include(pattern).unwrap();
+            let run = extract(format, &glob_tree(), &config);
+            assert_eq!(run.files(), expected, "{format:?} {pattern}");
+        }
+    }
+}
+
+#[test]
+fn a_glob_exclude_wins_over_a_glob_include() {
+    for format in FORMATS {
+        let config = base()
+            .try_add_include("src/**/*.rs")
+            .unwrap()
+            .try_add_exclude("deep")
+            .unwrap()
+            .try_add_exclude("two.rs")
+            .unwrap();
+        let run = extract(format, &glob_tree(), &config);
+        assert_eq!(run.files(), ["src/c/one.rs", "src/lib.rs"], "{format:?}");
+    }
+}
+
+#[test]
+fn an_unmatched_glob_include_is_reported_by_its_text() {
+    for format in FORMATS {
+        let config = base().try_add_include("src/**/*.go").unwrap();
+        let run = extract(format, &glob_tree(), &config);
+
+        let ArchiveError::UnmatchedInclude { patterns } = run.error() else {
+            panic!("{format:?}: {:?}", run.error());
+        };
+        let named: Vec<_> = patterns.iter().map(ToString::to_string).collect();
+        assert_eq!(named, ["src/**/*.go"], "{format:?}");
+    }
+}
+
 #[test]
 fn patterns_are_case_sensitive_and_match_before_stripping() {
     for format in FORMATS {
@@ -944,7 +1024,7 @@ fn the_boundary_refuses_a_strip_count_beyond_the_path_depth() {
 #[test]
 fn a_refused_pattern_names_its_setting() {
     assert_matches!(
-        SecurityConfig::default().try_add_include("**/x"),
+        SecurityConfig::default().try_add_include("a**b"),
         Err(ArchiveError::InvalidConfiguration {
             setting: ConfigSetting::EntryInclude,
             ..

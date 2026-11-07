@@ -75,6 +75,33 @@ def test_include_and_exclude_select_on_the_original_path(project, temp_dir):
     assert report.skipped.count("not_selected") >= 1
 
 
+def test_glob_patterns_select_entries(project, temp_dir):
+    out = temp_dir / "out"
+    config = (
+        exarch.SecurityConfig().add_include_pattern("proj/**/*.rs").add_exclude_pattern("l?b.rs")
+    )
+
+    exarch.extract_archive(project, out, config)
+
+    assert _files(out) == ["proj/src/main.rs"]
+
+
+def test_a_glob_exclude_drops_a_create_entry(temp_dir):
+    src = temp_dir / "src"
+    (src / "logs" / "deep").mkdir(parents=True)
+    (src / "keep.txt").write_text("k")
+    (src / "logs" / "a.log").write_text("a")
+    (src / "logs" / "deep" / "b.log").write_text("b")
+    archive = temp_dir / "o.tar"
+
+    config = exarch.CreationConfig().with_exclude_patterns(["logs/**/*.log"])
+    exarch.create_archive(archive, [src], config)
+
+    paths = {entry.path for entry in exarch.list_archive(archive).entries}
+    assert "keep.txt" in paths
+    assert not any(path.endswith(".log") for path in paths)
+
+
 def test_strip_components_drops_leading_components(project, temp_dir):
     out = temp_dir / "out"
     config = exarch.SecurityConfig().with_strip_components(1)
@@ -131,7 +158,7 @@ def test_properties_round_trip_and_rewrite_is_one_choice():
     ("method", "setting"),
     [("add_include_pattern", "entry_include"), ("add_exclude_pattern", "entry_exclude")],
 )
-@pytest.mark.parametrize("pattern", ["**/x", "a?b", "[x]", "", "a,b"])
+@pytest.mark.parametrize("pattern", ["a**b", "{x}", "[x", "!x", "", "a,b"])
 def test_a_refused_pattern_names_its_setting(method, setting, pattern):
     config = exarch.SecurityConfig()
 
@@ -148,7 +175,7 @@ def test_a_refused_pattern_through_the_property_names_its_setting():
     config.include_patterns = ["ok"]
 
     with pytest.raises(exarch.InvalidConfigurationError) as info:
-        config.include_patterns = ["fine", "**/x"]
+        config.include_patterns = ["fine", "a**b"]
 
     assert info.value.setting == "entry_include"
     assert config.include_patterns == ["ok"]

@@ -6,12 +6,15 @@ use super::admit::block_span;
 use super::admit::lzma2_dict_size;
 use super::header::BlockIndex;
 use super::header::SevenZHeader;
+use super::links::is_entry_checksum_error;
 use super::lzma2::DecodeKnobs;
 use super::lzma2::Lzma2Stream;
 use super::lzma2::with_parallel_reader;
 use crate::ParallelDecode;
 use sevenz_rust2::BlockDecoder;
 use sevenz_rust2::Password;
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::io;
 use std::io::Read;
 use std::io::Seek;
@@ -56,6 +59,106 @@ impl<R: Read> Read for CrcChecked<R> {
     }
 }
 
+/// A checksum mismatch a callback saw while reading entry `entry`.
+#[derive(Debug, PartialEq, Eq)]
+struct SeenMismatch {
+    entry: usize,
+    message: String,
+}
+
+/// Reader that records, against the entry being read, the checksum mismatch it
+/// failed a read with, when `arms` is set.
+struct FailureTap<'a, R> {
+    inner: R,
+    entry: usize,
+    arms: bool,
+    mismatch: &'a RefCell<Option<SeenMismatch>>,
+}
+
+impl<R: Read> Read for FailureTap<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf).inspect_err(|e| {
+            if self.arms && is_entry_checksum_error(e) {
+                *self.mismatch.borrow_mut() = Some(SeenMismatch {
+                    entry: self.entry,
+                    message: e.to_string(),
+                });
+            }
+        })
+    }
+}
+
+/// Decodes one block through sevenz-rust2's `BlockDecoder`, checking each
+/// entry's CRC here so a mismatch does not end the block (see
+/// [`SevenZHeader::unchecked_crc_archive`]).
+///
+/// When it drains an entry after the callback, the decoder repeats a checksum
+/// mismatch the callback already saw, as a plain I/O error that has lost its
+/// type but keeps its message. That repeat, and only that, is swallowed:
+/// `each` handled the mismatch of that same entry. A mismatch armed the
+/// swallow when the decoder raised it, or when this module's own entry check
+/// raised it on the block's last entry, where the decoder's repeat can only
+/// concern that entry. A different error, a
+/// mismatch of another entry or one the callback never saw, and any error
+/// `each` returned itself still propagate.
+fn sequential_block<R: Read + Seek>(
+    source: &mut R,
+    header: &SevenZHeader,
+    block_index: BlockIndex,
+    each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
+) -> EntryResult {
+    let password = Password::empty();
+    let mismatch = RefCell::new(None);
+    let callback_failed = Cell::new(false);
+    let last_entry = Cell::new(0);
+    let last_streamed = block_span(header, block_index)
+        .rev()
+        .find(|&i| header.files()[i].has_stream);
+    let mut next_file = header.block_first_file(block_index);
+    let result = BlockDecoder::new(
+        1,
+        block_index.get(),
+        header.unchecked_crc_archive(),
+        &password,
+        source,
+    )
+    .for_each_entries(&mut |_, reader| {
+        let index = next_file;
+        let file = &header.files()[index];
+        next_file += 1;
+        last_entry.set(index);
+        let below = FailureTap {
+            inner: reader,
+            entry: index,
+            arms: true,
+            mismatch: &mismatch,
+        };
+        let mut entry: Box<dyn Read + '_> = if file.has_stream && file.has_crc {
+            Box::new(CrcChecked::new(below, file.size, file.crc))
+        } else {
+            Box::new(below)
+        };
+        let mut tapped = FailureTap {
+            inner: entry.as_mut(),
+            entry: index,
+            arms: last_streamed == Some(index),
+            mismatch: &mismatch,
+        };
+        each(file, &mut tapped).inspect_err(|_| callback_failed.set(true))
+    });
+    match result {
+        Err(sevenz_rust2::Error::Io(e, _))
+            if !callback_failed.get()
+                && mismatch.borrow().as_ref().is_some_and(|seen| {
+                    seen.entry == last_entry.get() && seen.message == e.to_string()
+                }) =>
+        {
+            Ok(true)
+        }
+        other => other,
+    }
+}
+
 /// Decodes the files of one block and hands each to `each`.
 ///
 /// Blocks that hold a single LZMA2 stream with enough independent runs are
@@ -87,8 +190,7 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
         _ => None,
     };
     let Some((stream, lookahead)) = plan else {
-        return BlockDecoder::new(1, block_index.get(), archive, &password, source)
-            .for_each_entries(each);
+        return sequential_block(source, header, block_index, each);
     };
 
     // The dry run fails exactly as the sequential path would on a coder graph

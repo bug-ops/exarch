@@ -99,6 +99,7 @@ _QuotaSubCode = Literal[
     "TREE_NODES",
     "SINK_CAPACITY",
     "SOLID_BLOCK_MEMORY",
+    "HEADER_SIZE",
 ]
 _ZipBombSubCode = Literal["ENTRY", "SOLID_BLOCK", "SKIPPED_ENTRIES"]
 _SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH"]  # noqa: E501  # fmt: skip
@@ -755,19 +756,22 @@ class CreationConfig:
         ...
 
     def with_exclude_patterns(self, patterns: list[str]) -> CreationConfig:
-        """
+        r"""
         Sets exclude patterns, matched against the archive entry path.
 
-        A name (``build``), ``name*`` or ``*name`` matches one path component at
-        any depth; a pattern with a separator (``docs/build``) matches that
-        path from the archive root and its subtree.
+        Patterns are globs: ``*`` and ``?`` match within one path component
+        (``?`` is exactly one byte), ``[a-c]`` is a positive ASCII class, and
+        ``**`` as a whole component spans directories (``src/**/*.rs``). A
+        name without ``/`` (``build``, ``*.tmp``) matches any path component
+        at any depth, and so its subtree; a pattern with a ``/`` anywhere,
+        a trailing one included (``docs/build``, ``target/``), matches from
+        the archive root and its subtree. ``\`` is a separator, not an escape.
 
         Raises ``InvalidConfigurationError`` (``setting == "exclude_pattern"``)
-        for an empty pattern, ``.``, ``..``, an absolute path, a bare ``*``,
-        an inner or repeated ``*``, ``*`` combined with a separator, a glob
-        look-alike (``?``, ``[``, ``]``, ``{``, ``}``, ``!``), a comma, or leading
-        or trailing whitespace. Only the shapes above are matched, so a refused
-        pattern would otherwise be read literally.
+        for an empty pattern, ``.``, ``..``, an absolute path, a leading ``!``,
+        ``{`` or ``}``, ``**`` glued to other characters (``a**b``), a negated,
+        POSIX or non-ASCII class, an unterminated class, a class range outside
+        ``0-9``/``a-z``/``A-Z``, a comma, or leading or trailing whitespace.
         """
         ...
 
@@ -2121,7 +2125,6 @@ def verify_archive_bytes_with_progress(
         with the callback's exception chained as __cause__.
     """
     ...
-
 @final
 class CreatedArchive:
     """The result of create_archive_to_bytes."""

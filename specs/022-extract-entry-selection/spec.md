@@ -58,7 +58,7 @@ A caller states, in one validated value, which entries to extract and how many l
 
 ### Out of Scope
 
-- A glob engine. Patterns use exactly the grammar that `create -x/--exclude` accepts today (`Exact`, `Prefix`, `Suffix`, `Path`; see [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021). `**`, `?`, character classes, braces and negation stay refused.
+- A glob engine (superseded once #1000 is merged, which lands before this text: [[023-entry-selection-glob-patterns/spec]] adds one; the text below is the shipped #981 behavior). Patterns use exactly the grammar that `create -x/--exclude` accepts today (`Exact`, `Prefix`, `Suffix`, `Path`; see [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021). `**`, `?`, character classes, braces and negation stay refused.
 - Regular expressions, and tar-style `s/old/new/` name transforms.
 - A new overwrite policy. Collisions follow the existing `ExistingFiles {Skip, Overwrite, Refuse}` rules (and `--force` mapping to `Overwrite`); this spec adds no variant and no default.
 - A caller-supplied filter callback in `exarch-core` or the bindings (see section 9, Q16: user code per entry cannot be modeled by `verify`).
@@ -275,7 +275,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
 | `EntrySelection` (working) | Validated include and exclude pattern lists; default selects everything | `include`, `exclude`; `selects(&NormalizedPath) -> Selected` |
-| `EntryPattern` (working; shared with the creation `ExcludePattern`) | One parsed pattern from the create grammar | `Exact`, `Prefix`, `Suffix`, `Path`; `TryFrom<&str>`, `Display` |
+| `EntryPattern` (alias of the creation `ExcludePattern`) | One parsed pattern; opaque glob value since #1000 ([[023-entry-selection-glob-patterns/spec]]) | `TryFrom<&str>`, `Display`, `matches(&Path)`; was `Exact`, `Prefix`, `Suffix`, `Path` |
 | `PathRewrite` (working) | Closed enum for how a validated path becomes a landing | `Keep`, `Strip(StripComponents)`, `Flatten` |
 | `StripComponents` (working) | Newtype: 1 up to the maximum path depth; never zero | boundary parse from `u64`/`i64` |
 | `Selected` (working) | Result of testing an entry: extract it, or leave it out for a stated reason | `Extract`, `Skip(NotSelected \| StrippedAway)` |
@@ -340,7 +340,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 - Update `specs/` through the `rust-agents:sdd` agent in a dedicated worktree, `CHANGELOG.md`, doc comments with `# Examples`, and `skills/exarch-cli/SKILL.md`
 
 ### Ask First
-- Adding a glob syntax beyond the create grammar
+- Adding a glob syntax beyond the grammar of [[023-entry-selection-glob-patterns/spec]]
 - A caller-supplied filter callback
 - An overwrite-policy enum
 - Early termination of the archive scan
@@ -411,6 +411,7 @@ All sixteen questions from the research draft were resolved by the user's approv
 - [[019-verify-and-list-model/spec]] — `landing_paths`, `landings`, verify models extraction (FR-060, FR-061)
 - [[020-reader-sink-and-in-memory-api/spec]] — sinks run the same gates
 - [[021-create-staging-and-output-policy/spec]] — the pattern grammar (`ExcludePattern`) reused here; create `--strip-prefix`
+- [[023-entry-selection-glob-patterns/spec]] — glob grammar that replaces the four-variant grammar (#1000)
 - [python/cpython `tarfile`](https://docs.python.org/3/library/tarfile.html#tarfile.TarFile.extractall) — `extractall(members=...)` and the `filter` callable
 - [PEP 706](https://peps.python.org/pep-0706/) — `tarfile` extraction filters
 - [npm/node-tar](https://github.com/npm/node-tar) — `extract({ strip, filter, file list })`

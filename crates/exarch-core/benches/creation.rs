@@ -381,6 +381,18 @@ fn benchmark_path_filtering(c: &mut Criterion) {
         b.iter(|| prefix.matches(black_box(temp_path)));
     });
 
+    let deep_path = Path::new("src/module/nested/deeper/file.rs");
+    for (name, text) in [
+        ("matches_glob_double_star", "src/**/*.rs"),
+        ("matches_glob_single_star", "src/*/nested/*/file.rs"),
+        ("matches_glob_class", "[a-c]*.tmp"),
+    ] {
+        let glob = ExcludePattern::try_from(text).unwrap();
+        group.bench_function(name, |b| {
+            b.iter(|| glob.matches(black_box(deep_path)));
+        });
+    }
+
     group.finish();
 }
 

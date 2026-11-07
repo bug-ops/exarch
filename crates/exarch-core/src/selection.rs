@@ -31,10 +31,11 @@ use crate::ExcludePattern;
 use crate::Result;
 use crate::SkipKind;
 use crate::Violation;
+use crate::creation::exclude_pattern::normalized;
 use crate::security::fs_view::LinkKind;
 use crate::security::validator::NodeKind;
 
-/// A glob-free entry pattern, with the grammar of creation excludes.
+/// A glob entry pattern, with the grammar of creation excludes.
 ///
 /// The same type as [`ExcludePattern`]: `create -x` and extraction share one
 /// parser, so a pattern means the same thing in both directions.
@@ -150,8 +151,8 @@ pub enum PathRewrite {
 /// An entry is selected when it matches at least one include pattern (or there
 /// are none) and no exclude pattern; an exclude pattern always wins. Patterns
 /// match the entry's normalized archive path before any stripping, compare raw
-/// component bytes and are case-sensitive on every host. A path pattern
-/// selects the named entry and everything below it.
+/// bytes and are case-sensitive on every host. A match selects the entry and
+/// everything below it.
 ///
 /// The default selects every entry and keeps every path.
 ///
@@ -314,16 +315,22 @@ impl EntrySelection {
         shape: EntryShape,
         hits: Option<&IncludeHits>,
     ) -> Result<Decision> {
+        let normalized = normalized(original);
+        let matches = |pattern: &EntryPattern| {
+            normalized
+                .as_deref()
+                .is_some_and(|path| pattern.matches_normalized(path))
+        };
         let mut included = self.include.is_empty();
         for (index, pattern) in self.include.iter().enumerate() {
-            if pattern.matches(original) {
+            if matches(pattern) {
                 included = true;
                 if let Some(hits) = hits {
                     hits.record(index);
                 }
             }
         }
-        if !included || self.exclude.iter().any(|pattern| pattern.matches(original)) {
+        if !included || self.exclude.iter().any(matches) {
             return Ok(Decision::Skip(SkipKind::NotSelected));
         }
         Ok(match (self.rewrite, shape) {

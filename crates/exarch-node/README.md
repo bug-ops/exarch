@@ -290,7 +290,7 @@ try {
 |----------|----------|-------|
 | `code` | always | An `ErrorCode` such as `'PATH_TRAVERSAL'`, `'QUOTA_EXCEEDED'` or `'SECURITY_VIOLATION'`. A path rejected at the boundary (null byte, too long) is `'SECURITY_VIOLATION'` and a rejected setter value (a zero or negative limit, a non-positive ratio, an unusable list entry) is `'INVALID_CONFIGURATION'` with a `setting` naming it. Errors raised by the binding itself (an internal panic, a failed argument conversion) are `ExarchNativeError`: `code` is napi's status string (`'GenericFailure'`, `'InvalidArg'`, ...), not an `ErrorCode`, and no other property is set. |
 | `relaxableBy` | a `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit | The `PolicySetting` id, for example `'symlinks'` |
-| `subCode` | an `INVALID_ARCHIVE` with a finer classification, every core `SECURITY_VIOLATION`, every `QUOTA_EXCEEDED` and every `ZIP_BOMB` | on `INVALID_ARCHIVE`, `'TAR_AMBIGUITY'` (a TAR header read differently by different tools), `'TAR_TRAILER'` (the stream after the TAR end-of-archive marker is corrupt or truncated), `'ZIP_READER'` (a failure of the ZIP reader or of the structural check built on it), `'LINK_TARGET'`, `'DUPLICATE_ENTRY'`, `'ENTRY_NAME'`, `'DECLARED_SIZE'`, `'INTEGRITY'` (the refusal of that family), `'TAR_READER'` or `'SEVENZ_READER'` (a failure of the TAR or 7z reader); on `SECURITY_VIOLATION`, the family of the refusal, one of `'PATH_NAME'`, `'PATH_DEPTH'`, `'LINK_TARGET'`, `'LINK_POLICY'`, `'EXISTING_SYMLINK'`, `'ENTRY_TYPE'`, `'ROOT_ENTRY'`, `'ENCRYPTED'`, `'COMPRESSION_METHOD'`, `'SOLID_ARCHIVE'`, `'DECLARED_SIZE'`, `'CONCURRENT_CHANGE'`, `'TAR_METADATA'`, `'TAR_TRAILER'`, `'PLATFORM'`, `'OUTPUT_CONFLICT'`, `'SOURCE_PATH'`; on `QUOTA_EXCEEDED`, the quota (`'FILE_COUNT'`, `'TOTAL_SIZE'`, `'FILE_SIZE'`, `'INTEGER_OVERFLOW'`, `'DECODER_MEMORY'`, `'COMPRESSED_MEMBERS'`, `'TREE_NODES'`, `'SINK_CAPACITY'` or `'SOLID_BLOCK_MEMORY'`); on `ZIP_BOMB`, what the ratio was measured over (`'ENTRY'`, `'SOLID_BLOCK'` or `'SKIPPED_ENTRIES'`); typed `InvalidArchiveSubCode`, `SecurityViolationSubCode`, `QuotaSubCode` or `ZipBombSubCode` |
+| `subCode` | an `INVALID_ARCHIVE` with a finer classification, every core `SECURITY_VIOLATION`, every `QUOTA_EXCEEDED` and every `ZIP_BOMB` | on `INVALID_ARCHIVE`, `'TAR_AMBIGUITY'` (a TAR header read differently by different tools), `'TAR_TRAILER'` (the stream after the TAR end-of-archive marker is corrupt or truncated), `'ZIP_READER'` (a failure of the ZIP reader or of the structural check built on it), `'LINK_TARGET'`, `'DUPLICATE_ENTRY'`, `'ENTRY_NAME'`, `'DECLARED_SIZE'`, `'INTEGRITY'` (the refusal of that family), `'TAR_READER'` or `'SEVENZ_READER'` (a failure of the TAR or 7z reader); on `SECURITY_VIOLATION`, the family of the refusal, one of `'PATH_NAME'`, `'PATH_DEPTH'`, `'LINK_TARGET'`, `'LINK_POLICY'`, `'EXISTING_SYMLINK'`, `'ENTRY_TYPE'`, `'ROOT_ENTRY'`, `'ENCRYPTED'`, `'COMPRESSION_METHOD'`, `'SOLID_ARCHIVE'`, `'DECLARED_SIZE'`, `'CONCURRENT_CHANGE'`, `'TAR_METADATA'`, `'TAR_TRAILER'`, `'PLATFORM'`, `'OUTPUT_CONFLICT'`, `'SOURCE_PATH'`; on `QUOTA_EXCEEDED`, the quota (`'FILE_COUNT'`, `'TOTAL_SIZE'`, `'FILE_SIZE'`, `'INTEGER_OVERFLOW'`, `'DECODER_MEMORY'`, `'COMPRESSED_MEMBERS'`, `'TREE_NODES'`, `'SINK_CAPACITY'`, `'SOLID_BLOCK_MEMORY'` or `'HEADER_SIZE'`); on `ZIP_BOMB`, what the ratio was measured over (`'ENTRY'`, `'SOLID_BLOCK'` or `'SKIPPED_ENTRIES'`); typed `InvalidArchiveSubCode`, `SecurityViolationSubCode`, `QuotaSubCode` or `ZipBombSubCode` |
 | `nonUtf8EntryPath` | an `INVALID_ARCHIVE` (`'ENTRY_NAME'`) refusal of an entry name that is not valid UTF-8 | The name written injectively: a backslash is `\x5C`, each invalid byte `\xNN` |
 | `restore`, `backupPath` | an `IO_ERROR` from a failed `'atomic_replace'` | `restore` is `'not_needed'`, `'restored'` or `'failed'`; `backupPath` names where the original remains after `'failed'`; paths are redacted like the message |
 | `leftoverPath` | a staging directory or an empty output reservation file stayed on disk (a failed `'atomic_replace'`, a rolled-back extraction, a creation that left its reservation) | The leftover, redacted like the message |
@@ -402,14 +402,18 @@ const result = await extractArchiveWithProgress(
 ### Exclude patterns
 
 `CreationConfig.withExcludePatterns(patterns)` replaces the list (the defaults included)
-and `addExcludePattern(pattern)` appends one; both accept four shapes: `name` (a path
-component equal to it), `name*`, `*name` and `dir/sub` (that path and its
-subtree). Patterns match the entry's archive path, never the ancestors of a
-source directory, so for a source `src` write `build`, not `src/build`. Any
-other shape, such as `*.m*`, `?.txt`, `[a`, `{a,b}`, `!a.txt`, `a,b`, a pattern
-with leading or trailing whitespace, an empty one, `..` or an absolute path,
-throws `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'` instead of
-silently excluding nothing.
+and `addExcludePattern(pattern)` appends one; both accept glob patterns.
+`*` and `?` match within one path component (`?` is exactly
+one byte), `[a-c]` is a positive ASCII class, and `**` as a whole component
+spans directories (`src/**/*.rs`). A name without `/` (`build`, `*.tmp`) matches
+any path component, and so its subtree; a pattern with a `/` anywhere,
+a trailing one included (`target/`), matches from the archive root and its
+subtree. Patterns match the entry's archive path, never the
+ancestors of a source directory, so for a source `src` write `build`, not
+`src/build`. Unsupported syntax, such as `{a,b}`, `!a.txt`, `a**b`, `[!x]`, `[a`,
+`a,b`, a pattern with leading or trailing whitespace, an empty one, `..` or an
+absolute path, throws `INVALID_CONFIGURATION` with `setting: 'exclude_pattern'`
+instead of silently excluding nothing.
 
 ### Create options
 
@@ -499,9 +503,8 @@ selection with the same code. Order of operations: the original entry name is
 validated first (an unsafe name is refused even when it is not selected), then
 include and exclude patterns select entries, matching the path **before**
 stripping, then `stripComponents` or `flatten` rewrite the name, which is
-validated again. Patterns have four shapes (`name`, `name*`, `*name` and
-`dir/sub`, which selects that path and everything below it), compare raw
-components and are case-sensitive on every host. An empty pattern list selects
+validated again. Patterns are globs (`*`, `?`, `[a-c]`, `**`; see exclude patterns above), match
+raw bytes and are case-sensitive on every host. An empty pattern list selects
 everything.
 
 - Entries left out are counted in `skipped` as `'not_selected'`, and entries

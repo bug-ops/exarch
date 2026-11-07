@@ -101,8 +101,10 @@ impl LinkPolicyArgs {
 pub struct SelectionArgs {
     /// Act only on entries matching PATTERN (repeatable); a pattern that
     /// matches no entry is an error. Same pattern grammar as `create
-    /// --exclude`: a component (`docs`), a prefix (`tmp*`), a suffix (`*.rs`)
-    /// or a relative path (`src/lib`) that also selects everything below it.
+    /// --exclude`: globs such as `docs`, `*.rs`, `src/**/*.rs` or
+    /// `src/c/t?o.rs`; a name matches at any depth, a pattern with a `/` from
+    /// the archive root, and a match also selects everything below it. Quote
+    /// the pattern so the shell does not expand it.
     #[arg(long = "include", value_name = "PATTERN")]
     pub include: Vec<String>,
 
@@ -542,8 +544,10 @@ pub struct CreateArgs {
     #[arg(long)]
     pub include_hidden: bool,
 
-    /// Exclude pattern, can be repeated: a name, `name*`, `*name` (one path
-    /// component) or a relative path with separators (that path and below)
+    /// Exclude glob pattern, can be repeated: a name (`*.tmp`, `node_modules`)
+    /// matches any path component, a pattern with a `/` (`build/out`,
+    /// `src/**/*.o`) matches from the archive root; a match also excludes
+    /// everything below it. Quote the pattern so the shell does not expand it
     #[arg(long = "exclude", short = 'x', value_name = "PATTERN")]
     pub exclude: Vec<String>,
 

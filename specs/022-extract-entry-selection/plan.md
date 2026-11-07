@@ -62,7 +62,7 @@ All new public items are re-exported at the crate root. After #978B the modules 
 | Type | Pattern | Purpose |
 |------|---------|---------|
 | `EntrySelection` | immutable value, builder-only construction | Holds `include: Box<[EntryPattern]>`, `exclude: Box<[EntryPattern]>`, `rewrite: PathRewrite`. Default selects all and keeps paths. Fields private; `selects(&NormalizedPath) -> Selected` |
-| `EntryPattern` | newtype over the creation `ExcludePattern` | One grammar (`Exact`, `Prefix`, `Suffix`, `Path`), one `TryFrom<&str>`, one `Display`. The creation type moves to a shared module and `creation::ExcludePattern` becomes the same type, so the grammar has one definition (DRY, FR-004) |
+| `EntryPattern` | newtype over the creation `ExcludePattern` | One grammar (`Exact`, `Prefix`, `Suffix`, `Path`; superseded by the glob grammar of [[023-entry-selection-glob-patterns/spec]]), one `TryFrom<&str>`, one `Display`. The creation type moves to a shared module and `creation::ExcludePattern` becomes the same type, so the grammar has one definition (DRY, FR-004) |
 | `PathRewrite` | closed `#[non_exhaustive]` enum | `Keep` (default), `Strip(StripComponents)`, `Flatten`. One enum, so strip and flatten cannot combine (FR-060) |
 | `StripComponents` | newtype over `NonZeroUsize` | Range 1 to `max_path_depth` of the construction; one boundary function in `limit.rs` style takes the runtime integer (`i64`) and refuses `0`, negatives and out-of-range as `InvalidConfiguration{StripComponents, ..}` |
 | `Selected` | result enum | `Extract(Rewritten)` or `Skip(SkipKind)` where the kind is `NotSelected` or `StrippedAway` |

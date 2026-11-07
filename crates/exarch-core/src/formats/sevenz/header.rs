@@ -1,6 +1,6 @@
 //! The one place a 7z header is opened.
 //!
-//! `sevenz-rust2` 0.24.2 builds `Archive::stream_map` with every per-block
+//! `sevenz-rust2` 0.25 builds `Archive::stream_map` with every per-block
 //! table sized to the blocks, every per-file table sized to the files, and
 //! pack-stream and file spans that lie within the archive, and rejects a header
 //! with streams info and no files info. [`SevenZHeader`] can only be obtained
@@ -8,8 +8,11 @@
 //! check at the call site. The one gap upstream leaves, pack streams without
 //! blocks, is closed in `SevenZHeader::check`.
 
+use super::header_probe::DeclaredHeader;
+use super::header_probe::probe;
 use crate::ArchiveError;
 use crate::Malformation;
+use crate::QuotaResource;
 use crate::Result;
 use crate::formats::common;
 use crate::formats::source_fault::SourceRead;
@@ -21,6 +24,8 @@ use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::num::NonZeroU64;
+use std::sync::OnceLock;
 
 /// The six signature bytes every 7z archive starts with.
 pub(crate) const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
@@ -37,6 +42,12 @@ const EMPTY_ARCHIVE_SIZE: u64 = 32;
 pub(crate) struct BlockIndex(usize);
 
 impl BlockIndex {
+    /// The first block, for tests.
+    #[cfg(test)]
+    pub(crate) const fn first() -> Self {
+        Self(0)
+    }
+
     /// The position of the block in the archive's block list.
     pub(crate) const fn get(self) -> usize {
         self.0
@@ -52,6 +63,7 @@ impl BlockIndex {
 #[derive(Debug, Clone)]
 pub(crate) struct SevenZHeader {
     archive: Archive,
+    unchecked_crc: OnceLock<Archive>,
 }
 
 impl SevenZHeader {
@@ -72,13 +84,18 @@ impl SevenZHeader {
                 },
             ));
         }
-        Ok(Self { archive })
+        Ok(Self::new(archive))
     }
 
     /// The header of the valid empty archive.
     fn empty() -> Self {
+        Self::new(Archive::default())
+    }
+
+    fn new(archive: Archive) -> Self {
         Self {
-            archive: Archive::default(),
+            archive,
+            unchecked_crc: OnceLock::new(),
         }
     }
 
@@ -86,12 +103,30 @@ impl SevenZHeader {
     /// construct inconsistent-looking archives on purpose.
     #[cfg(test)]
     pub(crate) fn assume_checked(archive: Archive) -> Self {
-        Self { archive }
+        Self::new(archive)
     }
 
     /// The parsed archive, for `sevenz-rust2` calls that take it whole.
     pub(crate) const fn archive(&self) -> &Archive {
         &self.archive
+    }
+
+    /// The archive with every file checksum marked absent, for
+    /// `sevenz-rust2` block decoding.
+    ///
+    /// Since 0.25 the block decoder keeps failing every read of an entry after
+    /// a checksum mismatch and ends the block, so entries after a corrupt one
+    /// would go unchecked. Decoding through this view lets the caller verify
+    /// each entry's checksum itself and carry on, as the parallel path does;
+    /// the block checksum and the declared-size checks stay with the decoder.
+    ///
+    /// Clones the archive once per header, on first use.
+    pub(crate) fn unchecked_crc_archive(&self) -> &Archive {
+        self.unchecked_crc.get_or_init(|| {
+            let mut archive = self.archive.clone();
+            archive.files.iter_mut().for_each(|f| f.has_crc = false);
+            archive
+        })
     }
 
     /// The archive's file entries.
@@ -156,7 +191,114 @@ impl SevenZHeader {
     }
 }
 
+/// Header bytes a 7z archive may spend per permitted entry (`max_file_count`).
+///
+/// 7-Zip, py7zr and the sevenz-rust2 writer spend about `2 * (path length + 1)`
+/// plus 20 to 45 bytes per entry, so 256 admits an average path of about 120
+/// characters in an archive that holds exactly `max_file_count` entries (an
+/// archive with fewer entries gets proportionally more room per entry). The
+/// memory the entry table needs grows with the header size, so the cap grows
+/// with the number of permitted entries.
+const HEADER_BYTES_PER_ENTRY: u64 = 256;
+
+/// Header bytes allowed on top of the per-entry budget: stream and folder
+/// descriptions.
+const HEADER_BYTES_BASE: u64 = 64 * 1024;
+
+/// What the parse of a 7z header may use.
+///
+/// `memory` is what sevenz-rust2 holds the raw and decoded header sizes and
+/// the header coder's declared dictionary or model to, in whole KiB.
+/// `entry_bytes` additionally caps the plain or decoded header, whose size
+/// bounds the entry table; it is checked here from the declared sizes
+/// ([`probe`]) so that it does not also cap the header dictionary, which some
+/// writers set to 8 MiB or more for small archives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeaderLimit {
+    memory: NonZeroU64,
+    entry_bytes: NonZeroU64,
+}
+
+impl HeaderLimit {
+    /// A limit that never refuses, for tests of other behaviour.
+    #[cfg(test)]
+    pub(crate) const UNLIMITED: Self = Self {
+        memory: NonZeroU64::MAX,
+        entry_bytes: NonZeroU64::MAX,
+    };
+
+    /// The limit of `config`: `max_decoder_memory`, and the header bytes its
+    /// `max_file_count` entries may take.
+    pub(crate) fn from_config(config: &crate::SecurityConfig) -> Self {
+        let files = u64::try_from(config.max_file_count.ceiling()).unwrap_or(u64::MAX);
+        Self::from_limits(config.max_decoder_memory, files)
+    }
+
+    fn from_limits(max_decoder_memory: NonZeroU64, max_file_count: u64) -> Self {
+        let entry_bytes = max_file_count
+            .saturating_mul(HEADER_BYTES_PER_ENTRY)
+            .saturating_add(HEADER_BYTES_BASE);
+        Self {
+            memory: max_decoder_memory,
+            entry_bytes: NonZeroU64::new(entry_bytes).unwrap_or(NonZeroU64::MAX),
+        }
+    }
+
+    /// The most a plain or decoded header may take, and the limit it comes
+    /// from.
+    fn header_cap(self) -> HeaderCap {
+        if self.entry_bytes < self.memory {
+            HeaderCap::EntryBudget(self.entry_bytes)
+        } else {
+            HeaderCap::Memory(self.memory)
+        }
+    }
+}
+
+/// The limit a header size is held to, named by where it comes from so that a
+/// refusal says which limit was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderCap {
+    /// `max_decoder_memory`.
+    Memory(NonZeroU64),
+    /// The header bytes `max_file_count` entries may take.
+    EntryBudget(NonZeroU64),
+}
+
+impl HeaderCap {
+    const fn bytes(self) -> NonZeroU64 {
+        match self {
+            Self::Memory(bytes) | Self::EntryBudget(bytes) => bytes,
+        }
+    }
+
+    fn refusal(self) -> ArchiveError {
+        let resource = match self {
+            Self::Memory(bytes) => QuotaResource::DecoderMemory { max: bytes.get() },
+            Self::EntryBudget(bytes) => QuotaResource::HeaderSize { max: bytes.get() },
+        };
+        ArchiveError::QuotaExceeded { resource }
+    }
+}
+
+/// `limit` in KiB, rounded down so a limit below 1 KiB refuses every header,
+/// and saturated where `usize` is narrower than the limit.
+fn kib(limit: NonZeroU64) -> usize {
+    usize::try_from(limit.get() / 1024).unwrap_or(usize::MAX)
+}
+
 /// Opens the 7z header of `source`, the only place one is parsed.
+///
+/// A plain header, or an encoded header's declared decoded size, over
+/// [`HeaderLimit`]'s entry cap is refused before the parse; the entry table
+/// sevenz-rust2 builds grows with that size. The parse itself is held to
+/// `max_decoder_memory` on the raw header size, the decoded header size and
+/// the header coder's declared dictionary or model (not the output-bounded
+/// window that blocks are charged). Not bounded: the buffer that receives the
+/// decoded header (about twice its limit at most), the entry table of a header
+/// within the limit, and block decoding,
+/// whose windows admission estimates separately. A header the probe does not
+/// recognise is held to the entry cap on every quantity.
 ///
 /// A password requirement is [`common::encrypted_archive_error`]. The valid
 /// 32-byte empty archive, which `sevenz-rust2` reports as `UnexpectedEof`,
@@ -165,16 +307,35 @@ impl SevenZHeader {
 /// # Errors
 ///
 /// Returns [`ArchiveError::InvalidArchive`] for a header that does not parse
-/// or that lists pack streams without a stream-map offset for each.
-pub(crate) fn read_sevenz_header<R: Read + Seek>(source: &mut R) -> Result<SevenZHeader> {
+/// or that lists pack streams without a stream-map offset for each, and
+/// [`ArchiveError::QuotaExceeded`] with [`QuotaResource::HeaderSize`] when the
+/// header is larger than `max_file_count` permits and
+/// [`QuotaResource::DecoderMemory`] when it needs more than
+/// `max_decoder_memory`.
+pub(crate) fn read_sevenz_header<R: Read + Seek>(
+    source: &mut R,
+    limit: HeaderLimit,
+) -> Result<SevenZHeader> {
+    let cap = limit.header_cap();
+    let parse_limit = match probe(source) {
+        DeclaredHeader::Plain { bytes: size } | DeclaredHeader::Encoded { decoded: size } => {
+            if size > cap.bytes().get() {
+                return Err(cap.refusal());
+            }
+            HeaderCap::Memory(limit.memory)
+        }
+        DeclaredHeader::Unrecognized => cap,
+    };
+    source.seek(SeekFrom::Start(0)).map_err(ArchiveError::Io)?;
     let tap = SourceTap::default();
-    let parsed = Archive::read(
+    let parsed = Archive::read_with_memory_limit(
         &mut SourceRead::new(&mut *source, tap.clone()),
         &Password::empty(),
+        kib(parse_limit.bytes()),
     );
     match parsed {
         Ok(archive) => SevenZHeader::check(archive),
-        Err(error) => header_failure(&error, &tap, source),
+        Err(error) => header_failure(&error, &tap, source, parse_limit),
     }
 }
 
@@ -184,9 +345,13 @@ fn header_failure<R: Read + Seek>(
     error: &sevenz_rust2::Error,
     tap: &SourceTap,
     source: &mut R,
+    limit: HeaderCap,
 ) -> Result<SevenZHeader> {
     if let Some(fault) = tap.fault() {
         return Err(ArchiveError::Io(fault));
+    }
+    if matches!(error, sevenz_rust2::Error::MaxMemLimited { .. }) {
+        return Err(limit.refusal());
     }
     if super::is_password_error(error) {
         return Err(common::encrypted_archive_error());
@@ -260,6 +425,51 @@ mod tests {
     }
 
     #[test]
+    fn the_entry_cap_follows_max_file_count_and_leaves_the_memory_limit() {
+        let memory = NonZeroU64::new(1 << 30).unwrap();
+        let limit = HeaderLimit::from_limits(memory, 1000);
+        assert_eq!(
+            limit.entry_bytes.get(),
+            1000 * HEADER_BYTES_PER_ENTRY + HEADER_BYTES_BASE
+        );
+        assert_eq!(limit.memory, memory);
+        assert_eq!(
+            limit.header_cap(),
+            HeaderCap::EntryBudget(limit.entry_bytes)
+        );
+        let zero = HeaderLimit::from_limits(memory, 0);
+        assert_eq!(zero.entry_bytes.get(), HEADER_BYTES_BASE);
+    }
+
+    #[test]
+    fn the_header_cap_is_the_lower_of_memory_and_entry_bytes() {
+        let small = NonZeroU64::new(100 * 1024).unwrap();
+        let limit = HeaderLimit::from_limits(small, 1_000_000);
+        assert_eq!(limit.header_cap(), HeaderCap::Memory(small));
+    }
+
+    #[test]
+    fn an_unbounded_entry_count_saturates_instead_of_overflowing() {
+        let memory = NonZeroU64::new(256 << 20).unwrap();
+        let limit = HeaderLimit::from_limits(memory, u64::MAX);
+        assert_eq!(limit.entry_bytes, NonZeroU64::MAX);
+        assert_eq!(limit.header_cap(), HeaderCap::Memory(memory));
+    }
+
+    #[test]
+    fn header_limit_rounds_down_to_whole_kib_and_saturates() {
+        let kib = |bytes| kib(NonZeroU64::new(bytes).unwrap());
+        assert_eq!(kib(1), 0);
+        assert_eq!(kib(1023), 0);
+        assert_eq!(kib(1024), 1);
+        assert_eq!(kib(2047), 1);
+        assert_eq!(
+            kib(u64::MAX),
+            usize::try_from(u64::MAX / 1024).unwrap_or(usize::MAX)
+        );
+    }
+
+    #[test]
     fn upstream_rejects_streams_without_files_info() {
         let err = Archive::read(&mut Cursor::new(NO_FILES_INFO), &Password::empty()).unwrap_err();
         assert!(err.to_string().contains("no files info"), "{err}");
@@ -277,7 +487,7 @@ mod tests {
     #[test]
     fn check_rejects_pack_streams_without_blocks() {
         let bytes = archive_with_pack_stream_and_no_blocks();
-        let err = read_sevenz_header(&mut Cursor::new(bytes)).unwrap_err();
+        let err = read_sevenz_header(&mut Cursor::new(bytes), HeaderLimit::UNLIMITED).unwrap_err();
         assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().starts_with("failed to open 7z archive: "),
             "{err:?}"
         );
@@ -309,7 +519,8 @@ mod tests {
 
     #[test]
     fn read_header_rejects_the_vector_as_invalid_archive() {
-        let err = read_sevenz_header(&mut Cursor::new(NO_FILES_INFO)).unwrap_err();
+        let err = read_sevenz_header(&mut Cursor::new(NO_FILES_INFO), HeaderLimit::UNLIMITED)
+            .unwrap_err();
         assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().starts_with("failed to open 7z archive: "),
             "{err:?}"
         );
@@ -318,7 +529,8 @@ mod tests {
     #[test]
     fn read_header_opens_the_empty_archive() {
         let bytes = include_bytes!("../../../../../tests/fixtures/empty.7z");
-        let header = read_sevenz_header(&mut Cursor::new(&bytes[..])).unwrap();
+        let header =
+            read_sevenz_header(&mut Cursor::new(&bytes[..]), HeaderLimit::UNLIMITED).unwrap();
         assert!(header.files().is_empty());
         assert_eq!(header.block_count(), 0);
     }

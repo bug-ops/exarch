@@ -32,6 +32,7 @@ use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::sevenz::HeaderLimit;
 use crate::formats::sevenz::LinkCapture;
 use crate::formats::sevenz::LinkOutcome;
 use crate::formats::sevenz::LinkTable;
@@ -762,7 +763,7 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
     config: &SecurityConfig,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let header = read_sevenz_header(&mut source)?;
+    let header = read_sevenz_header(&mut source, HeaderLimit::from_config(config))?;
     list_sevenz_parsed(&header, source, config, listing)
 }
 

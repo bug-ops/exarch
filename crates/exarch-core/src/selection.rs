@@ -31,6 +31,7 @@ use crate::ExcludePattern;
 use crate::Result;
 use crate::SkipKind;
 use crate::Violation;
+use crate::creation::exclude_pattern::normalized;
 use crate::security::fs_view::LinkKind;
 use crate::security::validator::NodeKind;
 
@@ -297,8 +298,6 @@ impl EntrySelection {
         self
     }
 
-    // TODO(critic): compile include/exclude lists into one GlobSet each if
-    // per-pattern matching misses NFR-005
     /// Decides what happens to an entry whose name `original` already passed
     /// path validation (so it holds only normal components).
     ///
@@ -316,16 +315,22 @@ impl EntrySelection {
         shape: EntryShape,
         hits: Option<&IncludeHits>,
     ) -> Result<Decision> {
+        let normalized = normalized(original);
+        let matches = |pattern: &EntryPattern| {
+            normalized
+                .as_deref()
+                .is_some_and(|path| pattern.matches_normalized(path))
+        };
         let mut included = self.include.is_empty();
         for (index, pattern) in self.include.iter().enumerate() {
-            if pattern.matches(original) {
+            if matches(pattern) {
                 included = true;
                 if let Some(hits) = hits {
                     hits.record(index);
                 }
             }
         }
-        if !included || self.exclude.iter().any(|pattern| pattern.matches(original)) {
+        if !included || self.exclude.iter().any(matches) {
             return Ok(Decision::Skip(SkipKind::NotSelected));
         }
         Ok(match (self.rewrite, shape) {

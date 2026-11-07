@@ -403,7 +403,7 @@ const result = await extractArchiveWithProgress(
 
 `CreationConfig.withExcludePatterns(patterns)` replaces the list (the defaults included)
 and `addExcludePattern(pattern)` appends one; both accept glob patterns.
-Patterns are globs: `*` and `?` match within one path component (`?` is exactly
+`*` and `?` match within one path component (`?` is exactly
 one byte), `[a-c]` is a positive ASCII class, and `**` as a whole component
 spans directories (`src/**/*.rs`). A name without `/` (`build`, `*.tmp`) matches
 any path component, and so its subtree; a pattern with a `/` anywhere,

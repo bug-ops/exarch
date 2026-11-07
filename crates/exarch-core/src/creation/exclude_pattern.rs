@@ -178,8 +178,8 @@ impl ExcludePattern {
         }
     }
 
-    fn from_shape(shape: Shape, allow_direct: bool) -> std::result::Result<Self, ExcludeRefusal> {
-        let engine = engine_for(&shape, allow_direct)?;
+    fn from_shape(shape: Shape) -> std::result::Result<Self, ExcludeRefusal> {
+        let engine = engine_for(&shape)?;
         Ok(Self { shape, engine })
     }
 
@@ -210,7 +210,7 @@ impl ExcludePattern {
     /// ```
     pub fn parse_for(setting: ConfigSetting, text: &str) -> Result<Self> {
         parse_shape(text)
-            .and_then(|shape| Self::from_shape(shape, true))
+            .and_then(Self::from_shape)
             .map_err(|reason| refuse(setting, text, reason))
     }
 
@@ -235,7 +235,9 @@ impl ExcludePattern {
         normalized(archive_path).is_some_and(|path| self.matches_normalized(&path))
     }
 
-    fn matches_normalized(&self, path: &[u8]) -> bool {
+    /// Matches a path already reduced by [`normalized`], so a caller testing
+    /// many patterns against one entry normalizes it once.
+    pub(crate) fn matches_normalized(&self, path: &[u8]) -> bool {
         match &self.engine {
             Engine::Glob(set) => set.is_match_candidate(&Candidate::from_bytes(path)),
             Engine::Direct => match &self.shape {
@@ -468,15 +470,20 @@ fn is_direct(shape: &Shape) -> bool {
     }
 }
 
-fn engine_for(shape: &Shape, allow_direct: bool) -> std::result::Result<Engine, ExcludeRefusal> {
+fn engine_for(shape: &Shape) -> std::result::Result<Engine, ExcludeRefusal> {
+    if is_direct(shape) {
+        return Ok(Engine::Direct);
+    }
+    glob_engine(shape)
+}
+
+/// The glob engine for `shape`: the shape's own glob plus its subtree twin.
+fn glob_engine(shape: &Shape) -> std::result::Result<Engine, ExcludeRefusal> {
     let texts = match shape {
         Shape::MatchAll => return Ok(Engine::Direct),
         Shape::Floating(pattern) => [format!("**/{pattern}"), format!("**/{pattern}/**")],
         Shape::Anchored(pattern) => [pattern.to_string(), format!("{pattern}/**")],
     };
-    if allow_direct && is_direct(shape) {
-        return Ok(Engine::Direct);
-    }
     let mut builder = GlobSetBuilder::new();
     for text in &texts {
         let glob = GlobBuilder::new(text)
@@ -504,7 +511,7 @@ fn glob_refusal(kind: &ErrorKind) -> ExcludeRefusal {
 
 /// The `/`-joined normal components of `path`, or `None` when the path can
 /// never match: a root, a prefix, a `..` component, or no component at all.
-fn normalized(path: &Path) -> Option<Cow<'_, [u8]>> {
+pub(crate) fn normalized(path: &Path) -> Option<Cow<'_, [u8]>> {
     let bytes = path.as_os_str().as_encoded_bytes();
     let canonical = !bytes.is_empty()
         && bytes
@@ -540,7 +547,9 @@ mod tests {
     }
 
     fn glob_only(text: &str) -> ExcludePattern {
-        ExcludePattern::from_shape(parse_shape(text).unwrap(), false).unwrap()
+        let shape = parse_shape(text).unwrap();
+        let engine = glob_engine(&shape).unwrap();
+        ExcludePattern { shape, engine }
     }
 
     fn refusal(text: &str) -> ExcludeRefusal {

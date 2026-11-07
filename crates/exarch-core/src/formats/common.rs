@@ -91,8 +91,8 @@ impl SpoolBacking {
             any(target_vendor = "apple", target_os = "freebsd") => rustix::fs::fstatfs(file)
                 .map_or(Self::Disk, |stat| {
                     Self::from_mount(
-                        &c_chars_to_bytes(&stat.f_fstypename),
-                        &c_chars_to_bytes(&stat.f_mntfromname),
+                        c_chars_until_nul(&stat.f_fstypename),
+                        c_chars_until_nul(&stat.f_mntfromname),
                     )
                 }),
             _ => {
@@ -136,11 +136,18 @@ impl SpoolBacking {
     /// A vnode-backed `md` disk is also reported as memory; that only lowers
     /// the capacity, so a wrong answer never risks memory.
     #[cfg(any(target_vendor = "apple", target_os = "freebsd", test))]
-    fn from_mount(fs_type: &[u8], mounted_from: &[u8]) -> Self {
+    fn from_mount(
+        mut fs_type: impl Iterator<Item = u8>,
+        mut mounted_from: impl Iterator<Item = u8>,
+    ) -> Self {
         let is_md_disk = mounted_from
-            .strip_prefix(b"/dev/md")
-            .is_some_and(|rest| rest.first().is_some_and(u8::is_ascii_digit));
-        if fs_type == b"tmpfs" || is_md_disk {
+            .by_ref()
+            .take(b"/dev/md".len())
+            .eq(b"/dev/md".iter().copied())
+            && mounted_from
+                .next()
+                .is_some_and(|byte| byte.is_ascii_digit());
+        if fs_type.by_ref().eq(b"tmpfs".iter().copied()) || is_md_disk {
             Self::Ram
         } else {
             Self::Disk
@@ -153,12 +160,11 @@ impl SpoolBacking {
 /// `c_char` is `i8` on some targets and `u8` on others, so the bytes are taken
 /// by reinterpretation rather than by a cast.
 #[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
-fn c_chars_to_bytes(field: &[std::ffi::c_char]) -> Vec<u8> {
+fn c_chars_until_nul(field: &[std::ffi::c_char]) -> impl Iterator<Item = u8> {
     field
         .iter()
         .map(|c| c.to_ne_bytes()[0])
         .take_while(|byte| *byte != 0)
-        .collect()
 }
 
 /// An anonymous spool file and where its bytes live.
@@ -2114,7 +2120,7 @@ mod spool_tests {
         ];
         for (fs_type, from, expected) in cases {
             assert_eq!(
-                SpoolBacking::from_mount(fs_type, from),
+                SpoolBacking::from_mount(fs_type.iter().copied(), from.iter().copied()),
                 expected,
                 "{fs_type:?} {from:?}"
             );

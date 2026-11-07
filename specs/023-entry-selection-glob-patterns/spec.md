@@ -32,10 +32,10 @@ related:
 > **Subsystem**: exarch-core / `ExcludePattern` (grammar and matcher shared by creation excludes and extraction `EntrySelection`); surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
 > **MSRV**: Rust 1.99.1
 > **Origin**: #1000 (research finding, P3, enhancement), found after PR #999. Spec 022 lists a glob engine as out of scope.
-> **Status**: planned. This spec merges after the #1000 implementation PR (track S lands after T4), so from the merge on its requirements describe the shipped behavior; until then it describes the target. The design is decided (architect plan rev 3, critic rounds 1 and 2 folded in) and is being implemented under #1000; this spec states WHAT the shipped behavior must be. Section 9 lists what the plan leaves open.
+> **Status**: planned. Aligned with the code of trk-t4-glob on 2026-11-07 (`crates/exarch-core/src/creation/exclude_pattern.rs`, SKILL.md `--include` row). This spec merges after the #1000 implementation PR (track S lands after T4), so from the merge on its requirements describe the shipped behavior; until then it describes the target. The design is decided (architect plan rev 3, critic rounds 1 and 2 folded in) and is being implemented under #1000; this spec states WHAT the shipped behavior must be. Section 9 lists what the plan leaves open.
 
 > [!note] Working names
-> `ExcludePattern` (alias `EntryPattern`, the type spec 022 reuses), `ExcludeRefusal`, `Shape` and `Matcher` are the identifiers of the plan; the implementation may adjust private ones.
+> `ExcludePattern` (alias `EntryPattern`, the type spec 022 reuses), `ExcludeRefusal`, `Shape` and `Engine` (`Direct` or `Glob`) are the identifiers of the code.
 
 ## 1. Overview
 
@@ -184,21 +184,21 @@ Every check below runs on the text after `\` is rewritten to `/`, so `[a\b]` is 
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-010 | THE SYSTEM SHALL keep today's refusals: empty (including a pattern that is only `./`), over 255 bytes (`MAX_CONFIG_ENTRY_LENGTH`), NUL, a `.` or `..` component, an absolute or drive-prefixed pattern, a comma, leading or trailing whitespace or control characters (`Empty`, `TooLong`, `ContainsNul`, `DotEntry`, `Absolute`, `ContainsComma`, `PaddedWithBlank`) | must |
-| FR-011 | THE SYSTEM SHALL refuse with new typed reasons: raw text starting with `!` (`LeadingNegation`, "patterns cannot negate; use --exclude"; a `!` anywhere else is a literal character); `{` or `}` (`BraceAlternation`); a component that contains `**` but is not exactly `**`, including `a**b` and `***` (`UnsupportedWildcard`); a class starting with `!` or `^`, a class with a non-ASCII member, a class range whose ends are not in one group, and a POSIX class (`[:` inside a class) (`UnsupportedClass`); a class left open at the end of its component (`UnterminatedClass`); an inverted range such as `[z-a]` (`InvalidClassRange`); and any other globset parse error through a wildcard arm (`UnsupportedSyntax`) | must |
+| FR-010 | THE SYSTEM SHALL keep today's refusals: empty (including a pattern that is only `./`), over 255 bytes (`MAX_CONFIG_ENTRY_LENGTH`), NUL, a `.` or `..` component, an absolute pattern, a comma, leading or trailing whitespace or control characters (`Empty`, `TooLong`, `ContainsNul`, `DotEntry`, `Absolute`, `ContainsComma`, `PaddedWithBlank`). A drive prefix (`X:` with an ASCII letter) on the first segment is refused as `Absolute` on every host, so a pattern means the same wherever it is parsed; the cost is that a floating pattern such as `a:b` is refused on Unix too (`**/C:x`, `x/C:y` and `ab:c` are accepted). `-x '*'` and `-x '**'` are accepted and exclude every entry (a bare `*` was refused before), and a `]` outside a class is a literal | must |
+| FR-011 | THE SYSTEM SHALL refuse with new typed reasons: raw text starting with `!` (`LeadingNegation`, message "patterns cannot be negated (use an exclude pattern instead)"; a `!` anywhere else is a literal character); `{` or `}` (`BraceAlternation`; a comma is checked first, so `{a,b}` is `ContainsComma` and `{a}` is `BraceAlternation`); a component that contains `**` but is not exactly `**`, including `a**b` and `***` (`UnsupportedWildcard`); a class starting with `!` or `^`, a class with a non-ASCII member, and a POSIX class (`[:` inside a class) (`UnsupportedClass`); a class left open at the end of its component (`UnterminatedClass`); a class range or interior `-` whose ends are not both in `0-9`, `a-z` or `A-Z`, which includes every range that could span `/` (`x[.-9]y`, `x[+-0]y`, `[--0]`, `[*-0]`, `[]-a]`), and an inverted range such as `[z-a]` (`InvalidClassRange`); and any other globset parse error through a wildcard arm (`UnsupportedSyntax`) | must |
 | FR-011a | `ExcludeRefusal` SHALL stay `#[non_exhaustive]` and closed: kept `Empty`, `TooLong`, `ContainsNul`, `DotEntry`, `Absolute`, `UnsupportedWildcard`, `PaddedWithBlank`, `ContainsComma`; added `LeadingNegation`, `BraceAlternation`, `UnsupportedClass`, `UnterminatedClass`, `InvalidClassRange`, `UnsupportedSyntax`; removed `WildcardWithSeparator`, `GlobMetacharacter`. `explanation()`, the doc example in `config_error.rs`, the CLI hints and the binding messages SHALL be updated; globset's `ErrorKind` is foreign and SHALL never be matched exhaustively | must |
 | FR-012 | WHEN a pattern is parsed THE SYSTEM SHALL decide anchoring on the raw text after `\` to `/` and before any segment is dropped: any `/` anywhere makes it anchored, no `/` makes it floating (`target/`, `./build`, `build\` and `build/**` stay anchored, as `Path` is today). Then empty and `.` segments are dropped, runs of `**` are collapsed and trailing `**` segments are dropped. A pattern left with only `**` segments (`**`, `./**`, `**/`, `**/**`) SHALL be `MatchAll` whatever its anchoring. The structured form is `Shape { MatchAll, Floating(Box<str>), Anchored(Box<str>) }` | must |
-| FR-013 | `Display` SHALL derive from `Shape` and round-trip: `parse(display(p)) == p`. `MatchAll` prints `**`; `Floating` prints the segment; `Anchored` with one segment prints `seg/`, with more `a/b`. So `target/` prints `target/` (it printed `target`, which re-parses as floating, before; CHANGELOG line). The leading-`!` (FR-011) and padding (FR-010) checks SHALL hold for the normalized first and last segments as well, so `./!x` and `a/b /` cannot print a text that re-parses as a refusal (see section 9, Q3) | must |
+| FR-013 | `Display` SHALL derive from `Shape` and round-trip: `parse(display(p)) == p`. `MatchAll` prints `**`; `Floating` prints the segment; `Anchored` with one segment prints `seg/`, with more `a/b`. So `target/` prints `target/` (it printed `target`, which re-parses as floating, before; CHANGELOG line). The leading-`!` (FR-011) and padding (FR-010) checks run on the canonical segments: the first segment that is not `**` (start) and the last segment (end), so `./!x`, `**/!x`, `**/ x` and `a/b /` are refused instead of printing a text that re-parses as a refusal. `Shape` equality implies the same selection, not the converse: `x` and `**/x`, and `*` and `**`, select the same entries and are unequal | must |
 
 ### Matching semantics
 
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-020 | THE SYSTEM SHALL give every pattern accepted on `main` the same meaning: a floating pattern matches any component and selects that subtree (globs `**/P` and `**/P/**`, exactly today's `Exact`/`Prefix`/`Suffix`); an anchored pattern selects the matched path and its subtree (globs `P` and `P/**`, exactly today's `Path` and bsdtar's directory rule); `MatchAll` is the glob `**`. So `src/c/*.rs` selects `src/c/two.rs`, `build/*` selects the children of `build` and everything below, `*` selects everything | must |
-| FR-021 | `matches(&Path)` SHALL be a pure function over a normalized form: when the path is already canonical (no empty or `.` component, no leading `./`, no trailing separator) it SHALL match the raw encoded bytes without allocation; otherwise it SHALL match a `/`-joined buffer of the `Normal` components. A path with no normal component, or with a root, prefix or `..` component, SHALL never match. So `build//out/x` and `build/./out` match `build/out` as they did under `Path::starts_with`, and `a//b` does not meet `a/*/b` (documented) | must |
+| FR-021 | `matches(&Path)` SHALL be a pure function over a normalized form: when the path is already canonical (no empty or `.` component, no leading `./`, no trailing separator) it SHALL match the raw encoded bytes without allocation on Unix and WASI (on Windows the joined buffer is always built, for the separator rewrite); otherwise it SHALL match a `/`-joined buffer of the `Normal` components. A path with no normal component, or with a root, prefix or `..` component, SHALL never match. So `build//out/x` and `build/./out` match `build/out` as they did under `Path::starts_with`, and `a//b` does not meet `a/*/b` (documented) | must |
 | FR-022 | Matching SHALL run on bytes (`Candidate::from_bytes(as_encoded_bytes())`: raw bytes on Unix, WTF-8 with `\` rewritten to `/` on Windows), so a non-UTF-8 name is matched and never skipped | must |
-| FR-023 | A pattern without `*`, `?` or `[` SHALL be matched by exact component comparison (any component for `Floating`, `Path::starts_with` semantics for `Anchored`) through an internal `Matcher::Literal`; this path SHALL give the same answer as the glob path for every literal name and every path (including `.`, `..`, a root, `//`, a trailing `/` and non-UTF-8 bytes), because the FR-021 normalization and the never-match gate run before `Matcher` dispatch | must |
-| FR-024 | The default creation excludes (`.git` and so on, and the suffix default `*.tmp`) SHALL be built without a fallible parse and SHALL never be silently dropped; a test SHALL assert that each default excludes a sample path (the construction mechanism for the suffix default is open, Q4) | must |
+| FR-023 | A pattern whose shape holds no `*`, `?` or `[`, and the `*name` suffix shape, SHALL be matched by plain comparison (any component for `Floating`, `Path::starts_with` semantics for `Anchored`; `MatchAll` matches everything) through the internal `Engine::Direct`; every other shape uses `Engine::Glob`. The direct path SHALL give the same answer as the glob path for every such name and for odd paths (`.`, `..`, empty, a root, a `./` prefix), because the FR-021 normalization and the never-match gate run before engine dispatch | must |
+| FR-024 | The default creation excludes SHALL be built through the infallible `pub(crate)` constructors `literal_name` (`.git` and so on) and `suffix_name` (`*.tmp`), which never touch globset, so no default can be silently dropped; a test asserts that each default excludes a sample path and equals its parsed text | must |
 | FR-025 | Include/exclude combination rules of spec 022 FR-006 SHALL be unchanged: selected iff it matches an include (or there is none) and matches no exclude; exclude wins | must |
 | FR-026 | A refused original path (traversal, absolute, banned component, placement conflict) SHALL stay refused under any pattern, including `**`: selection runs after validation as in spec 022 FR-005 to FR-011 and cannot turn a refused entry into a selected or silently skipped one | must |
 
@@ -218,7 +218,7 @@ Every check below runs on the text after `\` is rewritten to `/`, so `[a\b]` is 
 | FR-101 | Rust, Python and Node SHALL parse through the single core boundary function (`ExcludePattern::try_from`); bindings keep their `str` inputs and only map types and errors (`ArchiveError::into_ffi_message()`); no binding type changes, only refused-shape tests and docs | must |
 | FR-102 | CLI help, Rust docs (with doc-tests), Python and Node docs and the README files SHALL carry the grammar table and one example each for `*`, `**` and the cross-component rule; the `ExcludePattern` docs SHALL state the 10 MiB per-thread lazy cache that globset allows per compiled set | must |
 | FR-103 | `skills/exarch-cli/SKILL.md` SHALL be updated in the same change and verified against the running binary | must |
-| FR-104 | The create-side semantics of [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021 and the out-of-scope line of [[022-extract-entry-selection/spec]] are amended in this change (done in this PR); the `CHANGELOG.md` SHALL record the breaking changes: `ExcludePattern` opaque, `ExcludeRefusal` variants changed, `Display` of an anchored single segment now ends in `/` | must |
+| FR-104 | The create-side semantics of [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021 and the out-of-scope line of [[022-extract-entry-selection/spec]] are amended in this change (done in this PR); the `CHANGELOG.md` SHALL record the breaking changes: `ExcludePattern` opaque, `ExcludeRefusal` variants changed (the codes `wildcard_with_separator` and `glob_metacharacter` are gone from `ExcludeRefusal::as_str` and messages; the CLI JSON envelope carries only the message, whose text changed), `Display` of an anchored single segment now ends in `/`, `matches` returns false for a path with a root, prefix or `..` component (`main` matched `/build/x` against `build`), `-x '*'` and `**` are accepted and exclude everything, a `]` outside a class is a literal, and a drive-prefixed first segment (`C:x`, so also a floating `a:b`) is refused on every host | must |
 
 ## 4. Non-Functional Requirements
 
@@ -228,19 +228,19 @@ Every check below runs on the text after `\` is rewritten to `/`, so `[a\b]` is 
 | NFR-002 | Security | Matching time is linear in the candidate for a fixed pattern (finite automata, no backtracking; globset caps the NFA at 10 MiB); pattern parse and normalization are bounded by 255 bytes; covered by property tests and a fuzz target |
 | NFR-003 | Security | Parsing SHALL NOT panic on any input including non-UTF-8 bytes from bindings; no `expect`/`unwrap` (workspace lints) |
 | NFR-004 | Correctness | Where meaning is shared with `bsdtar` the selected entries SHOULD agree; every deliberate deviation is listed in the differential table of section 6, and `tests/entry_selection_differential.rs` carries the cases where bsdtar agrees |
-| NFR-005 | Performance | Matching a representative selection (10 patterns) against 100000 names SHALL be benchmarked against `main` (bench group in `benches/validation.rs`); the threshold is not fixed (Q5). One `GlobSet` per pattern is the design; compiling each list into one set is deferred (D1: `// TODO(critic): compile include/exclude lists into one GlobSet each if per-pattern matching misses NFR-005` above `EntrySelection::decide`) |
+| NFR-005 | Performance | Selection matching cost is measured, not bounded by a fixed threshold. The `benches/creation.rs` bench carries glob legs; the comparison with the previous code was run by the performance review with release-CLI scratch binaries on 100000 synthetic paths (not by the tracked `cargo bench` suite, which was not run against `main`): default excludes +7 ns per entry (+8%); ten patterns of the old shapes +60 ns per entry (+24%, because `temp*` and `cache*` prefix shapes moved to the glob engine); ten real glob patterns 147 ns per entry; compiling a pattern set 32 microseconds. Against about 80 microseconds per extracted entry that is under 0.1%. One `GlobSet` per pattern is the design; sets of hundreds of glob patterns scale linearly (about 15 ns per glob per entry) and need re-measuring, and compiling each list into one set (D1: `// TODO(critic)` above `EntrySelection::decide`) is deferred |
 | NFR-006 | Maintainability | One matcher, one grammar, one `Display`; the literal path is a proven-equal shortcut (FR-023), not a second grammar |
 | NFR-007 | Dependencies | `globset` is a private dependency of `exarch-core` only (`cargo tree -i globset` lists nothing else), adds no duplicate crate (`multiple-versions = "deny"`), passes `cargo deny --all-features check` and can be bumped without a semver break |
-| NFR-008 | Portability | The same pattern selects the same entries on Linux, macOS and Windows; a Windows CI test matches `src\c\two.rs` against `src/c/*.rs` |
+| NFR-008 | Portability | The same pattern selects the same entries on Linux, macOS and Windows. The Windows test `host_separators_and_prefixes` (`#[cfg(windows)]`, in `exclude_pattern.rs`) asserts that `src/c/*.rs` matches `src\c\two.rs`, does not match `C:\src\c\two.rs`, and that `C:x` is `Absolute`; it was added in a fix round, has not been run locally (no Windows host; only `clippy --target x86_64-pc-windows-gnu` ran) and first runs on `windows-latest` in CI |
 
 ## 5. Data Model
 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
-| `ExcludePattern` (alias `EntryPattern`) | Opaque, immutable, validated pattern | `Shape` for `Eq`/`Hash`/`Display`, `Matcher::{Literal, Glob(GlobSet)}`; `Clone`; `Debug` prints the text only |
+| `ExcludePattern` (alias `EntryPattern`) | Opaque, immutable, validated pattern | `Shape` for `Eq`/`Hash`/`Display`, `Engine::{Direct, Glob(GlobSet)}`; `Clone`; `Debug` prints the text only |
 | `Shape` | Canonical anchoring and segments | `MatchAll`, `Floating(Box<str>)`, `Anchored(Box<str>)` (segments joined with `/`) |
 | `ExcludeRefusal` | Why a pattern was refused | closed `#[non_exhaustive]` enum (FR-011a) |
-| `literal_name` | Infallible `pub(crate)` constructor for the default literal excludes | never touches globset |
+| `literal_name`, `suffix_name` | Infallible `pub(crate)` constructors for the default excludes | never touch globset |
 | Unmatched include report | Typed error payload (spec 022) | pattern text, partial outcome |
 
 ## 6. Edge Cases and Error Handling
@@ -255,10 +255,14 @@ Every check below runs on the text after `\` is rewritten to `/`, so `[a\b]` is 
 | Entry `../x.rs` with `**/*.rs` | Refused by validation (FR-026) |
 | `src/[a-`, `[a\b]` | `UnterminatedClass` |
 | `a**b`, `***` | `UnsupportedWildcard` |
-| `{a,b}` | `BraceAlternation` (a comma alone is `ContainsComma`) |
-| `!keep.txt` | `LeadingNegation`; `a!b` is a literal |
+| `{a,b}` | `ContainsComma` (the comma is checked before the brace); `{a}` is `BraceAlternation` |
+| `!keep.txt`, `**/!x` | `LeadingNegation`; `a!b` is a literal |
+| `**/ x`, `a/b /` | `PaddedWithBlank` |
+| `C:x`, `./C:x` (any host), floating `a:b` | `Absolute`; `**/C:x`, `x/C:y`, `ab:c` accepted |
+| `*`, `**` | Accepted; select every entry (`-x '*'` excludes everything) |
+| `]` outside a class | Literal |
 | `a[!x]b`, `a[^x]b`, `[é]`, `[[:alpha:]]` | `UnsupportedClass` |
-| `x[.-9]y`, `x[+-0]y`, `[--0]`, `[*-0]`, `[]-a]` | `UnsupportedClass` (ranges that would span `/` or mix groups) |
+| `x[.-9]y`, `x[+-0]y`, `[--0]`, `[*-0]`, `[]-a]` | `InvalidClassRange` (ranges that would span `/` or mix groups) |
 | `[z-a]` | `InvalidClassRange` |
 | `[a-c]`, `[0-9]`, `[-a]`, `[a-]`, `[]a]`, `[*]` | Accepted |
 | `\*` | `\` is a separator, not an escape: the pattern is `/*` after normalization, which is `Absolute` |
@@ -275,15 +279,18 @@ Every check below runs on the text after `\` is rewritten to `/`, so `[a\b]` is 
 
 ### Differential table against bsdtar
 
-| Aspect | bsdtar member pattern | exarch | Basis |
-|--------|----------------------|--------|-------|
-| `*` and `/` | `*` crosses `/` | `*` never crosses `/` | plan |
-| Anchoring | member names unanchored | a pattern with a separator is anchored at the root, one without floats | plan |
-| Subtree rule | a directory pattern selects its members | same (implicit trailing `**`) | plan |
-| `?`, classes | by character | by byte, positive ASCII classes only | plan (`?` byte); refusals above |
-| Negated and POSIX classes, braces, backslash escape | not part of this comparison | refused (`\` is a separator) | refusals above |
+Verified live against bsdtar 3.5.3 by the T4 developer (SKILL.md, `--include` row).
 
-The differential corpus (`tests/entry_selection_differential.rs`) includes only cases where bsdtar agrees; rows above are the intended disagreements. Rows without a plan statement about bsdtar's behavior are exarch-side facts only.
+| Aspect | bsdtar member pattern | exarch |
+|--------|----------------------|--------|
+| `*` and `/` | `*` crosses `/`: `src/c/*.rs` also selects `src/c/deep/three.rs` | `*` and `?` never cross `/` |
+| Anchoring | every pattern is anchored at the archive root and matches the whole path: `bsdtar -tf t.tar two.rs` reports `Not found in archive`, `[a-c]*` selects only top-level `apple` | a pattern without `/` floats and matches at any depth; a pattern with `/` anywhere is anchored |
+| `**` | `src/**/*.rs` misses `src/lib.rs` | `**` matches zero components, so `src/lib.rs` is selected |
+| Subtree rule | a directory pattern (`src/c`) selects its members | same (implicit trailing `**`) |
+| `?`, classes | by character | by byte, positive ASCII classes only |
+| Negated and POSIX classes, braces, backslash escape | not part of this comparison | refused (`\` is a separator) |
+
+The differential corpus (`tests/entry_selection_differential.rs`) includes only cases where bsdtar agrees; the rows above are the intended disagreements.
 
 ## 7. Success Criteria
 
@@ -296,9 +303,9 @@ The differential corpus (`tests/entry_selection_differential.rs`) includes only 
 | SC-005 | CLI, Rust, Python and Node results | Same selected set; same typed error on malformed input |
 | SC-006 | `create --exclude`, `extract --exclude` and `list` on one fixture | Same entry set |
 | SC-007 | Every refusal of FR-010 and FR-011 | One test per variant, pattern named; globset traps (`a**b`, `***`, `{a,b}`, `a[!x]b` against `a/b`, `[é]`, `[[:alpha:]]`, `\*`, `x[.-9]y`, `x[+-0]y`) all refused |
-| SC-008 | Literal path versus glob path (FR-023) | Equal over random names and over arbitrary paths |
-| SC-009 | Each default exclude (FR-024) | Excludes its sample path |
-| SC-010 | Selection benchmark | Recorded against `main` in `.local/testing/benchmarks.md` |
+| SC-008 | Direct engine versus glob engine (FR-023) | Equal in a property test over names from `[a-c._]` and a fixed list of odd paths (`.`, `..`, empty, root, `./` prefix); a non-UTF-8 component is covered by a Unix-only unit test, not by the property test |
+| SC-009 | Each default exclude (FR-024) | Excludes its sample path and equals its parsed text |
+| SC-010 | Selection cost | Measured as in NFR-005 (performance review, +60 ns per entry for ten old-shape patterns) |
 
 ## 8. Agent Boundaries
 
@@ -322,13 +329,13 @@ The differential corpus (`tests/entry_selection_differential.rs`) includes only 
 
 ## 9. Open Questions
 
-> [!question] Left open by the plan
-> - **Q1 (follow-up)**: negated classes (`[!x]` as `[^x]` that also excludes `/`) and non-ASCII class members are refused in v1; the plan says a follow-up is possible. File one only if demand appears.
-> - **Q2**: the variant for a POSIX class (`[:` inside a class). The plan says "refuse" but names no variant; this spec uses `UnsupportedClass`. Confirm, or add a variant.
-> - **Q3**: the plan adopted the critic's round-2 finding that the `!` and padding checks must also hold for normalized segments (`./!x`, `a/b /`) only as a round-trip goal; the exact check point is for the implementation plan.
-> - **Q4**: how the default `*.tmp` suffix is built infallibly. `literal_name(&'static str)` cannot express it; options are a third infallible constructor or routing it through globset with the FR-024 test proving it never drops. The plan does not choose.
-> - **Q5**: the NFR-005 threshold is unverified until the bench runs (the draft's 5% was never measured).
-> - **Q6**: whether to compile each include/exclude list into one `GlobSet` (D1, deferred behind the bench).
+> [!question] Still open
+> - **Q1 (follow-up)**: negated classes (`[!x]` as `[^x]` that also excludes `/`) and non-ASCII class members are refused in v1; a follow-up is possible. File one only if demand appears.
+> - **Q6**: whether to compile each include/exclude list into one `GlobSet` (D1). The performance review found it unnecessary at these sizes; re-measure for lists of hundreds of glob patterns.
+> - **Q7**: a Windows run of `host_separators_and_prefixes` and of the drive-prefix test is still pending (CI only).
+
+> [!success] Resolved by the code
+> Q2 (POSIX class variant): `UnsupportedClass`. Q3 (`!` and padding checks on normalized segments): done on the first non-`**` and the last segment (FR-013). Q4 (infallible `*.tmp` default): `suffix_name`. Q5 (NFR-005): measured, no fixed threshold (NFR-005). The comma-before-brace order is `ContainsComma` first.
 
 ## 10. See Also
 

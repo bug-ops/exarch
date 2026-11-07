@@ -211,8 +211,9 @@ The budget counts derivations that actually cost, mirroring upstream's key cache
 Consequences:
 
 - A default-config encrypted 7z has one block per file (`SolidArchives::Refuse`). Counting every block would exhaust the budget after about 224 files at power 19 and fail the plaintext-twin test; counting runs does not. Evidence from a local `7z` run (`7z a -t7z -ms=off -mhc=off -p...`, 4 files): 4 blocks, each `LZMA2` plus `7zAES` at power 19, salt size 0 and a different 16-byte IV per block, so every block has the same (power, empty salt) and the archive costs one derivation, at any file count.
-- A hostile archive with a distinct salt per block, or alternating two salts, is charged `2^power` for every change, up to `2^24` each: the default budget `2^27` stops it after 8 runs at power 24 (about 3.2 s of derivation, plus the reserved header run) and fails with `KdfCostExceeded` before the first content derivation. At 7-Zip's power 19 the same budget allows 256 distinct runs.
+- A hostile archive with a distinct salt per block, or alternating two salts, is charged `2^power` for every change, up to `2^24` each: the default budget `2^27` stops it after 7 runs at power 24 once the header's `2^24` is reserved (about 2.8 s of derivation, plus the header run) and fails with `KdfCostExceeded` before the first content derivation. At 7-Zip's power 19 the same budget allows 256 distinct runs.
 - An archive from a writer that uses a distinct salt per file therefore hits a file-count cliff at `2^27 / 2^power` blocks; `max_kdf_work` raises it, and the default is to be confirmed against such writers (section 9, Q4).
+- The accounting walks the blocks once, but exarch reads 7z blocks more than once per operation (the link pre-pass `walk_sevenz_links` in `formats/sevenz/links.rs`, then extraction or the integrity pass), so with alternating salts the real derivation work is about the number of passes times the charged amount, unless the passes share derivations; this is an open point (Q10).
 - Residual until upstream ships a per-reader cache (FR-040): the cache is process-global and holds one slot, so another operation running in the same process with a different key evicts it, and a later block of this operation re-derives without being charged. The extra cost is bounded by the block count (at most `max_file_count`) times one derivation per interleaving, and is caused by concurrent operations of the same process, not by the archive alone. The docs state it; a service should not run untrusted encrypted 7z concurrently with a large `max_file_count`.
 
 ### Upstream key cache and dependencies
@@ -260,7 +261,7 @@ Consequences:
 | 7z power above 24 | Rejected upstream; admission refuses powers 25 to 62 first (`KdfCostExceeded`) |
 | 7z content coder at power `0x3F` | `WeakEncryptionRefused` |
 | 7z header at power `0x3F` | Not refusable by exarch in v1 (the key is built inside `Archive::read` and the header coder is not visible afterwards); needs an upstream change; content policy only |
-| Distinct salt per block | `KdfCostExceeded` after at most `max_kdf_work / 2^power` runs |
+| Distinct salt per block | `KdfCostExceeded` after at most `max_kdf_work / 2^power` runs (minus the header reservation) |
 | Header-encrypted 7z, no password | `PasswordRequired` for list, verify and extract |
 | Solid and encrypted 7z | Refused as solid regardless of password |
 | ZipCrypto entry | `WeakEncryptionRefused` |
@@ -331,6 +332,7 @@ The implementation PR meets all of these or does not merge:
 > - **Q6**: the decryption overhead target and the `Password` maximum length are not set (the file limit is 1 KiB).
 > - **Q7**: the typed reason for admission refusing powers 25 to 62 (this spec uses `KdfCostExceeded`; the plan names none).
 > - **Q8**: behavior when a password is supplied for an archive with no encrypted entries (ignore, or warn); the research draft left it open and the plan is silent.
+> - **Q10**: how the `max_kdf_work` accounting covers the several passes over the blocks (charge per pass, or arrange that derivations are shared); found when aligning this spec with the code on 2026-11-07, not covered by the plan.
 > - **Q9**: whether `list` without a password should also work for header-encrypted 7z (the plan says `PasswordRequired`, so no).
 
 ## 10. See Also

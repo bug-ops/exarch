@@ -119,6 +119,8 @@ impl SevenZHeader {
     /// would go unchecked. Decoding through this view lets the caller verify
     /// each entry's checksum itself and carry on, as the parallel path does;
     /// the block checksum and the declared-size checks stay with the decoder.
+    ///
+    /// Clones the archive once per header, on first use.
     pub(crate) fn unchecked_crc_archive(&self) -> &Archive {
         self.unchecked_crc.get_or_init(|| {
             let mut archive = self.archive.clone();
@@ -195,9 +197,8 @@ impl SevenZHeader {
 /// plus 20 to 45 bytes per entry, so 256 admits an average path of about 120
 /// characters in an archive that holds exactly `max_file_count` entries (an
 /// archive with fewer entries gets proportionally more room per entry). The
-/// parser allocates about 96 bytes for every header byte that declares an
-/// entry, so the table of a header inside the cap takes up to about 24 KiB per
-/// permitted entry.
+/// memory the entry table needs grows with the header size, so the cap grows
+/// with the number of permitted entries.
 const HEADER_BYTES_PER_ENTRY: u64 = 256;
 
 /// Header bytes allowed on top of the per-entry budget: stream and folder
@@ -294,8 +295,8 @@ fn kib(limit: NonZeroU64) -> usize {
 /// `max_decoder_memory` on the raw header size, the decoded header size and
 /// the header coder's declared dictionary or model (not the output-bounded
 /// window that blocks are charged). Not bounded: the buffer that receives the
-/// decoded header (about twice its limit at most), the table of a header
-/// within the limit (about 96 bytes per header byte), and block decoding,
+/// decoded header (about twice its limit at most), the entry table of a header
+/// within the limit, and block decoding,
 /// whose windows admission estimates separately. A header the probe does not
 /// recognise is held to the entry cap on every quantity.
 ///

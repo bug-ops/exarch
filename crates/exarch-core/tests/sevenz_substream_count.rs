@@ -17,6 +17,7 @@ use common::solid_copy_7z;
 use exarch_core::ArchiveError;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
+use exarch_core::Malformation;
 use exarch_core::SecurityConfig;
 use exarch_core::SolidArchives;
 use exarch_core::SolidLimits;
@@ -25,8 +26,6 @@ use exarch_core::VerifyRequest;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use tempfile::TempDir;
-
-const REFUSAL: &str = "fewer streamed files than sub-streams";
 
 fn solid_config() -> SecurityConfig {
     SecurityConfig::default().with_solid_archives(SolidArchives::Allow(SolidLimits::DEFAULT))
@@ -39,7 +38,11 @@ fn write(dir: &TempDir, entries: &[RawEntry<'_>]) -> PathBuf {
 }
 
 fn assert_refused_at_open(err: &ArchiveError) {
-    assert_matches!(err, ArchiveError::InvalidArchive(m) if m.to_string().contains(REFUSAL), "{err:?}");
+    assert_matches!(
+        err,
+        ArchiveError::InvalidArchive(Malformation::SevenZHeaderUnreadable { .. }),
+        "{err:?}"
+    );
 }
 
 fn shapes() -> Vec<(&'static str, Vec<RawEntry<'static>>)> {

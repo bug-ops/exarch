@@ -33,6 +33,7 @@ use exarch_core::IssueCategory;
 use exarch_core::LinkTarget;
 use exarch_core::ListOptions;
 use exarch_core::ListRequest;
+use exarch_core::Malformation;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
 use exarch_core::StoredTargets;
@@ -1151,7 +1152,7 @@ fn mark_stream_less(bytes: &[u8], file: usize) -> Vec<u8> {
         out.extend_from_slice(&patched);
 
         let parsed = Archive::read(&mut Cursor::new(out.clone()), &Password::empty());
-        if parsed.is_err_and(|e| e.to_string().contains("fewer streamed files")) {
+        if parsed.is_err_and(|e| matches!(e, sevenz_rust2::Error::Other(_))) {
             return out;
         }
     }
@@ -1181,13 +1182,12 @@ fn orphan_block_archive(dir: &TempDir, stream_less: usize) -> PathBuf {
 /// refused when it is opened, so `extract` writes nothing and `verify` and
 /// `list` refuse it too.
 fn assert_orphan_block_refused(path: &Path) {
-    const REFUSAL: &str = "fewer streamed files than sub-streams";
     let upstream = Archive::read(
         &mut Cursor::new(std::fs::read(path).unwrap()),
         &Password::empty(),
     )
     .unwrap_err();
-    assert!(upstream.to_string().contains(REFUSAL), "{upstream}");
+    assert_matches!(upstream, sevenz_rust2::Error::Other(_));
 
     let out = TempDir::new().unwrap();
     std::fs::write(out.path().join("a"), b"sentinel").unwrap();
@@ -1202,7 +1202,10 @@ fn assert_orphan_block_refused(path: &Path) {
         list_archive(path, &config).unwrap_err(),
     ];
     for err in refused {
-        assert_matches!(err, ArchiveError::InvalidArchive(reason) if reason.to_string().contains(REFUSAL));
+        assert_matches!(
+            err,
+            ArchiveError::InvalidArchive(Malformation::SevenZHeaderUnreadable { .. })
+        );
     }
     for name in ["a", "b"] {
         assert_eq!(std::fs::read(out.path().join(name)).unwrap(), b"sentinel");

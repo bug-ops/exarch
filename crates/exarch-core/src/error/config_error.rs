@@ -359,7 +359,9 @@ impl ExcludeRefusal {
             Self::UnsupportedWildcard => {
                 "glues `**` to other characters; `**` must be a whole path component"
             }
-            Self::LeadingNegation => "starts with `!`; patterns cannot be negated",
+            Self::LeadingNegation => {
+                "starts with `!`; patterns cannot be negated (use an exclude pattern instead)"
+            }
             Self::BraceAlternation => {
                 "contains `{` or `}`; alternation is not supported, give one pattern per option"
             }

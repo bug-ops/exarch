@@ -137,6 +137,20 @@ describe('createArchiveSync', () => {
     const logEntries = manifest.entries.filter((e) => e.path.endsWith('.log'));
     assert.strictEqual(logEntries.length, 0);
   });
+
+  it('should drop entries a glob exclude pattern selects', () => {
+    fs.mkdirSync(path.join(sourceDir, 'logs', 'deep'), { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, 'logs', 'a.log'), 'a');
+    fs.writeFileSync(path.join(sourceDir, 'logs', 'deep', 'b.log'), 'b');
+
+    const config = new CreationConfig();
+    config.addExcludePattern('logs/**/*.log');
+    createArchiveSync(outputPath, [sourceDir], config);
+
+    const manifest = listArchiveSync(outputPath);
+    assert.strictEqual(manifest.entries.filter((e) => e.path.endsWith('.log')).length, 0);
+    assert.ok(manifest.entries.length > 0);
+  });
 });
 
 describe('createArchive output handling', () => {

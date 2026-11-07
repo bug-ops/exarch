@@ -181,6 +181,14 @@ describe('entry selection', () => {
       assert.strictEqual(report.filesSkipped >= 1, true);
     });
 
+    it('selects entries with glob patterns', () => {
+      const config = new SecurityConfig()
+        .addIncludePattern('top/**/?.rs')
+        .addExcludePattern('d.*');
+      extractArchiveSync(archive, out, config);
+      assert.deepStrictEqual(extractedFiles(), ['top/sub/b.rs']);
+    });
+
     it('lets an exclude pattern win over an include pattern', () => {
       const config = new SecurityConfig().addIncludePattern('top/sub').addExcludePattern('*.tmp');
       extractArchiveSync(archive, out, config);

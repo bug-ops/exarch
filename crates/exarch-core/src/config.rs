@@ -1724,8 +1724,11 @@ pub enum DecodeReuse {
     /// plaintext of the archive until the extraction ends. When no temporary
     /// file can be created, or on WASI, nothing is kept.
     ///
-    /// On Linux and Android a file that lands on a tmpfs or ramfs is detected
-    /// and charged like [`Memory`](Self::Memory): its length counts against
+    /// A file that lands on a Linux or Android tmpfs or ramfs, a FreeBSD tmpfs
+    /// or `md` memory disk (`/dev/mdN`, with any suffix such as `md0p1` or
+    /// `md0.eli`; a vnode-backed `md` disk is charged too, conservatively), or
+    /// a macOS tmpfs mount is detected and charged like
+    /// [`Memory`](Self::Memory): its length counts against
     /// the shared decoder-memory budget, and when an extraction into a sink
     /// needs room the latest kept entries are cut off the end of the file and
     /// decoded again. The bytes of entries already extracted are not released
@@ -1733,9 +1736,11 @@ pub enum DecodeReuse {
     /// conservatively: evicting an entry below the one currently being read
     /// frees nothing, because the file is never cut lower than that entry's
     /// end. The Linux detection is compiled and exercised only by CI; it has
-    /// not been run on a Linux host. On every other target the file is assumed
-    /// to be on disk, so a temporary directory that is a RAM disk (FreeBSD
-    /// tmpfs, a macOS RAM disk) holds the spool in memory outside the budget.
+    /// not been run on a Linux host, and the FreeBSD arm is run by no CI job.
+    /// Everything else is assumed to be on disk, so a temporary directory on
+    /// a macOS `hdiutil` RAM disk, on a FreeBSD nullfs or unionfs over a
+    /// tmpfs, or on ZFS over an `md` disk holds the spool in memory outside
+    /// the budget.
     ///
     /// Writing the spool and reading it back is paid in kernel time on every
     /// byte kept. Measured (2026-11, macOS, release CLI, a shared host at a

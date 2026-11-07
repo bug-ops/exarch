@@ -332,6 +332,19 @@ config = config.with_parallel_decode_memory(
 # lookahead, so concurrent calls multiply both.
 ```
 
+**Patterns.** Include, exclude and `CreationConfig` exclude patterns share one glob grammar (matched case-sensitively on raw bytes, `\` is a separator):
+
+| Pattern | Meaning |
+|---|---|
+| `*` | any run of bytes within one path component |
+| `?` | exactly one byte within one component |
+| `[a-c]`, `[0-9]` | one byte from a positive ASCII class; ranges only inside `0-9`, `a-z`, `A-Z` |
+| `**` | as a whole component: any number of components, including none (`src/**/*.rs`) |
+| `name` | a name without `/` matches any path component, and so the subtree below it |
+| `dir/name`, `target/` | a pattern with a `/` anywhere matches from the archive root, and so its subtree |
+
+`{a,b}`, a leading `!`, `a**b`, negated or POSIX classes, unterminated classes and commas are refused (`InvalidConfigurationError`, `setting` is `exclude_pattern`, `entry_include` or `entry_exclude`).
+
 **Entry selection.** Include and exclude patterns, `strip_components` and `flatten` live in `SecurityConfig`, so `extract_archive*`, `list_archive*` and `verify_archive*` apply them identically (`manifest.dispositions` shows where each listed entry lands or why it is skipped, under the config passed to `list_archive*`). Order of operations: the entry name is validated, matched against the patterns on its original (pre-strip) path, stripped or flattened, and the new name is validated again. An exclude pattern wins over an include pattern, an include pattern that matches nothing fails the extraction (`InvalidConfigurationError`, `setting == "entry_include"`, `unmatched_patterns`), and `staging="atomic_replace"` refuses a selection.
 
 ## Security Features

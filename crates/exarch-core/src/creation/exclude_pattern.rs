@@ -25,9 +25,10 @@ const GLOBSTAR: &str = "**";
 
 /// What a pattern selects, independent of how it is matched.
 ///
-/// `Eq` and `Hash` live here, so two patterns are equal exactly when they
-/// select the same paths by construction (`target/` equals `./target`, but
-/// `x` does not equal `./x`).
+/// `Eq` and `Hash` live here, so two patterns are equal when they reduce to
+/// the same canonical form (`target/` equals `./target`, but `x` does not
+/// equal `./x`). Equal patterns select the same paths; the converse does not
+/// hold (`x` and `**/x` select the same paths and stay unequal).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Shape {
     /// Every path.
@@ -342,10 +343,9 @@ fn parse_shape(text: &str) -> std::result::Result<Shape, ExcludeRefusal> {
     if segments.contains(&"..") {
         return Err(ExcludeRefusal::DotEntry);
     }
-    if anchored
-        && !Path::new(&segments.join("/"))
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
+    if !Path::new(&segments.join("/"))
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
     {
         return Err(ExcludeRefusal::Absolute);
     }
@@ -364,7 +364,10 @@ fn parse_shape(text: &str) -> std::result::Result<Shape, ExcludeRefusal> {
         kept.pop();
     }
     // Checked on the canonical segments, so what Display prints parses again.
-    let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
+    let (Some(first), Some(last)) = (
+        kept.iter().find(|segment| **segment != GLOBSTAR),
+        kept.last(),
+    ) else {
         return Ok(Shape::MatchAll);
     };
     if first.starts_with(is_blank) || last.ends_with(is_blank) {
@@ -659,12 +662,19 @@ mod tests {
             assert_eq!(p.to_string(), text);
             assert_eq!(pattern(&p.to_string()), p);
         }
-        for text in ["./!x", "./x", "a//b/", "./a/**", "build\\"] {
-            if let Ok(p) = ExcludePattern::try_from(text) {
-                assert_eq!(pattern(&p.to_string()), p, "{text}");
-            }
+        for (text, shown) in [
+            ("./x", "x/"),
+            ("a//b/", "a/b"),
+            ("./a/**", "a/"),
+            ("build\\", "build/"),
+        ] {
+            let p = pattern(text);
+            assert_eq!(p.to_string(), shown, "{text}");
+            assert_eq!(pattern(shown), p, "{text}");
         }
         assert_eq!(refusal("./!x"), ExcludeRefusal::LeadingNegation);
+        assert_eq!(refusal("**/!x"), ExcludeRefusal::LeadingNegation);
+        assert_eq!(refusal("**/ x"), ExcludeRefusal::PaddedWithBlank);
         assert_eq!(refusal("a/b /"), ExcludeRefusal::PaddedWithBlank);
         assert_eq!(refusal("./ x"), ExcludeRefusal::PaddedWithBlank);
         assert_eq!(refusal("* /**/"), ExcludeRefusal::PaddedWithBlank);
@@ -756,6 +766,10 @@ mod tests {
         assert!(selects("build/out", "./build/out"));
         assert!(selects("build/out", "build/out/"));
         assert!(!selects("a/*/b", "a//b"));
+        // `a` names a component of `a/../a`, but a `..` path matches nothing,
+        // which is why the component oracle is limited to plain paths.
+        assert!(!selects("a", "a/../a"));
+        assert!(!selects("a/*", "a/../a/b"));
         for text in ["x", "x/y", "**", "*", "y", "/x"]
             .iter()
             .filter_map(|t| ExcludePattern::try_from(*t).ok())
@@ -831,16 +845,49 @@ mod tests {
     }
 
     #[test]
-    fn globset_traps_are_closed() {
-        assert!(!selects("a[0-9]b", "a/b"));
-        assert_eq!(refusal("a{b,c}d"), ExcludeRefusal::ContainsComma);
-        assert_eq!(refusal("a{b}d"), ExcludeRefusal::BraceAlternation);
+    fn glob_patterns_select_descendants_through_the_subtree_twin() {
+        for (text, path) in [
+            ("src/*", "src/x/y"),
+            ("src/*", "src/x"),
+            ("[a-c]*", "x/banana/deep"),
+            ("**/foo", "a/foo/b"),
+            ("**/foo", "foo/b"),
+            ("a?c/x", "abc/x/y"),
+            ("src/[a-c]*", "src/b/c/d"),
+        ] {
+            assert!(glob_only(text).matches(Path::new(path)), "{text} {path}");
+            assert!(selects(text, path), "{text} {path}");
+        }
+        assert!(!selects("src/*", "src"));
+        assert!(!selects("**/foo", "a/foobar"));
     }
 
     #[test]
-    fn ancestors_of_the_root_no_longer_match() {
-        assert!(legacy_matches(Path::new("job.tmp/a.txt"), "*.tmp"));
-        assert!(!pattern("*.tmp").matches(Path::new("a.txt")));
+    fn double_star_forms_are_anchored_and_span_directories() {
+        for text in ["**/x", "**/x/**", "./**/x"] {
+            let p = pattern(text);
+            assert_eq!(p.to_string(), "**/x", "{text}");
+            assert!(p.matches(Path::new("x")), "{text}");
+            assert!(p.matches(Path::new("a/b/x/y")), "{text}");
+            assert!(!p.matches(Path::new("a/xx")), "{text}");
+        }
+        assert_ne!(pattern("**/x"), pattern("x"));
+    }
+
+    #[test]
+    fn the_length_limit_is_255_bytes() {
+        let at_limit = "x".repeat(MAX_CONFIG_ENTRY_LENGTH);
+        assert_eq!(MAX_CONFIG_ENTRY_LENGTH, 255);
+        assert!(ExcludePattern::try_from(at_limit.as_str()).is_ok());
+        assert_eq!(refusal(&format!("{at_limit}x")), ExcludeRefusal::TooLong);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn host_separators_and_prefixes() {
+        assert!(pattern("src/c/*.rs").matches(Path::new("src\\c\\two.rs")));
+        assert!(!pattern("src/c/*.rs").matches(Path::new("C:\\src\\c\\two.rs")));
+        assert_eq!(refusal("C:x"), ExcludeRefusal::Absolute);
     }
 
     fn name_strategy() -> impl Strategy<Value = String> {
@@ -881,6 +928,20 @@ mod tests {
             let direct = pattern(&text);
             let glob = glob_only(&text);
             prop_assert_eq!(direct.matches(Path::new(&path)), glob.matches(Path::new(&path)));
+        }
+
+        #[test]
+        fn engines_agree_on_odd_paths(
+            text in prop::sample::select(vec![".git", "*.tmp", "a", "a/b", "target/", "**", "*", "a/*"]),
+            parts in prop::collection::vec(prop::sample::select(vec!["a", "b", ".", "..", "", "a.tmp"]), 0..5),
+            leading in prop::sample::select(vec!["", "/", "./"]),
+        ) {
+            let path = format!("{leading}{}", parts.join("/"));
+            prop_assert_eq!(
+                pattern(text).matches(Path::new(&path)),
+                glob_only(text).matches(Path::new(&path)),
+                "{} vs {:?}", text, path
+            );
         }
 
         #[test]

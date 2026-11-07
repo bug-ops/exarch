@@ -6,15 +6,8 @@ use exarch_core::ExcludePattern;
 use libfuzzer_sys::fuzz_target;
 
 fn path_of(bytes: &[u8]) -> std::path::PathBuf {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
-    }
-    #[cfg(not(unix))]
-    {
-        std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
-    }
+    use std::os::unix::ffi::OsStrExt as _;
+    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
 }
 
 fuzz_target!(|data: &[u8]| {

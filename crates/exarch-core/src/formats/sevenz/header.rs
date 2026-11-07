@@ -191,13 +191,14 @@ impl SevenZHeader {
 
 /// Header bytes a 7z archive may spend per permitted entry (`max_file_count`).
 ///
-/// Measured on 7-Zip 26.05 archives a decoded header holds about 100 bytes
-/// per entry for 36-character names with times and attributes, and names
-/// dominate it (2 bytes per character), so 512 admits an average name of
-/// over 200 characters. The parser allocates about 96 bytes for every
-/// header byte that declares an entry, so this budget bounds the table it
-/// builds.
-const HEADER_BYTES_PER_ENTRY: u64 = 512;
+/// 7-Zip, py7zr and the sevenz-rust2 writer spend about `2 * (path length + 1)`
+/// plus 20 to 45 bytes per entry, so 256 admits an average path of about 120
+/// characters in an archive that holds exactly `max_file_count` entries (an
+/// archive with fewer entries gets proportionally more room per entry). The
+/// parser allocates about 96 bytes for every header byte that declares an
+/// entry, so the table of a header inside the cap takes up to about 24 KiB per
+/// permitted entry.
+const HEADER_BYTES_PER_ENTRY: u64 = 256;
 
 /// Header bytes allowed on top of the per-entry budget: stream and folder
 /// descriptions.

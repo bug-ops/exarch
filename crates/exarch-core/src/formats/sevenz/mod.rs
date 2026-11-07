@@ -97,7 +97,8 @@
 //! whole runs with no output bound.
 //!
 //! The archive header is read under a byte limit, the lower of
-//! `max_decoder_memory` and 512 bytes per `max_file_count` entry plus 64 KiB.
+//! `max_decoder_memory` and 256 bytes per `max_file_count` entry plus 64 KiB
+//! (with an unbounded `max_file_count`, `max_decoder_memory` alone).
 //! The limit holds the raw header size, the decoded size of an encoded header
 //! and that header coder's declared dictionary or model, and, because the
 //! entry table sevenz-rust2 builds grows with the decoded header, it bounds

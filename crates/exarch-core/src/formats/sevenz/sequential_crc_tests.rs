@@ -199,6 +199,19 @@ fn a_callback_error_that_looks_like_a_checksum_failure_propagates() {
 }
 
 #[test]
+fn a_mismatch_of_one_entry_does_not_excuse_a_block_mismatch_drained_on_another() {
+    let mut bytes = solid_copy(&[("a", A), ("b", B)]);
+    let wrong = crc32(&[A, B].concat()) ^ 1;
+    let header = with_block_crc(&bytes, wrong, &[crc32(A)]);
+    flip_first(&mut bytes, A);
+
+    let (seen, result) = run(&header, bytes, Read_::Declared, None);
+
+    assert_eq!(seen[0], Seen::Checksum);
+    assert!(result.is_err(), "{result:?}");
+}
+
+#[test]
 fn a_folder_checksum_that_is_also_the_entry_checksum_is_reported_once() {
     let mut bytes = solid_copy(&[("a", A)]);
     let crc = crc32(A);

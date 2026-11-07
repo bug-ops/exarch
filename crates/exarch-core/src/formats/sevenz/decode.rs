@@ -59,18 +59,30 @@ impl<R: Read> Read for CrcChecked<R> {
     }
 }
 
-/// Reader that records the message of a checksum mismatch it failed a read
-/// with, whether raised by the decoder under it or by an entry check above.
+/// A checksum mismatch a callback saw while reading entry `entry`.
+#[derive(Debug, PartialEq, Eq)]
+struct SeenMismatch {
+    entry: usize,
+    message: String,
+}
+
+/// Reader that records the checksum mismatch it failed a read with, whether
+/// raised by the decoder under it or by an entry check above, against the
+/// entry being read.
 struct FailureTap<'a, R> {
     inner: R,
-    mismatch: &'a RefCell<Option<String>>,
+    entry: usize,
+    mismatch: &'a RefCell<Option<SeenMismatch>>,
 }
 
 impl<R: Read> Read for FailureTap<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf).inspect_err(|e| {
             if is_entry_checksum_error(e) {
-                *self.mismatch.borrow_mut() = Some(e.to_string());
+                *self.mismatch.borrow_mut() = Some(SeenMismatch {
+                    entry: self.entry,
+                    message: e.to_string(),
+                });
             }
         })
     }
@@ -83,8 +95,9 @@ impl<R: Read> Read for FailureTap<'_, R> {
 /// When it drains an entry after the callback, the decoder repeats a checksum
 /// mismatch the callback already saw, as a plain I/O error that has lost its
 /// type but keeps its message. That repeat, and only that, is swallowed:
-/// `each` handled the mismatch. A different error, a mismatch the callback
-/// never saw, and any error `each` returned itself still propagate.
+/// `each` handled the mismatch of that same entry. A different error, a
+/// mismatch of another entry or one the callback never saw, and any error
+/// `each` returned itself still propagate.
 fn sequential_block<R: Read + Seek>(
     source: &mut R,
     header: &SevenZHeader,
@@ -94,6 +107,7 @@ fn sequential_block<R: Read + Seek>(
     let password = Password::empty();
     let mismatch = RefCell::new(None);
     let callback_failed = Cell::new(false);
+    let last_entry = Cell::new(0);
     let mut next_file = header.block_first_file(block_index);
     let result = BlockDecoder::new(
         1,
@@ -103,8 +117,10 @@ fn sequential_block<R: Read + Seek>(
         source,
     )
     .for_each_entries(&mut |_, reader| {
-        let file = &header.files()[next_file];
+        let index = next_file;
+        let file = &header.files()[index];
         next_file += 1;
+        last_entry.set(index);
         let mut entry: Box<dyn Read + '_> = if file.has_stream && file.has_crc {
             Box::new(CrcChecked::new(reader, file.size, file.crc))
         } else {
@@ -112,6 +128,7 @@ fn sequential_block<R: Read + Seek>(
         };
         let mut tapped = FailureTap {
             inner: entry.as_mut(),
+            entry: index,
             mismatch: &mismatch,
         };
         each(file, &mut tapped).inspect_err(|_| callback_failed.set(true))
@@ -119,7 +136,9 @@ fn sequential_block<R: Read + Seek>(
     match result {
         Err(sevenz_rust2::Error::Io(e, _))
             if !callback_failed.get()
-                && mismatch.borrow().as_deref() == Some(e.to_string().as_str()) =>
+                && mismatch.borrow().as_ref().is_some_and(|seen| {
+                    seen.entry == last_entry.get() && seen.message == e.to_string()
+                }) =>
         {
             Ok(true)
         }

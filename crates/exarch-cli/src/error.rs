@@ -746,8 +746,9 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
             .lit(
                 "'\nThe archive declares a decompression dictionary or window larger than the \
                  allowed limit. For a 7z archive, a header too large for the permitted file count \
-                 is refused the same way, and --max-files raises that cap. No CLI flag relaxes \
-                 the memory limit itself. Rust API only: SecurityConfig::with_max_decoder_memory.",
+                 is refused the same way (256 bytes per permitted file plus 64 KiB). --max-files raises \
+                 that cap, and with it the memory a header of that size may need (about 24 KiB \
+                 per permitted file). No CLI flag relaxes the memory limit itself. Rust API only: SecurityConfig::with_max_decoder_memory.",
             ),
         QuotaKind::CompressedMembers => message
             .lit("Compressed member limit exceeded for '")

@@ -806,17 +806,26 @@ pub struct SecurityConfig {
     ///   [`parallel_decode`](Self::parallel_decode). The limit also applies
     ///   when the archive is opened: to the raw header size, the decoded size
     ///   of an encoded header and that header coder's declared dictionary or
-    ///   model. A header larger than 512 bytes per
+    ///   model. A header larger than 256 bytes per
     ///   [`max_file_count`](Self::max_file_count) entry plus 64 KiB is refused
-    ///   too, so the table built from it stays proportional to the permitted
-    ///   file count. The buffer that receives a decoded header (about twice the
-    ///   limit) and the table of a header inside the cap are not capped
-    ///   separately. A refusal is `QuotaExceeded { DecoderMemory }` from
-    ///   `list`, `verify` and `extract`. Blocks are charged the smaller of
-    ///   their dictionary and twice their unpack size instead. 7-Zip sizes the
-    ///   header dictionary to the header (4 KiB for a few files, 192 KiB at
-    ///   3,000 files, 1 MiB at 60,000) and the LZMA model adds about 22 KiB, so
-    ///   a limit below roughly 26 KiB refuses every 7z archive with an encoded
+    ///   too, which holds the table built from it in proportion to the
+    ///   permitted file count: a header just inside that cap can still need
+    ///   about 24 KiB of memory per permitted file (about 240 MiB at the
+    ///   default 10,000 files, 2.4 GB at 100,000). With an unbounded
+    ///   `max_file_count` (`Limit::Unbounded`; `None` in the Python and Node
+    ///   bindings) only this limit applies, so such a header can need about a
+    ///   hundred times `max_decoder_memory`. The buffer that receives a decoded
+    ///   header (about twice the limit) is not capped separately. The
+    ///   dictionary is held to `max_decoder_memory` alone for the usual header
+    ///   layout (one coder, a record under 4 KiB); for any other layout (two
+    ///   coders, such as a filter plus LZMA, or encrypted headers) it is held
+    ///   to the stricter of the two caps. A refusal is `QuotaExceeded {
+    ///   DecoderMemory }` from `list`, `verify` and `extract`, with the cap
+    ///   that was exceeded as `max`. Blocks are charged the smaller of their
+    ///   dictionary and twice their unpack size instead. 7-Zip sizes the header
+    ///   dictionary to the header (4 KiB for a few files, 192 KiB at 3,000
+    ///   files, 1 MiB at 60,000) and the LZMA model adds about 22 KiB, so a
+    ///   limit below roughly 26 KiB refuses every 7z archive with an encoded
     ///   header, `list` included; archives with a plain header are held only to
     ///   the header's own size and the entry cap.
     ///

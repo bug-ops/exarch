@@ -224,9 +224,9 @@ fn the_decoded_header_size_is_held_to_the_limit_when_the_raw_header_is_small() {
 }
 
 #[test]
-fn long_names_within_the_entry_budget_open() {
+fn paths_of_about_a_hundred_characters_at_the_file_cap_open() {
     let names: Vec<String> = (0..1000)
-        .map(|i| format!("{i:04}{}", "n".repeat(196)))
+        .map(|i| format!("{i:04}{}", "n".repeat(96)))
         .collect();
     let entries: Vec<RawEntry<'_>> = names.iter().map(|n| RawEntry::Dir(n)).collect();
     let dir = TempDir::new().unwrap();
@@ -282,4 +282,29 @@ fn a_plain_header_is_held_at_exactly_the_limit() {
     let path = write(&dir, &over);
     assert!(!opens(&path, &config_with_memory(1024)));
     assert!(opens(&path, &config_with_memory(2048)));
+}
+
+fn long_name_archive(dir: &TempDir) -> PathBuf {
+    let names: Vec<String> = (0..1000)
+        .map(|i| format!("{i:04}{}", "n".repeat(196)))
+        .collect();
+    let entries: Vec<RawEntry<'_>> = names.iter().map(|n| RawEntry::Dir(n)).collect();
+    write(dir, &solid_copy_7z(&entries))
+}
+
+#[test]
+fn paths_of_two_hundred_characters_at_the_file_cap_are_over_the_budget() {
+    let dir = TempDir::new().unwrap();
+    let path = long_name_archive(&dir);
+    let config = SecurityConfig::default().with_max_file_count(non_zero!(1000));
+
+    assert!(!opens(&path, &config));
+    assert!(opens(
+        &path,
+        &config.clone().with_max_file_count(non_zero!(2000))
+    ));
+    assert!(opens(
+        &path,
+        &config.with_max_file_count(exarch_core::Limit::Unbounded)
+    ));
 }

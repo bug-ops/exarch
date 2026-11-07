@@ -244,7 +244,8 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | A hidden source root named by the caller, a file source, or `include_hidden = true` | Unchanged: archived |
 | `--follow-symlinks` and a link `keys -> .ssh` | The visible name of the link decides: archived |
 | Pattern `target/` or `src/gen` | `Path`, anchored at the archive root |
-| Pattern `*.{a,b}`, `file?.txt`, `[ab]`, `!x`, `a,b` or `" a"` | Refused (`glob_metacharacter`, `contains_comma`, `padded_with_blank`); the message names the pattern |
+| Pattern `file?.txt`, `[ab]`, `build/*`, `src/**/*.o` | Accepted as globs (spec 023); before #1000 refused as `glob_metacharacter` or `wildcard_with_separator` |
+| Pattern `*.{a,b}`, `a,b`, `!x` or `" a"` | Refused (`contains_comma`, `leading_negation`, `padded_with_blank`; `{a}` alone is `brace_alternation`); the message names the pattern |
 | A non-UTF-8 file name and a pattern | Matched by raw bytes |
 | The progress callback raises (or throws) during creation | Creation stops with `Cancelled`, the staged file is deleted and the previous archive is kept (Python and Node surface the callback's exception) |
 | Pattern `*.tmp` and a source root under `x.tmp/` | Ancestors are not matched; the archive is not empty |

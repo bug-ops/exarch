@@ -561,13 +561,13 @@ fn resolve_pinned(
         .map_err(|refusal| refusal.into_error(link))
 }
 
-/// The real filesystem, with link targets resolved against the destination
-/// handle an extraction already holds.
+/// The real filesystem, resolving link targets through the extraction's
+/// already-open destination handle.
 ///
-/// Behaves like [`HostFs`] except that links are resolved
-/// handle-relatively from the extraction's [`PinnedRoot`], the same descriptor
-/// every write goes through. [`HostFs`] opens the destination by path on every
-/// call instead, so only an extraction should rely on the pinned form.
+/// Behaves like [`HostFs`] except that links are resolved handle-relatively
+/// from the extraction's [`PinnedRoot`], the same descriptor every write goes
+/// through. [`HostFs`] opens the destination by path on every call instead, so
+/// only an extraction should rely on the pinned form.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PinnedHostFs<'r> {
     root: &'r PinnedRoot,

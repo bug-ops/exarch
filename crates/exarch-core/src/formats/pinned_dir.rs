@@ -785,7 +785,7 @@ mod imp {
         /// Creates the subdirectory `name`.
         ///
         /// It inherits the parent's ACL, so it is not owner-only here.
-        // TODO(critic): an explicit owner-only DACL for staging directories.
+        // TODO(#1020): an explicit owner-only DACL for staging directories.
         pub(crate) fn make_private_dir(&self, name: Leaf<'_>) -> io::Result<()> {
             self.make_dir(name)
         }

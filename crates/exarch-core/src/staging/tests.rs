@@ -1175,20 +1175,34 @@ mod narrowing {
         seen.sort_by_key(|reason| reason.as_str());
         seen.dedup();
 
-        let unreachable_here = is_root()
-            || !cfg!(any(
-                target_os = "linux",
-                target_os = "android",
-                target_os = "macos"
-            ));
-        if !unreachable_here {
-            assert_eq!(seen.len(), NarrowingReason::NAMES.len(), "{seen:?}");
-        }
         for reason in NarrowingReason::ALL {
             let producible =
                 adoption_for(*reason).is_some() || *reason == NarrowingReason::DestinationVanished;
             assert_eq!(seen.contains(reason), producible, "{reason}");
         }
+        assert!(
+            seen.len() >= guaranteed_reasons(),
+            "{} reasons seen, expected at least {}: {seen:?}",
+            seen.len(),
+            guaranteed_reasons()
+        );
+    }
+
+    /// How many reasons a host must reach, so a silently skipped case fails.
+    ///
+    /// Every unix host reaches the six that need no host condition. The
+    /// copyable-ACL platforms (Linux, Android, macOS) add `OwnershipDiffers`
+    /// and `AclCopyFailed`; an unprivileged caller adds `GroupNotKept` and
+    /// `OwnerNotKept`. `DestinationVanished` is reachable through the atomic
+    /// path only: the replace path fails and rolls back when the original
+    /// permissions cannot be read.
+    fn guaranteed_reasons() -> usize {
+        let copyable = cfg!(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos"
+        ));
+        6 + if copyable { 2 } else { 0 } + if is_root() { 0 } else { 2 }
     }
 
     #[test]

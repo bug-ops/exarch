@@ -658,6 +658,26 @@ mod tests {
     }
 
     #[test]
+    fn format_extraction_result_renders_every_narrowing_reason() {
+        for reason in exarch_core::NarrowingReason::ALL {
+            let mut f = formatter(Verbosity::Normal, false);
+            let mut report = sample_extraction_report();
+            report
+                .warnings
+                .push(exarch_core::ExtractionWarning::RootAccessNarrowed { reason: *reason });
+            f.format_extraction_result(&report).unwrap();
+            let text = out_text(&f);
+            assert!(text.contains("Warnings:"), "{reason}");
+            assert!(
+                text.contains(&format!(
+                    "gives less access than the destination it replaced ({reason})"
+                )),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn format_extraction_result_no_warnings_section_when_empty() {
         let mut f = formatter(Verbosity::Normal, false);
         f.format_extraction_result(&sample_extraction_report())

@@ -265,19 +265,11 @@ mod linux {
     /// What the kernel returns for an id the reader's namespace cannot map
     /// (`ACL_UNDEFINED_ID`). No valid named entry carries it.
     const UNDEFINED_ID: u32 = u32::MAX;
-    const DEFAULT_OVERFLOW_ID: u32 = 65_534;
 
     /// A POSIX ACL extended attribute that has the version-2 header and a whole
     /// number of 8-byte entries.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(in crate::staging) struct AclBlob(Box<[u8]>);
-
-    /// Which id space a named ACL entry belongs to.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum IdSpace {
-        User,
-        Group,
-    }
 
     impl AclBlob {
         /// Checks the shape of `bytes` as read from the kernel.
@@ -301,77 +293,23 @@ mod linux {
             }
         }
 
-        /// The named user and group entries, with their ids.
-        fn named(&self) -> impl Iterator<Item = (IdSpace, u32)> + '_ {
+        /// Whether a named user or group entry carries the undefined id.
+        fn names_an_undefined_id(&self) -> bool {
             self.0
                 .get(HEADER_LEN..)
                 .unwrap_or_default()
                 .as_chunks::<ENTRY_LEN>()
                 .0
                 .iter()
-                .filter_map(|entry| {
-                    let tag = u16::from_le_bytes(*entry.first_chunk::<2>()?);
-                    let id = u32::from_le_bytes(*entry.get(4..)?.first_chunk::<4>()?);
-                    match tag {
-                        TAG_USER => Some((IdSpace::User, id)),
-                        TAG_GROUP => Some((IdSpace::Group, id)),
-                        _ => None,
-                    }
+                .any(|entry| {
+                    let tag = entry.first_chunk::<2>().map(|tag| u16::from_le_bytes(*tag));
+                    let id = entry
+                        .get(4..)
+                        .and_then(|id| id.first_chunk::<4>())
+                        .map(|id| u32::from_le_bytes(*id));
+                    matches!(tag, Some(TAG_USER | TAG_GROUP)) && id == Some(UNDEFINED_ID)
                 })
         }
-    }
-
-    /// What the reader knows about ids it cannot map.
-    #[derive(Debug, Clone, Copy)]
-    struct IdView {
-        overflow_uid: u32,
-        overflow_gid: u32,
-        namespaced_uid: bool,
-        namespaced_gid: bool,
-    }
-
-    impl IdView {
-        fn read() -> Self {
-            let id = |path: &str| {
-                std::fs::read_to_string(path)
-                    .ok()
-                    .and_then(|text| text.trim().parse().ok())
-                    .unwrap_or(DEFAULT_OVERFLOW_ID)
-            };
-            let namespaced = |path: &str| {
-                std::fs::read_to_string(path).map_or(true, |text| !is_identity_map(&text))
-            };
-            Self {
-                overflow_uid: id("/proc/sys/kernel/overflowuid"),
-                overflow_gid: id("/proc/sys/kernel/overflowgid"),
-                namespaced_uid: namespaced("/proc/self/uid_map"),
-                namespaced_gid: namespaced("/proc/self/gid_map"),
-            }
-        }
-
-        /// Whether a named entry with `id` may stand for an id this reader
-        /// could not map.
-        const fn is_unmapped(self, space: IdSpace, id: u32) -> bool {
-            let (overflow, namespaced) = match space {
-                IdSpace::User => (self.overflow_uid, self.namespaced_uid),
-                IdSpace::Group => (self.overflow_gid, self.namespaced_gid),
-            };
-            id == UNDEFINED_ID || (namespaced && id == overflow)
-        }
-    }
-
-    /// Whether a `/proc/self/{uid,gid}_map` is the identity map of the initial
-    /// namespace. Anything else, including text that does not parse, counts as
-    /// a namespace.
-    fn is_identity_map(text: &str) -> bool {
-        let mut lines = text.lines();
-        let fields: Option<Vec<u64>> = lines.next().and_then(|line| {
-            line.split_whitespace()
-                .map(|field| field.parse().ok())
-                .collect()
-        });
-        matches!(fields.as_deref(), Some(&[0, 0, count]) if count >= u64::from(u32::MAX))
-            && lines.all(|line| line.trim().is_empty())
     }
 
     /// The two POSIX ACL extended attributes of a directory, as stored.
@@ -476,23 +414,16 @@ mod linux {
         }
     }
 
-    /// Turns a blob that names an id the reader cannot map into an unreadable
-    /// one: written back, it could grant whoever holds that id here.
-    fn screen(blob: Blob, ids: impl FnOnce() -> IdView) -> Blob {
-        let refused = match &blob {
-            Blob::Present(acl) => {
-                let mut named = acl.named().peekable();
-                named.peek().is_some() && {
-                    let ids = ids();
-                    named.any(|(space, id)| ids.is_unmapped(space, id))
-                }
+    /// Turns a blob that names an id the reader's user namespace cannot map
+    /// into an unreadable one. The kernel returns such an id as
+    /// [`UNDEFINED_ID`] (verified inside `unshare -U`), and no valid named
+    /// entry carries it.
+    fn screen(blob: Blob) -> Blob {
+        match &blob {
+            Blob::Present(acl) if acl.names_an_undefined_id() => {
+                Blob::Unreadable(NarrowingReason::UnmappedId)
             }
-            Blob::Absent | Blob::Unreadable(_) => false,
-        };
-        if refused {
-            Blob::Unreadable(NarrowingReason::UnmappedId)
-        } else {
-            blob
+            Blob::Present(_) | Blob::Absent | Blob::Unreadable(_) => blob,
         }
     }
 
@@ -501,7 +432,7 @@ mod linux {
     ///
     /// The directory is opened for reading, never through an `O_PATH` handle.
     /// A directory its caller cannot open for reading, an ACL that cannot be
-    /// read in full or names an id this process cannot map, and a directory
+    /// read in full or names an id the namespace cannot map, and a directory
     /// that is no longer `expected` give [`AclPlan::Private`].
     ///
     /// # Errors
@@ -525,8 +456,8 @@ mod linux {
             return Ok(AclPlan::Private(NarrowingReason::DestinationChanged));
         }
         let mut buffer = vec![0_u8; XATTR_SIZE_MAX];
-        let access = screen(read_blob(&dir, ACCESS, &mut buffer)?, IdView::read);
-        let default = screen(read_blob(&dir, DEFAULT, &mut buffer)?, IdView::read);
+        let access = screen(read_blob(&dir, ACCESS, &mut buffer)?);
+        let default = screen(read_blob(&dir, DEFAULT, &mut buffer)?);
         Ok(plan_of(access, default))
     }
 
@@ -582,15 +513,6 @@ mod linux {
 
         fn read_error(errno: Errno) -> io::Result<Blob> {
             classify(Err(errno), &[])
-        }
-
-        fn view(namespaced: bool) -> IdView {
-            IdView {
-                overflow_uid: DEFAULT_OVERFLOW_ID,
-                overflow_gid: DEFAULT_OVERFLOW_ID,
-                namespaced_uid: namespaced,
-                namespaced_gid: namespaced,
-            }
         }
 
         #[test]
@@ -671,46 +593,100 @@ mod linux {
         }
 
         #[test]
-        fn a_named_entry_with_an_undefined_id_is_refused_in_any_namespace() {
-            let entries = [(USER_OBJ, NO_ID), (TAG_USER, NO_ID), (OTHER, NO_ID)];
-            for namespaced in [false, true] {
-                let screened = screen(present(&entries), || view(namespaced));
+        fn a_named_entry_with_an_undefined_id_is_refused() {
+            for tag in [TAG_USER, TAG_GROUP] {
+                let entries = [(USER_OBJ, NO_ID), (tag, NO_ID), (OTHER, NO_ID)];
                 assert_eq!(
-                    screened,
+                    screen(present(&entries)),
                     Blob::Unreadable(NarrowingReason::UnmappedId),
-                    "{namespaced}"
+                    "{tag:#x}"
                 );
             }
         }
 
         #[test]
-        fn the_overflow_id_is_refused_only_inside_a_namespace() {
-            let entries = [(GROUP_OBJ, NO_ID), (TAG_GROUP, DEFAULT_OVERFLOW_ID)];
+        fn a_mapped_named_entry_and_unnamed_undefined_ids_pass() {
+            let entries = [
+                (USER_OBJ, NO_ID),
+                (TAG_USER, 65_534),
+                (TAG_GROUP, 0),
+                (GROUP_OBJ, NO_ID),
+                (OTHER, NO_ID),
+            ];
+            assert_matches!(screen(present(&entries)), Blob::Present(_));
+        }
+
+        #[test]
+        fn the_size_limit_of_an_attribute_is_the_boundary_of_a_readable_blob() {
+            let blob_of_len = |len: usize| {
+                let mut bytes = vec![0_u8; len];
+                bytes[..HEADER_LEN].copy_from_slice(&VERSION.to_le_bytes());
+                bytes
+            };
+            // The largest whole-entry blob is 4 bytes under the limit; the next
+            // whole-entry size is over it.
+            assert!(AclBlob::parse(&blob_of_len(XATTR_SIZE_MAX - HEADER_LEN)).is_ok());
             assert_eq!(
-                screen(present(&entries), || view(true)),
-                Blob::Unreadable(NarrowingReason::UnmappedId)
+                AclBlob::parse(&blob_of_len(XATTR_SIZE_MAX + HEADER_LEN)).unwrap_err(),
+                NarrowingReason::AclUnreadable
             );
-            assert_matches!(screen(present(&entries), || view(false)), Blob::Present(_));
         }
 
         #[test]
-        fn a_blob_without_named_entries_never_reads_the_id_maps() {
-            let entries = [(USER_OBJ, NO_ID), (OTHER, NO_ID)];
-            let screened = screen(present(&entries), || unreachable!("no named entry"));
-            assert_matches!(screened, Blob::Present(_));
+        fn a_value_larger_than_the_buffer_is_unreadable_not_a_failure() {
+            assert_matches!(
+                read_error(Errno::RANGE),
+                Ok(Blob::Unreadable(NarrowingReason::AclUnreadable))
+            );
         }
 
         #[test]
-        fn only_the_full_identity_map_is_the_initial_namespace() {
-            assert!(is_identity_map("         0          0 4294967295\n"));
-            for text in [
-                "         0          0          1\n",
-                "      1000          0          1\n",
-                "0 0 4294967295\n0 0 1\n",
-                "",
-                "not a map",
-            ] {
-                assert!(!is_identity_map(text), "{text:?}");
+        fn a_real_attribute_larger_than_the_buffer_is_unreadable() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = File::open(temp.path()).unwrap();
+            // A named entry and a mask: a minimal ACL is folded into the mode.
+            let blob = blob_of(&[
+                (USER_OBJ, NO_ID),
+                (TAG_USER, 12_345),
+                (GROUP_OBJ, NO_ID),
+                (0x10, NO_ID),
+                (OTHER, NO_ID),
+            ]);
+            match rustix::fs::fsetxattr(&dir, ACCESS, &blob, rustix::fs::XattrFlags::empty()) {
+                Ok(()) => {}
+                Err(Errno::NOTSUP) => {
+                    eprintln!("skipping: the temporary directory has no POSIX ACLs");
+                    return;
+                }
+                Err(e) => panic!("setting the ACL: {e}"),
+            }
+            let mut small = vec![0_u8; 8];
+            assert_eq!(
+                read_blob(&dir, ACCESS, &mut small).unwrap(),
+                Blob::Unreadable(NarrowingReason::AclUnreadable)
+            );
+            let mut full = vec![0_u8; XATTR_SIZE_MAX];
+            assert_matches!(read_blob(&dir, ACCESS, &mut full), Ok(Blob::Present(_)));
+        }
+
+        proptest::proptest! {
+            #[test]
+            fn parsing_never_panics_and_accepts_only_whole_v2_blobs(
+                tail in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..200),
+                valid_header in proptest::prelude::any::<bool>(),
+            ) {
+                let mut bytes = if valid_header {
+                    VERSION.to_le_bytes().to_vec()
+                } else {
+                    Vec::new()
+                };
+                bytes.extend_from_slice(&tail);
+                let parsed = AclBlob::parse(&bytes);
+                if let Ok(blob) = parsed {
+                    proptest::prop_assert!(valid_header || bytes.len() >= HEADER_LEN);
+                    proptest::prop_assert_eq!((bytes.len() - HEADER_LEN) % ENTRY_LEN, 0);
+                    let _ = blob.names_an_undefined_id();
+                }
             }
         }
     }
@@ -937,6 +913,14 @@ mod macos {
         error.raw_os_error() == Some(Errno::NOTSUP.raw_os_error())
     }
 
+    /// FAT32 and exFAT answer a read of the (constant) extended security
+    /// attribute list with `EINVAL` rather than `ENOTSUP`: no ACL can exist
+    /// there. Only the read maps it; a write that fails with `EINVAL` stays an
+    /// error so an inherited entry is never left in place.
+    fn is_attribute_unavailable(error: &io::Error) -> bool {
+        error.raw_os_error() == Some(Errno::INVAL.raw_os_error())
+    }
+
     /// Removes every ACL entry, inherited ones included, from the directory
     /// `name` of `pin`, addressed through a descriptor on the entry itself.
     ///
@@ -956,7 +940,7 @@ mod macos {
                 Ok(Some(acl)) => AclPlan::Copy(acl),
                 Err(reason) => AclPlan::Private(reason),
             }),
-            Err(e) if is_unsupported(&e) => Ok(AclPlan::None),
+            Err(e) if is_unsupported(&e) || is_attribute_unavailable(&e) => Ok(AclPlan::None),
             // A bad descriptor is a bug here, not a property of the directory.
             Err(e) if e.raw_os_error() == Some(Errno::BADF.raw_os_error()) => Err(e),
             Ok(Fetched::Truncated) | Err(_) => Ok(AclPlan::Private(NarrowingReason::AclUnreadable)),
@@ -1141,6 +1125,7 @@ mod macos {
         #[test]
         fn a_deny_entry_the_kernel_returns_reads_back_with_its_semantics() {
             let temp = tempfile::tempdir().unwrap();
+            let _clear = ClearAcl(temp.path());
             add_ace(temp.path(), "everyone deny delete,file_inherit");
             let dir = File::open(temp.path()).unwrap();
 
@@ -1158,11 +1143,6 @@ mod macos {
             assert_ne!(ace.flags & FILE_INHERIT, 0);
             assert_ne!(ace.rights & RIGHT_DELETE, 0);
             assert_eq!(ace.applicable, EVERYONE);
-            Command::new("/bin/chmod")
-                .args(["-N"])
-                .arg(temp.path())
-                .status()
-                .unwrap();
         }
 
         #[test]
@@ -1194,6 +1174,57 @@ mod macos {
             );
             let bad_fd = io::Error::from_raw_os_error(Errno::BADF.raw_os_error());
             assert!(plan_of(Err(bad_fd)).is_err());
+        }
+
+        /// FAT32 and exFAT answer `EINVAL` (observed with a C probe on such a
+        /// volume); the same errno from a write is not mapped.
+        #[test]
+        fn a_volume_that_answers_einval_has_no_acl_but_a_failed_clear_stays_an_error() {
+            let einval = || io::Error::from_raw_os_error(Errno::INVAL.raw_os_error());
+            assert_matches!(plan_of(Err(einval())), Ok(AclPlan::None));
+            assert!(!is_unsupported(&einval()));
+        }
+
+        /// Removes the ACL of a test directory even when an assertion fails, so
+        /// the temporary directory can be deleted.
+        struct ClearAcl<'a>(&'a Path);
+
+        impl Drop for ClearAcl<'_> {
+            fn drop(&mut self) {
+                let _ = Command::new("/bin/chmod").args(["-N"]).arg(self.0).status();
+            }
+        }
+
+        proptest::proptest! {
+            #[test]
+            fn parsing_arbitrary_bytes_never_panics(
+                bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..300),
+            ) {
+                let _ = parse(&bytes);
+                let _ = parse_filesec(&bytes);
+            }
+
+            #[test]
+            fn parsing_with_a_valid_prefix_reaches_the_count_and_size_branches(
+                count in 0_u32..200,
+                tail in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..400),
+                declared_extra in 0_usize..4,
+            ) {
+                let mut filesec = filesec(&[]);
+                filesec[COUNT_AT..COUNT_AT + 4].copy_from_slice(&count.to_ne_bytes());
+                filesec.extend_from_slice(&tail);
+                let _ = parse_filesec(&filesec);
+                let attribute = {
+                    let total = ENVELOPE_LEN + filesec.len();
+                    let mut bytes = u32::try_from(total).unwrap().to_ne_bytes().to_vec();
+                    bytes.extend_from_slice(&8_i32.to_ne_bytes());
+                    let declared = filesec.len().saturating_sub(declared_extra);
+                    bytes.extend_from_slice(&u32::try_from(declared).unwrap().to_ne_bytes());
+                    bytes.extend_from_slice(&filesec);
+                    bytes
+                };
+                let _ = parse(&attribute);
+            }
         }
     }
 }

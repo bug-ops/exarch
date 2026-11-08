@@ -312,11 +312,18 @@ mod linux {
     fn a_replaced_destination_its_owner_cannot_read_publishes_a_private_root() {
         let fx = Fixture::new();
         chmod(&fx.dest, 0o300);
-        let expected = if is_root(&fx.dest) { 0o300 } else { 0o700 };
+        let root = is_root(&fx.dest);
+        let expected = if root { 0o300 } else { 0o700 };
 
-        fx.extract(Staging::AtomicReplace);
+        let report = fx.extract(Staging::AtomicReplace);
 
         assert_eq!(mode_of(&fx.dest), expected);
+        let reasons = narrowing_of(&report);
+        if root {
+            assert!(reasons.is_empty(), "{reasons:?}");
+        } else {
+            assert_eq!(reasons, [NarrowingReason::AclUnreadable]);
+        }
     }
 
     /// Needs root to give the destination away, so it only runs there; on an

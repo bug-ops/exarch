@@ -456,7 +456,7 @@ impl Narrowed {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn reasons(&self) -> &[NarrowingReason] {
         &self.0
     }
@@ -748,6 +748,47 @@ mod tests {
         if !cfg!(debug_assertions) {
             assert!(!redacted.to_string().contains("/srv/private"));
         }
+    }
+
+    #[test]
+    fn every_narrowing_reason_becomes_a_typed_warning() {
+        for reason in NarrowingReason::ALL {
+            let warning = ExtractionWarning::RootAccessNarrowed { reason: *reason };
+            assert_eq!(warning.kind(), ExtractionWarningKind::RootAccessNarrowed);
+            assert!(NarrowingReason::NAMES.contains(&reason.as_str()));
+            assert!(warning.to_string().contains(reason.as_str()));
+            assert_eq!(warning.redacted(), warning);
+        }
+    }
+
+    #[test]
+    fn a_narrowing_records_one_warning_per_distinct_reason() {
+        let mut narrowed = Narrowed::none();
+        narrowed.push(NarrowingReason::GroupNotKept);
+        narrowed.push(NarrowingReason::OwnerNotKept);
+        narrowed.push(NarrowingReason::GroupNotKept);
+        let mut report = ExtractionReport::new();
+
+        report.record_narrowing(narrowed);
+
+        assert_eq!(
+            report.warnings,
+            [
+                ExtractionWarning::RootAccessNarrowed {
+                    reason: NarrowingReason::GroupNotKept
+                },
+                ExtractionWarning::RootAccessNarrowed {
+                    reason: NarrowingReason::OwnerNotKept
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn recording_nothing_adds_no_warning() {
+        let mut report = ExtractionReport::new();
+        report.record_narrowing(Narrowed::none());
+        assert!(!report.has_warnings());
     }
 
     #[test]

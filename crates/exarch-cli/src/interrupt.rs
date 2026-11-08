@@ -305,7 +305,8 @@ enum Delivery {
 /// Runs `write` on a detached thread and waits at most `budget` for it to
 /// return, so a write blocked on a full pipe cannot keep the process alive.
 /// The thread is left behind when the budget runs out; the caller exits the
-/// process next, which ends it.
+/// process next, which ends it. Production ignores the returned [`Delivery`];
+/// it exists so tests can observe the outcome.
 #[cfg(not(target_os = "wasi"))]
 fn deliver_within(budget: std::time::Duration, write: impl FnOnce() + Send + 'static) -> Delivery {
     let (done, finished) = std::sync::mpsc::channel();
@@ -335,8 +336,8 @@ fn deliver_within(budget: std::time::Duration, write: impl FnOnce() + Send + 'st
 /// interrupted thread left buffered when the stdout lock is free, and that
 /// flush can block on a full pipe. The path is narrow, since the CLI writes
 /// whole lines, and a lock held by an abandoned writer makes the cleanup skip
-/// the flush. A `_exit`-style exit would avoid it but needs `unsafe`, which
-/// the workspace denies.
+/// the flush. A `_exit`-style exit would avoid it, but it would need a scoped
+/// `unsafe` module; it is not worth that surface for a path this narrow.
 #[cfg(not(target_os = "wasi"))]
 fn forced_exit(armed: &Armed, stop: Stop) -> ! {
     use crate::output::emit_line;

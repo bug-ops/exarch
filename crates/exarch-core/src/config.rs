@@ -1789,9 +1789,10 @@ pub enum DecodeReuse {
     /// frees nothing, because the file is never cut lower than that entry's
     /// end. The Linux detection ran in a Linux VM (Docker Desktop, kernel
     /// 7.0.14, aarch64; its spool tests pass there) but not on a bare-metal
-    /// Linux host. The FreeBSD arm runs only in the scheduled FreeBSD
-    /// workflow, against a default temporary file and a tmpfs mount; an `md`
-    /// disk is covered only by the name classifier's unit test.
+    /// Linux host. The FreeBSD arm runs only in the FreeBSD workflow (weekly,
+    /// on demand, and on pull requests touching the spool module), against a
+    /// default temporary file and a tmpfs mount; an `md` disk is covered only
+    /// by the name classifier's unit test.
     /// Everything else is assumed to be on disk, so a temporary directory on
     /// a macOS `hdiutil` RAM disk, on a FreeBSD nullfs or unionfs over a
     /// tmpfs, or on ZFS over an `md` disk holds the spool in memory outside

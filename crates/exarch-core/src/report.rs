@@ -439,7 +439,7 @@ impl fmt::Display for ExtractionWarning {
 ///
 /// Only [`ExtractionReport::record_narrowing`] consumes it, and it is
 /// `#[must_use]`, so a publication path that drops it fails `-D warnings`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 #[must_use = "record the narrowing on the report"]
 pub(crate) struct Narrowed(Vec<NarrowingReason>);
 

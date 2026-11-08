@@ -21,12 +21,11 @@ mod imp {
     use crate::formats::pinned_dir::EntryMode;
     use crate::formats::pinned_dir::EntryStatus;
     use crate::formats::pinned_dir::LeafBuf;
+    use crate::report::Narrowed;
     use crate::staging::acl;
     use crate::staging::acl::AclPlan;
     use crate::staging::acl::Ownership;
     use crate::staging::acl::Resolution;
-
-    use crate::report::Narrowed;
 
     const PROBE_ATTEMPTS: usize = 16;
 
@@ -357,29 +356,19 @@ mod imp {
         mode: DirMode,
         narrowed: &mut Narrowed,
     ) -> io::Result<()> {
-        let copied = acl.write_to(dir).and_then(|()| {
+        write_acl_then(dir, acl, narrowed, |dir| {
             let permission = if acl.has_access() {
                 dir.metadata()?.mode() & 0o777
             } else {
                 mode.permission_bits()
             };
             dir.set_permissions(mode.with_permission_bits(permission).permissions())
-        });
-        if copied.is_err() {
-            acl::CopiedAcl::clear(dir)?;
-            dir.set_permissions(DirMode::PRIVATE.permissions())?;
-            narrowed.push(NarrowingReason::AclCopyFailed);
-        }
-        Ok(())
+        })
     }
 
     /// Writes `acl` onto the root, then applies the destination's mode, so
     /// the root is never wider than the destination while its entries are
     /// missing; the kernel keeps the ACL across the mode change.
-    ///
-    /// The root stays `0700` until the ACL is written. When writing fails the
-    /// ACL is removed again and the root stays private; when that fails too the
-    /// error is returned, so the publish fails instead of exposing the root.
     #[cfg(target_os = "macos")]
     fn copy_acl(
         dir: &std::fs::File,
@@ -387,10 +376,25 @@ mod imp {
         mode: DirMode,
         narrowed: &mut Narrowed,
     ) -> io::Result<()> {
-        let copied = acl
-            .write_to(dir)
-            .and_then(|()| dir.set_permissions(mode.permissions()));
-        if copied.is_err() {
+        write_acl_then(dir, acl, narrowed, |dir| {
+            dir.set_permissions(mode.permissions())
+        })
+    }
+
+    /// Writes `acl` onto the root and then runs `set_mode`.
+    ///
+    /// The root stays `0700` until the ACL is written. When either step fails
+    /// the ACL is removed again, the root stays private and
+    /// [`NarrowingReason::AclCopyFailed`] is recorded; when that fails too the
+    /// error is returned, so the publish fails instead of exposing the root.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    fn write_acl_then(
+        dir: &std::fs::File,
+        acl: &acl::CopiedAcl,
+        narrowed: &mut Narrowed,
+        set_mode: impl FnOnce(&std::fs::File) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if acl.write_to(dir).and_then(|()| set_mode(dir)).is_err() {
             acl::CopiedAcl::clear(dir)?;
             dir.set_permissions(DirMode::PRIVATE.permissions())?;
             narrowed.push(NarrowingReason::AclCopyFailed);

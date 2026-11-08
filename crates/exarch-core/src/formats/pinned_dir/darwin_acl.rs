@@ -18,8 +18,8 @@ use std::os::fd::AsRawFd;
 
 use rustix::io::Errno;
 
-/// Bytes the attribute buffers hold; an ACL of the largest size macOS allows
-/// (128 entries) needs about 3.2 KiB.
+/// `u64` words of the attribute buffers (512 words, 4096 bytes); an ACL of the
+/// largest size macOS allows (128 entries) needs about 3.2 KiB.
 const BUFFER_WORDS: usize = 512;
 
 const REFERENCE_LEN: usize = size_of::<libc::attrreference_t>();

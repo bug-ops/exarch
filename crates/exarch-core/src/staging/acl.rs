@@ -466,13 +466,41 @@ mod macos {
     ///
     /// # Errors
     ///
+    /// A volume without ACL support (FAT, exFAT) cannot hold an inherited
+    /// entry, so its refusal counts as cleared.
+    ///
+    /// # Errors
+    ///
     /// The I/O error of clearing the ACL, or `NotFound` when the directory's
     /// path cannot be resolved.
     pub(in crate::staging) fn clear_inherited(pin: &VettedDir, name: Leaf<'_>) -> io::Result<()> {
         let path = pin
             .entry_path(name)
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        exacl::setfacl(&[path], &[], AclOption::SYMLINK_ACL)
+        cleared(exacl::setfacl(&[path], &[], AclOption::SYMLINK_ACL))
+    }
+
+    fn cleared(result: io::Result<()>) -> io::Result<()> {
+        match result {
+            Err(e) if is_unsupported(&e) => Ok(()),
+            other => other,
+        }
+    }
+
+    // exacl keeps the kind and the message of an OS error but not its code,
+    // and std maps ENOTSUP to `Uncategorized`, so the message is the only
+    // trace of it.
+    fn is_unsupported(error: &io::Error) -> bool {
+        let not_supported = io::Error::from_raw_os_error(rustix::io::Errno::NOTSUP.raw_os_error());
+        error.raw_os_error() == not_supported.raw_os_error()
+            || error.to_string().ends_with(&not_supported.to_string())
+    }
+
+    fn is_acl_free(read: io::Result<Vec<exacl::AclEntry>>) -> bool {
+        match read {
+            Ok(entries) => entries.is_empty(),
+            Err(e) => is_unsupported(&e),
+        }
     }
 
     /// Detects an ACL on the directory `name` inside `parent_path`.
@@ -494,8 +522,7 @@ mod macos {
         expected: FileIdentity,
     ) -> io::Result<AclPlan> {
         let path = parent_path.join(name.as_os_str());
-        let acl_free =
-            exacl::getfacl(&path, AclOption::SYMLINK_ACL).is_ok_and(|acl| acl.is_empty());
+        let acl_free = is_acl_free(exacl::getfacl(&path, AclOption::SYMLINK_ACL));
         let same_entry = rustix::fs::lstat(&path)
             .ok()
             .and_then(|stat| IdentityKey::of_stat(&stat).ok())
@@ -505,6 +532,58 @@ mod macos {
         } else {
             AclPlan::Private
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io;
+
+        use super::cleared;
+        use super::is_acl_free;
+
+        fn error(kind: io::ErrorKind) -> io::Error {
+            io::Error::from(kind)
+        }
+
+        fn not_supported() -> io::Error {
+            io::Error::from_raw_os_error(rustix::io::Errno::NOTSUP.raw_os_error())
+        }
+
+        fn wrapped_not_supported() -> io::Error {
+            io::Error::other(format!("File \"/Volumes/T/d\": {}", not_supported()))
+        }
+
+        #[test]
+        fn an_unsupported_clear_is_a_success() {
+            assert!(cleared(Err(not_supported())).is_ok());
+            assert!(cleared(Err(wrapped_not_supported())).is_ok());
+        }
+
+        #[test]
+        fn every_other_clear_error_stays_an_error() {
+            for kind in [
+                io::ErrorKind::PermissionDenied,
+                io::ErrorKind::NotFound,
+                io::ErrorKind::InvalidInput,
+                io::ErrorKind::Other,
+            ] {
+                assert_eq!(
+                    cleared(Err(error(kind))).err().map(|e| e.kind()),
+                    Some(kind)
+                );
+            }
+        }
+
+        #[test]
+        fn a_volume_without_acl_support_reads_as_acl_free() {
+            assert!(is_acl_free(Err(wrapped_not_supported())));
+            assert!(is_acl_free(Ok(Vec::new())));
+        }
+
+        #[test]
+        fn a_refused_acl_read_is_not_acl_free() {
+            assert!(!is_acl_free(Err(error(io::ErrorKind::PermissionDenied))));
+        }
     }
 }
 

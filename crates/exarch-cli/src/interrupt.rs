@@ -264,8 +264,10 @@ impl Drop for InterruptGuard {
 fn terminate_by_default(stop: Stop) -> ! {
     #[cfg(unix)]
     {
-        // The re-raise ends the process; the fallback below only runs when it
-        // could not be done.
+        // A terminating signal ends the process here, or aborts when the
+        // default action cannot be restored; the exit below only runs when
+        // this returns, for a signal it does not know or whose default does
+        // not terminate.
         let _ = signal_hook::low_level::emulate_default_handler(stop.raw_signal());
     }
     std::process::exit(i32::from(ExitStatus::from(stop) as u8))
@@ -273,8 +275,10 @@ fn terminate_by_default(stop: Stop) -> ! {
 
 /// Ends the process of a run that stopped on a request the way the request
 /// would have: by the signal itself, so a shell loop sees a signal death and
-/// stops too. `$?` still reads 130 or 143. Where that cannot be done the
-/// caller exits with the status.
+/// stops too. `$?` still reads 130 or 143. When the signal's default action
+/// does not terminate, or the signal is unknown, this returns and the caller
+/// exits with the status; a failure to restore the default action aborts the
+/// process.
 pub fn finish_by_signal() {
     #[cfg(unix)]
     if let Some(stop) = requested() {

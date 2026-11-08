@@ -165,7 +165,7 @@ closed_enum! {
         /// destination's owner and group, a write failure), the root is
         /// private (`0700`). On macOS an ACL on the destination is detected
         /// and gives a `0700` root; it is not copied. Other Unixes and `NFSv4`
-        /// ACLs are not detected (macOS and Windows copy: #1060, #1020).
+        /// ACLs are not detected.
         ///
         /// Cleanup is best-effort if the process is terminated via SIGKILL.
         Atomic => "atomic",
@@ -219,7 +219,7 @@ closed_enum! {
         /// destination's owner and group, a write failure), the root is
         /// private (`0700`). On macOS an ACL on the destination is detected
         /// and gives a `0700` root; it is not copied. Other Unixes and `NFSv4`
-        /// ACLs are not detected (macOS and Windows copy: #1060, #1020).
+        /// ACLs are not detected.
         AtomicReplace => "atomic_replace",
     }
 }

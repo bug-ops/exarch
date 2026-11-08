@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: FreeBSD and macOS tmpfs mounts and FreeBSD `md` disks are charged to the decoder memory limit like Linux tmpfs (#959, #1024).
 - Docs: specifications 023 (glob entry selection) and 024 (encrypted ZIP and 7z, draft) (#1000, #1001, #1024).
 - Core: `QuotaResource::HeaderEntryCount` and the `HEADER_ENTRY_COUNT` quota sub-code for a 7z header that declares more entries than `max_file_count` allows, in the CLI, Python and Node (#1061).
+- Core: `Disposition::Refuse` for an entry that validation refuses or that cannot be placed, shown as `[refused]` and `{"action":"refuse"}` by the CLI and as `RefuseDisposition` in Python and Node (#1036, #PRNUM).
+- Core: `ConfigSetting::CompressedMemberAllowance`, `DecodeReuse::{from_parts, limit}`, `CompressionLevel::{MIN, MAX}`, `FfiKind::io_kind` and `CreationWarning::redacted`, so the bindings stop re-implementing core rules (#1048, #1053, #1056, #1058, #PRNUM).
+- Core: extract and create poll for cancellation about every 8 MiB inside a single entry copy, so the first interrupt stops a large entry (#1045, #PRNUM).
+- CLI: SIGTERM cancels like SIGINT with exit 143, a graceful stop ends by the signal so shell loops stop, and a forced exit writes one `Cancelled` JSON document; `signal-hook` is used on Unix, `ctrlc` on Windows only, and SIGHUP stays at its default so `nohup` keeps working (#1035, #1037, #1050, #PRNUM).
+- Core: macOS-only dependency `exacl` detects a destination ACL for atomic extraction (#1031, #PRNUM).
+- Python: `compressed_member_allowance`, `windows_reserved_names`, `max_tar_metadata_bytes`, `max_decoder_memory` and `max_solid_compression_ratio` setters, `ListOptions.stored_targets` and `ArchiveEntry.modified` (#1052, #1056, #PRNUM).
+- Node: `withCompressedMemberAllowance`, `withAllowWindowsReservedNames`, `withMaxTarMetadataBytes`, `withMaxDecoderMemory` and `withMaxSolidCompressionRatio`, an optional `ListOptions` on `listArchive*`, `IntegrityGaps.total`, `SkippedSummary.total` and `sizeClamped` on byte-size reports (#1052, #1055, #1056, #PRNUM).
+- Tests: regression tests for the zip2 open-time advisories GHSA-m3j8 and GHSA-w2w4 (#1028, #PRNUM).
 
 ### Changed
 
@@ -56,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependencies: `sevenz-rust2` 0.25.0 and `lzma-rust2` 0.25 (#674, #769, #1024).
 - Docs: specifications 001-024 and the constitution synced with the implemented behavior (#1059).
 - **Breaking**: 7z archives whose encoded header uses a bzip2, PPMd or BCJ coder, or more than one coder, are refused as `InvalidArchive` ("unsupported header layout") (#1061).
+- **Breaking**: `max_file_count` counts every entry (directories, links, skipped entries and skipped duplicates) in every format and command; TAR extraction counted only files and links before (#1038, #PRNUM).
+- **Breaking**: `ExcludePattern`, `ExcludeRefusal` and `ConfigProblem::ExcludePatternRefused` become `EntryPattern`, `PatternRefusal` and `ConfigProblem::PatternRefused` in a `pattern` module, since one type serves include and exclude lists (#1041, #PRNUM).
+- **Breaking**: `list` fails with `UnmatchedInclude` in strict mode when an include pattern matches no entry, as `extract` does; `verify` still reports it (#1033, #PRNUM).
+- **Breaking**: `ArchiveManifest::dispositions` reports every entry, with `Refuse` where it used to omit one (#1036, #PRNUM).
+- **Breaking (CLI)**: quota advice moves from `error.message` to `error.hint`, `--json` host paths are exact UTF-8 and human text renders them with `path_text`, `-l` out of range exits 1, `completion` follows the stdout error policy, sizes in human output are labelled KiB/MiB, and help and hint text follow core defaults (#1034, #1047, #1048, #1049, #1051, #PRNUM).
+- **Breaking (Node)**: `createArchiveWithProgress(out, sources, config, options, progress)` takes `progress` last, count fields are exact numbers and no longer saturate at 2^32-1, and unknown core tokens pass through instead of failing the call (#1054, #1055, #1058, #PRNUM).
+- **Breaking (Python)**: an unknown manifest entry, link target, disposition or memory entry kind returns the base class instead of raising `RuntimeError` (#1054, #PRNUM).
+- Core: glob selection compiles one combined set per pattern list, adopted atomic root modes are typed (`DirMode`), the 7z probe and ZIP parsers share bounds-checked little-endian readers, FFI message tables are exhaustive, and `io::Error` sideband markers share one `IoMarker` trait (#1039, #1040, #1042, #1043, #1044, #1046, #PRNUM).
+- Core: Windows reserved names also refuse `CLOCK$`, `CONFIG$` and `COM`/`LPT` followed by superscript digits four to nine, a superset of zip2 9.4.1 (#1030, #PRNUM).
+- CI: the MSRV job checks the whole workspace on Rust 1.99.1, not only `exarch-core` (#1057, #PRNUM).
 
 ### Fixed
 
@@ -68,6 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: a destination swapped during `AtomicReplace` is restored and refused with `DestinationChanged`, a 0555 destination no longer leaves its backup behind, and ZIP message classification applies to ZIP only (#1002, #1005, #1006, #1019).
 - CLI: the forced-exit hint after a second signal names what the interrupted command left behind (#1014, #1019).
 - Core: the run record keys a created file by its descriptor identity (#996, #1019).
+- Core: atomic extraction no longer publishes a root more permissive than the destination: on Linux the destination's POSIX ACL is copied, the ACL the staging root inherits from the destination's parent is cleared, and a root whose ACL cannot be copied, or is detected on macOS, is published at 0700 (#1031, #PRNUM).
+- CLI: `completion` no longer panics when stdout fails, and a cancelled run prints `Operation cancelled` once (#1049, #1037, #PRNUM).
 - Python and Node: `leftover_path` survives a cancelled progress callback (#995, #1019).
 - Core: a 7z archive whose stream map would shift file contents is refused when it is opened by list, verify and extract (#769, #1024).
 

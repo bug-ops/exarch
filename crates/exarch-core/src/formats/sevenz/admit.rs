@@ -3,6 +3,7 @@
 
 use super::SIGNATURE_HEADER_SIZE;
 use super::header::BlockIndex;
+use super::header::PerBlock;
 use super::header::SevenZHeader;
 use crate::ArchiveError;
 use crate::EntryCompression;
@@ -45,7 +46,7 @@ pub(super) fn packed_stream_count(block: &sevenz_rust2::Block) -> usize {
         .iter()
         .filter(|coder| coder.encoder_method_id() == EncoderMethod::ID_BCJ2)
         .count();
-    1 + 3 * bcj2
+    bcj2.saturating_mul(3).saturating_add(1)
 }
 
 /// The declared decoded size of one block.
@@ -67,6 +68,7 @@ impl BlockTotal {
 }
 
 /// File count and declared decoded size of one block.
+#[derive(Clone)]
 struct BlockTally {
     files: usize,
     uncompressed: BlockTotal,
@@ -74,18 +76,15 @@ struct BlockTally {
 
 /// Tallies the files that have data in each block, 1:1 with the header's
 /// blocks.
-fn tally_blocks(header: &SevenZHeader) -> Vec<BlockTally> {
-    let mut tallies: Vec<BlockTally> = header
-        .block_indices()
-        .map(|_| BlockTally {
-            files: 0,
-            uncompressed: BlockTotal::Bytes(0),
-        })
-        .collect();
+fn tally_blocks(header: &SevenZHeader) -> PerBlock<BlockTally> {
+    let mut tallies = header.per_block(BlockTally {
+        files: 0,
+        uncompressed: BlockTotal::Bytes(0),
+    });
     for (index, file) in header.files().iter().enumerate() {
         if let Some(block) = header.file_block(index) {
-            let tally = &mut tallies[block.get()];
-            tally.files += 1;
+            let tally = &mut tallies[block];
+            tally.files = tally.files.saturating_add(1);
             tally.uncompressed = tally.uncompressed.add(file.size);
         }
     }
@@ -137,24 +136,28 @@ pub(crate) fn sevenz_entry_compression(
                 .saturating_add(packed_stream_count(header.block(block)))
                 .min(pack_sizes.len())
         });
-        pack_sizes[start..end]
+        let overflow = || ArchiveError::from(Malformation::PackSizesOverflow);
+        pack_sizes
+            .get(start..end)
+            .ok_or_else(overflow)?
             .iter()
             .try_fold(0u64, |acc, &size| acc.checked_add(size))
             .map(Compressed)
-            .ok_or_else(|| ArchiveError::from(Malformation::PackSizesOverflow))
+            .ok_or_else(overflow)
     };
 
     let tallies = tally_blocks(header);
-    let mut block_uncompressed = Vec::with_capacity(tallies.len());
-    let mut block_files = Vec::with_capacity(tallies.len());
-    for tally in &tallies {
+    let mut block_uncompressed = header.per_block(0u64);
+    let mut block_files = header.per_block(0usize);
+    for block in header.block_indices() {
+        let tally = &tallies[block];
         let BlockTotal::Bytes(bytes) = tally.uncompressed else {
             return Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow,
             });
         };
-        block_uncompressed.push(bytes);
-        block_files.push(tally.files);
+        block_uncompressed[block] = bytes;
+        block_files[block] = tally.files;
     }
 
     header
@@ -169,13 +172,13 @@ pub(crate) fn sevenz_entry_compression(
                 return Ok(EntryCompression::Unknown);
             }
             let compressed = block_compressed(block)?;
-            if block_files[block.get()] <= 1 {
+            if block_files[block] <= 1 {
                 return Ok(EntryCompression::Entry(compressed));
             }
             if header.block_first_file(block) == index {
                 Ok(EntryCompression::SolidBlockStart(SolidBlock::new(
                     compressed,
-                    Uncompressed(block_uncompressed[block.get()]),
+                    Uncompressed(block_uncompressed[block]),
                 )))
             } else {
                 Ok(EntryCompression::SolidBlockMember)
@@ -273,7 +276,7 @@ pub(super) const BZIP2_DECODER_MEMORY: u64 = 4 * 1024 * 1024;
 pub(super) fn lzma2_dict_size(props: &[u8]) -> Option<u32> {
     let bits = u32::from(*props.first()?);
     match bits {
-        0..=39 => Some((2 | (bits & 1)) << (bits / 2 + 11)),
+        0..=39 => (2 | (bits & 1)).checked_shl((bits / 2).saturating_add(11)),
         40 => Some(u32::MAX),
         _ => None,
     }
@@ -334,11 +337,11 @@ pub(super) fn block_span(header: &SevenZHeader, block: BlockIndex) -> std::ops::
 
 /// Sum of the declared sizes of the files mapped to each block, through
 /// `stream_map.file_block_index`; `None` for a block whose sum overflows.
-pub(super) fn declared_sizes(header: &SevenZHeader) -> Vec<Option<u64>> {
-    let mut sizes = vec![Some(0u64); header.block_count()];
+pub(super) fn declared_sizes(header: &SevenZHeader) -> PerBlock<Option<u64>> {
+    let mut sizes = header.per_block(Some(0u64));
     for (index, file) in header.files().iter().enumerate() {
         if let Some(block) = header.file_block(index) {
-            let size = &mut sizes[block.get()];
+            let size = &mut sizes[block];
             *size = size.and_then(|sum| sum.checked_add(file.size));
         }
     }
@@ -460,21 +463,17 @@ pub(crate) fn iter_sevenz_refusals<'a>(
 ) -> impl Iterator<Item = SevenZRefusal> + 'a {
     let solid = check_solid_policy(
         header.is_solid(),
-        tally_blocks(header)
-            .into_iter()
-            .map(|tally| tally.uncompressed),
+        tally_blocks(header).iter().map(|tally| tally.uncompressed),
         config,
     )
     .err()
     .map(|refused| SevenZRefusal::new(RefusalScope::Archive, refused));
-    let blocks = header
-        .block_indices()
-        .zip(declared_sizes(header))
-        .filter_map(move |(index, declared)| {
-            admit_sevenz_block(header.block(index), declared, config)
-                .err()
-                .map(|refused| SevenZRefusal::new(RefusalScope::Block(index), refused))
-        });
+    let sizes = declared_sizes(header);
+    let blocks = header.block_indices().filter_map(move |index| {
+        admit_sevenz_block(header.block(index), sizes[index], config)
+            .err()
+            .map(|refused| SevenZRefusal::new(RefusalScope::Block(index), refused))
+    });
     solid.into_iter().chain(blocks)
 }
 

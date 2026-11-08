@@ -10,6 +10,7 @@ use super::lzma2::DecodeKnobs;
 use super::lzma2::Lzma2Stream;
 use super::lzma2::with_parallel_reader;
 use crate::ParallelDecode;
+use crate::formats::bounded_read::read_prefix;
 use crate::formats::source_fault::is_sevenz_checksum;
 use sevenz_rust2::BlockDecoder;
 use sevenz_rust2::Password;
@@ -47,8 +48,9 @@ impl<R: Read> Read for CrcChecked<R> {
         if self.remaining == 0 {
             return Ok(0);
         }
-        let size = self.inner.read(buf)?;
-        self.crc.update(&buf[..size]);
+        let filled = read_prefix(&mut self.inner, buf)?;
+        self.crc.update(filled);
+        let size = filled.len();
         self.remaining = self.remaining.saturating_sub(size as u64);
         if self.remaining == 0 && u64::from(self.crc.sum()) != self.expected {
             return Err(io::Error::other(
@@ -88,6 +90,10 @@ impl<R: Read> Read for FailureTap<'_, R> {
     }
 }
 
+fn handover_violation() -> sevenz_rust2::Error {
+    sevenz_rust2::Error::Other("7z entries were not handed over exactly once".into())
+}
+
 /// Decodes one block through sevenz-rust2's `BlockDecoder`, checking each
 /// entry's CRC here so a mismatch does not end the block (see
 /// [`SevenZHeader::unchecked_crc_archive`]).
@@ -113,7 +119,7 @@ fn sequential_block<R: Read + Seek>(
     let last_entry = Cell::new(0);
     let last_streamed = block_span(header, block_index)
         .rev()
-        .find(|&i| header.files()[i].has_stream);
+        .find(|&i| header.files().get(i).is_some_and(|file| file.has_stream));
     let mut next_file = header.block_first_file(block_index);
     let result = BlockDecoder::new(
         1,
@@ -124,8 +130,8 @@ fn sequential_block<R: Read + Seek>(
     )
     .for_each_entries(&mut |_, reader| {
         let index = next_file;
-        let file = &header.files()[index];
-        next_file += 1;
+        let file = header.files().get(index).ok_or_else(handover_violation)?;
+        next_file = next_file.saturating_add(1);
         last_entry.set(index);
         let below = FailureTap {
             inner: reader,
@@ -182,9 +188,10 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
     let archive = header.archive();
     let span = block_span(header, block_index);
     let (first, count) = (span.start, span.len());
+    let end = first.saturating_add(count);
     let plan = match parallel {
         ParallelDecode::Bounded(lookahead) if knobs.threads.get() > 1 => {
-            parallel_stream(header, block_index, first..first + count, knobs.min_unit)
+            parallel_stream(header, block_index, first..end, knobs.min_unit)
                 .map(|stream| (stream, lookahead))
         }
         _ => None,
@@ -205,7 +212,11 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
         } else {
             Box::new(reader)
         };
-        for file in &header.files()[first..first + count] {
+        for file in header
+            .files()
+            .get(first..end)
+            .ok_or_else(handover_violation)?
+        {
             if is_sevenz_payload(file) {
                 let mut decoder: Box<dyn Read + '_> = Box::new((&mut block_reader).take(file.size));
                 if file.has_crc {
@@ -304,13 +315,13 @@ pub(super) fn decode_archive_entries<R: Read + Seek>(
                 if !each(file, empty)? {
                     return Ok(());
                 }
-                handed += 1;
+                handed = handed.saturating_add(1);
             }
             Some(block) if block.get() >= next_block => {
                 for fileless in header
                     .block_indices()
                     .skip(next_block)
-                    .take(block.get() - next_block)
+                    .take(block.get().saturating_sub(next_block))
                 {
                     decode_block_entries(source, header, fileless, parallel, knobs, each)?;
                 }
@@ -318,15 +329,13 @@ pub(super) fn decode_archive_entries<R: Read + Seek>(
                 if !decode_block_entries(source, header, block, parallel, knobs, each)? {
                     return Ok(());
                 }
-                handed += span.len();
-                next_block = block.get() + 1;
+                handed = handed.saturating_add(span.len());
+                next_block = block.get().saturating_add(1);
             }
             Some(_) => {}
         }
     }
-    (handed == header.files().len()).ok_or_else(|| {
-        sevenz_rust2::Error::Other("7z entries were not handed over exactly once".into())
-    })
+    (handed == header.files().len()).ok_or_else(handover_violation)
 }
 
 /// Reads past a payload file that has no integrity slot (an entry the listing

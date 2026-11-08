@@ -7,6 +7,7 @@ use super::decode::decode_block_entries;
 use super::decode::is_sevenz_payload;
 use super::decode::skip_payload;
 use super::header::BlockIndex;
+use super::header::PerBlock;
 use super::header::SevenZHeader;
 use super::lzma2::DecodeKnobs;
 use crate::ArchiveError;
@@ -15,6 +16,7 @@ use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::copy::CopyError;
+use crate::formats::bounded_read::invalid_data;
 use crate::formats::common;
 use crate::formats::source_fault::ReadFamily;
 use crate::formats::source_fault::is_sevenz_checksum;
@@ -212,7 +214,8 @@ impl<T> LinkTable<T> {
         self.entries
             .binary_search_by_key(&file_index, |&(index, _)| index)
             .ok()
-            .map(|at| &self.entries[at].1)
+            .and_then(|at| self.entries.get(at))
+            .map(|(_, value)| value)
     }
 
     /// The archive file indices, ascending.
@@ -230,7 +233,8 @@ pub(crate) fn deliver_undecoded_links(
 ) -> Result<Vec<usize>> {
     let mut streamed = Vec::new();
     for index in indices {
-        match link_storage(&header.files()[index]) {
+        let file = header.files().get(index).ok_or_else(invalid_data)?;
+        match link_storage(file) {
             LinkStorage::Empty => each(index, Ok(StoredLinkTarget::Read(PathBuf::new())))?,
             LinkStorage::Oversized(bytes) => {
                 each(index, Ok(StoredLinkTarget::Oversized { bytes }))?;
@@ -247,20 +251,21 @@ pub(super) fn blocks_closed_to_links(
     header: &SevenZHeader,
     compression: &[EntryCompression],
     config: &SecurityConfig,
-) -> Vec<bool> {
-    let mut closed = vec![false; header.block_count()];
+) -> PerBlock<bool> {
+    let mut closed = header.per_block(false);
     for refusal in sevenz_refusals(header, config) {
         match refusal.scope {
             RefusalScope::Archive => closed.fill(true),
-            RefusalScope::Block(index) => closed[index.get()] = true,
+            RefusalScope::Block(index) => closed[index] = true,
         }
     }
     for (index, file) in header.files().iter().enumerate() {
         if let Some(block) = header.file_block(index)
-            && validate_entry_compression(&compression[index], Uncompressed(file.size), config)
-                .is_err()
+            && compression.get(index).is_none_or(|entry| {
+                validate_entry_compression(entry, Uncompressed(file.size), config).is_err()
+            })
         {
-            closed[block.get()] = true;
+            closed[block] = true;
         }
     }
     closed
@@ -318,7 +323,7 @@ pub(crate) fn walk_sevenz_links<R: Read + Seek, T>(
         }
     }
     for (block, wanted) in by_block {
-        if closed[block.get()] {
+        if closed[block] {
             for index in wanted {
                 each(index, Err(LinkReadFailure::BlockRefused))?;
             }
@@ -348,7 +353,7 @@ pub(super) fn walk_block_links<R: Read + Seek>(
         DecodeKnobs::production(),
         &mut |file, reader| {
             let index = next_file;
-            next_file += 1;
+            next_file = next_file.saturating_add(1);
             if wanted.get(delivered) != Some(&index) {
                 return drain_unwanted(file, reader);
             }
@@ -359,7 +364,7 @@ pub(super) fn walk_block_links<R: Read + Seek>(
                     return Ok(false);
                 }
             };
-            delivered += 1;
+            delivered = delivered.saturating_add(1);
             let aligned = !matches!(
                 outcome,
                 Err(LinkReadFailure::Truncated | LinkReadFailure::Decode(_))
@@ -378,7 +383,7 @@ pub(super) fn walk_block_links<R: Read + Seek>(
         Err(_) => LinkReadFailure::Decode(LinkDecodeFailure::BlockAborted),
         Ok(_) => LinkReadFailure::Decode(LinkDecodeFailure::NotReached),
     };
-    for &index in &wanted[delivered..] {
+    for &index in wanted.get(delivered..).ok_or_else(invalid_data)? {
         each(index, Err(failure))?;
     }
     Ok(())
@@ -414,7 +419,12 @@ impl LinkCapture<'_> {
         indices: impl Iterator<Item = usize>,
     ) {
         for index in indices {
-            if let Some(position) = self.position(index, &header.files()[index]) {
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "indices come from the file list of this header"
+            )]
+            let file = &header.files()[index];
+            if let Some(position) = self.position(index, file) {
                 (self.set)(position, LinkTarget::Unreadable);
             }
         }
@@ -449,7 +459,7 @@ impl BlockScan<'_, '_> {
         reader: &mut dyn Read,
     ) -> bool {
         let file_index = self.next_file;
-        self.next_file += 1;
+        self.next_file = self.next_file.saturating_add(1);
         let Some(Some(slot)) = self.slots.get(file_index).copied() else {
             return !is_sevenz_payload(file) || skip_payload(file, reader);
         };

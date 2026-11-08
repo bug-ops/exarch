@@ -31,6 +31,10 @@ use std::thread::{self};
 
 use lzma_rust2::Lzma2Reader;
 
+use crate::formats::bounded_read::copy_prefix;
+use crate::formats::bounded_read::invalid_data;
+use crate::formats::bounded_read::read_prefix;
+
 /// Output bytes a worker decodes between two checks of the cancel flag.
 const DECODE_STEP: usize = 1 << 20;
 /// Fixed per-run allowance for the range decoder buffer and thread bookkeeping.
@@ -235,8 +239,10 @@ impl<'a, S: Read + Seek> Lzma2Planner<'a, S> {
         let available = self.pack.stream.len.saturating_sub(offset);
         let wanted = available.min(HEAD);
         let in_window = |planner: &Self| {
-            offset >= planner.window_start
-                && offset - planner.window_start + wanted <= planner.window.len() as u64
+            offset
+                .checked_sub(planner.window_start)
+                .and_then(|from| from.checked_add(wanted))
+                .is_some_and(|end| end <= planner.window.len() as u64)
         };
         if !in_window(self) {
             let fill = available.min(PLAN_WINDOW);
@@ -247,9 +253,18 @@ impl<'a, S: Read + Seek> Lzma2Planner<'a, S> {
             self.window_start = offset;
         }
         let mut head = [0u8; 6];
-        let at = usize::try_from(offset - self.window_start).unwrap_or_default();
+        let at = offset
+            .checked_sub(self.window_start)
+            .and_then(|from| usize::try_from(from).ok())
+            .ok_or_else(invalid_data)?;
         let len = usize::try_from(wanted).unwrap_or_default();
-        head[..len].copy_from_slice(&self.window[at..at + len]);
+        let bytes = at
+            .checked_add(len)
+            .and_then(|end| self.window.get(at..end))
+            .ok_or_else(invalid_data)?;
+        head.get_mut(..len)
+            .ok_or_else(invalid_data)?
+            .copy_from_slice(bytes);
         Ok(head)
     }
 
@@ -262,23 +277,29 @@ impl<'a, S: Read + Seek> Lzma2Planner<'a, S> {
         let head = self.head_at(offset)?;
         let first = usize::try_from(available.min(head.len() as u64)).unwrap_or(head.len());
         let control = head[0];
-        let be16 = |at: usize| u64::from(u16::from_be_bytes([head[at], head[at + 1]]));
+        let be16 = |at: usize| {
+            let field = head.get(at..)?.first_chunk::<2>()?;
+            Some(u64::from(u16::from_be_bytes(*field)))
+        };
         let chunk = match control {
             0x00 => Some(Chunk::End),
-            0x01 | 0x02 if first >= 3 => Some(Chunk::Data {
+            0x01 | 0x02 if first >= 3 => be16(1).map(|size| Chunk::Data {
                 resets: control == 0x01,
                 header: 3,
-                packed: be16(1) + 1,
-                output: be16(1) + 1,
+                packed: size.saturating_add(1),
+                output: size.saturating_add(1),
             }),
             0x80..=0xFF => {
                 let header = if control >= 0xC0 { 6 } else { 5 };
-                (first as u64 >= header).then(|| Chunk::Data {
-                    resets: control >= 0xE0,
-                    header,
-                    packed: be16(3) + 1,
-                    output: ((u64::from(control & 0x1F) << 16) | be16(1)) + 1,
-                })
+                (first as u64 >= header)
+                    .then(|| be16(3).zip(be16(1)))
+                    .flatten()
+                    .map(|(packed, low)| Chunk::Data {
+                        resets: control >= 0xE0,
+                        header,
+                        packed: packed.saturating_add(1),
+                        output: ((u64::from(control & 0x1F) << 16) | low).saturating_add(1),
+                    })
             }
             _ => None,
         };
@@ -295,7 +316,7 @@ impl<'a, S: Read + Seek> Lzma2Planner<'a, S> {
         let mut cursor = start;
         let mut output = 0u64;
         loop {
-            if self.produced + output == needed {
+            if self.produced.saturating_add(output) == needed {
                 break;
             }
             let Some(Chunk::Data {
@@ -328,10 +349,10 @@ impl<'a, S: Read + Seek> Lzma2Planner<'a, S> {
             output = next_output;
         }
         self.offset = cursor;
-        self.produced += output;
+        self.produced = self.produced.saturating_add(output);
         Ok(Some(PlannedUnit::Buffered(Lzma2Unit {
             offset: start,
-            packed: cursor - start,
+            packed: cursor.saturating_sub(start),
             output,
         })))
     }
@@ -353,10 +374,10 @@ impl Lookahead {
         let Some(total) = charge.transient.checked_add(charge.retained) else {
             return false;
         };
-        if total > self.free {
+        let Some(left) = self.free.checked_sub(total) else {
             return false;
-        }
-        self.free -= total;
+        };
+        self.free = left;
         true
     }
 
@@ -388,9 +409,15 @@ fn decode_unit(data: &[u8], output: usize, dict_size: u32, cancel: &AtomicBool) 
                 error: Some(io::Error::other("LZMA2 decode cancelled")),
             };
         }
-        let end = output.min(done + DECODE_STEP);
-        if let Err(error) = reader.read_exact(&mut out[done..end]) {
-            let valid = failing_prefix(data, dict_size, &mut out[..end], done);
+        let end = output.min(done.saturating_add(DECODE_STEP));
+        let Some(step) = out.get_mut(done..end) else {
+            return RunOutput {
+                data: Vec::new(),
+                error: Some(invalid_data()),
+            };
+        };
+        if let Err(error) = reader.read_exact(step) {
+            let valid = failing_prefix(data, dict_size, &mut out, done, end);
             out.truncate(valid);
             return RunOutput {
                 data: out,
@@ -403,19 +430,25 @@ fn decode_unit(data: &[u8], output: usize, dict_size: u32, cancel: &AtomicBool) 
     RunOutput { data: out, error }
 }
 
-/// Bytes of `out[..end]` that decode before the failure, given that the first
-/// `done` bytes are known good.
+/// Bytes of the first `end` bytes of `out` that decode before the failure,
+/// given that the first `done` bytes are known good.
 ///
 /// A failed read loses the bytes of its own call, so the failing step is
 /// decoded again one byte at a time. Only runs that fail pay for it.
-fn failing_prefix(data: &[u8], dict_size: u32, out: &mut [u8], done: usize) -> usize {
+fn failing_prefix(data: &[u8], dict_size: u32, out: &mut [u8], done: usize, end: usize) -> usize {
     let mut reader = Lzma2Reader::new(data, dict_size, None);
-    if reader.read_exact(&mut out[..done]).is_err() {
+    if out
+        .get_mut(..done)
+        .is_none_or(|known| reader.read_exact(known).is_err())
+    {
         return done;
     }
     let mut valid = done;
-    while valid < out.len() && matches!(reader.read(&mut out[valid..=valid]), Ok(1)) {
-        valid += 1;
+    while valid < end
+        && let Some(slot) = out.get_mut(valid..=valid)
+        && matches!(reader.read(slot), Ok(1))
+    {
+        valid = valid.saturating_add(1);
     }
     valid
 }
@@ -460,23 +493,24 @@ impl<S: Read + Seek> Read for UnitInput<'_, S> {
             return Ok(0);
         }
         if self.buf_pos == self.buf.len() {
-            let remaining = self.end - self.pos;
+            let remaining = self.end.checked_sub(self.pos).ok_or_else(invalid_data)?;
             if remaining == 0 {
-                return Ok(self.terminator.take().map_or_default(|byte| {
-                    out[0] = byte;
-                    1
-                }));
+                let (Some(slot), Some(byte)) = (out.first_mut(), self.terminator.take()) else {
+                    return Ok(0);
+                };
+                *slot = byte;
+                return Ok(1);
             }
             let take = usize::try_from(remaining).map_or(INPUT_BUFFER, |r| r.min(INPUT_BUFFER));
             self.buf.clear();
             self.buf.resize(take, 0);
             self.pack.read_at(self.pos, &mut self.buf)?;
-            self.pos += take as u64;
+            self.pos = self.pos.saturating_add(take as u64);
             self.buf_pos = 0;
         }
-        let n = out.len().min(self.buf.len() - self.buf_pos);
-        out[..n].copy_from_slice(&self.buf[self.buf_pos..self.buf_pos + n]);
-        self.buf_pos += n;
+        let pending = self.buf.get(self.buf_pos..).ok_or_else(invalid_data)?;
+        let n = copy_prefix(out, pending)?;
+        self.buf_pos = self.buf_pos.saturating_add(n);
         Ok(n)
     }
 }
@@ -597,12 +631,13 @@ impl<'scope, 'env, S: Read + Seek> ParallelLzma2<'scope, 'env, S> {
             };
             match self.spawn(unit, dict) {
                 Ok(handle) => {
-                    self.running += 1;
+                    self.running = self.running.saturating_add(1);
                     self.queue.push_back(Pending::Running { handle, charge });
                 }
                 Err(SpawnFailure::Source(e)) => return Err(e),
                 Err(SpawnFailure::Thread) => {
-                    self.lookahead.release(charge.transient + charge.retained);
+                    self.lookahead
+                        .release(charge.transient.saturating_add(charge.retained));
                     self.queue.push_back(Pending::Inline(unit));
                     self.spawn_failed = true;
                     break;
@@ -622,13 +657,16 @@ impl<'scope, 'env, S: Read + Seek> ParallelLzma2<'scope, 'env, S> {
             .filter(|&p| p < isize::MAX as usize)
             .ok_or(SpawnFailure::Thread)?;
         let output = usize::try_from(unit.output).map_err(|_| SpawnFailure::Thread)?;
-        let mut data = vec![0u8; packed + 1];
+        let mut data = vec![0u8; packed.checked_add(1).ok_or(SpawnFailure::Thread)?];
         self.pack
-            .read_at(unit.offset, &mut data[..packed])
+            .read_at(
+                unit.offset,
+                data.get_mut(..packed).ok_or(SpawnFailure::Thread)?,
+            )
             .map_err(SpawnFailure::Source)?;
         let cancel = self.cancel;
         let index = self.spawned;
-        self.spawned += 1;
+        self.spawned = self.spawned.saturating_add(1);
         #[cfg(test)]
         let fault = self.knobs.fault;
         #[cfg(test)]
@@ -653,7 +691,7 @@ impl<'scope, 'env, S: Read + Seek> ParallelLzma2<'scope, 'env, S> {
         let (pos, end, terminator, remaining) = match planned {
             PlannedUnit::Buffered(unit) => (
                 unit.offset,
-                unit.offset + unit.packed,
+                unit.offset.saturating_add(unit.packed),
                 Some(0u8),
                 Some(unit.output),
             ),
@@ -669,7 +707,13 @@ impl<'scope, 'env, S: Read + Seek> ParallelLzma2<'scope, 'env, S> {
     fn advance(&mut self) -> io::Result<bool> {
         match self.queue.pop_front() {
             Some(Pending::Running { handle, charge }) => {
-                self.running -= 1;
+                #[expect(
+                    clippy::arithmetic_side_effects,
+                    reason = "every queued `Running` entry was counted by `fill`"
+                )]
+                {
+                    self.running -= 1;
+                }
                 let joined = handle.join();
                 self.lookahead.release(charge.transient);
                 let run = joined.map_err(|_| io::Error::other("LZMA2 worker panicked"))?;
@@ -733,10 +777,9 @@ impl<S: Read + Seek> ParallelLzma2<'_, '_, S> {
                     retained,
                     error,
                 } => {
-                    if *pos < data.len() {
-                        let n = buf.len().min(data.len() - *pos);
-                        buf[..n].copy_from_slice(&data[*pos..*pos + n]);
-                        *pos += n;
+                    if let Some(rest) = data.get(*pos..).filter(|rest| !rest.is_empty()) {
+                        let n = copy_prefix(buf, rest)?;
+                        *pos = pos.saturating_add(n);
                         return Ok(n);
                     }
                     let (retained, error) = (*retained, error.take());
@@ -750,13 +793,14 @@ impl<S: Read + Seek> ParallelLzma2<'_, '_, S> {
                     let want = stream.remaining.map_or(buf.len(), |r| {
                         buf.len().min(usize::try_from(r).unwrap_or(usize::MAX))
                     });
-                    let n = stream.reader.read(&mut buf[..want])?;
+                    let window = buf.get_mut(..want).ok_or_else(invalid_data)?;
+                    let n = read_prefix(&mut stream.reader, window)?.len();
                     match (&mut stream.remaining, n) {
                         (None, 0) => self.current = Current::Idle,
                         (Some(_), 0) => return Err(io::ErrorKind::UnexpectedEof.into()),
                         (remaining, n) => {
                             if let Some(left) = remaining {
-                                *left -= n as u64;
+                                *left = left.checked_sub(n as u64).ok_or_else(invalid_data)?;
                                 if *left == 0 {
                                     expect_end(&mut stream.reader)?;
                                     self.current = Current::Idle;

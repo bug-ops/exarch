@@ -9,6 +9,7 @@ use crate::ConfigSetting;
 use crate::Result;
 use crate::closed_enum::ClosedEnum;
 use crate::closed_enum::closed_enum;
+use crate::formats::bounded_read::read_up_to;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::sevenz::SEVENZ_MAGIC;
 
@@ -478,6 +479,10 @@ pub(crate) struct Header {
 
 impl Header {
     /// The bytes that were actually read.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`filled` is set only by `read_up_to`, which never exceeds the buffer"
+    )]
     pub(crate) fn as_slice(&self) -> &[u8] {
         &self.buf[..self.filled]
     }
@@ -494,14 +499,7 @@ pub(crate) fn peek_header<R: std::io::Read + ?Sized>(reader: &mut R) -> std::io:
         buf: [0; MAGIC_READ_LEN],
         filled: 0,
     };
-    while header.filled < MAGIC_READ_LEN {
-        match reader.read(&mut header.buf[header.filled..]) {
-            Ok(0) => break,
-            Ok(n) => header.filled += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
+    header.filled = read_up_to(reader, &mut header.buf)?;
     Ok(header)
 }
 

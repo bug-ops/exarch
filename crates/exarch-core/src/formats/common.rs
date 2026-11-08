@@ -751,7 +751,7 @@ pub(crate) fn create_directory<P: ParentCheck>(
     )?;
     dirs.ensure_dir(root, safe_path)?;
 
-    report.directories_created += 1;
+    report.directories_created = report.directories_created.saturating_add(1);
 
     Ok(())
 }
@@ -888,7 +888,7 @@ pub(crate) fn create_symlink<P: ParentCheck>(
         root.created()
             .note(duplicates, &parent, leaf, safe_symlink.link().as_path());
 
-        report.symlinks_created += 1;
+        report.symlinks_created = report.symlinks_created.saturating_add(1);
 
         Ok(())
     }

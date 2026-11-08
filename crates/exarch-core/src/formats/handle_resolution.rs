@@ -418,7 +418,7 @@ impl<'r> LinkCursor<'r> {
     }
 
     fn note_held(&mut self) {
-        self.peak_held = self.peak_held.max(self.parents.len() + 1);
+        self.peak_held = self.peak_held.max(self.parents.len().saturating_add(1));
     }
 
     fn run(&mut self) -> Resolution<()> {
@@ -427,7 +427,10 @@ impl<'r> LinkCursor<'r> {
                 Step::Parent => self.ascend()?,
                 Step::Name(name) => self.enter(&name)?,
                 Step::LinkEnd => {
-                    self.active_links -= 1;
+                    self.active_links = self
+                        .active_links
+                        .checked_sub(1)
+                        .ok_or(Refusal::Unresolvable)?;
                     if self.active_links == 0 {
                         self.hops = 0;
                     }
@@ -456,7 +459,7 @@ impl<'r> LinkCursor<'r> {
 
     /// Reads the symlink `name` in the current directory and queues its target.
     fn follow_link(&mut self, name: Leaf<'_>) -> Resolution<()> {
-        self.hops += 1;
+        self.hops = self.hops.saturating_add(1);
         if self.hops > MAX_SYMLINK_HOPS {
             return Err(Refusal::Unresolvable);
         }
@@ -474,7 +477,10 @@ impl<'r> LinkCursor<'r> {
             target
         };
         self.pending.push_front(Step::LinkEnd);
-        self.active_links += 1;
+        self.active_links = self
+            .active_links
+            .checked_add(1)
+            .ok_or(Refusal::Unresolvable)?;
         let mut steps = std::mem::take(&mut self.pending);
         self.queue(&relative)?;
         self.pending.append(&mut steps);

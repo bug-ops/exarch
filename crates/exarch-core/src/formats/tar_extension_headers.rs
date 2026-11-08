@@ -79,7 +79,7 @@ struct PathOverrides {
 }
 
 fn lossy(bytes: &[u8]) -> String {
-    let shown = &bytes[..bytes.len().min(MAX_ECHOED_BYTES)];
+    let shown = bytes.get(..MAX_ECHOED_BYTES).unwrap_or(bytes);
     let mut text = crate::bytes_text(shown);
     if shown.len() < bytes.len() {
         text.push_str("...");
@@ -151,20 +151,24 @@ fn check_record_framing(body: &[u8]) -> Result<()> {
             .iter()
             .position(|&b| b == b' ')
             .ok_or(TarAmbiguity::MalformedRecord)?;
-        let digits = &rest[..space];
+        let (digits, _) = rest
+            .split_at_checked(space)
+            .ok_or(TarAmbiguity::MalformedRecord)?;
         let canonical = !digits.is_empty()
             && digits.iter().all(u8::is_ascii_digit)
-            && (digits.len() == 1 || digits[0] != b'0');
+            && (digits.len() == 1 || digits.first() != Some(&b'0'));
         let len = canonical
             .then(|| std::str::from_utf8(digits).ok()?.parse::<usize>().ok())
             .flatten()
             .filter(|len| (1..=MAX_PAX_RECORD_BYTES).contains(len))
             .ok_or(TarAmbiguity::MalformedRecord)?;
-        let record = rest.get(..len).ok_or(TarAmbiguity::MalformedRecord)?;
+        let (record, tail) = rest
+            .split_at_checked(len)
+            .ok_or(TarAmbiguity::MalformedRecord)?;
         if record.last() != Some(&b'\n') {
             return Err(TarAmbiguity::MalformedRecord.into());
         }
-        rest = &rest[len..];
+        rest = tail;
     }
     Ok(())
 }
@@ -173,17 +177,25 @@ fn check_record_framing(body: &[u8]) -> Result<()> {
 /// trailing spaces or NULs, the only form every reader reads the same way.
 fn is_plain_octal(field: &[u8]) -> bool {
     let leading_spaces = field.iter().take_while(|&&b| b == b' ').count();
-    let trimmed = &field[leading_spaces..];
+    let Some(trimmed) = field.get(leading_spaces..) else {
+        return false;
+    };
     let digits = trimmed
         .iter()
         .take_while(|b| (b'0'..=b'7').contains(b))
         .count();
-    digits > 0 && trimmed[digits..].iter().all(|&b| b == b' ' || b == 0)
+    digits > 0
+        && trimmed
+            .get(digits..)
+            .is_some_and(|rest| rest.iter().all(|&b| b == b' ' || b == 0))
 }
 
 /// Whether `field` is a base-256 number that fits 64 bits without a sign.
 fn is_plain_base256(field: &[u8]) -> bool {
-    field.first() == Some(&BASE256_MARKER) && field[1..4].iter().all(|&b| b == 0)
+    field.first() == Some(&BASE256_MARKER)
+        && field
+            .get(1..4)
+            .is_some_and(|zeros| zeros.iter().all(|&b| b == 0))
 }
 
 fn check_header_fields(header: &Header) -> Result<()> {

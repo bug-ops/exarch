@@ -57,6 +57,51 @@ impl BlockIndex {
     }
 }
 
+/// One `T` per block of a [`SevenZHeader`], indexed by [`BlockIndex`].
+///
+/// Only [`SevenZHeader::per_block`] builds one, sized to that header's blocks,
+/// so indexing it with a [`BlockIndex`] of the same header cannot go out of
+/// range.
+#[derive(Debug, Clone)]
+pub(crate) struct PerBlock<T>(Vec<T>);
+
+impl<T> PerBlock<T> {
+    /// The entries in block order.
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+
+    /// Sets every entry to `value`.
+    pub(crate) fn fill(&mut self, value: T)
+    where
+        T: Clone,
+    {
+        self.0.fill(value);
+    }
+}
+
+impl<T> std::ops::Index<BlockIndex> for PerBlock<T> {
+    type Output = T;
+
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the table is sized to the header whose blocks mint the index"
+    )]
+    fn index(&self, block: BlockIndex) -> &T {
+        &self.0[block.0]
+    }
+}
+
+impl<T> std::ops::IndexMut<BlockIndex> for PerBlock<T> {
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the table is sized to the header whose blocks mint the index"
+    )]
+    fn index_mut(&mut self, block: BlockIndex) -> &mut T {
+        &mut self.0[block.0]
+    }
+}
+
 /// A parsed 7z header whose stream map is consistent with its blocks and files.
 ///
 /// Holds, for every block, an entry in `block_first_pack_stream_index` and
@@ -147,12 +192,21 @@ impl SevenZHeader {
         self.archive.blocks.len()
     }
 
+    /// A table with `value` for every block.
+    pub(crate) fn per_block<T: Clone>(&self, value: T) -> PerBlock<T> {
+        PerBlock(vec![value; self.block_count()])
+    }
+
     /// Every block index, ascending.
     pub(crate) fn block_indices(&self) -> impl Iterator<Item = BlockIndex> + use<> {
         (0..self.archive.blocks.len()).map(BlockIndex)
     }
 
     /// The block at `index`.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "sevenz-rust2 >= 0.24.2 sizes its block tables to the blocks"
+    )]
     pub(crate) fn block(&self, index: BlockIndex) -> &Block {
         &self.archive.blocks[index.0]
     }
@@ -170,11 +224,19 @@ impl SevenZHeader {
     }
 
     /// The index of the first file `block` decodes.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "sevenz-rust2 >= 0.24.2 sizes its block tables to the blocks"
+    )]
     pub(crate) fn block_first_file(&self, block: BlockIndex) -> usize {
         self.archive.stream_map.block_first_file_index[block.0]
     }
 
     /// The index of the first pack stream of `block`.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "sevenz-rust2 >= 0.24.2 sizes its block tables to the blocks"
+    )]
     pub(crate) fn block_first_pack(&self, block: BlockIndex) -> usize {
         self.archive.stream_map.block_first_pack_stream_index()[block.0]
     }
@@ -184,7 +246,7 @@ impl SevenZHeader {
         self.archive
             .stream_map
             .block_first_pack_stream_index()
-            .get(block.0 + 1)
+            .get(block.0.saturating_add(1))
             .copied()
     }
 
@@ -433,6 +495,41 @@ mod tests {
     const NO_FILES_INFO: &[u8] =
         include_bytes!("../../../../../tests/fixtures/streams-without-files-info.7z");
     const SIMPLE: &[u8] = include_bytes!("../../../../../tests/fixtures/simple.7z");
+
+    fn header_with_blocks(count: usize) -> SevenZHeader {
+        let mut archive = Archive::default();
+        archive.blocks = vec![Block::default(); count];
+        SevenZHeader::assume_checked(archive)
+    }
+
+    #[test]
+    fn per_block_is_sized_to_the_header_blocks() {
+        let header = header_with_blocks(3);
+        let table = header.per_block(0u8);
+        assert_eq!(table.iter().count(), header.block_count());
+        assert!(header.block_indices().all(|block| table[block] == 0));
+    }
+
+    #[test]
+    fn per_block_index_mut_writes_only_the_addressed_block() {
+        let header = header_with_blocks(3);
+        let mut table = header.per_block(0u8);
+        let second = header.block_indices().nth(1).unwrap();
+        table[second] = 1;
+        let expected: Vec<u8> = header
+            .block_indices()
+            .map(|block| u8::from(block == second))
+            .collect();
+        assert_eq!(table.iter().copied().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn per_block_fill_sets_every_entry() {
+        let header = header_with_blocks(3);
+        let mut table = header.per_block(false);
+        table.fill(true);
+        assert!(table.iter().all(|&set| set));
+    }
 
     fn parsed(bytes: &[u8]) -> Archive {
         Archive::read(&mut Cursor::new(bytes), &Password::empty()).unwrap()

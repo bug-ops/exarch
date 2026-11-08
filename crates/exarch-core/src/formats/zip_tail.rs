@@ -26,6 +26,9 @@ use std::rc::Rc;
 use zip::ZipArchive as ZipReader;
 use zip::read::ZipFile;
 
+use super::bounded_read::invalid_data;
+use super::bounded_read::read_prefix;
+use super::bounded_read::read_up_to;
 use super::chunk_search::ChunkPlan;
 use super::chunk_search::ChunkSource;
 use super::chunk_search::Flow;
@@ -210,7 +213,9 @@ impl DescriptorTail {
         };
         let slack = self.compressed.saturating_sub(stream_end);
         let found = scan(&mut rest, slack, LFH_SIGNATURE, judge_header_in_slack)?;
-        Ok(found.map_or(Tail::Clean, |at| Tail::Hidden(stream_end + at)))
+        Ok(found.map_or(Tail::Clean, |at| {
+            Tail::Hidden(stream_end.saturating_add(at))
+        }))
     }
 }
 
@@ -349,8 +354,9 @@ pub(super) fn holds_reader_record<R: Read + Seek>(
     let mut buf = vec![0u8; SCAN_CHUNK + LFH_FIXED_LEN];
     let (mut filled, mut base) = (0usize, 0u64);
     loop {
-        let read = data.read(&mut buf[filled..])?;
-        filled += read;
+        let room = buf.get_mut(filled..).ok_or_else(invalid_data)?;
+        let read = read_prefix(&mut data, room)?.len();
+        filled = filled.saturating_add(read);
         let at_end = read == 0;
         let judged = if at_end {
             filled
@@ -359,20 +365,26 @@ pub(super) fn holds_reader_record<R: Read + Seek>(
         };
         let in_range = usize::try_from(compressed.saturating_sub(base)).unwrap_or(usize::MAX);
         let limit = judged.min(in_range);
-        let mut at = 0;
-        while let Some(found) = buf[at..limit].iter().position(|&b| b == b'P') {
-            at += found;
-            if starts_reader_record(&buf[at..filled]) {
+        let window = buf.get(..limit).ok_or_else(invalid_data)?;
+        let mut at = 0usize;
+        while let Some(found) = window
+            .get(at..)
+            .ok_or_else(invalid_data)?
+            .iter()
+            .position(|&b| b == b'P')
+        {
+            at = at.saturating_add(found);
+            if starts_reader_record(buf.get(at..filled).ok_or_else(invalid_data)?) {
                 return Ok(true);
             }
-            at += 1;
+            at = at.saturating_add(1);
         }
         if limit < judged || at_end {
             return Ok(false);
         }
         buf.copy_within(judged..filled, 0);
-        base += judged as u64;
-        filled -= judged;
+        base = base.saturating_add(judged as u64);
+        filled = filled.saturating_sub(judged);
     }
 }
 
@@ -429,9 +441,9 @@ fn copy_chunked(
         .clamp(8 * 1024, DECODE_CHUNK);
     let mut chunk = vec![0u8; len];
     loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => return Ok(()),
-            Ok(n) => sink.write_all(&chunk[..n])?,
+        match read_prefix(reader, &mut chunk) {
+            Ok([]) => return Ok(()),
+            Ok(read) => sink.write_all(read)?,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => return Err(e),
         }
@@ -580,7 +592,7 @@ pub(super) fn scan(
         |_, hit| {
             Ok(match judge(hit.bytes, hit.offset, total) {
                 Judgement::Hit(delta) => {
-                    found = Some(hit.offset + delta);
+                    found = Some(hit.offset.saturating_add(delta));
                     Flow::Stop
                 }
                 Judgement::NeedMore => Flow::NeedMore,
@@ -596,16 +608,7 @@ struct Sequential<'a, R>(&'a mut R);
 
 impl<R: Read> ChunkSource for Sequential<'_, R> {
     fn read_chunk(&mut self, _: u64, buf: &mut [u8]) -> Result<usize> {
-        let mut filled = 0;
-        while filled < buf.len() {
-            match self.0.read(&mut buf[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(ArchiveError::Io(e)),
-            }
-        }
-        Ok(filled)
+        read_up_to(self.0, buf).map_err(ArchiveError::Io)
     }
 }
 

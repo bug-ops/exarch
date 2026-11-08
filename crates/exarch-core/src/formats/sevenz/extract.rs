@@ -31,6 +31,7 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
+use crate::formats::bounded_read::invalid_data;
 use crate::formats::common;
 use crate::formats::common::EntryCompleteGuard;
 use crate::formats::source_fault::ReadFamily;
@@ -212,7 +213,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         config,
                     )?;
                     require_symlinks_allowed(config)?;
-                    pre.symlink(&safe_path, &self.header.files()[index])?;
+                    let file = self.header.files().get(index).ok_or_else(invalid_data)?;
+                    pre.symlink(&safe_path, file)?;
                     pre.reserve_symlink(entry.size)?;
                 }
                 SevenZKind::File => {

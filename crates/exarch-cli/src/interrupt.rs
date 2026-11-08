@@ -36,11 +36,11 @@ use crate::exit::ExitStatus;
 #[cfg(not(target_os = "wasi"))]
 use crate::operation::Operation;
 use crate::output::OutputMode;
+#[cfg(not(target_os = "wasi"))]
+use crate::output::terminal::host_path_text;
 use exarch_core::EntryPosition;
 use exarch_core::NoopProgress;
 use exarch_core::ProgressCallback;
-#[cfg(not(target_os = "wasi"))]
-use exarch_core::path_text;
 use std::path::Path;
 #[cfg(not(target_os = "wasi"))]
 use std::path::PathBuf;
@@ -163,8 +163,8 @@ impl Run {
 /// the staging entries are created in.
 #[cfg(not(target_os = "wasi"))]
 fn forced_exit_hint(output: &Path, place: &Path, run: Run) -> String {
-    let place = path_text(place);
-    let output = path_text(output);
+    let place = host_path_text(place);
+    let output = host_path_text(output);
     match run {
         Run::Create => format!(
             "interrupted again, stopping at once; an unfinished temporary file named .exarch-* \

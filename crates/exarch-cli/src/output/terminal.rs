@@ -384,10 +384,27 @@ impl fmt::Display for TerminalText<'_> {
     }
 }
 
+/// The text of a path of the host.
+///
+/// On Windows a path that is valid UTF-8 keeps its native spelling, since `\`
+/// is its separator and not a character of a name. Everywhere else, and for a
+/// Windows path that is not valid UTF-8, it is rendered with [`path_text`]:
+/// a backslash in a Unix name is written `\x5C`, as in core's own host paths.
+#[must_use]
+pub fn host_path_text(path: &Path) -> String {
+    host_path_text_for(path, cfg!(windows))
+}
+
+fn host_path_text_for(path: &Path, backslash_is_separator: bool) -> String {
+    match path.to_str() {
+        Some(text) if backslash_is_separator => text.to_owned(),
+        _ => path_text(path),
+    }
+}
+
 /// A path of the host (an archive, a destination, an output) rendered with
-/// [`path_text`], the same renderer core uses for the host paths in its error
-/// text, with control and invisible characters escaped. Only `--json` fields
-/// keep the exact string.
+/// [`host_path_text`], with control and invisible characters escaped. Only
+/// `--json` fields keep the exact string.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalPath<'a>(&'a Path);
 
@@ -401,7 +418,7 @@ impl<'a> TerminalPath<'a> {
 
 impl fmt::Display for TerminalPath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_escaped(f, &path_text(self.0))
+        write_escaped(f, &host_path_text(self.0))
     }
 }
 
@@ -653,6 +670,23 @@ mod tests {
         let path = Path::new("ro\\dir/out");
         assert_eq!(TerminalPath::new(path).to_string(), "ro\\x5Cdir/out");
         assert_eq!(TerminalPath::new(path).to_string(), path_text(path));
+    }
+
+    #[test]
+    fn windows_host_path_keeps_its_separators_and_trailing_one() {
+        let path = Path::new(r"C:\Users\me\out\");
+        let prefix = host_path_text_for(path, true);
+        assert_eq!(prefix, r"C:\Users\me\out\");
+        let conflict = format!("{prefix}{}", path_text(Path::new("a/b")));
+        assert_eq!(conflict, r"C:\Users\me\out\a/b");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_host_path_escapes_a_backslash() {
+        let path = Path::new(r"ro\dir/out/");
+        assert_eq!(host_path_text_for(path, false), r"ro\x5Cdir/out/");
+        assert_eq!(host_path_text(path), host_path_text_for(path, false));
     }
 
     #[test]

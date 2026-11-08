@@ -6,7 +6,6 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
-use std::assert_matches;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -556,6 +555,7 @@ mod linux {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::assert_matches;
     use std::process::Command;
 
     use super::*;

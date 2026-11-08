@@ -227,7 +227,7 @@ fn the_linux_host_model_keeps_case_variants_apart() {
 }
 
 #[test]
-fn portable_case_variant_directories_charge_the_node_budget() {
+fn portable_case_variant_directories_charge_the_file_count() {
     let entries: Vec<_> = [
         "aaaa/", "Aaaa/", "aAaa/", "aaAa/", "aaaA/", "AAaa/", "AaAa/", "aAAa/",
     ]
@@ -245,7 +245,7 @@ fn portable_case_variant_directories_charge_the_node_budget() {
     assert_matches!(
         error,
         ArchiveError::QuotaExceeded {
-            resource: exarch_core::QuotaResource::TreeNodes { max: 5 }
+            resource: exarch_core::QuotaResource::FileCount { max: 2, .. }
         },
         "{error:?}"
     );

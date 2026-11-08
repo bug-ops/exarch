@@ -4,6 +4,7 @@
 mod cli;
 mod commands;
 mod error;
+mod exit;
 mod interrupt;
 mod operation;
 mod output;
@@ -14,34 +15,18 @@ mod test_support;
 use clap::Parser;
 use commands::CommandResult;
 use commands::Outcome;
+use exit::ExitStatus;
 use operation::Operation;
 use output::OutputFormatter;
 use output::OutputMode;
+use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
-/// The process exit status, one value per documented meaning.
-///
-/// Code 2 is clap's usage-error status and is deliberately not used here, so a
-/// script can tell "your flags are wrong" from "the archive has warnings".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-enum ExitStatus {
-    Success = 0,
-    Failure = 1,
-    StrictWarning = 3,
-    Interrupted = interrupt::FORCED_EXIT_CODE,
-}
-
-impl From<ExitStatus> for ExitCode {
-    fn from(status: ExitStatus) -> Self {
-        Self::from(status as u8)
-    }
-}
-
-/// A command that failed, with the operation the formatter reports it under.
+/// A command that failed, with the operation the formatter reports it under;
+/// `None` for a command that has no JSON envelope (`completion`).
 struct Failure {
-    operation: Operation,
+    operation: Option<Operation>,
     error: anyhow::Error,
 }
 
@@ -53,7 +38,7 @@ fn attempt(
     result: CommandResult,
 ) -> Result<Outcome, Failure> {
     result.map_err(|error| Failure {
-        operation,
+        operation: Some(operation),
         error: error.contextualize(operation, archive),
     })
 }
@@ -85,10 +70,22 @@ fn run(
             commands::verify::execute(args, formatter),
         ),
         cli::Commands::Completion(args) => {
-            commands::completion::execute(args.shell);
-            Ok(Outcome::Ok)
+            commands::completion::execute(args.shell, &mut std::io::stdout())
+                .map(|()| Outcome::Ok)
+                .map_err(|error| Failure {
+                    operation: None,
+                    error: anyhow::Error::new(error).context("failed to write the completions"),
+                })
         }
     }
+}
+
+/// The status of a failed command: a cancelled run that a stop request caused
+/// reports that request, everything else is a plain failure.
+fn failure_status(error: &anyhow::Error) -> ExitStatus {
+    interrupt::requested()
+        .filter(|_| error::is_cancelled(error))
+        .map_or(ExitStatus::Failure, ExitStatus::from)
 }
 
 fn main() -> ExitCode {
@@ -104,32 +101,15 @@ fn main() -> ExitCode {
         }
         Ok(Outcome::StrictWarning) => ExitStatus::StrictWarning,
         Err(failure) => {
-            formatter.format_error(failure.operation, &failure.error);
-            if interrupt::requested() && error::is_cancelled(&failure.error) {
-                ExitStatus::Interrupted
-            } else {
-                ExitStatus::Failure
+            match failure.operation {
+                Some(operation) => formatter.format_error(operation, &failure.error),
+                // A closed stderr must not turn the failure into a panic.
+                None => {
+                    let _ = writeln!(std::io::stderr(), "Error: {:#}", failure.error);
+                }
             }
+            failure_status(&failure.error)
         }
     };
     status.into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ExitStatus;
-
-    #[test]
-    fn strict_warning_does_not_share_clap_usage_error_code() {
-        const CLAP_USAGE_ERROR: u8 = 2;
-        for status in [
-            ExitStatus::Success,
-            ExitStatus::Failure,
-            ExitStatus::StrictWarning,
-            ExitStatus::Interrupted,
-        ] {
-            assert_ne!(status as u8, CLAP_USAGE_ERROR, "{status:?}");
-        }
-        assert_eq!(ExitStatus::StrictWarning as u8, 3);
-    }
 }

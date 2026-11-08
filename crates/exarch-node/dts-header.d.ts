@@ -64,6 +64,7 @@ export interface ExarchErrorPlain extends ExarchErrorBase {
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
+  sizeClamped?: undefined
   filesSkipped?: undefined
   skipped?: undefined
   warnings?: undefined
@@ -75,6 +76,8 @@ export interface ExarchErrorWritesKept extends ExarchErrorBase {
   writes: 'kept'
   filesExtracted: number
   bytesWritten: number
+  /** `true` when `bytesWritten` exceeded `2^53 - 1` and was clamped to it. */
+  sizeClamped: boolean
   filesSkipped: number
   skipped: SkippedSummary
   warnings: Array<ExtractionWarning>
@@ -90,6 +93,7 @@ export interface ExarchErrorRolledBack extends ExarchErrorBase {
   writes: 'rolled_back'
   filesExtracted?: undefined
   bytesWritten?: undefined
+  sizeClamped?: undefined
   filesSkipped?: undefined
   skipped?: undefined
   warnings?: undefined
@@ -105,6 +109,7 @@ export interface ExarchErrorDiscarded extends ExarchErrorBase {
   writes: 'discarded'
   filesExtracted?: undefined
   bytesWritten?: undefined
+  sizeClamped?: undefined
   filesSkipped?: undefined
   skipped?: undefined
   warnings?: undefined
@@ -121,6 +126,7 @@ export interface ExarchErrorReadCallback extends ExarchErrorBase {
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
+  sizeClamped?: undefined
   filesSkipped?: undefined
   skipped?: undefined
   warnings?: undefined
@@ -137,6 +143,8 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
   warnings?: undefined
   filesAdded: number
   bytesWritten: number
+  /** `true` when `bytesWritten` exceeded `2^53 - 1` and was clamped to it. */
+  sizeClamped: boolean
 }
 
 /**
@@ -155,6 +163,7 @@ export interface ExarchNativeError extends Error {
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
+  sizeClamped?: undefined
   filesSkipped?: undefined
   skipped?: undefined
   warnings?: undefined
@@ -442,6 +451,11 @@ export type ExarchError = ExarchCoreError | ExarchNativeError
 /**
  * An entry delivered to an `onEntry` callback. Discriminate on `kind`: a file
  * always has `data`, a symlink or hardlink always has `target`.
+ *
+ * A value of a kind newer than this binding is delivered as the matching
+ * `UnknownMemoryEntry` (only the discriminant token and the fields core's accessors give);
+ * the union stays closed so that discriminating on `kind` narrows, so check
+ * for an unexpected token in a `default` branch.
  */
 export type MemoryEntry =
   | MemoryFileEntry
@@ -458,12 +472,22 @@ export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
 /**
  * A condition of an extraction worth surfacing that is not a skipped entry.
  * Discriminate on `kind`; `message` is the human-readable text.
+ *
+ * A value of a kind newer than this binding is delivered as the matching
+ * `UnknownExtractionWarning` (only the discriminant token and the fields core's accessors give);
+ * the union stays closed so that discriminating on `kind` narrows, so check
+ * for an unexpected token in a `default` branch.
  */
 export type ExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning
 
 /**
  * A condition of a creation worth surfacing that is not a skipped entry.
  * Discriminate on `kind`; `message` is the human-readable text.
+ *
+ * A value of a kind newer than this binding is delivered as the matching
+ * `UnknownCreationWarning` (only the discriminant token and the fields core's accessors give);
+ * the union stays closed so that discriminating on `kind` narrows, so check
+ * for an unexpected token in a `default` branch.
  */
 export type CreationWarning =
   | ZipRatioOverDefaultLimitWarning
@@ -473,9 +497,15 @@ export type CreationWarning =
 /**
  * What extraction does with a listed entry, discriminated by `action`: an
  * `'extract'` disposition has a `landing`, a `'skip'` one a `kind`, the
- * `SkipKind` it is left out for.
+ * `SkipKind` it is left out for, and a `'refuse'` one carries neither: the
+ * entry is refused by validation or policy, or cannot be placed.
+ *
+ * A value of a kind newer than this binding is delivered as the matching
+ * `UnknownDisposition` (only the discriminant token and the fields core's accessors give);
+ * the union stays closed so that discriminating on `action` narrows, so check
+ * for an unexpected token in a `default` branch.
  */
-export type EntryDisposition = ExtractDisposition | SkipDisposition
+export type EntryDisposition = ExtractDisposition | SkipDisposition | RefuseDisposition
 
 /** What a `MemoryEntry` holds. */
 export type MemoryEntryKind = MemoryEntry['kind']
@@ -483,6 +513,11 @@ export type MemoryEntryKind = MemoryEntry['kind']
 /**
  * A link target of a listing, discriminated by `state`: only a `'recorded'`
  * target has a `path`, and only an `'oversized'` one has `bytes`.
+ *
+ * A value of a kind newer than this binding is delivered as the matching
+ * `UnknownLinkTarget` (only the discriminant token and the fields core's accessors give);
+ * the union stays closed so that discriminating on `state` narrows, so check
+ * for an unexpected token in a `default` branch.
  */
 export type LinkTarget =
   | RecordedLinkTarget
@@ -494,6 +529,11 @@ export type LinkTarget =
 /**
  * One entry of a listing, discriminated by `entryType`: only a file has a
  * `size`, only a link has a `target`.
+ *
+ * A value of a kind newer than this binding is delivered as the matching
+ * `UnknownManifestEntry` (only the discriminant token and the fields core's accessors give);
+ * the union stays closed so that discriminating on `entryType` narrows, so check
+ * for an unexpected token in a `default` branch.
  */
 export type ArchiveEntry =
   | ManifestFileEntry

@@ -13,6 +13,7 @@
 //! duplicates are still skipped through the run record, but a file planted in
 //! the staging directory is refused instead of being kept and published.
 
+mod acl;
 mod adopt;
 mod dir;
 mod replace;
@@ -33,6 +34,7 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::Staging;
 use crate::StagingLeftover;
+use crate::destination_state::parent_or_cwd;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::security::fs_view::Occupant;
@@ -94,15 +96,6 @@ fn staged_options(options: &ExtractionOptions) -> ExtractionOptions {
         kept @ (ExistingFiles::Overwrite | ExistingFiles::Refuse) => kept,
     };
     options.clone().with_existing_files(existing_files)
-}
-
-/// The directory holding `path`; the working directory when `path` is a bare
-/// name and so has an empty parent.
-fn parent_or_cwd(path: &Path) -> &Path {
-    match path.parent() {
-        Some(parent) if !parent.is_empty() => parent,
-        _ => Path::new("."),
-    }
 }
 
 /// Where [`Staging::Atomic`] publishes: the destination's name inside its
@@ -189,7 +182,7 @@ fn is_empty_dir(dir: &Path) -> Result<bool> {
 fn io_context(error: &io::Error, context: &'static str, path: &Path) -> io::Error {
     io::Error::new(
         error.kind(),
-        IoContext::new(context, format!("{}: {error}", path.display())),
+        IoContext::new(context, format!("{}: {error}", crate::path_text(path))),
     )
 }
 
@@ -255,11 +248,26 @@ fn publish(
         .status(destination.name.as_leaf())
         .map_err(ArchiveError::Io)?
         .filter(|status| status.occupant == Occupant::Directory);
-    if let Some(adoption) = existing
-        .as_ref()
-        .map(Adoption::of_empty_destination)
-        .or(fresh_mode)
-    {
+    let adoption = match existing {
+        Some(status) => {
+            let acl = acl::read_destination(
+                &destination.pin,
+                destination.name.as_leaf(),
+                &destination.parent,
+                status.identity,
+            )
+            .map_err(|e| {
+                ArchiveError::Io(io_context(
+                    &e,
+                    "failed to read the destination's access control list",
+                    output_dir,
+                ))
+            })?;
+            Some(Adoption::of_empty_destination(&status, acl))
+        }
+        None => fresh_mode,
+    };
+    if let Some(adoption) = adoption {
         staging.adopt(adoption).map_err(|e| {
             ArchiveError::Io(io_context(
                 &e,

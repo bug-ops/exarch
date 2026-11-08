@@ -298,7 +298,8 @@ def test_partial_extraction_carries_files_skipped_and_warnings(temp_dir):
     output_dir.mkdir()
     # `add_allowed_extension` matches against `Path::extension()`, which never
     # includes the leading dot — pass "txt", not ".txt".
-    config = exarch.SecurityConfig().add_allowed_extension("txt").with_max_file_count(1)
+    # The skipped entry counts against `max_file_count` too (#1038).
+    config = exarch.SecurityConfig().add_allowed_extension("txt").with_max_file_count(2)
 
     with pytest.raises(exarch.QuotaExceededError) as exc_info:
         exarch.extract_archive(archive, output_dir, config)

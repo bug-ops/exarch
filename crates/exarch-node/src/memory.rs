@@ -11,8 +11,8 @@ use exarch_core::PathModel as CorePathModel;
 use exarch_core::SanitizedMode;
 use exarch_core::extract_reader_to_memory;
 use napi::Env;
-use napi::bindgen_prelude::Either3;
 use napi::bindgen_prelude::Either4;
+use napi::bindgen_prelude::Either5;
 use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::Result;
 use napi::bindgen_prelude::Uint8Array;
@@ -33,11 +33,11 @@ use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise;
 use crate::error::spawn_blocking_promise_with;
+use crate::mirror::mirror_into_core;
 use crate::report::ArchiveType;
 use crate::report::CreatableFormat;
 use crate::report::CreationReport;
 use crate::report::ExtractionReport;
-use crate::report::unknown_variant;
 use crate::run_with_optional_progress;
 use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
@@ -58,14 +58,10 @@ pub enum PathModel {
     Portable,
 }
 
-impl From<PathModel> for CorePathModel {
-    fn from(value: PathModel) -> Self {
-        match value {
-            PathModel::Host => Self::Host,
-            PathModel::Portable => Self::Portable,
-        }
-    }
-}
+mirror_into_core!(
+    PathModel => CorePathModel,
+    [Host, Portable]
+);
 
 /// The `kind` of a [`MemoryFileEntry`].
 #[napi(string_enum)]
@@ -151,32 +147,50 @@ pub struct MemoryHardlinkEntry {
     pub target: String,
 }
 
+/// An entry of a kind newer than this binding.
+#[napi(object)]
+pub struct UnknownMemoryEntry {
+    /// Entry path, relative, as delivered by extraction.
+    pub path: String,
+    /// The entry kind's token, as core spells it.
+    pub kind: String,
+}
+
 /// An entry held in the result of an extraction into memory.
-pub type StoredEntry = Either3<MemoryFileEntry, MemoryDirectoryEntry, MemorySymlinkEntry>;
+pub type StoredEntry =
+    Either4<MemoryFileEntry, MemoryDirectoryEntry, MemorySymlinkEntry, UnknownMemoryEntry>;
 
 /// An entry delivered to an `onEntry` callback: a stored entry or a hardlink.
-pub type MemoryEntry =
-    Either4<MemoryFileEntry, MemoryDirectoryEntry, MemorySymlinkEntry, MemoryHardlinkEntry>;
+pub type MemoryEntry = Either5<
+    MemoryFileEntry,
+    MemoryDirectoryEntry,
+    MemorySymlinkEntry,
+    MemoryHardlinkEntry,
+    UnknownMemoryEntry,
+>;
 
 fn stored_entry(path: &Path, entry: CoreMemoryEntry) -> CoreResult<StoredEntry> {
     let path = utf8_path(path)?;
     Ok(match entry {
-        CoreMemoryEntry::File { data, mode } => Either3::A(MemoryFileEntry {
+        CoreMemoryEntry::File { data, mode } => Either4::A(MemoryFileEntry {
             path,
             kind: FileKind::File,
             data: Uint8Array::from(data),
             mode: mode.map(SanitizedMode::as_u32),
         }),
-        CoreMemoryEntry::Directory => Either3::B(MemoryDirectoryEntry {
+        CoreMemoryEntry::Directory => Either4::B(MemoryDirectoryEntry {
             path,
             kind: DirectoryKind::Directory,
         }),
-        CoreMemoryEntry::Symlink { target } => Either3::C(MemorySymlinkEntry {
+        CoreMemoryEntry::Symlink { target } => Either4::C(MemorySymlinkEntry {
             path,
             kind: SymlinkKind::Symlink,
             target: utf8_path(&target)?,
         }),
-        _ => return Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
+        other => Either4::D(UnknownMemoryEntry {
+            path,
+            kind: other.kind().as_str().to_owned(),
+        }),
     })
 }
 
@@ -184,16 +198,20 @@ fn stored_entry(path: &Path, entry: CoreMemoryEntry) -> CoreResult<StoredEntry> 
 pub fn callback_entry(path: &Path, entry: CallbackEntry) -> CoreResult<MemoryEntry> {
     match entry {
         CallbackEntry::Stored(stored) => Ok(match stored_entry(path, stored)? {
-            Either3::A(file) => Either4::A(file),
-            Either3::B(directory) => Either4::B(directory),
-            Either3::C(symlink) => Either4::C(symlink),
+            Either4::A(file) => Either5::A(file),
+            Either4::B(directory) => Either5::B(directory),
+            Either4::C(symlink) => Either5::C(symlink),
+            Either4::D(unknown) => Either5::E(unknown),
         }),
-        CallbackEntry::Hardlink { target } => Ok(Either4::D(MemoryHardlinkEntry {
+        CallbackEntry::Hardlink { target } => Ok(Either5::D(MemoryHardlinkEntry {
             path: utf8_path(path)?,
             kind: HardlinkKind::Hardlink,
             target: utf8_path(target.as_path())?,
         })),
-        _ => Err(Failure::Native(unknown_variant("memory entry", "unknown"))),
+        other => Ok(Either5::E(UnknownMemoryEntry {
+            path: utf8_path(path)?,
+            kind: other.kind().as_str().to_owned(),
+        })),
     }
 }
 
@@ -298,7 +316,7 @@ fn into_memory_extraction(
     sink: MemorySink,
 ) -> CoreResult<MemoryExtraction> {
     Ok(MemoryExtraction {
-        report: ExtractionReport::try_from(report).map_err(Failure::Native)?,
+        report: ExtractionReport::from(report),
         entries: sink
             .into_entries()
             .into_iter()
@@ -391,7 +409,7 @@ fn create_to_bytes_core(
         exarch_core::CreateRequest::new(config).to_bytes(format.into(), &sources)?;
     Ok(CreatedArchive {
         data: Uint8Array::from(bytes),
-        report: CreationReport::try_from(report).map_err(Failure::Native)?,
+        report: CreationReport::from(report),
     })
 }
 

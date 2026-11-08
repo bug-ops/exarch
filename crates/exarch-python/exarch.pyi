@@ -109,7 +109,7 @@ _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
 _DecodeReuse = Literal["off", "memory", "temp_file"]
 _LinkState = Literal["recorded", "missing", "unread", "unreadable", "oversized"]
-_DispositionKind = Literal["extract", "skip"]
+_DispositionKind = Literal["extract", "skip", "refuse"]
 _SkipKind = Literal[
     "duplicate",
     "extension_not_allowed",
@@ -235,8 +235,8 @@ class SecurityConfig:
     def with_max_compression_ratio(self, ratio: float) -> SecurityConfig:
         """Sets the maximum compression ratio.
 
-        Solid 7z blocks are exempt: each block is checked as a whole against a
-        fixed 1000x limit that is configurable only from the Rust API.
+        Solid 7z blocks are exempt: each block is checked as a whole against the
+        limit of ``with_max_solid_compression_ratio`` (default 1000).
 
         Raises ``ValueError`` for a ratio that is not a positive finite number;
         its ``setting`` attribute is ``"max_compression_ratio"``.
@@ -247,8 +247,8 @@ class SecurityConfig:
         """
         Sets the maximum file count.
 
-        `extract_archive` counts files, symlinks and hardlinks, not
-        directories; `list_archive` and `verify_archive` count every entry.
+        Every entry counts in every operation and format: files, directories,
+        links and skipped entries.
 
         Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
         its ``setting`` attribute is
@@ -327,6 +327,46 @@ class SecurityConfig:
         while solid archives are allowed: call ``with_allow_solid_archives`` first. Raises
         ``ValueError`` if *size* is zero or solid archives are not allowed. Its ``setting``
         attribute is ``"max_solid_block_memory"``.
+        """
+        ...
+
+    def with_allow_windows_reserved_names(self, allow: bool = True) -> SecurityConfig:
+        """
+        Allows or denies names Windows reserves (``CON``, ``NUL``, ...).
+
+        Refused by default on every platform, because an archive extracted here
+        may be unpacked on Windows later.
+        """
+        ...
+
+    def with_max_tar_metadata_bytes(self, size: int) -> SecurityConfig:
+        """
+        Sets the most bytes of TAR header and metadata records (GNU long names, PAX
+        headers, sparse blocks) read between two consecutive entries (default: 4 MiB).
+
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
+        its ``setting`` attribute is ``"max_tar_metadata_bytes"``.
+        """
+        ...
+
+    def with_max_decoder_memory(self, size: int) -> SecurityConfig:
+        """
+        Sets the most memory in bytes a decoder may hold while decoding a compressed
+        TAR or a 7z block (default: 256 MiB).
+
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
+        its ``setting`` attribute is ``"max_decoder_memory"``.
+        """
+        ...
+
+    def with_max_solid_compression_ratio(self, ratio: float) -> SecurityConfig:
+        """
+        Sets the compression ratio limit of a whole solid 7z block (default: 1000).
+
+        The limit exists only while solid archives are allowed: call
+        ``with_allow_solid_archives`` first. Raises ``InvalidConfigurationError`` for a
+        ratio that is not a positive finite number or while solid archives are not
+        allowed; its ``setting`` attribute is ``"max_solid_compression_ratio"``.
         """
         ...
 
@@ -444,8 +484,8 @@ class SecurityConfig:
         """
         Maximum number of entries (default: 10,000); None if unbounded.
 
-        `extract_archive` counts files, symlinks and hardlinks, not
-        directories; `list_archive` and `verify_archive` count every entry.
+        Every entry counts in every operation and format: files, directories,
+        links and skipped entries.
         """
         ...
 
@@ -475,6 +515,35 @@ class SecurityConfig:
 
     @max_solid_block_memory.setter
     def max_solid_block_memory(self, value: int) -> None: ...
+    @property
+    def max_solid_compression_ratio(self) -> float | None:
+        """
+        Compression ratio limit of a whole solid 7z block (default: 1000 once solid
+        archives are allowed, ``None`` while they are not).
+        """
+        ...
+
+    @max_solid_compression_ratio.setter
+    def max_solid_compression_ratio(self, value: float) -> None: ...
+    @property
+    def allow_windows_reserved_names(self) -> bool:
+        """Whether names Windows reserves are allowed (default: False)."""
+        ...
+
+    @property
+    def max_tar_metadata_bytes(self) -> int:
+        """Most bytes of TAR header and metadata records between two entries (default: 4 MiB)."""
+        ...
+
+    @max_tar_metadata_bytes.setter
+    def max_tar_metadata_bytes(self, value: int) -> None: ...
+    @property
+    def max_decoder_memory(self) -> int:
+        """Most memory in bytes a decoder may hold (default: 256 MiB)."""
+        ...
+
+    @max_decoder_memory.setter
+    def max_decoder_memory(self, value: int) -> None: ...
     @property
     def allow_symlinks(self) -> bool:
         """Whether symlinks are allowed (default: False)."""
@@ -572,6 +641,33 @@ class SecurityConfig:
 
     @flatten.setter
     def flatten(self, value: bool) -> None: ...
+
+@final
+class ListOptions:
+    """
+    Options controlling listing behavior.
+
+    Listing a 7z archive leaves link targets unread by default, so it decodes no
+    entry data; ``with_stored_targets`` reads them.
+    """
+
+    def __init__(self) -> None:
+        """Creates a new ListOptions with defaults (link targets unread)."""
+        ...
+
+    @staticmethod
+    def default() -> ListOptions:
+        """Creates a ListOptions with defaults."""
+        ...
+
+    def with_stored_targets(self, read: bool = True) -> ListOptions:
+        """Sets whether link targets kept in entry data are read (decodes their blocks)."""
+        ...
+
+    @property
+    def stored_targets(self) -> bool:
+        """Whether link targets kept in entry data are read (default: False)."""
+        ...
 
 @final
 class VerificationOptions:
@@ -824,7 +920,7 @@ class Skip:
     """One entry an operation left out."""
 
     @property
-    def kind(self) -> _SkipKind:
+    def kind(self) -> _SkipKind | str:
         """Why the entry was skipped."""
         ...
 
@@ -834,7 +930,7 @@ class Skip:
         ...
 
     @property
-    def io_kind(self) -> _IoKind | None:
+    def io_kind(self) -> _IoKind | str | None:
         """The stable kind of the I/O failure behind an "unreadable" skip."""
         ...
 
@@ -875,7 +971,7 @@ class ExtractionWarning:
     """
 
     @property
-    def kind(self) -> _ExtractionWarningKind:
+    def kind(self) -> _ExtractionWarningKind | str:
         """The condition: ``"anti_items_skipped"`` or ``"backup_cleanup_failed"``."""
         ...
 
@@ -910,12 +1006,12 @@ class BackupCleanupFailedWarning(ExtractionWarning):
         ...
 
     @property
-    def identity(self) -> _BackupIdentity:
+    def identity(self) -> _BackupIdentity | str:
         """Whether the backup's identity was confirmed before its removal failed."""
         ...
 
     @property
-    def io_kind(self) -> _IoKind:
+    def io_kind(self) -> _IoKind | str:
         """The stable kind of the removal failure."""
         ...
 
@@ -935,7 +1031,7 @@ class CreationWarning:
     """
 
     @property
-    def kind(self) -> _CreationWarningKind:
+    def kind(self) -> _CreationWarningKind | str:
         """The condition."""
         ...
 
@@ -992,7 +1088,7 @@ class DirectoryNotSyncedWarning(CreationWarning):
     @property
     def kind(self) -> Literal["directory_not_synced"]: ...
     @property
-    def io_kind(self) -> _IoKind:
+    def io_kind(self) -> _IoKind | str:
         """The stable kind of the failure."""
         ...
 
@@ -1129,8 +1225,12 @@ class LinkTarget:
     """
     What listing learned of a link's target; narrow with ``isinstance`` or on
     ``state``. A 7z symlink is an ``UnreadLinkTarget``: listing does not decode
-    7z entry data.
+    7z entry data. A state this binding has no class for is a bare
+    ``LinkTarget`` whose ``state`` is ``"unknown"``.
     """
+
+    @property
+    def state(self) -> str: ...
 
 @final
 class RecordedLinkTarget(LinkTarget):
@@ -1201,7 +1301,7 @@ class ArchiveEntry:
         ...
 
     @property
-    def entry_type(self) -> _ManifestEntryType:
+    def entry_type(self) -> _ManifestEntryType | str:
         """Entry type."""
         ...
 
@@ -1218,6 +1318,11 @@ class ArchiveEntry:
     @property
     def mode(self) -> int | None:
         """File permissions (Unix mode)."""
+        ...
+
+    @property
+    def modified(self) -> float | None:
+        """Modification time in seconds since the Unix epoch, if the archive records one."""
         ...
 
     def compression_ratio(self) -> float | None:
@@ -1291,7 +1396,7 @@ class ArchiveManifest:
         ...
 
     @property
-    def format(self) -> _ArchiveType:
+    def format(self) -> _ArchiveType | str:
         """Archive format."""
         ...
 
@@ -1308,7 +1413,7 @@ class ArchiveManifest:
 class EntryDisposition:
     """What extraction does with one listed entry (see ``AnyEntryDisposition``)."""
 
-    action: ClassVar[_DispositionKind]
+    action: ClassVar[_DispositionKind | str]
 
     @property
     def path(self) -> str:
@@ -1333,18 +1438,24 @@ class SkipDisposition(EntryDisposition):
     action: ClassVar[Literal["skip"]]
 
     @property
-    def kind(self) -> _SkipKind:
+    def kind(self) -> _SkipKind | str:
         """Why it is left out."""
         ...
 
-AnyEntryDisposition = ExtractDisposition | SkipDisposition
+@final
+class RefuseDisposition(EntryDisposition):
+    """An entry that is refused by validation or policy, or cannot be placed."""
+
+    action: ClassVar[Literal["refuse"]]
+
+AnyEntryDisposition = ExtractDisposition | SkipDisposition | RefuseDisposition
 
 @final
 class VerificationIssue:
     """Verification issue."""
 
     @property
-    def severity(self) -> _IssueSeverity:
+    def severity(self) -> _IssueSeverity | str:
         """Issue severity level."""
         ...
 
@@ -1359,12 +1470,12 @@ class VerificationIssue:
         ...
 
     @property
-    def category(self) -> _IssueCategory:
+    def category(self) -> _IssueCategory | str:
         """Issue category."""
         ...
 
     @property
-    def code(self) -> _ErrorCode | None:
+    def code(self) -> _ErrorCode | str | None:
         """
         The error code of a refusal, the same an exception of that refusal
         carries; None for a heuristic finding.
@@ -1381,17 +1492,17 @@ class VerificationIssue:
         ...
 
     @property
-    def relaxable_by(self) -> _PolicySetting | None:
+    def relaxable_by(self) -> _PolicySetting | str | None:
         """The policy setting that would admit the refused entry, if one does."""
         ...
 
     @property
-    def setting(self) -> _ConfigSetting | None:
+    def setting(self) -> _ConfigSetting | str | None:
         """The configuration setting the refusal concerns, if any."""
         ...
 
     @property
-    def io_kind(self) -> _IoKind | None:
+    def io_kind(self) -> _IoKind | str | None:
         """The stable kind of the I/O failure of an ``IO_ERROR`` refusal, else None."""
         ...
 
@@ -1412,7 +1523,7 @@ class UnverifiedEntry:
         ...
 
     @property
-    def reason(self) -> _UnverifiedReason:
+    def reason(self) -> _UnverifiedReason | str:
         """Why the entry was not verified."""
         ...
 
@@ -1453,7 +1564,7 @@ class VerificationReport:
     """
 
     @property
-    def status(self) -> _VerificationStatus:
+    def status(self) -> _VerificationStatus | str:
         """Overall verification status."""
         ...
 
@@ -1478,12 +1589,12 @@ class VerificationReport:
         ...
 
     @property
-    def format(self) -> _ArchiveType:
+    def format(self) -> _ArchiveType | str:
         """Archive format."""
         ...
 
     @property
-    def integrity_status(self) -> _IntegrityStatus:
+    def integrity_status(self) -> _IntegrityStatus | str:
         """
         Payload integrity result.
 
@@ -1514,7 +1625,7 @@ class VerificationReport:
         ...
 
     @property
-    def security_status(self) -> _CheckStatus:
+    def security_status(self) -> _CheckStatus | str:
         """Security check result."""
         ...
 
@@ -1759,6 +1870,7 @@ def create_archive_with_progress(
 def list_archive(
     archive_path: str | Path,
     config: SecurityConfig | None = None,
+    options: ListOptions | None = None,
 ) -> ArchiveManifest:
     """
     List archive contents without extracting.
@@ -1766,6 +1878,8 @@ def list_archive(
     Args:
         archive_path: Path to archive file (str or pathlib.Path)
         config: Optional SecurityConfig (uses secure defaults if None)
+        options: Optional ListOptions; ``ListOptions().with_stored_targets()``
+            reads the 7z link targets that listing leaves unread by default
 
     Returns:
         ArchiveManifest with entry metadata
@@ -1809,6 +1923,7 @@ def list_archive_bytes(
     data: _ArchiveData,
     config: SecurityConfig | None = None,
     format: _ArchiveType | None = None,
+    options: ListOptions | None = None,
 ) -> ArchiveManifest:
     """
     List the contents of an archive held in memory, without extracting.
@@ -1819,6 +1934,7 @@ def list_archive_bytes(
             the TAR family. An exception it raises propagates unchanged.
         config: Optional SecurityConfig (uses secure defaults if None)
         format: The archive format; detected from the leading bytes if None
+        options: Optional ListOptions, as in list_archive
 
     Returns:
         ArchiveManifest with entry metadata
@@ -1862,12 +1978,18 @@ class MemoryEntry:
     An entry extracted into memory.
 
     The concrete class tells what the entry holds; narrow with ``isinstance``
-    or on ``kind``. Each class carries only the attributes of its kind.
+    or on ``kind``. Each class carries only the attributes of its kind. A kind
+    this binding has no class for is a bare ``MemoryEntry`` with its ``kind``.
     """
 
     @property
     def path(self) -> str:
         """Entry path, relative, as delivered by extraction."""
+        ...
+
+    @property
+    def kind(self) -> _MemoryEntryKind | str:
+        """What the entry holds."""
         ...
 
 @final
@@ -2089,6 +2211,7 @@ def list_archive_bytes_with_progress(
     config: SecurityConfig | None = None,
     progress: ProgressCallbackFn | None = None,
     format: _ArchiveType | None = None,
+    options: ListOptions | None = None,
 ) -> ArchiveManifest:
     """
     List the contents of an archive held in memory, reporting progress.

@@ -8,7 +8,6 @@ use exarch_core::ArchiveType;
 use exarch_core::CallbackEntry;
 use exarch_core::CallbackError;
 use exarch_core::ClosedEnum;
-use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
@@ -29,7 +28,6 @@ use exarch_core::VerifyRequest;
 use exarch_core::extract_reader_to_callback;
 use exarch_core::extract_reader_to_memory;
 use exarch_core::utf8_entry_path;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -38,6 +36,7 @@ use crate::catch_panic_as_py_err;
 use crate::catch_panic_as_py_result;
 use crate::config::PyCreationConfig;
 use crate::config::PyInteger;
+use crate::config::PyListOptions;
 use crate::config::PySecurityConfig;
 use crate::config::PyVerificationOptions;
 use crate::config::parse_existing_files;
@@ -97,6 +96,7 @@ fn parse_path_model(path_model: Option<&str>) -> PyResult<Option<PathModel>> {
 #[pyclass(name = "MemoryEntry", subclass, frozen)]
 pub struct PyMemoryEntry {
     path: String,
+    kind: &'static str,
 }
 
 #[pymethods]
@@ -104,6 +104,11 @@ impl PyMemoryEntry {
     #[getter]
     fn path(&self) -> &str {
         &self.path
+    }
+
+    #[getter]
+    const fn kind(&self) -> &'static str {
+        self.kind
     }
 }
 
@@ -215,7 +220,10 @@ impl PyMemoryHardlink {
 
 impl PyMemoryEntry {
     fn new(py: Python<'_>, path: &Path, entry: CallbackEntry) -> PyResult<Py<Self>> {
-        let base = Self { path: utf8(path)? };
+        let base = Self {
+            path: utf8(path)?,
+            kind: entry.kind().as_str(),
+        };
         match entry {
             CallbackEntry::Stored(MemoryEntry::File { data, mode }) => Bound::new(
                 py,
@@ -244,9 +252,7 @@ impl PyMemoryEntry {
                 }),
             )
             .map(|entry| entry.into_super().unbind()),
-            _ => Err(PyRuntimeError::new_err(
-                "exarch-python is older than exarch-core: unknown memory entry kind",
-            )),
+            _ => Bound::new(py, PyClassInitializer::from(base)).map(Bound::unbind),
         }
     }
 }
@@ -259,62 +265,23 @@ fn utf8(path: &Path) -> PyResult<String> {
         .map_err(|malformation| convert_error(ArchiveError::from(malformation)))
 }
 
-/// Where a ZIP extraction keeps decoded output, with the limit only the
-/// modes that keep something have.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReuseSetting {
-    Off,
-    Memory(ReuseLimit),
-    TempFile(ReuseLimit),
+/// Builds the core policy from the two Python arguments; core owns the pairing
+/// rule.
+fn build_decode_reuse(kind: DecodeReuseKind, limit: Option<PyInteger>) -> PyResult<DecodeReuse> {
+    let limit = limit
+        .map(|bytes| {
+            bytes
+                .positive(ConfigSetting::DecodeReuseLimit)
+                .map(ReuseLimit::new)
+        })
+        .transpose()?;
+    DecodeReuse::from_parts(kind, limit).map_err(convert_error)
 }
 
-impl ReuseSetting {
-    fn new(kind: DecodeReuseKind, limit: Option<PyInteger>) -> PyResult<Self> {
-        let limit = limit
-            .map(|bytes| {
-                bytes
-                    .positive(ConfigSetting::DecodeReuseLimit)
-                    .map(ReuseLimit::new)
-            })
-            .transpose()?;
-        match (kind, limit) {
-            (DecodeReuseKind::Off, None) => Ok(Self::Off),
-            (DecodeReuseKind::Off, Some(_)) => {
-                Err(convert_error(ArchiveError::InvalidConfiguration {
-                    setting: ConfigSetting::DecodeReuseLimit,
-                    problem: ConfigProblem::NotSupported,
-                }))
-            }
-            (DecodeReuseKind::Memory, limit) => {
-                Ok(Self::Memory(limit.unwrap_or(ReuseLimit::DEFAULT)))
-            }
-            (DecodeReuseKind::TempFile, limit) => {
-                Ok(Self::TempFile(limit.unwrap_or(ReuseLimit::DEFAULT)))
-            }
-        }
-    }
-
-    const fn kind(self) -> DecodeReuseKind {
-        match self {
-            Self::Off => DecodeReuseKind::Off,
-            Self::Memory(_) => DecodeReuseKind::Memory,
-            Self::TempFile(_) => DecodeReuseKind::TempFile,
-        }
-    }
-
-    const fn limit(self) -> Option<ReuseLimit> {
-        match self {
-            Self::Off => None,
-            Self::Memory(limit) | Self::TempFile(limit) => Some(limit),
-        }
-    }
-
-    const fn as_core(self) -> DecodeReuse {
-        match self {
-            Self::Off => DecodeReuse::Off,
-            Self::Memory(limit) => DecodeReuse::Memory(limit),
-            Self::TempFile(limit) => DecodeReuse::TempFile(limit),
-        }
+const fn reuse_limit(reuse: DecodeReuse) -> Option<ReuseLimit> {
+    match reuse {
+        DecodeReuse::Memory(limit) | DecodeReuse::TempFile(limit) => Some(limit),
+        _ => None,
     }
 }
 
@@ -339,7 +306,7 @@ impl ReuseSetting {
 #[derive(Clone)]
 pub struct PySinkOptions {
     existing_files: ExistingFiles,
-    reuse: ReuseSetting,
+    reuse: DecodeReuse,
 }
 
 #[pymethods]
@@ -359,7 +326,7 @@ impl PySinkOptions {
         let kind = parse_one(ConfigSetting::DecodeReuse, &decode_reuse)?;
         Ok(Self {
             existing_files: parse_existing_files(&existing_files)?,
-            reuse: ReuseSetting::new(kind, decode_reuse_limit)?,
+            reuse: build_decode_reuse(kind, decode_reuse_limit)?,
         })
     }
 
@@ -375,7 +342,7 @@ impl PySinkOptions {
 
     #[getter]
     fn decode_reuse_limit(&self) -> Option<u64> {
-        self.reuse.limit().map(ReuseLimit::get)
+        reuse_limit(self.reuse).map(ReuseLimit::get)
     }
 
     fn __repr__(&self) -> String {
@@ -392,7 +359,7 @@ impl PySinkOptions {
     fn as_core(&self) -> exarch_core::SinkOptions {
         exarch_core::SinkOptions::default()
             .with_existing_files(self.existing_files)
-            .with_decode_reuse(self.reuse.as_core())
+            .with_decode_reuse(self.reuse)
     }
 }
 
@@ -599,6 +566,7 @@ pub fn extract_archive_to_memory_with_progress(
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
 /// * `progress` - Optional progress callback function
 /// * `format` - The archive format; detected from the leading bytes if None
+/// * `options` - Optional `ListOptions`, as in `list_archive`
 ///
 /// # Returns
 ///
@@ -628,16 +596,18 @@ pub fn extract_archive_to_memory_with_progress(
     clippy::needless_pass_by_value,
     reason = "pyo3 cannot extract `&str` under abi3-py39"
 )]
-#[pyo3(signature = (data, config=None, progress=None, format=None))]
+#[pyo3(signature = (data, config=None, progress=None, format=None, options=None))]
 pub fn list_archive_bytes_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
     progress: Option<Py<PyAny>>,
     format: Option<String>,
+    options: Option<PyRef<'_, PyListOptions>>,
 ) -> PyResult<PyArchiveManifest> {
     let format = parse_format(format.as_deref())?;
     let config = PySecurityConfig::snapshot(config);
+    let options = PyListOptions::snapshot(options);
 
     let slot = data.failure_slot();
     let result = run_with_optional_progress(
@@ -647,14 +617,14 @@ pub fn list_archive_bytes_with_progress(
         |progress| {
             let reader = data.into_reader(format)?;
             ListRequest::new(&config)
+                .with_options(options)
                 .with_progress(progress)
                 .list_reader(reader)
+                .map(|manifest| PyArchiveManifest::new(manifest, &config))
         },
         |_, _| {},
     );
-    let manifest = slot.surface(result)?;
-
-    Ok(PyArchiveManifest::new(manifest, &config))
+    slot.surface(result)
 }
 
 /// Verify the security of an archive held in memory, with a progress callback.
@@ -1003,6 +973,7 @@ pub fn create_archive_to_bytes(
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
 /// * `format` - The archive format (`"Tar"`, `"TarGz"`, `"TarBz2"`, `"TarXz"`,
 ///   `"TarZst"`, `"Zip"`, `"SevenZ"`); detected from the leading bytes if None
+/// * `options` - Optional `ListOptions`, as in `list_archive`
 ///
 /// # Returns
 ///
@@ -1028,26 +999,29 @@ pub fn create_archive_to_bytes(
     clippy::needless_pass_by_value,
     reason = "pyo3 cannot extract `&str` under abi3-py39"
 )]
-#[pyo3(signature = (data, config=None, format=None))]
+#[pyo3(signature = (data, config=None, format=None, options=None))]
 pub fn list_archive_bytes(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
     format: Option<String>,
+    options: Option<PyRef<'_, PyListOptions>>,
 ) -> PyResult<PyArchiveManifest> {
     let format = parse_format(format.as_deref())?;
     let config = PySecurityConfig::snapshot(config);
+    let options = PyListOptions::snapshot(options);
 
     let slot = data.failure_slot();
     let result = catch_panic_as_py_err("archive listing", || {
         py.detach(|| {
             let reader = data.into_reader(format)?;
-            ListRequest::new(&config).list_reader(reader)
+            ListRequest::new(&config)
+                .with_options(options)
+                .list_reader(reader)
+                .map(|manifest| PyArchiveManifest::new(manifest, &config))
         })
     });
-    let manifest = slot.surface(result)?;
-
-    Ok(PyArchiveManifest::new(manifest, &config))
+    slot.surface(result)
 }
 
 /// Verify the security of an archive held in memory.

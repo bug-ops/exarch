@@ -12,6 +12,13 @@ use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
 use exarch_core::VerifyRequest;
 
+/// Runs `verify`: checks the archive without extracting it and prints the
+/// report; the outcome carries the exit status the report's status calls for.
+///
+/// # Errors
+///
+/// The core failure of the verification, or the CLI's own refusal of a flag
+/// value.
 pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = security_config(args, SecurityConfig::default())?;
 

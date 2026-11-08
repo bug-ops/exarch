@@ -3,6 +3,8 @@
 use crate::ArchiveError;
 use crate::IoContext;
 use crate::Result;
+use crate::creation::progress::CancelledMidEntry;
+use crate::formats::io_marker::IoMarker;
 use std::io;
 use std::io::Read;
 use std::path::Path;
@@ -91,7 +93,12 @@ pub(crate) fn copy_outcome<T>(
     fault: Option<io::Error>,
     path: &Path,
 ) -> Result<T> {
-    result.map_err(|error| fault.map_or_else(|| error.into(), |fault| source_error(path, fault)))
+    result.map_err(|error| {
+        if CancelledMidEntry::find(&error).is_some() {
+            return ArchiveError::Cancelled;
+        }
+        fault.map_or_else(|| error.into(), |fault| source_error(path, fault))
+    })
 }
 
 #[cfg(test)]

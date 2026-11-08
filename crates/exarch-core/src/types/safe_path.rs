@@ -584,9 +584,14 @@ pub(crate) fn stream_separator_error(comp: &str) -> ArchiveError {
 ///
 /// The name is the text before the first `.`, with trailing spaces trimmed,
 /// compared ASCII case-insensitively against `CON`, `PRN`, `AUX`, `NUL`,
-/// `COM0`-`COM9`, `LPT0`-`LPT9`, the superscript forms `COM¹²³` / `LPT¹²³`,
-/// `CONIN$` and `CONOUT$`. Pure and platform-independent; callers decide
-/// whether to apply it.
+/// `COM0`-`COM9`, `LPT0`-`LPT9`, the superscript forms `COM¹²³⁴⁵⁶⁷⁸⁹` /
+/// `LPT¹²³⁴⁵⁶⁷⁸⁹`, `CONIN$`, `CONOUT$`, `CLOCK$` and `CONFIG$`. Pure and
+/// platform-independent; callers decide whether to apply it.
+///
+/// The list matches zip2 9.4.2. Microsoft documents only the superscripts
+/// `¹²³`; the device status of `CLOCK$`, `CONFIG$` and `⁴`-`⁹` is unverified
+/// on a Windows host. They are refused fail-closed because accepting a real
+/// device name is the dangerous failure mode.
 ///
 /// # Examples
 ///
@@ -600,7 +605,9 @@ pub(crate) fn stream_separator_error(comp: &str) -> ArchiveError {
 #[must_use]
 #[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 pub fn is_windows_reserved_component(comp: &OsStr) -> bool {
-    const PLAIN: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
+    const PLAIN: [&str; 8] = [
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$", "CONFIG$",
+    ];
     let lossy = comp.to_string_lossy();
     let base = lossy
         .split_once('.')
@@ -620,7 +627,7 @@ pub fn is_windows_reserved_component(comp: &OsStr) -> bool {
     let mut rest = base[3..].chars();
     matches!(
         (rest.next(), rest.next()),
-        (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+        (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}' | '\u{2074}'..='\u{2079}'), None)
     )
 }
 
@@ -1137,6 +1144,12 @@ mod tests {
             "LPT\u{b3}",
             "CONIN$",
             "conout$",
+            "CLOCK$",
+            "clock$.txt",
+            "Config$",
+            "COM\u{2074}",
+            "COM\u{2079}",
+            "lpt\u{2077}",
             "CON.txt",
             "NUL.tar.gz",
             "aux.",
@@ -1159,7 +1172,12 @@ mod tests {
             ".CON",
             "",
             "\u{e9}\u{e9}",
-            "COM\u{2074}",
+            "CLOCK",
+            "CONFIG",
+            "CLOCK$$",
+            "COM\u{2073}",
+            "COM\u{207a}",
+            "COM\u{2074}\u{2074}",
         ] {
             assert!(!is_windows_reserved_component(OsStr::new(name)), "{name}");
         }

@@ -38,9 +38,9 @@ use super::EntryLayout;
 use super::LFH_FIXED_LEN;
 use super::ZIP64_EXTRA_ID;
 use super::extra_fields;
-use super::le_u32;
-use super::le_u64;
-use super::le32;
+use crate::formats::le::le32;
+use crate::formats::le::u32_at;
+use crate::formats::le::u64_at;
 
 /// Bytes after an entry's data that decide where a streaming reader resumes:
 /// the longest data descriptor.
@@ -122,7 +122,7 @@ impl DescriptorWidth {
         } else {
             4
         };
-        if crc == CrcCheck::Compared && le_u32(at_end, sizes_at - 4) != Some(layout.crc32) {
+        if crc == CrcCheck::Compared && u32_at(at_end, sizes_at - 4) != Some(layout.crc32) {
             return false;
         }
         let field = if self.wide() { 8 } else { 4 };
@@ -131,9 +131,9 @@ impl DescriptorWidth {
         };
         let read = |at: usize| {
             if self.wide() {
-                le_u64(sizes, at)
+                u64_at(sizes, at)
             } else {
-                le_u32(sizes, at).map(u64::from)
+                u32_at(sizes, at).map(u64::from)
             }
         };
         read(0) == Some(compressed) && read(field) == Some(size)

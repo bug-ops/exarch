@@ -20,6 +20,7 @@ use std::num::NonZeroU64;
 use crate::Result;
 use crate::config::SecurityConfig;
 use crate::creation::CompressionLevel;
+use crate::formats::io_marker::IoMarker;
 use crate::formats::tar_metadata_limit::CompressedMembersExceeded;
 use crate::formats::tar_metadata_limit::DecoderMemoryExceeded;
 use crate::formats::zstd_window::ZstdWindowLog;
@@ -320,13 +321,10 @@ enum Replay {
 
 impl Replay {
     fn of(error: &io::Error) -> Self {
-        if let Some(cap) = error
-            .get_ref()
-            .and_then(|e| e.downcast_ref::<CompressedMembersExceeded>())
-        {
+        if let Some(cap) = CompressedMembersExceeded::find(error) {
             return Self::MemberCap(*cap);
         }
-        if is_trailing_data(error) {
+        if TrailingData::find(error).is_some() {
             return Self::TrailingData;
         }
         Self::Other(error.kind(), error.to_string())
@@ -334,8 +332,8 @@ impl Replay {
 
     fn error(&self) -> io::Error {
         match self {
-            Self::MemberCap(cap) => io::Error::other(*cap),
-            Self::TrailingData => io::Error::new(io::ErrorKind::InvalidData, TrailingData),
+            Self::MemberCap(cap) => cap.into_io(),
+            Self::TrailingData => TrailingData.into_io(),
             Self::Other(kind, message) => io::Error::new(*kind, message.clone()),
         }
     }
@@ -343,23 +341,11 @@ impl Replay {
 
 /// Marker error for bytes after the last compressed member that are neither
 /// another member nor zero padding.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("trailing data after the last compressed member")]
 pub(crate) struct TrailingData;
 
-impl std::fmt::Display for TrailingData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("trailing data after the last compressed member")
-    }
-}
-
-impl std::error::Error for TrailingData {}
-
-/// Whether `error` is the [`TrailingData`] marker.
-pub(crate) fn is_trailing_data(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(<dyn std::error::Error + Send + Sync>::is::<TrailingData>)
-}
+impl IoMarker for TrailingData {}
 
 enum Step {
     Data(usize),
@@ -403,7 +389,7 @@ fn consume_zero_tail<R: BufRead>(input: &mut R) -> io::Result<()> {
             return Ok(());
         }
         if buf.iter().any(|&b| b != 0) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, TrailingData));
+            return Err(TrailingData.into_io());
         }
         let n = buf.len();
         input.consume(n);
@@ -435,10 +421,7 @@ impl<R: BufRead, D: Member<R>> MultiMember<R, D> {
                         let members = self.members.saturating_add(1);
                         let allowance = self.allowance.at(self.produced);
                         if members > allowance {
-                            return Err(io::Error::other(CompressedMembersExceeded {
-                                members,
-                                allowance,
-                            }));
+                            return Err(CompressedMembersExceeded { members, allowance }.into_io());
                         }
                         self.members = members;
                         if let MemberState::Between(input) =
@@ -509,7 +492,7 @@ impl<R: BufRead> Read for XzLimited<R> {
                 .and_then(|inner| inner.downcast_ref::<liblzma::stream::Error>())
                 .is_some_and(|err| matches!(err, liblzma::stream::Error::MemLimit));
             if mem_limit {
-                io::Error::other(DecoderMemoryExceeded { max: self.max })
+                DecoderMemoryExceeded { max: self.max }.into_io()
             } else {
                 e
             }
@@ -528,7 +511,7 @@ impl<R: BufRead> Read for ZstdLimited<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf).map_err(|e| {
             if is_window_too_large(&e) {
-                io::Error::other(DecoderMemoryExceeded { max: self.max })
+                DecoderMemoryExceeded { max: self.max }.into_io()
             } else {
                 e
             }
@@ -957,7 +940,7 @@ mod tests {
         let first = decoder.read_to_end(&mut sink).unwrap_err();
         let second = decoder.read_to_end(&mut sink).unwrap_err();
         for err in [first, second] {
-            assert!(is_trailing_data(&err));
+            assert!(TrailingData::find(&err).is_some());
         }
     }
 

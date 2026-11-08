@@ -599,7 +599,9 @@ pub trait ProgressCallback: Send {
     /// Whether the operation should stop, polled by every operation
     /// (extraction, listing, verification and creation) before each entry, and
     /// once more before an archive is published or a staged extraction is
-    /// committed.
+    /// committed. Extraction and creation also poll about every 8 MiB inside
+    /// one entry's copy; listing and verification do not, so one very large
+    /// entry delays a verification until its end.
     ///
     /// The callbacks above cannot fail, so a callback that hit an error of its
     /// own (a raising script callback, a closed channel) reports it here: the
@@ -607,8 +609,8 @@ pub trait ProgressCallback: Send {
     /// that had already recorded progress reports it as
     /// [`ArchiveError::PartialExtraction`] wrapping `Cancelled`, rolled back
     /// under atomic staging; a creation discards its staged output and leaves a
-    /// previous archive at the output path untouched. One very large entry is
-    /// not interruptible. The default never cancels.
+    /// previous archive at the output path untouched; the partial file of the
+    /// entry being copied is removed. The default never cancels.
     fn is_cancelled(&mut self) -> bool {
         false
     }

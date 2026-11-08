@@ -148,6 +148,7 @@ use crate::types::safe_path::stream_separator_error;
 
 use super::common;
 use super::common::EntryCompleteGuard;
+use super::io_marker::IoMarker as _;
 use super::source_fault::DeclaredSizeCeiling;
 use super::source_fault::ReadFamily;
 use super::source_fault::ReadFaults;
@@ -818,7 +819,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// forgery.
     fn classify_declared_size_overrun(err: ArchiveError, declared: u64) -> ArchiveError {
         match err {
-            ArchiveError::Io(ref io) if DeclaredSizeCeiling::is(io) => {
+            ArchiveError::Io(ref io) if DeclaredSizeCeiling::find(io).is_some() => {
                 declared_size_exceeded(declared)
             }
             other => other,

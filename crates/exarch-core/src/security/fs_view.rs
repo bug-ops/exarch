@@ -917,10 +917,9 @@ pub(crate) struct NodeBudget {
 impl NodeBudget {
     /// A budget of `max_file_count * max_path_depth + 1` names: enough for
     /// `max_file_count` files, each at the deepest allowed path with no name
-    /// shared. Explicit directory entries and aliases spend it too although
-    /// `max_file_count` does not count directories, so an archive of many
-    /// directories can exhaust it while within the file limit; raise
-    /// `max_file_count` or `max_path_depth` to allow more. Unbounded when
+    /// shared. Every entry, directories included, counts against
+    /// `max_file_count`, so the budget backs that limit as a second bound on
+    /// the tree. Unbounded when
     /// `max_file_count` is [`Limit::Unbounded`](crate::Limit::Unbounded); a
     /// product that overflows saturates at `usize::MAX`.
     #[must_use]

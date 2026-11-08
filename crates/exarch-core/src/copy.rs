@@ -26,7 +26,47 @@ use std::io::{self};
 use crate::formats::tar_metadata_limit::budget_violation;
 
 use crate::ArchiveError;
+use crate::ProgressCallback;
 use crate::Violation;
+
+/// Bytes an entry copy moves between two cancellation polls.
+pub(crate) const CANCEL_POLL_INTERVAL: u64 = 8 * 1024 * 1024;
+
+/// Decides when a byte-counting loop polls
+/// [`ProgressCallback::is_cancelled`] again.
+///
+/// Shared by every loop that moves one entry's bytes, so extraction and
+/// creation poll at the same granularity.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CancelClock {
+    next: u64,
+    interval: u64,
+}
+
+impl CancelClock {
+    /// A clock that first fires once `interval` bytes have been moved.
+    pub(crate) const fn new(interval: u64) -> Self {
+        Self {
+            next: interval,
+            interval,
+        }
+    }
+
+    /// A clock firing every [`CANCEL_POLL_INTERVAL`] bytes.
+    pub(crate) const fn standard() -> Self {
+        Self::new(CANCEL_POLL_INTERVAL)
+    }
+
+    /// Whether `moved` bytes reach the next poll point; if so, the point
+    /// advances one interval past `moved`.
+    pub(crate) const fn due(&mut self, moved: u64) -> bool {
+        if moved < self.next {
+            return false;
+        }
+        self.next = moved.saturating_add(self.interval);
+        true
+    }
+}
 
 /// Optimal buffer size for I/O operations (64KB).
 ///
@@ -95,6 +135,8 @@ pub enum CopyError {
     Short { declared: u64, actual: u64 },
     /// The byte counter overflowed `u64`.
     Overflow,
+    /// The progress callback asked to stop in the middle of the copy.
+    Cancelled,
 }
 
 impl From<CopyError> for ArchiveError {
@@ -112,6 +154,7 @@ impl From<CopyError> for ArchiveError {
             CopyError::Overflow => Self::QuotaExceeded {
                 resource: crate::QuotaResource::IntegerOverflow,
             },
+            CopyError::Cancelled => Self::Cancelled,
         }
     }
 }
@@ -185,9 +228,51 @@ pub(crate) fn copy_bounded<R: Read + ?Sized, W: Write + ?Sized>(
     buffer: &mut CopyBuffer,
     expected_size: Option<u64>,
 ) -> Result<u64, CopyError> {
+    copy_polled(reader, writer, buffer, expected_size, None)
+}
+
+/// [`copy_bounded`] that also polls `progress` every
+/// [`CANCEL_POLL_INTERVAL`] bytes.
+///
+/// # Errors
+///
+/// As [`copy_bounded`], plus [`CopyError::Cancelled`] when
+/// [`ProgressCallback::is_cancelled`] answers yes between two chunks; the
+/// caller's guard removes the partial output.
+#[inline]
+pub(crate) fn copy_cancellable<R: Read + ?Sized, W: Write + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut CopyBuffer,
+    expected_size: Option<u64>,
+    progress: &mut dyn ProgressCallback,
+) -> Result<u64, CopyError> {
+    copy_polled(
+        reader,
+        writer,
+        buffer,
+        expected_size,
+        Some((progress, CancelClock::standard())),
+    )
+}
+
+fn copy_polled<R: Read + ?Sized, W: Write + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut CopyBuffer,
+    expected_size: Option<u64>,
+    mut poll: Option<(&mut dyn ProgressCallback, CancelClock)>,
+) -> Result<u64, CopyError> {
     let mut total: u64 = 0;
 
     loop {
+        if let Some((progress, clock)) = poll.as_mut()
+            && clock.due(total)
+            && progress.is_cancelled()
+        {
+            return Err(CopyError::Cancelled);
+        }
+
         let bytes_read = match reader.read(&mut buffer.buf) {
             Ok(0) => break,
             Ok(n) => n,
@@ -242,6 +327,72 @@ mod tests {
     fn test_copy_buffer_new() {
         let buffer = CopyBuffer::new();
         assert_eq!(buffer.size(), 64 * 1024);
+    }
+
+    struct Cancelling;
+
+    impl ProgressCallback for Cancelling {
+        fn on_entry_start(&mut self, _: &std::path::Path, _: crate::EntryPosition) {}
+
+        fn on_bytes_written(&mut self, _: u64) {}
+
+        fn on_entry_complete(&mut self, _: &std::path::Path) {}
+
+        fn on_complete(&mut self) {}
+
+        fn is_cancelled(&mut self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn cancel_clock_fires_once_per_interval() {
+        let mut clock = CancelClock::new(10);
+        assert!(!clock.due(9));
+        assert!(clock.due(10));
+        assert!(!clock.due(19));
+        assert!(clock.due(25));
+        assert!(!clock.due(34));
+        assert!(clock.due(35));
+    }
+
+    #[test]
+    fn copy_cancellable_stops_between_chunks_once_an_interval_has_passed() {
+        let len = usize::try_from(CANCEL_POLL_INTERVAL).unwrap() + 4096;
+        let mut input = Cursor::new(vec![0u8; len]);
+        let mut output = Vec::new();
+        let mut buffer = CopyBuffer::new();
+
+        let result = copy_cancellable(&mut input, &mut output, &mut buffer, None, &mut Cancelling);
+
+        assert_matches!(result, Err(CopyError::Cancelled));
+        assert_eq!(output.len() as u64, CANCEL_POLL_INTERVAL);
+    }
+
+    #[test]
+    fn copy_cancellable_does_not_poll_a_short_copy() {
+        let mut input = Cursor::new(vec![7u8; 1000]);
+        let mut output = Vec::new();
+        let mut buffer = CopyBuffer::new();
+
+        let copied = copy_cancellable(
+            &mut input,
+            &mut output,
+            &mut buffer,
+            Some(1000),
+            &mut Cancelling,
+        )
+        .unwrap();
+
+        assert_eq!(copied, 1000);
+    }
+
+    #[test]
+    fn a_cancelled_copy_maps_to_the_cancelled_archive_error() {
+        assert_matches!(
+            ArchiveError::from(CopyError::Cancelled),
+            ArchiveError::Cancelled
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ use exarch_core::ArchiveReader;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::Disposition;
+use exarch_core::DispositionKind;
 use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
@@ -806,6 +807,219 @@ fn verify_charges_a_skipped_file_to_the_file_count_alone() {
             assert_eq!(report.status(), VerificationStatus::Pass, "{format:?}");
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CountOutcome {
+    Within,
+    Exceeded,
+}
+
+fn count_outcome<T>(result: Result<T, ArchiveError>) -> CountOutcome {
+    match result {
+        Ok(_) => CountOutcome::Within,
+        Err(error) => {
+            assert_matches!(
+                root(&error),
+                ArchiveError::QuotaExceeded {
+                    resource: QuotaResource::FileCount { .. }
+                },
+                "{error:?}"
+            );
+            CountOutcome::Exceeded
+        }
+    }
+}
+
+fn verify_count_outcome(archive: &Path, config: &SecurityConfig) -> CountOutcome {
+    match verify_archive(archive, config) {
+        Ok(report) if report.status() == VerificationStatus::Pass => CountOutcome::Within,
+        Ok(report) => {
+            assert!(
+                report
+                    .issues()
+                    .iter()
+                    .any(|issue| issue.message().contains("file count")),
+                "{:?}",
+                report.issues()
+            );
+            CountOutcome::Exceeded
+        }
+        Err(error) => count_outcome::<()>(Err(error)),
+    }
+}
+
+/// Extract, list and verify all pass at `limit_at` entries and all fail one
+/// below.
+fn assert_every_command_counts(
+    format: Format,
+    items: &[Item<'_>],
+    config: &SecurityConfig,
+    limit_at: usize,
+) {
+    let work = TempDir::new().unwrap();
+    let archive = format.write(work.path(), items);
+    let expected = |max: usize| {
+        if max >= limit_at {
+            CountOutcome::Within
+        } else {
+            CountOutcome::Exceeded
+        }
+    };
+    for max in [limit_at, limit_at - 1] {
+        let config = config
+            .clone()
+            .with_max_file_count(std::num::NonZeroUsize::new(max).unwrap());
+        let dest = work.path().join(format!("out{max}"));
+        let extracted = ExtractRequest::new(&config).extract(&archive, &dest);
+        assert_eq!(
+            count_outcome(extracted),
+            expected(max),
+            "{format:?} extract {max}"
+        );
+        assert_eq!(
+            count_outcome(list_archive(&archive, &config)),
+            expected(max),
+            "{format:?} list {max}"
+        );
+        assert_eq!(
+            verify_count_outcome(&archive, &config),
+            expected(max),
+            "{format:?} verify {max}"
+        );
+    }
+}
+
+#[test]
+fn every_entry_counts_toward_the_file_limit_in_every_format_and_command() {
+    let items = [
+        Item::Dir("a/"),
+        Item::File("a/1", b"1"),
+        Item::Dir("b/"),
+        Item::File("b/1", b"2"),
+        Item::Dir("c/"),
+        Item::File("c/1", b"3"),
+    ];
+    for format in FORMATS {
+        assert_every_command_counts(format, &items, &base(), 6);
+        assert_every_command_counts(format, &items, &base().try_add_include("a").unwrap(), 6);
+        assert_every_command_counts(
+            format,
+            &items,
+            &base().try_add_allowed_extension("zzz").unwrap(),
+            6,
+        );
+    }
+}
+
+#[test]
+fn a_skipped_duplicate_counts_toward_the_file_limit() {
+    let items = [
+        Item::File("d", b"1"),
+        Item::File("d", b"2"),
+        Item::Dir("x/"),
+        Item::File("x/f", b"3"),
+    ];
+    for format in [Format::Tar, Format::SevenZ] {
+        assert_every_command_counts(format, &items, &base(), 4);
+    }
+}
+
+#[test]
+fn list_refuses_an_unmatched_include_and_verify_reports_it() {
+    for format in FORMATS {
+        let work = TempDir::new().unwrap();
+        let archive = format.write(
+            work.path(),
+            &[
+                Item::Dir("a/"),
+                Item::File("a/b", b"x"),
+                Item::File("q", b"y"),
+            ],
+        );
+        let config = base()
+            .try_add_include("a")
+            .unwrap()
+            .try_add_include("zzz")
+            .unwrap();
+
+        let listed = list_archive(&archive, &config);
+        let Err(ArchiveError::UnmatchedInclude { patterns }) = listed else {
+            panic!("{format:?}: {listed:?}");
+        };
+        assert_eq!(patterns.len(), 1, "{format:?}");
+
+        let report = verify_archive(&archive, &config).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Fail, "{format:?}");
+
+        let matched = base().try_add_include("a").unwrap();
+        assert!(list_archive(&archive, &matched).is_ok(), "{format:?}");
+    }
+}
+
+#[test]
+fn an_entry_that_cannot_be_placed_is_reported_as_refused() {
+    for format in [Format::Tar, Format::Zip] {
+        let work = TempDir::new().unwrap();
+        let archive = format.write(
+            work.path(),
+            &[Item::File("f", b"x"), Item::File("f/g", b"y")],
+        );
+        let manifest = list_archive(&archive, &base()).unwrap();
+
+        let dispositions: Vec<_> = manifest
+            .dispositions(&base())
+            .map(|(_, disposition)| disposition.kind())
+            .collect();
+        assert_eq!(
+            dispositions,
+            [DispositionKind::Extract, DispositionKind::Refuse],
+            "{format:?}"
+        );
+        assert_eq!(manifest.landing_paths(&base()).count(), 1, "{format:?}");
+    }
+}
+
+/// Glob selection stays linear on deep paths and stacked wildcards: no
+/// recursion in member selection with long paths (node-tar GHSA-r292).
+///
+/// The bound is far above the observed debug-build time (milliseconds), so it
+/// trips only on a super-linear or recursive matcher, never on a slow host.
+#[test]
+fn glob_selection_is_linear_on_deep_paths_and_stacked_wildcards() {
+    const DEPTH: usize = 2_000;
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+    let deep = vec!["a"; DEPTH].join("/");
+    let work = TempDir::new().unwrap();
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(1);
+    header.set_mode(0o644);
+    builder.append_data(&mut header, &deep, &b"x"[..]).unwrap();
+    let archive = work.path().join("deep.tar");
+    std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+    let depth = std::num::NonZeroUsize::new(DEPTH * 2).unwrap();
+    let limits = || base().with_max_path_depth(depth);
+
+    for text in [
+        "**/a/**/a/**/a/**/a/**/a/**/b",
+        "*a*a*a*a*a*a*a*a*a*a*b",
+        "**/**/**/**/**/**/**/**/b",
+    ] {
+        let config = limits().try_add_include(text).unwrap();
+        let started = std::time::Instant::now();
+        let listed = list_archive(&archive, &config);
+        let elapsed = started.elapsed();
+        assert_matches!(listed, Err(ArchiveError::UnmatchedInclude { .. }), "{text}");
+        assert!(elapsed < BOUND, "{text}: {elapsed:?}");
+    }
+
+    let config = limits()
+        .try_add_exclude("**/a/**/a/**/a/**/a/**/a")
+        .unwrap();
+    let started = std::time::Instant::now();
+    list_archive(&archive, &config).unwrap();
+    assert!(started.elapsed() < BOUND);
 }
 
 #[test]

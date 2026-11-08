@@ -327,7 +327,7 @@ impl<'a> HostTarget<'a> {
     /// Validates a file's path and applies the selection and the extension
     /// allowlist, leaving quota to the caller.
     pub(super) fn screen_file(
-        &self,
+        &mut self,
         request: FileRequest<'_>,
     ) -> Result<Gated<PendingFile<HostParent>>> {
         let ctx = host_context(&self.core, &self.root);
@@ -339,6 +339,11 @@ impl<'a> HostTarget<'a> {
             &PinnedHostFs::new(&self.root),
             &ctx,
         )
+    }
+
+    /// Charges a screened file skipped as a duplicate to the file count.
+    pub(super) fn charge_skipped(&mut self) -> Result<()> {
+        self.core.charge_skipped()
     }
 
     /// Reserves the quota of a screened file.
@@ -566,6 +571,7 @@ impl ExtractTarget for HostTarget<'_> {
             link_file,
             &mut self.copy_buffer,
             permit,
+            &mut *tally.progress,
         )?;
         cleanup_guard.persist();
 

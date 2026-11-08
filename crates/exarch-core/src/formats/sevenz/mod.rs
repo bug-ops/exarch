@@ -170,7 +170,8 @@ struct CachedEntry {
 }
 
 /// Size of the fixed 7z signature header that precedes the packed streams.
-const SIGNATURE_HEADER_SIZE: u64 = 32;
+const SIGNATURE_HEADER_LEN: usize = 32;
+const SIGNATURE_HEADER_SIZE: u64 = SIGNATURE_HEADER_LEN as u64;
 
 /// 7z archive handler with security validation.
 ///

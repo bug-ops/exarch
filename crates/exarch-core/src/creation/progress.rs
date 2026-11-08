@@ -14,9 +14,23 @@
 use crate::EntryPosition;
 use crate::EntryTotal;
 use crate::ProgressCallback;
+use crate::copy::CancelClock;
 use crate::formats::common::EntryCompleteGuard;
+use crate::formats::io_marker::IoMarker;
+use std::io;
 use std::io::Read;
 use std::path::Path;
+
+/// Marks the [`io::Error`] a [`ProgressReader`] raises when the callback asks
+/// to stop in the middle of an entry, so the writer that consumed the reader
+/// can tell it from a source or sink fault.
+#[derive(Debug, thiserror::Error)]
+#[error("operation cancelled")]
+pub(crate) struct CancelledMidEntry;
+
+impl IoMarker for CancelledMidEntry {
+    const KIND: io::ErrorKind = io::ErrorKind::Other;
+}
 
 /// Manages progress callbacks with automatic entry counting.
 ///
@@ -118,6 +132,10 @@ pub(crate) struct ProgressReader<'a, R> {
     bytes_since_last_update: u64,
     /// Batch threshold in bytes (default: 1 MB)
     batch_threshold: u64,
+    /// Bytes read so far, for the cancellation clock
+    total_read: u64,
+    /// Decides when the callback is asked about cancellation
+    clock: CancelClock,
 }
 
 impl<'a, R> ProgressReader<'a, R> {
@@ -136,7 +154,16 @@ impl<'a, R> ProgressReader<'a, R> {
             progress,
             bytes_since_last_update: 0,
             batch_threshold: 1024 * 1024, // 1 MB batching threshold
+            total_read: 0,
+            clock: CancelClock::standard(),
         }
+    }
+
+    /// Replaces the cancellation poll interval, in bytes.
+    #[cfg(test)]
+    fn with_cancel_interval(mut self, interval: u64) -> Self {
+        self.clock = CancelClock::new(interval);
+        self
     }
 
     /// Creates a new progress-tracking reader with custom batch threshold.
@@ -158,6 +185,8 @@ impl<'a, R> ProgressReader<'a, R> {
             progress,
             bytes_since_last_update: 0,
             batch_threshold,
+            total_read: 0,
+            clock: CancelClock::standard(),
         }
     }
 
@@ -175,8 +204,12 @@ impl<'a, R> ProgressReader<'a, R> {
 
 impl<R: Read> Read for ProgressReader<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.clock.due(self.total_read) && self.progress.is_cancelled() {
+            return Err(CancelledMidEntry.into_io());
+        }
         let bytes_read = self.inner.read(buf)?;
         if bytes_read > 0 {
+            self.total_read += bytes_read as u64;
             self.bytes_since_last_update += bytes_read as u64;
             if self.bytes_since_last_update >= self.batch_threshold {
                 self.progress.on_bytes_written(self.bytes_since_last_update);
@@ -298,6 +331,36 @@ mod tests {
 
         // Should have reported bytes (batched)
         assert!(progress.bytes_written > 0);
+    }
+
+    #[derive(Default)]
+    struct CancelOnPoll;
+
+    impl ProgressCallback for CancelOnPoll {
+        fn on_entry_start(&mut self, _: &Path, _: crate::EntryPosition) {}
+
+        fn on_bytes_written(&mut self, _: u64) {}
+
+        fn on_entry_complete(&mut self, _: &Path) {}
+
+        fn on_complete(&mut self) {}
+
+        fn is_cancelled(&mut self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_progress_reader_cancels_mid_entry_with_a_marker() {
+        let mut progress = CancelOnPoll;
+        let mut reader = ProgressReader::new(Cursor::new(vec![0u8; 100]), &mut progress)
+            .with_cancel_interval(10);
+        let mut buffer = [0u8; 4];
+
+        let error = (0..10)
+            .find_map(|_| reader.read(&mut buffer).err())
+            .unwrap();
+        assert!(CancelledMidEntry::find(&error).is_some());
     }
 
     #[test]

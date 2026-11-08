@@ -300,6 +300,17 @@ fn reserve_entry(
     }
 }
 
+/// Settles what only a whole strict listing decides: an include pattern that
+/// matched no entry. The pre-flight leaves that to `verify`, which reports it.
+fn finish_listing(manifest: ArchiveManifest, mode: ListMode) -> Result<ArchiveManifest> {
+    if mode == ListMode::Strict {
+        manifest.selection().require_includes_matched(
+            manifest.entries().iter().map(|entry| entry.path.as_path()),
+        )?;
+    }
+    Ok(manifest)
+}
+
 /// What [`reserve_entry`] charged an entry to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reservation {
@@ -508,7 +519,7 @@ fn list_tar_entries<R: std::io::Read>(
         (None, ListMode::VerifyPreflight) => {}
     }
 
-    Ok(manifest)
+    finish_listing(manifest, list_mode)
 }
 
 /// Classifies the target of a TAR symlink or hardlink entry; any other entry
@@ -635,10 +646,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
-        // enforced here using the same logic. Note this doesn't make listing
-        // and extraction fully equivalent — extraction's QuotaTracker does not
-        // record directories, while listing records every entry type, a
-        // pre-existing divergence.
+        // enforced here using the same logic.
         let raw_name = entry
             .name()
             .map_err(|e| {
@@ -751,7 +759,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         manifest.add_entry(archive_entry)?;
     }
 
-    Ok(manifest)
+    finish_listing(manifest, list_mode)
 }
 
 /// Lists entries from an already-opened 7z source reader.
@@ -821,7 +829,7 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
             verify_sevenz_blocks(header, &mut source, pass, progress, &slots, Some(capture))?;
         }
     }
-    Ok(manifest)
+    finish_listing(manifest, list_mode)
 }
 
 /// How a 7z listing settles the targets of its Unix symlinks, which every
@@ -931,10 +939,7 @@ fn list_sevenz_archive(
 
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
-        // enforced here using the same logic. Note this doesn't make listing
-        // and extraction fully equivalent — extraction's QuotaTracker does not
-        // record directories, while listing records every entry type, a
-        // pre-existing divergence.
+        // enforced here using the same logic.
         let path = PathBuf::from(normalize_entry_name(&entry.name));
         let entry_type = kind.manifest_type();
         let is_file = entry_type == ManifestEntryType::File;

@@ -61,7 +61,7 @@ describe('hostile cause chains from a throwing progress callback', () => {
     it(`create rejects normally on a ${kind} cause`, () => {
       const out = path.join(tempDir, `new-${kind}.tar.gz`);
       const result = runChild(
-        `exarch.createArchiveWithProgress(${JSON.stringify(out)}, [${JSON.stringify(sourceDir)}], null, thrower)`,
+        `exarch.createArchiveWithProgress(${JSON.stringify(out)}, [${JSON.stringify(sourceDir)}], null, null, thrower)`,
         thrower
       );
       assert.strictEqual(result.status, 0, `status=${result.status} stderr=${result.stderr}`);

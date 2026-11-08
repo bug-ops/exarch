@@ -6,11 +6,11 @@ use super::admit::block_span;
 use super::admit::lzma2_dict_size;
 use super::header::BlockIndex;
 use super::header::SevenZHeader;
-use super::links::is_entry_checksum_error;
 use super::lzma2::DecodeKnobs;
 use super::lzma2::Lzma2Stream;
 use super::lzma2::with_parallel_reader;
 use crate::ParallelDecode;
+use crate::formats::source_fault::is_sevenz_checksum;
 use sevenz_rust2::BlockDecoder;
 use sevenz_rust2::Password;
 use std::cell::Cell;
@@ -78,7 +78,7 @@ struct FailureTap<'a, R> {
 impl<R: Read> Read for FailureTap<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf).inspect_err(|e| {
-            if self.arms && is_entry_checksum_error(e) {
+            if self.arms && is_sevenz_checksum(e) {
                 *self.mismatch.borrow_mut() = Some(SeenMismatch {
                     entry: self.entry,
                     message: e.to_string(),

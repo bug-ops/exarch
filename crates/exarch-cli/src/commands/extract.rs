@@ -12,6 +12,7 @@ use crate::error::add_archive_context;
 use crate::error::convert_error;
 use crate::error::convert_error_with_advice;
 use crate::interrupt;
+use crate::interrupt::InterruptGuard;
 use crate::operation::Flag;
 use crate::operation::Operation;
 use crate::output::OutputFormatter;
@@ -131,15 +132,19 @@ fn banned_components(tokens: &[ListToken]) -> Result<Option<Vec<PathComponentNam
 /// error before extraction can say that symlinks are not allowed.
 ///
 /// Every failure keeps the category message and hint extraction would give the
-/// same error, since that is the error the user has to act on.
+/// same error, since that is the error the user has to act on. The pass polls
+/// `watcher` per entry, so a stop request cancels it instead of waiting for
+/// the whole listing.
 fn list_for_extract(
     archive: &Path,
     config: &SecurityConfig,
     reuse: DecodeReuse,
+    watcher: &mut dyn ProgressCallback,
 ) -> Result<ListedArchive> {
     let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
     ListRequest::new(config)
         .with_options(options)
+        .with_progress(watcher)
         .for_extraction(archive, reuse)
         .map_err(|err| convert_error(Operation::Extract, err, archive))
 }
@@ -271,6 +276,7 @@ fn plan_extraction(
     mode: WriteMode,
     output_dir: &Path,
     config: &SecurityConfig,
+    guard: &InterruptGuard,
 ) -> Result<ExtractPlan> {
     let reuse = DecodeReuseArg::resolve(args.decode_reuse);
     let options = |staging: CoreStaging| {
@@ -294,7 +300,7 @@ fn plan_extraction(
         });
     }
 
-    let listed = list_for_extract(&args.archive, config, reuse)?;
+    let listed = list_for_extract(&args.archive, config, reuse, &mut guard.watcher())?;
     if let Some((check, advice)) = mode.destination_check() {
         listed.check_destination(output_dir, check).map_err(|err| {
             convert_error_with_advice(Operation::Extract, err, &args.archive, advice)
@@ -308,6 +314,12 @@ fn plan_extraction(
     })
 }
 
+/// Runs `extract`: plans the extraction, runs it inside the armed interrupt
+/// window and prints the report once the window is closed.
+///
+/// # Errors
+///
+/// The core failure of the run, or the CLI's own refusal of a flag value.
 pub fn execute(
     args: &ExtractArgs,
     formatter: &mut dyn OutputFormatter,
@@ -318,7 +330,8 @@ pub fn execute(
         None => env::current_dir().context("failed to get current directory")?,
     };
 
-    interrupt::install(&output_dir, WriteMode::of(args).run());
+    let write_mode = WriteMode::of(args);
+    let guard = interrupt::install(&output_dir, write_mode.run(), mode);
 
     let allowed_extensions = parse_extensions(&args.allowed_extensions)?;
 
@@ -333,12 +346,15 @@ pub fn execute(
     };
     let config = security_config(args, base)?;
 
-    let plan = plan_extraction(args, WriteMode::of(args), &output_dir, &config)?;
+    let plan = plan_extraction(args, write_mode, &output_dir, &config, &guard)?;
     let length = plan.manifest().map_or(BarLength::Discover, |manifest| {
         BarLength::Known(listed_entry_count(manifest, &config))
     });
-    let mut progress = progress_for(mode, length, Operation::Extract);
-    let report = plan.run(&args.archive, &output_dir, &config, progress.as_mut())?;
+    let mut progress = progress_for(mode, length, Operation::Extract, &guard);
+    let result = plan.run(&args.archive, &output_dir, &config, progress.as_mut());
+    drop(progress);
+    drop(guard);
+    let report = result?;
 
     formatter.format_extraction_result(&report)?;
 

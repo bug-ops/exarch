@@ -91,7 +91,7 @@ fn run(
             };
             seen.push(match outcome {
                 Ok(_) => Seen::Data(data),
-                Err(e) if super::links::is_entry_checksum_error(&e) => Seen::Checksum,
+                Err(e) if crate::formats::source_fault::is_sevenz_checksum(&e) => Seen::Checksum,
                 Err(_) => Seen::Other,
             });
             match fail_last_with {

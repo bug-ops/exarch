@@ -681,9 +681,9 @@ jobs:
           RUSTFLAGS: ""
         run: cargo +nightly check --manifest-path fuzz/Cargo.toml --all-targets
 
-  # MSRV check (exarch-core only)
+  # MSRV check (every workspace crate declares rust-version)
   msrv:
-    name: MSRV Check (exarch-core)
+    name: MSRV Check (workspace)
     needs: [changes, format]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -705,8 +705,8 @@ jobs:
           shared-key: "msrv"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Check MSRV for exarch-core
-        run: cargo check -p exarch-core --all-features
+      - name: Check MSRV for the workspace
+        run: cargo check --workspace --all-features
 
   # WASI build + smoke test (CLI under wasmtime)
   wasm:

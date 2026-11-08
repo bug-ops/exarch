@@ -210,7 +210,7 @@ const HEADER_BYTES_PER_ENTRY: u64 = 256;
 const HEADER_BYTES_BASE: u64 = 64 * 1024;
 
 /// Header entries allowed on top of `max_file_count`: entries extraction does
-/// not count against it (anti items, skipped entries) and small archives.
+/// not count against it (anti items) and small archives.
 const HEADER_ENTRIES_BASE: u64 = 1024;
 
 /// What the parse of a 7z header may use.

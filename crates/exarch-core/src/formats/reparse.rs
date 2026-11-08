@@ -9,6 +9,8 @@
 
 use std::io;
 
+use super::le;
+
 const SYMLINK_TAG: u32 = 0xA000_000C;
 const MOUNT_POINT_TAG: u32 = 0xA000_0003;
 const SYMLINK_FLAG_RELATIVE: u32 = 1;
@@ -60,20 +62,12 @@ impl From<ReparseError> for io::Error {
     }
 }
 
-fn array_at<const N: usize>(bytes: &[u8], at: usize) -> Result<[u8; N], ReparseError> {
-    let end = at.checked_add(N).ok_or(ReparseError::Truncated)?;
-    bytes
-        .get(at..end)
-        .and_then(|raw| raw.try_into().ok())
-        .ok_or(ReparseError::Truncated)
-}
-
 fn u16_at(bytes: &[u8], at: usize) -> Result<u16, ReparseError> {
-    array_at(bytes, at).map(u16::from_le_bytes)
+    le::u16_at(bytes, at).ok_or(ReparseError::Truncated)
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Result<u32, ReparseError> {
-    array_at(bytes, at).map(u32::from_le_bytes)
+    le::u32_at(bytes, at).ok_or(ReparseError::Truncated)
 }
 
 fn units(bytes: &[u8]) -> Vec<u16> {

@@ -360,7 +360,7 @@ fn paths_of_two_hundred_characters_at_the_file_cap_are_over_the_budget() {
 }
 
 #[test]
-fn directories_count_toward_the_header_budget_though_extraction_counts_only_files() {
+fn directories_count_toward_the_header_budget() {
     let dir = TempDir::new().unwrap();
     let path = long_name_archive(&dir);
     let few = SecurityConfig::default().with_max_file_count(non_zero!(100));

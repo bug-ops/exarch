@@ -51,7 +51,7 @@ describe('createArchiveWithProgress', () => {
   it('rejects the promise instead of throwing when the callback throws', async () => {
     await assert.rejects(
       () =>
-        createArchiveWithProgress(outputPath, [sourceDir], null, () => {
+        createArchiveWithProgress(outputPath, [sourceDir], null, null, () => {
           throw new Error('boom from progress callback');
         }),
       (err) => {
@@ -67,7 +67,7 @@ describe('createArchiveWithProgress', () => {
   it('cancels the creation and writes nothing when the callback throws', async () => {
     await assert.rejects(
       () =>
-        createArchiveWithProgress(outputPath, [sourceDir], null, () => {
+        createArchiveWithProgress(outputPath, [sourceDir], null, null, () => {
           throw new Error('boom from progress callback');
         }),
       (err) => {
@@ -89,7 +89,7 @@ describe('createArchiveWithProgress', () => {
     fs.writeFileSync(outputPath, 'previous');
     await assert.rejects(
       () =>
-        createArchiveWithProgress(outputPath, [sourceDir], null, () => {
+        createArchiveWithProgress(outputPath, [sourceDir], null, null, () => {
           throw new Error('boom');
         }),
       { code: 'PROGRESS_CALLBACK_ERROR' }
@@ -114,7 +114,7 @@ describe('createArchiveWithProgress', () => {
 
     await assert.rejects(
       () =>
-        createArchiveWithProgress(outputPath, [unreadable], null, () => {
+        createArchiveWithProgress(outputPath, [unreadable], null, null, () => {
           throw new Error('boom from progress callback');
         }),
       (err) => {
@@ -134,7 +134,7 @@ describe('createArchiveWithProgress', () => {
     let calls = 0;
     await assert.rejects(
       () =>
-        createArchiveWithProgress(outputPath, [sourceDir], null, () => {
+        createArchiveWithProgress(outputPath, [sourceDir], null, null, () => {
           calls += 1;
           throw new Error('boom from progress callback');
         }),
@@ -156,6 +156,7 @@ describe('createArchiveWithProgress', () => {
       exarch.createArchiveWithProgress(
         ${JSON.stringify(outputPath)},
         [${JSON.stringify(sourceDir)}],
+        null,
         null,
         () => { throw new Error('boom from progress callback'); },
       ).then(
@@ -200,6 +201,7 @@ describe('createArchiveWithProgress', () => {
           ${JSON.stringify(outputPath)},
           [${JSON.stringify(sourceDir)}],
           null,
+          null,
           () => { throw ${thrown}; },
         ).then(
           () => { console.log('UNEXPECTED_RESOLVE'); process.exit(2); },
@@ -234,7 +236,7 @@ describe('createArchiveWithProgress', () => {
   it('cancels the creation when the callback throws a primitive', async () => {
     await assert.rejects(
       () =>
-        createArchiveWithProgress(outputPath, [sourceDir], null, () => {
+        createArchiveWithProgress(outputPath, [sourceDir], null, null, () => {
           throw 'oops';
         }),
       (err) => {
@@ -255,7 +257,7 @@ describe('createArchiveWithProgress', () => {
   // invalid argument throws synchronously rather than rejecting.
   it('throws synchronously when progress is not a function, without creating', () => {
     assert.throws(
-      () => createArchiveWithProgress(outputPath, [sourceDir], null, 42),
+      () => createArchiveWithProgress(outputPath, [sourceDir], null, null, 42),
       (err) => {
         assert.match(err.message, /Function/);
         return true;
@@ -271,7 +273,7 @@ describe('createArchiveWithProgress', () => {
   it('preserves a plain-object throw directly under cause, not cause.cause', async () => {
     await assert.rejects(
       () =>
-        createArchiveWithProgress(outputPath, [sourceDir], null, () => {
+        createArchiveWithProgress(outputPath, [sourceDir], null, null, () => {
           throw { code: 'CUSTOM', detail: 'stuff' };
         }),
       (err) => {
@@ -293,7 +295,7 @@ describe('createArchiveWithProgress', () => {
   it('preserves a thrown Symbol as its string form under cause, without crashing', async () => {
     await assert.rejects(
       () =>
-        createArchiveWithProgress(outputPath, [sourceDir], null, () => {
+        createArchiveWithProgress(outputPath, [sourceDir], null, null, () => {
           throw Symbol('boom');
         }),
       (err) => {

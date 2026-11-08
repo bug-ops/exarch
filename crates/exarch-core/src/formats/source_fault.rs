@@ -20,6 +20,7 @@ use std::sync::PoisonError;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use super::io_marker::IoMarker;
 use super::tar_metadata_limit::budget_violation;
 use crate::ArchiveError;
 use crate::Malformation;
@@ -119,7 +120,7 @@ impl<'a> ReadFaults<'a> {
         {
             // The entry's caller knows the declared size and types it as a
             // security violation.
-            return ArchiveError::Io(DeclaredSizeCeiling::into_io());
+            return ArchiveError::Io(DeclaredSizeCeiling.into_io());
         }
         match verdict.into_decoder_error() {
             Ok(error) => self.unreadable(error),
@@ -227,18 +228,7 @@ pub(crate) fn classify_decoder_read(
 #[error("Invalid checksum")]
 pub(crate) struct ReplayChecksumMismatch;
 
-impl ReplayChecksumMismatch {
-    pub(crate) fn into_io() -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, Self)
-    }
-
-    /// Whether `error` was built by [`into_io`](Self::into_io).
-    pub(crate) fn is(error: &io::Error) -> bool {
-        error
-            .get_ref()
-            .is_some_and(<dyn std::error::Error + Send + Sync>::is::<Self>)
-    }
-}
+impl IoMarker for ReplayChecksumMismatch {}
 
 /// An entry decoded past its declared size, typed so the entry's caller can
 /// raise a security violation.
@@ -246,18 +236,7 @@ impl ReplayChecksumMismatch {
 #[error("entry data exceeds its declared size")]
 pub(crate) struct DeclaredSizeCeiling;
 
-impl DeclaredSizeCeiling {
-    pub(crate) fn into_io() -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, Self)
-    }
-
-    /// Whether `error` was built by [`into_io`](Self::into_io).
-    pub(crate) fn is(error: &io::Error) -> bool {
-        error
-            .get_ref()
-            .is_some_and(<dyn std::error::Error + Send + Sync>::is::<Self>)
-    }
-}
+impl IoMarker for DeclaredSizeCeiling {}
 
 /// A failure the `zip` crate reports as a plain-text `io::Error`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,13 +277,18 @@ fn zip_crate_failure(error: &io::Error, family: ReadFamily) -> Option<ZipCrateFa
     }
 }
 
-fn is_checksum_failure(error: &io::Error, family: ReadFamily) -> bool {
-    let sevenz = error
+/// Whether `error` is the checksum failure sevenz-rust2 raises for an entry
+/// whose data was read to its end.
+pub(crate) fn is_sevenz_checksum(error: &io::Error) -> bool {
+    error
         .get_ref()
         .and_then(|inner| inner.downcast_ref::<sevenz_rust2::Error>())
-        .is_some_and(|e| matches!(e, sevenz_rust2::Error::ChecksumVerificationFailed));
-    ReplayChecksumMismatch::is(error)
-        || sevenz
+        .is_some_and(|e| matches!(e, sevenz_rust2::Error::ChecksumVerificationFailed))
+}
+
+fn is_checksum_failure(error: &io::Error, family: ReadFamily) -> bool {
+    ReplayChecksumMismatch::find(error).is_some()
+        || is_sevenz_checksum(error)
         || zip_crate_failure(error, family) == Some(ZipCrateFailure::InvalidChecksum)
 }
 
@@ -694,7 +678,7 @@ mod tests {
 
         let ceiling = zip_read_error(&forged_size_zip());
         let error = ReadFaults::new(ReadFamily::Zip, None).classify(CopyError::Read(ceiling));
-        assert_matches!(error, ArchiveError::Io(ref e) if DeclaredSizeCeiling::is(e));
+        assert_matches!(error, ArchiveError::Io(ref e) if DeclaredSizeCeiling::find(e).is_some());
     }
 
     #[test]
@@ -765,7 +749,7 @@ mod tests {
             ReadVerdict::Checksum(_)
         );
         assert_matches!(
-            classify_decoder_read(ReplayChecksumMismatch::into_io(), None, ReadFamily::Tar),
+            classify_decoder_read(ReplayChecksumMismatch.into_io(), None, ReadFamily::Tar),
             ReadVerdict::Checksum(_)
         );
         assert_matches!(

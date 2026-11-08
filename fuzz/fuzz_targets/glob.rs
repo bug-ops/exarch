@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use exarch_core::ExcludePattern;
+use exarch_core::EntryPattern;
 use libfuzzer_sys::fuzz_target;
 
 fn path_of(bytes: &[u8]) -> std::path::PathBuf {
@@ -18,12 +18,12 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(pattern_bytes) else {
         return;
     };
-    let Ok(pattern) = ExcludePattern::try_from(text) else {
+    let Ok(pattern) = EntryPattern::try_from(text) else {
         return;
     };
 
     let shown = pattern.to_string();
-    let reparsed = ExcludePattern::try_from(shown.as_str());
+    let reparsed = EntryPattern::try_from(shown.as_str());
     assert_eq!(
         reparsed.as_ref().ok(),
         Some(&pattern),

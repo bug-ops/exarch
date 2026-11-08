@@ -15,13 +15,13 @@ use exarch_core::SkipKind;
 use exarch_core::Skips as CoreSkips;
 use exarch_core::VerificationIssue;
 use exarch_core::VerificationReport;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
 
 use crate::buffer::parse_one;
 use crate::warning::creation_warnings;
@@ -32,8 +32,8 @@ use crate::warning::extraction_warnings;
 /// # Attributes
 ///
 /// * `kind` - Why it was skipped (`"duplicate"`, `"extension_not_allowed"`,
-///   `"excluded"`, `"hidden"`, `"over_max_file_size"`, `"symlink_unsupported"`
-///   or `"unreadable"`)
+///   `"not_selected"`, `"stripped_away"`, `"excluded"`, `"hidden"`,
+///   `"over_max_file_size"`, `"symlink_unsupported"` or `"unreadable"`)
 /// * `path` - The entry's path as the operation names it
 /// * `io_kind` - The stable kind of the I/O failure behind an `"unreadable"`
 ///   skip (`"PermissionDenied"`, ...), else `None`
@@ -41,7 +41,7 @@ use crate::warning::extraction_warnings;
 pub struct PySkip {
     kind: SkipKind,
     path: PathBuf,
-    io_kind: Option<String>,
+    io_kind: Option<&'static str>,
 }
 
 #[pymethods]
@@ -57,8 +57,8 @@ impl PySkip {
     }
 
     #[getter]
-    fn io_kind(&self) -> Option<&str> {
-        self.io_kind.as_deref()
+    const fn io_kind(&self) -> Option<&'static str> {
+        self.io_kind
     }
 
     fn __repr__(&self) -> String {
@@ -75,7 +75,7 @@ impl From<&CoreSkip> for PySkip {
         Self {
             kind: skip.kind,
             path: skip.path.clone(),
-            io_kind: skip.io_kind.map(|kind| kind.as_str().to_owned()),
+            io_kind: skip.io_kind.map(exarch_core::IoKind::as_str),
         }
     }
 }
@@ -376,6 +376,8 @@ impl From<CoreCreationReport> for PyCreationReport {
 /// * `entry_type` - `"File"`, `"Directory"`, `"Symlink"` or `"Hardlink"`
 /// * `compressed_size` - Compressed size when the format reports one
 /// * `mode` - Unix permission bits when the archive records them
+/// * `modified` - Modification time as seconds since the Unix epoch (negative
+///   before it) when the archive records one
 #[pyclass(name = "ArchiveEntry", subclass, frozen)]
 #[derive(Clone)]
 pub struct PyArchiveEntry {
@@ -402,6 +404,16 @@ impl PyArchiveEntry {
     #[getter]
     fn mode(&self) -> Option<u32> {
         self.inner.mode.map(exarch_core::RawMode::get)
+    }
+
+    #[getter]
+    fn modified(&self) -> Option<f64> {
+        self.inner.modified.map(|time| {
+            time.duration_since(UNIX_EPOCH).map_or_else(
+                |before| -before.duration().as_secs_f64(),
+                |after| after.as_secs_f64(),
+            )
+        })
     }
 
     fn compression_ratio(&self) -> Option<f64> {
@@ -502,9 +514,7 @@ impl PyArchiveEntry {
                 }),
             )
             .map(|e| e.into_super().unbind()),
-            _ => Err(PyRuntimeError::new_err(
-                "exarch-python is older than exarch-core: unknown manifest entry kind",
-            )),
+            _ => Bound::new(py, init).map(Bound::unbind),
         }
     }
 }
@@ -547,6 +557,16 @@ impl LinkState {
 /// listing does not decode 7z entry data.
 #[pyclass(name = "LinkTarget", subclass, frozen)]
 pub struct PyLinkTarget;
+
+#[pymethods]
+impl PyLinkTarget {
+    /// The state of a target this binding has no class for; every known class
+    /// overrides it.
+    #[classattr]
+    fn state() -> &'static str {
+        "unknown"
+    }
+}
 
 /// A link target the archive records.
 #[pyclass(name = "RecordedLinkTarget", extends = PyLinkTarget, frozen)]
@@ -640,9 +660,7 @@ impl PyLinkTarget {
                 Bound::new(py, init.add_subclass(PyOversizedLinkTarget { bytes }))
                     .map(|t| t.into_super().unbind())
             }
-            _ => Err(PyRuntimeError::new_err(
-                "exarch-python is older than exarch-core: unknown link target state",
-            )),
+            _ => Bound::new(py, init).map(Bound::unbind),
         }
     }
 }
@@ -686,8 +704,8 @@ impl PyArchiveManifest {
     }
 
     #[getter]
-    fn format(&self) -> String {
-        self.inner.format().as_str().to_owned()
+    fn format(&self) -> &'static str {
+        self.inner.format().as_str()
     }
 
     /// What extraction would do with each entry the validation accepts: where
@@ -738,16 +756,17 @@ impl PyArchiveManifest {
 /// What extraction does with one listed entry.
 ///
 /// The concrete class tells which: `ExtractDisposition` (the entry lands at
-/// `landing`) or `SkipDisposition` (the entry is validated but left out, for
-/// `kind`).
+/// `landing`), `SkipDisposition` (the entry is validated but left out, for
+/// `kind`) or `RefuseDisposition` (the entry is refused or cannot be placed).
 ///
 /// # Attributes
 ///
-/// * `action` - `"extract"` or `"skip"`
+/// * `action` - `"extract"`, `"skip"` or `"refuse"`
 /// * `path` - The entry's path in the archive
 #[pyclass(name = "EntryDisposition", subclass, frozen)]
 pub struct PyEntryDisposition {
     path: PathBuf,
+    action: &'static str,
 }
 
 #[pymethods]
@@ -755,6 +774,11 @@ impl PyEntryDisposition {
     #[getter]
     fn path(&self) -> &OsStr {
         self.path.as_os_str()
+    }
+
+    #[getter]
+    const fn action(&self) -> &'static str {
+        self.action
     }
 }
 
@@ -806,9 +830,24 @@ impl PySkipDisposition {
     }
 }
 
+/// An entry that is refused by validation or policy, or cannot be placed.
+#[pyclass(name = "RefuseDisposition", extends = PyEntryDisposition, frozen)]
+pub struct PyRefuseDisposition;
+
+#[pymethods]
+impl PyRefuseDisposition {
+    #[classattr]
+    fn action() -> &'static str {
+        DispositionKind::Refuse.as_str()
+    }
+}
+
 impl PyEntryDisposition {
     fn into_py(py: Python<'_>, path: PathBuf, disposition: Disposition) -> PyResult<Py<Self>> {
-        let init = PyClassInitializer::from(Self { path });
+        let init = PyClassInitializer::from(Self {
+            path,
+            action: disposition.kind().as_str(),
+        });
         match disposition {
             Disposition::Extract(landing) => Bound::new(
                 py,
@@ -821,9 +860,9 @@ impl PyEntryDisposition {
                 Bound::new(py, init.add_subclass(PySkipDisposition { kind }))
                     .map(|d| d.into_super().unbind())
             }
-            _ => Err(PyRuntimeError::new_err(
-                "exarch-python is older than exarch-core: unknown entry disposition",
-            )),
+            Disposition::Refuse => Bound::new(py, init.add_subclass(PyRefuseDisposition))
+                .map(|d| d.into_super().unbind()),
+            _ => Bound::new(py, init).map(Bound::unbind),
         }
     }
 }
@@ -895,10 +934,10 @@ impl PyVerificationIssue {
     /// `None`.
     #[getter]
     fn io_kind(&self) -> Option<&'static str> {
-        match self.inner.ffi_kind() {
-            Some(exarch_core::FfiKind::Io(kind)) => Some(exarch_core::IoKind::from(*kind).as_str()),
-            _ => None,
-        }
+        self.inner
+            .ffi_kind()
+            .and_then(exarch_core::FfiKind::io_kind)
+            .map(|kind| exarch_core::IoKind::from(kind).as_str())
     }
 
     /// The permission bits the finding is about (an invalid-permissions
@@ -934,7 +973,7 @@ impl From<VerificationIssue> for PyVerificationIssue {
 pub struct PyUnverifiedEntry {
     path: PathBuf,
     #[pyo3(get)]
-    reason: String,
+    reason: &'static str,
 }
 
 #[pymethods]
@@ -962,10 +1001,10 @@ pub struct PyIntegrityGaps {
 #[pymethods]
 impl PyIntegrityGaps {
     #[getter]
-    fn counts(&self) -> BTreeMap<String, u64> {
+    fn counts(&self) -> BTreeMap<&'static str, u64> {
         self.inner
             .counts()
-            .map(|(reason, count)| (reason.as_str().to_owned(), count))
+            .map(|(reason, count)| (reason.as_str(), count))
             .collect()
     }
 
@@ -976,7 +1015,7 @@ impl PyIntegrityGaps {
             .iter()
             .map(|e| PyUnverifiedEntry {
                 path: e.path().to_path_buf(),
-                reason: e.reason().as_str().to_owned(),
+                reason: e.reason().as_str(),
             })
             .collect()
     }
@@ -1018,8 +1057,8 @@ pub struct PyVerificationReport {
 #[pymethods]
 impl PyVerificationReport {
     #[getter]
-    fn status(&self) -> String {
-        self.inner.status().as_str().to_owned()
+    fn status(&self) -> &'static str {
+        self.inner.status().as_str()
     }
 
     #[getter]
@@ -1048,13 +1087,13 @@ impl PyVerificationReport {
     }
 
     #[getter]
-    fn format(&self) -> String {
-        self.inner.format().as_str().to_owned()
+    fn format(&self) -> &'static str {
+        self.inner.format().as_str()
     }
 
     #[getter]
-    fn integrity_status(&self) -> String {
-        self.inner.integrity_status().as_str().to_owned()
+    fn integrity_status(&self) -> &'static str {
+        self.inner.integrity_status().as_str()
     }
 
     #[getter]
@@ -1066,8 +1105,8 @@ impl PyVerificationReport {
     }
 
     #[getter]
-    fn security_status(&self) -> String {
-        self.inner.security_status().as_str().to_owned()
+    fn security_status(&self) -> &'static str {
+        self.inner.security_status().as_str()
     }
 
     fn is_safe(&self) -> bool {
@@ -1425,6 +1464,25 @@ mod tests {
                     .unwrap();
                 assert_eq!(entry_type, expected.as_str());
             }
+        });
+    }
+
+    #[test]
+    fn test_a_refused_disposition_gets_its_own_class() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let obj = PyEntryDisposition::into_py(py, PathBuf::from("bad/x"), Disposition::Refuse)
+                .unwrap();
+            let obj = obj.bind(py);
+            let name: String = obj
+                .get_type()
+                .getattr("__name__")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(name, "RefuseDisposition");
+            let action: String = obj.getattr("action").unwrap().extract().unwrap();
+            assert_eq!(action, "refuse");
         });
     }
 

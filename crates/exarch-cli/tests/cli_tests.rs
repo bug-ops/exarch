@@ -7892,6 +7892,200 @@ fn test_output_exists_text_names_the_path_once() {
     );
 }
 
+/// A negative level is refused by core like any other out-of-range value:
+/// exit 1, not clap's usage error (#1051).
+#[test]
+fn test_create_negative_compression_level_is_exit_1() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("create")
+        .arg("-l")
+        .arg("-1")
+        .arg(temp.path().join("t.tar.gz"))
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("between 1 and 9"));
+}
+
+/// The help text states the bounds and defaults core enforces, read from core
+/// rather than copied (#1048).
+#[test]
+fn test_help_texts_follow_the_core_bounds_and_defaults() {
+    use exarch_core::CompressionLevel;
+    use exarch_core::DecompressionBudget;
+    use exarch_core::ReuseLimit;
+    use exarch_core::SecurityConfig;
+
+    let help = |args: &[&str]| {
+        let output = exarch_cmd()
+            .args(args)
+            .arg("--help")
+            .output()
+            .expect("help");
+        String::from_utf8(output.stdout)
+            .expect("utf-8")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mib = |bytes: u64| format!("{} MiB", bytes / (1024 * 1024));
+
+    let create = help(&["create"]);
+    assert!(
+        create.contains(&format!(
+            "({}-{})",
+            CompressionLevel::MIN.get(),
+            CompressionLevel::MAX.get()
+        )),
+        "{create}"
+    );
+    let ratio = SecurityConfig::default().max_compression_ratio.get();
+    assert!(create.contains(&format!("more than {ratio}x")), "{create}");
+
+    let extract = help(&["extract"]);
+    assert!(
+        extract.contains(&format!("up to {}", mib(ReuseLimit::MAX.get()))),
+        "{extract}"
+    );
+    assert!(
+        extract.contains(&mib(SecurityConfig::default().max_decoder_memory.get())),
+        "{extract}"
+    );
+
+    let verify = help(&["verify"]);
+    assert!(
+        verify.contains(&format!(
+            "default {}",
+            mib(DecompressionBudget::DEFAULT.get())
+        )),
+        "{verify}"
+    );
+}
+
+/// `list` fails on an include that matches nothing, like `extract` and
+/// `verify` (#1033).
+#[test]
+fn test_list_fails_on_an_unmatched_include() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+
+    let stdout = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg("--include")
+        .arg("zzz")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "InvalidConfiguration", "{json}");
+    assert_eq!(json["error"]["setting"], "entry_include", "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("zzz"),
+        "{json}"
+    );
+
+    exarch_cmd()
+        .arg("list")
+        .arg("--include")
+        .arg("proj/src")
+        .arg(&archive)
+        .assert()
+        .success();
+}
+
+/// An entry that extraction cannot place carries the `refuse` disposition in
+/// `--json` and `[refused]` in text, and `list` still exits 0: it reports,
+/// `extract` and `verify` judge (#1036).
+#[test]
+fn test_list_marks_an_entry_that_cannot_be_placed() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("t.tar");
+    let mut builder = tar::Builder::new(std::fs::File::create(&archive).expect("create tar"));
+    for name in ["f", "f/g"] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, name, &b"x"[..])
+            .expect("append entry");
+    }
+    builder.finish().expect("finish tar");
+
+    let stdout = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg("--exclude")
+        .arg("zzz")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    let entries = json["data"]["entries"].as_array().expect("entries");
+    let nested = entries
+        .iter()
+        .find(|e| e["path"] == "f/g")
+        .expect("f/g entry");
+    assert_eq!(nested["disposition"]["action"], "refuse", "{json}");
+    assert_eq!(entries[0]["disposition"]["action"], "extract", "{json}");
+
+    exarch_cmd()
+        .arg("list")
+        .arg("--exclude")
+        .arg("zzz")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("f/g  [refused]"));
+}
+
+/// A reader that closed the pipe is not a failure of `completion` (#1049).
+#[test]
+fn test_completion_to_a_closed_pipe_is_not_a_failure() {
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(exarch_cmd().get_program())
+        .args(["completion", "bash"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn exarch");
+    drop(child.stdout.take());
+    let status = child.wait().expect("wait");
+    assert_eq!(status.code(), Some(0), "{status:?}");
+}
+
+/// Any other stdout failure is exit 1 with a message, not a panic (#1049).
+#[cfg(target_os = "linux")]
+#[test]
+fn test_completion_to_a_full_device_exits_1() {
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let output = std::process::Command::new(exarch_cmd().get_program())
+        .args(["completion", "bash"])
+        .stdout(full)
+        .output()
+        .expect("run exarch");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to write the completions"),
+        "{stderr}"
+    );
+}
+
 #[cfg(unix)]
 mod interrupt {
     use super::exarch_cmd;
@@ -8076,5 +8270,117 @@ mod interrupt {
         assert_eq!(status.code(), Some(130), "{status:?}");
         assert!(!output.exists(), "no archive may be published");
         assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    fn sigterm(child: &std::process::Child) {
+        let status = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .expect("run kill");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn extract_stops_with_143_on_sigterm_and_leaves_no_staging_entry() {
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+
+        let mut command = exarch();
+        command.args(["--verbose", "extract"]).arg(&tar).arg(&out);
+        let mut child = running(command);
+        sigterm(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(143), "{status:?}");
+        assert!(!out.exists(), "the destination must not be published");
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn create_stops_with_143_on_sigterm_and_leaves_no_staging_entry() {
+        let temp = TempDir::new().expect("temp dir");
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        for i in 0..20_000 {
+            std::fs::write(src.join(format!("f{i}")), "x").expect("write source file");
+        }
+        let output = temp.path().join("o.tar");
+
+        let mut command = exarch();
+        command.args(["--verbose", "create"]).arg(&output).arg(&src);
+        let mut child = running(command);
+        sigterm(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.code(), Some(143), "{status:?}");
+        assert!(!output.exists(), "no archive may be published");
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
+    /// `list` never arms the handler, so SIGTERM keeps its default action:
+    /// the process dies of the signal instead of exiting with a status.
+    #[test]
+    fn sigterm_during_list_gets_the_default_action() {
+        use std::io::Read as _;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+
+        let mut child = exarch()
+            .args(["list", "--max-files", "100000"])
+            .arg(&tar)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn exarch");
+        // Nothing reads past this byte, so the listing blocks on a full pipe.
+        let mut first = [0_u8; 1];
+        child
+            .stdout
+            .as_mut()
+            .expect("piped stdout")
+            .read_exact(&mut first)
+            .expect("first output byte");
+        sigterm(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.signal(), Some(15), "{status:?}");
+    }
+
+    /// A repeated signal exits at once; whichever path ends the run, `--json`
+    /// still gets exactly one document, and it is the `Cancelled` error.
+    #[test]
+    fn repeated_sigint_under_json_writes_one_cancelled_document() {
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+
+        let child = exarch()
+            .args(["--json", "extract"])
+            .arg(&tar)
+            .arg(&out)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn exarch");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while leftovers(temp.path()).is_empty() {
+            assert!(std::time::Instant::now() < deadline, "the run never staged");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        sigint(&child);
+        sigint(&child);
+        let output = child.wait_with_output().expect("wait");
+
+        assert_eq!(output.status.code(), Some(130), "{:?}", output.status);
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("exactly one JSON document");
+        assert_eq!(json["status"], "error", "{json}");
+        assert_eq!(json["error"]["kind"], "Cancelled", "{json}");
     }
 }

@@ -34,8 +34,9 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::Staging;
 use crate::copy::CopyBuffer;
-use crate::copy::copy_bounded;
+use crate::copy::copy_cancellable;
 use crate::formats::common;
+use crate::formats::io_marker::IoMarker;
 use crate::formats::occupant::OccupantAction;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
@@ -233,9 +234,14 @@ impl TryFrom<&ExtractionOptions> for SinkOptions {
 /// let error = io::Error::new(io::ErrorKind::QuotaExceeded, SinkFull::new(1024));
 /// assert_eq!(error.to_string(), "sink is full (1024 bytes)");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("sink is full ({max} bytes)")]
 pub struct SinkFull {
     max: u64,
+}
+
+impl IoMarker for SinkFull {
+    const KIND: io::ErrorKind = io::ErrorKind::QuotaExceeded;
 }
 
 impl SinkFull {
@@ -251,14 +257,6 @@ impl SinkFull {
         self.max
     }
 }
-
-impl std::fmt::Display for SinkFull {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "sink is full ({} bytes)", self.max)
-    }
-}
-
-impl std::error::Error for SinkFull {}
 
 /// Receives the validated entries of an archive in extraction order.
 ///
@@ -659,11 +657,12 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
             .sink
             .create_file(&staged.path, staged.mode, staged.size)
             .map_err(sink_error)?;
-        let written = copy_bounded(
+        let written = copy_cancellable(
             reader,
             &mut file,
             &mut self.copy_buffer,
             Some(staged.size.get()),
+            &mut *tally.progress,
         )
         .map_err(|error| faults.classify(error))?;
         self.finish_staged(staged.path, file, written, tally)
@@ -730,10 +729,7 @@ fn place_error(error: PlaceError) -> ArchiveError {
 
 /// Maps an error a sink returned, keeping a full sink typed.
 fn sink_error(error: io::Error) -> ArchiveError {
-    let full = error
-        .get_ref()
-        .and_then(|inner| inner.downcast_ref::<SinkFull>())
-        .map(SinkFull::max);
+    let full = SinkFull::find(&error).map(SinkFull::max);
     full.map_or_else(
         || ArchiveError::Io(error),
         |max| ArchiveError::QuotaExceeded {

@@ -13,8 +13,10 @@ use crate::Skip;
 use crate::SkipKind;
 use crate::ZipBombDetails;
 use crate::ZipBombScope;
+use crate::copy::CancelClock;
 use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressTracker;
+use crate::creation::progress::check_cancelled;
 use crate::creation::report::CreationReport;
 use crate::creation::report::CreationWarning;
 use crate::creation::source::source_error;
@@ -233,7 +235,11 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
 
     // Copy file contents with progress tracking and reusable buffer
     let mut bytes_written = 0u64;
+    let mut clock = CancelClock::standard();
     loop {
+        if clock.due(bytes_written) {
+            check_cancelled(&mut *progress)?;
+        }
         let bytes_read = match file.read(buffer) {
             Ok(bytes_read) => bytes_read,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -279,7 +285,7 @@ fn normalize_zip_path(path: &Path) -> Result<String> {
     let path_str = path.to_str().ok_or_else(|| {
         ArchiveError::Io(std::io::Error::other(IoContext::new(
             "archive path is not valid UTF-8",
-            path.display().to_string(),
+            crate::path_text(path),
         )))
     })?;
 

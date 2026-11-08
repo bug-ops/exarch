@@ -1,79 +1,128 @@
-//! Turns SIGINT into a cancelled run.
+//! Turns SIGINT and SIGTERM into a cancelled run, for exactly as long as the
+//! run can honour it.
 //!
-//! Only SIGINT is handled: SIGTERM and SIGHUP keep their default action, so a
-//! `nohup`-ed run still ignores SIGHUP and `kill` still ends the process at
-//! once.
+//! Only `extract` and `create` arm the handler, through [`install`]: they stage
+//! their output, and core removes the staging entry when
+//! [`ProgressCallback::is_cancelled`] reports a stop. The returned
+//! [`InterruptGuard`] is the armed window. Dropping it, which the commands do
+//! before they print results, disarms the handler: a signal that arrives later
+//! gets the default action at once, so Ctrl-C during output ends the process
+//! instead of being swallowed. The commands that write nothing (`list`,
+//! `verify`, `completion`) never install it and keep the default action
+//! throughout.
 //!
-//! Only `extract` and `create` install the handler: they stage their output,
-//! and core removes the staging entry when [`ProgressCallback::is_cancelled`]
-//! reports a stop. The commands that write nothing keep the default signal
-//! action, so Ctrl-C ends them at once.
+//! A first signal while armed stops the run at the next poll and the process
+//! exits with [`ExitStatus::Interrupted`] (SIGINT) or
+//! [`ExitStatus::Terminated`] (SIGTERM). A second signal gives up waiting and
+//! exits at once with the same status; under `--json` it writes a minimal
+//! `Cancelled` error document to stdout first, so the one-document contract
+//! holds, and otherwise a hint on stderr naming what the run left behind.
 //!
-//! Cancellation takes effect at entry boundaries; one very large entry is
-//! finished first, and for `extract` the pre-extraction listing pass runs to
-//! its end before the first poll. A second signal gives up waiting and exits
-//! at once with [`FORCED_EXIT_CODE`].
+//! SIGHUP is deliberately not handled: a `nohup`-ed run ignores it, and
+//! handling it here would override that. A disposition inherited as ignored
+//! cannot be detected without `unsafe`, so SIGINT or SIGTERM that the parent
+//! ignored is still turned into a cancel.
 //!
-//! WASI has no signals, so the handler is not installed there.
+//! Core polls at entry boundaries and every few MiB inside one entry's copy,
+//! and the `extract` pre-extraction listing polls per entry, so the first
+//! signal is effective without the forced path except inside one decoder call.
+//!
+//! On Unix the signals are read on a helper thread through `signal-hook`; on
+//! Windows `ctrlc` reports Ctrl-C and Ctrl-Break as an interrupt. WASI has no
+//! signals, so nothing is installed there.
 
-use exarch_core::EntryPosition;
-use exarch_core::ProgressCallback;
 #[cfg(not(target_os = "wasi"))]
-use std::io::Write as _;
+use crate::exit::ExitStatus;
+#[cfg(not(target_os = "wasi"))]
+use crate::operation::Operation;
+use crate::output::OutputMode;
+use exarch_core::EntryPosition;
+use exarch_core::NoopProgress;
+use exarch_core::ProgressCallback;
 use std::path::Path;
 #[cfg(not(target_os = "wasi"))]
 use std::path::PathBuf;
-#[cfg(not(target_os = "wasi"))]
-use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 
-/// The exit status of an interrupted run.
-pub const FORCED_EXIT_CODE: u8 = 130;
+/// Why the process was asked to stop; decides its exit status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// SIGINT, or Ctrl-C and Ctrl-Break on Windows.
+    Interrupt,
+    /// SIGTERM.
+    Terminate,
+}
 
-/// What a received signal means for the run.
+impl Stop {
+    #[cfg(not(target_os = "wasi"))]
+    const fn encode(self) -> u8 {
+        match self {
+            Self::Interrupt => 1,
+            Self::Terminate => 2,
+        }
+    }
+
+    const fn decode(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Interrupt),
+            2 => Some(Self::Terminate),
+            _ => None,
+        }
+    }
+
+    #[cfg(unix)]
+    const fn raw_signal(self) -> std::ffi::c_int {
+        match self {
+            Self::Interrupt => signal_hook::consts::SIGINT,
+            Self::Terminate => signal_hook::consts::SIGTERM,
+        }
+    }
+}
+
+/// What a received stop request means for the run.
 #[cfg(not(target_os = "wasi"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Signal {
-    /// The first signal: stop at the next entry boundary.
+    /// The first request: stop at the next poll.
     First,
-    /// A later signal: stop waiting.
+    /// A later request: stop waiting.
     Repeated,
 }
 
-/// Whether a stop was asked for.
+/// Whether a stop was asked for, and by what: the first request decides.
 #[derive(Debug, Default)]
-pub struct Interrupt(AtomicBool);
+pub struct Interrupt(AtomicU8);
 
 impl Interrupt {
     /// An interrupt that was not requested.
     #[must_use]
     pub const fn new() -> Self {
-        Self(AtomicBool::new(false))
+        Self(AtomicU8::new(0))
     }
 
-    /// Records a signal and says whether it is the first.
+    /// Records a request and says whether it is the first.
     #[cfg(not(target_os = "wasi"))]
-    pub fn request(&self) -> Signal {
-        if self.0.swap(true, Ordering::SeqCst) {
-            Signal::Repeated
-        } else {
-            Signal::First
+    pub fn request(&self, stop: Stop) -> Signal {
+        match self
+            .0
+            .compare_exchange(0, stop.encode(), Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => Signal::First,
+            Err(_) => Signal::Repeated,
         }
     }
 
-    /// Whether a signal arrived.
-    pub fn requested(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+    /// What the first request was, if there was one.
+    pub fn requested(&self) -> Option<Stop> {
+        Stop::decode(self.0.load(Ordering::SeqCst))
     }
 }
 
 static INTERRUPT: Interrupt = Interrupt::new();
-#[cfg(not(target_os = "wasi"))]
-static OUTPUT: OnceLock<(PathBuf, Run)> = OnceLock::new();
 
-/// Whether the process was asked to stop.
-pub fn requested() -> bool {
+/// What the process was asked to stop by, if it was.
+pub fn requested() -> Option<Stop> {
     INTERRUPT.requested()
 }
 
@@ -92,18 +141,27 @@ pub enum Run {
     ExtractReplace,
 }
 
+impl Run {
+    /// The command that makes this run, as the JSON envelope names it.
+    #[cfg(not(target_os = "wasi"))]
+    const fn operation(self) -> Operation {
+        match self {
+            Self::Create => Operation::Create,
+            Self::ExtractInPlace | Self::ExtractAtomic | Self::ExtractReplace => Operation::Extract,
+        }
+    }
+}
+
 /// What the forced exit tells the user to look for.
 ///
 /// `.exarch-backup-*` holds the only copy of the original destination between
 /// the moment an atomic replace moves it aside and the moment the new content
 /// takes its place, so it is named apart from the staging entries that are safe
-/// to delete, and only for the run that makes one.
+/// to delete, and only for the run that makes one. `place` is the directory
+/// the staging entries are created in.
 #[cfg(not(target_os = "wasi"))]
-fn forced_exit_hint(output: &Path, run: Run) -> String {
-    let place = match output.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.display().to_string(),
-        _ => "the current directory".to_owned(),
-    };
+fn forced_exit_hint(output: &Path, place: &Path, run: Run) -> String {
+    let place = place.display();
     let output = output.display();
     match run {
         Run::Create => format!(
@@ -127,31 +185,181 @@ fn forced_exit_hint(output: &Path, run: Run) -> String {
     }
 }
 
+/// The directory core stages `output`'s run in: the parent of the absolute
+/// path, so a destination spelled `.` names the directory above the working
+/// directory, where its staging entry really is.
 #[cfg(not(target_os = "wasi"))]
-fn on_signal() {
-    if INTERRUPT.request() == Signal::Repeated {
-        if let Some((output, run)) = OUTPUT.get() {
-            // A closed stderr must not stop the exit below.
-            let _ = writeln!(std::io::stderr(), "{}", forced_exit_hint(output, *run));
+fn staging_place(output: &Path) -> PathBuf {
+    let absolute = std::path::absolute(output).unwrap_or_else(|_| output.to_path_buf());
+    absolute
+        .parent()
+        .map_or_else(|| absolute.clone(), Path::to_path_buf)
+}
+
+/// What a forced exit does once the armed window has seen a second request.
+#[cfg(not(target_os = "wasi"))]
+#[derive(Debug)]
+struct Armed {
+    hint: String,
+    operation: Operation,
+    mode: OutputMode,
+}
+
+#[cfg(not(target_os = "wasi"))]
+static ARMED: std::sync::Mutex<Option<Armed>> = std::sync::Mutex::new(None);
+
+#[cfg(not(target_os = "wasi"))]
+fn armed() -> std::sync::MutexGuard<'static, Option<Armed>> {
+    ARMED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The armed window of a staged run: while it lives, a stop request cancels
+/// the run; once it is dropped, the default action applies again.
+///
+/// Only one window can be open at a time; installing again replaces the
+/// previous one. It is created by [`install`], and the progress reporter of a
+/// staged run is built from it ([`InterruptGuard::watch`]), so a command cannot
+/// arm the handler without polling it.
+#[must_use = "dropping the guard disarms the interrupt handler at once"]
+#[derive(Debug)]
+pub struct InterruptGuard {
+    interrupt: &'static Interrupt,
+}
+
+impl InterruptGuard {
+    const fn armed() -> Self {
+        Self {
+            interrupt: &INTERRUPT,
         }
-        std::process::exit(i32::from(FORCED_EXIT_CODE));
+    }
+
+    /// Wraps `inner` so that a requested stop cancels the run it reports on.
+    pub fn watch(&self, inner: Box<dyn ProgressCallback>) -> Interruptible {
+        Interruptible::watching(inner, self.interrupt)
+    }
+
+    /// A reporter that only watches for a stop, for a pass with nothing to
+    /// show.
+    pub fn watcher(&self) -> Interruptible {
+        self.watch(Box::new(NoopProgress))
     }
 }
 
-/// Starts turning SIGINT into a cancelled run of the command that
-/// writes `output`. A handler that cannot be installed is reported and the
-/// default signal action stays.
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        #[cfg(not(target_os = "wasi"))]
+        {
+            *armed() = None;
+        }
+    }
+}
+
+/// What a stop request does outside an armed window: the default action, so
+/// the process ends as it would have without this module.
 #[cfg(not(target_os = "wasi"))]
-pub fn install(output: &Path, run: Run) {
-    OUTPUT.get_or_init(|| (output.to_path_buf(), run));
-    if let Err(error) = ctrlc::set_handler(on_signal) {
-        eprintln!("warning: cannot install the interrupt handler: {error}");
+fn terminate_by_default(stop: Stop) -> ! {
+    #[cfg(unix)]
+    {
+        // The re-raise ends the process; the fallback below only runs when it
+        // could not be done.
+        let _ = signal_hook::low_level::emulate_default_handler(stop.raw_signal());
+    }
+    std::process::exit(i32::from(ExitStatus::from(stop) as u8))
+}
+
+/// Gives up waiting for the run: reports what it leaves and exits with the
+/// status of the stop.
+#[cfg(not(target_os = "wasi"))]
+fn forced_exit(armed: &Armed, stop: Stop) -> ! {
+    use crate::output::emit_line;
+    use std::io::Write as _;
+
+    // A closed stdout or stderr must not stop the exit below.
+    match armed.mode {
+        OutputMode::Json => {
+            if let Ok(document) = crate::output::forced_exit_envelope(armed.operation, &armed.hint)
+            {
+                let _ = emit_line(&mut std::io::stdout(), format_args!("{document}"));
+            }
+        }
+        OutputMode::Human(_) => {
+            let _ = writeln!(std::io::stderr(), "{}", armed.hint);
+        }
+    }
+    std::process::exit(i32::from(ExitStatus::from(stop) as u8))
+}
+
+#[cfg(not(target_os = "wasi"))]
+fn on_stop(stop: Stop) {
+    let window = armed();
+    let Some(armed) = window.as_ref() else {
+        drop(window);
+        terminate_by_default(stop);
+    };
+    if INTERRUPT.request(stop) == Signal::Repeated {
+        forced_exit(armed, stop);
     }
 }
 
-/// WASI has no signals; there is nothing to install.
+#[cfg(unix)]
+fn register(handler: fn(Stop)) -> std::io::Result<()> {
+    use signal_hook::consts::SIGINT;
+    use signal_hook::consts::SIGTERM;
+
+    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])?;
+    std::thread::Builder::new()
+        .name("exarch-signals".to_owned())
+        .spawn(move || {
+            for signal in signals.forever() {
+                handler(if signal == SIGTERM {
+                    Stop::Terminate
+                } else {
+                    Stop::Interrupt
+                });
+            }
+        })
+        .map(drop)
+}
+
+#[cfg(windows)]
+fn register(handler: fn(Stop)) -> std::io::Result<()> {
+    ctrlc::set_handler(move || handler(Stop::Interrupt)).map_err(std::io::Error::other)
+}
+
+/// Arms the handler for the command that writes `output` and returns the
+/// window it stays armed for. A handler that cannot be installed is reported
+/// and the default signal action stays.
+#[cfg(not(target_os = "wasi"))]
+pub fn install(output: &Path, run: Run, mode: OutputMode) -> InterruptGuard {
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+
+    let guard = arm(output, run, mode);
+    REGISTERED.call_once(|| {
+        if let Err(error) = register(on_stop) {
+            eprintln!("warning: cannot install the interrupt handler: {error}");
+        }
+    });
+    guard
+}
+
+/// Opens the armed window without touching the process's signal handlers.
+#[cfg(not(target_os = "wasi"))]
+fn arm(output: &Path, run: Run, mode: OutputMode) -> InterruptGuard {
+    *armed() = Some(Armed {
+        hint: forced_exit_hint(output, &staging_place(output), run),
+        operation: run.operation(),
+        mode,
+    });
+    InterruptGuard::armed()
+}
+
+/// WASI has no signals; there is nothing to arm.
 #[cfg(target_os = "wasi")]
-pub const fn install(_output: &Path, _run: Run) {}
+pub const fn install(_output: &Path, _run: Run, _mode: OutputMode) -> InterruptGuard {
+    InterruptGuard::armed()
+}
 
 /// Wraps a reporter so that a requested stop cancels the run.
 pub struct Interruptible {
@@ -160,11 +368,6 @@ pub struct Interruptible {
 }
 
 impl Interruptible {
-    /// `inner` reporting, stopping when the process is asked to.
-    pub fn new(inner: Box<dyn ProgressCallback>) -> Self {
-        Self::watching(inner, &INTERRUPT)
-    }
-
     const fn watching(inner: Box<dyn ProgressCallback>, interrupt: &'static Interrupt) -> Self {
         Self { inner, interrupt }
     }
@@ -188,7 +391,7 @@ impl ProgressCallback for Interruptible {
     }
 
     fn is_cancelled(&mut self) -> bool {
-        self.interrupt.requested() || self.inner.is_cancelled()
+        self.interrupt.requested().is_some() || self.inner.is_cancelled()
     }
 }
 
@@ -196,16 +399,26 @@ impl ProgressCallback for Interruptible {
 mod tests {
     use super::*;
     #[cfg(not(target_os = "wasi"))]
-    use exarch_core::NoopProgress;
+    use crate::output::Verbosity;
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
-    fn the_first_signal_is_first_and_the_next_are_repeated() {
+    fn the_first_request_is_first_and_decides_the_stop() {
         let interrupt = Interrupt::new();
-        assert!(!interrupt.requested());
-        assert_eq!(interrupt.request(), Signal::First);
-        assert!(interrupt.requested());
-        assert_eq!(interrupt.request(), Signal::Repeated);
+        assert_eq!(interrupt.requested(), None);
+        assert_eq!(interrupt.request(Stop::Terminate), Signal::First);
+        assert_eq!(interrupt.requested(), Some(Stop::Terminate));
+        assert_eq!(interrupt.request(Stop::Interrupt), Signal::Repeated);
+        assert_eq!(interrupt.requested(), Some(Stop::Terminate));
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn every_stop_survives_the_atomic_encoding() {
+        for stop in [Stop::Interrupt, Stop::Terminate] {
+            assert_eq!(Stop::decode(stop.encode()), Some(stop));
+        }
+        assert_eq!(Stop::decode(0), None);
     }
 
     #[cfg(not(target_os = "wasi"))]
@@ -214,21 +427,22 @@ mod tests {
         static WATCHED: Interrupt = Interrupt::new();
         let mut progress = Interruptible::watching(Box::new(NoopProgress), &WATCHED);
         assert!(!progress.is_cancelled());
-        WATCHED.request();
+        WATCHED.request(Stop::Interrupt);
         assert!(progress.is_cancelled());
     }
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
     fn only_a_replace_names_the_backup() {
-        let replace = forced_exit_hint(Path::new("work/out"), Run::ExtractReplace);
-        assert!(replace.contains("in work:"), "{replace}");
+        let place = Path::new("/work");
+        let replace = forced_exit_hint(Path::new("/work/out"), place, Run::ExtractReplace);
+        assert!(replace.contains("in /work:"), "{replace}");
         assert!(
             replace.contains("rename the .exarch-backup-* entry"),
             "{replace}"
         );
         for run in [Run::Create, Run::ExtractInPlace, Run::ExtractAtomic] {
-            let hint = forced_exit_hint(Path::new("work/out"), run);
+            let hint = forced_exit_hint(Path::new("/work/out"), place, run);
             assert!(!hint.contains("backup"), "{run:?}: {hint}");
         }
     }
@@ -236,23 +450,48 @@ mod tests {
     #[cfg(not(target_os = "wasi"))]
     #[test]
     fn each_run_names_what_it_leaves() {
-        let create = forced_exit_hint(Path::new("o.tar"), Run::Create);
+        let place = Path::new("/work");
+        let create = forced_exit_hint(Path::new("/work/o.tar"), place, Run::Create);
         assert!(
             create.contains("temporary file named .exarch-*"),
             "{create}"
         );
-        assert!(create.contains("in the current directory"), "{create}");
-        let atomic = forced_exit_hint(Path::new("work/out"), Run::ExtractAtomic);
+        assert!(create.contains("in /work:"), "{create}");
+        let atomic = forced_exit_hint(Path::new("/work/out"), place, Run::ExtractAtomic);
         assert!(
             atomic.contains("staging directory named .exarch-*"),
             "{atomic}"
         );
-        let in_place = forced_exit_hint(Path::new("work/out"), Run::ExtractInPlace);
-        assert!(in_place.contains("work/out"), "{in_place}");
+        let in_place = forced_exit_hint(Path::new("/work/out"), place, Run::ExtractInPlace);
+        assert!(in_place.contains("/work/out"), "{in_place}");
         assert!(
             in_place.contains("staging directory named .exarch-*"),
             "{in_place}"
         );
         assert!(!in_place.contains("backup"), "{in_place}");
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_destination_spelled_dot_stages_above_the_working_directory() {
+        let cwd = std::env::current_dir().expect("working directory");
+        let above = cwd.parent().map_or_else(|| cwd.clone(), Path::to_path_buf);
+        assert_eq!(staging_place(Path::new(".")), above);
+        assert_eq!(staging_place(Path::new("out")), cwd);
+        assert_eq!(staging_place(&cwd.join("work/out")), cwd.join("work"));
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn the_window_is_armed_only_while_the_guard_lives() {
+        let guard = arm(
+            Path::new("out"),
+            Run::ExtractAtomic,
+            OutputMode::Human(Verbosity::Normal),
+        );
+        assert!(armed().is_some());
+        drop(guard);
+        assert!(armed().is_none());
     }
 }

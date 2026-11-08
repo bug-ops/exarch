@@ -202,7 +202,7 @@ fn replay_of_damaged_bytes_fails_with_the_checksum_error() {
         .read_to_end(&mut out)
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(ReplayChecksumMismatch::is(&error));
+    assert!(ReplayChecksumMismatch::find(&error).is_some());
 }
 
 #[test]
@@ -393,7 +393,7 @@ fn extraction_refuses_damaged_kept_output_as_io_without_decoding_again() {
         };
         assert_matches!(
             cause,
-            ArchiveError::Io(io) if ReplayChecksumMismatch::is(io),
+            ArchiveError::Io(io) if ReplayChecksumMismatch::find(io).is_some(),
             "{mode:?}: {error:?}"
         );
         assert_matches!(

@@ -28,6 +28,7 @@ use super::write::write_file_with_permit_using;
 use super::*;
 use crate::Extension;
 use crate::IssueCategory;
+use crate::NoopProgress;
 use crate::ParallelDecode;
 use crate::QuotaResource;
 use crate::SolidBlock;
@@ -475,6 +476,7 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
         &mut copy_buffer,
         test_permit(13),
         ReplacePermit::for_test(),
+        &mut NoopProgress,
         || {
             let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
             next_candidate += 1;
@@ -535,6 +537,7 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
         &mut copy_buffer,
         test_permit(13),
         ReplacePermit::for_test(),
+        &mut NoopProgress,
         || {
             let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
             next_candidate += 1;
@@ -575,6 +578,7 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
         leaf("bomb.bin"),
         &mut copy_buffer,
         test_permit(50),
+        &mut NoopProgress,
     );
 
     assert!(
@@ -622,6 +626,7 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
         &mut copy_buffer,
         test_permit(50),
         ReplacePermit::for_test(),
+        &mut NoopProgress,
     );
 
     assert!(

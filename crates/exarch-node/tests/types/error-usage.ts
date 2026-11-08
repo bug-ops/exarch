@@ -246,5 +246,12 @@ export function pathOfARefusedSource(err: ExarchCoreError): string | undefined {
 }
 
 export function dispositionOutcome(disposition: EntryDisposition): string {
-  return disposition.action === 'skip' ? disposition.kind : disposition.landing
+  switch (disposition.action) {
+    case 'skip':
+      return disposition.kind
+    case 'extract':
+      return disposition.landing
+    case 'refuse':
+      return 'refused'
+  }
 }

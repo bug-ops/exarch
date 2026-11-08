@@ -169,6 +169,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
             )?;
             match action {
                 OccupantAction::Skip => {
+                    self.inner.charge_skipped()?;
                     return tally
                         .record_duplicate_skip(safe_path.as_path())
                         .map(Admission::Skipped);
@@ -250,6 +251,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 leaf,
                 self.inner.copy_buffer_mut(),
                 permit,
+                &mut *tally.progress,
             )?,
             WriteMode::ReplaceRegular(replace) => write_file_with_permit(
                 reader,
@@ -259,6 +261,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 self.inner.copy_buffer_mut(),
                 permit,
                 replace,
+                &mut *tally.progress,
             )?,
         };
         self.inner.root().created().note(
@@ -329,6 +332,10 @@ impl PrePass for HostPrePass<'_> {
         // its no-partial-extraction guarantee for this refusal.
         occupancy.refuse_symlink(safe_path.as_path())?;
         Ok(FilePlan::Reserve)
+    }
+
+    fn charge_skipped(&mut self) -> Result<()> {
+        self.core.charge_skipped()
     }
 
     fn reserve_symlink(&mut self, size: u64) -> Result<()> {

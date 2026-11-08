@@ -423,11 +423,9 @@ fn sevenz_dangling_symlink_at_destination_rejected_when_overwrite_requested() {
 }
 
 /// `ExistingFiles::Skip` (default): a dangling symlink at the destination
-/// path is skipped like any other duplicate, and — unlike before the #478
-/// fix — the skipped entry must never reserve quota in the first place (it
-/// is never released, because it was never reserved). Proven here by
-/// extracting a second, independent entry against a `max_file_count` of 1:
-/// it only fits if the skipped entry's quota was never reserved.
+/// path is skipped like any other duplicate. The skipped entry counts against
+/// `max_file_count` (every entry does, #1038) but never reserves bytes (#478):
+/// the second entry fits a total-size limit that only it fits.
 #[cfg(unix)]
 #[test]
 fn sevenz_dangling_symlink_at_destination_quota_not_consumed_when_skipped() {
@@ -444,13 +442,15 @@ fn sevenz_dangling_symlink_at_destination_quota_not_consumed_when_skipped() {
     );
 
     let archive = make_sevenz_two_entries("link.txt", b"payload", "other.txt", b"second-file");
-    let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(1));
+    let config = SecurityConfig::default()
+        .with_max_file_count(exarch_core::non_zero!(2))
+        .with_max_total_size(exarch_core::non_zero!(11));
     let options = ExtractionOptions::default(); // ExistingFiles::Skip (default)
 
     let report = ExtractRequest::new(&config)
         .with_options(options)
         .extract(archive.path(), dest.path())
-        .expect("a skipped duplicate must not permanently consume the file-count quota");
+        .expect("a skipped duplicate must not consume the byte quota");
 
     assert_eq!(
         report.files_skipped(),
@@ -459,14 +459,33 @@ fn sevenz_dangling_symlink_at_destination_quota_not_consumed_when_skipped() {
     );
     assert_eq!(
         report.files_extracted, 1,
-        "the second entry must still fit within max_file_count=1: it only does if the \
-         skipped entry never reserved quota in the first place"
+        "the second entry must fit the 11-byte total: it only does if the skipped entry \
+         never reserved bytes"
     );
     assert!(dest.path().join("other.txt").exists());
     assert!(
         !escape_target.exists(),
         "payload must never land outside dest via the dangling symlink"
     );
+}
+
+/// A skipped 7z duplicate counts against `max_file_count`, as it does for TAR
+/// (#1038).
+#[cfg(unix)]
+#[test]
+fn sevenz_skipped_duplicate_counts_against_the_file_limit() {
+    use std::os::unix::fs::symlink;
+
+    let dest = TempDir::new().unwrap();
+    symlink(dest.path().join("missing"), dest.path().join("link.txt")).unwrap();
+    let archive = make_sevenz_two_entries("link.txt", b"payload", "other.txt", b"second-file");
+    let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(1));
+
+    let error = ExtractRequest::new(&config)
+        .extract(archive.path(), dest.path())
+        .unwrap_err();
+
+    assert!(format!("{error:?}").contains("FileCount"), "{error:?}");
 }
 
 /// `ExistingFiles::Overwrite`: a pre-existing *regular file* (not a symlink) at

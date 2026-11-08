@@ -1,6 +1,6 @@
 //! Progress bar implementation for CLI operations.
 
-use crate::interrupt::Interruptible;
+use crate::interrupt::InterruptGuard;
 use crate::operation::Operation;
 use crate::output::OutputMode;
 use crate::output::Verbosity;
@@ -31,10 +31,14 @@ pub enum BarLength {
 /// when verbose, a bar on a terminal, and nothing when quiet, in `--json`
 /// mode or when stdout is not a terminal. It also cancels the run once the
 /// process is asked to stop.
+///
+/// Takes the armed [`InterruptGuard`], so a command cannot report progress
+/// without being stoppable, nor arm the handler without polling it.
 pub fn progress_for(
     mode: OutputMode,
     length: BarLength,
     operation: Operation,
+    guard: &InterruptGuard,
 ) -> Box<dyn ProgressCallback> {
     let reporter: Box<dyn ProgressCallback> = match mode {
         OutputMode::Json | OutputMode::Human(Verbosity::Quiet) => Box::new(NoopProgress),
@@ -47,7 +51,7 @@ pub fn progress_for(
             }
         }
     };
-    Box::new(Interruptible::new(reporter))
+    Box::new(guard.watch(reporter))
 }
 
 const fn operation_label(operation: Operation) -> &'static str {
@@ -69,7 +73,6 @@ pub struct CliProgress {
     bar: ProgressBar,
     label: String,
     bytes_written: u64,
-    sized: bool,
 }
 
 impl CliProgress {
@@ -96,7 +99,6 @@ impl CliProgress {
             bar,
             label: message.to_string(),
             bytes_written: 0,
-            sized: true,
         }
     }
 
@@ -123,7 +125,6 @@ impl CliProgress {
             bar,
             label: message.to_string(),
             bytes_written: 0,
-            sized: false,
         }
     }
 
@@ -150,13 +151,12 @@ impl Drop for CliProgress {
 
 impl ProgressCallback for CliProgress {
     fn on_entry_start(&mut self, _path: &Path, position: EntryPosition) {
-        if self.sized {
+        if self.bar.length().is_some() {
             return;
         }
         if let EntryTotal::Known(total) = position.total
             && total > 0
         {
-            self.sized = true;
             self.bar.set_length(total as u64);
             self.bar.set_style(Self::sized_style());
         }
@@ -272,13 +272,12 @@ mod tests {
     #[test]
     fn test_counting_progress_becomes_sized_once_total_is_known() {
         let mut progress = CliProgress::new(BarLength::Discover, "Testing");
-        assert!(!progress.sized);
+        assert_eq!(progress.bar.length(), None);
 
         progress.on_entry_start(Path::new("a"), position(1, EntryTotal::Unknown));
-        assert!(!progress.sized);
+        assert_eq!(progress.bar.length(), None);
 
         progress.on_entry_start(Path::new("b"), position(2, EntryTotal::Known(7)));
-        assert!(progress.sized);
         assert_eq!(progress.bar.length(), Some(7));
     }
 }

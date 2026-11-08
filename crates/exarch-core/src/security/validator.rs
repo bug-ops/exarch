@@ -290,7 +290,7 @@ impl<'a> ValidatorCore<'a> {
     /// named `../x.bin` is refused rather than skipped. This is the one place
     /// the allowlist rule is applied to extraction.
     pub(crate) fn screen_file_path_in<V: FsView, P: ParentCheck>(
-        &self,
+        &mut self,
         path: &Path,
         size: EntrySize,
         mode: Option<RawMode>,
@@ -303,6 +303,7 @@ impl<'a> ValidatorCore<'a> {
             Gated::Skip(kind) => return Ok(Gated::Skip(kind)),
         };
         if !is_extension_allowed(safe_path.as_path(), self.config) {
+            self.charge_skipped()?;
             return Ok(Gated::Skip(SkipKind::ExtensionNotAllowed));
         }
         check_name_limits(view, &safe_path, true, self.config)?;
@@ -322,7 +323,7 @@ impl<'a> ValidatorCore<'a> {
 
     /// Validates a directory entry: path, selection and ratio.
     pub(crate) fn validate_directory_in<V: FsView, P: ParentCheck>(
-        &self,
+        &mut self,
         path: &Path,
         size: EntrySize,
         root: &V::Root,
@@ -416,8 +417,18 @@ impl<'a> ValidatorCore<'a> {
     ///
     /// The landing is the validated path itself, or, when the selection
     /// rewrites paths, the rewritten path validated again.
+    ///
+    /// Every entry counts once against `max_file_count`: a skipped entry and
+    /// an admitted directory are charged here, files and links by their own
+    /// reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the validation error of the path, or
+    /// [`Violation::FileCountExceeded`](crate::error::Violation) when the
+    /// count is exceeded.
     pub(crate) fn route_entry_in<V: FsView, P: ParentCheck>(
-        &self,
+        &mut self,
         path: &Path,
         shape: EntryShape,
         root: &V::Root,
@@ -432,6 +443,13 @@ impl<'a> ValidatorCore<'a> {
             hits: Some(&self.include_hits),
         };
         let routed = route_validated(run, original, shape, root, self.config, ctx, view)?;
+        let charged = match (&routed, shape) {
+            (Gated::Skip(_), _) | (Gated::Admit(_), EntryShape::Directory) => true,
+            (Gated::Admit(_), _) => false,
+        };
+        if charged {
+            self.charge_skipped()?;
+        }
         Ok(routed.map(|landing| {
             if landing.as_path().is_empty() {
                 EntryPath::Root(landing)
@@ -458,6 +476,16 @@ impl<'a> ValidatorCore<'a> {
             EntryPath::Root(path) => validate(path).map(EntryPath::Root),
             EntryPath::Child(path) => validate(path).map(EntryPath::Child),
         }
+    }
+
+    /// Charges an entry the extraction skips after validation, such as a
+    /// duplicate, to `max_file_count`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::QuotaExceeded`] when the count is exceeded.
+    pub(crate) fn charge_skipped(&mut self) -> Result<()> {
+        self.quota_tracker.reserve_count(self.config).map(drop)
     }
 
     pub(crate) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
@@ -544,7 +572,7 @@ mod tests {
             self.file(path, sizes(bytes), Some(0o644))
         }
 
-        fn directory(&self, path: &str) -> Result<SafePath> {
+        fn directory(&mut self, path: &str) -> Result<SafePath> {
             let ctx = self.core.context::<HostFs>();
             self.core
                 .validate_directory_in(Path::new(path), sizes(0), &self.dest, &HostFs, &ctx)
@@ -621,7 +649,7 @@ mod tests {
     #[test]
     fn test_validate_directory_entry() {
         let config = SecurityConfig::default();
-        let harness = Harness::new(&config);
+        let mut harness = Harness::new(&config);
 
         let path = harness.directory("dir").unwrap();
 
@@ -725,7 +753,7 @@ mod tests {
     #[test]
     fn test_nested_empty_directories() {
         let config = SecurityConfig::default();
-        let harness = Harness::new(&config);
+        let mut harness = Harness::new(&config);
 
         for dir in ["a/", "a/b/", "a/b/c/", "empty_dir/"] {
             assert!(harness.directory(dir).is_ok(), "{dir}");

@@ -9,9 +9,12 @@
 //! keeps them exact.
 
 use crate::cli::ZipConsistencyArg;
+use crate::cli::default_banned_components_text;
 use crate::cli::solid_ratio_text;
+use crate::operation::ATOMIC_FORCE_REFUSED;
 use crate::operation::Flag;
 use crate::operation::Operation;
+use crate::operation::join_words;
 use crate::output::skip_breakdown_lines;
 use crate::output::terminal::TerminalEntry;
 use crate::output::terminal::TerminalPath;
@@ -19,17 +22,16 @@ use crate::output::terminal::TerminalText;
 use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveType;
+use exarch_core::CompressionLevel;
 use exarch_core::CompressionRatio;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::ExtractionReport;
 use exarch_core::PartialWrites;
-use exarch_core::PathComponentName;
 use exarch_core::PolicySetting;
 use exarch_core::QuotaKind;
 use exarch_core::ReplaceFailure;
 use exarch_core::Restore;
-use exarch_core::SecurityConfig;
 use exarch_core::TarTrailerRefusal;
 use exarch_core::Violation;
 use exarch_core::ZipBombDetails;
@@ -40,6 +42,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// One piece of a CLI-authored message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,12 +252,7 @@ impl Message {
 
 /// Joins flag names as "A", "A or B" or "A, B, or C".
 fn join_or(flags: &[&str]) -> String {
-    match flags {
-        [] => String::new(),
-        [only] => (*only).to_owned(),
-        [a, b] => format!("{a} or {b}"),
-        [init @ .., last] => format!("{}, or {last}", init.join(", ")),
-    }
+    join_words("or", flags)
 }
 
 /// The flags of `candidates` that `op` accepts, as typed.
@@ -362,9 +360,26 @@ pub struct PartialExtractionContext {
     pub(crate) writes: PartialWrites,
     leftover: Option<PathBuf>,
     inner: anyhow::Error,
+    message: OnceLock<Message>,
 }
 
 impl PartialExtractionContext {
+    /// A report of a run that stopped, with the converted cause behind it.
+    pub fn new(
+        report: ExtractionReport,
+        writes: PartialWrites,
+        leftover: Option<PathBuf>,
+        inner: anyhow::Error,
+    ) -> Self {
+        Self {
+            report,
+            writes,
+            leftover,
+            inner,
+            message: OnceLock::new(),
+        }
+    }
+
     /// The text for each [`PartialWrites`] state; `None` for a state added to
     /// the `#[non_exhaustive]` enum after this match was written, which
     /// `every_partial_writes_state_has_dedicated_text` rejects.
@@ -425,19 +440,23 @@ impl PartialExtractionContext {
         Some(message)
     }
 
-    fn message(&self) -> Message {
-        self.dedicated_message()
-            .unwrap_or_else(|| Message::default().lit("WARNING: Extraction was stopped."))
+    /// The message, built on first use: rendering asks for it once per link
+    /// of the chain and per medium.
+    fn message(&self) -> &Message {
+        self.message.get_or_init(|| {
+            self.dedicated_message()
+                .unwrap_or_else(|| Message::default().lit("WARNING: Extraction was stopped."))
+        })
     }
 }
 
 impl CliMessage for PartialExtractionContext {
     fn parts(&self) -> Cow<'_, [Part]> {
-        Cow::Owned(self.message().parts)
+        Cow::Borrowed(&self.message().parts)
     }
 
     fn hint(&self) -> Option<Cow<'_, [Part]>> {
-        self.message().hint.map(Cow::Owned)
+        self.message().hint.as_deref().map(Cow::Borrowed)
     }
 }
 
@@ -585,12 +604,7 @@ fn configuration_hint(setting: ConfigSetting, problem: &ConfigProblem) -> Option
                 "{} {force} replaces the whole destination, so it cannot be combined with {}; \
                  drop {force} or those flags.",
                 Flag::Atomic.long(),
-                join_or(&[
-                    Flag::Include.long(),
-                    Flag::Exclude.long(),
-                    Flag::StripComponents.long(),
-                    Flag::Flatten.long(),
-                ]),
+                join_or(&ATOMIC_FORCE_REFUSED.map(Flag::long)),
             ))
         }
         (_, problem) => problem_hint(problem).map(str::to_owned),
@@ -634,7 +648,7 @@ fn problem_hint(problem: &ConfigProblem) -> Option<&'static str> {
         | ConfigProblem::NotCreatable { .. }
         | ConfigProblem::TooLong { .. }
         | ConfigProblem::ContainsNul
-        | ConfigProblem::ExcludePatternRefused { .. } => {
+        | ConfigProblem::PatternRefused { .. } => {
             "Check the flags you passed and their allowed value ranges."
         }
         _ => return None,
@@ -670,12 +684,7 @@ fn relaxation_hint(op: Operation, relaxable_by: Option<PolicySetting>) -> String
                  entries you still want banned (defaults: {}), leaving out only the component \
                  that refused this entry.",
                 Flag::BannedComponent.long(),
-                SecurityConfig::default()
-                    .banned_path_components
-                    .iter()
-                    .map(PathComponentName::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                default_banned_components_text()
             )
         }),
         Some(PolicySetting::MaxPathDepth) => op.accepts(Flag::MaxPathDepth).then(|| {
@@ -720,11 +729,13 @@ fn quota_exceeded_context(op: Operation, kind: QuotaKind, archive: &Path) -> Mes
         Message::default()
             .lit("Extraction limit exceeded for '")
             .path(archive)
-            .lit("'\nNo CLI flag is known to relax it.")
+            .lit("'")
+            .hint_lit("No CLI flag is known to relax it.")
     })
 }
 
-/// The context for each quota dimension; `None` only for a dimension added to
+/// The context for each quota dimension: a one-line message naming the
+/// archive, and the advice as the hint; `None` only for a dimension added to
 /// the `#[non_exhaustive]` [`QuotaKind`] after this match was written, which
 /// `test_every_quota_kind_has_a_dedicated_context` rejects.
 fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Option<Message> {
@@ -736,67 +747,92 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
                 .lit("Extraction limit exceeded for '")
                 .path(archive)
                 .lit("'")
-                .hint((!flags.is_empty()).then(|| {
-                    format!("Use {} to increase limits.", join_or(&flags))
-                }))
+                .hint(
+                    (!flags.is_empty())
+                        .then(|| format!("Use {} to increase limits.", join_or(&flags))),
+                )
         }
         QuotaKind::DecoderMemory => message
             .lit("Decoder memory limit exceeded for '")
             .path(archive)
-            .lit(
-                "'\nThe archive declares a decompression dictionary or window larger than the \
+            .lit("'")
+            .hint_lit(
+                "The archive declares a decompression dictionary or window larger than the \
                  allowed limit. No CLI flag relaxes this. Rust API only: \
                  SecurityConfig::with_max_decoder_memory.",
             ),
         QuotaKind::CompressedMembers => message
             .lit("Compressed member limit exceeded for '")
             .path(archive)
-            .lit(
-                "'\nThe stream holds more gzip or bzip2 members than its output allows. No CLI \
-                 flag relaxes this. Rust API only: SecurityConfig::with_compressed_member_allowance.",
+            .lit("'")
+            .hint_lit(
+                "The stream holds more gzip or bzip2 members than its output allows. No CLI \
+                 flag relaxes this. Rust API only: \
+                 SecurityConfig::with_compressed_member_allowance.",
             ),
         QuotaKind::IntegerOverflow => message
             .lit("Quota accounting overflowed for '")
             .path(archive)
-            .lit(
-                "'\nThe archive declares sizes or counts too large to track. No CLI flag relaxes \
+            .lit("'")
+            .hint_lit(
+                "The archive declares sizes or counts too large to track. No CLI flag relaxes \
                  this.",
             ),
         QuotaKind::TreeNodes => message
             .lit("Destination name budget exceeded for '")
             .path(archive)
-            .lit(
-                "'\nThe archive spells more distinct names than the in-memory destination model \
+            .lit("'")
+            .hint_lit(
+                "The archive spells more distinct names than the in-memory destination model \
                  admits. No CLI flag relaxes this. Rust API only: \
                  SecurityConfig::with_max_file_count and SecurityConfig::with_max_path_depth.",
             ),
         QuotaKind::SinkCapacity => message
             .lit("In-memory sink capacity exceeded for '")
             .path(archive)
-            .lit("'\nNo CLI flag relaxes this. Rust API only: the sink's capacity limit."),
-        QuotaKind::HeaderSize => message
-            .lit("Archive header too large for '")
-            .path(archive)
-            .lit(
-                "'\nThe header of this 7z archive is larger than 256 bytes per permitted file \
-                 (--max-files) plus 64 KiB. --max-files raises that size, and with it the memory \
-                 a header's entry table may need.",
-            ),
-        QuotaKind::HeaderEntryCount => message
-            .lit("Archive header entry count too large for '")
-            .path(archive)
-            .lit(
-                "'\nThe header of this 7z archive declares more entries than the permitted file \
-                 count (--max-files) plus a small allowance; directories and links count too. \
-                 --max-files raises that limit, and with it the memory a header's entry table \
-                 may need.",
-            ),
+            .lit("'")
+            .hint_lit("No CLI flag relaxes this. Rust API only: the sink's capacity limit."),
+        QuotaKind::HeaderSize => {
+            let raise = accepted(op, &[Flag::MaxFiles]).first().map(|flag| {
+                format!(
+                    " {flag} raises that budget, and with it the memory a header's entry table \
+                     may need."
+                )
+            });
+            message
+                .lit("Archive header too large for '")
+                .path(archive)
+                .lit("'")
+                .hint(Some(format!(
+                    "The header of this 7z archive is larger than the budget derived from the \
+                     permitted file count.{}",
+                    raise.unwrap_or_default()
+                )))
+        }
+        QuotaKind::HeaderEntryCount => {
+            let raise = accepted(op, &[Flag::MaxFiles]).first().map(|flag| {
+                format!(
+                    " {flag} raises that limit, and with it the memory a header's entry table \
+                     may need."
+                )
+            });
+            message
+                .lit("Archive header entry count too large for '")
+                .path(archive)
+                .lit("'")
+                .hint(Some(format!(
+                    "The header of this 7z archive declares more entries than the permitted file \
+                     count plus a small allowance; directories and links count too.{}",
+                    raise.unwrap_or_default()
+                )))
+        }
         QuotaKind::SolidBlockMemory => message
             .lit("Solid block size limit exceeded for '")
             .path(archive)
-            .lit(
-                "'\nA solid 7z block declares more decoded data than the limit admits. No CLI \
-                 flag relaxes this. Rust API only: SecurityConfig::with_solid_limits.",
+            .lit("'")
+            .hint_lit(
+                "A solid 7z block declares more decoded data than the limit admits. No CLI flag \
+                 relaxes this. Rust API only: SecurityConfig::with_solid_limits.",
             ),
         _ => return None,
     };
@@ -837,12 +873,12 @@ pub fn convert_error_with_advice(
         ArchiveError::PartialExtraction(partial) => {
             let leftover = partial.leftover().map(|leftover| leftover.path.clone());
             let (cause, report, writes) = partial.into_parts();
-            return anyhow::Error::new(PartialExtractionContext {
+            return anyhow::Error::new(PartialExtractionContext::new(
                 report,
                 writes,
                 leftover,
-                inner: convert_error_with_advice(op, cause, archive, advice),
-            });
+                convert_error_with_advice(op, cause, archive, advice),
+            ));
         }
         other => other,
     };
@@ -1039,11 +1075,15 @@ fn dedicated_context(
             "Invalid permissions {:#o}: blocked by security policy.",
             mode.get()
         )),
-        ArchiveError::InvalidCompressionLevel { level } => message.text(format!(
-            "Invalid compression level {level}: must be between 1 and 9."
-        )),
+        ArchiveError::InvalidCompressionLevel { level } => {
+            message.restating_source().text(format!(
+                "Invalid compression level {level}: must be between {} and {}.",
+                CompressionLevel::MIN.get(),
+                CompressionLevel::MAX.get()
+            ))
+        }
 
-        ArchiveError::Cancelled => message.lit("Operation cancelled"),
+        ArchiveError::Cancelled => message.restating_source().lit("Operation cancelled"),
         ArchiveError::OutputReservationLeft { .. } => {
             message.lit("Failed to finish writing the output")
         }
@@ -1102,6 +1142,7 @@ mod tests {
     use super::*;
     use exarch_core::Compressed;
     use exarch_core::LinkKind;
+    use exarch_core::SecurityConfig;
     use exarch_core::Uncompressed;
     use exarch_core::Violation;
     use std::io;
@@ -1109,8 +1150,8 @@ mod tests {
 
     #[test]
     fn every_known_config_problem_has_advice() {
-        use exarch_core::ExcludeRefusal;
         use exarch_core::ExtractOnlyFormat;
+        use exarch_core::PatternRefusal;
         use exarch_core::ProtectedPath;
 
         let problems = [
@@ -1138,9 +1179,9 @@ mod tests {
             },
             ConfigProblem::TooLong { max: 1, got: 2 },
             ConfigProblem::ContainsNul,
-            ConfigProblem::ExcludePatternRefused {
+            ConfigProblem::PatternRefused {
                 pattern: "p".into(),
-                reason: ExcludeRefusal::Empty,
+                reason: PatternRefusal::Empty,
             },
             ConfigProblem::NotADirectory,
             ConfigProblem::IsSymlink,
@@ -1560,6 +1601,69 @@ mod tests {
     }
 
     #[test]
+    fn every_quota_kind_states_the_fact_in_one_line_and_the_advice_as_a_hint() {
+        let archive = Path::new("a.tar");
+        for &kind in QuotaKind::ALL {
+            let context = dedicated_quota_context(Operation::Extract, kind, archive)
+                .unwrap_or_else(|| panic!("{kind} took the wildcard arm"))
+                .into_context();
+            let message = raw(&context.parts());
+            assert!(!message.contains('\n'), "{kind}: {message:?}");
+            assert!(context.hint().is_some(), "{kind} has no hint");
+        }
+    }
+
+    #[test]
+    fn a_header_size_refusal_joins_its_cause_once_and_has_a_hint() {
+        let error = convert_error(
+            Operation::List,
+            ArchiveError::QuotaExceeded {
+                resource: exarch_core::QuotaResource::HeaderSize { max: 1 },
+            },
+            Path::new("a.7z"),
+        );
+        let text = chain_text(&error);
+        assert!(!text.contains(".:"), "{text}");
+        assert!(
+            text.starts_with("Archive header too large for 'a.7z': "),
+            "{text}"
+        );
+        let hints = chain_hints(&error, raw);
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        assert!(hints[0].contains("--max-files"), "{hints:?}");
+    }
+
+    #[test]
+    fn a_cancelled_run_says_so_once() {
+        let error = convert_error(
+            Operation::Create,
+            ArchiveError::Cancelled,
+            Path::new("o.tar"),
+        );
+        assert_eq!(chain_text(&error), "Operation cancelled");
+        let rolled_back = convert_error(
+            Operation::Extract,
+            ArchiveError::Cancelled.rolled_back_with(None),
+            Path::new("a.tar"),
+        );
+        assert_eq!(chain_text(&rolled_back).matches("cancelled").count(), 1);
+    }
+
+    #[test]
+    fn the_compression_level_message_names_the_bounds_core_enforces() {
+        let error = CompressionLevel::from_i128(10).unwrap_err();
+        let text = chain_text(&convert_error(Operation::Create, error, Path::new("o.tar")));
+        assert_eq!(
+            text,
+            format!(
+                "Invalid compression level 10: must be between {} and {}.",
+                CompressionLevel::MIN.get(),
+                CompressionLevel::MAX.get()
+            )
+        );
+    }
+
+    #[test]
     fn test_every_policy_setting_has_a_specific_hint() {
         for &setting in PolicySetting::ALL {
             let msg = hint_for(setting);
@@ -1821,16 +1925,9 @@ mod tests {
     }
 
     fn forged_warning_context() -> PartialExtractionContext {
-        PartialExtractionContext {
-            report: {
-                let mut r = exarch_core::ExtractionReport::new();
-                r.warnings = vec![crate::test_support::extraction_warning("w\x1b[31m\nforged")];
-                r
-            },
-            writes: PartialWrites::Kept,
-            leftover: None,
-            inner: anyhow::anyhow!("inner"),
-        }
+        let mut report = exarch_core::ExtractionReport::new();
+        report.warnings = vec![crate::test_support::extraction_warning("w\x1b[31m\nforged")];
+        PartialExtractionContext::new(report, PartialWrites::Kept, None, anyhow::anyhow!("inner"))
     }
 
     #[test]
@@ -1866,12 +1963,12 @@ mod tests {
     #[test]
     fn every_partial_writes_state_has_dedicated_text() {
         for &writes in PartialWrites::ALL {
-            let context = PartialExtractionContext {
-                report: ExtractionReport::default(),
+            let context = PartialExtractionContext::new(
+                ExtractionReport::default(),
                 writes,
-                leftover: None,
-                inner: anyhow::anyhow!("inner"),
-            };
+                None,
+                anyhow::anyhow!("inner"),
+            );
             assert!(
                 context.dedicated_message().is_some(),
                 "{writes} took the wildcard"
@@ -1883,12 +1980,12 @@ mod tests {
     fn a_kept_partial_extraction_lists_skips_per_kind() {
         let mut report = exarch_core::ExtractionReport::new();
         report.skipped = crate::test_support::skips(2);
-        let context = PartialExtractionContext {
+        let context = PartialExtractionContext::new(
             report,
-            writes: PartialWrites::Kept,
-            leftover: None,
-            inner: anyhow::anyhow!("inner"),
-        };
+            PartialWrites::Kept,
+            None,
+            anyhow::anyhow!("inner"),
+        );
         let text = context.to_string();
         assert!(
             text.contains("Files skipped: 2\n    duplicate: 2"),
@@ -1898,12 +1995,12 @@ mod tests {
 
     #[test]
     fn discarded_extraction_says_nothing_was_written() {
-        let context = PartialExtractionContext {
-            report: ExtractionReport::default(),
-            writes: PartialWrites::Discarded,
-            leftover: None,
-            inner: anyhow::anyhow!("inner"),
-        };
+        let context = PartialExtractionContext::new(
+            ExtractionReport::default(),
+            PartialWrites::Discarded,
+            None,
+            anyhow::anyhow!("inner"),
+        );
         assert_eq!(
             context.to_string(),
             "WARNING: Extraction was stopped. Nothing was written."
@@ -2167,12 +2264,12 @@ mod tests {
             ArchiveError::from(Violation::SolidArchive),
             Path::new("a.7z"),
         );
-        let partial = anyhow::Error::new(PartialExtractionContext {
-            report: ExtractionReport::default(),
-            writes: PartialWrites::RolledBack,
-            leftover: None,
-            inner: cause,
-        });
+        let partial = anyhow::Error::new(PartialExtractionContext::new(
+            ExtractionReport::default(),
+            PartialWrites::RolledBack,
+            None,
+            cause,
+        ));
         let text = chain_text(&partial);
         assert!(!text.contains(".:"), "{text}");
         let mut lines = text.lines();

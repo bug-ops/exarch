@@ -1,6 +1,7 @@
 /**
  * 7z symlink targets stay unread by listArchive, and links count against
- * maxFileCount in extractArchive (issues #718, #719).
+ * maxFileCount in extractArchive (issues #718, #719); directories count too
+ * (#1038).
  */
 const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
@@ -17,20 +18,20 @@ const {
 // Written with sevenz-rust2: `a.txt` and a Unix-mode symlink `link` -> `a.txt`.
 const SYMLINK_7Z = path.join(__dirname, '..', '..', '..', 'tests', 'fixtures', 'symlink-mode.7z');
 
-/** A tar holding `count` symlinks named link0..linkN that point at `target`. */
-function tarWithSymlinks(count) {
+/** A tar of `count` empty members named `<prefix>0..N` of the given type flag. */
+function tarOfEmptyMembers(count, prefix, typeflag, linkname) {
   const blocks = [];
   for (let i = 0; i < count; i++) {
     const header = Buffer.alloc(512);
-    header.write(`link${i}`, 0, 100, 'ascii');
+    header.write(`${prefix}${i}`, 0, 100, 'ascii');
     header.write('0000777\0', 100, 8, 'ascii');
     header.write('0000000\0', 108, 8, 'ascii');
     header.write('0000000\0', 116, 8, 'ascii');
     header.write('00000000000\0', 124, 12, 'ascii');
     header.write('00000000000\0', 136, 12, 'ascii');
     header.write('        ', 148, 8, 'ascii');
-    header.write('2', 156, 1, 'ascii');
-    header.write('target', 157, 100, 'ascii');
+    header.write(typeflag, 156, 1, 'ascii');
+    header.write(linkname, 157, 100, 'ascii');
     header.write('ustar\0', 257, 6, 'ascii');
     header.write('00', 263, 2, 'ascii');
     const sum = header.reduce((total, byte) => total + byte, 0);
@@ -39,6 +40,16 @@ function tarWithSymlinks(count) {
   }
   blocks.push(Buffer.alloc(1024));
   return Buffer.concat(blocks);
+}
+
+/** A tar holding `count` symlinks named link0..linkN that point at `target`. */
+function tarWithSymlinks(count) {
+  return tarOfEmptyMembers(count, 'link', '2', 'target');
+}
+
+/** A tar holding `count` directories named dir0/..dirN/. */
+function tarWithDirectories(count) {
+  return tarOfEmptyMembers(count, 'dir', '5', '');
 }
 
 describe('7z symlink targets and link counting', () => {
@@ -107,6 +118,30 @@ describe('7z symlink targets and link counting', () => {
     const config = new SecurityConfig().withAllowSymlinks(true).withMaxFileCount(2);
 
     assert.throws(() => extractArchiveSync(archive, path.join(tempDir, 'out'), config));
+  });
+
+  it('extractArchive counts directories against maxFileCount', () => {
+    const archive = path.join(tempDir, 'dirs.tar');
+    fs.writeFileSync(archive, tarWithDirectories(3));
+
+    assert.throws(() =>
+      extractArchiveSync(
+        archive,
+        path.join(tempDir, 'out'),
+        new SecurityConfig().withMaxFileCount(2),
+      ),
+    );
+
+    extractArchiveSync(
+      archive,
+      path.join(tempDir, 'out'),
+      new SecurityConfig().withMaxFileCount(3),
+    );
+    assert.deepStrictEqual(fs.readdirSync(path.join(tempDir, 'out')).sort(), [
+      'dir0',
+      'dir1',
+      'dir2',
+    ]);
   });
 
   it('extractArchive accepts symlinks at maxFileCount', () => {

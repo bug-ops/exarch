@@ -28,8 +28,11 @@
 //!   matching `INVALID_CONFIGURATION`.
 //! - `nonUtf8EntryPath`: the injectively escaped path of an `INVALID_ARCHIVE`
 //!   (`ENTRY_NAME`) refusal of an entry name that is not valid UTF-8.
-//! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`,
-//!   `warnings`: the fate of a partial extraction.
+//! - `writes`, `filesExtracted`, `bytesWritten`, `sizeClamped`, `filesSkipped`,
+//!   `skipped`, `warnings`: the fate of a partial extraction; `sizeClamped` is
+//!   `true` when `bytesWritten` was clamped to `2^53 - 1`.
+//! - A property that cannot be attached is skipped; the error keeps its `code`
+//!   and its other properties.
 //! - `cause`: the exception thrown by a JS progress callback.
 //!
 //! Errors raised by the binding itself (a Rust panic, a join
@@ -44,7 +47,6 @@ use exarch_core::ErrorCode as CoreErrorCode;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::FfiDetail;
 use exarch_core::FfiErrorMessage;
-use exarch_core::FfiKind;
 use exarch_core::FfiNameCollision;
 use exarch_core::FfiRestore;
 use exarch_core::PartialOutcome;
@@ -53,16 +55,16 @@ use exarch_core::SubCode;
 use napi::Env;
 use napi::Error;
 use napi::Status;
-use napi::bindgen_prelude::Either4;
 use napi::bindgen_prelude::JsValue;
+use napi::bindgen_prelude::Object;
 use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::ToNapiValue;
 use napi_derive::napi;
 
 use crate::mirror::mirror_from_core;
+use crate::report::ByteSize;
 use crate::report::ExtractionReport;
-use crate::report::saturating_i64;
-use crate::report::saturating_u32;
+use crate::report::saturating_usize;
 
 /// `code` of a rejection caused by a throwing JS progress callback over an
 /// otherwise successful operation. Node-only: core has no such error.
@@ -318,6 +320,9 @@ pub enum ConfigSetting {
     /// `max_decoder_memory`.
     #[napi(value = "max_decoder_memory")]
     MaxDecoderMemory,
+    /// `compressed_member_allowance`.
+    #[napi(value = "compressed_member_allowance")]
+    CompressedMemberAllowance,
     /// `decompression_budget`.
     #[napi(value = "decompression_budget")]
     DecompressionBudget,
@@ -544,44 +549,38 @@ impl IoKind {
     }
 }
 
-impl From<exarch_core::IoKind> for IoKind {
-    fn from(kind: exarch_core::IoKind) -> Self {
-        match kind {
-            exarch_core::IoKind::NotFound => Self::NotFound,
-            exarch_core::IoKind::PermissionDenied => Self::PermissionDenied,
-            exarch_core::IoKind::AlreadyExists => Self::AlreadyExists,
-            exarch_core::IoKind::NotADirectory => Self::NotADirectory,
-            exarch_core::IoKind::IsADirectory => Self::IsADirectory,
-            exarch_core::IoKind::DirectoryNotEmpty => Self::DirectoryNotEmpty,
-            exarch_core::IoKind::ReadOnlyFilesystem => Self::ReadOnlyFilesystem,
-            exarch_core::IoKind::StorageFull => Self::StorageFull,
-            exarch_core::IoKind::QuotaExceeded => Self::QuotaExceeded,
-            exarch_core::IoKind::FileTooLarge => Self::FileTooLarge,
-            exarch_core::IoKind::InvalidInput => Self::InvalidInput,
-            exarch_core::IoKind::InvalidData => Self::InvalidData,
-            exarch_core::IoKind::InvalidFilename => Self::InvalidFilename,
-            exarch_core::IoKind::TimedOut => Self::TimedOut,
-            exarch_core::IoKind::Interrupted => Self::Interrupted,
-            exarch_core::IoKind::UnexpectedEof => Self::UnexpectedEof,
-            exarch_core::IoKind::WriteZero => Self::WriteZero,
-            exarch_core::IoKind::Unsupported => Self::Unsupported,
-            exarch_core::IoKind::CrossesDevices => Self::CrossesDevices,
-            exarch_core::IoKind::TooManyLinks => Self::TooManyLinks,
-            exarch_core::IoKind::ResourceBusy => Self::ResourceBusy,
-            exarch_core::IoKind::BrokenPipe => Self::BrokenPipe,
-            exarch_core::IoKind::OutOfMemory => Self::OutOfMemory,
-            exarch_core::IoKind::WouldBlock => Self::WouldBlock,
-            // `Other` and the `#[non_exhaustive]` tail of core's enum.
-            _ => Self::Other,
-        }
-    }
-}
-
-impl From<std::io::ErrorKind> for IoKind {
-    fn from(kind: std::io::ErrorKind) -> Self {
-        Self::from(exarch_core::IoKind::from(kind))
-    }
-}
+mirror_from_core!(
+    IoKind,
+    exarch_core::IoKind,
+    "io kind",
+    [
+        NotFound,
+        PermissionDenied,
+        AlreadyExists,
+        NotADirectory,
+        IsADirectory,
+        DirectoryNotEmpty,
+        ReadOnlyFilesystem,
+        StorageFull,
+        QuotaExceeded,
+        FileTooLarge,
+        InvalidInput,
+        InvalidData,
+        InvalidFilename,
+        TimedOut,
+        Interrupted,
+        UnexpectedEof,
+        WriteZero,
+        Unsupported,
+        CrossesDevices,
+        TooManyLinks,
+        ResourceBusy,
+        BrokenPipe,
+        OutOfMemory,
+        WouldBlock,
+        Other
+    ]
+);
 
 /// Value of the `subCode` property of a `SECURITY_VIOLATION` error.
 // The runtime type of the matching report field: core's variants map in
@@ -694,6 +693,7 @@ mirror_from_core!(
         MaxSolidBlockMemory,
         MaxTarMetadataBytes,
         MaxDecoderMemory,
+        CompressedMemberAllowance,
         DecompressionBudget,
         AllowedExtension,
         BannedPathComponent,
@@ -786,29 +786,6 @@ mirror_from_core!(
     "zip bomb sub-code",
     [Entry, SolidBlock, SkippedEntries]
 );
-
-/// The finer classification of a refusal: the sub-code of whichever family
-/// the refusal belongs to.
-pub type SubCodeValue =
-    Either4<InvalidArchiveSubCode, SecurityViolationSubCode, QuotaSubCode, ZipBombSubCode>;
-
-/// The typed value of a core [`SubCode`].
-///
-/// # Errors
-///
-/// Returns "older than exarch-core" for a family or code this binding does not
-/// know.
-pub fn sub_code_value(code: SubCode) -> napi::Result<SubCodeValue> {
-    Ok(match code {
-        SubCode::InvalidArchive(code) => Either4::A(code.try_into()?),
-        SubCode::SecurityViolation(code) => Either4::B(code.try_into()?),
-        SubCode::Quota(kind) => Either4::C(kind.try_into()?),
-        SubCode::ZipBomb(scope) => Either4::D(scope.try_into()?),
-        other => {
-            return Err(crate::report::unknown_variant("sub-code", other.as_str()));
-        }
-    })
-}
 
 /// Value of the `writes` property: whether a failed extraction left files on
 /// disk.
@@ -1106,7 +1083,7 @@ struct ErrorProps {
     relaxable_by: Option<CorePolicySetting>,
     sub_code: Option<SubCode>,
     setting: Option<exarch_core::ConfigSetting>,
-    io_kind: Option<IoKind>,
+    io_kind: Option<exarch_core::IoKind>,
     source_fault: Option<SourceFault>,
     path: Option<String>,
     leftover_path: Option<String>,
@@ -1171,10 +1148,7 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
     props.relaxable_by = kind.relaxable_by();
     props.sub_code = kind.sub_code();
     props.setting = kind.setting();
-    props.io_kind = match kind {
-        FfiKind::Io(io_kind) => Some(IoKind::from(io_kind)),
-        _ => None,
-    };
+    props.io_kind = kind.io_kind().map(exarch_core::IoKind::from);
     props.source_fault = source_fault;
     props.path = fault_path.or(path);
     props.leftover_path = leftover_path;
@@ -1277,90 +1251,115 @@ fn describe(failure: Failure) -> Result<Described, Error> {
     }
 }
 
+/// Sets one property of a JS error, skipping it when napi cannot.
+///
+/// A property that fails to attach must not cost the error its other
+/// properties: a path-traversal error without its `code` loses its whole
+/// classification, so only `code` itself is required (#1058).
+fn set_property<V: ToNapiValue>(obj: &mut Object<'_>, key: &str, value: V) {
+    // Degrading one attribute at a time is the contract; the failure carries
+    // no information the caller could act on.
+    obj.set(key, value).ok();
+}
+
 fn apply(env: Env, described: Described) -> napi::Result<Error> {
     let Described { description, props } = described;
     let mut obj = env.create_error(Error::new(Status::GenericFailure, description))?;
     obj.set("code", props.code.as_str())?;
     if props.code == JsCode::Abort {
-        obj.set("name", "AbortError")?;
+        set_property(&mut obj, "name", "AbortError");
     }
     if let Some(setting) = props.relaxable_by {
-        obj.set("relaxableBy", setting.as_str())?;
+        set_property(&mut obj, "relaxableBy", setting.as_str());
     }
     if let Some(sub_code) = props.sub_code {
-        obj.set("subCode", sub_code.as_str())?;
+        set_property(&mut obj, "subCode", sub_code.as_str());
     }
     if let Some(setting) = props.setting {
-        obj.set("setting", setting.as_str())?;
+        set_property(&mut obj, "setting", setting.as_str());
     }
     if let Some(io_kind) = props.io_kind {
-        obj.set("ioKind", io_kind.as_str())?;
+        set_property(&mut obj, "ioKind", io_kind.as_str());
     }
     if let Some(fault) = props.source_fault {
         if let Some(errno) = fault.errno {
-            obj.set("errno", errno)?;
+            set_property(&mut obj, "errno", errno);
         }
-        obj.set("strerror", fault.strerror)?;
+        set_property(&mut obj, "strerror", fault.strerror);
     }
     if let Some(path) = props.path {
-        obj.set("path", path)?;
+        set_property(&mut obj, "path", path);
     }
     if let Some(path) = props.leftover_path {
-        obj.set("leftoverPath", path)?;
+        set_property(&mut obj, "leftoverPath", path);
     }
-    match props.detail {
+    apply_detail(&mut obj, props.detail);
+    apply_details(&mut obj, props.details);
+    if let Some(cause) = props.cause {
+        set_property(&mut obj, "cause", cause);
+    }
+    Ok(Error::from_unknown_without_coercion(obj.to_unknown()))
+}
+
+fn apply_detail(obj: &mut Object<'_>, detail: FfiDetail) {
+    match detail {
         FfiDetail::None => {}
-        FfiDetail::Occupied { conflicts } => obj.set("conflicts", conflicts.into_vec())?,
+        FfiDetail::Occupied { conflicts } => {
+            set_property(obj, "conflicts", conflicts.into_vec());
+        }
         FfiDetail::Replace(restore) => {
-            obj.set("restore", restore.kind().as_str())?;
+            set_property(obj, "restore", restore.kind().as_str());
             if let FfiRestore::Failed { backup_path } = restore {
-                obj.set("backupPath", backup_path)?;
+                set_property(obj, "backupPath", backup_path);
             }
         }
-        FfiDetail::ProtectedPath(path) => obj.set("protectedPath", path.as_str())?,
+        FfiDetail::ProtectedPath(path) => set_property(obj, "protectedPath", path.as_str()),
         FfiDetail::NameCollision(FfiNameCollision {
             name,
             first,
             second,
             ..
-        }) => obj.set(
+        }) => set_property(
+            obj,
             "collision",
             NameCollision {
                 name,
                 first,
                 second,
             },
-        )?,
+        ),
         FfiDetail::UnmatchedInclude { patterns } => {
-            obj.set("unmatchedPatterns", patterns.into_vec())?;
+            set_property(obj, "unmatchedPatterns", patterns.into_vec());
         }
-        FfiDetail::NonUtf8EntryPath { path } => obj.set("nonUtf8EntryPath", path)?,
+        FfiDetail::NonUtf8EntryPath { path } => set_property(obj, "nonUtf8EntryPath", path),
     }
-    match props.details {
+}
+
+fn apply_details(obj: &mut Object<'_>, details: Details) {
+    match details {
         Details::None => {}
         Details::Extraction(outcome) => {
-            obj.set("writes", outcome.writes().as_str())?;
+            set_property(obj, "writes", outcome.writes().as_str());
             if let PartialOutcome::Kept(report) = outcome {
-                let report = ExtractionReport::try_from(report)?;
-                obj.set("filesExtracted", report.files_extracted)?;
-                obj.set("bytesWritten", report.bytes_written)?;
-                obj.set("filesSkipped", report.files_skipped)?;
-                obj.set("skipped", report.skipped)?;
-                obj.set("warnings", report.warnings)?;
+                let report = ExtractionReport::from(report);
+                set_property(obj, "filesExtracted", report.files_extracted);
+                set_property(obj, "bytesWritten", report.bytes_written);
+                set_property(obj, "sizeClamped", report.size_clamped);
+                set_property(obj, "filesSkipped", report.files_skipped);
+                set_property(obj, "skipped", report.skipped);
+                set_property(obj, "warnings", report.warnings);
             }
         }
         Details::Creation {
             files_added,
             bytes_written,
         } => {
-            obj.set("filesAdded", saturating_u32(files_added))?;
-            obj.set("bytesWritten", saturating_i64(bytes_written))?;
+            let bytes_written = ByteSize::new(bytes_written);
+            set_property(obj, "filesAdded", saturating_usize(files_added));
+            set_property(obj, "bytesWritten", bytes_written.value);
+            set_property(obj, "sizeClamped", bytes_written.clamped);
         }
     }
-    if let Some(cause) = props.cause {
-        obj.set("cause", cause)?;
-    }
-    Ok(Error::from_unknown_without_coercion(obj.to_unknown()))
 }
 
 impl IntoJsError for Failure {
@@ -1865,6 +1864,7 @@ mod tests {
             MaxSolidBlockMemory,
             MaxTarMetadataBytes,
             MaxDecoderMemory,
+            CompressedMemberAllowance,
             DecompressionBudget,
             AllowedExtension,
             BannedPathComponent,
@@ -1948,13 +1948,6 @@ mod tests {
         crate::report::DispositionKind,
         exarch_core::DispositionKind
     );
-
-    #[test]
-    fn every_sub_code_converts_to_its_family() {
-        for code in SubCode::QUOTA_ALL.iter().chain(SubCode::ZIP_BOMB_ALL) {
-            assert!(sub_code_value(*code).is_ok(), "{code:?}");
-        }
-    }
 
     fn described(err: CoreError) -> Described {
         describe(Failure::Core(err)).expect("core errors are always described")
@@ -2080,7 +2073,7 @@ mod tests {
     #[test]
     fn test_every_core_io_kind_has_a_mirror_with_the_same_spelling() {
         for core in exarch_core::IoKind::ALL {
-            assert_eq!(IoKind::from(*core).as_str(), core.as_str(), "{core:?}");
+            assert_eq!(IoKind::try_from(*core).unwrap().as_str(), core.as_str());
         }
         let mirror: Vec<_> = IoKind::ALL.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(mirror, exarch_core::IoKind::NAMES);
@@ -2089,7 +2082,7 @@ mod tests {
     #[test]
     fn test_unlisted_std_kind_is_other() {
         let core = exarch_core::IoKind::from(std::io::ErrorKind::ConnectionReset);
-        assert_eq!(IoKind::from(core), IoKind::Other);
+        assert_eq!(core, exarch_core::IoKind::Other);
     }
 
     #[test]
@@ -2097,7 +2090,7 @@ mod tests {
         let d = described(CoreError::Io(std::io::Error::from(
             std::io::ErrorKind::NotFound,
         )));
-        assert_eq!(d.props.io_kind, Some(IoKind::NotFound));
+        assert_eq!(d.props.io_kind, Some(exarch_core::IoKind::NotFound));
         let d = described(CoreError::PathTraversal {
             path: PathBuf::from("../x"),
         });
@@ -2400,7 +2393,7 @@ mod tests {
             error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         });
         assert_eq!(d.props.code.as_str(), "IO_ERROR");
-        assert_eq!(d.props.io_kind, Some(IoKind::PermissionDenied));
+        assert_eq!(d.props.io_kind, Some(exarch_core::IoKind::PermissionDenied));
         assert!(d.description.contains("out.tar"), "{}", d.description);
         #[cfg(not(debug_assertions))]
         assert!(!d.description.contains("internal"), "{}", d.description);
@@ -2418,7 +2411,7 @@ mod tests {
         );
         let d = described(CoreError::ReplaceFailed(failure));
         assert_eq!(d.props.code.as_str(), "IO_ERROR");
-        assert_eq!(d.props.io_kind, Some(IoKind::PermissionDenied));
+        assert_eq!(d.props.io_kind, Some(exarch_core::IoKind::PermissionDenied));
         let FfiDetail::Replace(FfiRestore::Failed {
             backup_path: backup,
         }) = d.props.detail

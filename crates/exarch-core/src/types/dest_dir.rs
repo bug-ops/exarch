@@ -122,7 +122,7 @@ impl DestDir {
                 std::io::ErrorKind::NotFound,
                 IoContext::new(
                     "destination directory does not exist",
-                    path.display().to_string(),
+                    crate::path_text(&path),
                 ),
             )));
         }
@@ -141,7 +141,7 @@ impl DestDir {
                 e.kind(),
                 IoContext::new(
                     "failed to canonicalize path",
-                    format!("{}: {e}", path.display()),
+                    format!("{}: {e}", crate::path_text(&path)),
                 ),
             ))
         })?;
@@ -169,7 +169,7 @@ impl DestDir {
             if result != 0 {
                 return Err(ArchiveError::Io(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    IoContext::new("directory is not writable", canonical.display().to_string()),
+                    IoContext::new("directory is not writable", crate::path_text(&canonical)),
                 )));
             }
         }
@@ -204,7 +204,7 @@ impl DestDir {
                 e.kind(),
                 IoContext::new(
                     "failed to create destination directory",
-                    format!("{}: {e}", path.display()),
+                    format!("{}: {e}", crate::path_text(&path)),
                 ),
             ))
         })?;

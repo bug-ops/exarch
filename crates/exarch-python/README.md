@@ -330,7 +330,19 @@ config = config.with_parallel_decode_memory(
 )  # 7z LZMA2 lookahead memory (default 128 MiB); None decodes on one thread
 # Each extract/verify call may start up to 16 worker threads and hold its own
 # lookahead, so concurrent calls multiply both.
+config = config.with_allow_windows_reserved_names(True)  # CON, NUL, ... (refused by default)
+config = config.with_max_tar_metadata_bytes(
+    8 * 1024 * 1024
+)  # TAR header/metadata bytes between entries (default 4 MiB)
+config = config.with_max_decoder_memory(512 * 1024 * 1024)  # Decoder memory (default 256 MiB)
+config = config.with_max_solid_compression_ratio(
+    500.0
+)  # Solid 7z block ratio; needs with_allow_solid_archives first
 ```
+
+Every setting an error names in `relaxable_by` has a setter. `list_archive*` takes `options=ListOptions().with_stored_targets()` to read the 7z link targets that a listing leaves unread by default.
+
+**Newer core values.** Output tokens (`kind`, `code`, `sub_code`, `io_kind`, entry and disposition kinds, ...) are the strings `exarch-core` emits, so a value added to the core after your stubs were written still arrives as a plain `str`; an unknown report class falls back to its base class (`ArchiveEntry`, `LinkTarget` with `state == "unknown"`, `EntryDisposition`, `MemoryEntry`, `ExtractionWarning`, `CreationWarning`) instead of raising.
 
 **Patterns.** Include, exclude and `CreationConfig` exclude patterns share one glob grammar (matched case-sensitively on raw bytes, `\` is a separator):
 

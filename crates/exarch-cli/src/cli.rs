@@ -1,11 +1,16 @@
 //! CLI argument parsing using clap.
 
+use crate::operation::ATOMIC_FORCE_REFUSED;
+use crate::operation::Flag;
+use crate::operation::join_words;
 use clap::Parser;
 use clap::Subcommand;
 use clap_complete::Shell;
 use exarch_core::ArchiveError;
+use exarch_core::CompressionLevel;
 use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
+use exarch_core::DecompressionBudget;
 use exarch_core::Limit;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
@@ -48,11 +53,7 @@ pub enum Commands {
     /// Extract archive contents
     Extract(ExtractArgs),
     /// Create a new archive
-    #[command(
-        after_help = "A ZIP entry that compresses more than 100x is refused by default \
-                            extraction as a zip bomb (create warns when it writes one); extract \
-                            it with --max-compression-ratio set to the ratio the warning names."
-    )]
+    #[command(after_help = create_after_help())]
     Create(CreateArgs),
     /// List archive contents without extraction
     List(ListArgs),
@@ -159,20 +160,111 @@ impl SelectionArgs {
     }
 }
 
+/// Whole MiB of `bytes`, spelled as help and hints give sizes (`256 MiB`).
+///
+/// Every size passed here is a multiple of 1 MiB, so nothing is rounded away.
+fn mib_text(bytes: u64) -> String {
+    format!("{} MiB", bytes / (1024 * 1024))
+}
+
+/// The ratio an entry is held to by default, spelled as in help and hints
+/// (`100x`); read from core so the text follows a changed default.
+fn default_ratio_text() -> String {
+    format!("{}x", SecurityConfig::default().max_compression_ratio.get())
+}
+
+/// After-help of `create`: what a high-ratio ZIP entry costs at extraction.
+fn create_after_help() -> String {
+    format!(
+        "A ZIP entry that compresses more than {} is refused by default extraction as a zip \
+         bomb (create warns when it writes one); extract it with {} set to the ratio the \
+         warning names.",
+        default_ratio_text(),
+        Flag::MaxCompressionRatio.long()
+    )
+}
+
+/// Help of `--parallel-decode-memory`, naming the lookahead core applies by
+/// default.
+fn parallel_decode_help() -> String {
+    format!(
+        "Memory for decoding independent LZMA2 runs of a 7z block ahead on worker threads \
+         (K, M, G, T suffixes), or `off` to decode on one thread (default: {}). A stock 7-Zip \
+         archive has 64 MiB runs, about 100 MiB per extra concurrent run; archives with small \
+         runs need far less.",
+        mib_text(ParallelDecode::DEFAULT_BYTES.get())
+    )
+}
+
+/// Help of `--decode-reuse`, naming the limits core applies.
+fn decode_reuse_help() -> String {
+    format!(
+        "Where to keep what the ZIP structure check decodes, so compressed entries are not \
+         decoded a second time (default: memory, up to {reuse}, never more than {total} or the \
+         {decoder} decoder memory limit). It has no effect under {zip} ignore, which skips that \
+         decode. With temp-file the decoded plaintext sits in an unnamed file in the temporary \
+         directory until extraction ends; on a tmpfs that is memory too, and on a disk it is \
+         often no faster than memory or off. Entries that do not fit are decoded again.",
+        reuse = mib_text(ReuseLimit::MAX.get()),
+        total = Flag::MaxTotalSize.long(),
+        decoder = mib_text(SecurityConfig::default().max_decoder_memory.get()),
+        zip = Flag::ZipConsistency.long(),
+    )
+}
+
+/// Help of `--decompression-budget`, naming the default budget core applies.
+fn decompression_budget_help() -> String {
+    format!(
+        "Extra bytes --check-integrity may decode beyond listing (K, M, G, T suffixes; \
+         default {}, independent of {})",
+        mib_text(DecompressionBudget::DEFAULT.get()),
+        Flag::MaxTotalSize.long()
+    )
+}
+
+/// Help of `--compression-level`, naming the range core accepts.
+fn compression_level_help() -> String {
+    format!(
+        "Compression level ({}-{})",
+        CompressionLevel::MIN.get(),
+        CompressionLevel::MAX.get()
+    )
+}
+
 /// The ratio a whole solid 7z block is held to, spelled as in help and hints
 /// (`1000x`); fixed by core, not by a flag.
 pub fn solid_ratio_text() -> String {
     format!("{}x", SolidLimits::DEFAULT.max_ratio.get())
 }
 
-/// Long help of `--banned-component`, naming the default list core applies.
-fn banned_component_help() -> String {
-    let defaults = SecurityConfig::default()
+/// The default ban list core applies, comma-separated, as help and hints
+/// spell it.
+pub fn default_banned_components_text() -> String {
+    SecurityConfig::default()
         .banned_path_components
         .iter()
         .map(PathComponentName::as_str)
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(", ")
+}
+
+/// Long help of `--atomic`, naming the flags `--atomic --force` refuses.
+fn atomic_long_help() -> String {
+    format!(
+        "Extract atomically: stage in a private directory next to the destination, rename on \
+         success, remove it on failure.\n\nWith --force the existing destination directory is \
+         replaced as a whole: it is renamed aside, the staged content is renamed into its \
+         place, and only then is the old destination removed, so a failure at any point leaves \
+         either the old or the new content under the destination name. --atomic --force \
+         refuses {}. On Unix, --force also needs search (execute) permission on the \
+         destination's parent directory; the destination itself need not be readable.",
+        join_words("and", &ATOMIC_FORCE_REFUSED.map(Flag::long))
+    )
+}
+
+/// Long help of `--banned-component`, naming the default list core applies.
+fn banned_component_help() -> String {
+    let defaults = default_banned_components_text();
     format!(
         "Banned path component; can be repeated or comma-separated.\n\nWhen specified, \
          replaces the default ban list ({defaults}). Use an exactly empty value (\"\") to \
@@ -321,14 +413,15 @@ impl From<ZipConsistencyArg> for ZipConsistencyPolicy {
 pub enum DecodeReuseArg {
     /// Keep nothing; compressed entries are decoded twice
     Off,
-    /// Keep up to 256 MiB in memory
+    /// Keep the decoded entries in memory
     Memory,
-    /// Keep up to 256 MiB in an unnamed temporary file
+    /// Keep the decoded entries in an unnamed temporary file
     TempFile,
 }
 
 impl DecodeReuseArg {
-    /// The mode of the flag, or 256 MiB in memory when it is omitted.
+    /// The mode of the flag, or the most core allows in memory when it is
+    /// omitted.
     pub const fn resolve(arg: Option<Self>) -> DecodeReuse {
         match arg {
             Some(Self::Off) => DecodeReuse::Off,
@@ -359,11 +452,12 @@ impl ZipPolicyArgs {
 /// Lookahead memory flag shared by the commands that decode 7z payloads.
 #[derive(clap::Args, Clone, Copy)]
 pub struct ParallelDecodeArgs {
-    /// Memory for decoding independent LZMA2 runs of a 7z block ahead on worker
-    /// threads (K, M, G, T suffixes), or `off` to decode on one thread
-    /// (default: 128M). A stock 7-Zip archive has 64 MiB runs, about 100 MiB
-    /// per extra concurrent run; archives with small runs need far less.
-    #[arg(long, value_name = "SIZE|off", value_parser = parse_parallel_decode)]
+    #[arg(
+        long,
+        value_name = "SIZE|off",
+        value_parser = parse_parallel_decode,
+        help = parallel_decode_help()
+    )]
     pub parallel_decode_memory: Option<ParallelDecodeValue>,
 }
 
@@ -425,15 +519,7 @@ pub struct ExtractArgs {
     #[command(flatten)]
     pub parallel: ParallelDecodeArgs,
 
-    /// Where to keep what the ZIP structure check decodes, so compressed
-    /// entries are not decoded a second time (default: memory, up to 256 MiB,
-    /// never more than --max-total-size or the 256 MiB decoder memory limit).
-    /// It has no effect under --zip-consistency ignore, which skips that
-    /// decode. With temp-file the decoded plaintext sits in an unnamed file in
-    /// the temporary directory until extraction ends; on a tmpfs that is memory
-    /// too, and on a disk it is often no faster than memory or off. Entries
-    /// that do not fit are decoded again.
-    #[arg(long, value_enum, value_name = "MODE")]
+    #[arg(long, value_enum, value_name = "MODE", help = decode_reuse_help())]
     pub decode_reuse: Option<DecodeReuseArg>,
 
     /// Maximum path depth allowed (minimum: 1; the security policy default
@@ -469,16 +555,7 @@ pub struct ExtractArgs {
 
     /// Extract atomically: stage in a private directory next to the
     /// destination, rename on success, remove it on failure.
-    ///
-    /// With --force the existing destination directory is replaced as a whole:
-    /// it is renamed aside, the staged content is renamed into its place, and
-    /// only then is the old destination removed, so a failure at any point
-    /// leaves either the old or the new content under the destination name.
-    /// --atomic --force refuses --include, --exclude, --strip-components and
-    /// --flatten. On Unix, --force also needs search (execute) permission
-    /// on the destination's parent directory; the destination itself need not
-    /// be readable.
-    #[arg(long)]
+    #[arg(long, long_help = atomic_long_help())]
     pub atomic: bool,
 
     /// Only extract files whose extension is in this list.
@@ -532,9 +609,14 @@ pub struct CreateArgs {
     #[arg(value_name = "SOURCE", required = true)]
     pub sources: Vec<PathBuf>,
 
-    /// Compression level (1-9)
-    #[arg(short = 'l', long, value_name = "LEVEL")]
-    pub compression_level: Option<u32>,
+    #[arg(
+        short = 'l',
+        long,
+        value_name = "LEVEL",
+        allow_negative_numbers = true,
+        help = compression_level_help()
+    )]
+    pub compression_level: Option<i64>,
 
     /// Follow symbolic links
     #[arg(long)]
@@ -643,13 +725,12 @@ pub struct VerifyArgs {
     #[arg(long)]
     pub check_integrity: bool,
 
-    /// Extra bytes --check-integrity may decode beyond listing (K, M, G, T
-    /// suffixes; default 500M, independent of --max-total-size)
     #[arg(
         long,
         value_name = "SIZE",
         value_parser = parse_byte_size,
-        requires = "check_integrity"
+        requires = "check_integrity",
+        help = decompression_budget_help()
     )]
     pub decompression_budget: Option<u64>,
 

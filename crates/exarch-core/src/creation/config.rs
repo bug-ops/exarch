@@ -4,8 +4,8 @@ use crate::ArchiveError;
 use crate::Limit;
 use crate::PermissionPolicy;
 use crate::Result;
-use crate::creation::exclude_pattern::ExcludePattern;
 use crate::error::RequestedLevel;
+use crate::pattern::EntryPattern;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -21,7 +21,11 @@ use std::path::PathBuf;
 ///
 /// let level = CompressionLevel::try_from(9u8)?;
 /// assert_eq!(level.get(), 9);
-/// assert_eq!(CompressionLevel::default().get(), 6);
+/// assert_eq!(CompressionLevel::default(), CompressionLevel::DEFAULT);
+/// assert_eq!(
+///     (CompressionLevel::MIN.get(), CompressionLevel::MAX.get()),
+///     (1, 9)
+/// );
 /// assert!(CompressionLevel::try_from(0u8).is_err());
 /// assert!(CompressionLevel::try_from(10u32).is_err());
 /// # Ok::<(), exarch_core::ArchiveError>(())
@@ -30,6 +34,13 @@ use std::path::PathBuf;
 pub struct CompressionLevel(u8);
 
 impl CompressionLevel {
+    /// The default level, 6.
+    pub const DEFAULT: Self = Self(6);
+    /// The highest level, 9: slowest, smallest output.
+    pub const MAX: Self = Self(9);
+    /// The lowest level, 1: fastest, largest output.
+    pub const MIN: Self = Self(1);
+
     /// The level on the 1-9 scale.
     #[must_use]
     pub const fn get(self) -> u8 {
@@ -39,7 +50,7 @@ impl CompressionLevel {
 
 impl Default for CompressionLevel {
     fn default() -> Self {
-        Self(6)
+        Self::DEFAULT
     }
 }
 
@@ -51,7 +62,7 @@ impl TryFrom<u8> for CompressionLevel {
     /// Returns [`ArchiveError::InvalidCompressionLevel`] if `level` is not in
     /// 1-9.
     fn try_from(level: u8) -> Result<Self> {
-        if (1..=9).contains(&level) {
+        if (Self::MIN.0..=Self::MAX.0).contains(&level) {
             Ok(Self(level))
         } else {
             Err(ArchiveError::InvalidCompressionLevel {
@@ -94,7 +105,7 @@ impl CompressionLevel {
     pub fn from_i128(level: i128) -> Result<Self> {
         u8::try_from(level)
             .ok()
-            .filter(|level| (1..=9).contains(level))
+            .filter(|level| (Self::MIN.0..=Self::MAX.0).contains(level))
             .map(Self)
             .ok_or_else(|| ArchiveError::InvalidCompressionLevel {
                 level: i64::try_from(level)
@@ -203,7 +214,7 @@ pub struct CreationConfig {
     /// Files matching these patterns will be skipped.
     ///
     /// Default: `[".git", ".DS_Store", "*.tmp"]`.
-    pub exclude_patterns: Vec<ExcludePattern>,
+    pub exclude_patterns: Vec<EntryPattern>,
 
     /// Prefix to strip from entry paths in the archive.
     ///
@@ -243,9 +254,9 @@ impl Default for CreationConfig {
             include_hidden: false,
             max_file_size: Limit::Unbounded,
             exclude_patterns: vec![
-                ExcludePattern::literal_name(".git"),
-                ExcludePattern::literal_name(".DS_Store"),
-                ExcludePattern::suffix_name(".tmp"),
+                EntryPattern::literal_name(".git"),
+                EntryPattern::literal_name(".DS_Store"),
+                EntryPattern::suffix_name(".tmp"),
             ],
             strip_prefix: None,
             compression_level: CompressionLevel::default(),
@@ -322,15 +333,15 @@ impl CreationConfig {
     ///
     /// ```
     /// use exarch_core::CreationConfig;
-    /// use exarch_core::ExcludePattern;
+    /// use exarch_core::EntryPattern;
     ///
-    /// let log = ExcludePattern::try_from("*.log")?;
+    /// let log = EntryPattern::try_from("*.log")?;
     /// let config = CreationConfig::default().with_exclude_patterns(vec![log.clone()]);
     /// assert_eq!(config.exclude_patterns, vec![log]);
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
-    pub fn with_exclude_patterns(mut self, patterns: Vec<ExcludePattern>) -> Self {
+    pub fn with_exclude_patterns(mut self, patterns: Vec<EntryPattern>) -> Self {
         self.exclude_patterns = patterns;
         self
     }
@@ -419,7 +430,7 @@ mod tests {
             .with_follow_symlinks(true)
             .with_include_hidden(true)
             .with_max_file_size(crate::non_zero!(1024 * 1024))
-            .with_exclude_patterns(vec![ExcludePattern::try_from("*.log").unwrap()])
+            .with_exclude_patterns(vec![EntryPattern::try_from("*.log").unwrap()])
             .with_strip_prefix(Some(PathBuf::from("/base")))
             .with_compression_level(level)
             .with_preserve_permissions(false);
@@ -432,7 +443,7 @@ mod tests {
         );
         assert_eq!(
             config.exclude_patterns,
-            vec![ExcludePattern::try_from("*.log").unwrap()]
+            vec![EntryPattern::try_from("*.log").unwrap()]
         );
         assert_eq!(config.strip_prefix, Some(PathBuf::from("/base")));
         assert_eq!(config.compression_level, level);
@@ -494,7 +505,7 @@ mod tests {
         assert!(
             config
                 .exclude_patterns
-                .contains(&ExcludePattern::literal_name(".git")),
+                .contains(&EntryPattern::literal_name(".git")),
             "should exclude .git by default"
         );
     }

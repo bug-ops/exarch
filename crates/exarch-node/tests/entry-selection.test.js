@@ -334,8 +334,23 @@ describe('entry selection', () => {
   describe('list and verify', () => {
     it('lists every entry whatever the selection is', () => {
       const plain = listArchiveSync(archive);
-      const selected = listArchiveSync(archive, new SecurityConfig().addIncludePattern('missing'));
+      const selected = listArchiveSync(archive, new SecurityConfig().addIncludePattern('top/sub'));
       assert.strictEqual(selected.totalEntries, plain.totalEntries);
+    });
+
+    it('fails a listing on an include pattern that matched nothing, as extract does', () => {
+      const config = new SecurityConfig()
+        .addIncludePattern('top/sub')
+        .addIncludePattern('missing');
+      assert.throws(
+        () => listArchiveSync(archive, config),
+        (err) => {
+          assert.strictEqual(err.code, 'INVALID_CONFIGURATION');
+          assert.strictEqual(err.setting, 'entry_include');
+          assert.deepStrictEqual(err.unmatchedPatterns, ['missing']);
+          return true;
+        }
+      );
     });
 
     it('reports what extraction does with every entry as typed dispositions', () => {

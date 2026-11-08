@@ -91,6 +91,31 @@ impl CreationWarning {
             Self::DirectoryNotSynced { .. } => CreationWarningKind::DirectoryNotSynced,
         }
     }
+
+    /// A copy that is safe to show without leaking the host layout, so a
+    /// binding or a JSON consumer redacts every warning through one call.
+    ///
+    /// No creation warning holds a host path today, so the copy equals the
+    /// original; a variant that gains one is redacted here, in one place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::CreationWarning;
+    ///
+    /// let warning = CreationWarning::ZipRatioCheckFailed {
+    ///     reason: "invalid Zip archive".into(),
+    /// };
+    /// assert_eq!(warning.redacted(), warning);
+    /// ```
+    #[must_use]
+    pub fn redacted(&self) -> Self {
+        match self {
+            Self::ZipRatioOverDefaultLimit { .. }
+            | Self::ZipRatioCheckFailed { .. }
+            | Self::DirectoryNotSynced { .. } => self.clone(),
+        }
+    }
 }
 
 impl fmt::Display for CreationWarning {

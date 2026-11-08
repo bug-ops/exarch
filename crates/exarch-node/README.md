@@ -356,12 +356,35 @@ interface ExtractionReport {
   directoriesCreated: number; // Number of directories created
   symlinksCreated: number;    // Number of symlinks created
   bytesWritten: number;       // Total bytes written
+  sizeClamped: boolean;       // bytesWritten exceeded 2^53 - 1 and was clamped to it
   durationMs: number;         // Extraction duration in milliseconds
   filesSkipped: number;       // Entries skipped, over all reasons
-  skipped: { counts: { kind: SkipKind; count: number }[]; sample: SkippedEntry[] }; // by reason
+  skipped: { counts: { kind: SkipKind; count: number }[]; sample: SkippedEntry[]; total: number }; // by reason
   warnings: ExtractionWarning[]; // Typed conditions worth surfacing; branch on `kind`, `message` is the text
 }
 ```
+
+**Numbers.** Counts (`filesExtracted`, `totalEntries`, every `count` and
+`total`) are exact JavaScript numbers. Byte sizes are clamped to `2^53 - 1`,
+the largest integer a number holds exactly; an object with byte-size fields
+carries `sizeClamped: true` when any of them was clamped, so an absurd declared
+size is never mistaken for a real value of `9007199254740991`. The Python
+binding reports exact integers and has no such flag.
+
+**Counts shape.** `skipped.counts` and `integrityGaps.counts` are arrays of
+`{ kind | reason, count }` in a fixed order, with reasons that have no items
+left out. The Python binding exposes the same data as a dict keyed by the
+reason; both give `total`.
+
+**Tokens newer than the binding.** Fields that name a core enum value
+(`kind`, `reason`, `ioKind`, `format`, `integrityStatus`, `category`, `code`,
+`subCode`, `relaxableBy`, `setting`) carry core's own spelling, typed as the
+known union widened with `(string & {})`. A listing, verification or
+extraction that succeeded in core never fails because a report field is newer
+than the binding. A discriminated object of an unknown kind (a warning, a
+disposition, a link target, an entry) degrades to an `Unknown*` object holding
+only its token; the unions stay closed so that narrowing on the discriminant
+keeps working.
 
 ### `extractArchiveWithProgress(archivePath, outputDir, config?, options?, progress?)`
 
@@ -436,7 +459,7 @@ can be empty or truncated and a new output can be empty, and write-back errors
 (network filesystems, quotas, delayed allocation) are not reported, so success
 does not prove the bytes reached the disk.
 
-### `createArchiveWithProgress(outputPath, sources, config?, progress?, options?)`
+### `createArchiveWithProgress(outputPath, sources, config?, options?, progress?)`
 
 Async archive creation with an optional progress callback, invoked once per entry.
 
@@ -451,6 +474,7 @@ const result = await createArchiveWithProgress(
   'backup.tar.gz',
   ['src/', 'package.json'],
   undefined,  // CreationConfig or undefined
+  undefined,  // CreateOptions or undefined
   (err, [path, total, current, bytesWritten]) => {
     console.log(`[${current}/${total}] ${path}`);
   }
@@ -464,8 +488,8 @@ const result = await createArchiveWithProgress(
 | `outputPath` | `string` | Path to the output archive file |
 | `sources` | `string[]` | Source files/directories to include |
 | `config` | `CreationConfig \| undefined` | Optional creation configuration |
-| `progress` | `(err: Error \| null, arg: ProgressArgs) => void \| undefined` | Optional progress callback |
 | `options` | `CreateOptions \| undefined` | Optional `{ format, overwrite, durability }` (see Create options) |
+| `progress` | `(err: Error \| null, arg: ProgressArgs) => void \| undefined` | Optional progress callback, last like in every `*WithProgress` function |
 
 **Returns:** `Promise<CreationReport>`
 
@@ -489,10 +513,23 @@ const config = new SecurityConfig()
   .withFlatten(true)                          // Land every file under its final component (replaces a strip count)
   .withAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
   .withZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'
-  .withParallelDecodeMemory(256 * 1024 * 1024); // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread
+  .withParallelDecodeMemory(256 * 1024 * 1024) // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread
+  .withMaxSolidCompressionRatio(n)            // Ratio limit of a solid 7z block; only while solid archives are allowed
+  .withMaxTarMetadataBytes(bytes)             // TAR metadata budget (default 4 MiB)
+  .withMaxDecoderMemory(bytes)                // Decoder dictionary/window memory (default 256 MiB)
+  .withCompressedMemberAllowance(n)           // Base gzip members / bzip2 streams of a compressed TAR (default 10,000)
+  .withAllowWindowsReservedNames(true);       // Allow CON, NUL, COM1, ... components (Windows only; default: false)
 ```
 
-**Getters:** `allowedExtensions` returns the allowlist, or `null` while every extension is allowed. `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`. `parallelDecodeMemory` returns the 7z lookahead memory in bytes, or `null` when decoding runs on one thread. Each extract or verify call may start up to 16 worker threads and hold its own lookahead, so concurrent calls multiply both.
+An error whose `relaxableBy` or `setting` names one of these says which call
+relaxes it.
+
+**List options.** `listArchive*` take a trailing optional `ListOptions`:
+`new ListOptions().withStoredTargets('read')` reads the symlink targets a 7z
+archive keeps in compressed entry data, which decodes part of the archive;
+the default `'skip'` reports them as `'unread'`.
+
+**Getters:** `maxTarMetadataBytes`, `maxDecoderMemory`, `compressedMemberAllowance`, `maxSolidCompressionRatio` (`null` while solid archives are not allowed) and `allowWindowsReservedNames` return the settings above. `allowedExtensions` returns the allowlist, or `null` while every extension is allowed. `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`. `parallelDecodeMemory` returns the 7z lookahead memory in bytes, or `null` when decoding runs on one thread. Each extract or verify call may start up to 16 worker threads and hold its own lookahead, so concurrent calls multiply both.
 
 ### Selecting and rewriting entries
 

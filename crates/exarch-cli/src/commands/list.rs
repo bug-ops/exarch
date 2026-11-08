@@ -22,6 +22,13 @@ const fn manifest_view(args: &ListArgs) -> ManifestView {
     }
 }
 
+/// Runs `list`: lists the archive under the selection and prints the manifest.
+/// It reports and does not judge: an entry extraction would refuse is marked,
+/// and the exit status stays 0.
+///
+/// # Errors
+///
+/// The core failure of the listing, or the CLI's own refusal of a flag value.
 pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = security_config(args, SecurityConfig::default())?;
 

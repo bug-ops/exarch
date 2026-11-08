@@ -858,6 +858,19 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_scratch_use_gets_its_own_empty_buffer() {
+        let hits = IncludeHits::of(&EntrySelection::default());
+        hits.with_scratch(|outer| {
+            outer.push(1);
+            hits.with_scratch(|inner| {
+                assert!(inner.is_empty());
+                inner.push(2);
+            });
+            assert_eq!(outer.as_slice(), [1]);
+        });
+    }
+
+    #[test]
     fn link_target_maps_through_the_same_rules() {
         let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
         let selection = EntrySelection::default()

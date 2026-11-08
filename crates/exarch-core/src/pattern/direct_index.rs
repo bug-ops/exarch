@@ -2,8 +2,10 @@
 //!
 //! A direct pattern is a literal name, a `*suffix`, an anchored literal path
 //! or the match-all pattern. Testing them one by one costs entries times
-//! patterns; [`DirectIndex`] answers every pattern of the list with one pass
-//! over the path whose cost does not depend on the number of patterns.
+//! patterns; [`DirectIndex`] answers every pattern of the list with hash
+//! probes whose number depends on the path and on the distinct key lengths
+//! (at most 255), not on the number of patterns. Memory stays proportional to
+//! the pattern bytes.
 
 use super::Engine;
 use super::EntryPattern;
@@ -15,49 +17,10 @@ use std::ops::ControlFlow;
 /// The positions, in the list, of the patterns that share one key.
 type Owners = SmallVec<[usize; 1]>;
 
-#[derive(Default)]
-struct Node {
-    /// Sorted by byte, so a lookup is a binary search.
-    edges: Vec<(u8, Self)>,
-    owners: Owners,
-}
+type KeyMap = HashMap<Box<[u8]>, Owners>;
 
-impl Node {
-    fn child(&self, byte: u8) -> Option<&Self> {
-        self.edges
-            .binary_search_by_key(&byte, |(edge, _)| *edge)
-            .ok()
-            .and_then(|at| self.edges.get(at))
-            .map(|(_, node)| node)
-    }
-
-    fn child_or_insert(&mut self, byte: u8) -> Option<&mut Self> {
-        let at = self.edges.partition_point(|(edge, _)| *edge < byte);
-        if self.edges.get(at).is_none_or(|(edge, _)| *edge != byte) {
-            self.edges.insert(at, (byte, Self::default()));
-        }
-        self.edges.get_mut(at).map(|(_, node)| node)
-    }
-}
-
-/// A byte trie whose nodes own the patterns whose key ends there.
-#[derive(Default)]
-struct ByteTrie {
-    root: Node,
-}
-
-impl ByteTrie {
-    fn insert(&mut self, key: impl IntoIterator<Item = u8>, owner: usize) {
-        let mut node = &mut self.root;
-        for byte in key {
-            // An edge was just created or found, so `None` cannot happen.
-            let Some(next) = node.child_or_insert(byte) else {
-                return;
-            };
-            node = next;
-        }
-        node.owners.push(owner);
-    }
+fn add_owner(map: &mut KeyMap, key: &[u8], owner: usize) {
+    map.entry(key.into()).or_default().push(owner);
 }
 
 fn visit_owners(
@@ -67,6 +30,14 @@ fn visit_owners(
     owners.iter().try_for_each(|owner| visit(*owner))
 }
 
+/// The distinct key lengths of `map`, ascending.
+fn key_lengths(map: &KeyMap) -> Box<[usize]> {
+    let mut lengths: Vec<usize> = map.keys().map(|key| key.len()).collect();
+    lengths.sort_unstable();
+    lengths.dedup();
+    lengths.into_boxed_slice()
+}
+
 /// Every direct pattern of a list, indexed by what it matches.
 ///
 /// Floating and anchored keys never share a structure: `x` selects a
@@ -74,12 +45,16 @@ fn visit_owners(
 #[derive(Default)]
 pub(super) struct DirectIndex {
     /// Literal names, looked up once per path component.
-    floating: HashMap<Box<[u8]>, Owners>,
-    /// Anchored paths, walked forward over the path.
-    anchored: ByteTrie,
-    /// `*suffix` names, keyed by the reversed suffix and walked from the end
-    /// of each component; the root owns the bare `*`.
-    suffixes: ByteTrie,
+    floating: KeyMap,
+    /// Anchored paths, probed at every `/` boundary of the path and at its
+    /// end, never past the longest key.
+    anchored: KeyMap,
+    longest_anchored: usize,
+    /// The suffix of each `*suffix` name; the empty key is the bare `*`.
+    suffixes: KeyMap,
+    /// The distinct suffix lengths, ascending: the tail of each component is
+    /// probed once per length.
+    suffix_lengths: Box<[usize]>,
     match_all: Owners,
 }
 
@@ -95,20 +70,19 @@ impl DirectIndex {
             match &pattern.shape {
                 Shape::MatchAll => index.match_all.push(position),
                 Shape::Floating(name) => match name.as_bytes().strip_prefix(b"*") {
-                    Some(suffix) => index
-                        .suffixes
-                        .insert(suffix.iter().rev().copied(), position),
-                    None => index
-                        .floating
-                        .entry(name.as_bytes().into())
-                        .or_default()
-                        .push(position),
+                    Some(suffix) => add_owner(&mut index.suffixes, suffix, position),
+                    None => add_owner(&mut index.floating, name.as_bytes(), position),
                 },
-                Shape::Anchored(path) => {
-                    index.anchored.insert(path.bytes(), position);
-                }
+                Shape::Anchored(path) => add_owner(&mut index.anchored, path.as_bytes(), position),
             }
         }
+        index.suffix_lengths = key_lengths(&index.suffixes);
+        index.longest_anchored = index
+            .anchored
+            .keys()
+            .map(|key| key.len())
+            .max()
+            .unwrap_or(0);
         index
     }
 
@@ -127,27 +101,30 @@ impl DirectIndex {
     }
 
     /// The anchored patterns that equal the path or a leading run of its
-    /// components; the walk is bounded by the longest key.
+    /// components: the prefixes ending before a `/` or at the end, none longer
+    /// than the longest key.
     fn visit_anchored(
         &self,
         path: &[u8],
         visit: &mut impl FnMut(usize) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
-        let mut node = &self.anchored.root;
-        let mut rest = path;
-        loop {
-            if rest.first().is_none_or(|byte| *byte == b'/') {
-                visit_owners(&node.owners, visit)?;
-            }
-            let Some((byte, tail)) = rest.split_first() else {
-                return ControlFlow::Continue(());
-            };
-            let Some(next) = node.child(*byte) else {
-                return ControlFlow::Continue(());
-            };
-            node = next;
-            rest = tail;
+        if self.anchored.is_empty() {
+            return ControlFlow::Continue(());
         }
+        let slashes = path
+            .iter()
+            .enumerate()
+            .take(self.longest_anchored.saturating_add(1))
+            .filter(|(_, byte)| **byte == b'/')
+            .map(|(at, _)| at);
+        let end = (path.len() <= self.longest_anchored).then_some(path.len());
+        slashes.chain(end).try_for_each(|boundary| {
+            path.get(..boundary)
+                .and_then(|prefix| self.anchored.get(prefix))
+                .map_or(ControlFlow::Continue(()), |owners| {
+                    visit_owners(owners, visit)
+                })
+        })
     }
 
     fn visit_component(
@@ -158,14 +135,16 @@ impl DirectIndex {
         if let Some(owners) = self.floating.get(component) {
             visit_owners(owners, visit)?;
         }
-        let mut node = &self.suffixes.root;
-        visit_owners(&node.owners, visit)?;
-        for byte in component.iter().rev() {
-            let Some(next) = node.child(*byte) else {
+        for length in &self.suffix_lengths {
+            let Some(start) = component.len().checked_sub(*length) else {
                 break;
             };
-            node = next;
-            visit_owners(&node.owners, visit)?;
+            if let Some(owners) = component
+                .get(start..)
+                .and_then(|suffix| self.suffixes.get(suffix))
+            {
+                visit_owners(owners, visit)?;
+            }
         }
         ControlFlow::Continue(())
     }

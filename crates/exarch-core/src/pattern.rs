@@ -1111,6 +1111,159 @@ mod tests {
         assert_eq!(refusal("C:x"), PatternRefusal::Absolute);
     }
 
+    type Positions = std::collections::BTreeSet<usize>;
+
+    fn visited(list: &PatternList, path: &[u8]) -> Positions {
+        let mut found = Positions::new();
+        list.matching(Some(path), &mut Vec::new(), |index| {
+            found.insert(index);
+        });
+        found
+    }
+
+    fn own_results(patterns: &[EntryPattern], path: &[u8]) -> Positions {
+        patterns
+            .iter()
+            .enumerate()
+            .filter(|(_, pattern)| pattern.matches_normalized(path))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn edge_patterns() -> Vec<EntryPattern> {
+        let long_name = "a".repeat(255);
+        let long_suffix = format!("*{}", "a".repeat(254));
+        let long_anchored = format!("x/{}", "a".repeat(252));
+        [
+            "*",
+            "*b",
+            "*ab",
+            "*\u{e9}",
+            "\u{e9}",
+            "x",
+            "./x",
+            "x/d",
+            "a/b",
+            "target",
+            "*.tmp",
+            "a/*",
+            &long_name,
+            &long_suffix,
+            &long_anchored,
+        ]
+        .iter()
+        .map(|text| pattern(text))
+        .collect()
+    }
+
+    fn edge_paths() -> Vec<Vec<u8>> {
+        let mut paths: Vec<Vec<u8>> = [
+            &b"b"[..],
+            b"ab",
+            b"xab",
+            b"",
+            b"/",
+            b"a//b",
+            b"a/",
+            b"/a",
+            b"a/b/c",
+            b"x",
+            b"x/y",
+            b"y/x",
+            b"a.tmp",
+            &[0xFF],
+            &[b'a', 0xFF],
+            &[0xA9],
+            &[0xC3],
+            &[b'x', b'/', 0xFF, 0xC3, 0xA9],
+        ]
+        .iter()
+        .map(|path| path.to_vec())
+        .collect();
+        paths.extend(
+            ["\u{e9}", "caf\u{e9}", "x/\u{e9}", "\u{e9}/x"]
+                .iter()
+                .map(|path| path.as_bytes().to_vec()),
+        );
+        for length in [253, 254, 255, 256, 300] {
+            let run = "a".repeat(length);
+            paths.push(run.clone().into_bytes());
+            paths.push(format!("x/{run}").into_bytes());
+            paths.push(format!("x/{run}/z").into_bytes());
+        }
+        paths.push("x/d/".repeat(300).into_bytes());
+        paths
+    }
+
+    #[test]
+    fn a_list_agrees_with_its_patterns_on_edge_paths() {
+        let patterns = edge_patterns();
+        let list = PatternList::from(patterns.clone());
+        for path in edge_paths() {
+            assert_eq!(
+                visited(&list, &path),
+                own_results(&patterns, &path),
+                "{:?}",
+                String::from_utf8_lossy(&path)
+            );
+            assert_eq!(
+                list.any_match(Some(&path)),
+                !own_results(&patterns, &path).is_empty()
+            );
+        }
+        assert!(
+            visited(&list, &[0xFF]).contains(&0),
+            "`*` matches raw bytes"
+        );
+        assert!(
+            !visited(&list, &[0xA9]).contains(&3),
+            "a split multi-byte suffix"
+        );
+        assert!(visited(&list, "caf\u{e9}".as_bytes()).contains(&3));
+    }
+
+    #[test]
+    fn the_separate_glob_fallback_agrees_with_the_combined_index() {
+        let patterns = edge_patterns();
+        let list = PatternList::from(patterns.clone());
+        let direct = DirectIndex::new(patterns.iter().enumerate());
+        assert!(
+            list.index
+                .set(ListIndex {
+                    direct,
+                    globs: GlobIndex::Separate,
+                })
+                .is_ok()
+        );
+        for path in edge_paths() {
+            assert_eq!(visited(&list, &path), own_results(&patterns, &path));
+            assert_eq!(
+                list.any_match(Some(&path)),
+                !own_results(&patterns, &path).is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn a_direct_visit_stops_at_the_first_break() {
+        let patterns: Vec<_> = ["a", "*", "a/b", "b"].iter().map(|t| pattern(t)).collect();
+        let index = DirectIndex::new(patterns.iter().enumerate());
+        let mut seen = 0;
+        let flow = index.visit(b"a/b", |_| {
+            seen += 1;
+            ControlFlow::Break(())
+        });
+        assert!(flow.is_break());
+        assert_eq!(seen, 1);
+        let mut all = 0;
+        let flow = index.visit(b"a/b", |_| {
+            all += 1;
+            ControlFlow::Continue(())
+        });
+        assert!(flow.is_continue());
+        assert!(all > 1);
+    }
+
     fn name_strategy() -> impl Strategy<Value = String> {
         "[a-c_][a-c._]{0,2}"
     }

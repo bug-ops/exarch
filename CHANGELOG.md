@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Docs: `exarch-cli` skill split into a 151-line `SKILL.md` and eight `references/` files within Agent Skills size limits (#1066).
 - **Breaking**: `with_atomic` and `with_skip_duplicates` are replaced by `with_staging` and `with_existing_files`, and the extension allowlist is an `ExtensionFilter` whose empty list refuses instead of allowing all (#972, #975, #999).
 - **Breaking**: every `exarch_core` module is private and its public items are re-exported once from the crate root; the concrete format handlers, `ZIP_FAMILY_ALIASES` and the creation filter functions are no longer public (#978, #999).
 - **Breaking**: a corrupt or truncated payload in ZIP, 7z, tar.xz and TAR is `InvalidArchive` whatever the destination state, while source and destination faults stay `Io` and a forged declared size stays `SecurityViolation` (#964, #965, #999).

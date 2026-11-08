@@ -2877,7 +2877,7 @@ mod tests {
             .try_set_include_patterns(Some(&strings(&["src"])), SelectionEdit::Replace)
             .unwrap();
         let err = config
-            .try_set_include_patterns(Some(&strings(&["ok", "**/x"])), SelectionEdit::Replace)
+            .try_set_include_patterns(Some(&strings(&["ok", "/x"])), SelectionEdit::Replace)
             .unwrap_err();
         assert_matches!(
             err,

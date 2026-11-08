@@ -182,9 +182,7 @@ describe('entry selection', () => {
     });
 
     it('selects entries with glob patterns', () => {
-      const config = new SecurityConfig()
-        .addIncludePattern('top/**/?.rs')
-        .addExcludePattern('d.*');
+      const config = new SecurityConfig().addIncludePattern('top/**/?.rs').addExcludePattern('d.*');
       extractArchiveSync(archive, out, config);
       assert.deepStrictEqual(extractedFiles(), ['top/sub/b.rs']);
     });

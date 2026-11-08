@@ -83,10 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: glob selection compiles one combined set per pattern list, adopted atomic root modes are typed (`DirMode`), the 7z probe and ZIP parsers share bounds-checked little-endian readers, FFI message tables are exhaustive, and `io::Error` sideband markers share one `IoMarker` trait (#1039, #1040, #1042, #1043, #1044, #1046, #1065).
 - Core: Windows reserved names also refuse `CLOCK$`, `CONFIG$` and `COM`/`LPT` followed by superscript digits four to nine, a superset of zip2 9.4.1 (#1030, #1065).
 - CI: the MSRV job checks the whole workspace on Rust 1.99.1, not only `exarch-core` (#1057, #1065).
-- **Breaking**: `NarrowingReason::AclHasInheritableEntries` and `acl_has_inheritable_entries` are removed from core, the CLI `--json` `root_access_narrowed` reasons, Python and Node, because atomic extraction now seeds the destination's inheritable ACL entries onto the staging root instead of narrowing the root (#1067).
-- Core: `indexing_slicing` and `arithmetic_side_effects` are enforced across all of `exarch-core` from `lib.rs` instead of the format and security modules, and the remaining sites use checked or saturating forms that stay restrictive (#1070).
-- Core: `fs_view` tree nodes are addressed by a `NodeId` minted by a private arena and 7z files by a header-minted `FileIndex` with one `SevenZHeader::file` accessor (#1071, #1072).
-- Tests: the CLI interrupt tests join their stderr reader, drive the repeated-SIGINT case through a FIFO and run under a `package(exarch-cli)` nextest override with a 2 s leak timeout that reports a leak without failing the run (#1075).
+- **Breaking**: `NarrowingReason::AclHasInheritableEntries` and `acl_has_inheritable_entries` are removed from core, the CLI `--json` `root_access_narrowed` reasons, Python and Node, because atomic extraction now seeds the destination's inheritable ACL entries onto the staging root instead of narrowing the root (#1067, #1081).
+- Core: `indexing_slicing` and `arithmetic_side_effects` are enforced across all of `exarch-core` from `lib.rs` instead of the format and security modules, and the remaining sites use checked or saturating forms that stay restrictive (#1070, #1081).
+- Core: `fs_view` tree nodes are addressed by a `NodeId` minted by a private arena and 7z files by a header-minted `FileIndex` with one `SevenZHeader::file` accessor (#1071, #1072, #1081).
+- Tests: the CLI interrupt tests join their stderr reader, drive the repeated-SIGINT case through a FIFO and run under a `package(exarch-cli)` nextest override with a 2 s leak timeout that reports a leak without failing the run (#1075, #1081).
 
 ### Fixed
 
@@ -104,7 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `completion` no longer panics when stdout fails, and a cancelled run prints `Operation cancelled` once (#1049, #1037, #1065).
 - Python and Node: `leftover_path` survives a cancelled progress callback (#995, #1019).
 - Core: a 7z archive whose stream map would shift file contents is refused when it is opened by list, verify and extract (#769, #1024).
-- Core: atomic extraction seeds the destination's default ACL (Linux) and inheritable entries (macOS) onto the staging root before any child exists, so extracted files and directories inherit what an in-place extraction would give; the stage stays 0700, the umask probe runs before the seed, and a destination that is replaced or vanishes before publish leaves a 0700 root with no ACL (#1067).
+- Core: atomic extraction seeds the destination's default ACL (Linux) and inheritable entries (macOS) onto the staging root before any child exists, so extracted files and directories inherit what an in-place extraction would give; the stage stays 0700, the umask probe runs before the seed, and a destination that is replaced or vanishes before publish leaves a 0700 root with no ACL (#1067, #1081).
 
 ## [0.9.0] - 2026-11-05
 

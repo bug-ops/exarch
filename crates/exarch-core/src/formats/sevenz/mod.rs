@@ -394,6 +394,7 @@ pub(crate) use admit::sevenz_entry_compression;
 pub(crate) use admit::sevenz_refusals;
 pub(crate) use classify::SevenZClass;
 pub(crate) use classify::SevenZKind;
+pub(crate) use header::FileIndex;
 pub(crate) use header::HeaderLimit;
 pub(crate) use header::SEVENZ_MAGIC;
 pub(crate) use header::SevenZHeader;

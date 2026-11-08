@@ -83,7 +83,7 @@ impl<'a> ProgressTracker<'a> {
     pub(crate) fn begin<'p>(&'p mut self, path: &'p Path) -> crate::Result<EntryCompleteGuard<'p>> {
         let position =
             EntryPosition::at_index(self.current_entry, EntryTotal::Known(self.total_entries));
-        self.current_entry += 1;
+        self.current_entry = self.current_entry.saturating_add(1);
         EntryCompleteGuard::try_start(&mut *self.progress, path, position)
     }
 
@@ -209,8 +209,10 @@ impl<R: Read> Read for ProgressReader<'_, R> {
         }
         let bytes_read = self.inner.read(buf)?;
         if bytes_read > 0 {
-            self.total_read += bytes_read as u64;
-            self.bytes_since_last_update += bytes_read as u64;
+            self.total_read = self.total_read.saturating_add(bytes_read as u64);
+            self.bytes_since_last_update = self
+                .bytes_since_last_update
+                .saturating_add(bytes_read as u64);
             if self.bytes_since_last_update >= self.batch_threshold {
                 self.progress.on_bytes_written(self.bytes_since_last_update);
                 self.bytes_since_last_update = 0;

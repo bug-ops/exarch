@@ -6,6 +6,7 @@ use super::admit::sevenz_refusals;
 use super::decode::decode_block_entries;
 use super::decode::is_sevenz_payload;
 use super::header::BlockIndex;
+use super::header::FileIndex;
 use super::header::PerBlock;
 use super::header::SevenZHeader;
 use super::links::BlockScan;
@@ -27,7 +28,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 /// A payload file of a block: its archive file index and integrity slot.
-pub(super) type PayloadFile = (usize, Slot);
+pub(super) type PayloadFile = (FileIndex, Slot);
 
 /// Groups the payload files of each block through
 /// `stream_map.file_block_index`.
@@ -39,10 +40,10 @@ pub(super) fn payload_by_block(
     slots: &[Option<Slot>],
 ) -> PerBlock<Vec<PayloadFile>> {
     let mut blocks = header.per_block(Vec::new());
-    for index in 0..header.files().len() {
+    for index in header.file_indices() {
         if let (Some(block), Some(Some(slot)), true) = (
-            header.file_block(index),
-            slots.get(index),
+            header.file_block(index.get()),
+            slots.get(index.get()),
             is_decode_announced(header, index, true),
         ) {
             blocks[block].push((index, *slot));
@@ -54,10 +55,8 @@ pub(super) fn payload_by_block(
 /// Whether the integrity decode of the file at `index` (rather than the listing
 /// walk) reports it: a payload file that has an integrity slot (`has_slot`) and
 /// belongs to a block.
-pub(crate) fn is_decode_announced(header: &SevenZHeader, index: usize, has_slot: bool) -> bool {
-    has_slot
-        && header.file_block(index).is_some()
-        && header.files().get(index).is_some_and(is_sevenz_payload)
+pub(crate) fn is_decode_announced(header: &SevenZHeader, index: FileIndex, has_slot: bool) -> bool {
+    has_slot && header.file_block(index.get()).is_some() && is_sevenz_payload(header.file(index))
 }
 
 /// Decodes every payload block of a parsed 7z archive for an integrity pass.
@@ -137,19 +136,8 @@ pub(crate) fn verify_sevenz_blocks<R: Read + Seek>(
 }
 
 /// Path of the archive file at `index`, as listed in the manifest.
-pub(super) fn file_path(header: &SevenZHeader, index: usize) -> PathBuf {
-    PathBuf::from(common::normalize_entry_name(&file_at(header, index).name))
-}
-
-/// The archive file at `index`, an index of the payload lists built from
-/// `files().iter().enumerate()` or the decoder's file counter, which
-/// `is_decode_announced` checks with `files().get(index)`.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "indices come from `files().iter().enumerate()` payload lists and from the decoder's file counter, which `is_decode_announced` checks with `files().get(index)`"
-)]
-fn file_at(header: &SevenZHeader, index: usize) -> &sevenz_rust2::ArchiveEntry {
-    &header.files()[index]
+pub(super) fn file_path(header: &SevenZHeader, index: FileIndex) -> PathBuf {
+    PathBuf::from(common::normalize_entry_name(&header.file(index).name))
 }
 
 /// Announces and closes the archive files at `indices`, whose payload the
@@ -157,7 +145,7 @@ fn file_at(header: &SevenZHeader, index: usize) -> &sevenz_rust2::ArchiveEntry {
 fn announce_skipped(
     progress: &mut Progress<'_>,
     header: &SevenZHeader,
-    indices: impl Iterator<Item = usize>,
+    indices: impl Iterator<Item = FileIndex>,
 ) -> Result<()> {
     for index in indices {
         progress.begin(&file_path(header, index))?.complete();
@@ -170,7 +158,7 @@ pub(super) fn mark_files(
     pass: &mut IntegrityPass<'_>,
     header: &SevenZHeader,
     reason: UnverifiedReason,
-    indices: impl Iterator<Item = usize>,
+    indices: impl Iterator<Item = FileIndex>,
 ) {
     for index in indices {
         pass.mark_unverified(reason, &file_path(header, index));
@@ -184,7 +172,7 @@ pub(super) fn record_block_failure(
     header: &SevenZHeader,
     lead: (&Path, Slot),
     failure: DecodeFailure,
-    others: &[usize],
+    others: &[FileIndex],
 ) -> Result<()> {
     let reason = match failure {
         DecodeFailure::ResourceLimit(_) => UnverifiedReason::ResourceLimit,
@@ -204,8 +192,8 @@ pub(super) fn entries_uncovered_by_block_crc(
     block_has_crc: bool,
     entry_sizes: u64,
     block_size: u64,
-    entries: impl Iterator<Item = (usize, bool)>,
-) -> Vec<usize> {
+    entries: impl Iterator<Item = (FileIndex, bool)>,
+) -> Vec<FileIndex> {
     if !block_has_crc || entry_sizes == block_size {
         return Vec::new();
     }
@@ -231,14 +219,14 @@ fn visit_announced(
     file: &sevenz_rust2::ArchiveEntry,
     reader: &mut dyn Read,
 ) -> bool {
-    let index = scan.next_file;
-    if !is_decode_announced(
-        header,
-        index,
-        matches!(scan.slots.get(index), Some(Some(_))),
-    ) {
-        return scan.visit(file, reader);
-    }
+    let position = scan.next_file;
+    let has_slot = matches!(scan.slots.get(position), Some(Some(_)));
+    let Some(index) = header
+        .file_index(position)
+        .filter(|&index| is_decode_announced(header, index, has_slot))
+    else {
+        return scan.visit(header, file, reader);
+    };
     let path = file_path(header, index);
     let in_flight = match progress.begin(&path) {
         Ok(guard) => guard,
@@ -247,7 +235,7 @@ fn visit_announced(
             return false;
         }
     };
-    let keep_going = scan.visit(file, reader);
+    let keep_going = scan.visit(header, file, reader);
     in_flight.complete();
     keep_going
 }
@@ -311,7 +299,9 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
     );
     let (stop, visited) = (scan.stop.take(), scan.visited);
 
-    let unvisited: Vec<usize> = all.filter(|index| !visited.contains(index)).collect();
+    let unvisited: Vec<FileIndex> = all
+        .filter(|index| !visited.contains(&index.get()))
+        .collect();
     announce_skipped(progress, header, unvisited.iter().copied())?;
     match (stop, result) {
         (Some(BlockStop::Fatal(e)), _) => return Err(e),
@@ -325,13 +315,13 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
             let Some(&(index, slot)) = payload
                 .iter()
                 .rev()
-                .find(|(index, _)| visited.contains(index))
+                .find(|(index, _)| visited.contains(&index.get()))
                 .or_else(|| payload.first())
             else {
                 return Err(e.into());
             };
             let path = file_path(header, index);
-            let others: Vec<usize> = unvisited.into_iter().filter(|&i| i != index).collect();
+            let others: Vec<FileIndex> = unvisited.into_iter().filter(|&i| i != index).collect();
             return record_block_failure(
                 pass,
                 header,
@@ -349,12 +339,12 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
             );
             let entry_sizes = payload
                 .iter()
-                .map(|&(index, _)| file_at(header, index).size)
+                .map(|&(index, _)| header.file(index).size)
                 .fold(0, u64::saturating_add);
             let own_crcs = payload
                 .iter()
-                .filter(|(index, _)| visited.contains(index))
-                .map(|&(index, _)| (index, file_at(header, index).has_crc));
+                .filter(|(index, _)| visited.contains(&index.get()))
+                .map(|&(index, _)| (index, header.file(index).has_crc));
             let uncovered = entries_uncovered_by_block_crc(
                 block.has_crc,
                 entry_sizes,

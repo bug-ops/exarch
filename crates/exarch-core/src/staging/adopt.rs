@@ -17,7 +17,6 @@ mod imp {
     use super::StagingDir;
     use crate::NarrowingReason;
     use crate::formats::file_identity::FileIdentity;
-    use crate::formats::file_identity::IdentityCheck;
     use crate::formats::pinned_dir::EntryMode;
     use crate::formats::pinned_dir::EntryStatus;
     use crate::formats::pinned_dir::LeafBuf;
@@ -106,6 +105,7 @@ mod imp {
         mode: DirMode,
         owner: Option<Owner>,
         acl: AclPlan,
+        destination: Option<FileIdentity>,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -156,6 +156,7 @@ mod imp {
                     claim,
                 }),
                 acl,
+                destination: Some(status.identity),
             }
         }
 
@@ -184,7 +185,18 @@ mod imp {
                     claim,
                 }),
                 acl,
+                destination: None,
             }
+        }
+
+        /// This adoption as taken from the destination `identity` names.
+        #[cfg(test)]
+        pub(in crate::staging) const fn of_destination_identity(
+            mut self,
+            identity: FileIdentity,
+        ) -> Self {
+            self.destination = Some(identity);
+            self
         }
     }
 
@@ -210,6 +222,7 @@ mod imp {
                             mode: DirMode::of_umask_probe(status.mode),
                             owner: None,
                             acl: AclPlan::None,
+                            destination: None,
                         });
                     }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -229,11 +242,18 @@ mod imp {
         /// permission bits and setgid are dropped instead of being granted to
         /// whichever group the directory ended up in.
         ///
-        /// Whatever ACL the root inherited from its parent is removed first, so
-        /// the root's ACL is the destination's and nothing else. The
-        /// destination's ACL is copied only onto a root that ended up with the
-        /// destination's uid and gid; otherwise, and when the copy fails, the
-        /// root stays `0700`.
+        /// Whatever ACL the root inherited from its parent, or was seeded with
+        /// for its children, is removed first, so the root's ACL is the
+        /// destination's and nothing else. The destination's ACL is copied
+        /// only onto a root that ended up with the destination's uid and gid;
+        /// otherwise, and when the copy fails, the root stays `0700`.
+        ///
+        /// The root also stays `0700`, with no ACL, when its children could
+        /// not inherit from the destination being adopted, or were seeded from
+        /// one that is gone (see [`Inherited::withholds`]): they would
+        /// otherwise sit under a root that grants more than what they were
+        /// made under. The destination's owner is still claimed, so the
+        /// owner keeps access, unless the destination is another directory.
         ///
         /// Returns every way the root ended up with less access than the
         /// destination had.
@@ -244,23 +264,30 @@ mod imp {
         /// changing its mode, or a directory that is no longer the one
         /// created.
         pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<Narrowed> {
-            let dir = self.parent.open_dir_file(self.name.as_leaf())?;
-            if FileIdentity::of_file(&dir).check(self.id) != IdentityCheck::Same {
-                return Err(io::Error::other("the staging directory was replaced"));
-            }
+            let dir = self.open_verified()?;
             let Adoption {
                 mut mode,
                 owner,
                 acl,
+                destination,
             } = adoption;
             let mut narrowed = Narrowed::none();
-            let resolution = match owner {
-                Some(owner) => {
-                    acl::clear_inherited(self.parent, self.name.as_leaf())?;
-                    let root = claim_owner(&dir, owner, &mut mode, &mut narrowed)?;
-                    acl::resolve(acl, owner.ids, root)
+            let withheld = self.inherited.withholds(destination);
+            if withheld.is_some() || owner.is_some() {
+                acl::clear_inherited(self.parent, self.name.as_leaf())?;
+            }
+            // Another directory than the one that was seeded from has other
+            // owners: its uid and gid are not this destination's to claim.
+            let claimed = match owner {
+                Some(owner) if withheld != Some(NarrowingReason::DestinationChanged) => {
+                    Some((owner, claim_owner(&dir, owner, &mut mode, &mut narrowed)?))
                 }
-                None => Resolution::NoAcl,
+                _ => None,
+            };
+            let resolution = match (withheld, claimed) {
+                (Some(reason), _) => Resolution::Private(reason),
+                (None, Some((owner, root))) => acl::resolve(acl, owner.ids, root),
+                (None, None) => Resolution::NoAcl,
             };
             let applied = match resolution {
                 Resolution::NoAcl => dir.set_permissions(mode.permissions()),
@@ -273,6 +300,22 @@ mod imp {
             };
             self.adopted = Some(dir);
             applied.map(|()| narrowed)
+        }
+
+        /// The reason the root stays as private as it is although the
+        /// destination vanished before it could be adopted, if its children
+        /// were seeded from that destination or could not inherit from it;
+        /// the root's ACL is cleared then, as [`adopt`](Self::adopt) does.
+        ///
+        /// # Errors
+        ///
+        /// The I/O error of clearing the ACL.
+        pub(in crate::staging) fn vanished_reason(&self) -> io::Result<Option<NarrowingReason>> {
+            let reason = self.inherited.withholds(None);
+            if reason.is_some() {
+                acl::clear_inherited(self.parent, self.name.as_leaf())?;
+            }
+            Ok(reason)
         }
 
         /// Makes an adopted directory private again, through the descriptor
@@ -577,6 +620,12 @@ mod imp {
 
         pub(in crate::staging) fn adopt(&mut self, _adoption: Adoption) -> io::Result<Narrowed> {
             Ok(Narrowed::none())
+        }
+
+        pub(in crate::staging) fn vanished_reason(
+            &self,
+        ) -> io::Result<Option<crate::NarrowingReason>> {
+            Ok(None)
         }
 
         pub(in crate::staging) fn reset_private(&self) {}

@@ -156,7 +156,7 @@ fn add_directory_to_tar<W: Write>(
     header.set_cksum();
     builder.append_data(&mut header, archive_path, std::io::empty())?;
 
-    report.directories_added += 1;
+    report.directories_added = report.directories_added.saturating_add(1);
 
     Ok(())
 }
@@ -190,8 +190,8 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
     };
     copy_outcome(appended, fault, file_path)?;
 
-    report.files_added += 1;
-    report.bytes_written += size;
+    report.files_added = report.files_added.saturating_add(1);
+    report.bytes_written = report.bytes_written.saturating_add(size);
 
     Ok(())
 }
@@ -211,7 +211,7 @@ fn add_symlink_to_tar<W: Write>(
 
     builder.append_link(&mut header, link_path, target)?;
 
-    report.symlinks_added += 1;
+    report.symlinks_added = report.symlinks_added.saturating_add(1);
 
     Ok(())
 }

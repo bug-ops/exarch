@@ -79,7 +79,6 @@ _NarrowingReason = Literal[
     "acl_unreadable",
     "destination_changed",
     "unmapped_id",
-    "acl_has_inheritable_entries",
     "ownership_differs",
     "acl_copy_failed",
     "group_not_kept",

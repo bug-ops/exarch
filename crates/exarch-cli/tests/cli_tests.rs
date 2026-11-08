@@ -8154,28 +8154,35 @@ mod interrupt {
     }
 
     /// A spawned `exarch` that is killed and reaped when the test ends, so a
-    /// failed assertion or a timeout cannot leave it running.
-    struct Reaped(std::process::Child);
+    /// failed assertion or a timeout cannot leave it running. It also owns
+    /// the thread draining the child's stderr, joined once the child is gone.
+    struct Reaped {
+        child: std::process::Child,
+        stderr_drain: Option<std::thread::JoinHandle<()>>,
+    }
 
     impl std::ops::Deref for Reaped {
         type Target = std::process::Child;
 
         fn deref(&self) -> &Self::Target {
-            &self.0
+            &self.child
         }
     }
 
     impl std::ops::DerefMut for Reaped {
         fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.0
+            &mut self.child
         }
     }
 
     impl Drop for Reaped {
         fn drop(&mut self) {
             // An already reaped child makes both calls fail, which is fine.
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(drain) = self.stderr_drain.take() {
+                let _ = drain.join();
+            }
         }
     }
 
@@ -8185,7 +8192,10 @@ mod interrupt {
 
     impl SpawnReaped for Command {
         fn spawn_reaped(&mut self) -> Reaped {
-            Reaped(self.spawn().expect("spawn exarch"))
+            Reaped {
+                child: self.spawn().expect("spawn exarch"),
+                stderr_drain: None,
+            }
         }
     }
 
@@ -8202,21 +8212,30 @@ mod interrupt {
         let mut first = String::new();
         lines.read_line(&mut first).expect("first progress line");
         assert!(!first.is_empty(), "the run produced no progress line");
-        std::thread::spawn(move || {
+        child.stderr_drain = Some(std::thread::spawn(move || {
             let mut sink = String::new();
             while lines.read_line(&mut sink).is_ok_and(|n| n > 0) {
                 sink.clear();
             }
-        });
+        }));
         child
     }
 
-    fn sigint(child: &std::process::Child) {
+    /// Delivers `signal` (a `kill` option such as `-INT`) to `child`. `kill`
+    /// gets null streams so it can never hold a pipe of the test process.
+    fn raise(child: &std::process::Child, signal: &str) {
         let status = Command::new("kill")
-            .args(["-INT", &child.id().to_string()])
+            .args([signal, &child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .expect("run kill");
         assert!(status.success());
+    }
+
+    fn sigint(child: &std::process::Child) {
+        raise(child, "-INT");
     }
 
     #[test]
@@ -8332,11 +8351,7 @@ mod interrupt {
     }
 
     fn sigterm(child: &std::process::Child) {
-        let status = Command::new("kill")
-            .args(["-TERM", &child.id().to_string()])
-            .status()
-            .expect("run kill");
-        assert!(status.success());
+        raise(child, "-TERM");
     }
 
     #[test]
@@ -8463,32 +8478,62 @@ mod interrupt {
         assert_eq!(status.signal(), Some(15), "{status:?}");
     }
 
-    /// A repeated signal exits at once; whichever path ends the run, `--json`
-    /// still gets exactly one document, and it is the `Cancelled` error.
+    fn make_fifo(path: &Path) {
+        let status = Command::new("mkfifo")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success());
+    }
+
+    /// The archive is a FIFO nobody writes to, so the run stays blocked
+    /// reading it: the first SIGINT only requests a graceful stop that cannot
+    /// complete, and a repeated one always takes the forced exit. The signal
+    /// is resent until the process ends, since standard signals coalesce.
+    /// The forced report is best effort, so the oracle is the exit status
+    /// plus "at most one `Cancelled` document". A status other than 130
+    /// would mean the blocked read was interrupted and failed instead.
     #[test]
-    fn repeated_sigint_under_json_writes_one_cancelled_document() {
+    fn repeated_sigint_under_json_forces_the_exit_with_130() {
         use std::io::Read as _;
-        use std::os::unix::process::ExitStatusExt as _;
 
         let temp = TempDir::new().expect("temp dir");
-        let tar = temp.path().join("many.tar");
-        write_many_entries_tar(&tar, 40_000);
+        let fifo = temp.path().join("blocked.tar");
+        make_fifo(&fifo);
         let out = temp.path().join("out");
 
         let mut child = exarch()
             .args(["--json", "extract"])
-            .arg(&tar)
+            .arg(&fifo)
             .arg(&out)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn_reaped();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while leftovers(temp.path()).is_empty() {
-            assert!(std::time::Instant::now() < deadline, "the run never staged");
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        sigint(&child);
-        sigint(&child);
+        // Opening for writing completes once `exarch` has opened the read end.
+        let (opened, writer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = opened.send(std::fs::OpenOptions::new().write(true).open(fifo));
+        });
+        let held = writer
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("exarch never opened the archive")
+            .expect("open the archive for writing");
+
+        let ended_by = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let status = loop {
+            sigint(&child);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Some(status) = child.try_wait().expect("poll") {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < ended_by,
+                "the run outlived repeated SIGINTs"
+            );
+        };
         let mut stdout = Vec::new();
         child
             .stdout
@@ -8496,18 +8541,19 @@ mod interrupt {
             .expect("piped stdout")
             .read_to_end(&mut stdout)
             .expect("read stdout");
-        let status = child.wait().expect("wait");
+        drop(held);
 
-        // The second signal may land after the graceful stop already ended
-        // the process, which then dies by SIGINT instead of exiting 130.
-        assert!(
-            status.code() == Some(130) || status.signal() == Some(2),
-            "{status:?}"
-        );
-        let json: serde_json::Value =
-            serde_json::from_slice(&stdout).expect("exactly one JSON document");
-        assert_eq!(json["status"], "error", "{json}");
-        assert_eq!(json["error"]["kind"], "Cancelled", "{json}");
+        let stdout = String::from_utf8_lossy(&stdout);
+        assert_eq!(status.code(), Some(130), "{status:?}, stdout: {stdout:?}");
+        let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&stdout)
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|error| panic!("{error}; stdout: {stdout:?}"));
+        assert!(documents.len() <= 1, "{documents:?}");
+        for json in &documents {
+            assert_eq!(json["status"], "error", "{json}");
+            assert_eq!(json["error"]["kind"], "Cancelled", "{json}");
+        }
     }
 
     /// Whichever path ends the run, a stdout pipe that is full and never read

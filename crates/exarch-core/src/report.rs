@@ -260,9 +260,6 @@ closed_enum! {
         DestinationChanged => "destination_changed",
         /// The list names a user or group the reading process cannot map.
         UnmappedId => "unmapped_id",
-        /// The list holds entries that children inherit, which the root alone
-        /// cannot carry.
-        AclHasInheritableEntries => "acl_has_inheritable_entries",
         /// The root belongs to another user or group than the destination, so
         /// its list would grant the wrong principals.
         OwnershipDiffers => "ownership_differs",
@@ -528,7 +525,9 @@ impl ExtractionReport {
     /// this alone.
     #[must_use]
     pub fn total_items(&self) -> usize {
-        self.files_extracted + self.directories_created + self.symlinks_created
+        self.files_extracted
+            .saturating_add(self.directories_created)
+            .saturating_add(self.symlinks_created)
     }
 
     /// Returns whether any warnings were generated.

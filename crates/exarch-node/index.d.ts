@@ -2687,7 +2687,7 @@ export interface NameCollision {
  * Why the published root of an atomic extraction gives less access than the
  * destination it replaced or filled.
  */
-export type NarrowingReason = 'acl_unreadable' | 'destination_changed' | 'unmapped_id' | 'acl_has_inheritable_entries' | 'ownership_differs' | 'acl_copy_failed' | 'group_not_kept' | 'foreign_write_dropped' | 'owner_not_kept' | 'destination_vanished'
+export type NarrowingReason = 'acl_unreadable' | 'destination_changed' | 'unmapped_id' | 'ownership_differs' | 'acl_copy_failed' | 'group_not_kept' | 'foreign_write_dropped' | 'owner_not_kept' | 'destination_vanished'
 
 /** A link target above the host's name limits. */
 export interface OversizedLinkTarget {

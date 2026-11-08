@@ -122,7 +122,7 @@ impl ArchiveManifest {
     /// Records an entry dropped for its over-long path; its position counts
     /// the kept and the dropped entries listed before it.
     pub(crate) fn add_oversized(&mut self, bytes: usize) {
-        let index = self.entries.len() + self.oversized.len();
+        let index = self.entries.len().saturating_add(self.oversized.len());
         self.oversized.push(OversizedEntry::new(index, bytes));
     }
 
@@ -150,7 +150,7 @@ impl ArchiveManifest {
         {
             return None;
         }
-        let position = index - dropped_before;
+        let position = index.checked_sub(dropped_before)?;
         (position < self.entries.len()).then_some(position)
     }
 

@@ -15,9 +15,67 @@
 //! existing destination those are removed at creation and again at adoption,
 //! and a failure to remove them fails the run.
 //!
-//! The ACL is created before the children are, so an inheritable entry of the
-//! destination never reaches them through the root; the macOS copy therefore
-//! refuses a list that has such entries.
+//! The children of an in-place extraction inherit the destination's own
+//! inheritable entries, so the staging directory is seeded with them at
+//! creation (see [`Inheritance`]): the Linux default ACL, and on macOS the
+//! inheritable entries rewritten as `ONLY_INHERIT`, which children receive and
+//! the staging directory itself does not apply. Adoption then replaces the
+//! seed with the destination's full list.
+
+/// What the children of a staging directory inherit from the destination the
+/// staged tree will fill or replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Inheritance {
+    /// The destination has nothing its children inherit.
+    None,
+    /// Inheritable entries to write onto the staging directory before
+    /// anything is extracted into it.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    Stage(InheritedAcl),
+    /// The destination's ACL cannot be carried faithfully, so its children
+    /// inherit nothing from it and the published root stays `0700`.
+    #[cfg(unix)]
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "android", target_os = "macos")),
+        allow(
+            dead_code,
+            reason = "only platforms that look for an ACL ever withhold the inheritance"
+        )
+    )]
+    Withheld(crate::NarrowingReason),
+}
+
+/// Reads the inheritance of the directory `name` of `pin`, which must still be
+/// the directory `expected` names.
+///
+/// # Errors
+///
+/// The I/O error of [`read_destination`].
+#[cfg(unix)]
+pub(super) fn read_inheritance(
+    pin: &crate::formats::pinned_dir::VettedDir,
+    name: crate::formats::pinned_dir::Leaf<'_>,
+    parent_path: &std::path::Path,
+    expected: crate::formats::file_identity::FileIdentity,
+) -> std::io::Result<Inheritance> {
+    read_destination(pin, name, parent_path, expected).map(|plan| plan.inheritance())
+}
+
+/// Platforms without Unix ACLs have no inheritance to carry.
+#[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    clippy::missing_const_for_fn,
+    reason = "keeps the call sites platform-neutral"
+)]
+pub(super) fn read_inheritance(
+    _pin: &crate::formats::pinned_dir::VettedDir,
+    _name: crate::formats::pinned_dir::Leaf<'_>,
+    _parent_path: &std::path::Path,
+    _expected: crate::formats::file_identity::FileIdentity,
+) -> std::io::Result<Inheritance> {
+    Ok(Inheritance::None)
+}
 
 #[cfg(unix)]
 mod imp {
@@ -105,6 +163,50 @@ mod imp {
             AclPlan::Copy(_) => Resolution::Private(NarrowingReason::OwnershipDiffers),
             AclPlan::Private(reason) => Resolution::Private(reason),
         }
+    }
+
+    impl AclPlan {
+        /// What the children of a directory with this ACL inherit.
+        pub(in crate::staging) fn inheritance(&self) -> super::Inheritance {
+            match self {
+                Self::None => super::Inheritance::None,
+                #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+                Self::Copy(acl) => acl
+                    .inheritance()
+                    .map_or(super::Inheritance::None, super::Inheritance::Stage),
+                Self::Private(reason) => super::Inheritance::Withheld(*reason),
+            }
+        }
+    }
+
+    /// Writes `inheritance` onto the freshly cleared staging directory `dir`.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of writing the entries.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    pub(in crate::staging) fn stage(
+        dir: &std::fs::File,
+        inheritance: &super::Inheritance,
+    ) -> std::io::Result<()> {
+        match inheritance {
+            super::Inheritance::Stage(acl) => acl.write_to(dir),
+            super::Inheritance::None | super::Inheritance::Withheld(_) => Ok(()),
+        }
+    }
+
+    /// Other Unixes carry no ACL handling.
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    #[allow(
+        clippy::unnecessary_wraps,
+        clippy::missing_const_for_fn,
+        reason = "keeps the signature of the platforms that stage an ACL"
+    )]
+    pub(in crate::staging) fn stage(
+        _dir: &std::fs::File,
+        _inheritance: &super::Inheritance,
+    ) -> std::io::Result<()> {
+        Ok(())
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -326,6 +428,11 @@ mod linux {
             self.access.is_some()
         }
 
+        /// The default ACL, which is what children inherit.
+        pub(in crate::staging) fn inheritance(&self) -> Option<InheritedAcl> {
+            self.default.clone().map(InheritedAcl)
+        }
+
         /// Makes the ACLs of `dir` exactly these: a blob that is present is
         /// written (default first, then access) and one that is absent is
         /// removed, so nothing inherited from the parent survives.
@@ -366,6 +473,45 @@ mod linux {
                 access: access.map(raw),
                 default: default.map(raw),
             }
+        }
+    }
+
+    /// The default ACL of a destination, staged on the root before anything is
+    /// extracted so that children inherit it as they would in place.
+    ///
+    /// Only the default ACL is written: it is never consulted for access to
+    /// the directory that holds it, so the staging directory stays `0700`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(in crate::staging) struct InheritedAcl(AclBlob);
+
+    impl InheritedAcl {
+        pub(in crate::staging) fn write_to(&self, dir: &File) -> io::Result<()> {
+            rustix::fs::fsetxattr(dir, DEFAULT, &self.0.0, rustix::fs::XattrFlags::empty())?;
+            Ok(())
+        }
+
+        /// The bytes of the default ACL.
+        #[cfg(test)]
+        pub(in crate::staging) fn bytes(&self) -> &[u8] {
+            &self.0.0
+        }
+
+        /// A value the kernel refuses to store.
+        #[cfg(test)]
+        pub(in crate::staging) fn invalid_for_test() -> Self {
+            Self(AclBlob(vec![0xff; 7].into_boxed_slice()))
+        }
+
+        /// A minimal valid default ACL: owner `rwx`, group `r-x`, other none.
+        #[cfg(test)]
+        pub(in crate::staging) fn valid_for_test() -> Self {
+            let mut bytes = VERSION.to_le_bytes().to_vec();
+            for (tag, perm) in [(0x01_u16, 7_u16), (0x04, 5), (0x20, 0)] {
+                bytes.extend_from_slice(&tag.to_le_bytes());
+                bytes.extend_from_slice(&perm.to_le_bytes());
+                bytes.extend_from_slice(&UNDEFINED_ID.to_le_bytes());
+            }
+            Self(AclBlob(bytes.into_boxed_slice()))
         }
     }
 
@@ -617,6 +763,29 @@ mod linux {
         }
 
         #[test]
+        fn only_the_default_acl_is_what_children_inherit() {
+            let entries = [(USER_OBJ, NO_ID), (GROUP_OBJ, NO_ID), (OTHER, NO_ID)];
+            let default = blob_of(&entries);
+            let both = PosixAcl::for_test(Some(blob_of(&entries)), Some(default.clone()));
+            let access_only = PosixAcl::for_test(Some(blob_of(&entries)), None);
+
+            assert_eq!(both.inheritance().unwrap().bytes(), default.as_slice());
+            assert!(access_only.inheritance().is_none());
+            assert_matches!(
+                AclPlan::Copy(access_only).inheritance(),
+                crate::staging::acl::Inheritance::None
+            );
+        }
+
+        #[test]
+        fn a_private_plan_withholds_the_inheritance_for_its_reason() {
+            assert_matches!(
+                AclPlan::Private(NarrowingReason::UnmappedId).inheritance(),
+                crate::staging::acl::Inheritance::Withheld(NarrowingReason::UnmappedId)
+            );
+        }
+
+        #[test]
         fn the_size_limit_of_an_attribute_is_the_boundary_of_a_readable_blob() {
             let blob_of_len = |len: usize| {
                 let mut bytes = vec![0_u8; len];
@@ -727,16 +896,55 @@ mod macos {
     const ENVELOPE_LEN: usize = 12;
     /// Offset of the `attrreference_t` in the attribute buffer.
     const REFERENCE_AT: usize = 4;
-    /// `KAUTH_ACE_FILE_INHERIT | DIRECTORY_INHERIT | ONLY_INHERIT`.
-    const INHERIT_FLAGS: u32 = 0x20 | 0x40 | 0x100;
+    /// `KAUTH_ACE_FILE_INHERIT | DIRECTORY_INHERIT`: the flags that make an
+    /// entry reach children. `LIMIT_INHERIT` alone does not.
+    const CHILD_INHERIT_FLAGS: u32 = 0x20 | 0x40;
+    /// `KAUTH_ACE_ONLY_INHERIT`: the entry is for children only and is not
+    /// evaluated for the directory that holds it.
+    const ONLY_INHERIT: u32 = 0x100;
 
     /// A destination's ACL as a serialized `kauth_filesec` with its owner and
     /// group GUIDs zeroed.
     ///
     /// The bytes passed the checks of [`parse`]: the magic, the entry count and
-    /// the size agree, and no entry is inherited by children.
+    /// the size agree.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(in crate::staging) struct MacAcl(Box<[u8]>);
+
+    /// The entries of a destination's ACL that children inherit, rewritten as
+    /// `ONLY_INHERIT` so the staging directory that holds them does not apply
+    /// them to itself (measured on Darwin 25.6: children get them with
+    /// `inherited` set and `ONLY_INHERIT` cleared).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(in crate::staging) struct InheritedAcl(MacAcl);
+
+    impl InheritedAcl {
+        pub(in crate::staging) fn write_to(&self, dir: &File) -> io::Result<()> {
+            self.0.write_to(dir)
+        }
+
+        #[cfg(test)]
+        pub(in crate::staging) fn acl(&self) -> &MacAcl {
+            &self.0
+        }
+
+        /// A value the kernel refuses to store.
+        #[cfg(test)]
+        pub(in crate::staging) fn invalid_for_test() -> Self {
+            Self(MacAcl::raw_for_test(vec![0xff; 5]))
+        }
+
+        /// One inheritable allow entry for everyone.
+        #[cfg(test)]
+        pub(in crate::staging) fn valid_for_test() -> Self {
+            const EVERYONE: [u8; GUID_LEN] = [
+                0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0x00, 0x00,
+                0x00, 0x0C,
+            ];
+            let list = MacAcl::from_entries(&[(EVERYONE, 1 | 0x20 | 0x40, 0x2)]);
+            list.inheritance().unwrap_or_else(Self::invalid_for_test)
+        }
+    }
 
     /// One access control entry.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -768,6 +976,18 @@ mod macos {
                 Err(e) if is_unsupported(&e) => Ok(()),
                 other => other,
             }
+        }
+
+        /// The inheritable entries in their original order, or `None` when no
+        /// entry reaches children.
+        pub(in crate::staging) fn inheritance(&self) -> Option<InheritedAcl> {
+            let entries: Vec<_> = self
+                .aces()
+                .into_iter()
+                .filter(|ace| ace.flags & CHILD_INHERIT_FLAGS != 0)
+                .map(|ace| (ace.applicable, ace.flags | ONLY_INHERIT, ace.rights))
+                .collect();
+            (!entries.is_empty()).then(|| InheritedAcl(Self(filesec(&entries).into_boxed_slice())))
         }
 
         fn aces(&self) -> Vec<Ace> {
@@ -810,7 +1030,8 @@ mod macos {
     /// zeroed owner and group.
     fn filesec(entries: &[([u8; GUID_LEN], u32, u32)]) -> Vec<u8> {
         let count = u32::try_from(entries.len()).unwrap_or(NO_ACL);
-        let mut bytes = Vec::with_capacity(HEADER_LEN + ENTRY_LEN * entries.len());
+        let mut bytes =
+            Vec::with_capacity(HEADER_LEN.saturating_add(ENTRY_LEN.saturating_mul(entries.len())));
         bytes.extend_from_slice(&MAGIC.to_ne_bytes());
         bytes.extend_from_slice(&[0; COUNT_AT - OWNER_AT]);
         bytes.extend_from_slice(&count.to_ne_bytes());
@@ -851,9 +1072,7 @@ mod macos {
     ///
     /// # Errors
     ///
-    /// [`NarrowingReason::AclUnreadable`] for any of the above;
-    /// [`NarrowingReason::AclHasInheritableEntries`] for a list that children
-    /// would inherit from.
+    /// [`NarrowingReason::AclUnreadable`] for any of the above.
     fn parse(attribute: &[u8]) -> Result<Option<MacAcl>, NarrowingReason> {
         let unreadable = NarrowingReason::AclUnreadable;
         let total = ne_u32(attribute, 0)
@@ -901,11 +1120,7 @@ mod macos {
         if let Some(guids) = owned.get_mut(OWNER_AT..COUNT_AT) {
             guids.fill(0);
         }
-        let acl = MacAcl(owned.into_boxed_slice());
-        if acl.aces().iter().any(|ace| ace.flags & INHERIT_FLAGS != 0) {
-            return Err(NarrowingReason::AclHasInheritableEntries);
-        }
-        Ok(Some(acl))
+        Ok(Some(MacAcl(owned.into_boxed_slice())))
     }
 
     // `fsetattrlist` reports a volume without ACL support as `ENOTSUP`.
@@ -954,9 +1169,8 @@ mod macos {
     /// symlink, its identity is compared with `expected`, and the ACL is read
     /// through that same descriptor, so a swap of the entry cannot change
     /// which object is read. A directory its caller cannot open for reading,
-    /// an ACL that cannot be read in full or parsed, a list with entries that
-    /// children inherit, and a directory that is no longer `expected` give
-    /// [`AclPlan::Private`].
+    /// an ACL that cannot be read in full or parsed, and a directory that is no
+    /// longer `expected` give [`AclPlan::Private`].
     ///
     /// # Errors
     ///
@@ -993,9 +1207,12 @@ mod macos {
             0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0x00, 0x00,
             0x00, 0x0C,
         ];
+        const KIND_ALLOW: u32 = 1;
         const KIND_DENY: u32 = 2;
         const KIND_MASK: u32 = 0xf;
         const FILE_INHERIT: u32 = 0x20;
+        const DIRECTORY_INHERIT: u32 = 0x40;
+        const LIMIT_INHERIT: u32 = 0x80;
         const RIGHT_DELETE: u32 = 0x10;
         const RIGHT_LIST: u32 = 0x2;
 
@@ -1072,21 +1289,136 @@ mod macos {
         }
 
         #[test]
-        fn inheritable_entries_are_refused() {
+        fn inheritable_entries_parse() {
             for flags in [0x20, 0x40, 0x100, KIND_DENY | FILE_INHERIT] {
                 let attribute = attribute_of(&filesec(&[entry(KIND_DENY), entry(flags)]));
-                assert_eq!(
-                    parse(&attribute).unwrap_err(),
-                    NarrowingReason::AclHasInheritableEntries,
-                    "{flags:#x}"
-                );
+                assert_matches!(parse(&attribute), Ok(Some(_)), "{flags:#x}");
             }
         }
 
         #[test]
         fn a_limit_inherit_entry_alone_is_not_inheritance() {
-            let attribute = attribute_of(&filesec(&[entry(KIND_DENY | 0x80)]));
-            assert_matches!(parse(&attribute), Ok(Some(_)));
+            let acl = MacAcl::from_entries(&[entry(KIND_DENY | 0x80)]);
+            assert!(acl.inheritance().is_none());
+        }
+
+        #[test]
+        fn an_access_only_list_has_no_inheritance() {
+            let acl = MacAcl::from_entries(&[entry(KIND_DENY), entry(KIND_ALLOW)]);
+            assert!(acl.inheritance().is_none());
+        }
+
+        /// The GUID the kernel stores for an entry that names the current user.
+        fn own_guid() -> [u8; GUID_LEN] {
+            let output = Command::new("/usr/bin/id").arg("-un").output().unwrap();
+            let name = String::from_utf8(output.stdout).unwrap();
+            let scratch = tempfile::tempdir().unwrap();
+            let _clear = ClearAcl(scratch.path());
+            add_ace(
+                scratch.path(),
+                &format!("user:{} allow list,directory_inherit", name.trim()),
+            );
+            let acl = read_acl(&File::open(scratch.path()).unwrap()).unwrap();
+            acl.aces().first().unwrap().applicable
+        }
+
+        /// The kernel keeps its promise that an `ONLY_INHERIT` entry is for
+        /// children alone: a `deny list` aimed at the current user leaves the
+        /// directory that holds it listable and not the directory made in it.
+        #[test]
+        fn only_inherit_entries_reach_children_and_not_the_directory_holding_them() {
+            let denying =
+                MacAcl::from_entries(&[(own_guid(), KIND_DENY | DIRECTORY_INHERIT, RIGHT_LIST)]);
+            let stage = tempfile::tempdir().unwrap();
+            let _clear = ClearAcl(stage.path());
+
+            denying
+                .inheritance()
+                .unwrap()
+                .write_to(&File::open(stage.path()).unwrap())
+                .unwrap();
+
+            assert!(std::fs::read_dir(stage.path()).is_ok());
+            std::fs::create_dir(stage.path().join("child")).unwrap();
+            let refused = std::fs::read_dir(stage.path().join("child")).unwrap_err();
+            assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        }
+
+        #[test]
+        fn writing_an_inheritable_list_does_not_reach_existing_children() {
+            let temp = tempfile::tempdir().unwrap();
+            let _clear = ClearAcl(temp.path());
+            std::fs::create_dir(temp.path().join("child")).unwrap();
+            let list = MacAcl::from_entries(&[(
+                EVERYONE,
+                KIND_DENY | FILE_INHERIT | DIRECTORY_INHERIT,
+                RIGHT_DELETE,
+            )]);
+
+            list.write_to(&File::open(temp.path()).unwrap()).unwrap();
+
+            let child = File::open(temp.path().join("child")).unwrap();
+            assert!(read_acl(&child).is_none());
+        }
+
+        #[test]
+        fn a_plan_maps_to_the_inheritance_of_its_list() {
+            use crate::staging::acl::Inheritance;
+
+            assert_matches!(
+                AclPlan::Copy(MacAcl::from_entries(&[entry(KIND_DENY)])).inheritance(),
+                Inheritance::None
+            );
+            assert_matches!(
+                AclPlan::Copy(MacAcl::from_entries(&[entry(KIND_DENY | FILE_INHERIT)]))
+                    .inheritance(),
+                Inheritance::Stage(_)
+            );
+            assert_matches!(
+                AclPlan::Private(NarrowingReason::UnmappedId).inheritance(),
+                Inheritance::Withheld(NarrowingReason::UnmappedId)
+            );
+        }
+
+        #[test]
+        fn inheritable_entries_are_kept_in_order_as_only_inherit() {
+            let acl = MacAcl::from_entries(&[
+                (EVERYONE, KIND_DENY | FILE_INHERIT, RIGHT_DELETE),
+                (EVERYONE, KIND_ALLOW, RIGHT_LIST),
+                (
+                    EVERYONE,
+                    KIND_ALLOW | DIRECTORY_INHERIT | LIMIT_INHERIT,
+                    RIGHT_LIST,
+                ),
+                (
+                    EVERYONE,
+                    KIND_DENY | ONLY_INHERIT | FILE_INHERIT,
+                    RIGHT_LIST,
+                ),
+            ]);
+
+            let staged = acl.inheritance().unwrap();
+
+            assert_eq!(
+                staged.acl().aces(),
+                [
+                    Ace {
+                        applicable: EVERYONE,
+                        flags: KIND_DENY | FILE_INHERIT | ONLY_INHERIT,
+                        rights: RIGHT_DELETE
+                    },
+                    Ace {
+                        applicable: EVERYONE,
+                        flags: KIND_ALLOW | DIRECTORY_INHERIT | LIMIT_INHERIT | ONLY_INHERIT,
+                        rights: RIGHT_LIST
+                    },
+                    Ace {
+                        applicable: EVERYONE,
+                        flags: KIND_DENY | ONLY_INHERIT | FILE_INHERIT,
+                        rights: RIGHT_LIST
+                    },
+                ]
+            );
         }
 
         #[test]
@@ -1132,9 +1464,7 @@ mod macos {
             let Ok(Fetched::Complete(attribute)) = darwin_acl::fetch(&dir) else {
                 panic!("the attribute should be readable");
             };
-            let reason = parse(&attribute).unwrap_err();
-
-            assert_eq!(reason, NarrowingReason::AclHasInheritableEntries);
+            assert_matches!(parse(&attribute), Ok(Some(_)));
             let filesec = attribute.get(ENVELOPE_LEN..).unwrap();
             assert_eq!(ne_u32(filesec, 0), Some(MAGIC), "the kernel's byte order");
             let acl = MacAcl(filesec.into());
@@ -1191,7 +1521,10 @@ mod macos {
 
         impl Drop for ClearAcl<'_> {
             fn drop(&mut self) {
-                let _ = Command::new("/bin/chmod").args(["-N"]).arg(self.0).status();
+                let _ = Command::new("/bin/chmod")
+                    .args(["-R", "-N"])
+                    .arg(self.0)
+                    .status();
             }
         }
 
@@ -1229,8 +1562,12 @@ mod macos {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(super) use linux::InheritedAcl;
 #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
 pub(super) use linux::PosixAcl as CopiedAcl;
+#[cfg(target_os = "macos")]
+pub(super) use macos::InheritedAcl;
 #[cfg(all(unix, target_os = "macos"))]
 pub(super) use macos::MacAcl as CopiedAcl;
 
@@ -1262,15 +1599,6 @@ mod imp {
     ) -> io::Result<AclPlan> {
         Ok(AclPlan)
     }
-
-    #[allow(
-        clippy::unnecessary_wraps,
-        clippy::missing_const_for_fn,
-        reason = "keeps the call sites platform-neutral"
-    )]
-    pub(in crate::staging) fn clear_inherited(_pin: &VettedDir, _name: Leaf<'_>) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 pub(super) use imp::AclPlan;
@@ -1278,7 +1606,10 @@ pub(super) use imp::AclPlan;
 pub(super) use imp::Ownership;
 #[cfg(unix)]
 pub(super) use imp::Resolution;
+#[cfg(unix)]
 pub(super) use imp::clear_inherited;
 pub(super) use imp::read_destination;
 #[cfg(unix)]
 pub(super) use imp::resolve;
+#[cfg(unix)]
+pub(super) use imp::stage;

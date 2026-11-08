@@ -4,6 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::admit::sevenz_entry_compression;
+use super::header::FileIndex;
 use super::header::HeaderLimit;
 use super::links::LinkOutcome;
 use super::links::LinkReadFailure;
@@ -90,7 +91,7 @@ fn config(solid: bool) -> SecurityConfig {
 fn table(indices: &[usize]) -> LinkTable<()> {
     let mut table = LinkTable::default();
     for &index in indices {
-        table.push(index, ()).unwrap();
+        table.push(FileIndex::at(index), ()).unwrap();
     }
     table
 }
@@ -109,7 +110,7 @@ fn walk(
         config,
         &table(links),
         &mut |index, outcome| {
-            seen.push((index, outcome));
+            seen.push((index.get(), outcome));
             Ok(())
         },
     )
@@ -124,14 +125,23 @@ fn target(path: &str) -> StoredLinkTarget {
 #[test]
 fn a_link_table_accepts_only_ascending_indices() {
     let mut table = LinkTable::default();
-    table.push(2, "a").unwrap();
-    table.push(5, "b").unwrap();
+    table.push(FileIndex::at(2), "a").unwrap();
+    table.push(FileIndex::at(5), "b").unwrap();
 
-    assert_matches!(table.push(5, "c"), Err(ArchiveError::InvalidArchive(_)));
-    assert_matches!(table.push(3, "c"), Err(ArchiveError::InvalidArchive(_)));
-    assert_eq!(table.get(5), Some(&"b"));
-    assert_eq!(table.get(3), None);
-    assert_eq!(table.indices().collect::<Vec<_>>(), [2, 5]);
+    assert_matches!(
+        table.push(FileIndex::at(5), "c"),
+        Err(ArchiveError::InvalidArchive(_))
+    );
+    assert_matches!(
+        table.push(FileIndex::at(3), "c"),
+        Err(ArchiveError::InvalidArchive(_))
+    );
+    assert_eq!(table.get(FileIndex::at(5)), Some(&"b"));
+    assert_eq!(table.get(FileIndex::at(3)), None);
+    assert_eq!(
+        table.indices().map(FileIndex::get).collect::<Vec<_>>(),
+        [2, 5]
+    );
 }
 
 #[test]

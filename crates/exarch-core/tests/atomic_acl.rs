@@ -11,16 +11,23 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::EntryPosition;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::ExtractionWarning;
 use exarch_core::NarrowingReason;
+use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::Staging;
 use tempfile::TempDir;
 
 const MODES: [Staging; 2] = [Staging::Atomic, Staging::AtomicReplace];
+
+/// The paths of the archive's tree, relative to the destination, which the
+/// root's own ACL is compared at as well as its children's.
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+const TREE: [&str; 4] = ["", "p.txt", "d", "d/q.txt"];
 
 struct Fixture {
     #[cfg_attr(
@@ -33,33 +40,99 @@ struct Fixture {
     temp: TempDir,
     archive: PathBuf,
     dest: PathBuf,
+    twin: PathBuf,
+    config: SecurityConfig,
+}
+
+/// Runs a closure once the extraction wrote its last entry, before anything
+/// is published, and can cancel the run right after.
+struct AtEnd {
+    act: Option<Box<dyn FnOnce() + Send>>,
+    cancel: bool,
+    finished: bool,
+}
+
+impl AtEnd {
+    fn new(act: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            act: Some(Box::new(act)),
+            cancel: false,
+            finished: false,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn cancelling() -> Self {
+        Self {
+            act: None,
+            cancel: true,
+            finished: false,
+        }
+    }
+}
+
+impl ProgressCallback for AtEnd {
+    fn on_entry_start(&mut self, _: &Path, _: EntryPosition) {}
+
+    fn on_bytes_written(&mut self, _: u64) {}
+
+    fn on_entry_complete(&mut self, _: &Path) {}
+
+    fn on_complete(&mut self) {
+        if let Some(act) = self.act.take() {
+            act();
+        }
+        self.finished = true;
+    }
+
+    fn is_cancelled(&mut self) -> bool {
+        self.cancel && self.finished
+    }
 }
 
 impl Fixture {
+    /// A destination, and a twin of it that is extracted in place, which is
+    /// what a staged extraction must be indistinguishable from.
     fn new() -> Self {
         let temp = TempDir::new().unwrap();
         let mut builder = tar::Builder::new(Vec::new());
-        let mut header = tar::Header::new_gnu();
-        header.set_size(2);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "p.txt", &b"ok"[..])
-            .unwrap();
-        let archive = temp.path().canonicalize().unwrap().join("a.tar");
+        let mut dir = tar::Header::new_gnu();
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_mode(0o755);
+        dir.set_size(0);
+        dir.set_cksum();
+        builder.append_data(&mut dir, "d/", &b""[..]).unwrap();
+        for name in ["p.txt", "d/q.txt"] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(2);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, &b"ok"[..]).unwrap();
+        }
+        let root = temp.path().canonicalize().unwrap();
+        let archive = root.join("a.tar");
         std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
-        let dest = archive.with_file_name("dest");
+        let dest = root.join("dest");
+        let twin = root.join("twin");
         std::fs::create_dir(&dest).unwrap();
+        std::fs::create_dir(&twin).unwrap();
         Self {
             temp,
             archive,
             dest,
+            twin,
+            config: SecurityConfig::default(),
         }
     }
 
-    fn extract(&self, staging: Staging) -> ExtractionReport {
-        let report = ExtractRequest::new(&SecurityConfig::default())
+    fn request(&self, staging: Staging) -> ExtractRequest<'_> {
+        ExtractRequest::new(&self.config)
             .with_options(ExtractionOptions::default().with_staging(staging))
+    }
+
+    fn extract(&self, staging: Staging) -> ExtractionReport {
+        let report = self
+            .request(staging)
             .extract(&self.archive, &self.dest)
             .unwrap_or_else(|e| panic!("{staging:?}: {e}"));
         assert_eq!(
@@ -69,6 +142,51 @@ impl Fixture {
         );
         report
     }
+
+    /// Like [`extract`](Self::extract), running `observe` when the last entry
+    /// was written.
+    fn extract_observed(
+        &self,
+        staging: Staging,
+        observe: impl FnOnce() + Send + 'static,
+    ) -> ExtractionReport {
+        let mut progress = AtEnd::new(observe);
+        self.request(staging)
+            .with_progress(&mut progress)
+            .extract(&self.archive, &self.dest)
+            .unwrap_or_else(|e| panic!("{staging:?}: {e}"))
+    }
+
+    /// The failure of a run that is cancelled once everything was extracted.
+    #[cfg(target_os = "macos")]
+    fn extract_cancelled(&self, staging: Staging) -> exarch_core::ArchiveError {
+        let mut progress = AtEnd::cancelling();
+        self.request(staging)
+            .with_progress(&mut progress)
+            .extract(&self.archive, &self.dest)
+            .unwrap_err()
+    }
+
+    fn extract_twin(&self) {
+        self.request(Staging::InPlace)
+            .extract(&self.archive, &self.twin)
+            .unwrap();
+    }
+}
+
+/// The staging directory of a running extraction in `parent`.
+fn staging_dir_in(parent: &Path) -> PathBuf {
+    let found: Vec<_> = std::fs::read_dir(parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".exarch-"))
+        })
+        .collect();
+    let [staging] = <[PathBuf; 1]>::try_from(found)
+        .unwrap_or_else(|found| panic!("expected one staging directory, found {found:?}"));
+    staging
 }
 
 #[cfg(target_os = "macos")]
@@ -270,24 +388,106 @@ mod linux {
                 DestinationAcl::AccessOnly,
             ] {
                 let fx = Fixture::new();
-                chmod(&fx.dest, 0o750);
-                match case {
-                    DestinationAcl::None => {}
-                    DestinationAcl::DefaultOnly => set(&fx.dest, DEFAULT, &default_acl()),
-                    DestinationAcl::AccessOnly => set(&fx.dest, ACCESS, &access_acl()),
+                for dir in [&fx.dest, &fx.twin] {
+                    chmod(dir, 0o750);
+                    match case {
+                        DestinationAcl::None => {}
+                        DestinationAcl::DefaultOnly => set(dir, DEFAULT, &default_acl()),
+                        DestinationAcl::AccessOnly => set(dir, ACCESS, &access_acl()),
+                    }
                 }
                 set(fx.dest.parent().unwrap(), DEFAULT, &parent_default_acl());
                 let acls_before = read(&fx.dest);
                 let mode_before = mode_of(&fx.dest);
 
                 fx.extract(staging);
+                fx.extract_twin();
 
                 let label = format!("{staging:?} {case:?}");
                 assert_eq!(read(&fx.dest), acls_before, "{label}");
                 assert_eq!(mode_of(&fx.dest), mode_before, "{label}");
-                assert_eq!(read(&fx.dest.join("p.txt")), Acls::default(), "{label}");
+                for path in TREE {
+                    assert_eq!(
+                        read(&fx.dest.join(path)),
+                        read(&fx.twin.join(path)),
+                        "{label} {path:?}"
+                    );
+                }
+                let inherited = read(&fx.dest.join("p.txt"));
+                assert_eq!(
+                    inherited.access.is_some(),
+                    matches!(case, DestinationAcl::DefaultOnly),
+                    "{label}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn staged_children_inherit_the_destination_default_acl_as_an_in_place_twin_does() {
+        for staging in MODES {
+            let fx = Fixture::new();
+            for dir in [&fx.dest, &fx.twin] {
+                set(dir, DEFAULT, &default_acl());
+                chmod(dir, 0o755);
+            }
+
+            fx.extract(staging);
+            fx.extract_twin();
+
+            for path in TREE {
+                assert_eq!(
+                    read(&fx.dest.join(path)),
+                    read(&fx.twin.join(path)),
+                    "{staging:?} {path:?}"
+                );
+            }
+            let child_dir = read(&fx.dest.join("d"));
+            assert!(child_dir.access.is_some(), "{staging:?}");
+            assert_eq!(child_dir.default, Some(default_acl()), "{staging:?}");
+        }
+    }
+
+    #[test]
+    fn the_stage_holds_only_a_default_acl_while_the_archive_extracts() {
+        for staging in MODES {
+            let fx = Fixture::new();
+            set(&fx.dest, DEFAULT, &default_acl());
+            set(fx.dest.parent().unwrap(), DEFAULT, &parent_default_acl());
+            let parent = fx.dest.parent().unwrap().to_path_buf();
+
+            fx.extract_observed(staging, move || {
+                let stage = staging_dir_in(&parent);
+                assert_eq!(mode_of(&stage), 0o700, "{staging:?}");
+                assert_eq!(
+                    read(&stage),
+                    Acls {
+                        access: None,
+                        default: Some(default_acl())
+                    },
+                    "{staging:?}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn a_destination_that_vanishes_after_seeding_publishes_a_private_root_without_its_acl() {
+        let fx = Fixture::new();
+        set(&fx.dest, DEFAULT, &default_acl());
+        chmod(&fx.dest, 0o755);
+
+        let removed = fx.dest.clone();
+        let report = fx.extract_observed(Staging::Atomic, move || {
+            std::fs::remove_dir(&removed).unwrap();
+        });
+
+        assert_eq!(mode_of(&fx.dest), 0o700);
+        assert_eq!(read(&fx.dest), Acls::default());
+        assert_eq!(
+            narrowing_of(&report),
+            [NarrowingReason::DestinationVanished]
+        );
     }
 
     #[test]
@@ -404,25 +604,154 @@ mod macos {
         assert_eq!(narrowing_of(&report), [NarrowingReason::AclUnreadable]);
     }
 
+    /// A mix of access-only and inheritable entries, allow and deny, in an
+    /// order the copy must keep.
+    fn mixed_entries(dir: &Path) {
+        chmod(dir, 0o755);
+        add_ace(
+            dir,
+            "user:nobody deny delete,file_inherit,directory_inherit",
+        );
+        add_ace(dir, "group:_www deny read,file_inherit");
+        add_ace(dir, "group:staff allow list,search,read,directory_inherit");
+        add_ace(dir, "group:_www deny list,search");
+    }
+
     #[test]
-    fn an_acl_with_inheritable_entries_gives_a_private_root_with_a_warning() {
+    fn staged_children_inherit_the_destination_entries_as_an_in_place_twin_does() {
         for staging in MODES {
             let fx = Fixture::new();
-            chmod(&fx.dest, 0o755);
-            add_ace(&fx.dest, "group:staff allow list,search,file_inherit");
-            assert_eq!(aces_of(&fx.dest).len(), 1);
+            mixed_entries(&fx.dest);
+            mixed_entries(&fx.twin);
+            let root_before = aces_of(&fx.dest);
+            assert_eq!(root_before.len(), 4);
 
             let report = fx.extract(staging);
+            fx.extract_twin();
 
-            assert_eq!(mode_of(&fx.dest), 0o700, "{staging:?}");
-            assert!(aces_of(&fx.dest).is_empty(), "{staging:?}");
-            assert!(aces_of(&fx.dest.join("p.txt")).is_empty(), "{staging:?}");
+            assert!(narrowing_of(&report).is_empty(), "{staging:?}");
+            assert_eq!(aces_of(&fx.dest), root_before, "{staging:?}");
+            assert_eq!(mode_of(&fx.dest), 0o755, "{staging:?}");
+            for path in TREE {
+                assert_eq!(
+                    aces_of(&fx.dest.join(path)),
+                    aces_of(&fx.twin.join(path)),
+                    "{staging:?} {path:?}"
+                );
+            }
+            assert!(!aces_of(&fx.dest.join("p.txt")).is_empty(), "{staging:?}");
+            assert!(!aces_of(&fx.dest.join("d")).is_empty(), "{staging:?}");
+        }
+    }
+
+    #[test]
+    fn the_stage_holds_only_entries_that_children_receive_while_the_archive_extracts() {
+        for staging in MODES {
+            let fx = Fixture::new();
+            mixed_entries(&fx.dest);
+            let parent = fx.dest.parent().unwrap().to_path_buf();
+
+            fx.extract_observed(staging, move || {
+                let stage = staging_dir_in(&parent);
+                assert_eq!(mode_of(&stage), 0o700, "{staging:?}");
+                let aces = aces_of(&stage);
+                assert_eq!(aces.len(), 3, "{staging:?} {aces:?}");
+                assert!(
+                    aces.iter().all(|ace| ace.contains("only_inherit")),
+                    "{staging:?} {aces:?}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn a_destination_that_vanishes_after_seeding_publishes_a_private_root_without_its_entries() {
+        let fx = Fixture::new();
+        mixed_entries(&fx.dest);
+
+        let removed = fx.dest.clone();
+        let report = fx.extract_observed(Staging::Atomic, move || {
+            std::fs::remove_dir(&removed).unwrap();
+        });
+
+        assert_eq!(mode_of(&fx.dest), 0o700);
+        assert!(aces_of(&fx.dest).is_empty());
+        std::fs::write(fx.dest.join("later.txt"), b"x").unwrap();
+        assert!(aces_of(&fx.dest.join("later.txt")).is_empty());
+        assert_eq!(
+            narrowing_of(&report),
+            [NarrowingReason::DestinationVanished]
+        );
+    }
+
+    #[test]
+    fn a_destination_deny_that_children_inherit_does_not_strand_the_umask_probe() {
+        let fx = Fixture::new();
+        chmod(&fx.dest, 0o755);
+        chmod(&fx.twin, 0o755);
+        let deny = "everyone deny delete,directory_inherit,only_inherit";
+        add_ace(&fx.dest, deny);
+        add_ace(&fx.twin, deny);
+
+        fx.extract(Staging::Atomic);
+        fx.extract_twin();
+
+        assert_eq!(
+            probes_under(&fx.dest),
+            Vec::<PathBuf>::new(),
+            "no probe directory is published"
+        );
+        for path in TREE {
             assert_eq!(
-                narrowing_of(&report),
-                [NarrowingReason::AclHasInheritableEntries],
-                "{staging:?}"
+                aces_of(&fx.dest.join(path)),
+                aces_of(&fx.twin.join(path)),
+                "{path:?}"
             );
         }
+        assert_eq!(aces_of(&fx.dest.join("d")).len(), 1);
+    }
+
+    fn probes_under(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".exarch-probe-"))
+                {
+                    found.push(path.clone());
+                }
+                if path.is_dir() {
+                    pending.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_failed_run_under_an_inherited_delete_deny_names_its_private_leftover() {
+        let fx = Fixture::new();
+        chmod(&fx.dest, 0o755);
+        add_ace(
+            &fx.dest,
+            "everyone deny delete,directory_inherit,only_inherit",
+        );
+
+        let error = fx.extract_cancelled(Staging::Atomic);
+
+        let exarch_core::ArchiveError::PartialExtraction(partial) = &error else {
+            panic!("expected a partial extraction, got {error}");
+        };
+        let leftover = partial.leftover().unwrap();
+        assert!(leftover.path.starts_with(fx.dest.parent().unwrap()));
+        assert_eq!(mode_of(&leftover.path), 0o700);
+        assert!(
+            leftover.path.join("d").exists(),
+            "the inheriting directory survived"
+        );
     }
 
     #[test]

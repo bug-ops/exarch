@@ -851,7 +851,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         if !occupied && !rel.is_empty() {
             self.sink.create_directory(&resolved).map_err(sink_error)?;
         }
-        tally.report.directories_created += 1;
+        tally.report.directories_created = tally.report.directories_created.saturating_add(1);
         Ok(())
     }
 
@@ -946,7 +946,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         self.sink
             .create_symlink(&resolved, symlink.checked_target())
             .map_err(sink_error)?;
-        tally.report.symlinks_created += 1;
+        tally.report.symlinks_created = tally.report.symlinks_created.saturating_add(1);
         Ok(())
     }
 

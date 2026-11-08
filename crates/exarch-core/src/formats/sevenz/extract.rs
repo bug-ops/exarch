@@ -31,7 +31,6 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
-use crate::formats::bounded_read::invalid_data;
 use crate::formats::common;
 use crate::formats::common::EntryCompleteGuard;
 use crate::formats::source_fault::ReadFamily;
@@ -194,7 +193,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// The checks that need only the file table, in the order every
     /// destination applies them.
     fn run_pre_pass(&self, config: &SecurityConfig, pre: &mut dyn PrePass) -> Result<()> {
-        for (index, entry) in self.entries.iter().enumerate() {
+        for (index, entry) in self.header.file_indices().zip(&self.entries) {
             let Some(kind) = entry.class.present(&entry.name)? else {
                 continue;
             };
@@ -213,8 +212,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         config,
                     )?;
                     require_symlinks_allowed(config)?;
-                    let file = self.header.files().get(index).ok_or_else(invalid_data)?;
-                    pre.symlink(&safe_path, file)?;
+                    pre.symlink(&safe_path, self.header.file(index))?;
                     pre.reserve_symlink(entry.size)?;
                 }
                 SevenZKind::File => {

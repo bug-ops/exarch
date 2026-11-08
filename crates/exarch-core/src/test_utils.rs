@@ -39,6 +39,16 @@ pub(crate) fn flip_first(bytes: &mut [u8], marker: &[u8]) {
     bytes[at] ^= 0x01;
 }
 
+/// A reader that breaks the `Read` contract by reporting one byte more than
+/// the buffer it was given.
+pub(crate) struct OverReporting;
+
+impl std::io::Read for OverReporting {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        Ok(buf.len() + 1)
+    }
+}
+
 /// A relative path of exactly `len` bytes made of 100-byte components.
 #[must_use]
 pub(crate) fn path_of_len(len: usize) -> String {

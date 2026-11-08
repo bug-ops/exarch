@@ -32,6 +32,7 @@ use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::sevenz::FileIndex;
 use crate::formats::sevenz::HeaderLimit;
 use crate::formats::sevenz::LinkCapture;
 use crate::formats::sevenz::LinkOutcome;
@@ -203,7 +204,7 @@ impl Progress<'_> {
     /// the callback asks to stop.
     pub(crate) fn begin<'p>(&'p mut self, path: &'p Path) -> Result<EntryCompleteGuard<'p>> {
         let position = crate::EntryPosition::at_index(self.started, self.total);
-        self.started += 1;
+        self.started = self.started.saturating_add(1);
         let callback: &'p mut dyn ProgressCallback = match &mut self.reporter {
             Reporter::Noop(noop) => noop,
             Reporter::Callback(callback) => &mut **callback,
@@ -871,7 +872,7 @@ fn record_link_target(
     manifest: &mut ArchiveManifest,
     links: &LinkTable<EntryPosition>,
     mode: ListMode,
-    index: usize,
+    index: FileIndex,
     outcome: LinkOutcome,
 ) -> Result<()> {
     if let Some(&position) = links.get(index) {
@@ -927,10 +928,8 @@ fn list_sevenz_archive(
     listing.progress.set_total(header.files().len());
 
     for (index, (entry, compression)) in header
-        .files()
-        .iter()
-        .zip(compression.iter().copied())
-        .enumerate()
+        .file_indices()
+        .zip(header.files().iter().zip(compression.iter().copied()))
     {
         let Some(kind) = SevenZClass::of(entry).present(&entry.name)? else {
             slots.push(None);

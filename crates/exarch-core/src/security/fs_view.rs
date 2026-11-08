@@ -1045,20 +1045,20 @@ struct TreeNode {
     /// The component exactly as the archive spells it.
     name: OsString,
     /// The directory holding this node; the root is its own parent.
-    parent: usize,
+    parent: NodeId,
     /// Only populated for directories; every spelling seen so far (the node's
     /// own and its aliases) mapped to the child, so a repeated spelling is
     /// found without folding it.
-    children: HashMap<OsString, usize>,
+    children: HashMap<OsString, NodeId>,
     /// Folded component to child; empty on hosts that compare names exactly.
-    folded: HashMap<OsString, usize>,
+    folded: HashMap<OsString, NodeId>,
     /// Pairs of spellings of this directory that merged while it was empty: if
     /// it later gains an entry the merge stops being harmless.
     empty_merges: Vec<(PathBuf, PathBuf)>,
 }
 
 impl TreeNode {
-    fn new(kind: Node, name: &OsStr, parent: usize) -> Self {
+    fn new(kind: Node, name: &OsStr, parent: NodeId) -> Self {
         Self {
             kind,
             name: name.to_os_string(),
@@ -1070,24 +1070,78 @@ impl TreeNode {
     }
 }
 
-const ROOT: usize = 0;
+use nodes::NodeId;
+use nodes::Nodes;
+
+/// The node arena and the only mint of [`NodeId`].
+mod nodes {
+    use std::ffi::OsStr;
+
+    use super::Node;
+    use super::TreeNode;
+
+    /// Handle to a node of one [`Nodes`] arena.
+    ///
+    /// Only [`Nodes::push`] and [`NodeId::ROOT`] produce one, so an id always
+    /// names a node of the arena that minted it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct NodeId(usize);
+
+    impl NodeId {
+        /// The root directory, created with every arena.
+        pub(super) const ROOT: Self = Self(0);
+    }
+
+    /// Append-only arena of tree nodes, created with its root.
+    pub(super) struct Nodes(Vec<TreeNode>);
+
+    impl Nodes {
+        /// Creates an arena holding only the root directory.
+        pub(super) fn new() -> Self {
+            Self(vec![TreeNode::new(Node::Dir, OsStr::new(""), NodeId::ROOT)])
+        }
+
+        /// Appends `node` and returns its id.
+        pub(super) fn push(&mut self, node: TreeNode) -> NodeId {
+            let id = NodeId(self.0.len());
+            self.0.push(node);
+            id
+        }
+
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "a `NodeId` is minted only by `push` of this arena, nodes are never removed, and ids never leave the owning `VirtualTree`"
+        )]
+        pub(super) fn node(&self, id: NodeId) -> &TreeNode {
+            &self.0[id.0]
+        }
+
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "a `NodeId` is minted only by `push` of this arena, nodes are never removed, and ids never leave the owning `VirtualTree`"
+        )]
+        pub(super) fn node_mut(&mut self, id: NodeId) -> &mut TreeNode {
+            &mut self.0[id.0]
+        }
+    }
+}
 
 enum Resolved {
-    Inside { rel: PathBuf, id: usize },
+    Inside { rel: PathBuf, id: NodeId },
     Outside,
 }
 
 /// Where an insert put its node.
 struct Landed {
-    parent: usize,
+    parent: NodeId,
     /// The node that already held the name, if any.
-    existing: Option<usize>,
+    existing: Option<NodeId>,
 }
 
 /// A child found by name.
 #[derive(Clone, Copy)]
 struct Found {
-    id: usize,
+    id: NodeId,
     /// Found only through the fold: the archive spells it differently.
     alias: bool,
 }
@@ -1102,14 +1156,14 @@ struct Found {
 /// Every name it stores is charged to a [`NodeBudget`].
 pub(crate) struct VirtualTree {
     root: PathBuf,
-    nodes: Vec<TreeNode>,
+    nodes: Nodes,
     model: PathModel,
     fold: FoldFn,
     budget: NodeBudget,
     recording: CollisionRecording,
     collisions: Vec<NameCollision>,
     /// Directories holding at least one empty merge.
-    empty_merge_nodes: Vec<usize>,
+    empty_merge_nodes: Vec<NodeId>,
     /// Whether any symlink was ever stored: until one is, no path can land
     /// anywhere but where it is spelled.
     links_seen: bool,
@@ -1157,7 +1211,7 @@ impl VirtualTree {
     ) -> Self {
         Self {
             root: root.as_path().to_path_buf(),
-            nodes: vec![TreeNode::new(Node::Dir, OsStr::new(""), ROOT)],
+            nodes: Nodes::new(),
             model,
             fold,
             budget,
@@ -1326,7 +1380,7 @@ impl VirtualTree {
         landed.map_or_else(PathBuf::new, |landed| {
             let leaf = landed.existing.map_or_else(
                 || rel.file_name(),
-                |id| Some(self.node(id).name.as_os_str()),
+                |id| Some(self.nodes.node(id).name.as_os_str()),
             );
             let mut resolved = self.path_of(landed.parent);
             resolved.extend(leaf);
@@ -1335,10 +1389,10 @@ impl VirtualTree {
     }
 
     /// The path of node `id` relative to the root, spelled by the stored names.
-    fn path_of(&self, mut id: usize) -> PathBuf {
+    fn path_of(&self, mut id: NodeId) -> PathBuf {
         let mut names = Vec::new();
-        while id != ROOT {
-            let node = self.node(id);
+        while id != NodeId::ROOT {
+            let node = self.nodes.node(id);
             names.push(node.name.as_os_str());
             id = node.parent;
         }
@@ -1360,7 +1414,7 @@ impl VirtualTree {
                 self.add_child(parent, name, node)?;
                 Ok(())
             }
-            (Some(id), Node::Dir) => match self.node(id).kind {
+            (Some(id), Node::Dir) => match self.nodes.node(id).kind {
                 Node::Dir => Ok(()),
                 Node::File => Err(Conflict::already_exists_at(Occupant::File, rel)),
                 Node::OpaqueSymlink => Err(Conflict::already_exists_at(Occupant::Symlink, rel)),
@@ -1369,9 +1423,9 @@ impl VirtualTree {
                     .ok_or_else(|| Conflict::already_exists_at(Occupant::Symlink, rel)),
             },
             (Some(id), node @ (Node::Symlink(_) | Node::OpaqueSymlink)) => {
-                match self.node(id).kind {
+                match self.nodes.node(id).kind {
                     Node::File => {
-                        self.node_mut(id).kind = node;
+                        self.nodes.node_mut(id).kind = node;
                         self.links_seen = true;
                         Err(Conflict::already_exists(Occupant::File))
                     }
@@ -1384,7 +1438,7 @@ impl VirtualTree {
                     }
                 }
             }
-            (Some(id), Node::File) => match self.node(id).kind {
+            (Some(id), Node::File) => match self.nodes.node(id).kind {
                 Node::File => Ok(()),
                 Node::Dir => Err(Conflict {
                     error: io::Error::from(io::ErrorKind::IsADirectory),
@@ -1412,11 +1466,11 @@ impl VirtualTree {
     pub(crate) fn occupant(&self, rel: &Path) -> Option<Occupant> {
         let name = rel.file_name()?;
         let parent = match self.resolve(&self.root.join(rel.parent()?)) {
-            Ok(Resolved::Inside { id, .. }) if self.node(id).kind == Node::Dir => id,
+            Ok(Resolved::Inside { id, .. }) if self.nodes.node(id).kind == Node::Dir => id,
             _ => return None,
         };
         let found = self.lookup(parent, name)?;
-        Some(match self.node(found.id).kind {
+        Some(match self.nodes.node(found.id).kind {
             Node::Dir => Occupant::Directory,
             Node::File => Occupant::File,
             Node::Symlink(_) | Node::OpaqueSymlink => Occupant::Symlink,
@@ -1427,7 +1481,7 @@ impl VirtualTree {
     pub(crate) fn resolves_to_dir(&self, path: &Path) -> bool {
         matches!(
             self.resolve(path),
-            Ok(Resolved::Inside { id, .. }) if self.node(id).kind == Node::Dir
+            Ok(Resolved::Inside { id, .. }) if self.nodes.node(id).kind == Node::Dir
         )
     }
 
@@ -1445,7 +1499,7 @@ impl VirtualTree {
         let nodes = std::mem::take(&mut self.empty_merge_nodes);
         nodes
             .into_iter()
-            .flat_map(|id| std::mem::take(&mut self.node_mut(id).empty_merges))
+            .flat_map(|id| std::mem::take(&mut self.nodes.node_mut(id).empty_merges))
             .map(|(existing, incoming)| NameCollision {
                 existing,
                 incoming,
@@ -1462,7 +1516,7 @@ impl VirtualTree {
     /// merge is flagged so it is upgraded if the directory gains an entry.
     fn settle_alias(
         &mut self,
-        parent: usize,
+        parent: NodeId,
         found: Found,
         name: &OsStr,
         incoming_node: &Node,
@@ -1474,18 +1528,19 @@ impl VirtualTree {
         }
         self.aliases_seen = true;
         self.budget.charge()?;
-        self.node_mut(parent)
+        self.nodes
+            .node_mut(parent)
             .children
             .insert(name.to_os_string(), found.id);
         if self.recording == CollisionRecording::Discard {
             return Ok(());
         }
-        let existing = self.node(found.id);
+        let existing = self.nodes.node(found.id);
         let has_contents = incoming_has_contents || !existing.children.is_empty();
         let kind = CollisionKind::of(&existing.kind, incoming_node, has_contents);
         let existing_path = incoming.with_file_name(&existing.name);
         if kind == CollisionKind::Directories {
-            let node = self.node_mut(found.id);
+            let node = self.nodes.node_mut(found.id);
             node.empty_merges
                 .push((existing_path, incoming.to_path_buf()));
             self.empty_merge_nodes.push(found.id);
@@ -1499,27 +1554,11 @@ impl VirtualTree {
         Ok(())
     }
 
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "ids come from `nodes.len()` and nodes are never removed"
-    )]
-    fn node(&self, id: usize) -> &TreeNode {
-        &self.nodes[id]
-    }
-
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "ids come from `nodes.len()` and nodes are never removed"
-    )]
-    fn node_mut(&mut self, id: usize) -> &mut TreeNode {
-        &mut self.nodes[id]
-    }
-
-    fn lookup(&self, parent: usize, name: &OsStr) -> Option<Found> {
+    fn lookup(&self, parent: NodeId, name: &OsStr) -> Option<Found> {
         if self.model.name_len(name) > self.model.limits().component {
             return None;
         }
-        let node = self.node(parent);
+        let node = self.nodes.node(parent);
         if let Some(&id) = node.children.get(name) {
             return Some(Found { id, alias: false });
         }
@@ -1529,27 +1568,26 @@ impl VirtualTree {
         }
     }
 
-    fn child(&self, parent: usize, name: &OsStr) -> Option<usize> {
+    fn child(&self, parent: NodeId, name: &OsStr) -> Option<NodeId> {
         self.lookup(parent, name).map(|found| found.id)
     }
 
     /// Adds a node under `parent`.
     fn add_child(
         &mut self,
-        parent: usize,
+        parent: NodeId,
         name: &OsStr,
         kind: Node,
-    ) -> Result<usize, NodeBudgetExceeded> {
+    ) -> Result<NodeId, NodeBudgetExceeded> {
         self.budget.charge()?;
         self.links_seen |= matches!(kind, Node::Symlink(_) | Node::OpaqueSymlink);
-        let id = self.nodes.len();
-        self.nodes.push(TreeNode::new(kind, name, parent));
+        let id = self.nodes.push(TreeNode::new(kind, name, parent));
         let key = match (self.fold)(name) {
             Cow::Borrowed(_) => None,
             Cow::Owned(key) => Some(key),
         };
         let upgrade = {
-            let parent_node = self.node_mut(parent);
+            let parent_node = self.nodes.node_mut(parent);
             parent_node.children.insert(name.to_os_string(), id);
             if let Some(key) = key {
                 parent_node.folded.insert(key, id);
@@ -1566,8 +1604,8 @@ impl VirtualTree {
         Ok(id)
     }
 
-    fn ensure_dir(&mut self, dir: &Path, entry: &Path) -> Result<usize, PlaceError> {
-        let mut current = ROOT;
+    fn ensure_dir(&mut self, dir: &Path, entry: &Path) -> Result<NodeId, PlaceError> {
+        let mut current = NodeId::ROOT;
         let mut walked = PathBuf::new();
         for component in dir.components() {
             let name = match component {
@@ -1588,14 +1626,16 @@ impl VirtualTree {
                 None => self.add_child(current, name, Node::Dir)?,
                 Some(found) => {
                     self.settle_alias(current, found, name, &Node::Dir, &walked, true)?;
-                    match self.node(found.id).kind {
+                    match self.nodes.node(found.id).kind {
                         Node::Dir => found.id,
                         Node::File => {
                             return Err(blocked(io::ErrorKind::NotADirectory, ParentBlocker::File));
                         }
                         Node::OpaqueSymlink => return Err(unread_target_error().into()),
                         Node::Symlink(_) => match self.resolve(&self.root.join(&walked)) {
-                            Ok(Resolved::Inside { id, .. }) if self.node(id).kind == Node::Dir => {
+                            Ok(Resolved::Inside { id, .. })
+                                if self.nodes.node(id).kind == Node::Dir =>
+                            {
                                 id
                             }
                             Ok(Resolved::Inside { .. }) => {
@@ -1623,7 +1663,7 @@ impl VirtualTree {
             return Ok(Resolved::Outside);
         };
         let mut pending: VecDeque<Component<'_>> = rel.components().collect();
-        let mut stack = vec![ROOT];
+        let mut stack = vec![NodeId::ROOT];
         let mut current = PathBuf::new();
         let mut hops = 0usize;
 
@@ -1638,28 +1678,28 @@ impl VirtualTree {
                     current.pop();
                 }
                 Component::Normal(name) => {
-                    let top = stack.last().copied().unwrap_or(ROOT);
+                    let top = stack.last().copied().unwrap_or(NodeId::ROOT);
                     let Some(id) = self.child(top, name) else {
                         return Err(io::Error::from(io::ErrorKind::NotFound));
                     };
-                    match &self.node(id).kind {
+                    match &self.nodes.node(id).kind {
                         Node::Dir => {
                             stack.push(id);
-                            current.push(&self.node(id).name);
+                            current.push(&self.nodes.node(id).name);
                         }
                         Node::File => {
                             if !pending.is_empty() {
                                 return Err(io::Error::from(io::ErrorKind::NotADirectory));
                             }
                             stack.push(id);
-                            current.push(&self.node(id).name);
+                            current.push(&self.nodes.node(id).name);
                         }
                         Node::OpaqueSymlink => {
                             if !pending.is_empty() {
                                 return Err(unread_target_error());
                             }
                             stack.push(id);
-                            current.push(&self.node(id).name);
+                            current.push(&self.nodes.node(id).name);
                         }
                         Node::Symlink(target) => {
                             hops = hops.saturating_add(1);
@@ -1684,7 +1724,7 @@ impl VirtualTree {
         }
         Ok(Resolved::Inside {
             rel: current,
-            id: stack.last().copied().unwrap_or(ROOT),
+            id: stack.last().copied().unwrap_or(NodeId::ROOT),
         })
     }
 }
@@ -1720,14 +1760,14 @@ impl FsView for VirtualTree {
         };
         let id = self.child(parent, name).ok_or_else(not_found)?;
         Ok(matches!(
-            self.node(id).kind,
+            self.nodes.node(id).kind,
             Node::Symlink(_) | Node::OpaqueSymlink
         ))
     }
 
     fn canonicalize(&self, path: &Path, _: &VirtualRoot) -> io::Result<Containment> {
         match self.resolve(path)? {
-            Resolved::Inside { id, .. } if self.node(id).kind == Node::OpaqueSymlink => {
+            Resolved::Inside { id, .. } if self.nodes.node(id).kind == Node::OpaqueSymlink => {
                 Err(unread_target_error())
             }
             Resolved::Inside { rel, .. } => Ok(Containment::Within(self.root.join(rel))),

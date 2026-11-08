@@ -2444,10 +2444,14 @@ fn test_dir_swapped_for_symlink_between_entries_is_rejected() {
 
 #[test]
 fn test_uncovered_by_block_crc_counts_entries_without_own_crc() {
-    let crcs = [(4, true), (5, false), (6, false)];
+    let crcs = [
+        (FileIndex::at(4), true),
+        (FileIndex::at(5), false),
+        (FileIndex::at(6), false),
+    ];
     assert_eq!(
         entries_uncovered_by_block_crc(true, 10, 12, crcs.into_iter()),
-        [5, 6]
+        [FileIndex::at(5), FileIndex::at(6)]
     );
     assert!(entries_uncovered_by_block_crc(true, 12, 12, crcs.into_iter()).is_empty());
     assert!(entries_uncovered_by_block_crc(false, 10, 12, crcs.into_iter()).is_empty());
@@ -2597,7 +2601,7 @@ fn test_payload_by_block_skips_anti_items_and_stream_less_files() {
         payload_by_block(&SevenZHeader::assume_checked(archive), &slots)
             .iter()
             .collect::<Vec<_>>(),
-        [&vec![(1, a), (3, b)]]
+        [&vec![(FileIndex::at(1), a), (FileIndex::at(3), b)]]
     );
 }
 
@@ -2622,8 +2626,12 @@ fn scan_failing_file(error: io::Error) -> (bool, Option<BlockStop>, Vec<IssueCat
         visited: BTreeSet::new(),
         stop: None,
     };
+    let file = sevenz_file("a", true, 4, false);
+    let mut archive = Archive::default();
+    archive.files = vec![file.clone()];
     let keep_going = scan.visit(
-        &sevenz_file("a", true, 4, false),
+        &SevenZHeader::assume_checked(archive),
+        &file,
         &mut FailingReader(Some(error)),
     );
     let stop = scan.stop.take();

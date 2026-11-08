@@ -915,6 +915,7 @@ mod adoption {
 
     use super::super::adopt::Adoption;
     use super::super::adopt::Claim;
+    use super::super::dir::Seed;
     use super::super::dir::StagingDir;
     use super::*;
     use crate::formats::pinned_dir::VettedDir;
@@ -928,7 +929,7 @@ mod adoption {
     fn an_adopted_mode_is_applied_through_the_descriptor() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
 
         let narrowed = staging
@@ -948,7 +949,7 @@ mod adoption {
     fn a_group_the_directory_cannot_join_loses_its_group_access() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         let foreign = std::fs::metadata("/").unwrap().gid();
         if foreign == own.gid() || own.uid() == 0 {
@@ -968,7 +969,7 @@ mod adoption {
     fn a_cautious_adoption_never_takes_a_foreign_uid_nor_its_write_bits() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         let foreign_uid = own.uid().wrapping_add(1);
 
@@ -991,7 +992,7 @@ mod adoption {
     fn a_cautious_adoption_of_an_own_destination_keeps_its_mode() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
 
         let narrowed = staging
@@ -1011,7 +1012,7 @@ mod adoption {
     fn a_read_only_adopted_directory_can_still_be_discarded() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent).unwrap();
+        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         std::fs::write(staging.path().join("f"), b"x").unwrap();
 
@@ -1029,7 +1030,7 @@ mod adoption {
     fn dropping_a_staging_directory_removes_it() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let staging = StagingDir::create(&pin, &parent).unwrap();
+        let staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
         let path = staging.path().to_path_buf();
         assert_eq!(mode_of(&path), 0o700);
 
@@ -1047,6 +1048,7 @@ mod narrowing {
     use super::super::acl::AclPlan;
     use super::super::adopt::Adoption;
     use super::super::adopt::Claim;
+    use super::super::dir::Seed;
     use super::super::dir::StagingDir;
     use super::super::publish_adopted;
     use super::super::replace::swap_adopted_for_test;
@@ -1072,7 +1074,7 @@ mod narrowing {
         own().uid == 0
     }
 
-    fn reasons(report: &ExtractionReport) -> Vec<NarrowingReason> {
+    pub(super) fn reasons(report: &ExtractionReport) -> Vec<NarrowingReason> {
         report
             .warnings
             .iter()
@@ -1088,14 +1090,15 @@ mod narrowing {
         let parent = temp.path().canonicalize().unwrap();
         let output = parent.join("dest");
         let destination = AtomicDestination::resolve(&output).unwrap();
-        let mut staging = StagingDir::create(&destination.pin, &destination.parent).unwrap();
+        let mut staging =
+            StagingDir::create(&destination.pin, &destination.parent, Seed::Absent).unwrap();
         let mut report = ExtractionReport::new();
         publish_adopted(&mut staging, &destination, adoption, &output, &mut report).unwrap();
         reasons(&report)
     }
 
     fn replace(adoption: Adoption) -> Vec<NarrowingReason> {
-        reasons(&swap_adopted_for_test(adoption))
+        reasons(&swap_adopted_for_test(adoption, |_| Seed::Absent))
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1127,8 +1130,7 @@ mod narrowing {
         match reason {
             NarrowingReason::AclUnreadable
             | NarrowingReason::DestinationChanged
-            | NarrowingReason::UnmappedId
-            | NarrowingReason::AclHasInheritableEntries => Some(full(plan(reason))),
+            | NarrowingReason::UnmappedId => Some(full(plan(reason))),
             #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
             NarrowingReason::OwnershipDiffers => Some(Adoption::for_test_with_acl(
                 0o755,
@@ -1190,7 +1192,7 @@ mod narrowing {
 
     /// How many reasons a host must reach, so a silently skipped case fails.
     ///
-    /// Every unix host reaches the six that need no host condition. The
+    /// Every unix host reaches the five that need no host condition. The
     /// copyable-ACL platforms (Linux, Android, macOS) add `OwnershipDiffers`
     /// and `AclCopyFailed`; an unprivileged caller adds `GroupNotKept` and
     /// `OwnerNotKept`. `DestinationVanished` is reachable through the atomic
@@ -1202,7 +1204,7 @@ mod narrowing {
             target_os = "android",
             target_os = "macos"
         ));
-        6 + if copyable { 2 } else { 0 } + if is_root() { 0 } else { 2 }
+        5 + if copyable { 2 } else { 0 } + if is_root() { 0 } else { 2 }
     }
 
     #[test]
@@ -1216,6 +1218,327 @@ mod narrowing {
         let adoption = Adoption::for_test(0o755, me.uid, me.gid, Claim::Full);
         assert!(atomic(Some(adoption.clone())).is_empty());
         assert!(replace(adoption).is_empty());
+    }
+}
+
+/// What a staging directory does with the destination's inheritance, seen
+/// through the publish paths.
+mod seeding {
+    use std::os::unix::fs::MetadataExt;
+
+    use super::super::AtomicDestination;
+    use super::super::acl::Inheritance;
+    use super::super::adopt::Adoption;
+    use super::super::adopt::Claim;
+    use super::super::dir::Seed;
+    use super::super::dir::StagingDir;
+    use super::super::publish_adopted;
+    use super::super::replace::swap_adopted_for_test;
+    use super::*;
+    use crate::formats::pinned_dir::VettedDir;
+
+    /// An existing directory's identity, distinct from every other one made
+    /// by a test.
+    fn identity(temp: &TempDir, name: &str) -> FileIdentity {
+        let dir = temp.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        identity_of(&dir).unwrap()
+    }
+
+    fn adoption() -> Adoption {
+        let owner = std::fs::metadata(TempDir::new().unwrap().path()).unwrap();
+        Adoption::for_test(0o755, owner.uid(), owner.gid(), Claim::Full)
+    }
+
+    fn stage(seed: impl FnOnce(&TempDir) -> Seed) -> (TempDir, PathBuf, VettedDir, Seed) {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let pin = VettedDir::open_path(&parent).unwrap();
+        let seed = seed(&temp);
+        (temp, parent, pin, seed)
+    }
+
+    #[test]
+    fn a_withheld_inheritance_keeps_every_publish_path_private() {
+        let reason = NarrowingReason::AclUnreadable;
+        let withheld = || Seed::FillEmpty(FileIdentity::Unknown, Inheritance::Withheld(reason));
+
+        let (_temp, parent, pin, seed) = stage(|_| withheld());
+        let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+        let narrowed = staging.adopt(adoption()).unwrap();
+        assert_eq!(narrowed.reasons(), [reason]);
+        assert_eq!(mode_of(staging.path()), 0o700);
+
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().canonicalize().unwrap().join("dest");
+        let destination = AtomicDestination::resolve(&output).unwrap();
+        let mut report = ExtractionReport::new();
+        let mut staging =
+            StagingDir::create(&destination.pin, &destination.parent, withheld()).unwrap();
+        publish_adopted(&mut staging, &destination, None, &output, &mut report).unwrap();
+        assert_eq!(
+            narrowing::reasons(&report),
+            [NarrowingReason::DestinationVanished, reason]
+        );
+        assert_eq!(mode_of(&output), 0o700);
+
+        let report = swap_adopted_for_test(adoption(), |_| {
+            Seed::Replace(FileIdentity::Unknown, Inheritance::Withheld(reason))
+        });
+        assert_eq!(narrowing::reasons(&report), [reason]);
+    }
+
+    fn me() -> (u32, u32) {
+        let metadata = std::fs::metadata(TempDir::new().unwrap().path()).unwrap();
+        (metadata.uid(), metadata.gid())
+    }
+
+    fn withheld_stage(reason: NarrowingReason) -> (TempDir, PathBuf, VettedDir, Seed) {
+        stage(|_| Seed::FillEmpty(FileIdentity::Unknown, Inheritance::Withheld(reason)))
+    }
+
+    #[test]
+    fn a_withheld_root_still_claims_the_destination_group() {
+        let (uid, _) = me();
+        let foreign = std::fs::metadata("/").unwrap().gid();
+        if uid == 0 || foreign == me().1 {
+            eprintln!("skipping: no group this caller is outside of");
+            return;
+        }
+        let reason = NarrowingReason::AclUnreadable;
+        let (_temp, parent, pin, seed) = withheld_stage(reason);
+        let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+
+        let narrowed = staging
+            .adopt(Adoption::for_test(0o775, uid, foreign, Claim::Full))
+            .unwrap();
+
+        assert_eq!(narrowed.reasons(), [NarrowingReason::GroupNotKept, reason]);
+        assert_eq!(mode_of(staging.path()), 0o700);
+    }
+
+    #[test]
+    fn a_withheld_root_reports_an_owner_it_could_not_take() {
+        let (uid, gid) = me();
+        if uid == 0 {
+            eprintln!("skipping: root can give a directory away");
+            return;
+        }
+        let reason = NarrowingReason::AclUnreadable;
+        let (_temp, parent, pin, seed) = withheld_stage(reason);
+        let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+
+        let narrowed = staging
+            .adopt(Adoption::for_test(
+                0o755,
+                uid.wrapping_add(1),
+                gid,
+                Claim::Full,
+            ))
+            .unwrap();
+
+        assert_eq!(narrowed.reasons(), [NarrowingReason::OwnerNotKept, reason]);
+    }
+
+    #[test]
+    fn another_destination_is_not_claimed_from() {
+        let (uid, _) = me();
+        let foreign = std::fs::metadata("/").unwrap().gid();
+        let (temp, parent, pin, seed) =
+            stage(|temp| Seed::FillEmpty(identity(temp, "seeded-from"), Inheritance::None));
+        let adopted_from = identity(&temp, "adopted-from");
+        let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+
+        let narrowed = staging
+            .adopt(
+                Adoption::for_test(0o775, uid.wrapping_add(1), foreign, Claim::Full)
+                    .of_destination_identity(adopted_from),
+            )
+            .unwrap();
+
+        assert_eq!(narrowed.reasons(), [NarrowingReason::DestinationChanged]);
+    }
+
+    #[test]
+    fn children_seeded_from_another_destination_keep_the_root_private() {
+        let (temp, parent, pin, seed) =
+            stage(|temp| Seed::FillEmpty(identity(temp, "seeded-from"), Inheritance::None));
+        let adopted_from = identity(&temp, "adopted-from");
+        let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+
+        let narrowed = staging
+            .adopt(adoption().of_destination_identity(adopted_from))
+            .unwrap();
+
+        assert_eq!(narrowed.reasons(), [NarrowingReason::DestinationChanged]);
+        assert_eq!(mode_of(staging.path()), 0o700);
+    }
+
+    #[test]
+    fn children_seeded_from_the_destination_being_adopted_leave_the_root_open() {
+        let (temp, parent, pin, seed) =
+            stage(|temp| Seed::FillEmpty(identity(temp, "dest"), Inheritance::None));
+        let same = identity_of(&temp.path().join("dest")).unwrap();
+        let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+
+        let narrowed = staging
+            .adopt(adoption().of_destination_identity(same))
+            .unwrap();
+
+        assert!(narrowed.reasons().is_empty());
+        assert_eq!(mode_of(staging.path()), 0o755);
+    }
+
+    #[test]
+    fn a_swapped_destination_keeps_a_replaced_root_private() {
+        let other = TempDir::new().unwrap();
+        let other_identity = identity(&other, "other");
+
+        let report =
+            swap_adopted_for_test(adoption().of_destination_identity(other_identity), |id| {
+                Seed::Replace(id, Inheritance::None)
+            });
+
+        assert_eq!(
+            narrowing::reasons(&report),
+            [NarrowingReason::DestinationChanged]
+        );
+    }
+
+    #[test]
+    fn a_destination_that_vanished_does_not_withhold_what_it_never_seeded() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().canonicalize().unwrap().join("dest");
+        let destination = AtomicDestination::resolve(&output).unwrap();
+        let mut staging = StagingDir::create(
+            &destination.pin,
+            &destination.parent,
+            Seed::FillEmpty(identity(&temp, "gone"), Inheritance::None),
+        )
+        .unwrap();
+        let mut report = ExtractionReport::new();
+
+        publish_adopted(&mut staging, &destination, None, &output, &mut report).unwrap();
+
+        assert_eq!(
+            narrowing::reasons(&report),
+            [NarrowingReason::DestinationVanished]
+        );
+    }
+
+    #[test]
+    fn an_absent_destination_keeps_the_parents_inheritance_and_probes_the_umask() {
+        let (_temp, parent, pin, seed) = stage(|_| Seed::Absent);
+
+        let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+
+        assert!(staging.take_fresh().is_some());
+        assert!(
+            std::fs::read_dir(staging.path()).unwrap().next().is_none(),
+            "the probe directory is removed"
+        );
+    }
+
+    #[test]
+    fn replacing_never_probes_the_umask() {
+        let (_temp, parent, pin, seed) =
+            stage(|temp| Seed::Replace(identity(temp, "dest"), Inheritance::None));
+
+        let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+
+        assert!(staging.take_fresh().is_none());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    mod stored {
+        use super::super::super::acl;
+        use super::super::super::acl::AclPlan;
+        use super::super::super::acl::InheritedAcl;
+        use super::*;
+
+        fn seeded_from(temp: &TempDir) -> Seed {
+            Seed::FillEmpty(
+                identity(temp, "dest"),
+                Inheritance::Stage(InheritedAcl::valid_for_test()),
+            )
+        }
+
+        fn assert_published_private_without_the_seed(
+            pin: &VettedDir,
+            name: crate::formats::pinned_dir::Leaf<'_>,
+            parent: &Path,
+            id: FileIdentity,
+            root: &Path,
+        ) {
+            assert_eq!(mode_of(root), 0o700);
+            let plan = acl::read_destination(pin, name, parent, id);
+            assert_eq!(plan.unwrap(), AclPlan::None);
+        }
+
+        #[test]
+        fn a_seeded_stage_whose_destination_vanished_is_private_without_the_seed() {
+            let (_temp, parent, pin, seed) = stage(seeded_from);
+            let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+            let fresh = staging.take_fresh().unwrap();
+
+            let narrowed = staging.adopt(fresh).unwrap();
+
+            assert_eq!(narrowed.reasons(), [NarrowingReason::DestinationVanished]);
+            assert_published_private_without_the_seed(
+                &pin,
+                staging.name.as_leaf(),
+                &parent,
+                staging.id,
+                staging.path(),
+            );
+        }
+
+        #[test]
+        fn a_seeded_stage_without_a_probe_result_is_private_without_the_seed() {
+            let temp = TempDir::new().unwrap();
+            let output = temp.path().canonicalize().unwrap().join("dest");
+            let destination = AtomicDestination::resolve(&output).unwrap();
+            let seed = Seed::FillEmpty(
+                identity(&temp, "gone"),
+                Inheritance::Stage(InheritedAcl::valid_for_test()),
+            );
+            let mut staging =
+                StagingDir::create(&destination.pin, &destination.parent, seed).unwrap();
+            let mut report = ExtractionReport::new();
+
+            publish_adopted(&mut staging, &destination, None, &output, &mut report).unwrap();
+
+            assert_eq!(
+                narrowing::reasons(&report),
+                [NarrowingReason::DestinationVanished]
+            );
+            assert_published_private_without_the_seed(
+                &destination.pin,
+                destination.name.as_leaf(),
+                &destination.parent,
+                staging.id,
+                &output,
+            );
+        }
+
+        #[test]
+        fn an_inheritance_the_kernel_refuses_is_withheld_and_leaves_no_acl() {
+            let (_temp, parent, pin, seed) = stage(|temp| {
+                Seed::FillEmpty(
+                    identity(temp, "dest"),
+                    Inheritance::Stage(InheritedAcl::invalid_for_test()),
+                )
+            });
+
+            let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();
+
+            let plan =
+                acl::read_destination(&pin, staging.name.as_leaf(), &parent, staging.id).unwrap();
+            assert_eq!(plan, AclPlan::None);
+            let narrowed = staging.adopt(adoption()).unwrap();
+            assert_eq!(narrowed.reasons(), [NarrowingReason::AclCopyFailed]);
+            assert_eq!(mode_of(staging.path()), 0o700);
+        }
     }
 }
 

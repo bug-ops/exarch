@@ -295,9 +295,11 @@ fn copy_polled<R: Read + ?Sized, W: Write + ?Sized>(
             return Err(CopyError::Overrun { declared: expected });
         }
 
-        writer
-            .write_all(&buffer.buf[..bytes_read])
-            .map_err(CopyError::Write)?;
+        let chunk = buffer
+            .buf
+            .get(..bytes_read)
+            .ok_or_else(|| CopyError::Read(io::Error::from(io::ErrorKind::InvalidData)))?;
+        writer.write_all(chunk).map_err(CopyError::Write)?;
     }
 
     // SECURITY: A short stream (fewer bytes than declared) is just as much a
@@ -322,6 +324,8 @@ mod tests {
     use proptest::prelude::*;
     use std::assert_matches;
     use std::io::Cursor;
+
+    use crate::test_utils::OverReporting;
 
     #[test]
     fn test_copy_buffer_new() {
@@ -385,6 +389,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(copied, 1000);
+    }
+
+    #[test]
+    fn a_reader_reporting_more_than_the_buffer_is_refused() {
+        let mut output = Vec::new();
+        let mut buffer = CopyBuffer::new();
+
+        let result = copy_bounded(&mut OverReporting, &mut output, &mut buffer, None);
+
+        assert_matches!(
+            result,
+            Err(CopyError::Read(e)) if e.kind() == io::ErrorKind::InvalidData
+        );
+        assert!(output.is_empty());
     }
 
     #[test]

@@ -581,7 +581,7 @@ impl<R: Read> SpoolTee<R> {
         let Some(spool) = self.spool.as_mut() else {
             return;
         };
-        self.written += chunk.len() as u64;
+        self.written = self.written.saturating_add(chunk.len() as u64);
         if self.written > self.limit || spool.write_all(chunk).is_err() {
             self.spool = None;
         }
@@ -627,7 +627,12 @@ impl<R: Read> Read for SpoolTee<R> {
                 Ok(0)
             }
             Ok(n) => {
-                self.spool_chunk(&buf[..n]);
+                let Some(chunk) = buf.get(..n) else {
+                    self.decoding = Decoding::Failed;
+                    self.spool = None;
+                    return Err(io::Error::from(io::ErrorKind::InvalidData));
+                };
+                self.spool_chunk(chunk);
                 Ok(n)
             }
             Err(e) => {
@@ -649,6 +654,7 @@ mod tests {
     use crate::ExtractRequest;
     use crate::NoopProgress;
     use crate::formats::spool::SpoolBacking;
+    use crate::test_utils::OverReporting;
     use crate::test_utils::create_test_tar;
     use tempfile::TempDir;
 
@@ -958,6 +964,17 @@ mod tests {
         let mut sink = [0; 8];
         while tee.read(&mut sink).is_ok_and(|n| n > 0) {}
         tee.finish_spool(&SecurityConfig::default())
+    }
+
+    #[test]
+    fn a_decoder_reporting_more_than_the_buffer_yields_no_spool() {
+        let mut tee = SpoolTee::new(OverReporting, 100, u64::MAX);
+        let mut sink = [0; 8];
+
+        let error = tee.read(&mut sink).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(tee.finish_spool(&SecurityConfig::default()).is_none());
     }
 
     const EIO: i32 = 5;

@@ -7,6 +7,7 @@ use super::decode::decode_block_entries;
 use super::decode::is_sevenz_payload;
 use super::decode::skip_payload;
 use super::header::BlockIndex;
+use super::header::FileIndex;
 use super::header::PerBlock;
 use super::header::SevenZHeader;
 use super::lzma2::DecodeKnobs;
@@ -177,7 +178,7 @@ pub(super) fn link_storage(file: &sevenz_rust2::ArchiveEntry) -> LinkStorage {
 /// and every walk visits links in file order.
 #[derive(Debug)]
 pub(crate) struct LinkTable<T> {
-    entries: Vec<(usize, T)>,
+    entries: Vec<(FileIndex, T)>,
 }
 
 impl<T> Default for LinkTable<T> {
@@ -195,7 +196,7 @@ impl<T> LinkTable<T> {
     ///
     /// Returns `InvalidArchive` unless `file_index` is above every index
     /// already added.
-    pub(crate) fn push(&mut self, file_index: usize, value: T) -> Result<()> {
+    pub(crate) fn push(&mut self, file_index: FileIndex, value: T) -> Result<()> {
         if self
             .entries
             .last()
@@ -210,7 +211,7 @@ impl<T> LinkTable<T> {
     }
 
     /// The value added for `file_index`, if any.
-    pub(crate) fn get(&self, file_index: usize) -> Option<&T> {
+    pub(crate) fn get(&self, file_index: FileIndex) -> Option<&T> {
         self.entries
             .binary_search_by_key(&file_index, |&(index, _)| index)
             .ok()
@@ -219,7 +220,7 @@ impl<T> LinkTable<T> {
     }
 
     /// The archive file indices, ascending.
-    pub(crate) fn indices(&self) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn indices(&self) -> impl Iterator<Item = FileIndex> + '_ {
         self.entries.iter().map(|&(index, _)| index)
     }
 }
@@ -228,13 +229,12 @@ impl<T> LinkTable<T> {
 /// indices) that need no decoding, and returns the links that do.
 pub(crate) fn deliver_undecoded_links(
     header: &SevenZHeader,
-    indices: impl Iterator<Item = usize>,
-    each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
-) -> Result<Vec<usize>> {
+    indices: impl Iterator<Item = FileIndex>,
+    each: &mut impl FnMut(FileIndex, LinkOutcome) -> Result<()>,
+) -> Result<Vec<FileIndex>> {
     let mut streamed = Vec::new();
     for index in indices {
-        let file = header.files().get(index).ok_or_else(invalid_data)?;
-        match link_storage(file) {
+        match link_storage(header.file(index)) {
             LinkStorage::Empty => each(index, Ok(StoredLinkTarget::Read(PathBuf::new())))?,
             LinkStorage::Oversized(bytes) => {
                 each(index, Ok(StoredLinkTarget::Oversized { bytes }))?;
@@ -308,16 +308,16 @@ pub(crate) fn walk_sevenz_links<R: Read + Seek, T>(
     compression: &[EntryCompression],
     config: &SecurityConfig,
     links: &LinkTable<T>,
-    each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
+    each: &mut impl FnMut(FileIndex, LinkOutcome) -> Result<()>,
 ) -> Result<()> {
     let streamed = deliver_undecoded_links(header, links.indices(), each)?;
     if streamed.is_empty() {
         return Ok(());
     }
     let closed = blocks_closed_to_links(header, compression, config);
-    let mut by_block: BTreeMap<BlockIndex, Vec<usize>> = BTreeMap::new();
+    let mut by_block: BTreeMap<BlockIndex, Vec<FileIndex>> = BTreeMap::new();
     for index in streamed {
-        match header.file_block(index) {
+        match header.file_block(index.get()) {
             Some(block) => by_block.entry(block).or_default().push(index),
             None => each(index, Err(LinkReadFailure::BlockRefused))?,
         }
@@ -339,8 +339,8 @@ pub(super) fn walk_block_links<R: Read + Seek>(
     source: &mut R,
     config: &SecurityConfig,
     block: BlockIndex,
-    wanted: &[usize],
-    each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
+    wanted: &[FileIndex],
+    each: &mut impl FnMut(FileIndex, LinkOutcome) -> Result<()>,
 ) -> Result<()> {
     let mut next_file = header.block_first_file(block);
     let mut delivered = 0;
@@ -352,11 +352,14 @@ pub(super) fn walk_block_links<R: Read + Seek>(
         config.parallel_decode,
         DecodeKnobs::production(),
         &mut |file, reader| {
-            let index = next_file;
+            let position = next_file;
             next_file = next_file.saturating_add(1);
-            if wanted.get(delivered) != Some(&index) {
+            let Some(&index) = wanted
+                .get(delivered)
+                .filter(|wanted| wanted.get() == position)
+            else {
                 return drain_unwanted(file, reader);
-            }
+            };
             let outcome = match read_sevenz_link_target(reader, file.size) {
                 Ok(outcome) => outcome,
                 Err(e) => {
@@ -403,7 +406,7 @@ impl LinkCapture<'_> {
     /// block and is read here.
     fn position(
         &self,
-        file_index: usize,
+        file_index: FileIndex,
         file: &sevenz_rust2::ArchiveEntry,
     ) -> Option<EntryPosition> {
         matches!(link_storage(file), LinkStorage::Stream)
@@ -416,15 +419,10 @@ impl LinkCapture<'_> {
     pub(super) fn mark_unreadable(
         &mut self,
         header: &SevenZHeader,
-        indices: impl Iterator<Item = usize>,
+        indices: impl Iterator<Item = FileIndex>,
     ) {
         for index in indices {
-            #[expect(
-                clippy::indexing_slicing,
-                reason = "indices come from the file list of this header"
-            )]
-            let file = &header.files()[index];
-            if let Some(position) = self.position(index, file) {
+            if let Some(position) = self.position(index, header.file(index)) {
                 (self.set)(position, LinkTarget::Unreadable);
             }
         }
@@ -455,6 +453,7 @@ impl BlockScan<'_, '_> {
     /// Decodes one file of the block; returns whether the scan continues.
     pub(super) fn visit(
         &mut self,
+        header: &SevenZHeader,
         file: &sevenz_rust2::ArchiveEntry,
         reader: &mut dyn Read,
     ) -> bool {
@@ -471,7 +470,8 @@ impl BlockScan<'_, '_> {
         let link_position = self
             .links
             .as_ref()
-            .and_then(|c| c.position(file_index, file));
+            .zip(header.file_index(file_index))
+            .and_then(|(c, index)| c.position(index, file));
         let outcome = match link_position {
             Some(position) => match self.read_link(position, slot, file, reader) {
                 Ok(outcome) => outcome,

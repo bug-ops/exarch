@@ -54,7 +54,7 @@ status: permanent
 - `deny(unsafe_code)` workspace-wide — no exceptions
 - `deny(expect_used)` and `deny(unwrap_used)` — use `?` for error propagation
 - `clippy::pedantic` and `clippy::nursery` — all warnings treated as errors
-- `formats/**` and `security/**` warn on `clippy::indexing_slicing` and `clippy::arithmetic_side_effects` in non-test builds (denied in CI via `-D warnings`); every `#[expect(...)]` there carries a `reason` naming the invariant (#1032)
+- `exarch-core` warns crate-wide (one gate in `lib.rs`) on `clippy::indexing_slicing` and `clippy::arithmetic_side_effects` in non-test builds (denied in CI via `-D warnings`); every `#[expect(...)]` carries a `reason` naming the invariant (#1032, #1070)
 - All `pub` types, traits, functions, and methods require doc comments explaining what and why
 - Formatting: `cargo +nightly fmt --all`
 

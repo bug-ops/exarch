@@ -251,7 +251,7 @@ impl<P: ParentCheck> SafePath<P> {
         }
 
         // Single-pass validation and normalization
-        let mut depth = 0;
+        let mut depth = 0_usize;
         let mut normalized = PathBuf::new();
         let mut needs_normalization = false;
         let has_banned_components = !config.banned_path_components.is_empty();
@@ -264,7 +264,7 @@ impl<P: ParentCheck> SafePath<P> {
                     });
                 }
                 Component::Normal(comp) => {
-                    depth += 1;
+                    depth = depth.saturating_add(1);
 
                     check_component_for(view.path_model(), comp, config)?;
 

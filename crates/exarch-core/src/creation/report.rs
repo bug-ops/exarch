@@ -333,7 +333,9 @@ impl CreationReport {
     /// ```
     #[must_use]
     pub fn total_items(&self) -> usize {
-        self.files_added + self.directories_added + self.symlinks_added
+        self.files_added
+            .saturating_add(self.directories_added)
+            .saturating_add(self.symlinks_added)
     }
 }
 
@@ -343,6 +345,15 @@ mod tests {
     use super::*;
     use crate::Skip;
     use crate::SkipKind;
+
+    #[test]
+    fn test_total_items_saturates_instead_of_overflowing() {
+        let mut report = CreationReport::new();
+        report.files_added = usize::MAX;
+        report.directories_added = 1;
+
+        assert_eq!(report.total_items(), usize::MAX);
+    }
 
     #[test]
     fn test_creation_report_default() {

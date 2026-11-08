@@ -41,6 +41,7 @@ use crate::formats::pinned_dir::VettedDir;
 use crate::report::Narrowed;
 use crate::security::fs_view::Occupant;
 use adopt::Adoption;
+use dir::Seed;
 use dir::StagingDir;
 
 /// The extraction a staging mode wraps: it writes into the directory it is
@@ -106,7 +107,6 @@ struct AtomicDestination {
     name: LeafBuf,
     parent: PathBuf,
     pin: VettedDir,
-    existed: bool,
 }
 
 impl AtomicDestination {
@@ -126,7 +126,7 @@ impl AtomicDestination {
             setting: ConfigSetting::OutputPath,
             problem,
         };
-        let (parent, name, existed) = if output_dir.exists() {
+        let (parent, name) = if output_dir.exists() {
             let canonical = output_dir.canonicalize().map_err(ArchiveError::Io)?;
             if !canonical.is_dir() {
                 return Err(refuse(ConfigProblem::NotADirectory));
@@ -141,7 +141,7 @@ impl AtomicDestination {
                 .parent()
                 .ok_or_else(|| refuse(ConfigProblem::NoParent))?
                 .to_path_buf();
-            (parent, name, true)
+            (parent, name)
         } else {
             if output_dir
                 .symlink_metadata()
@@ -153,7 +153,7 @@ impl AtomicDestination {
             let parent = parent_or_cwd(output_dir);
             std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;
             let parent = parent.canonicalize().map_err(ArchiveError::Io)?;
-            (parent, name, false)
+            (parent, name)
         };
         let pin = VettedDir::open_path(&parent).map_err(|e| {
             ArchiveError::Io(io_context(
@@ -162,12 +162,7 @@ impl AtomicDestination {
                 &parent,
             ))
         })?;
-        Ok(Self {
-            name,
-            parent,
-            pin,
-            existed,
-        })
+        Ok(Self { name, parent, pin })
     }
 }
 
@@ -195,28 +190,47 @@ fn cancelled_after(report: ExtractionReport, leftover: Option<StagingLeftover>) 
     ArchiveError::partial_or(report, ArchiveError::Cancelled).rolled_back_with(leftover)
 }
 
-/// Removes the ACL a fresh staging directory inherited from `parent`, or
-/// discards the directory and fails.
-fn clear_inherited_acl<'p>(staging: StagingDir<'p>, parent: &Path) -> Result<StagingDir<'p>> {
-    match staging.clear_inherited_acl() {
-        Ok(()) => Ok(staging),
-        Err(e) => {
-            let error = ArchiveError::Io(io_context(
-                &e,
-                "failed to clear the access control list the staging directory inherited",
-                parent,
-            ));
-            Err(error.rolled_back_with(staging.discard()))
-        }
-    }
-}
-
 /// The narrowing of a root whose destination vanished before its mode could
-/// be read.
-fn destination_vanished() -> Narrowed {
+/// be read, with the reason its children could not inherit from it, if any.
+fn destination_vanished(withheld: Option<NarrowingReason>) -> Narrowed {
     let mut narrowed = Narrowed::none();
     narrowed.push(NarrowingReason::DestinationVanished);
+    if let Some(reason) = withheld {
+        narrowed.push(reason);
+    }
     narrowed
+}
+
+/// How the staging directory for `destination` is prepared: as for an empty
+/// directory to fill when one is there, else as for an absent destination.
+///
+/// An absent destination has no mode to keep: the one a new directory gets
+/// under the umask is read at creation, before any archive content is
+/// written. It is also read for an existing one, as the fallback should that
+/// destination vanish before the publish.
+fn atomic_seed(destination: &AtomicDestination, output_dir: &Path) -> Result<Seed> {
+    let existing = destination
+        .pin
+        .status(destination.name.as_leaf())
+        .map_err(ArchiveError::Io)?
+        .filter(|status| status.occupant == Occupant::Directory);
+    let Some(status) = existing else {
+        return Ok(Seed::Absent);
+    };
+    let inheritance = acl::read_inheritance(
+        &destination.pin,
+        destination.name.as_leaf(),
+        &destination.parent,
+        status.identity,
+    )
+    .map_err(|e| {
+        ArchiveError::Io(io_context(
+            &e,
+            "failed to read the destination's access control list",
+            output_dir,
+        ))
+    })?;
+    Ok(Seed::FillEmpty(status.identity, inheritance))
 }
 
 fn extract_atomic(
@@ -226,27 +240,8 @@ fn extract_atomic(
     extract: impl StagedRun,
 ) -> Result<ExtractionReport> {
     let destination = AtomicDestination::resolve(output_dir)?;
-    let mut staging = StagingDir::create(&destination.pin, &destination.parent)?;
-    if destination.existed {
-        staging = clear_inherited_acl(staging, &destination.parent)?;
-    }
-
-    // An absent destination has no mode to keep: the one a new directory gets
-    // under the umask is read now, before any archive content is written. It is
-    // also read for an existing one, as the fallback should that destination
-    // vanish before the publish; only for an absent one is a failure fatal.
-    let fresh_mode = match staging.probe_umask() {
-        Ok(adoption) => Some(adoption),
-        Err(_) if destination.existed => None,
-        Err(e) => {
-            let error = ArchiveError::Io(io_context(
-                &e,
-                "failed to probe the umask",
-                &destination.parent,
-            ));
-            return Err(error.rolled_back_with(staging.discard()));
-        }
-    };
+    let seed = atomic_seed(&destination, output_dir)?;
+    let mut staging = StagingDir::create(&destination.pin, &destination.parent, seed)?;
 
     let mut report = match extract(staging.path(), &staged_options(options), progress) {
         Ok(report) => report,
@@ -255,7 +250,8 @@ fn extract_atomic(
     if progress.is_cancelled() {
         return Err(cancelled_after(report, staging.discard()));
     }
-    let published = adoption_for(&destination, fresh_mode, output_dir).and_then(|adoption| {
+    let fresh = staging.take_fresh();
+    let published = adoption_for(&destination, fresh, output_dir).and_then(|adoption| {
         publish_adopted(
             &mut staging,
             &destination,
@@ -315,18 +311,24 @@ fn publish_adopted(
     output_dir: &Path,
     report: &mut ExtractionReport,
 ) -> Result<()> {
-    match adoption {
-        Some(adoption) => {
-            let narrowed = staging.adopt(adoption).map_err(|e| {
-                ArchiveError::Io(io_context(
-                    &e,
-                    "failed to give the extracted content the destination's permissions",
-                    output_dir,
-                ))
-            })?;
-            report.record_narrowing(narrowed);
-        }
-        None => report.record_narrowing(destination_vanished()),
+    if let Some(adoption) = adoption {
+        let narrowed = staging.adopt(adoption).map_err(|e| {
+            ArchiveError::Io(io_context(
+                &e,
+                "failed to give the extracted content the destination's permissions",
+                output_dir,
+            ))
+        })?;
+        report.record_narrowing(narrowed);
+    } else {
+        let withheld = staging.vanished_reason().map_err(|e| {
+            ArchiveError::Io(io_context(
+                &e,
+                "failed to clear the access control list of the staging directory",
+                output_dir,
+            ))
+        })?;
+        report.record_narrowing(destination_vanished(withheld));
     }
     staging
         .publish(&destination.name)

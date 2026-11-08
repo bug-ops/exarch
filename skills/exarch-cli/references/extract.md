@@ -57,10 +57,25 @@ Extract into a hidden staging directory (`0700`) in the destination's parent and
 - With `--force` the existing directory is renamed aside, the new content renamed in, then the old directory removed, so a failure leaves either old or new content. It needs search (execute) permission on the parent, not read.
 - `--atomic --force` refuses before extracting (`InvalidConfiguration`, setting `output_path`): `.`, `..`, any directory containing the working directory or the archive, a filesystem root, a file, or a symlink (pass the resolved path). It cannot combine with `--include`, `--exclude`, `--strip-components`, or `--flatten` (`InvalidConfiguration`, setting `entry_selection`); plain `--atomic` can.
 - Unix: the published root takes the mode of the destination it replaces or fills (never setuid). With `--force` it also takes the owner as far as the caller may (only root can give a directory away; an unjoinable group drops group bits and setgid). Plain `--atomic` onto an empty directory never takes the uid and takes the group only when the caller owns the destination; a destination owned by someone else also loses group/world write.
-- ACLs: on Linux and Android the destination's POSIX ACL (access and default) is copied onto the root; the default ACL lands on the root only, so already-extracted content does not inherit it. If it cannot be copied faithfully the root is `0700`. On macOS an ACL is detected and yields a `0700` root. Other Unixes and NFSv4 ACLs are not detected.
+- ACLs: on Linux and Android the destination's POSIX ACL (access and default) is copied onto the root; the default ACL lands on the root only, so already-extracted content does not inherit it. If it cannot be copied faithfully the root is `0700`; a named user or group entry that does not map in the process's user namespace also gives `0700` and an `unmapped_id` warning. On macOS the destination's ACL is copied onto the root when it has no inheritable entries; with inheritable entries the root is `0700` and the warning reason is `acl_has_inheritable_entries`. Every `0700` fallback and every dropped owner, group or write bit is reported as a `root_access_narrowed` warning (reasons in `json-output.md`). Other Unixes and NFSv4 ACLs are not detected.
 - Windows: staging inherits the ACL of the destination's parent; plain `--atomic` onto an existing empty directory fails `OutputExists`.
 - A failed swap is an error whose message says whether the destination is unchanged or restored and where a backup is left (`IoError`).
 - Plain (non-atomic) `extract` resolves a symlinked destination via `canonicalize()` and writes through it, like `tar -C`.
+
+## `--decode-reuse` cost
+
+`off` decodes every entry twice, `memory` keeps decoded output in RAM, `temp-file` keeps it in an unnamed file in `TMPDIR`. On a tmpfs or ramfs (Linux, FreeBSD, macOS tmpfs mount) `temp-file` is charged to the decoder memory limit like `memory`. A macOS `hdiutil` RAM disk is not detected, so a `TMPDIR` there holds the spool in memory outside that limit. Prefer `memory`; use `temp-file` only to keep RSS low.
+
+Measured on Linux (Linux VM (Docker Desktop), aarch64, 12 CPUs, release CLI, deflate ZIPs of 10 MiB members at ratio about 2.2, `hyperfine --warmup 2 --runs 10`, mean wall time; `TMPDIR` on an ext4 Docker volume or a `--tmpfs` mount, output on a volume). This is a VM, not a bare-metal host. Each `TMPDIR` was a separate hyperfine run, so `off` and `memory` differ between rows by run noise.
+
+| Decoded | `TMPDIR` | `off` | `memory` | `temp-file` | `temp-file` / `memory` |
+|---------|----------|-------|----------|-------------|------------------------|
+| 100 MiB (48 MB ZIP) | ext4 | 283 ms | 176 ms | 226 ms | 1.3x |
+| 100 MiB | tmpfs | 331 ms | 174 ms | 208 ms | 1.2x |
+| 300 MiB (146 MB ZIP) | ext4 | 818 ms | 525 ms | 1009 ms | 1.9x |
+| 300 MiB | tmpfs | 801 ms | 545 ms | 608 ms | 1.1x |
+
+The 300 MiB ext4 `temp-file` cell is dominated by writeback outliers (standard deviation 539 ms, minimum 590 ms, median 748 ms, maximum 1842 ms): 1.1x at the minimum, 1.4x at the median. The `off` runs at 100 MiB on tmpfs and 300 MiB on ext4 are also noisy (standard deviation 80 ms and 50 ms). Peak RSS is 5.5 MiB for `off`, 5.6 MiB for `temp-file`, 106 MiB and 256 MiB for `memory` (the 256 MiB limit means the tail of the 300 MiB archive is decoded twice in both keeping modes).
 
 ## Pre-flight listing and partial extraction
 

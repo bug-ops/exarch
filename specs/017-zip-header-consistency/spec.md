@@ -230,7 +230,7 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 ## 9. Open Questions
 
 > [!question] Default policy
-> **Resolved: Enforce by default, including `SecurityConfig::permissive()`.** The compatibility corpus (SC-004) showed no false positives from the producers that could be tested (Info-ZIP, ditto, 7-Zip, bsdtar, Go, Python, the `zip` crate); Java (`jar`, `java.util.zip`) and Windows (`Compress-Archive`, .NET `ZipFile`) archives are generated and checked at test time in CI, while Windows Explorer and WinRAR archives are not covered. Original question: should the default be strict (Enforce) or opt-in (Ignore)?
+> **Resolved: Enforce by default, including `SecurityConfig::permissive()`.** The compatibility corpus (SC-004) showed no false positives from the producers that could be tested (Info-ZIP, ditto, 7-Zip, bsdtar, Go, Python, the `zip` crate); Java (`jar`, `java.util.zip`) and Windows (`Compress-Archive`, .NET `ZipFile`) archives are generated and checked at test time in CI, while committed Windows Explorer archives and three WinRAR archives (one with genuine WinRAR deflate output, #855) stand in for those producers. Original question: should the default be strict (Enforce) or opt-in (Ignore)?
 >
 > **Recommendation: Enforce by default, with a documented typed opt-out (Ignore).**
 >

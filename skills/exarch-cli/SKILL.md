@@ -142,7 +142,7 @@ Read only the file that matches the situation:
 | File | Read when |
 |---|---|
 | [references/install.md](references/install.md) | `exarch` is missing and `cargo` is unavailable, or on Windows. |
-| [references/extract.md](references/extract.md) | Tuning `extract`: `--atomic`/`--force` semantics, selection globs, quotas, destination conflicts, cancellation. |
+| [references/extract.md](references/extract.md) | Tuning `extract`: `--atomic`/`--force` semantics, selection globs, quotas, destination conflicts, cancellation, `--decode-reuse` cost. |
 | [references/create.md](references/create.md) | Building archives: exclude grammar, symlink handling, refused outputs, ZIP ratio warning. |
 | [references/list.md](references/list.md) | Parsing `list` output, `disposition`, `link_target`. |
 | [references/verify.md](references/verify.md) | Interpreting verify issues, integrity results, or verify/extract disagreement. |

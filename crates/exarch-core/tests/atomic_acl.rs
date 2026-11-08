@@ -6,6 +6,7 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
+use std::assert_matches;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -866,8 +867,9 @@ mod macos {
             .extract(&fx.archive, &fx.dest)
             .unwrap_err();
 
-        assert!(
-            matches!(error, exarch_core::ArchiveError::OutputExists { .. }),
+        assert_matches!(
+            error,
+            exarch_core::ArchiveError::OutputExists { .. },
             "{error}"
         );
         assert_eq!(

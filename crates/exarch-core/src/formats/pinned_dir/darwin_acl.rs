@@ -13,7 +13,6 @@
 use std::fs::File;
 use std::io;
 use std::mem::size_of;
-use std::mem::size_of_val;
 use std::os::fd::AsRawFd;
 
 use rustix::io::Errno;
@@ -21,6 +20,9 @@ use rustix::io::Errno;
 /// `u64` words of the attribute buffers (512 words, 4096 bytes); an ACL of the
 /// largest size macOS allows (128 entries) needs about 3.2 KiB.
 const BUFFER_WORDS: usize = 512;
+
+/// Bytes of an attribute buffer.
+const BUFFER_LEN: usize = size_of::<[u64; BUFFER_WORDS]>();
 
 const REFERENCE_LEN: usize = size_of::<libc::attrreference_t>();
 
@@ -56,14 +58,14 @@ pub(crate) fn fetch(file: &File) -> io::Result<Fetched> {
     let mut list = extended_security_list();
     let mut buffer = [0_u64; BUFFER_WORDS];
     // SAFETY: `list` is a valid `attrlist` and `buffer` is writable for the
-    // `size_of_val(&buffer)` bytes passed, both outliving the call; the
+    // `BUFFER_LEN` bytes passed, both outliving the call; the
     // descriptor is open because `file` is borrowed for the whole call.
     let result = unsafe {
         libc::fgetattrlist(
             file.as_raw_fd(),
             (&raw mut list).cast(),
             buffer.as_mut_ptr().cast(),
-            size_of_val(&buffer),
+            BUFFER_LEN,
             libc::FSOPT_REPORT_FULLSIZE,
         )
     };
@@ -94,7 +96,7 @@ pub(crate) fn store(file: &File, filesec: &[u8]) -> io::Result<()> {
     let too_large = || io::Error::from(io::ErrorKind::InvalidInput);
     let total = REFERENCE_LEN
         .checked_add(filesec.len())
-        .filter(|total| *total <= BUFFER_WORDS * size_of::<u64>())
+        .filter(|total| *total <= BUFFER_LEN)
         .ok_or_else(too_large)?;
     let reference = libc::attrreference_t {
         attr_dataoffset: i32::try_from(REFERENCE_LEN).map_err(|_| too_large())?,

@@ -48,7 +48,7 @@ use exarch_core::{non_zero, ratio_limit, Extension, ExtensionFilter, SecurityCon
 let config = SecurityConfig::default()
     .with_max_file_size(non_zero!(100 * 1024 * 1024))    // 100 MB per file
     .with_max_total_size(non_zero!(1024 * 1024 * 1024))  // 1 GB total
-    .with_max_file_count(non_zero!(10_000))              // Max 10k files
+    .with_max_file_count(non_zero!(10_000))              // Max 10k entries (files, directories and links all count)
     .with_max_compression_ratio(ratio_limit!(50.0)) // 50x compression limit
     .with_allowed_extensions(ExtensionFilter::only(vec![
         Extension::try_from(".tar")?,

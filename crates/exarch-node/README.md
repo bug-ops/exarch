@@ -501,7 +501,7 @@ Builder-style security configuration.
 const config = new SecurityConfig()
   .withMaxFileSize(bytes)                     // Max size per file
   .withMaxTotalSize(bytes)                    // Max total extraction size
-  .withMaxFileCount(count)                    // Max number of files
+  .withMaxFileCount(count)                    // Max number of entries (every entry counts, directories included)
   .withMaxCompressionRatio(n)                 // Max compression ratio (zip bomb detection)
   .addAllowedExtension(".txt")               // Restrict to a set of extensions (repeatable)
   .withAllowedExtensions([".txt", ".md"])     // Replace the allowlist; null allows every extension, [] is refused

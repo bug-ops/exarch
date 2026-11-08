@@ -1789,8 +1789,9 @@ pub enum DecodeReuse {
     /// frees nothing, because the file is never cut lower than that entry's
     /// end. The Linux detection ran in a Linux VM (Docker Desktop, kernel
     /// 7.0.14, aarch64; its spool tests pass there) but not on a bare-metal
-    /// Linux host, and the FreeBSD arm is run only by the scheduled FreeBSD
-    /// workflow.
+    /// Linux host. The FreeBSD arm runs only in the scheduled FreeBSD
+    /// workflow, against a default temporary file and a tmpfs mount; an `md`
+    /// disk is covered only by the name classifier's unit test.
     /// Everything else is assumed to be on disk, so a temporary directory on
     /// a macOS `hdiutil` RAM disk, on a FreeBSD nullfs or unionfs over a
     /// tmpfs, or on ZFS over an `md` disk holds the spool in memory outside
@@ -1812,25 +1813,28 @@ pub enum DecodeReuse {
     /// release CLI, the same deflate ZIPs of 10 MiB members at a ratio of about
     /// 2.2, `hyperfine --warmup 2 --runs 10`, mean wall time; `TMPDIR` on a
     /// named Docker volume (ext4) or on a `--tmpfs` mount, the output always on
-    /// a volume), not a bare-metal host:
+    /// a volume), not a bare-metal host. Each `TMPDIR` was its own hyperfine
+    /// run, so `off` and `memory` are measured twice and differ by run noise:
     ///
-    /// | Decoded | `off` | `memory` | `temp-file` on ext4 | `temp-file` on tmpfs |
-    /// |---------|-------|----------|---------------------|----------------------|
-    /// | 100 MiB (48 MB ZIP) | 283 ms | 176 ms | 226 ms | 208 ms |
-    /// | 300 MiB (146 MB ZIP) | 818 ms | 525 ms | 1009 ms | 608 ms |
+    /// | Decoded | `TMPDIR` | `off` | `memory` | `temp-file` | `temp-file` / `memory` |
+    /// |---------|----------|-------|----------|-------------|------------------------|
+    /// | 100 MiB (48 MB ZIP) | ext4 | 283 ms | 176 ms | 226 ms | 1.3x |
+    /// | 100 MiB | tmpfs | 331 ms | 174 ms | 208 ms | 1.2x |
+    /// | 300 MiB (146 MB ZIP) | ext4 | 818 ms | 525 ms | 1009 ms | 1.9x |
+    /// | 300 MiB | tmpfs | 801 ms | 545 ms | 608 ms | 1.1x |
     ///
-    /// `off` decodes every entry twice, so it is the slowest mode except for
-    /// the ext4 run of the 300 MiB archive, whose 1009 ms mean is dominated by
-    /// writeback outliers (standard deviation 539 ms, minimum 590 ms, maximum
-    /// 1842 ms; the `off` runs at 100 MiB on tmpfs and 300 MiB on ext4 are
-    /// also noisy, with 80 ms and 50 ms). Against `memory`, `temp-file`
-    /// measures 1.2x to 1.3x at 100 MiB and 1.1x (tmpfs) to 1.9x (ext4, the
-    /// noisy cell, 1.1x at its minimum) at 300 MiB. The peak resident set stays
-    /// at 5.5 MiB for `off` and `temp-file` and reaches 105 MiB and 255 MiB for
-    /// `memory` (256 MiB is the CLI's reuse limit, so the tail of the 300 MiB
-    /// archive is decoded twice in both keeping modes). The numbers are those
-    /// of a VM whose volumes sit behind the hypervisor's block layer; do not
-    /// read them as the cost on a native Linux filesystem.
+    /// The 300 MiB ext4 `temp-file` cell is dominated by writeback outliers
+    /// (standard deviation 539 ms, minimum 590 ms, median 748 ms, maximum
+    /// 1842 ms; against `memory` that is 1.1x at the minimum and 1.4x at the
+    /// median). The `off` runs at 100 MiB on tmpfs and 300 MiB on ext4 are also
+    /// noisy (standard deviation 80 ms and 50 ms); every other cell is within
+    /// 24 ms. `off` decodes every entry twice and is the slowest mode in all
+    /// rows but the noisy one. The peak resident set stays at 5.5 MiB for `off`
+    /// and 5.6 MiB for `temp-file` and reaches 106 MiB and 256 MiB for `memory`
+    /// (256 MiB is the CLI's reuse limit, so the tail of the 300 MiB archive is
+    /// decoded twice in both keeping modes). The numbers are those of a VM
+    /// whose volumes sit behind the hypervisor's block layer; do not read them
+    /// as the cost on a native Linux filesystem.
     ///
     /// The archive's own listing pass for TAR, which also spools to a
     /// temporary file, is not charged to this budget.

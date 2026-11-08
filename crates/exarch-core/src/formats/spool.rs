@@ -13,13 +13,13 @@
 //!   `tmpfs` and `/dev/md<digits>` are RAM.
 //! - macOS RAM disks made with `hdiutil attach ram://` appear as an ordinary
 //!   `/dev/disk<N>` device and are classified as [`SpoolBacking::Disk`].
-//!   Telling them apart needs `IOKit`, which cannot be called without `unsafe`
-//!   FFI, and `unsafe_code` is denied workspace-wide. A temporary directory on
-//!   such a disk therefore holds the spool in memory outside the decoder
-//!   budget, bounded only by the reuse limit. The reverse error (a disk
-//!   reported as memory, as for a vnode-backed FreeBSD `md` disk) only lowers
-//!   the spool's capacity, which is why the classifiers lean towards
-//!   [`SpoolBacking::Ram`].
+//!   Telling them apart needs `IOKit`, i.e. another `unsafe` FFI surface; the
+//!   crate keeps `unsafe` to a few scoped, audited modules and does not add one
+//!   for this. A temporary directory on such a disk therefore holds the spool
+//!   in memory outside the decoder budget, bounded only by the reuse limit. The
+//!   reverse error (a disk reported as memory, as for a vnode-backed FreeBSD
+//!   `md` disk) only lowers the spool's capacity, which is why the classifiers
+//!   lean towards [`SpoolBacking::Ram`].
 //! - Every other target, and a failed `fstatfs`, report [`SpoolBacking::Disk`].
 //! - WASI has no temporary directory, so [`open_spool`] returns `None`.
 
@@ -118,7 +118,7 @@ impl SpoolBacking {
 ///
 /// `c_char` is `i8` on some targets and `u8` on others, so the bytes are taken
 /// by reinterpretation rather than by a cast.
-#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+#[cfg(any(target_vendor = "apple", target_os = "freebsd", test))]
 fn c_chars_until_nul(field: &[std::ffi::c_char]) -> impl Iterator<Item = u8> {
     field
         .iter()
@@ -174,9 +174,19 @@ mod spool_tests {
     use std::path::Path;
 
     #[test]
-    fn a_forced_backing_is_reported() {
-        let spool = TempSpool::with_backing(SpoolBacking::Ram).unwrap();
-        assert_eq!(spool.backing, SpoolBacking::Ram);
+    fn c_chars_stop_at_the_first_nul() {
+        let field = |bytes: &[u8]| -> Vec<std::ffi::c_char> {
+            bytes
+                .iter()
+                .map(|b| std::ffi::c_char::from_ne_bytes([*b]))
+                .collect()
+        };
+        let bytes = |bytes: &[u8]| c_chars_until_nul(&field(bytes)).collect::<Vec<u8>>();
+        assert_eq!(bytes(b"tmpfs\0junk"), b"tmpfs");
+        assert_eq!(bytes(b"tmpfs"), b"tmpfs");
+        assert_eq!(bytes(b""), b"");
+        assert_eq!(bytes(b"\0tmpfs"), b"");
+        assert_eq!(bytes(&[0xff, 0x80, 0]), [0xff, 0x80]);
     }
 
     #[test]
@@ -216,9 +226,9 @@ mod spool_tests {
         }
     }
 
-    #[cfg(target_vendor = "apple")]
+    #[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
     #[test]
-    fn a_default_temp_file_on_apple_is_disk() {
+    fn a_default_temp_file_on_a_bsd_is_disk() {
         let file = tempfile::tempfile().unwrap();
         assert_eq!(SpoolBacking::of(&file), SpoolBacking::Disk);
     }
@@ -237,8 +247,26 @@ mod spool_tests {
     fn a_file_in_dev_shm_is_ram_backed() {
         let dir = Path::new("/dev/shm");
         if !dir.is_dir() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "/dev/shm is missing on a CI host"
+            );
+            eprintln!("skipped: /dev/shm is not a directory on this host");
             return;
         }
+        let file = tempfile::tempfile_in(dir).unwrap();
+        assert_eq!(SpoolBacking::of(&file), SpoolBacking::Ram);
+    }
+
+    /// The workflow in `.github/workflows/freebsd.yml` mounts a tmpfs and
+    /// exports its path; the test fails, not skips, when it is run without.
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    #[ignore = "needs a tmpfs mount: set EXARCH_TEST_TMPFS_DIR (freebsd.yml does)"]
+    fn a_file_on_a_freebsd_tmpfs_is_ram_backed() {
+        let Some(dir) = std::env::var_os("EXARCH_TEST_TMPFS_DIR") else {
+            panic!("EXARCH_TEST_TMPFS_DIR must name a mounted tmpfs");
+        };
         let file = tempfile::tempfile_in(dir).unwrap();
         assert_eq!(SpoolBacking::of(&file), SpoolBacking::Ram);
     }

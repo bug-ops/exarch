@@ -525,8 +525,8 @@ fn winrar_fixtures_have_no_structural_findings_and_extract() {
     }
 }
 
-/// Made by `WinRAR` (version made by `0x001F`, 243 deflated and 36 stored
-/// entries); taken from the Apache Commons Compress test resources, see
+/// Made by `WinRAR` (version made by `0x001F`, 243 deflated files and 36
+/// directories); taken from the Apache Commons Compress test resources, see
 /// `tests/fixtures/PROVENANCE.md`. Covers `WinRAR`'s real deflate output.
 #[test]
 fn winrar_deflate_fixture_has_no_structural_findings_extracts_and_verifies() {
@@ -540,5 +540,21 @@ fn winrar_deflate_fixture_has_no_structural_findings_extracts_and_verifies() {
 
     let out = TempDir::new().unwrap();
     extract_archive(&archive, out.path(), &config).unwrap();
-    assert!(std::fs::read_dir(out.path()).unwrap().next().is_some());
+
+    let files: Vec<_> = walkdir::WalkDir::new(out.path())
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|e| e.file_type().is_file())
+        .collect();
+    assert_eq!(files.len(), 243);
+    let total: u64 = files.iter().map(|e| e.metadata().unwrap().len()).sum();
+    assert_eq!(total, 1_800_196);
+
+    let known = std::fs::read(out.path().join(
+        "commons-compress/src/main/java/org/apache/commons/compress/archivers/ar/package.html",
+    ))
+    .unwrap();
+    let mut crc = flate2::Crc::new();
+    crc.update(&known);
+    assert_eq!((known.len(), crc.sum()), (1112, 0x6f19_be0e));
 }

@@ -13,6 +13,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::disallowed_methods)]
 
+#[cfg(unix)]
 use exarch_core::ArchiveError;
 use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
@@ -20,6 +21,7 @@ use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
+#[cfg(unix)]
 use std::assert_matches;
 use std::io::Write as _;
 use tempfile::NamedTempFile;

@@ -176,6 +176,8 @@ mod imp {
 
         #[cfg(any(target_os = "linux", target_os = "android"))]
         mod posix {
+            use std::assert_matches;
+
             use super::*;
             use crate::staging::acl::linux::PosixAcl;
 
@@ -185,10 +187,10 @@ mod imp {
 
             #[test]
             fn an_acl_is_copied_onto_a_root_with_the_same_owner_and_group() {
-                assert!(matches!(
+                assert_matches!(
                     resolve(plan(), DESTINATION, DESTINATION),
                     Resolution::Copy(_)
-                ));
+                );
             }
 
             #[test]
@@ -302,6 +304,7 @@ mod linux {
     }
 
     /// One ACL attribute of a directory.
+    #[derive(Debug)]
     enum Blob {
         Present(Box<[u8]>),
         Absent,
@@ -379,6 +382,7 @@ mod linux {
     #[cfg(test)]
     #[allow(clippy::unwrap_used)]
     mod tests {
+        use std::assert_matches;
         use std::os::fd::OwnedFd;
 
         use rustix::fs::Mode;
@@ -404,7 +408,7 @@ mod linux {
         #[test]
         fn a_missing_or_unsupported_acl_is_absent() {
             for errno in [Errno::NODATA, Errno::NOTSUP] {
-                assert!(matches!(read_error(errno), Ok(Blob::Absent)), "{errno}");
+                assert_matches!(read_error(errno), Ok(Blob::Absent), "{errno}");
             }
         }
 

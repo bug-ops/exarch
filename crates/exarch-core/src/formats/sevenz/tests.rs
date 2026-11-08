@@ -28,6 +28,7 @@ use super::write::write_file_with_permit_using;
 use super::*;
 use crate::Extension;
 use crate::IssueCategory;
+#[cfg(unix)]
 use crate::NoopProgress;
 use crate::ParallelDecode;
 use crate::QuotaResource;

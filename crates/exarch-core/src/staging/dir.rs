@@ -13,7 +13,11 @@ use std::path::PathBuf;
 
 #[cfg(unix)]
 use super::acl;
+#[cfg(unix)]
+use super::acl::AclPlan;
 use super::acl::Inheritance;
+#[cfg(unix)]
+use super::acl::ParentAcl;
 use super::adopt::Adoption;
 use super::io_context;
 use crate::ArchiveError;
@@ -32,9 +36,8 @@ const CREATE_ATTEMPTS: usize = 16;
 /// What a new staging directory is made to resemble, which fixes the order of
 /// the steps that prepare it (create, clear, probe, seed).
 ///
-/// The destination's inheritance is written only after the umask probe: a
-/// probe directory made under it could inherit a deny entry and become
-/// impossible to remove.
+/// The inheritance is written only after the umask probe: a probe directory
+/// made under it could inherit a deny entry and become impossible to remove.
 #[cfg_attr(
     not(unix),
     allow(
@@ -43,8 +46,11 @@ const CREATE_ATTEMPTS: usize = 16;
     )
 )]
 pub(super) enum Seed {
-    /// No destination exists: the directory keeps what a plain `mkdir` in the
-    /// parent gives it, and the umask is probed (a failure is fatal).
+    /// No destination exists. Where the parent's inherited entries can be
+    /// listed (macOS) they are captured, cleared, and re-seeded as entries for
+    /// children only, so the directory is private while it is filled;
+    /// elsewhere the parent's default ACL stays, as the mode's group bits mask
+    /// it. The umask is probed either way (a failure is fatal).
     Absent,
     /// An empty destination that is filled in place of: the parent's
     /// inheritance is cleared, the umask probed (a failure is tolerated) and
@@ -100,6 +106,23 @@ impl Inherited {
             },
         }
     }
+}
+
+/// Proof that the staging directory was renamed to its destination.
+///
+/// Only [`StagingDir::publish`] makes one, so what must happen to the root
+/// after the rename cannot be done before it.
+#[derive(Debug)]
+pub(super) struct Published(());
+
+/// Whose inheritance a staging directory is seeded with.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum SeedSource {
+    /// The parent's, as a directory made at the destination's path gets it.
+    Parent,
+    /// The destination with this identity.
+    Destination(FileIdentity),
 }
 
 /// A staging directory inside the pinned directory `parent`.
@@ -181,25 +204,56 @@ impl<'p> StagingDir<'p> {
     #[cfg(unix)]
     fn prepared(mut self, seed: Seed, parent_path: &Path) -> Result<Self> {
         match seed {
-            Seed::Absent => match self.probe_umask() {
-                Ok(fresh) => self.fresh = Some(fresh),
-                Err(e) => return Err(self.fail(&e, "failed to probe the umask", parent_path)),
-            },
+            Seed::Absent => self = self.prepared_absent(parent_path)?,
             Seed::FillEmpty(id, inheritance) => {
                 self = self.cleared(parent_path)?;
                 // Without a probe result the fallback for a vanished
                 // destination is a private root.
-                if let Ok(fresh) = self.probe_umask() {
+                if let Ok(fresh) = self.probe_umask(AclPlan::None) {
                     self.fresh = Some(fresh);
                 }
-                self = self.seeded(id, &inheritance, parent_path)?;
+                self = self.seeded(SeedSource::Destination(id), &inheritance, parent_path)?;
             }
             Seed::Replace(id, inheritance) => {
                 self = self.cleared(parent_path)?;
-                self = self.seeded(id, &inheritance, parent_path)?;
+                self = self.seeded(SeedSource::Destination(id), &inheritance, parent_path)?;
             }
         }
         Ok(self)
+    }
+
+    /// Prepares the directory for a destination that is absent: what a `mkdir`
+    /// of it in the parent would give it is captured, cleared from the
+    /// directory, and written back as entries for children only.
+    ///
+    /// The captured list also goes to the root that is published, which gets
+    /// it after the rename; the directory stays private until then.
+    #[cfg(unix)]
+    fn prepared_absent(mut self, parent_path: &Path) -> Result<Self> {
+        let captured = acl::capture_parent(self.parent, self.name.as_leaf(), parent_path, self.id);
+        let plan = match captured {
+            Ok(ParentAcl::MaskedByMode | ParentAcl::Captured(AclPlan::None)) => None,
+            Ok(ParentAcl::Captured(plan)) => {
+                self = self.cleared(parent_path)?;
+                Some(plan)
+            }
+            Err(e) => {
+                return Err(self.fail(
+                    &e,
+                    "failed to read the access control list the staging directory inherited",
+                    parent_path,
+                ));
+            }
+        };
+        let inheritance = plan.as_ref().map(AclPlan::inheritance);
+        match self.probe_umask(plan.unwrap_or(AclPlan::None)) {
+            Ok(fresh) => self.fresh = Some(fresh),
+            Err(e) => return Err(self.fail(&e, "failed to probe the umask", parent_path)),
+        }
+        match inheritance {
+            Some(inheritance) => self.seeded(SeedSource::Parent, &inheritance, parent_path),
+            None => Ok(self),
+        }
     }
 
     #[cfg(not(unix))]
@@ -243,8 +297,8 @@ impl<'p> StagingDir<'p> {
         }
     }
 
-    /// Writes the destination's inheritance onto the cleared directory, so its
-    /// children inherit what an in-place extraction's would.
+    /// Writes `inheritance` onto the cleared directory, so its children
+    /// inherit what an in-place extraction's would.
     ///
     /// A write that fails is cleared again and recorded as
     /// [`Inherited::Withheld`]; when that clear fails too the run fails, as a
@@ -252,7 +306,7 @@ impl<'p> StagingDir<'p> {
     #[cfg(unix)]
     fn seeded(
         mut self,
-        id: FileIdentity,
+        source: SeedSource,
         inheritance: &Inheritance,
         parent_path: &Path,
     ) -> Result<Self> {
@@ -267,8 +321,13 @@ impl<'p> StagingDir<'p> {
             }
         };
         self.inherited = match acl::stage(&dir, inheritance) {
-            Ok(()) if matches!(inheritance, Inheritance::None) => Inherited::Destination(id),
-            Ok(()) => Inherited::Seeded(id),
+            Ok(()) => match source {
+                SeedSource::Parent => Inherited::Parent,
+                SeedSource::Destination(id) if matches!(inheritance, Inheritance::None) => {
+                    Inherited::Destination(id)
+                }
+                SeedSource::Destination(id) => Inherited::Seeded(id),
+            },
             Err(_) => match acl::clear_inherited(self.parent, self.name.as_leaf()) {
                 Ok(()) => Inherited::Withheld(NarrowingReason::AclCopyFailed),
                 Err(e) => {
@@ -310,11 +369,11 @@ impl<'p> StagingDir<'p> {
     /// # Errors
     ///
     /// The rename's I/O error.
-    pub(super) fn publish(&mut self, destination: &LeafBuf) -> io::Result<()> {
+    pub(super) fn publish(&mut self, destination: &LeafBuf) -> io::Result<Published> {
         self.parent
             .rename_dir_within(self.name.as_leaf(), destination.as_leaf())?;
         self.armed = false;
-        Ok(())
+        Ok(Published(()))
     }
 
     /// Removes the staging directory and says what survived the removal.

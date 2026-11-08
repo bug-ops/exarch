@@ -297,13 +297,16 @@ fn adoption_for(
     Ok(Some(Adoption::of_empty_destination(&status, acl)))
 }
 
-/// Gives the staging directory the permissions in `adoption` and renames it
-/// onto the destination, recording on `report` every way the root ended up
-/// with less access than the destination. No `adoption` means the destination
-/// vanished with no mode left to read: the root keeps its private mode.
+/// Gives the staging directory the permissions in `adoption`, renames it onto
+/// the destination and then finishes the root with the destination's ACL,
+/// recording on `report` every way the root ended up with less access than
+/// the destination. No `adoption` means the destination vanished with no mode
+/// left to read: the root keeps its private mode.
 ///
-/// Both happen only now so every earlier failure leaves the staging directory
-/// private; a failure here leaves the caller to discard it.
+/// The ACL waits for the rename because one that denies deleting the root
+/// would stop it. Everything before the rename leaves the staging directory
+/// private; a failure up to and including the rename leaves the caller to
+/// discard it.
 fn publish_adopted(
     staging: &mut StagingDir<'_>,
     destination: &AtomicDestination,
@@ -311,15 +314,15 @@ fn publish_adopted(
     output_dir: &Path,
     report: &mut ExtractionReport,
 ) -> Result<()> {
-    if let Some(adoption) = adoption {
-        let narrowed = staging.adopt(adoption).map_err(|e| {
+    let adopted = if let Some(adoption) = adoption {
+        let root = staging.adopt(adoption).map_err(|e| {
             ArchiveError::Io(io_context(
                 &e,
                 "failed to give the extracted content the destination's permissions",
                 output_dir,
             ))
         })?;
-        report.record_narrowing(narrowed);
+        Some(root)
     } else {
         let withheld = staging.vanished_reason().map_err(|e| {
             ArchiveError::Io(io_context(
@@ -329,8 +332,9 @@ fn publish_adopted(
             ))
         })?;
         report.record_narrowing(destination_vanished(withheld));
-    }
-    staging
+        None
+    };
+    let published = staging
         .publish(&destination.name)
         .map_err(|e| match e.kind() {
             io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty => {
@@ -343,7 +347,11 @@ fn publish_adopted(
                 "failed to rename temp dir into place",
                 output_dir,
             )),
-        })
+        })?;
+    if let Some(root) = adopted {
+        report.record_narrowing(root.finish(published));
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]

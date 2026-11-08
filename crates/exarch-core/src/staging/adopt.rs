@@ -4,7 +4,14 @@
 //! root that gets published must look like the destination it replaces, or a
 //! `0700` destination would come back `0755` and expose what it holds. The
 //! destination's ACL is carried over where it can be, see [`super::acl`].
+//!
+//! Adoption is split around the publishing rename. [`StagingDir::adopt`] does
+//! everything that may still fail the run and returns an [`AdoptedRoot`];
+//! the ACL, which may deny deleting the very directory being renamed, is
+//! written by [`AdoptedRoot::finish`], which takes the [`Published`] proof the
+//! rename returns.
 
+use super::dir::Published;
 use super::dir::StagingDir;
 
 #[cfg(unix)]
@@ -14,6 +21,7 @@ mod imp {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::fchown;
 
+    use super::Published;
     use super::StagingDir;
     use crate::NarrowingReason;
     use crate::formats::file_identity::FileIdentity;
@@ -103,9 +111,24 @@ mod imp {
     #[derive(Debug, Clone)]
     pub(in crate::staging) struct Adoption {
         mode: DirMode,
-        owner: Option<Owner>,
-        acl: AclPlan,
-        destination: Option<FileIdentity>,
+        origin: RootOrigin,
+    }
+
+    /// What the published root takes its owner and ACL from.
+    #[derive(Debug, Clone)]
+    enum RootOrigin {
+        /// A directory made for a destination that was absent: it keeps the
+        /// owner it was created with, and takes the ACL a directory made at
+        /// the destination's path was given.
+        Fresh { captured: AclPlan },
+        /// An existing destination: its owner is taken as far as the claim
+        /// allows, and its ACL as `acl` says. `identity` names the directory,
+        /// or is unknown when the volume provides none.
+        Destination {
+            owner: Owner,
+            acl: AclPlan,
+            identity: FileIdentity,
+        },
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -148,15 +171,27 @@ mod imp {
             };
             Self {
                 mode,
-                owner: Some(Owner {
-                    ids: Ownership {
-                        uid: status.mode.uid(),
-                        gid: status.mode.gid(),
+                origin: RootOrigin::Destination {
+                    owner: Owner {
+                        ids: Ownership {
+                            uid: status.mode.uid(),
+                            gid: status.mode.gid(),
+                        },
+                        claim,
                     },
-                    claim,
-                }),
-                acl,
-                destination: Some(status.identity),
+                    acl,
+                    identity: status.identity,
+                },
+            }
+        }
+
+        /// The adoption of a root made for an absent destination, with the
+        /// mode a new directory gets under the umask and `captured`: the ACL
+        /// a directory made at the destination's path was given.
+        fn fresh(mode: DirMode, captured: AclPlan) -> Self {
+            Self {
+                mode,
+                origin: RootOrigin::Fresh { captured },
             }
         }
 
@@ -180,35 +215,92 @@ mod imp {
         ) -> Self {
             Self {
                 mode: DirMode(mode),
-                owner: Some(Owner {
-                    ids: Ownership { uid, gid },
-                    claim,
-                }),
-                acl,
-                destination: None,
+                origin: RootOrigin::Destination {
+                    owner: Owner {
+                        ids: Ownership { uid, gid },
+                        claim,
+                    },
+                    acl,
+                    identity: FileIdentity::Unknown,
+                },
             }
         }
 
-        /// This adoption as taken from the destination `identity` names.
+        /// This adoption as taken from the destination `named` names; a root
+        /// made for an absent destination has none.
         #[cfg(test)]
-        pub(in crate::staging) const fn of_destination_identity(
-            mut self,
-            identity: FileIdentity,
-        ) -> Self {
-            self.destination = Some(identity);
+        pub(in crate::staging) fn of_destination_identity(mut self, named: FileIdentity) -> Self {
+            if let RootOrigin::Destination { identity, .. } = &mut self.origin {
+                *identity = named;
+            }
             self
         }
     }
 
+    /// The ACL and mode a root takes once it has been renamed onto the
+    /// destination, with the descriptor that was held across the rename.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[derive(Debug)]
+    struct PendingCopy {
+        dir: std::fs::File,
+        acl: acl::CopiedAcl,
+        mode: DirMode,
+    }
+
+    /// A staging root made as close to the destination as can be before the
+    /// publishing rename.
+    ///
+    /// [`finish`](Self::finish) does the rest, so dropping one leaves the root
+    /// as private as it was before the rename.
+    #[must_use = "the root's ACL is only written by `finish`"]
+    #[derive(Debug)]
+    pub(in crate::staging) struct AdoptedRoot {
+        narrowed: Narrowed,
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        pending: Option<PendingCopy>,
+    }
+
+    impl AdoptedRoot {
+        /// Writes the destination's ACL and then its mode onto the published
+        /// root, through the descriptor held across the rename, and returns
+        /// every way the root has less access than the destination.
+        ///
+        /// The `Published` proof only a successful rename gives is what makes
+        /// writing the ACL before the rename unrepresentable. The directory is
+        /// published by now, so a failure is not an error:
+        /// [`NarrowingReason::AclCopyFailed`] is recorded and the root is made
+        /// private where the OS lets it.
+        pub(in crate::staging) fn finish(self, _published: Published) -> Narrowed {
+            #[allow(
+                unused_mut,
+                reason = "only platforms that copy an ACL have anything to record"
+            )]
+            let mut narrowed = self.narrowed;
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            if let Some(PendingCopy { dir, acl, mode }) = self.pending {
+                copy_acl(&dir, &acl, mode, &mut narrowed);
+            }
+            narrowed
+        }
+
+        /// What has been recorded as narrowed so far, before the rename.
+        #[cfg(test)]
+        pub(in crate::staging) fn reasons(&self) -> &[NarrowingReason] {
+            self.narrowed.reasons()
+        }
+    }
+
     impl StagingDir<'_> {
-        /// The mode a new directory gets under the process umask, read from a
-        /// throwaway directory made inside the private staging directory, so
-        /// the umask is never read through the racy `umask()` call.
+        /// The adoption of a root made for an absent destination: the mode a
+        /// new directory gets under the process umask, read from a throwaway
+        /// directory made inside the private staging directory (so the umask
+        /// is never read through the racy `umask()` call), and `captured`, the
+        /// ACL such a directory was given.
         ///
         /// # Errors
         ///
         /// The I/O error of creating, inspecting or removing the probe.
-        pub(in crate::staging) fn probe_umask(&self) -> io::Result<Adoption> {
+        pub(in crate::staging) fn probe_umask(&self, captured: AclPlan) -> io::Result<Adoption> {
             let staging = self.parent.open_dir(self.name.as_leaf())?;
             for _ in 0..PROBE_ATTEMPTS {
                 let probe = LeafBuf::random(".exarch-probe-");
@@ -218,12 +310,10 @@ mod imp {
                         staging.remove_dir(probe.as_leaf())?;
                         let status =
                             status?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-                        return Ok(Adoption {
-                            mode: DirMode::of_umask_probe(status.mode),
-                            owner: None,
-                            acl: AclPlan::None,
-                            destination: None,
-                        });
+                        return Ok(Adoption::fresh(
+                            DirMode::of_umask_probe(status.mode),
+                            captured,
+                        ));
                     }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(e) => return Err(e),
@@ -246,7 +336,10 @@ mod imp {
         /// for its children, is removed first, so the root's ACL is the
         /// destination's and nothing else. The destination's ACL is copied
         /// only onto a root that ended up with the destination's uid and gid;
-        /// otherwise, and when the copy fails, the root stays `0700`.
+        /// otherwise the root stays `0700`. The copy itself is not made here:
+        /// it waits in the returned [`AdoptedRoot`] for
+        /// [`finish`](AdoptedRoot::finish), as an entry that denies deleting
+        /// the root would stop the publishing rename.
         ///
         /// The root also stays `0700`, with no ACL, when its children could
         /// not inherit from the destination being adopted, or were seeded from
@@ -256,39 +349,51 @@ mod imp {
         /// owner keeps access, unless the destination is another directory.
         ///
         /// Returns every way the root ended up with less access than the
-        /// destination had.
+        /// destination had, and what is left to do after the rename.
         ///
         /// # Errors
         ///
         /// The I/O error of opening the directory, clearing its ACL or
         /// changing its mode, or a directory that is no longer the one
         /// created.
-        pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<Narrowed> {
+        pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<AdoptedRoot> {
             let dir = self.open_verified()?;
-            let Adoption {
-                mut mode,
-                owner,
-                acl,
-                destination,
-            } = adoption;
+            let Adoption { mut mode, origin } = adoption;
+            let (acl, destination, owner) = match origin {
+                RootOrigin::Fresh { captured } => (captured, None, None),
+                RootOrigin::Destination {
+                    owner,
+                    acl,
+                    identity,
+                } => (acl, Some(identity), Some(owner)),
+            };
             let mut narrowed = Narrowed::none();
             let withheld = self.inherited.withholds(destination);
-            if withheld.is_some() || owner.is_some() {
+            // A fresh root with nothing captured keeps what it has: on Linux
+            // that is the parent's default ACL, which a clear would strip.
+            if withheld.is_some() || owner.is_some() || !matches!(acl, AclPlan::None) {
                 acl::clear_inherited(self.parent, self.name.as_leaf())?;
             }
             // Another directory than the one that was seeded from has other
             // owners: its uid and gid are not this destination's to claim.
             let claimed = match owner {
-                Some(owner) if withheld != Some(NarrowingReason::DestinationChanged) => {
-                    Some((owner, claim_owner(&dir, owner, &mut mode, &mut narrowed)?))
+                Some(owner) if withheld != Some(NarrowingReason::DestinationChanged) => Some((
+                    owner.ids,
+                    claim_owner(&dir, owner, &mut mode, &mut narrowed)?,
+                )),
+                Some(_) => None,
+                None => {
+                    let root = Ownership::of(&dir.metadata()?);
+                    Some((root, root))
                 }
-                _ => None,
             };
             let resolution = match (withheld, claimed) {
                 (Some(reason), _) => Resolution::Private(reason),
-                (None, Some((owner, root))) => acl::resolve(acl, owner.ids, root),
+                (None, Some((destination, root))) => acl::resolve(acl, destination, root),
                 (None, None) => Resolution::NoAcl,
             };
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            let mut pending = None;
             let applied = match resolution {
                 Resolution::NoAcl => dir.set_permissions(mode.permissions()),
                 Resolution::Private(reason) => {
@@ -296,10 +401,16 @@ mod imp {
                     dir.set_permissions(DirMode::PRIVATE.permissions())
                 }
                 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
-                Resolution::Copy(acl) => copy_acl(&dir, &acl, mode, &mut narrowed),
+                Resolution::Copy(acl) => dir.try_clone().map(|dir| {
+                    pending = Some(PendingCopy { dir, acl, mode });
+                }),
             };
             self.adopted = Some(dir);
-            applied.map(|()| narrowed)
+            applied.map(|()| AdoptedRoot {
+                narrowed,
+                #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+                pending,
+            })
         }
 
         /// The reason the root stays as private as it is although the
@@ -389,16 +500,10 @@ mod imp {
     /// not rewritten. A directory without an access ACL gets the destination's
     /// permission bits as they are.
     ///
-    /// The root stays `0700` until the ACL is written. When writing fails the
-    /// ACL is removed again and the root stays private; when that fails too the
-    /// error is returned, so the publish fails instead of exposing the root.
+    /// The root stays `0700` until the ACL is written; see [`write_acl_then`]
+    /// for what a failure leaves.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn copy_acl(
-        dir: &std::fs::File,
-        acl: &acl::CopiedAcl,
-        mode: DirMode,
-        narrowed: &mut Narrowed,
-    ) -> io::Result<()> {
+    fn copy_acl(dir: &std::fs::File, acl: &acl::CopiedAcl, mode: DirMode, narrowed: &mut Narrowed) {
         write_acl_then(dir, acl, narrowed, |dir| {
             let permission = if acl.has_access() {
                 dir.metadata()?.mode() & 0o777
@@ -406,43 +511,82 @@ mod imp {
                 mode.permission_bits()
             };
             dir.set_permissions(mode.with_permission_bits(permission).permissions())
-        })
+        });
     }
 
     /// Writes `acl` onto the root, then applies the destination's mode, so
     /// the root is never wider than the destination while its entries are
     /// missing; the kernel keeps the ACL across the mode change.
     #[cfg(target_os = "macos")]
-    fn copy_acl(
-        dir: &std::fs::File,
-        acl: &acl::CopiedAcl,
-        mode: DirMode,
-        narrowed: &mut Narrowed,
-    ) -> io::Result<()> {
+    fn copy_acl(dir: &std::fs::File, acl: &acl::CopiedAcl, mode: DirMode, narrowed: &mut Narrowed) {
         write_acl_then(dir, acl, narrowed, |dir| {
             dir.set_permissions(mode.permissions())
-        })
+        });
     }
 
-    /// Writes `acl` onto the root and then runs `set_mode`.
+    /// Writes `acl` onto the published root and then runs `set_mode`.
     ///
-    /// The root stays `0700` until the ACL is written. When either step fails
-    /// the ACL is removed again, the root stays private and
-    /// [`NarrowingReason::AclCopyFailed`] is recorded; when that fails too the
-    /// error is returned, so the publish fails instead of exposing the root.
+    /// The root is `0700` until the ACL is written. When either step fails
+    /// [`NarrowingReason::AclCopyFailed`] is recorded and the ACL is removed
+    /// and the mode set to `0700` where the OS allows. The root is published
+    /// already, so nothing here can fail the run.
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     fn write_acl_then(
         dir: &std::fs::File,
         acl: &acl::CopiedAcl,
         narrowed: &mut Narrowed,
         set_mode: impl FnOnce(&std::fs::File) -> io::Result<()>,
-    ) -> io::Result<()> {
+    ) {
         if acl.write_to(dir).and_then(|()| set_mode(dir)).is_err() {
-            acl::CopiedAcl::clear(dir)?;
-            dir.set_permissions(DirMode::PRIVATE.permissions())?;
+            // Best effort: the root is published and there is no one to fail.
+            let _ = acl::CopiedAcl::clear(dir);
+            let _ = dir.set_permissions(DirMode::PRIVATE.permissions());
             narrowed.push(NarrowingReason::AclCopyFailed);
         }
-        Ok(())
+    }
+
+    #[cfg(all(
+        test,
+        any(target_os = "linux", target_os = "android", target_os = "macos")
+    ))]
+    #[allow(clippy::unwrap_used)]
+    mod post_rename_tests {
+        use super::*;
+        use crate::formats::pinned_dir::VettedDir;
+        use crate::staging::acl::InheritedAcl;
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        fn valid_acl() -> acl::CopiedAcl {
+            acl::CopiedAcl::for_test(None, Some(InheritedAcl::valid_for_test().bytes().to_vec()))
+        }
+
+        #[cfg(target_os = "macos")]
+        fn valid_acl() -> acl::CopiedAcl {
+            InheritedAcl::valid_for_test().acl().clone()
+        }
+
+        #[test]
+        fn a_mode_that_fails_after_the_acl_was_written_leaves_a_private_root_without_it() {
+            let temp = tempfile::tempdir().unwrap();
+            let parent = temp.path().canonicalize().unwrap();
+            let root = parent.join("root");
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let dir = std::fs::File::open(&root).unwrap();
+            let mut narrowed = Narrowed::none();
+
+            write_acl_then(&dir, &valid_acl(), &mut narrowed, |_| {
+                Err(io::Error::other("mode refused"))
+            });
+
+            assert_eq!(narrowed.reasons(), [NarrowingReason::AclCopyFailed]);
+            assert_eq!(dir.metadata().unwrap().mode() & 0o7777, 0o700);
+            let pin = VettedDir::open_path(&parent).unwrap();
+            let name = LeafBuf::of(&root).unwrap();
+            let id = pin.status(name.as_leaf()).unwrap().unwrap().identity;
+            let plan = acl::read_destination(&pin, name.as_leaf(), &parent, id).unwrap();
+            assert_eq!(plan, AclPlan::None);
+        }
     }
 
     #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
@@ -478,7 +622,7 @@ mod imp {
             let mode = DirMode::of_destination(EntryMode::for_test(0o755, 0, 0));
             let mut narrowed = Narrowed::none();
 
-            copy_acl(&dir, &acl, mode, &mut narrowed).unwrap();
+            copy_acl(&dir, &acl, mode, &mut narrowed);
 
             assert_eq!(narrowed.reasons(), [NarrowingReason::AclCopyFailed]);
             assert_eq!(dir.metadata().unwrap().mode() & 0o7777, 0o700);
@@ -584,6 +728,7 @@ mod removable {
 mod imp {
     use std::io;
 
+    use super::Published;
     use super::StagingDir;
     use crate::formats::pinned_dir::EntryStatus;
     use crate::report::Narrowed;
@@ -592,6 +737,21 @@ mod imp {
     /// Platforms without Unix modes publish the staging directory as it is.
     #[derive(Debug, Clone, Copy)]
     pub(in crate::staging) struct Adoption;
+
+    /// Nothing is left to do to a root after its rename here.
+    #[derive(Debug)]
+    pub(in crate::staging) struct AdoptedRoot;
+
+    impl AdoptedRoot {
+        #[allow(
+            clippy::unused_self,
+            clippy::missing_const_for_fn,
+            reason = "keeps the call sites platform-neutral"
+        )]
+        pub(in crate::staging) fn finish(self, _published: Published) -> Narrowed {
+            Narrowed::none()
+        }
+    }
 
     impl Adoption {
         pub(in crate::staging) const fn of(_status: &EntryStatus, _acl: AclPlan) -> Self {
@@ -618,8 +778,8 @@ mod imp {
             Ok(Adoption)
         }
 
-        pub(in crate::staging) fn adopt(&mut self, _adoption: Adoption) -> io::Result<Narrowed> {
-            Ok(Narrowed::none())
+        pub(in crate::staging) fn adopt(&mut self, _adoption: Adoption) -> io::Result<AdoptedRoot> {
+            Ok(AdoptedRoot)
         }
 
         pub(in crate::staging) fn vanished_reason(

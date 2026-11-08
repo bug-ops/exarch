@@ -263,7 +263,16 @@ closed_enum! {
         /// The root belongs to another user or group than the destination, so
         /// its list would grant the wrong principals.
         OwnershipDiffers => "ownership_differs",
-        /// Writing the destination's list onto the root failed.
+        /// Writing an access control list failed, in one of two places.
+        ///
+        /// Writing the destination's list onto the root happens after the
+        /// publishing rename, so the run still succeeds and the root is made
+        /// private (`0700`, no list) where the OS allows.
+        ///
+        /// Seeding the staging directory with the entries its children
+        /// inherit (from the destination, or from the parent of an absent
+        /// destination) happens before the rename. The seed is removed again
+        /// and the published root stays `0700` with no list.
         AclCopyFailed => "acl_copy_failed",
         /// The root could not join the destination's group, so its group
         /// access and setgid bit were dropped.

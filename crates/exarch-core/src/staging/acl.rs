@@ -13,14 +13,18 @@
 //! A staging directory made in the destination's parent also inherits that
 //! parent's default ACL (Linux) or inheritable entries (macOS). For an
 //! existing destination those are removed at creation and again at adoption,
-//! and a failure to remove them fails the run.
+//! and a failure to remove them fails the run. For an absent destination
+//! macOS captures them first, clears them, and seeds them back for children
+//! only, so the directory is private; Linux leaves them, which its mode masks.
 //!
 //! The children of an in-place extraction inherit the destination's own
 //! inheritable entries, so the staging directory is seeded with them at
 //! creation (see [`Inheritance`]): the Linux default ACL, and on macOS the
 //! inheritable entries rewritten as `ONLY_INHERIT`, which children receive and
 //! the staging directory itself does not apply. Adoption then replaces the
-//! seed with the destination's full list.
+//! seed with the destination's full list, which is written only once the
+//! directory has been renamed onto the destination: an entry that denies
+//! deleting would stop the rename.
 
 /// What the children of a staging directory inherit from the destination the
 /// staged tree will fill or replace.
@@ -162,6 +166,37 @@ mod imp {
             #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
             AclPlan::Copy(_) => Resolution::Private(NarrowingReason::OwnershipDiffers),
             AclPlan::Private(reason) => Resolution::Private(reason),
+        }
+    }
+
+    /// What a new directory got from the ACL of its parent.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(in crate::staging) enum ParentAcl {
+        /// Nothing that is read or cleared: a POSIX default ACL lives in the
+        /// mode's group bits, and clearing it would hide it from the umask
+        /// probe.
+        MaskedByMode,
+        /// The list the directory inherited, read before it is cleared.
+        Captured(AclPlan),
+    }
+
+    /// Reads what the directory `name` of `pin`, just created in a parent,
+    /// inherited from that parent. Only macOS lists it: its inherited entries
+    /// are ordinary ACL entries the directory applies to itself.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of [`read_destination`].
+    pub(in crate::staging) fn capture_parent(
+        pin: &crate::formats::pinned_dir::VettedDir,
+        name: crate::formats::pinned_dir::Leaf<'_>,
+        parent_path: &std::path::Path,
+        created: crate::formats::file_identity::FileIdentity,
+    ) -> std::io::Result<ParentAcl> {
+        if cfg!(target_os = "macos") {
+            read_destination(pin, name, parent_path, created).map(ParentAcl::Captured)
+        } else {
+            Ok(ParentAcl::MaskedByMode)
         }
     }
 
@@ -1605,7 +1640,11 @@ pub(super) use imp::AclPlan;
 #[cfg(unix)]
 pub(super) use imp::Ownership;
 #[cfg(unix)]
+pub(super) use imp::ParentAcl;
+#[cfg(unix)]
 pub(super) use imp::Resolution;
+#[cfg(unix)]
+pub(super) use imp::capture_parent;
 #[cfg(unix)]
 pub(super) use imp::clear_inherited;
 pub(super) use imp::read_destination;

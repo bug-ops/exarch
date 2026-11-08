@@ -789,4 +789,165 @@ mod macos {
             assert_eq!(mode_of(&fx.dest), 0o755, "{staging:?}");
         }
     }
+
+    fn staging_dirs_in(parent: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".exarch-"))
+            })
+            .collect()
+    }
+
+    /// A fixture whose destination and twin do not exist yet.
+    fn absent_fixture() -> Fixture {
+        let fx = Fixture::new();
+        std::fs::remove_dir(&fx.dest).unwrap();
+        std::fs::remove_dir(&fx.twin).unwrap();
+        fx
+    }
+
+    #[test]
+    fn a_destination_denying_its_own_deletion_is_published_with_its_acl() {
+        let fx = Fixture::new();
+        chmod(&fx.dest, 0o755);
+        add_ace(&fx.dest, "everyone deny delete");
+        let before = aces_of(&fx.dest);
+        assert_eq!(before.len(), 1);
+
+        let report = fx.extract(Staging::Atomic);
+
+        assert_eq!(aces_of(&fx.dest), before);
+        assert_eq!(mode_of(&fx.dest), 0o755);
+        assert!(narrowing_of(&report).is_empty());
+        assert_eq!(
+            staging_dirs_in(fx.dest.parent().unwrap()),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn a_destination_denying_deletion_to_its_children_matches_the_in_place_twin() {
+        let fx = Fixture::new();
+        for dir in [&fx.dest, &fx.twin] {
+            chmod(dir, 0o755);
+            add_ace(dir, "everyone deny delete,file_inherit,directory_inherit");
+        }
+
+        fx.extract(Staging::Atomic);
+        fx.extract_twin();
+
+        for path in TREE {
+            assert_eq!(
+                aces_of(&fx.dest.join(path)),
+                aces_of(&fx.twin.join(path)),
+                "{path:?}"
+            );
+        }
+        assert_eq!(
+            staging_dirs_in(fx.dest.parent().unwrap()),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn a_destination_filled_meanwhile_is_refused_without_a_leftover() {
+        let fx = Fixture::new();
+        chmod(&fx.dest, 0o755);
+        add_ace(&fx.dest, "everyone deny delete");
+        let planted = fx.dest.join("planted");
+        let mut progress = AtEnd::new(move || std::fs::write(planted, b"x").unwrap());
+
+        let error = fx
+            .request(Staging::Atomic)
+            .with_progress(&mut progress)
+            .extract(&fx.archive, &fx.dest)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, exarch_core::ArchiveError::OutputExists { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            staging_dirs_in(fx.dest.parent().unwrap()),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn an_absent_destination_is_private_while_the_archive_extracts_and_inherits_as_in_place() {
+        for staging in MODES {
+            let fx = absent_fixture();
+            let parent = fx.dest.parent().unwrap().to_path_buf();
+            add_ace(
+                &parent,
+                "everyone allow list,add_file,search,add_subdirectory,directory_inherit",
+            );
+            let observed = parent.clone();
+
+            let report = fx.extract_observed(staging, move || {
+                let stage = staging_dir_in(&observed);
+                assert_eq!(mode_of(&stage), 0o700, "{staging:?}");
+                let aces = aces_of(&stage);
+                assert!(!aces.is_empty(), "{staging:?}");
+                assert!(
+                    aces.iter().all(|ace| ace.contains("only_inherit")),
+                    "{staging:?} {aces:?}"
+                );
+            });
+            fx.extract_twin();
+
+            assert!(narrowing_of(&report).is_empty(), "{staging:?}");
+            assert_eq!(mode_of(&fx.dest), mode_of(&fx.twin), "{staging:?}");
+            for path in TREE {
+                assert_eq!(
+                    aces_of(&fx.dest.join(path)),
+                    aces_of(&fx.twin.join(path)),
+                    "{staging:?} {path:?}"
+                );
+            }
+            assert!(!aces_of(&fx.dest).is_empty(), "{staging:?}");
+        }
+    }
+
+    #[test]
+    fn an_absent_destination_under_an_inheritable_deny_extracts_like_in_place() {
+        for staging in MODES {
+            let fx = absent_fixture();
+            let parent = fx.dest.parent().unwrap().to_path_buf();
+            add_ace(&parent, "everyone deny delete,directory_inherit");
+
+            fx.extract(staging);
+            fx.extract_twin();
+
+            assert_eq!(probes_under(&fx.dest), Vec::<PathBuf>::new(), "{staging:?}");
+            assert_eq!(
+                staging_dirs_in(&parent),
+                Vec::<PathBuf>::new(),
+                "{staging:?}"
+            );
+            for path in TREE {
+                assert_eq!(
+                    aces_of(&fx.dest.join(path)),
+                    aces_of(&fx.twin.join(path)),
+                    "{staging:?} {path:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_absent_destination_under_a_parent_without_an_acl_gets_none() {
+        for staging in MODES {
+            let fx = absent_fixture();
+
+            fx.extract(staging);
+            fx.extract_twin();
+
+            assert!(aces_of(&fx.dest).is_empty(), "{staging:?}");
+            assert_eq!(mode_of(&fx.dest), mode_of(&fx.twin), "{staging:?}");
+        }
+    }
 }

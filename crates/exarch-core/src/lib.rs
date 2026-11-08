@@ -25,6 +25,10 @@
 #![warn(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+#![cfg_attr(
+    not(test),
+    warn(clippy::indexing_slicing, clippy::arithmetic_side_effects)
+)]
 
 mod api;
 pub(crate) mod closed_enum;

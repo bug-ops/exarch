@@ -57,6 +57,26 @@ impl BlockIndex {
     }
 }
 
+/// Index of a file of a [`SevenZHeader`], in range for that header.
+///
+/// Only [`SevenZHeader`] mints one, so [`SevenZHeader::file`] needs no bounds
+/// check. It is only meaningful for the header that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct FileIndex(usize);
+
+impl FileIndex {
+    /// The file at `position`, for tests that build tables without a header.
+    #[cfg(test)]
+    pub(crate) const fn at(position: usize) -> Self {
+        Self(position)
+    }
+
+    /// The position of the file in the archive's file list.
+    pub(crate) const fn get(self) -> usize {
+        self.0
+    }
+}
+
 /// One `T` per block of a [`SevenZHeader`], indexed by [`BlockIndex`].
 ///
 /// Only [`SevenZHeader::per_block`] builds one, sized to that header's blocks,
@@ -180,6 +200,25 @@ impl SevenZHeader {
     /// The archive's file entries.
     pub(crate) fn files(&self) -> &[sevenz_rust2::ArchiveEntry] {
         &self.archive.files
+    }
+
+    /// Every file index, ascending.
+    pub(crate) fn file_indices(&self) -> impl Iterator<Item = FileIndex> + use<> {
+        (0..self.archive.files.len()).map(FileIndex)
+    }
+
+    /// The index of the file at `position`, or `None` past the file list.
+    pub(crate) fn file_index(&self, position: usize) -> Option<FileIndex> {
+        (position < self.archive.files.len()).then_some(FileIndex(position))
+    }
+
+    /// The file at `index`.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "a FileIndex is minted only by this header from its own file list and never crosses headers"
+    )]
+    pub(crate) fn file(&self, index: FileIndex) -> &sevenz_rust2::ArchiveEntry {
+        &self.archive.files[index.0]
     }
 
     /// Whether the archive is solid.

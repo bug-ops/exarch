@@ -146,7 +146,7 @@ fn verify_with_tree(
             &mut hardlink_tracker,
         );
         if outcome.hardlink_pending {
-            deferred.push(index);
+            deferred.push((index, entry));
         }
         let mut issues = outcome.issues;
         if !outcome.left_out {
@@ -160,8 +160,8 @@ fn verify_with_tree(
         claims: &claims,
         hits: None,
     };
-    for index in deferred {
-        let entry = &manifest.entries()[index];
+    let mut stray_issues = Vec::new();
+    for (index, entry) in deferred {
         let materialized = verify_deferred_hardlink(
             entry,
             config,
@@ -170,13 +170,17 @@ fn verify_with_tree(
             &mut tree,
             &mut hardlink_tracker,
         );
-        lists[index].extend(collision_issues(&mut tree));
-        if let Err(issue) = materialized {
-            lists[index].push(issue);
+        let late_issues = collision_issues(&mut tree)
+            .into_iter()
+            .chain(materialized.err());
+        match lists.get_mut(index) {
+            Some(list) => list.extend(late_issues),
+            None => stray_issues.extend(late_issues),
         }
     }
 
     let mut archive_issues = structure.refusals().to_vec();
+    archive_issues.extend(stray_issues);
     archive_issues.extend(oversized_entry_issues(manifest.oversized_entries()));
     archive_issues.extend(unread_targets_issue(manifest, config));
     if let Err(error) = include_hits.require_all_matched(manifest.selection()) {

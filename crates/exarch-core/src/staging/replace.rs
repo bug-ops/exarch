@@ -30,7 +30,7 @@ use super::acl;
 use super::adopt::Adoption;
 use super::adopt::make_removable;
 use super::cancelled_after;
-use super::clear_inherited_acl;
+use super::dir::Seed;
 use super::dir::StagingDir;
 use super::io_context;
 use super::parent_or_cwd;
@@ -338,7 +338,14 @@ pub(super) fn run(
         parent,
         path,
     } = target;
-    let staging = clear_inherited_acl(StagingDir::create(&pin, &parent)?, &parent)?;
+    let inheritance = acl::read_inheritance(&pin, name.as_leaf(), &parent, id).map_err(|e| {
+        ArchiveError::Io(io_context(
+            &e,
+            "failed to read the destination's access control list",
+            &path,
+        ))
+    })?;
+    let staging = StagingDir::create(&pin, &parent, Seed::Replace(id, inheritance))?;
 
     let report = match extract(staging.path(), &staged_options(options), progress) {
         Ok(report) => report,
@@ -617,11 +624,15 @@ fn roll_back(
     ))
 }
 
-/// Runs [`swap_adopted`] over a real destination with `adoption` and returns
+/// Runs [`swap_adopted`] over a real destination with `adoption`, on a staging
+/// directory made as `seed` says of the destination's identity, and returns
 /// the report it produced.
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
-pub(super) fn swap_adopted_for_test(adoption: Adoption) -> ExtractionReport {
+pub(super) fn swap_adopted_for_test(
+    adoption: Adoption,
+    seed: impl FnOnce(FileIdentity) -> Seed,
+) -> ExtractionReport {
     use crate::formats::file_identity::identity_of;
 
     let temp = tempfile::TempDir::new().unwrap();
@@ -636,7 +647,7 @@ pub(super) fn swap_adopted_for_test(adoption: Adoption) -> ExtractionReport {
         parent: &parent,
     };
     let pin = crate::formats::pinned_dir::support::pinned_at(&parent);
-    let staging = StagingDir::create(&pin, &parent).unwrap();
+    let staging = StagingDir::create(&pin, &parent, seed(dest.id)).unwrap();
     let Ok(displaced) = Displaced::displace(&pin, &dest) else {
         panic!("the destination should be displaced");
     };

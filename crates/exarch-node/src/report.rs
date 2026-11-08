@@ -663,10 +663,6 @@ pub enum NarrowingReason {
     /// The list names a user or group the reading process cannot map.
     #[napi(value = "unmapped_id")]
     UnmappedId,
-    /// The list holds entries that children inherit, which the root alone
-    /// cannot carry.
-    #[napi(value = "acl_has_inheritable_entries")]
-    AclHasInheritableEntries,
     /// The root belongs to another user or group than the destination.
     #[napi(value = "ownership_differs")]
     OwnershipDiffers,
@@ -1759,7 +1755,6 @@ mod tests {
             NarrowingReason::AclUnreadable,
             NarrowingReason::DestinationChanged,
             NarrowingReason::UnmappedId,
-            NarrowingReason::AclHasInheritableEntries,
             NarrowingReason::OwnershipDiffers,
             NarrowingReason::AclCopyFailed,
             NarrowingReason::GroupNotKept,
@@ -1771,7 +1766,6 @@ mod tests {
             NarrowingReason::AclUnreadable => "acl_unreadable",
             NarrowingReason::DestinationChanged => "destination_changed",
             NarrowingReason::UnmappedId => "unmapped_id",
-            NarrowingReason::AclHasInheritableEntries => "acl_has_inheritable_entries",
             NarrowingReason::OwnershipDiffers => "ownership_differs",
             NarrowingReason::AclCopyFailed => "acl_copy_failed",
             NarrowingReason::GroupNotKept => "group_not_kept",

@@ -385,19 +385,25 @@ impl<'c> IntegrityPass<'c> {
         let quota_ok = self.quota.reserve(size, self.config).is_ok();
         let ratio_ok =
             validate_entry_compression(compression, Uncompressed(size), self.config).is_ok();
+        let slot = Slot(self.slots.len());
         self.slots.push(EntrySlot {
             issues: Vec::new(),
             admitted: quota_ok && ratio_ok,
         });
-        Slot(self.slots.len() - 1)
+        slot
     }
 
     pub(crate) fn is_admitted(&self, slot: Slot) -> bool {
-        self.slots[slot.0].admitted
+        self.slots.get(slot.0).is_some_and(|s| s.admitted)
     }
 
+    /// An issue for a slot this recorder never opened is kept as an archive
+    /// issue instead of being dropped.
     pub(crate) fn push_issue(&mut self, slot: Slot, issue: VerificationIssue) {
-        self.slots[slot.0].issues.push(issue);
+        match self.slots.get_mut(slot.0) {
+            Some(entry) => entry.issues.push(issue),
+            None => self.archive_issues.push(issue),
+        }
     }
 
     /// Counts unverified items that belong to no single entry.
@@ -832,6 +838,20 @@ mod tests {
         assert!(issue.message().contains("3 item(s)"), "{}", issue.message());
         assert!(issue.message().contains("over budget: 2"));
         assert!(!issue.message().contains("no end-of-archive"));
+    }
+
+    #[test]
+    fn test_unknown_slot_is_not_admitted_and_keeps_its_issue() {
+        let config = SecurityConfig::default();
+        let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
+        let stray = Slot(7);
+        let issue = VerificationIssue::from_error(&ArchiveError::Cancelled, None);
+
+        pass.push_issue(stray, issue);
+
+        assert!(!pass.is_admitted(stray));
+        let outcome = pass.finish();
+        assert_eq!(outcome.archive_issues.len(), 1);
     }
 
     #[test]

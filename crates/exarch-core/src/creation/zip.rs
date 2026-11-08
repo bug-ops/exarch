@@ -96,7 +96,7 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
                         e.to_string(),
                     ))
                 })?;
-                report.directories_added += 1;
+                report.directories_added = report.directories_added.saturating_add(1);
             }
             EntryType::Symlink { .. } => {
                 if config.follow_symlinks {
@@ -178,7 +178,7 @@ fn extraction_ratio_warning<R: Read + Seek>(
         if let CompressionRatio::Finite(ratio) = details.ratio()
             && ratio > limit
         {
-            over_limit += 1;
+            over_limit = over_limit.saturating_add(1);
             highest = highest.max(ratio);
         }
     }
@@ -248,13 +248,19 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
         if bytes_read == 0 {
             break;
         }
-        zip.write_all(&buffer[..bytes_read])?;
-        bytes_written += bytes_read as u64;
+        let chunk = buffer.get(..bytes_read).ok_or_else(|| {
+            source_error(
+                file_path,
+                std::io::Error::from(std::io::ErrorKind::InvalidData),
+            )
+        })?;
+        zip.write_all(chunk)?;
+        bytes_written = bytes_written.saturating_add(bytes_read as u64);
         progress.on_bytes_written(bytes_read as u64);
     }
 
-    report.files_added += 1;
-    report.bytes_written += bytes_written;
+    report.files_added = report.files_added.saturating_add(1);
+    report.bytes_written = report.bytes_written.saturating_add(bytes_written);
 
     Ok(())
 }

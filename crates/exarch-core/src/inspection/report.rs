@@ -146,12 +146,12 @@ impl VerificationReport {
                 &ArchiveError::ZipInconsistency(finding.clone()),
                 None,
             );
-            match bound_entry {
-                Some(position) => {
-                    let issue =
-                        issue.with_entry_path(Some(manifest.entries()[position].path.clone()));
-                    lists[position].push(issue);
-                }
+            let target = bound_entry.and_then(|position| {
+                let path = manifest.entries().get(position)?.path.clone();
+                lists.get_mut(position).map(|list| (list, path))
+            });
+            match target {
+                Some((list, path)) => list.push(issue.with_entry_path(Some(path))),
                 None => lists.push(vec![issue]),
             }
         }
@@ -166,7 +166,7 @@ impl VerificationReport {
         }
 
         let mut issues = archive_issues;
-        let mut suspicious_entries = 0;
+        let mut suspicious_entries = 0_usize;
 
         for (index, entry_issues) in lists.into_iter().enumerate() {
             if index < manifest.total_entries()
@@ -174,7 +174,7 @@ impl VerificationReport {
                     .iter()
                     .any(|i| i.severity() >= IssueSeverity::Medium)
             {
-                suspicious_entries += 1;
+                suspicious_entries = suspicious_entries.saturating_add(1);
             }
             issues.extend(entry_issues);
         }
@@ -545,7 +545,8 @@ impl IntegrityGaps {
 
     pub(crate) fn count_items(&mut self, reason: UnverifiedReason, items: u64) {
         if items > 0 {
-            *self.counts.entry(reason).or_default() += items;
+            let count = self.counts.entry(reason).or_default();
+            *count = count.saturating_add(items);
         }
     }
 
@@ -557,7 +558,7 @@ impl IntegrityGaps {
                 reason,
             });
         } else {
-            self.omitted += 1;
+            self.omitted = self.omitted.saturating_add(1);
         }
     }
 
@@ -1278,6 +1279,16 @@ mod tests {
     use std::io;
 
     use crate::inspection::manifest::ManifestEntryKind;
+
+    #[test]
+    fn test_unverified_counts_saturate_instead_of_wrapping_to_zero() {
+        let mut gaps = IntegrityGaps::default();
+        gaps.count_items(UnverifiedReason::OverBudget, u64::MAX);
+        gaps.count_items(UnverifiedReason::OverBudget, 2);
+
+        assert_eq!(gaps.count(UnverifiedReason::OverBudget), u64::MAX);
+        assert!(!gaps.is_empty());
+    }
 
     fn file_of(size: u64) -> ManifestEntryKind {
         ManifestEntryKind::File {

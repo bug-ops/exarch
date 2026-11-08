@@ -187,10 +187,10 @@ impl<P: ParentCheck> SafeSymlink<P> {
         }
 
         // 2.5. Check target for banned components and depth (HIGH-005)
-        let mut target_depth = 0;
+        let mut target_depth = 0_usize;
         for component in target.components() {
             if let std::path::Component::Normal(comp) = component {
-                target_depth += 1;
+                target_depth = target_depth.saturating_add(1);
                 check_component_for(view.path_model(), comp, config)?;
                 let comp_str = comp.to_string_lossy();
                 if !config.is_path_component_allowed(&comp_str) {

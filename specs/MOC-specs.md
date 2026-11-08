@@ -21,7 +21,7 @@ status: moc
 | ID | Feature | Phase | Status | Tasks |
 |----|---------|-------|--------|-------|
 | 001 | [[001-security-pipeline/spec\|Security Pipeline]] | tasks | current (synced through #1024; selection screening, 7z header size and Windows handle-relative links added) | [[001-security-pipeline/tasks\|none open]] |
-| 002 | [[002-format-handlers/spec\|Format Handlers]] | tasks | current (synced through #1024; sevenz-rust2 0.25, 7z header limit #674, #769, BSD and macOS spool #959) | [[002-format-handlers/tasks\|none open]] |
+| 002 | [[002-format-handlers/spec\|Format Handlers]] | tasks | current (synced through #1024; #1070 crate-wide index gate, #1071, #1072; sevenz-rust2 0.25, 7z header limit #674, #769, BSD and macOS spool #959) | [[002-format-handlers/tasks\|none open]] |
 | 003 | [[003-config-api/spec\|Configuration API]] | tasks | current (synced through #1024) | [[003-config-api/tasks\|none]] |
 | 004 | [[004-progress-tracking/spec\|Progress Tracking]] | tasks | current (synced through #1024) | [[004-progress-tracking/tasks\|none]] |
 | 005 | [[005-cli/spec\|CLI]] | tasks | current (synced through #1024) | [[005-cli/tasks\|none open]] |
@@ -30,7 +30,7 @@ status: moc
 | 011 | [[011-ffi-panic-boundary-simplification/spec\|FFI Panic Boundary Simplification]] | specify | draft (research, P3) | n/a (specify-only) |
 | 012 | [[012-windows-reserved-device-names/spec\|Windows Reserved Device Name Validation]] | specify | implemented (0.7.0, #652; extended in 0.8.0, #780, #790) | [[012-windows-reserved-device-names/tasks\|not started]] |
 | 013 | [[013-quota-permit-capability-token/spec\|Quota Permit Capability Token]] | tasks | current (synced through #1024) | [[013-quota-permit-capability-token/tasks\|none open]] |
-| 015 | [[015-atomic-force-destination-swap-hardening/spec\|Atomic-Force Destination Swap Hardening]] | tasks | current (synced through #1024) | [[015-atomic-force-destination-swap-hardening/tasks\|none open]] |
+| 015 | [[015-atomic-force-destination-swap-hardening/spec\|Atomic-Force Destination Swap Hardening]] | tasks | current (synced through #1024; #1067 staged children inherit the destination ACL) | [[015-atomic-force-destination-swap-hardening/tasks\|none open]] |
 | 016 | [[016-sanitized-mode-and-non-exhaustive-enums/spec\|SanitizedMode Newtype and Non-Exhaustive Enum Hardening]] | specify | implemented (v0.6.1, #554) | n/a (specify-only, retrospective) |
 | 017 | [[017-zip-header-consistency/spec\|ZIP Header Consistency Validation]] | specify | implemented (0.7.0, #671, #684, #688, #689, #690; extended in 0.9.0, #821, #827, #837, #848) | n/a (specify-only) |
 | 018 | [[018-7z-stream-map-panic/spec\|7z Stream Map Validation]] | specify | implemented (0.7.0, #752; narrowed in 0.8.0, #751, #770) | n/a (specify-only) |

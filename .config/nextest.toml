@@ -1,0 +1,3 @@
+[[profile.default.overrides]]
+filter = "package(exarch-cli)"
+leak-timeout = { period = "2s", result = "pass" }

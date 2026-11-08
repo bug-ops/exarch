@@ -418,8 +418,8 @@ fn scan_segment(segment: &str) -> std::result::Result<(), PatternRefusal> {
     let mut i = 0;
     while i < bytes.len() {
         i = match bytes.get(i) {
-            Some(b'[') => scan_class(bytes, i + 1)?,
-            _ => i + 1,
+            Some(b'[') => scan_class(bytes, i.saturating_add(1))?,
+            _ => i.saturating_add(1),
         };
     }
     Ok(())
@@ -435,13 +435,14 @@ fn scan_class(bytes: &[u8], start: usize) -> std::result::Result<usize, PatternR
     loop {
         let &member = bytes.get(i).ok_or(PatternRefusal::UnterminatedClass)?;
         let first = i == start;
+        let at = |offset: usize| bytes.get(i.saturating_add(offset));
         if member == b']' && !first {
-            return Ok(i + 1);
+            return Ok(i.saturating_add(1));
         }
-        if !member.is_ascii() || (member == b'[' && bytes.get(i + 1) == Some(&b':')) {
+        if !member.is_ascii() || (member == b'[' && at(1) == Some(&b':')) {
             return Err(PatternRefusal::UnsupportedClass);
         }
-        let range_end = match (bytes.get(i + 1), bytes.get(i + 2)) {
+        let range_end = match (at(1), at(2)) {
             (Some(b'-'), Some(end)) if *end != b']' => Some(*end),
             _ => None,
         };
@@ -452,13 +453,13 @@ fn scan_class(bytes: &[u8], start: usize) -> std::result::Result<usize, PatternR
             if !is_alnum_range(member, end) {
                 return Err(PatternRefusal::InvalidClassRange);
             }
-            i += 3;
+            i = i.saturating_add(3);
             continue;
         }
-        if member == b'-' && !first && bytes.get(i + 1) != Some(&b']') {
+        if member == b'-' && !first && at(1) != Some(&b']') {
             return Err(PatternRefusal::InvalidClassRange);
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 }
 

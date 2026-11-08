@@ -879,8 +879,8 @@ export declare class SecurityConfig {
   /**
    * Sets the maximum file count.
    *
-   * `extractArchive` counts files, symlinks and hardlinks, not directories;
-   * `listArchive` and `verifyArchive` count every entry.
+   * Every entry counts in every operation and format: files, directories,
+   * links and skipped entries.
    *
    * # Errors
    *
@@ -1366,10 +1366,10 @@ export interface ArchiveManifest {
   /** Archive format: an `ArchiveType`, or a token newer than this binding. */
   format: ArchiveType | (string & {})
   /**
-   * What extraction would do with each entry validation accepts: where it
-   * lands, or why it is left out. The selection is the one the listing's
-   * `SecurityConfig` carried and that config supplies the limits and
-   * policies; an entry validation refuses is not reported.
+   * What extraction would do with each entry: where it lands, why it is
+   * left out, or that validation refuses it. The selection is the one the
+   * listing's `SecurityConfig` carried and that config supplies the limits
+   * and policies.
    */
   dispositions: Array<EntryDisposition>
 }

@@ -334,8 +334,8 @@ impl SecurityConfig {
 
     /// Sets the maximum file count.
     ///
-    /// `extractArchive` counts files, symlinks and hardlinks, not directories;
-    /// `listArchive` and `verifyArchive` count every entry.
+    /// Every entry counts in every operation and format: files, directories,
+    /// links and skipped entries.
     ///
     /// # Errors
     ///

@@ -965,10 +965,10 @@ pub struct ArchiveManifest {
     /// Archive format: an `ArchiveType`, or a token newer than this binding.
     #[napi(ts_type = "ArchiveType | (string & {})")]
     pub format: String,
-    /// What extraction would do with each entry validation accepts: where it
-    /// lands, or why it is left out. The selection is the one the listing's
-    /// `SecurityConfig` carried and that config supplies the limits and
-    /// policies; an entry validation refuses is not reported.
+    /// What extraction would do with each entry: where it lands, why it is
+    /// left out, or that validation refuses it. The selection is the one the
+    /// listing's `SecurityConfig` carried and that config supplies the limits
+    /// and policies.
     #[napi(ts_type = "Array<EntryDisposition>")]
     pub dispositions: Vec<EntryDisposition>,
 }

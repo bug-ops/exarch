@@ -128,14 +128,14 @@ describe('7z symlink targets and link counting', () => {
       extractArchiveSync(
         archive,
         path.join(tempDir, 'out'),
-        new SecurityConfig().withMaxFileCount(2),
-      ),
+        new SecurityConfig().withMaxFileCount(2)
+      )
     );
 
     extractArchiveSync(
       archive,
       path.join(tempDir, 'out'),
-      new SecurityConfig().withMaxFileCount(3),
+      new SecurityConfig().withMaxFileCount(3)
     );
     assert.deepStrictEqual(fs.readdirSync(path.join(tempDir, 'out')).sort(), [
       'dir0',

@@ -115,7 +115,7 @@ import { extractArchive, SecurityConfig } from 'exarch-rs';
 const config = new SecurityConfig()
   .withMaxFileSize(100 * 1024 * 1024)   // 100 MB per file
   .withMaxTotalSize(1024 * 1024 * 1024) // 1 GB total
-  .withMaxFileCount(10_000);             // Max 10k files
+  .withMaxFileCount(10_000);             // Max 10k entries
 
 const result = await extractArchive('archive.tar.gz', '/output', config);
 ```
@@ -557,9 +557,10 @@ everything.
 - `'atomic_replace'` staging with a non-default selection is refused
   (`INVALID_CONFIGURATION`, `setting` `'entry_selection'`).
 - `listArchive*` still lists every entry and adds `dispositions`: one object per
-  entry validation accepts, `{ action: 'extract', path, landing }` or
-  `{ action: 'skip', path, kind }` (`kind` is the `SkipKind`), computed with the listing's `SecurityConfig`
-  (an entry validation refuses is not reported). `verifyArchive*` reports the
+  entry, `{ action: 'extract', path, landing }`,
+  `{ action: 'skip', path, kind }` (`kind` is the `SkipKind`) or
+  `{ action: 'refuse', path }` (validation refuses the entry), computed with the listing's `SecurityConfig`.
+  `verifyArchive*` reports the
   refusals extraction would raise for the same selection as issues.
 
 ## Security Features

@@ -708,12 +708,11 @@ impl PyArchiveManifest {
         self.inner.format().as_str()
     }
 
-    /// What extraction would do with each entry the validation accepts: where
-    /// it lands, or why it is left out.
+    /// What extraction would do with each entry: where it lands, why it is
+    /// left out, or that the validation refuses it.
     ///
     /// Computed when the archive was listed, under that call's
-    /// `SecurityConfig` (its selection, limits and policies). An entry the
-    /// validation refuses is not reported.
+    /// `SecurityConfig` (its selection, limits and policies).
     #[getter]
     fn dispositions(&self, py: Python<'_>) -> PyResult<Vec<Py<PyEntryDisposition>>> {
         self.dispositions

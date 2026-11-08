@@ -386,3 +386,14 @@ def test_selection_survives_a_config_copy_through_the_progress_variant(project, 
 
     assert _files(out) == ["README.md"]
     assert seen
+
+
+def test_an_entry_that_cannot_be_placed_is_listed_as_refuse(temp_dir):
+    archive = _tar(temp_dir, [("f", b"x"), ("f/g", b"y")])
+
+    manifest = exarch.list_archive(archive)
+
+    refused = [d for d in manifest.dispositions if d.action == "refuse"]
+    assert [str(d.path) for d in refused] == ["f/g"]
+    assert isinstance(refused[0], exarch.RefuseDisposition)
+    assert [d.action for d in manifest.dispositions] == ["extract", "refuse"]

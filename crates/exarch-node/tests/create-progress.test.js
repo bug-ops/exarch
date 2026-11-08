@@ -255,6 +255,17 @@ describe('createArchiveWithProgress', () => {
   // `TypeError: callback is not a function`. Argument extraction happens
   // synchronously before the returned promise is even constructed, so the
   // invalid argument throws synchronously rather than rejecting.
+  it('takes progress after options: the former order is refused', () => {
+    assert.throws(
+      () => createArchiveWithProgress(outputPath, [sourceDir], null, () => {}, { overwrite: true }),
+      (err) => {
+        assert.match(err.message, /Function/);
+        return true;
+      }
+    );
+    assert.ok(!fs.existsSync(outputPath));
+  });
+
   it('throws synchronously when progress is not a function, without creating', () => {
     assert.throws(
       () => createArchiveWithProgress(outputPath, [sourceDir], null, null, 42),

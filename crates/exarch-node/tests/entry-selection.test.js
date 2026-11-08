@@ -339,9 +339,7 @@ describe('entry selection', () => {
     });
 
     it('fails a listing on an include pattern that matched nothing, as extract does', () => {
-      const config = new SecurityConfig()
-        .addIncludePattern('top/sub')
-        .addIncludePattern('missing');
+      const config = new SecurityConfig().addIncludePattern('top/sub').addIncludePattern('missing');
       assert.throws(
         () => listArchiveSync(archive, config),
         (err) => {
@@ -368,6 +366,17 @@ describe('entry selection', () => {
         kind: 'not_selected',
       });
       assert.strictEqual(byPath['top/'].action, 'skip');
+    });
+
+    it('reports an entry that cannot be placed as refused', () => {
+      const unplaceable = path.join(tempDir, 'unplaceable.tar');
+      fs.writeFileSync(unplaceable, tarOf(file('f'), file('f/g')));
+      const manifest = listArchiveSync(unplaceable);
+      assert.deepStrictEqual(
+        manifest.dispositions.map((d) => d.action),
+        ['extract', 'refuse']
+      );
+      assert.deepStrictEqual(manifest.dispositions[1], { action: 'refuse', path: 'f/g' });
     });
 
     it('reports every entry as extracted at its own path without a selection', () => {

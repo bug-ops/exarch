@@ -243,6 +243,8 @@ fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
 ///   between two entries (default: 4 MiB)
 /// * `max_decoder_memory` - Most memory in bytes a compressed-TAR or 7z decoder
 ///   may hold (default: 256 MiB)
+/// * `compressed_member_allowance` - Base number of gzip members or bzip2
+///   streams a compressed TAR may hold (default: 10,000)
 /// * `max_solid_compression_ratio` - Compression ratio limit of a whole solid
 ///   7z block, or `None` while solid archives are not allowed
 ///
@@ -415,6 +417,21 @@ impl PySecurityConfig {
         size: PyInteger,
     ) -> PyResult<PyRefMut<'_, Self>> {
         slf.inner.max_decoder_memory = size.positive(ConfigSetting::MaxDecoderMemory)?;
+        Ok(slf)
+    }
+
+    /// Sets the base number of gzip members or bzip2 streams a compressed TAR
+    /// may hold; every 16 KiB of decoded output adds one more.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if `count` is zero, negative or above 2**64 - 1.
+    fn with_compressed_member_allowance(
+        mut slf: PyRefMut<'_, Self>,
+        count: PyInteger,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.compressed_member_allowance =
+            count.positive(ConfigSetting::CompressedMemberAllowance)?;
         Ok(slf)
     }
 
@@ -818,6 +835,18 @@ impl PySecurityConfig {
     #[setter]
     fn set_max_decoder_memory(&mut self, value: PyInteger) -> PyResult<()> {
         self.inner.max_decoder_memory = value.positive(ConfigSetting::MaxDecoderMemory)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn get_compressed_member_allowance(&self) -> u64 {
+        self.inner.compressed_member_allowance.get()
+    }
+
+    #[setter]
+    fn set_compressed_member_allowance(&mut self, value: PyInteger) -> PyResult<()> {
+        self.inner.compressed_member_allowance =
+            value.positive(ConfigSetting::CompressedMemberAllowance)?;
         Ok(())
     }
 

@@ -150,6 +150,7 @@ _ConfigSetting = Literal[
     "max_solid_block_memory",
     "max_tar_metadata_bytes",
     "max_decoder_memory",
+    "compressed_member_allowance",
     "decompression_budget",
     "allowed_extension",
     "banned_path_component",
@@ -359,6 +360,16 @@ class SecurityConfig:
         """
         ...
 
+    def with_compressed_member_allowance(self, count: int) -> SecurityConfig:
+        """
+        Sets the base number of gzip members or bzip2 streams a compressed TAR may hold;
+        every 16 KiB of decoded output adds one more (default: 10,000).
+
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
+        its ``setting`` attribute is ``"compressed_member_allowance"``.
+        """
+        ...
+
     def with_max_solid_compression_ratio(self, ratio: float) -> SecurityConfig:
         """
         Sets the compression ratio limit of a whole solid 7z block (default: 1000).
@@ -544,6 +555,13 @@ class SecurityConfig:
 
     @max_decoder_memory.setter
     def max_decoder_memory(self, value: int) -> None: ...
+    @property
+    def compressed_member_allowance(self) -> int:
+        """Base number of gzip members or bzip2 streams of a compressed TAR (default: 10,000)."""
+        ...
+
+    @compressed_member_allowance.setter
+    def compressed_member_allowance(self, value: int) -> None: ...
     @property
     def allow_symlinks(self) -> bool:
         """Whether symlinks are allowed (default: False)."""
@@ -1403,10 +1421,10 @@ class ArchiveManifest:
     @property
     def dispositions(self) -> list[AnyEntryDisposition]:
         """
-        What extraction would do with each entry the validation accepts: where it
-        lands, or why it is left out. Computed when the archive was listed, under
-        that call's ``SecurityConfig`` (selection, limits and policies). An entry
-        the validation refuses is not reported.
+        What extraction would do with each entry: where it lands, why it is left
+        out, or that the validation refuses it (``action == "refuse"``). Computed
+        when the archive was listed, under that call's ``SecurityConfig``
+        (selection, limits and policies).
         """
         ...
 

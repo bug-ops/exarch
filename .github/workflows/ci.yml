@@ -39,6 +39,7 @@ jobs:
       node: ${{ steps.filter.outputs.node }}
       ci: ${{ steps.filter.outputs.ci }}
       docs: ${{ steps.filter.outputs.docs }}
+      skills: ${{ steps.filter.outputs.skills }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -71,6 +72,9 @@ jobs:
             docs:
               - '**/*.md'
               - '**/README.md'
+            skills:
+              - 'skills/**'
+              - '.github/workflows/ci.yml'
 
   # Reject any action reference that is not pinned to a full commit SHA
   pin-check:
@@ -708,6 +712,53 @@ jobs:
       - name: Check MSRV for the workspace
         run: cargo check --workspace --all-features
 
+  # Agent skills under skills/: Agent Skills spec via the reference validator,
+  # plus the project size and link limits it does not cover
+  skills:
+    name: Agent Skills
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: changes
+    if: |
+      needs.changes.outputs.skills == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install skills-ref
+        run: |
+          python3 -m venv "$RUNNER_TEMP/skills-ref"
+          "$RUNNER_TEMP/skills-ref/bin/pip" install --quiet skills-ref==0.1.1
+
+      - name: Validate skills
+        run: |
+          set -euo pipefail
+          status=0
+          for dir in skills/*/; do
+            dir=${dir%/}
+            "$RUNNER_TEMP/skills-ref/bin/agentskills" validate "$dir" || status=1
+            lines=$(wc -l < "$dir/SKILL.md")
+            if (( lines > 500 )); then
+              echo "::error file=$dir/SKILL.md::SKILL.md has $lines lines (limit 500)"
+              status=1
+            fi
+            while read -r ref; do
+              if [[ ! -f "$dir/$ref" ]]; then
+                echo "::error file=$dir/SKILL.md::broken link $ref"
+                status=1
+              fi
+            done < <(grep -oE 'references/[A-Za-z0-9_./-]+' "$dir/SKILL.md" | sed 's/[.]$//' | sort -u)
+            for f in "$dir"/references/*; do
+              n=$(wc -l < "$f")
+              if (( n > 300 )); then
+                echo "::error file=$f::$n lines (limit 300)"
+                status=1
+              fi
+            done
+          done
+          exit "$status"
+
   # WASI build + smoke test (CLI under wasmtime)
   wasm:
     name: WASI (wasm32-wasip1)
@@ -821,7 +872,7 @@ jobs:
   # All checks passed
   ci-success:
     name: CI Success
-    needs: [pin-check, format, clippy, documentation, security, test, test-release, test-python, test-node, test-node-runtimes, msrv, wasm, bench-build, fuzz-build]
+    needs: [pin-check, format, clippy, documentation, security, test, test-release, test-python, test-node, test-node-runtimes, msrv, wasm, bench-build, fuzz-build, skills]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -843,6 +894,7 @@ jobs:
             "${{ needs.wasm.result }}"
             "${{ needs.bench-build.result }}"
             "${{ needs.fuzz-build.result }}"
+            "${{ needs.skills.result }}"
           )
 
           for result in "${REQUIRED_JOBS[@]}"; do

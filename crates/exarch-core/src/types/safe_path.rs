@@ -588,10 +588,10 @@ pub(crate) fn stream_separator_error(comp: &str) -> ArchiveError {
 /// `LPT¹²³⁴⁵⁶⁷⁸⁹`, `CONIN$`, `CONOUT$`, `CLOCK$` and `CONFIG$`. Pure and
 /// platform-independent; callers decide whether to apply it.
 ///
-/// The list matches zip2 9.4.2. Microsoft documents only the superscripts
-/// `¹²³`; the device status of `CLOCK$`, `CONFIG$` and `⁴`-`⁹` is unverified
-/// on a Windows host. They are refused fail-closed because accepting a real
-/// device name is the dangerous failure mode.
+/// The list is a superset of zip2 9.4.1 and 9.4.2. Microsoft documents only the
+/// superscripts `¹²³`; the device status of `CLOCK$`, `CONFIG$` and `⁴`-`⁹` is
+/// unverified on a Windows host. They are refused fail-closed because accepting
+/// a real device name is the dangerous failure mode.
 ///
 /// # Examples
 ///

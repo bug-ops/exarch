@@ -8,6 +8,11 @@
 //! Linux and Android copy the POSIX ACL. macOS only detects an ACL. Wherever
 //! an ACL cannot be carried over faithfully the root stays private (`0700`).
 //! Other Unixes and `NFSv4` ACLs are not detected.
+//!
+//! A staging directory made in the destination's parent also inherits that
+//! parent's default ACL (Linux) or inheritable entries (macOS). For an
+//! existing destination those are removed at creation and again at adoption,
+//! and a failure to remove them fails the run.
 
 #[cfg(unix)]
 mod imp {
@@ -96,9 +101,27 @@ mod imp {
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(in crate::staging) use super::linux::clear_inherited;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub(in crate::staging) use super::linux::read_destination;
     #[cfg(target_os = "macos")]
+    pub(in crate::staging) use super::macos::clear_inherited;
+    #[cfg(target_os = "macos")]
     pub(in crate::staging) use super::macos::read_destination;
+
+    /// Other Unixes carry no ACL handling.
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    #[allow(
+        clippy::unnecessary_wraps,
+        clippy::missing_const_for_fn,
+        reason = "keeps the signature of the platforms that clear an ACL"
+    )]
+    pub(in crate::staging) fn clear_inherited(
+        _pin: &crate::formats::pinned_dir::VettedDir,
+        _name: crate::formats::pinned_dir::Leaf<'_>,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
 
     /// Other Unixes carry no ACL detection.
     #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
@@ -221,14 +244,19 @@ mod linux {
             self.access.is_some()
         }
 
-        /// Writes the default ACL and then the access ACL onto `dir`.
+        /// Makes the ACLs of `dir` exactly these: a blob that is present is
+        /// written (default first, then access) and one that is absent is
+        /// removed, so nothing inherited from the parent survives.
         ///
         /// The kernel derives the owner, mask and other bits of the mode from
         /// the access ACL.
         pub(in crate::staging) fn write_to(&self, dir: &File) -> io::Result<()> {
             for (name, blob) in [(DEFAULT, &self.default), (ACCESS, &self.access)] {
-                if let Some(blob) = blob {
-                    rustix::fs::fsetxattr(dir, name, blob, rustix::fs::XattrFlags::empty())?;
+                match blob {
+                    Some(blob) => {
+                        rustix::fs::fsetxattr(dir, name, blob, rustix::fs::XattrFlags::empty())?;
+                    }
+                    None => remove_blob(dir, name)?,
                 }
             }
             Ok(())
@@ -240,13 +268,8 @@ mod linux {
         ///
         /// The error of removing an ACL that exists.
         pub(in crate::staging) fn clear(dir: &File) -> io::Result<()> {
-            for name in [DEFAULT, ACCESS] {
-                match rustix::fs::fremovexattr(dir, name) {
-                    Ok(()) | Err(Errno::NODATA | Errno::NOTSUP) => {}
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            Ok(())
+            remove_blob(dir, DEFAULT)?;
+            remove_blob(dir, ACCESS)
         }
 
         #[cfg(test)]
@@ -261,6 +284,23 @@ mod linux {
         }
     }
 
+    fn remove_blob(dir: &File, name: &str) -> io::Result<()> {
+        match rustix::fs::fremovexattr(dir, name) {
+            Ok(()) | Err(Errno::NODATA | Errno::NOTSUP) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Removes the ACLs the directory `name` of `pin` inherited from its
+    /// parent.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of opening the directory or of removing an ACL it has.
+    pub(in crate::staging) fn clear_inherited(pin: &VettedDir, name: Leaf<'_>) -> io::Result<()> {
+        PosixAcl::clear(&pin.open_dir_file(name)?)
+    }
+
     /// One ACL attribute of a directory.
     enum Blob {
         Present(Box<[u8]>),
@@ -269,7 +309,12 @@ mod linux {
     }
 
     fn read_blob(dir: &File, name: &str, buffer: &mut [u8]) -> io::Result<Blob> {
-        match rustix::fs::fgetxattr(dir, name, &mut *buffer) {
+        let read = rustix::fs::fgetxattr(dir, name, &mut *buffer);
+        classify(read, buffer)
+    }
+
+    fn classify(read: Result<usize, Errno>, buffer: &[u8]) -> io::Result<Blob> {
+        match read {
             Ok(len) => Ok(buffer
                 .get(..len)
                 .filter(|blob| !blob.is_empty())
@@ -310,20 +355,92 @@ mod linux {
         let mut buffer = vec![0_u8; XATTR_SIZE_MAX];
         let access = read_blob(&dir, ACCESS, &mut buffer)?;
         let default = read_blob(&dir, DEFAULT, &mut buffer)?;
-        Ok(match (access, default) {
+        Ok(plan_of(access, default))
+    }
+
+    fn plan_of(access: Blob, default: Blob) -> AclPlan {
+        match (access, default) {
             (Blob::Unreadable, _) | (_, Blob::Unreadable) => AclPlan::Private,
             (Blob::Absent, Blob::Absent) => AclPlan::None,
             (access, default) => AclPlan::Copy(PosixAcl {
                 access: present(access),
                 default: present(default),
             }),
-        })
+        }
     }
 
     fn present(blob: Blob) -> Option<Box<[u8]>> {
         match blob {
             Blob::Present(bytes) => Some(bytes),
             Blob::Absent | Blob::Unreadable => None,
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    mod tests {
+        use std::os::fd::OwnedFd;
+
+        use rustix::fs::Mode;
+        use rustix::fs::OFlags;
+
+        use super::*;
+
+        fn read_error(errno: Errno) -> io::Result<Blob> {
+            classify(Err(errno), &[])
+        }
+
+        fn is_unreadable(blob: &io::Result<Blob>) -> bool {
+            matches!(blob, Ok(Blob::Unreadable))
+        }
+
+        #[test]
+        fn a_refused_read_of_an_acl_is_unreadable() {
+            for errno in [Errno::ACCESS, Errno::PERM, Errno::IO] {
+                assert!(is_unreadable(&read_error(errno)), "{errno}");
+            }
+        }
+
+        #[test]
+        fn a_missing_or_unsupported_acl_is_absent() {
+            for errno in [Errno::NODATA, Errno::NOTSUP] {
+                assert!(matches!(read_error(errno), Ok(Blob::Absent)), "{errno}");
+            }
+        }
+
+        #[test]
+        fn a_bad_descriptor_is_an_error_not_a_property_of_the_directory() {
+            let error = read_error(Errno::BADF).err().unwrap();
+            assert_eq!(error.raw_os_error(), Some(Errno::BADF.raw_os_error()));
+        }
+
+        #[test]
+        fn reading_an_acl_through_a_path_only_handle_fails_with_a_bad_descriptor() {
+            let temp = tempfile::tempdir().unwrap();
+            let fd: OwnedFd = rustix::fs::open(
+                temp.path(),
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap();
+            let handle = File::from(fd);
+            let mut buffer = vec![0_u8; 16];
+            let error = read_blob(&handle, ACCESS, &mut buffer).err().unwrap();
+            assert_eq!(error.raw_os_error(), Some(Errno::BADF.raw_os_error()));
+        }
+
+        #[test]
+        fn an_unreadable_blob_makes_the_plan_private_whatever_the_other_one_is() {
+            let present = || Blob::Present(Box::from([2_u8, 0, 0, 0].as_slice()));
+            assert_eq!(plan_of(Blob::Unreadable, Blob::Absent), AclPlan::Private);
+            assert_eq!(plan_of(Blob::Absent, Blob::Unreadable), AclPlan::Private);
+            assert_eq!(plan_of(present(), Blob::Unreadable), AclPlan::Private);
+            assert_eq!(plan_of(Blob::Unreadable, present()), AclPlan::Private);
+        }
+
+        #[test]
+        fn two_absent_blobs_make_no_plan() {
+            assert_eq!(plan_of(Blob::Absent, Blob::Absent), AclPlan::None);
         }
     }
 }
@@ -340,6 +457,23 @@ mod macos {
     use crate::formats::file_identity::IdentityKey;
     use crate::formats::pinned_dir::Leaf;
     use crate::formats::pinned_dir::VettedDir;
+
+    /// Removes every ACL entry, inherited ones included, from the directory
+    /// `name` of `pin`, addressed through a descriptor on the entry itself.
+    ///
+    /// A macOS allow entry beats the mode bits, so a root that kept an
+    /// inherited one cannot be made private with `chmod`.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of clearing the ACL, or `NotFound` when the directory's
+    /// path cannot be resolved.
+    pub(in crate::staging) fn clear_inherited(pin: &VettedDir, name: Leaf<'_>) -> io::Result<()> {
+        let path = pin
+            .entry_path(name)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        exacl::setfacl(&[path], &[], AclOption::SYMLINK_ACL)
+    }
 
     /// Detects an ACL on the directory `name` inside `parent_path`.
     ///
@@ -402,6 +536,15 @@ mod imp {
     ) -> io::Result<AclPlan> {
         Ok(AclPlan)
     }
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        clippy::missing_const_for_fn,
+        reason = "keeps the call sites platform-neutral"
+    )]
+    pub(in crate::staging) fn clear_inherited(_pin: &VettedDir, _name: Leaf<'_>) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(super) use imp::AclPlan;
@@ -409,6 +552,7 @@ pub(super) use imp::AclPlan;
 pub(super) use imp::Ownership;
 #[cfg(unix)]
 pub(super) use imp::Resolution;
+pub(super) use imp::clear_inherited;
 pub(super) use imp::read_destination;
 #[cfg(unix)]
 pub(super) use imp::resolve;

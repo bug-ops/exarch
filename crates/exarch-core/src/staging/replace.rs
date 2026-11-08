@@ -30,6 +30,7 @@ use super::acl;
 use super::adopt::Adoption;
 use super::adopt::make_removable;
 use super::cancelled_after;
+use super::clear_inherited_acl;
 use super::dir::StagingDir;
 use super::io_context;
 use super::parent_or_cwd;
@@ -337,7 +338,7 @@ pub(super) fn run(
         parent,
         path,
     } = target;
-    let staging = StagingDir::create(&pin, &parent)?;
+    let staging = clear_inherited_acl(StagingDir::create(&pin, &parent)?, &parent)?;
 
     let report = match extract(staging.path(), &staged_options(options), progress) {
         Ok(report) => report,

@@ -193,6 +193,22 @@ fn cancelled_after(report: ExtractionReport, leftover: Option<StagingLeftover>) 
     ArchiveError::partial_or(report, ArchiveError::Cancelled).rolled_back_with(leftover)
 }
 
+/// Removes the ACL a fresh staging directory inherited from `parent`, or
+/// discards the directory and fails.
+fn clear_inherited_acl<'p>(staging: StagingDir<'p>, parent: &Path) -> Result<StagingDir<'p>> {
+    match staging.clear_inherited_acl() {
+        Ok(()) => Ok(staging),
+        Err(e) => {
+            let error = ArchiveError::Io(io_context(
+                &e,
+                "failed to clear the access control list the staging directory inherited",
+                parent,
+            ));
+            Err(error.rolled_back_with(staging.discard()))
+        }
+    }
+}
+
 fn extract_atomic(
     output_dir: &Path,
     options: &ExtractionOptions,
@@ -201,6 +217,9 @@ fn extract_atomic(
 ) -> Result<ExtractionReport> {
     let destination = AtomicDestination::resolve(output_dir)?;
     let mut staging = StagingDir::create(&destination.pin, &destination.parent)?;
+    if destination.existed {
+        staging = clear_inherited_acl(staging, &destination.parent)?;
+    }
 
     // An absent destination has no mode to keep: the one a new directory gets
     // under the umask is read now, before any archive content is written. It is

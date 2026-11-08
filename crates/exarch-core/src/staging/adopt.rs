@@ -216,14 +216,17 @@ mod imp {
         /// permission bits and setgid are dropped instead of being granted to
         /// whichever group the directory ended up in.
         ///
-        /// The destination's ACL is copied only onto a root that ended up with
-        /// the destination's uid and gid; otherwise, and when the copy fails,
-        /// the root stays `0700`.
+        /// Whatever ACL the root inherited from its parent is removed first, so
+        /// the root's ACL is the destination's and nothing else. The
+        /// destination's ACL is copied only onto a root that ended up with the
+        /// destination's uid and gid; otherwise, and when the copy fails, the
+        /// root stays `0700`.
         ///
         /// # Errors
         ///
-        /// The I/O error of opening the directory or changing its mode, or a
-        /// directory that is no longer the one created.
+        /// The I/O error of opening the directory, clearing its ACL or
+        /// changing its mode, or a directory that is no longer the one
+        /// created.
         pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<()> {
             let dir = self.parent.open_dir_file(self.name.as_leaf())?;
             if FileIdentity::of_file(&dir).check(self.id) != IdentityCheck::Same {
@@ -236,6 +239,7 @@ mod imp {
             } = adoption;
             let resolution = match owner {
                 Some(owner) => {
+                    acl::clear_inherited(self.parent, self.name.as_leaf())?;
                     let root = claim_owner(&dir, owner, &mut mode)?;
                     acl::resolve(acl, owner.ids, root)
                 }
@@ -307,6 +311,64 @@ mod imp {
             dir.set_permissions(DirMode::PRIVATE.permissions())?;
         }
         Ok(())
+    }
+
+    #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+    #[allow(clippy::unwrap_used)]
+    mod copy_acl_tests {
+        use super::*;
+
+        const ACCESS: &str = "system.posix_acl_access";
+        const DEFAULT: &str = "system.posix_acl_default";
+
+        /// A valid default ACL: version 2 with the owner, group and other
+        /// entries.
+        fn default_blob() -> Vec<u8> {
+            let mut bytes = 2_u32.to_le_bytes().to_vec();
+            for (tag, perm) in [(0x01_u16, 7_u16), (0x04, 5), (0x20, 0)] {
+                bytes.extend_from_slice(&tag.to_le_bytes());
+                bytes.extend_from_slice(&perm.to_le_bytes());
+                bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+            }
+            bytes
+        }
+
+        fn has(dir: &std::fs::File, name: &str) -> bool {
+            let mut buffer = vec![0_u8; 65_536];
+            rustix::fs::fgetxattr(dir, name, &mut buffer[..]).is_ok()
+        }
+
+        #[test]
+        fn a_rejected_acl_leaves_a_private_root_without_either_acl() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = std::fs::File::open(temp.path()).unwrap();
+            let acl = acl::PosixAcl::for_test(Some(vec![0xff; 7]), Some(default_blob()));
+            let mode = DirMode::of_destination(EntryMode::for_test(0o755, 0, 0));
+
+            copy_acl(&dir, &acl, mode).unwrap();
+
+            assert_eq!(dir.metadata().unwrap().mode() & 0o7777, 0o700);
+            assert!(!has(&dir, ACCESS));
+            assert!(!has(&dir, DEFAULT));
+        }
+
+        #[test]
+        fn an_acl_that_is_absent_from_the_copy_is_removed_from_the_root() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = std::fs::File::open(temp.path()).unwrap();
+            rustix::fs::fsetxattr(
+                &dir,
+                DEFAULT,
+                &default_blob(),
+                rustix::fs::XattrFlags::empty(),
+            )
+            .unwrap();
+            let acl = acl::PosixAcl::for_test(None, None);
+
+            acl.write_to(&dir).unwrap();
+
+            assert!(!has(&dir, DEFAULT));
+        }
     }
 }
 

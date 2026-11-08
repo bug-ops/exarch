@@ -118,6 +118,7 @@ mod linux {
     const OTHER: u16 = 0x20;
     const NO_ID: u32 = u32::MAX;
     const NAMED_UID: u32 = 12_345;
+    const INHERITED_UID: u32 = 54_321;
 
     const R: u16 = 4;
     const W: u16 = 2;
@@ -225,6 +226,54 @@ mod linux {
         }
     }
 
+    /// A default ACL on the destination's parent that grants a named user
+    /// everything: a directory made there inherits it.
+    fn parent_default_acl() -> Vec<u8> {
+        blob(&[
+            (USER_OBJ, R | W | X, NO_ID),
+            (USER, R | W | X, INHERITED_UID),
+            (GROUP_OBJ, R | X, NO_ID),
+            (MASK, R | W | X, NO_ID),
+            (OTHER, 0, NO_ID),
+        ])
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum DestinationAcl {
+        None,
+        DefaultOnly,
+        AccessOnly,
+    }
+
+    #[test]
+    fn a_parent_default_acl_is_not_inherited_by_the_published_root() {
+        for staging in MODES {
+            for case in [
+                DestinationAcl::None,
+                DestinationAcl::DefaultOnly,
+                DestinationAcl::AccessOnly,
+            ] {
+                let fx = Fixture::new();
+                chmod(&fx.dest, 0o750);
+                match case {
+                    DestinationAcl::None => {}
+                    DestinationAcl::DefaultOnly => set(&fx.dest, DEFAULT, &default_acl()),
+                    DestinationAcl::AccessOnly => set(&fx.dest, ACCESS, &access_acl()),
+                }
+                set(fx.dest.parent().unwrap(), DEFAULT, &parent_default_acl());
+                let acls_before = read(&fx.dest);
+                let mode_before = mode_of(&fx.dest);
+
+                fx.extract(staging);
+
+                let label = format!("{staging:?} {case:?}");
+                assert_eq!(read(&fx.dest), acls_before, "{label}");
+                assert_eq!(mode_of(&fx.dest), mode_before, "{label}");
+                assert_eq!(read(&fx.dest.join("p.txt")), Acls::default(), "{label}");
+            }
+        }
+    }
+
     #[test]
     fn a_setgid_destination_with_an_acl_stays_setgid() {
         for staging in MODES {
@@ -254,6 +303,9 @@ mod linux {
         assert_eq!(mode_of(&fx.dest), expected);
     }
 
+    /// Needs root to give the destination away, so it only runs there; on an
+    /// unprivileged run the decision itself is covered by the unit tests of
+    /// `resolve` in `staging/acl.rs`.
     #[test]
     fn an_acl_is_not_copied_onto_a_root_another_user_owns() {
         let fx = Fixture::new();
@@ -305,6 +357,25 @@ mod macos {
 
         assert_eq!(mode_of(&fx.dest), 0o700);
         assert!(acl_of(&fx.dest).is_empty());
+    }
+
+    #[test]
+    fn a_parent_inheritable_entry_is_not_inherited_by_the_published_root() {
+        for staging in MODES {
+            let fx = Fixture::new();
+            chmod(&fx.dest, 0o700);
+            add_ace(
+                fx.dest.parent().unwrap(),
+                "everyone allow list,search,read,file_inherit,directory_inherit",
+            );
+            assert!(acl_of(&fx.dest).is_empty(), "{staging:?}");
+
+            fx.extract(staging);
+
+            assert_eq!(mode_of(&fx.dest), 0o700, "{staging:?}");
+            assert!(acl_of(&fx.dest).is_empty(), "{staging:?}");
+            assert!(acl_of(&fx.dest.join("p.txt")).is_empty(), "{staging:?}");
+        }
     }
 
     #[test]

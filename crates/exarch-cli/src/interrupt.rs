@@ -39,6 +39,8 @@ use crate::output::OutputMode;
 use exarch_core::EntryPosition;
 use exarch_core::NoopProgress;
 use exarch_core::ProgressCallback;
+#[cfg(not(target_os = "wasi"))]
+use exarch_core::path_text;
 use std::path::Path;
 #[cfg(not(target_os = "wasi"))]
 use std::path::PathBuf;
@@ -161,8 +163,8 @@ impl Run {
 /// the staging entries are created in.
 #[cfg(not(target_os = "wasi"))]
 fn forced_exit_hint(output: &Path, place: &Path, run: Run) -> String {
-    let place = place.display();
-    let output = output.display();
+    let place = path_text(place);
+    let output = path_text(output);
     match run {
         Run::Create => format!(
             "interrupted again, stopping at once; an unfinished temporary file named .exarch-* \
@@ -269,6 +271,17 @@ fn terminate_by_default(stop: Stop) -> ! {
     std::process::exit(i32::from(ExitStatus::from(stop) as u8))
 }
 
+/// Ends the process of a run that stopped on a request the way the request
+/// would have: by the signal itself, so a shell loop sees a signal death and
+/// stops too. `$?` still reads 130 or 143. Where that cannot be done the
+/// caller exits with the status.
+pub fn finish_by_signal() {
+    #[cfg(unix)]
+    if let Some(stop) = requested() {
+        let _ = signal_hook::low_level::emulate_default_handler(stop.raw_signal());
+    }
+}
+
 /// Gives up waiting for the run: reports what it leaves and exits with the
 /// status of the stop.
 #[cfg(not(target_os = "wasi"))]
@@ -291,6 +304,12 @@ fn forced_exit(armed: &Armed, stop: Stop) -> ! {
     std::process::exit(i32::from(ExitStatus::from(stop) as u8))
 }
 
+/// The stop that decides the exit status: the first request, not the latest.
+#[cfg(not(target_os = "wasi"))]
+fn decided(interrupt: &Interrupt, latest: Stop) -> Stop {
+    interrupt.requested().unwrap_or(latest)
+}
+
 #[cfg(not(target_os = "wasi"))]
 fn on_stop(stop: Stop) {
     let window = armed();
@@ -299,7 +318,7 @@ fn on_stop(stop: Stop) {
         terminate_by_default(stop);
     };
     if INTERRUPT.request(stop) == Signal::Repeated {
-        forced_exit(armed, stop);
+        forced_exit(armed, decided(&INTERRUPT, stop));
     }
 }
 
@@ -410,6 +429,15 @@ mod tests {
         assert_eq!(interrupt.requested(), Some(Stop::Terminate));
         assert_eq!(interrupt.request(Stop::Interrupt), Signal::Repeated);
         assert_eq!(interrupt.requested(), Some(Stop::Terminate));
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn a_forced_exit_takes_the_status_of_the_first_request() {
+        let interrupt = Interrupt::new();
+        interrupt.request(Stop::Terminate);
+        assert_eq!(interrupt.request(Stop::Interrupt), Signal::Repeated);
+        assert_eq!(decided(&interrupt, Stop::Interrupt), Stop::Terminate);
     }
 
     #[cfg(not(target_os = "wasi"))]

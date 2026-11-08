@@ -384,8 +384,10 @@ impl fmt::Display for TerminalText<'_> {
     }
 }
 
-/// A path of the host (an archive, a destination, an output) rendered in its
-/// native spelling with control and invisible characters escaped.
+/// A path of the host (an archive, a destination, an output) rendered with
+/// [`path_text`], the same renderer core uses for the host paths in its error
+/// text, with control and invisible characters escaped. Only `--json` fields
+/// keep the exact string.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalPath<'a>(&'a Path);
 
@@ -399,7 +401,7 @@ impl<'a> TerminalPath<'a> {
 
 impl fmt::Display for TerminalPath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_escaped(f, &self.0.to_string_lossy())
+        write_escaped(f, &path_text(self.0))
     }
 }
 
@@ -643,6 +645,14 @@ mod tests {
             TerminalPath::new(Path::new("d/\x1b]0;t\x07/f\n")).to_string(),
             "d/\\x1b]0;t\\x07/f\\x0a"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_renders_like_the_core_host_paths() {
+        let path = Path::new("ro\\dir/out");
+        assert_eq!(TerminalPath::new(path).to_string(), "ro\\x5Cdir/out");
+        assert_eq!(TerminalPath::new(path).to_string(), path_text(path));
     }
 
     #[test]

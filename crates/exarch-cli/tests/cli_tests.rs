@@ -8051,17 +8051,22 @@ fn test_list_marks_an_entry_that_cannot_be_placed() {
 }
 
 /// A reader that closed the pipe is not a failure of `completion` (#1049).
+///
+/// Deterministic: the reader end is closed before the child is spawned, so its
+/// first write always meets a broken pipe and never races a reader.
+#[cfg(unix)]
 #[test]
 fn test_completion_to_a_closed_pipe_is_not_a_failure() {
+    use std::os::fd::OwnedFd;
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new(exarch_cmd().get_program())
+    let (reader, writer) = std::io::pipe().expect("create pipe");
+    drop(reader);
+    let status = std::process::Command::new(exarch_cmd().get_program())
         .args(["completion", "bash"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("spawn exarch");
-    drop(child.stdout.take());
-    let status = child.wait().expect("wait");
+        .stdout(Stdio::from(OwnedFd::from(writer)))
+        .status()
+        .expect("run exarch");
     assert_eq!(status.code(), Some(0), "{status:?}");
 }
 
@@ -8107,6 +8112,25 @@ mod interrupt {
                 .expect("append entry");
         }
         builder.finish().expect("finish tar");
+    }
+
+    #[derive(Clone, Copy)]
+    enum Stop {
+        Int,
+        Term,
+    }
+
+    /// A graceful stop re-raises the signal, so the shell sees a signal death
+    /// (`$?` reads 128 + signal) and a loop around the command stops too.
+    fn assert_stopped_by(status: std::process::ExitStatus, stop: Stop) {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let (signal, code) = match stop {
+            Stop::Int => (2, 130),
+            Stop::Term => (15, 143),
+        };
+        assert_eq!(status.signal(), Some(signal), "{status:?}");
+        assert_eq!(status.code(), None, "{status:?}; expected code {code}");
     }
 
     fn exarch() -> Command {
@@ -8173,7 +8197,7 @@ mod interrupt {
         sigint(&child);
         let status = child.wait().expect("wait");
 
-        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert_stopped_by(status, Stop::Int);
         assert!(!out.exists(), "the destination must not be published");
         assert_eq!(leftovers(temp.path()), Vec::<String>::new());
     }
@@ -8194,7 +8218,7 @@ mod interrupt {
         sigint(&child);
         let status = child.wait().expect("wait");
 
-        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert_stopped_by(status, Stop::Int);
         assert!(!out.exists(), "the destination must not be published");
         assert_eq!(leftovers(temp.path()), Vec::<String>::new());
     }
@@ -8217,7 +8241,7 @@ mod interrupt {
         sigint(&child);
         let status = child.wait().expect("wait");
 
-        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert_stopped_by(status, Stop::Int);
         let names: Vec<_> = std::fs::read_dir(&out)
             .expect("read destination")
             .map(|entry| entry.expect("entry").file_name())
@@ -8246,7 +8270,7 @@ mod interrupt {
         sigint(&child);
         let status = child.wait().expect("wait");
 
-        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert_stopped_by(status, Stop::Int);
         assert!(!output.exists(), "no archive may be published");
         assert_eq!(leftovers(temp.path()), Vec::<String>::new());
     }
@@ -8267,7 +8291,7 @@ mod interrupt {
         sigint(&child);
         let status = child.wait().expect("wait");
 
-        assert_eq!(status.code(), Some(130), "{status:?}");
+        assert_stopped_by(status, Stop::Int);
         assert!(!output.exists(), "no archive may be published");
         assert_eq!(leftovers(temp.path()), Vec::<String>::new());
     }
@@ -8293,7 +8317,7 @@ mod interrupt {
         sigterm(&child);
         let status = child.wait().expect("wait");
 
-        assert_eq!(status.code(), Some(143), "{status:?}");
+        assert_stopped_by(status, Stop::Term);
         assert!(!out.exists(), "the destination must not be published");
         assert_eq!(leftovers(temp.path()), Vec::<String>::new());
     }
@@ -8314,7 +8338,7 @@ mod interrupt {
         sigterm(&child);
         let status = child.wait().expect("wait");
 
-        assert_eq!(status.code(), Some(143), "{status:?}");
+        assert_stopped_by(status, Stop::Term);
         assert!(!output.exists(), "no archive may be published");
         assert_eq!(leftovers(temp.path()), Vec::<String>::new());
     }
@@ -8351,10 +8375,67 @@ mod interrupt {
         assert_eq!(status.signal(), Some(15), "{status:?}");
     }
 
+    /// `verify` never arms the handler either: SIGTERM in the middle of its
+    /// scan kills it by the signal.
+    #[test]
+    fn sigterm_during_verify_gets_the_default_action() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Read as _;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        const ENTRY_BYTES: u64 = 1 << 28;
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("big.tar.gz");
+        let gz = GzEncoder::new(
+            std::fs::File::create(&tar).expect("create archive"),
+            Compression::fast(),
+        );
+        let mut builder = tar::Builder::new(gz);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(ENTRY_BYTES);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, "zeros", std::io::repeat(0).take(ENTRY_BYTES))
+            .expect("append entry");
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+
+        let mut child = exarch()
+            .args([
+                "verify",
+                "--max-file-size",
+                "1G",
+                "--max-total-size",
+                "1G",
+                "--max-compression-ratio",
+                "1000000",
+            ])
+            .arg(&tar)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn exarch");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            child.try_wait().expect("poll").is_none(),
+            "verify finished before the signal"
+        );
+        sigterm(&child);
+        let status = child.wait().expect("wait");
+
+        assert_eq!(status.signal(), Some(15), "{status:?}");
+    }
+
     /// A repeated signal exits at once; whichever path ends the run, `--json`
     /// still gets exactly one document, and it is the `Cancelled` error.
     #[test]
     fn repeated_sigint_under_json_writes_one_cancelled_document() {
+        use std::os::unix::process::ExitStatusExt as _;
+
         let temp = TempDir::new().expect("temp dir");
         let tar = temp.path().join("many.tar");
         write_many_entries_tar(&tar, 40_000);
@@ -8377,7 +8458,13 @@ mod interrupt {
         sigint(&child);
         let output = child.wait_with_output().expect("wait");
 
-        assert_eq!(output.status.code(), Some(130), "{:?}", output.status);
+        // The second signal may land after the graceful stop already ended
+        // the process, which then dies by SIGINT instead of exiting 130.
+        assert!(
+            output.status.code() == Some(130) || output.status.signal() == Some(2),
+            "{:?}",
+            output.status
+        );
         let json: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("exactly one JSON document");
         assert_eq!(json["status"], "error", "{json}");

@@ -49,8 +49,9 @@ use std::sync::OnceLock;
 pub enum Part {
     /// Text written in the source: trusted, may span lines.
     Lit(&'static str),
-    /// A path of the host (an archive, a destination, an output), in its
-    /// native spelling: escaped for the terminal, exact in `--json`.
+    /// A path of the host (an archive, a destination, an output): rendered
+    /// with `path_text` and escaped for the terminal, like core's own host
+    /// paths; exact in `--json`.
     Path(PathBuf),
     /// The name of an archive entry: rendered injectively with `path_text`
     /// and escaped for the terminal.
@@ -119,6 +120,19 @@ fn as_cli_message<'a>(link: &'a (dyn std::error::Error + 'static)) -> Option<&'a
             link.downcast_ref::<PartialExtractionContext>()
                 .map(|c| c as &dyn CliMessage)
         })
+}
+
+/// The advice after an `--include` that matched nothing: `list` already shows
+/// the names, so only the other commands are sent to it.
+fn unmatched_include_hint(op: Operation) -> String {
+    let rule = format!(
+        "Patterns match the entry path as the archive lists it, before {}",
+        Flag::StripComponents.long()
+    );
+    match op {
+        Operation::List => format!("{rule}; compare the pattern with the names listed above."),
+        _ => format!("{rule}; run `exarch list` to see the names."),
+    }
 }
 
 /// The structured message of `link` when it is one of the CLI's own error
@@ -1032,11 +1046,7 @@ fn dedicated_context(
             .lit("' matches an ")
             .lit(Flag::Include.long())
             .lit(" pattern")
-            .hint(Some(format!(
-                "Patterns match the entry path as the archive lists it, before {}; run `exarch \
-                 list` to see the names.",
-                Flag::StripComponents.long()
-            ))),
+            .hint(Some(unmatched_include_hint(op))),
         ArchiveError::SecurityViolation { kind, .. } => security_violation(
             message,
             archive,
@@ -2319,6 +2329,12 @@ mod tests {
         );
         assert_eq!(leftover_path(&error), None);
         assert!(chain_hints(&error, terminal).is_empty());
+    }
+
+    #[test]
+    fn the_unmatched_include_hint_does_not_send_list_to_list() {
+        assert!(!unmatched_include_hint(Operation::List).contains("run `exarch list`"));
+        assert!(unmatched_include_hint(Operation::Extract).contains("run `exarch list`"));
     }
 
     #[test]

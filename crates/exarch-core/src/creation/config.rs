@@ -4,7 +4,7 @@ use crate::ArchiveError;
 use crate::Limit;
 use crate::PermissionPolicy;
 use crate::Result;
-use crate::creation::filters::ExcludePattern;
+use crate::creation::exclude_pattern::ExcludePattern;
 use crate::error::RequestedLevel;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
@@ -243,9 +243,9 @@ impl Default for CreationConfig {
             include_hidden: false,
             max_file_size: Limit::Unbounded,
             exclude_patterns: vec![
-                ExcludePattern::exact(".git"),
-                ExcludePattern::exact(".DS_Store"),
-                ExcludePattern::suffix(".tmp"),
+                ExcludePattern::literal_name(".git"),
+                ExcludePattern::literal_name(".DS_Store"),
+                ExcludePattern::suffix_name(".tmp"),
             ],
             strip_prefix: None,
             compression_level: CompressionLevel::default(),
@@ -494,7 +494,7 @@ mod tests {
         assert!(
             config
                 .exclude_patterns
-                .contains(&ExcludePattern::exact(".git")),
+                .contains(&ExcludePattern::literal_name(".git")),
             "should exclude .git by default"
         );
     }

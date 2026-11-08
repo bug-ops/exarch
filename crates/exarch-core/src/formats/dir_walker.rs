@@ -28,20 +28,13 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
-#[cfg(any(unix, target_os = "wasi"))]
 use crate::formats::handle_resolution::LinkCursor;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
-#[cfg(not(any(unix, target_os = "wasi")))]
-use crate::security::fs_view::HostFs;
-#[cfg(not(any(unix, target_os = "wasi")))]
-use crate::security::fs_view::LinkClass;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::PathModel;
-#[cfg(not(any(unix, target_os = "wasi")))]
-use crate::security::fs_view::classify_link;
 use crate::security::fs_view::joined;
 use crate::security::fs_view::name_too_long;
 use crate::security::fs_view::projected_landing_within_limits;
@@ -383,7 +376,7 @@ impl DirWalker {
         if links == Links::Strict {
             return Err(ParentBlocker::Symlink.error(entry, walked));
         }
-        match (Followed::of(root, site, walked), self.links) {
+        match (Followed::of(root, site), self.links) {
             (Followed::Blocked(blocker), _) => Err(blocker.error(entry, walked)),
             (Followed::Failed(error), _) => Err(error),
             (Followed::Inside { .. }, LinkPolicy::Refuse) => {
@@ -411,13 +404,6 @@ impl DirWalker {
 /// Where a symlink component sits: the handle of the directory that holds it,
 /// its name, and that directory's symlink-free position below the destination.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(
-    not(any(unix, target_os = "wasi")),
-    expect(
-        dead_code,
-        reason = "only the handle-relative resolver reads the link site"
-    )
-)]
 struct LinkSite<'a> {
     parent: &'a VettedDir,
     leaf: Leaf<'a>,
@@ -436,19 +422,14 @@ enum Followed {
     /// Nothing may be written through the link.
     Blocked(ParentBlocker),
     /// The host could not answer; says nothing about the link.
-    #[cfg_attr(
-        not(any(unix, target_os = "wasi")),
-        expect(dead_code, reason = "only the handle-relative resolver fails this way")
-    )]
     Failed(ArchiveError),
 }
 
-#[cfg(any(unix, target_os = "wasi"))]
 impl Followed {
     /// Resolves the link with a [`LinkCursor`] on the handles the walk holds,
     /// so the verdict never depends on how long the destination's own absolute
     /// path is, and the walk continues in the cursor's final handle.
-    fn of(root: &PinnedRoot, site: &LinkSite<'_>, _walked: &Path) -> Self {
+    fn of(root: &PinnedRoot, site: &LinkSite<'_>) -> Self {
         match LinkCursor::at_site(root, site.parent, site.here, site.leaf) {
             Ok((position, dir)) => Self::Inside {
                 position,
@@ -458,27 +439,6 @@ impl Followed {
                 Ok(error) => Self::Failed(error),
                 Err(verdict) => Self::Blocked(verdict.blocker()),
             },
-        }
-    }
-}
-
-#[cfg(not(any(unix, target_os = "wasi")))]
-impl Followed {
-    /// Resolves the link by its absolute path: there is no pinned
-    /// `readlinkat` on this platform.
-    // TODO(#958): resolve handle-relatively on Windows; realpath makes
-    // acceptance depend on the destination's absolute length there.
-    fn of(root: &PinnedRoot, _site: &LinkSite<'_>, walked: &Path) -> Self {
-        let dest = root.dest();
-        match classify_link(&HostFs, &dest.as_path().join(walked), dest) {
-            LinkClass::InsideDir(resolved) => Self::Inside {
-                position: resolved
-                    .strip_prefix(dest.as_path())
-                    .unwrap_or(&resolved)
-                    .to_path_buf(),
-                dir: None,
-            },
-            LinkClass::Blocked(blocker) => Self::Blocked(blocker),
         }
     }
 }
@@ -1048,6 +1008,149 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
         });
 
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    }
+}
+
+#[cfg(all(test, windows))]
+#[allow(clippy::unwrap_used)]
+mod windows_tests {
+    use super::*;
+    use crate::formats::pinned_dir::support::junction;
+    use crate::formats::pinned_dir::support::plain;
+    use crate::types::DestDir;
+    use crate::types::safe_path::Resolved;
+    use std::assert_matches;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn walker(allow_symlinks: bool) -> DirWalker {
+        DirWalker::new(&SecurityConfig::default().with_allow_symlinks(allow_symlinks))
+    }
+
+    fn sp(path: &str) -> SafePath {
+        SafePath::<Resolved>::for_test(path)
+    }
+
+    fn dest_with_outside() -> (TempDir, PinnedRoot, PathBuf) {
+        let root = TempDir::new().unwrap();
+        let dest = root.path().join("dest");
+        let outside = root.path().join("outside");
+        fs::create_dir(&dest).unwrap();
+        fs::create_dir(&outside).unwrap();
+        (
+            root,
+            PinnedRoot::open(DestDir::new(dest).unwrap()).unwrap(),
+            outside.canonicalize().unwrap(),
+        )
+    }
+
+    fn require_junction(link: &Path, target: &Path) -> bool {
+        if junction(link, target) {
+            return true;
+        }
+        assert!(
+            std::env::var_os("EXARCH_REQUIRE_PRIVILEGED_TESTS").is_none(),
+            "mklink /J failed but EXARCH_REQUIRE_PRIVILEGED_TESTS is set"
+        );
+        eprintln!("skipping: cannot create a junction");
+        false
+    }
+
+    #[test]
+    fn a_junction_inside_the_destination_is_followed() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        fs::create_dir(base.join("real")).unwrap();
+        if !require_junction(&base.join("alias"), &base.join("real")) {
+            return;
+        }
+
+        let rel = sp("alias/f.txt");
+        let (dir, leaf) = walker(true).ensure_parent(&dest, &rel).unwrap();
+        dir.create_new(leaf, None).unwrap();
+
+        assert!(base.join("real").join("f.txt").is_file());
+    }
+
+    #[test]
+    fn a_junction_target_spelled_in_another_case_is_followed() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        fs::create_dir(base.join("real")).unwrap();
+        let shouted = PathBuf::from(plain(&base.join("real")).to_string_lossy().to_uppercase());
+        if !require_junction(&base.join("alias"), &shouted) {
+            return;
+        }
+
+        walker(true)
+            .ensure_dir(&dest, &sp("alias/sub"))
+            .map(drop)
+            .unwrap();
+
+        assert!(base.join("real").join("sub").is_dir());
+    }
+
+    #[test]
+    fn a_junction_outside_the_destination_is_an_escape() {
+        let (_root, dest, outside) = dest_with_outside();
+        if !require_junction(&dest.dest().as_path().join("alias"), &outside) {
+            return;
+        }
+
+        let err = walker(true)
+            .ensure_parent(&dest, &sp("alias/f.txt"))
+            .map(drop)
+            .unwrap_err();
+
+        assert_matches!(err, ArchiveError::SymlinkEscape { .. }, "{err}");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_junction_is_refused_when_symlinks_are_not_allowed() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        fs::create_dir(base.join("real")).unwrap();
+        if !require_junction(&base.join("alias"), &base.join("real")) {
+            return;
+        }
+
+        let err = walker(false)
+            .ensure_parent(&dest, &sp("alias/f.txt"))
+            .map(drop)
+            .unwrap_err();
+
+        assert_matches!(err, ArchiveError::SecurityViolation { .. }, "{err}");
+        assert!(!base.join("real").join("f.txt").exists());
+    }
+
+    #[test]
+    fn a_relative_directory_symlink_is_followed_and_one_that_leaves_is_an_escape() {
+        let (_root, dest, outside) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        fs::create_dir(base.join("real")).unwrap();
+        let made = std::os::windows::fs::symlink_dir("real", base.join("rel")).is_ok()
+            && std::os::windows::fs::symlink_dir(r"..\outside", base.join("up")).is_ok();
+        if !made {
+            assert!(
+                std::env::var_os("EXARCH_REQUIRE_PRIVILEGED_TESTS").is_none(),
+                "symlink_dir failed but EXARCH_REQUIRE_PRIVILEGED_TESTS is set"
+            );
+            eprintln!("skipping: cannot create symlinks");
+            return;
+        }
+
+        let rel = sp("rel/f.txt");
+        let (dir, leaf) = walker(true).ensure_parent(&dest, &rel).unwrap();
+        dir.create_new(leaf, None).unwrap();
+        let err = walker(true)
+            .ensure_parent(&dest, &sp("up/g.txt"))
+            .map(drop)
+            .unwrap_err();
+
+        assert!(base.join("real").join("f.txt").is_file());
+        assert_matches!(err, ArchiveError::SymlinkEscape { .. }, "{err}");
         assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
     }
 }

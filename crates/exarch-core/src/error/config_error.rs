@@ -308,7 +308,7 @@ closed_enum! {
     /// ```
     /// use exarch_core::ExcludeRefusal;
     ///
-    /// assert_eq!(ExcludeRefusal::GlobMetacharacter.as_str(), "glob_metacharacter");
+    /// assert_eq!(ExcludeRefusal::BraceAlternation.as_str(), "brace_alternation");
     /// ```
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[non_exhaustive]
@@ -323,13 +323,20 @@ closed_enum! {
         DotEntry => "dot_entry",
         /// The pattern is an absolute path
         Absolute => "absolute",
-        /// The wildcard shape is not one of `name`, `name*` and `*name`
+        /// `**` is glued to other characters instead of being a whole component
         UnsupportedWildcard => "unsupported_wildcard",
-        /// A `*` is combined with a path separator
-        WildcardWithSeparator => "wildcard_with_separator",
-        /// The pattern holds `?`, `[`, `]`, `{`, `}` or `!`, which would be
-        /// matched literally
-        GlobMetacharacter => "glob_metacharacter",
+        /// The pattern starts with `!`; patterns cannot negate
+        LeadingNegation => "leading_negation",
+        /// The pattern holds `{` or `}`; alternation is not supported
+        BraceAlternation => "brace_alternation",
+        /// A class is negated, POSIX or holds a non-ASCII character
+        UnsupportedClass => "unsupported_class",
+        /// A `[` has no closing `]` in the same path component
+        UnterminatedClass => "unterminated_class",
+        /// A class range is reversed or not within `0-9`, `a-z` or `A-Z`
+        InvalidClassRange => "invalid_class_range",
+        /// The glob engine rejected the pattern for another reason
+        UnsupportedSyntax => "unsupported_syntax",
         /// The pattern starts or ends with whitespace or a control character
         PaddedWithBlank => "padded_with_blank",
         /// The pattern holds a comma, which reads as a list separator
@@ -350,14 +357,22 @@ impl ExcludeRefusal {
                 "is an absolute path; patterns match archive paths, which are relative"
             }
             Self::UnsupportedWildcard => {
-                "uses an unsupported `*` shape; only `name`, `name*` and `*name` are supported"
+                "glues `**` to other characters; `**` must be a whole path component"
             }
-            Self::WildcardWithSeparator => {
-                "combines `*` with a path separator (for `build/*` write `build`)"
+            Self::LeadingNegation => {
+                "starts with `!`; patterns cannot be negated (use an exclude pattern instead)"
             }
-            Self::GlobMetacharacter => {
-                "contains `?`, `[`, `]`, `{`, `}` or `!`, which are not glob syntax here and would match literally"
+            Self::BraceAlternation => {
+                "contains `{` or `}`; alternation is not supported, give one pattern per option"
             }
+            Self::UnsupportedClass => {
+                "has a negated, POSIX or non-ASCII character class; only positive ASCII classes such as `[abc]` are supported"
+            }
+            Self::UnterminatedClass => "has a `[` without a closing `]` in the same path component",
+            Self::InvalidClassRange => {
+                "has a class range that is reversed or not within `0-9`, `a-z` or `A-Z`"
+            }
+            Self::UnsupportedSyntax => "uses glob syntax that is not supported",
             Self::PaddedWithBlank => "starts or ends with whitespace",
             Self::ContainsComma => "contains a comma; give one pattern per option",
         }

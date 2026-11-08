@@ -103,7 +103,7 @@ describe('entry selection', () => {
       const config = new SecurityConfig()
         .withIncludePatterns(['keep'])
         .withExcludePatterns(['gone']);
-      assert.throws(() => config.addIncludePattern('**/x'), {
+      assert.throws(() => config.addIncludePattern('a**b'), {
         code: 'INVALID_CONFIGURATION',
         setting: 'entry_include',
       });
@@ -111,7 +111,7 @@ describe('entry selection', () => {
         code: 'INVALID_CONFIGURATION',
         setting: 'entry_include',
       });
-      assert.throws(() => config.withExcludePatterns(['ok', '?x']), {
+      assert.throws(() => config.withExcludePatterns(['ok', '{x}']), {
         code: 'INVALID_CONFIGURATION',
         setting: 'entry_exclude',
       });
@@ -179,6 +179,12 @@ describe('entry selection', () => {
       const kinds = Object.fromEntries(report.skipped.counts.map((c) => [c.kind, c.count]));
       assert.ok(kinds.not_selected >= 1, JSON.stringify(report.skipped));
       assert.strictEqual(report.filesSkipped >= 1, true);
+    });
+
+    it('selects entries with glob patterns', () => {
+      const config = new SecurityConfig().addIncludePattern('top/**/?.rs').addExcludePattern('d.*');
+      extractArchiveSync(archive, out, config);
+      assert.deepStrictEqual(extractedFiles(), ['top/sub/b.rs']);
     });
 
     it('lets an exclude pattern win over an include pattern', () => {

@@ -45,6 +45,7 @@ use windows_sys::Wdk::Storage::FileSystem::FileDispositionInformationEx;
 use windows_sys::Wdk::Storage::FileSystem::FileRenameInformation;
 use windows_sys::Wdk::Storage::FileSystem::FileRenameInformationEx;
 use windows_sys::Wdk::Storage::FileSystem::NtCreateFile;
+use windows_sys::Wdk::Storage::FileSystem::NtFsControlFile;
 use windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile;
 use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
 use windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED;
@@ -66,8 +67,10 @@ use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
 use windows_sys::Win32::Storage::FileSystem::FileIdInfo;
 use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
+use windows_sys::Win32::Storage::FileSystem::MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_POSIX_SEMANTICS;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_REPLACE_IF_EXISTS;
 
@@ -195,6 +198,44 @@ pub(super) fn create_at(
     // SAFETY: the call succeeded, so `handle` is a newly opened handle that
     // nothing else owns.
     Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+/// The raw reparse data of the reparse point `name` inside `dir`, as
+/// `FSCTL_GET_REPARSE_POINT` returns it.
+///
+/// The name is opened as itself, never followed, and the control code runs on
+/// that handle, so no path is formed. A name that is not a reparse point is an
+/// error (`ERROR_NOT_A_REPARSE_POINT`).
+pub(super) fn reparse_data_at(dir: BorrowedHandle<'_>, name: Leaf<'_>) -> io::Result<Vec<u8>> {
+    let file = create_at(dir, name, Request::open(FILE_READ_ATTRIBUTES))?;
+    let capacity = MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
+    let mut buffer = vec![0_u8; capacity as usize];
+    let mut status_block = IO_STATUS_BLOCK::default();
+
+    // SAFETY: `file` is a live handle opened with
+    // `FILE_SYNCHRONOUS_IO_NONALERT`, so the call completes before returning
+    // and keeps no pointer. The event, APC routine, APC context and input
+    // buffer are null with a zero input length. `buffer` is valid for writes of
+    // `capacity` bytes and `status_block` is valid for writes.
+    let status = unsafe {
+        NtFsControlFile(
+            file.as_raw_handle(),
+            null_mut(),
+            None,
+            null(),
+            &raw mut status_block,
+            FSCTL_GET_REPARSE_POINT,
+            null(),
+            0,
+            buffer.as_mut_ptr().cast(),
+            capacity,
+        )
+    };
+    if status < 0 {
+        return Err(nt_error(status));
+    }
+    buffer.truncate(status_block.Information.min(buffer.len()));
+    Ok(buffer)
 }
 
 /// An `NtSetInformationFile` payload in 8-aligned storage.

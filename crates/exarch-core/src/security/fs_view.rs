@@ -56,7 +56,6 @@ use crate::QuotaResource;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::closed_enum::closed_enum;
-#[cfg(any(unix, target_os = "wasi"))]
 use crate::formats::handle_resolution::LinkCursor;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::types::DestDir;
@@ -490,18 +489,21 @@ pub(crate) trait FsView {
 /// GHSA-wcmx-7f9h-5mv5.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn paths_start_with(path: &Path, base: &Path) -> bool {
-    let mut path_components = path.components();
+    strip_prefix_folded(path, base).is_some()
+}
+
+/// What follows `base` in `path` when `base` is a component-wise,
+/// case-insensitive prefix of it; the rule [`paths_start_with`] applies.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn strip_prefix_folded<'p>(path: &'p Path, base: &Path) -> Option<&'p Path> {
+    let fold = |component: Component<'_>| component.as_os_str().to_string_lossy().to_lowercase();
+    let mut rest = path.components();
     for base_component in base.components() {
-        let Some(path_component) = path_components.next() else {
-            return false;
-        };
-        let path_str = path_component.as_os_str().to_string_lossy().to_lowercase();
-        let base_str = base_component.as_os_str().to_string_lossy().to_lowercase();
-        if path_str != base_str {
-            return false;
+        if fold(rest.next()?) != fold(base_component) {
+            return None;
         }
     }
-    true
+    Some(rest.as_path())
 }
 
 /// Case-sensitive path prefix check for Unix (not macOS).
@@ -537,7 +539,6 @@ impl FsView for HostFs {
         std::fs::canonicalize(path).map(|canonical| contain(canonical, root.as_path()))
     }
 
-    #[cfg(any(unix, target_os = "wasi"))]
     fn resolve_link_target(
         &self,
         link: &Path,
@@ -549,7 +550,6 @@ impl FsView for HostFs {
     }
 }
 
-#[cfg(any(unix, target_os = "wasi"))]
 fn resolve_pinned(
     root: &PinnedRoot,
     link: &Path,
@@ -561,19 +561,15 @@ fn resolve_pinned(
         .map_err(|refusal| refusal.into_error(link))
 }
 
-/// The real filesystem, with link targets resolved against the destination
-/// handle an extraction already holds.
+/// The real filesystem, resolving link targets through the extraction's
+/// already-open destination handle.
 ///
-/// Behaves like [`HostFs`] except that, on Unix and WASI, links are resolved
-/// handle-relatively from the extraction's [`PinnedRoot`], the same descriptor
-/// every write goes through. [`HostFs`] opens the destination by path on every
-/// call instead, so only an extraction should rely on the pinned form.
+/// Behaves like [`HostFs`] except that links are resolved handle-relatively
+/// from the extraction's [`PinnedRoot`], the same descriptor every write goes
+/// through. [`HostFs`] opens the destination by path on every call instead, so
+/// only an extraction should rely on the pinned form.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PinnedHostFs<'r> {
-    #[cfg_attr(
-        not(any(unix, target_os = "wasi")),
-        expect(dead_code, reason = "only the handle-relative resolver reads the root")
-    )]
     root: &'r PinnedRoot,
 }
 
@@ -608,7 +604,6 @@ impl FsView for PinnedHostFs<'_> {
         HostFs.canonicalize(path, root)
     }
 
-    #[cfg(any(unix, target_os = "wasi"))]
     fn resolve_link_target(
         &self,
         link: &Path,
@@ -3100,6 +3095,44 @@ mod host_fs_tests {
         assert_matches!(
             contain(PathBuf::from("/mnt/OUT/a"), root),
             Containment::Within(_)
+        );
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+mod strip_prefix_folded_tests {
+    use super::strip_prefix_folded;
+    use std::path::Path;
+
+    #[test]
+    fn the_remainder_follows_a_case_insensitive_prefix() {
+        assert_eq!(
+            strip_prefix_folded(Path::new("/Dest/a/b"), Path::new("/dest")),
+            Some(Path::new("a/b"))
+        );
+    }
+
+    #[test]
+    fn equal_paths_leave_an_empty_remainder() {
+        assert_eq!(
+            strip_prefix_folded(Path::new("/dest"), Path::new("/DEST")),
+            Some(Path::new(""))
+        );
+    }
+
+    #[test]
+    fn a_base_longer_than_the_path_is_no_prefix() {
+        assert_eq!(
+            strip_prefix_folded(Path::new("/dest"), Path::new("/dest/a")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_sibling_sharing_a_name_prefix_is_no_prefix() {
+        assert_eq!(
+            strip_prefix_folded(Path::new("/destevil/a"), Path::new("/dest")),
+            None
         );
     }
 }

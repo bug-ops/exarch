@@ -33,6 +33,7 @@ use exarch_core::IssueCategory;
 use exarch_core::LinkTarget;
 use exarch_core::ListOptions;
 use exarch_core::ListRequest;
+use exarch_core::Malformation;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
 use exarch_core::StoredTargets;
@@ -1117,7 +1118,8 @@ fn a_link_written_by_7zip_with_snl_is_a_unix_symlink_not_a_reparse_point() {
 /// Marks file `file` of a two-file archive stored with a plain header as
 /// stream-less (a directory), leaving every block as it was.
 ///
-/// The block of the file then keeps its streams, which no file accounts for.
+/// The block of the file then keeps its streams, which no file accounts for,
+/// so `sevenz-rust2` refuses the archive when it reads the header.
 /// The patch is built here from the header layout: 6 signature bytes, 2
 /// version bytes, the start header CRC, then the next header's offset, size
 /// and CRC.
@@ -1150,7 +1152,7 @@ fn mark_stream_less(bytes: &[u8], file: usize) -> Vec<u8> {
         out.extend_from_slice(&patched);
 
         let parsed = Archive::read(&mut Cursor::new(out.clone()), &Password::empty());
-        if parsed.is_ok_and(|a| a.blocks.len() == 2 && !a.files[file].has_stream) {
+        if parsed.is_err_and(|e| matches!(e, sevenz_rust2::Error::Other(_))) {
             return out;
         }
     }
@@ -1176,48 +1178,39 @@ fn orphan_block_archive(dir: &TempDir, stream_less: usize) -> PathBuf {
     path
 }
 
-/// An orphan block holds streams that no file accounts for. It is refused where
-/// the archive is admitted, by `extract` before any write and by `verify`,
-/// which never decodes it, and `list` reports only what the header holds.
-fn assert_orphan_block_refused(path: &Path, mapping: [Option<usize>; 2]) {
-    let archive = Archive::read(
+/// An orphan block holds streams that no file accounts for. The archive is
+/// refused when it is opened, so `extract` writes nothing and `verify` and
+/// `list` refuse it too.
+fn assert_orphan_block_refused(path: &Path) {
+    let upstream = Archive::read(
         &mut Cursor::new(std::fs::read(path).unwrap()),
         &Password::empty(),
     )
-    .unwrap();
-    assert_eq!(archive.blocks.len(), 2);
-    assert_eq!(archive.stream_map.file_block_index, mapping);
+    .unwrap_err();
+    assert_matches!(upstream, sevenz_rust2::Error::Other(_));
 
     let out = TempDir::new().unwrap();
     std::fs::write(out.path().join("a"), b"sentinel").unwrap();
     std::fs::write(out.path().join("b"), b"sentinel").unwrap();
-    let err = extract_archive(path, out.path(), &SecurityConfig::default()).unwrap_err();
-    assert_matches!(
-        err,
-        ArchiveError::InvalidArchive(reason) if reason.to_string().contains("do not account for")
-    );
+    let config = SecurityConfig::default();
+    let refused = [
+        extract_archive(path, out.path(), &config).unwrap_err(),
+        VerifyRequest::new(&config)
+            .with_options(integrity(1 << 20))
+            .verify(path)
+            .unwrap_err(),
+        list_archive(path, &config).unwrap_err(),
+    ];
+    for err in refused {
+        assert_matches!(
+            err,
+            ArchiveError::InvalidArchive(Malformation::SevenZHeaderUnreadable { .. })
+        );
+    }
     for name in ["a", "b"] {
         assert_eq!(std::fs::read(out.path().join(name)).unwrap(), b"sentinel");
     }
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 2);
-
-    let report = VerifyRequest::new(&SecurityConfig::default())
-        .with_options(integrity(1 << 20))
-        .verify(path)
-        .unwrap();
-    assert_eq!(report.status(), VerificationStatus::Fail);
-    assert_eq!(
-        issue_categories(&report)
-            .into_iter()
-            .filter(|c| *c == IssueCategory::InvalidArchive)
-            .count(),
-        1,
-        "{:?}",
-        report.issues()
-    );
-
-    let manifest = list_archive(path, &SecurityConfig::default()).unwrap();
-    assert_eq!(manifest.total_entries(), 2);
 }
 
 #[test]
@@ -1225,7 +1218,7 @@ fn an_orphan_trailing_block_is_refused() {
     let dir = TempDir::new().unwrap();
     let path = orphan_block_archive(&dir, 1);
 
-    assert_orphan_block_refused(&path, [Some(0), None]);
+    assert_orphan_block_refused(&path);
 }
 
 #[test]
@@ -1233,7 +1226,7 @@ fn an_orphan_block_after_a_leading_stream_less_entry_is_refused() {
     let dir = TempDir::new().unwrap();
     let path = orphan_block_archive(&dir, 0);
 
-    assert_orphan_block_refused(&path, [None, Some(0)]);
+    assert_orphan_block_refused(&path);
 }
 
 #[cfg(unix)]

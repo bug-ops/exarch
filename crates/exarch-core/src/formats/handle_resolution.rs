@@ -3,7 +3,8 @@
 //! A [`LinkCursor`] resolves a link target the way the kernel would, one
 //! component at a time, while holding the directory handle of the position it
 //! has reached. Every file-system operation is relative to a handle already
-//! held (`readlinkat`, `fstatat` with no-follow, `openat` with `O_NOFOLLOW`),
+//! held (`readlinkat`, `fstatat` with no-follow, `openat` with `O_NOFOLLOW`; on
+//! Windows `FSCTL_GET_REPARSE_POINT` and `NtCreateFile` on the held handle),
 //! so the result does not depend on later changes to path names, and no
 //! absolute path is ever formed: the verdict does not depend on how long the
 //! destination's own absolute path is.
@@ -23,9 +24,9 @@
 //!
 //! - a `..` above the root is an escape;
 //! - an absolute target is mapped only through the destination's canonical root
-//!   or the root as the caller wrote it (`/var/x` for `/private/var/x`); any
-//!   other spelling of the same place (a bind mount, another alias) is an
-//!   escape;
+//!   or, on Unix, the root as the caller wrote it (`/var/x` for
+//!   `/private/var/x`); any other spelling of the same place (a bind mount, a
+//!   `SUBST` drive, a short name, another alias) is an escape;
 //! - more than [`MAX_SYMLINK_HOPS`] links, or a link that dangles or runs
 //!   through a file, is unresolvable.
 
@@ -44,6 +45,9 @@ use crate::security::fs_view::LinkBase;
 use crate::security::fs_view::MAX_SYMLINK_HOPS;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::ParentBlocker;
+#[cfg(windows)]
+use crate::security::fs_view::strip_prefix_folded;
+use crate::types::DestDir;
 
 /// The most ancestor handles a cursor keeps open at once, so a deep path
 /// costs a bounded number of descriptors.
@@ -94,15 +98,7 @@ impl Refusal {
     }
 
     fn of_probe(error: &io::Error) -> Self {
-        let exhausted = rustix::io::Errno::from_io_error(error).is_some_and(|errno| {
-            [
-                rustix::io::Errno::MFILE,
-                rustix::io::Errno::NFILE,
-                rustix::io::Errno::NOMEM,
-            ]
-            .contains(&errno)
-        });
-        if exhausted || error.kind() == io::ErrorKind::OutOfMemory {
+        if is_resource_exhaustion(error) {
             Self::Resource(io::Error::new(error.kind(), error.to_string()))
         } else if error.kind() == io::ErrorKind::InvalidFilename {
             Self::NameTooLong(io::Error::from(io::ErrorKind::InvalidFilename))
@@ -110,6 +106,71 @@ impl Refusal {
             Self::Unresolvable
         }
     }
+}
+
+#[cfg(any(unix, target_os = "wasi"))]
+fn is_resource_exhaustion(error: &io::Error) -> bool {
+    rustix::io::Errno::from_io_error(error).is_some_and(|errno| {
+        [
+            rustix::io::Errno::MFILE,
+            rustix::io::Errno::NFILE,
+            rustix::io::Errno::NOMEM,
+        ]
+        .contains(&errno)
+    }) || error.kind() == io::ErrorKind::OutOfMemory
+}
+
+#[cfg(windows)]
+fn is_resource_exhaustion(error: &io::Error) -> bool {
+    use windows_sys::Win32::Foundation::ERROR_COMMITMENT_LIMIT;
+    use windows_sys::Win32::Foundation::ERROR_NO_SYSTEM_RESOURCES;
+    use windows_sys::Win32::Foundation::ERROR_NOT_ENOUGH_MEMORY;
+    use windows_sys::Win32::Foundation::ERROR_OUTOFMEMORY;
+    use windows_sys::Win32::Foundation::ERROR_TOO_MANY_OPEN_FILES;
+
+    error
+        .raw_os_error()
+        .map(i32::cast_unsigned)
+        .is_some_and(|code| {
+            [
+                ERROR_TOO_MANY_OPEN_FILES,
+                ERROR_NOT_ENOUGH_MEMORY,
+                ERROR_OUTOFMEMORY,
+                ERROR_NO_SYSTEM_RESOURCES,
+                ERROR_COMMITMENT_LIMIT,
+            ]
+            .contains(&code)
+        })
+        || error.kind() == io::ErrorKind::OutOfMemory
+}
+
+/// The part of the absolute `target` below the destination, or `None` when it
+/// does not start at the destination.
+///
+/// Unix also accepts the destination as the caller wrote it. Windows compares
+/// component-wise and case-insensitively, like the validator's containment
+/// check; a spelling of the destination it does not recognize (a short 8.3
+/// name, a `SUBST` drive, a volume GUID) does not match and is an escape.
+#[cfg(unix)]
+fn dest_relative(target: &Path, dest: &DestDir) -> Option<PathBuf> {
+    target
+        .strip_prefix(dest.as_path())
+        .or_else(|_| target.strip_prefix(dest.written()))
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+#[cfg(target_os = "wasi")]
+fn dest_relative(target: &Path, dest: &DestDir) -> Option<PathBuf> {
+    target
+        .strip_prefix(dest.as_path())
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+#[cfg(windows)]
+fn dest_relative(target: &Path, dest: &DestDir) -> Option<PathBuf> {
+    strip_prefix_folded(target, dest.as_path()).map(Path::to_path_buf)
 }
 
 type Resolution<T> = std::result::Result<T, Refusal>;
@@ -404,11 +465,7 @@ impl<'r> LinkCursor<'r> {
             .read_link(name)
             .map_err(|e| Refusal::of_probe(&e))?;
         let relative = if target.is_absolute() {
-            let dest = self.root.dest();
-            let stripped = target.strip_prefix(dest.as_path());
-            #[cfg(unix)]
-            let stripped = stripped.or_else(|_| target.strip_prefix(dest.written()));
-            let inside = stripped.map_err(|_| Refusal::Escape)?.to_path_buf();
+            let inside = dest_relative(&target, self.root.dest()).ok_or(Refusal::Escape)?;
             self.position.clear();
             self.parents.clear();
             self.dir = None;

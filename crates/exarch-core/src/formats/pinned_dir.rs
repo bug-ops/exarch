@@ -53,9 +53,13 @@
 //! - Over SMB the redirector rebuilds a relative open as a full path, so the
 //!   server resolves the names. Third-party filesystem drivers are unverified.
 //! - Only NTFS is exercised in CI; `ReFS` and Dev Drive are untested.
-//! - Following a pre-existing symlink under `ContainedOnly` stays path-based
-//!   through `classify_link` on Windows. On Unix it is resolved with
-//!   `readlinkat` and `openat` on the held handles instead.
+//! - Following a pre-existing symlink or junction under `ContainedOnly` reads
+//!   the link with `FSCTL_GET_REPARSE_POINT` on the held handle and opens the
+//!   target relative to the destination root. An absolute target is matched
+//!   against the canonical destination only, case-insensitively by component; a
+//!   destination reached through `SUBST`, a mapped drive or a symlinked
+//!   ancestor, or a target spelled with a short name or volume GUID, is refused
+//!   as an escape.
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -612,12 +616,15 @@ pub(in crate::formats) mod nt;
 
 #[cfg(windows)]
 mod imp {
+    use std::ffi::OsString;
     use std::fs::File;
     use std::io;
+    use std::os::windows::ffi::OsStringExt;
     use std::os::windows::fs::MetadataExt;
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsHandle;
     use std::path::Path;
+    use std::path::PathBuf;
 
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
@@ -641,6 +648,8 @@ mod imp {
     use super::nt::Request;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::occupant::ReplacePermit;
+    use crate::formats::reparse;
+    use crate::formats::reparse::ReparseTarget;
     use crate::security::fs_view::Occupant;
     use crate::security::permissions::SanitizedMode;
 
@@ -690,6 +699,18 @@ mod imp {
             };
             let handle = nt::create_at(self.0.as_handle(), name, request)?;
             Self::into_dir(File::from(handle))
+        }
+
+        /// Reads the target of the symlink or junction `name` from its reparse
+        /// data. An absolute target comes back in the verbatim `\\?\` form.
+        ///
+        /// A reparse point of another kind, or data that does not parse, is an
+        /// `InvalidData` error.
+        pub(crate) fn read_link(&self, name: Leaf<'_>) -> io::Result<PathBuf> {
+            let buffer = nt::reparse_data_at(self.0.as_handle(), name)?;
+            let (ReparseTarget::Relative(units) | ReparseTarget::Absolute(units)) =
+                reparse::parse(&buffer)?;
+            Ok(PathBuf::from(OsString::from_wide(&units)))
         }
 
         /// Reports an occupied `name` as `AlreadyExists`.
@@ -764,7 +785,7 @@ mod imp {
         /// Creates the subdirectory `name`.
         ///
         /// It inherits the parent's ACL, so it is not owner-only here.
-        // TODO(critic): an explicit owner-only DACL for staging directories.
+        // TODO(#1020): an explicit owner-only DACL for staging directories.
         pub(crate) fn make_private_dir(&self, name: Leaf<'_>) -> io::Result<()> {
             self.make_dir(name)
         }
@@ -900,6 +921,26 @@ pub(crate) mod support {
 
     pub(super) fn pinned(temp: &tempfile::TempDir) -> VettedDir {
         pinned_at(temp.path())
+    }
+
+    /// `path` without the verbatim `\\?\` prefix a canonical Windows path
+    /// carries, which `mklink` does not accept.
+    #[cfg(windows)]
+    pub(crate) fn plain(path: &Path) -> std::path::PathBuf {
+        path.to_str()
+            .and_then(|text| text.strip_prefix(r"\\?\"))
+            .map_or_else(|| path.to_path_buf(), std::path::PathBuf::from)
+    }
+
+    /// Creates the junction `link` to `target`; `false` when `mklink` fails.
+    #[cfg(windows)]
+    pub(crate) fn junction(link: &Path, target: &Path) -> bool {
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(plain(target))
+            .output()
+            .is_ok_and(|out| out.status.success())
     }
 }
 
@@ -1106,6 +1147,7 @@ mod tests {
 #[cfg(all(test, windows))]
 #[allow(clippy::unwrap_used)]
 mod windows_tests {
+    use super::support::junction;
     use super::support::leaf;
     use super::support::pinned;
     use super::support::pinned_at;
@@ -1124,19 +1166,6 @@ mod windows_tests {
             .args(args)
             .output()
             .is_ok_and(|out| out.status.success())
-    }
-
-    fn junction(link: &Path, target: &Path) -> bool {
-        run(
-            "cmd",
-            &[
-                "/C".as_ref(),
-                "mklink".as_ref(),
-                "/J".as_ref(),
-                link.as_ref(),
-                target.as_ref(),
-            ],
-        )
     }
 
     fn entries(dir: &Path) -> usize {
@@ -1179,6 +1208,35 @@ mod windows_tests {
         let status = dir.status(leaf("link")).unwrap().unwrap();
 
         assert!(status.reparse);
+    }
+
+    #[test]
+    fn a_junction_reads_back_as_its_verbatim_target() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let target = target.canonicalize().unwrap();
+        if !junction(&temp.path().join("link"), &target) {
+            eprintln!("skipping: cannot create a junction");
+            return;
+        }
+
+        let read = dir.read_link(leaf("link")).unwrap();
+
+        assert_eq!(read, target);
+    }
+
+    #[test]
+    fn reading_a_link_that_is_not_one_fails() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        dir.make_dir(leaf("plain")).unwrap();
+        fs::write(temp.path().join("file"), b"x").unwrap();
+
+        assert!(dir.read_link(leaf("plain")).is_err());
+        assert!(dir.read_link(leaf("file")).is_err());
+        assert!(dir.read_link(leaf("missing")).is_err());
     }
 
     #[test]

@@ -79,14 +79,21 @@ pub(crate) enum SpoolBacking {
 impl SpoolBacking {
     /// Classifies the filesystem `file` lives on.
     ///
-    /// Only Linux and Android are classified; a failed `fstatfs` and every
-    /// other target report [`Self::Disk`].
+    /// Linux, Android, FreeBSD and Apple targets are classified; a failed
+    /// `fstatfs` and every other target report [`Self::Disk`].
     #[cfg(not(target_os = "wasi"))]
     fn of(file: &File) -> Self {
         cfg_select! {
             any(target_os = "linux", target_os = "android") => rustix::fs::fstatfs(file)
                 .map_or(Self::Disk, |stat| {
                     Self::from_fs_type(i128::from(stat.f_type))
+                }),
+            any(target_vendor = "apple", target_os = "freebsd") => rustix::fs::fstatfs(file)
+                .map_or(Self::Disk, |stat| {
+                    Self::from_mount(
+                        c_chars_until_nul(&stat.f_fstypename),
+                        c_chars_until_nul(&stat.f_mntfromname),
+                    )
                 }),
             _ => {
                 let _ = file;
@@ -121,6 +128,43 @@ impl SpoolBacking {
             Self::Disk
         }
     }
+
+    /// Maps a BSD mount's filesystem type name and mounted-from source to a
+    /// backing: `tmpfs`, and a FreeBSD `md` memory disk (`/dev/md<digits>` with
+    /// any suffix such as `p1` or `.eli`).
+    ///
+    /// A vnode-backed `md` disk is also reported as memory; that only lowers
+    /// the capacity, so a wrong answer never risks memory.
+    #[cfg(any(target_vendor = "apple", target_os = "freebsd", test))]
+    fn from_mount(
+        mut fs_type: impl Iterator<Item = u8>,
+        mut mounted_from: impl Iterator<Item = u8>,
+    ) -> Self {
+        let is_md_disk = mounted_from
+            .by_ref()
+            .take(b"/dev/md".len())
+            .eq(b"/dev/md".iter().copied())
+            && mounted_from
+                .next()
+                .is_some_and(|byte| byte.is_ascii_digit());
+        if fs_type.by_ref().eq(b"tmpfs".iter().copied()) || is_md_disk {
+            Self::Ram
+        } else {
+            Self::Disk
+        }
+    }
+}
+
+/// The bytes of a NUL-terminated `c_char` field, up to the first NUL.
+///
+/// `c_char` is `i8` on some targets and `u8` on others, so the bytes are taken
+/// by reinterpretation rather than by a cast.
+#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+fn c_chars_until_nul(field: &[std::ffi::c_char]) -> impl Iterator<Item = u8> {
+    field
+        .iter()
+        .map(|c| c.to_ne_bytes()[0])
+        .take_while(|byte| *byte != 0)
 }
 
 /// An anonymous spool file and where its bytes live.
@@ -169,8 +213,8 @@ pub(crate) fn open_archive(path: &Path) -> Result<File> {
 /// WASI has no temporary directory and `std::env::temp_dir` panics there, so
 /// no temporary file is attempted on that target.
 pub(crate) fn open_spool() -> Option<TempSpool> {
-    // TODO(#959): Linux timings for ext4 and tmpfs; tmpfs detection on FreeBSD
-    // and macOS RAM disks.
+    // TODO(#959): Linux timings for ext4 and tmpfs and a hand run of the Linux
+    // detection; macOS `hdiutil ram://` disks need IOKit and are not detected.
     cfg_select! {
         target_os = "wasi" => None,
         _ => tempfile::tempfile().ok().map(TempSpool::new),
@@ -2057,6 +2101,37 @@ mod spool_tests {
         );
         assert_eq!(SpoolBacking::from_fs_type(0xEF53), SpoolBacking::Disk);
         assert_eq!(SpoolBacking::from_fs_type(0), SpoolBacking::Disk);
+    }
+
+    #[test]
+    fn mounts_classify_on_every_host() {
+        let cases: [(&[u8], &[u8], SpoolBacking); 11] = [
+            (b"tmpfs", b"tmpfs", SpoolBacking::Ram),
+            (b"tmpfs", b"", SpoolBacking::Ram),
+            (b"ufs", b"/dev/md0", SpoolBacking::Ram),
+            (b"ufs", b"/dev/md12", SpoolBacking::Ram),
+            (b"ufs", b"/dev/md0p1", SpoolBacking::Ram),
+            (b"zfs", b"/dev/md0.eli", SpoolBacking::Ram),
+            (b"ufs", b"/dev/mdx", SpoolBacking::Disk),
+            (b"ufs", b"/dev/md", SpoolBacking::Disk),
+            (b"apfs", b"/dev/disk3s1", SpoolBacking::Disk),
+            (b"tmpfsx", b"/dev/ada0p2", SpoolBacking::Disk),
+            (b"", b"", SpoolBacking::Disk),
+        ];
+        for (fs_type, from, expected) in cases {
+            assert_eq!(
+                SpoolBacking::from_mount(fs_type.iter().copied(), from.iter().copied()),
+                expected,
+                "{fs_type:?} {from:?}"
+            );
+        }
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_default_temp_file_on_apple_is_disk() {
+        let file = tempfile::tempfile().unwrap();
+        assert_eq!(SpoolBacking::of(&file), SpoolBacking::Disk);
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]

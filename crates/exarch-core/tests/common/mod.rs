@@ -89,23 +89,33 @@ pub enum RawEntry<'a> {
     File(&'a str, &'a [u8]),
     Link(&'a str, &'a [u8]),
     Dir(&'a str),
+    /// A directory that still owns a zero-size sub-stream, the shape the
+    /// `sevenz-rust2` 0.24 writer produced (#769).
+    DirWithSubStream(&'a str),
 }
 
-fn crc32(data: &[u8]) -> u32 {
+pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = flate2::Crc::new();
     crc.update(data);
     crc.sum()
 }
 
-/// A 7z number below 0x4000.
-fn number(value: usize) -> Vec<u8> {
-    assert!(value < 0x4000, "number too large for the helper");
-    let [high, low] = u16::try_from(value).expect("below 0x4000").to_be_bytes();
-    if value < 0x80 {
-        vec![low]
-    } else {
-        vec![0x80 | high, low]
+/// A 7z variable-length number (the leading byte's high bits give the count
+/// of extra bytes).
+pub fn number(value: usize) -> Vec<u8> {
+    let value = u64::try_from(value).expect("fits in u64");
+    for extra in 0..8u32 {
+        if value < 1 << (7 * (extra + 1)) {
+            let mask = !(0xFFu8 >> extra);
+            let high = u8::try_from(value >> (8 * extra)).expect("fits the leading byte");
+            let mut out = vec![mask | high];
+            out.extend_from_slice(&value.to_le_bytes()[..extra as usize]);
+            return out;
+        }
     }
+    let mut out = vec![0xFF];
+    out.extend_from_slice(&value.to_le_bytes());
+    out
 }
 
 fn bit_vector(flags: &[bool]) -> Vec<u8> {
@@ -118,14 +128,28 @@ fn bit_vector(flags: &[bool]) -> Vec<u8> {
 
 /// Writes a stored (Copy) 7z archive with one solid block holding a sub-stream
 /// per file or link, and a stream-less entry for every directory, wherever it
-/// stands in the entry order, as 7-Zip lays it out. The `sevenz-rust2` writer
-/// cannot do this: it gives a directory in a solid block a sub-stream of its
-/// own.
+/// stands in the entry order, as 7-Zip lays it out.
+/// [`RawEntry::DirWithSubStream`] writes the malformed shape instead: a
+/// directory with a sub-stream of its own, which no `sevenz-rust2` 0.25 writer
+/// produces.
 pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
+    solid_copy_7z_with_crcs(entries, &[], None)
+}
+
+/// [`solid_copy_7z`] with declared checksums: `file_crcs` for the streamed
+/// entries in order (`None` leaves one without; a shorter slice leaves the
+/// rest without) and `block_crc` for the whole block. The checksums are
+/// written as given, so a wrong one makes a corrupt-looking archive.
+pub fn solid_copy_7z_with_crcs(
+    entries: &[RawEntry<'_>],
+    file_crcs: &[Option<u32>],
+    block_crc: Option<u32>,
+) -> Vec<u8> {
     let streamed: Vec<&[u8]> = entries
         .iter()
         .filter_map(|e| match e {
             RawEntry::File(_, data) | RawEntry::Link(_, data) => Some(*data),
+            RawEntry::DirWithSubStream(_) => Some(&[][..]),
             RawEntry::Dir(_) => None,
         })
         .collect();
@@ -142,6 +166,10 @@ pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
     h.extend(number(1));
     h.extend([0x01, 0x00, 0x0C]);
     h.extend(number(data.len()));
+    if let Some(crc) = block_crc {
+        h.extend([0x0A, 0x01]);
+        h.extend(crc.to_le_bytes());
+    }
     h.extend([0x00, 0x08, 0x0D]);
     h.extend(number(streamed.len()));
     if streamed.len() > 1 {
@@ -150,12 +178,27 @@ pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
             h.extend(number(part.len()));
         }
     }
+    let defined: Vec<bool> = (0..streamed.len())
+        .map(|i| file_crcs.get(i).copied().flatten().is_some())
+        .collect();
+    if defined.contains(&true) {
+        h.push(0x0A);
+        if defined.iter().all(|d| *d) {
+            h.push(0x01);
+        } else {
+            h.push(0x00);
+            h.extend(bit_vector(&defined));
+        }
+        for crc in file_crcs.iter().flatten() {
+            h.extend(crc.to_le_bytes());
+        }
+    }
     h.extend([0x00, 0x00, 0x05]);
     h.extend(number(entries.len()));
 
     let empty_stream: Vec<bool> = entries
         .iter()
-        .map(|e| matches!(e, RawEntry::Dir(_)))
+        .map(|e| matches!(e, RawEntry::Dir(_) | RawEntry::DirWithSubStream(_)))
         .collect();
     if empty_stream.contains(&true) {
         let bits = bit_vector(&empty_stream);
@@ -170,7 +213,9 @@ pub fn solid_copy_7z(entries: &[RawEntry<'_>]) -> Vec<u8> {
         let (name, attribute) = match entry {
             RawEntry::File(name, _) => (name, 0x20 | 0x8000 | (0o100_644u32 << 16)),
             RawEntry::Link(name, _) => (name, 0x8000 | (0o120_777u32 << 16)),
-            RawEntry::Dir(name) => (name, 0x10 | 0x8000 | (0o040_755u32 << 16)),
+            RawEntry::Dir(name) | RawEntry::DirWithSubStream(name) => {
+                (name, 0x10 | 0x8000 | (0o040_755u32 << 16))
+            }
         };
         for unit in name.encode_utf16().chain([0]) {
             names.extend(unit.to_le_bytes());

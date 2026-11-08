@@ -258,6 +258,9 @@ pub enum QuotaSubCode {
     /// The summed decoded size of a solid 7z block.
     #[napi(value = "SOLID_BLOCK_MEMORY")]
     SolidBlockMemory,
+    /// The size of an archive header, bounded by the file count limit.
+    #[napi(value = "HEADER_SIZE")]
+    HeaderSize,
 }
 
 /// Value of the `subCode` property of a `ZIP_BOMB` error: what the refused
@@ -768,7 +771,8 @@ mirror_from_core!(
         CompressedMembers,
         TreeNodes,
         SinkCapacity,
-        SolidBlockMemory
+        SolidBlockMemory,
+        HeaderSize
     ]
 );
 mirror_from_core!(
@@ -1691,7 +1695,8 @@ mod tests {
             CompressedMembers,
             TreeNodes,
             SinkCapacity,
-            SolidBlockMemory
+            SolidBlockMemory,
+            HeaderSize
         ]
     );
 

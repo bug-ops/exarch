@@ -12,9 +12,10 @@
 //! `ZipFile`) archives are generated at test time. A missing tool skips its
 //! producers locally; with `EXARCH_REQUIRE_PRODUCERS=1` (set in CI) it fails.
 //! Windows Explorer archives cannot be produced headless in-process, so a
-//! committed archive stands in for them on every host. Two `WinRAR` archives
-//! (from the Go test data) are committed as well; they cover header shape
-//! only, since each holds one empty stored entry.
+//! committed archive stands in for them on every host. Three `WinRAR` archives
+//! are committed as well: two from the Go test data cover header shape only
+//! (each holds one empty stored entry); one from Apache Commons Compress
+//! carries `WinRAR`'s deflate output.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::disallowed_methods)]
@@ -522,4 +523,22 @@ fn winrar_fixtures_have_no_structural_findings_and_extract() {
             "{fixture}"
         );
     }
+}
+
+/// Made by `WinRAR` (version made by `0x001F`, 243 deflated and 36 stored
+/// entries); taken from the Apache Commons Compress test resources, see
+/// `tests/fixtures/PROVENANCE.md`. Covers `WinRAR`'s real deflate output.
+#[test]
+fn winrar_deflate_fixture_has_no_structural_findings_extracts_and_verifies() {
+    let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/zip-family/deflate-winrar.zip");
+    assert_no_structural_finding(&archive, "deflate-winrar.zip");
+
+    let config = SecurityConfig::default();
+    let report = verify_archive(&archive, &config).unwrap();
+    assert!(report.is_safe(), "{:?}", report.issues());
+
+    let out = TempDir::new().unwrap();
+    extract_archive(&archive, out.path(), &config).unwrap();
+    assert!(std::fs::read_dir(out.path()).unwrap().next().is_some());
 }

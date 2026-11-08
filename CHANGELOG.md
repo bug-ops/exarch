@@ -90,6 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Core: macOS atomic extraction onto a destination whose ACL denies delete publishes, because the destination ACL is applied after the publishing rename (#1079, #1086).
+- Core: on macOS the staging directory of an absent destination no longer keeps the parent's inherited ACL (#1078, #1086).
 - Core: a destination that is a symlink to an empty directory works with `--atomic`, and a failed parent directory sync is reported (#976, #977, #999).
 - Core: a hardlink to a target that selection collided on is refused instead of copying the winner's bytes (#967, #999).
 - Core: creation benches no longer discard errors and measure a real fsync (#993, #999).

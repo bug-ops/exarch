@@ -310,7 +310,9 @@ fn benchmark_many_small_files(c: &mut Criterion) {
 
 /// Cost of leaving every entry of a 10,000-file ZIP out, by the extension
 /// allowlist and by an exclude pattern: the selection gate must stay within
-/// 10% of the allowlist skip (spec 022 NFR-006).
+/// 10% of the allowlist skip (spec 022 NFR-006). The two-thousand-pattern
+/// lists (literal names, suffix names) end in `*.txt` and must stay within
+/// 1.2x of `exclude_pattern`: direct patterns add no per-entry cost.
 fn benchmark_skipped_entries(c: &mut Criterion) {
     const ENTRIES: usize = 10_000;
     let zip_data = create_many_small_files_zip(ENTRIES);
@@ -326,10 +328,20 @@ fn benchmark_skipped_entries(c: &mut Criterion) {
         fifty = fifty.try_add_exclude(&format!("*.never{i}")).unwrap();
     }
     let fifty_excludes = fifty.try_add_exclude("*.txt").unwrap();
+    let mut literals = SecurityConfig::default();
+    let mut suffixes = SecurityConfig::default();
+    for i in 0..1999 {
+        literals = literals.try_add_exclude(&format!("never{i}")).unwrap();
+        suffixes = suffixes.try_add_exclude(&format!("*.never{i}")).unwrap();
+    }
+    let two_thousand_literals = literals.try_add_exclude("*.txt").unwrap();
+    let two_thousand_suffixes = suffixes.try_add_exclude("*.txt").unwrap();
     for (name, config) in [
         ("extension_allowlist", allowlist),
         ("exclude_pattern", excluded),
         ("fifty_exclude_patterns", fifty_excludes),
+        ("two_thousand_literal_excludes", two_thousand_literals),
+        ("two_thousand_suffix_excludes", two_thousand_suffixes),
     ] {
         let zip_data_file = write_archive("archive.zip", &zip_data);
         group.bench_function(name, |b| {

@@ -359,12 +359,18 @@ impl EntrySelection {
     /// Records which include patterns match `path` and tells whether the entry
     /// is included: some pattern matched, or there is none.
     fn record_includes(&self, path: Option<&[u8]>, hits: Option<&IncludeHits>) -> bool {
-        let mut included = self.include.is_empty();
-        self.include.matching(path, |index| {
-            included = true;
-            if let Some(hits) = hits {
+        if self.include.is_empty() {
+            return true;
+        }
+        let Some(hits) = hits else {
+            return self.include.any_match(path);
+        };
+        let mut included = false;
+        hits.with_scratch(|scratch| {
+            self.include.matching(path, scratch, |index| {
+                included = true;
                 hits.record(index);
-            }
+            });
         });
         included
     }
@@ -565,22 +571,35 @@ pub(crate) enum TargetMapping {
 
 /// Which include patterns matched at least one scanned entry.
 #[derive(Debug)]
-pub(crate) struct IncludeHits(Box<[Cell<bool>]>);
+pub(crate) struct IncludeHits {
+    matched: Box<[Cell<bool>]>,
+    /// The glob matches of the entry being tested, reused across entries.
+    scratch: RefCell<Vec<usize>>,
+}
 
 impl IncludeHits {
     /// A record with one slot per include pattern of `selection`.
     pub(crate) fn of(selection: &EntrySelection) -> Self {
-        Self(
-            selection
+        Self {
+            matched: selection
                 .include()
                 .iter()
                 .map(|_| Cell::new(false))
                 .collect(),
-        )
+            scratch: RefCell::default(),
+        }
+    }
+
+    /// Runs `body` with the reusable match buffer. A nested call finds it
+    /// empty and allocates its own, so the buffer is never shared.
+    fn with_scratch(&self, body: impl FnOnce(&mut Vec<usize>)) {
+        let mut scratch = self.scratch.take();
+        body(&mut scratch);
+        self.scratch.replace(scratch);
     }
 
     fn record(&self, index: usize) {
-        if let Some(slot) = self.0.get(index) {
+        if let Some(slot) = self.matched.get(index) {
             slot.set(true);
         }
     }
@@ -594,7 +613,7 @@ impl IncludeHits {
         let unmatched: Box<[EntryPattern]> = selection
             .include()
             .iter()
-            .zip(self.0.iter())
+            .zip(self.matched.iter())
             .filter(|(_, hit)| !hit.get())
             .map(|(pattern, _)| pattern.clone())
             .collect();

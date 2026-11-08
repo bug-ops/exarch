@@ -323,6 +323,15 @@ pub enum QuotaResource {
         /// Maximum header size in bytes, derived from `max_file_count`.
         max: u64,
     },
+    /// An archive header declares more entries than `max_file_count` permits
+    /// (plus a small allowance), so the entry table built from it would not
+    /// stay proportional to the permitted file count.
+    HeaderEntryCount {
+        /// Number of entries the header declares.
+        declared: u64,
+        /// Maximum number of header entries, derived from `max_file_count`.
+        max: u64,
+    },
 }
 
 closed_enum! {
@@ -387,6 +396,8 @@ closed_enum! {
         SolidBlockMemory => "solid_block_memory",
         /// [`QuotaResource::HeaderSize`].
         HeaderSize => "header_size",
+        /// [`QuotaResource::HeaderEntryCount`].
+        HeaderEntryCount => "header_entry_count",
     }
 }
 
@@ -405,6 +416,7 @@ impl QuotaResource {
             Self::SinkCapacity { .. } => QuotaKind::SinkCapacity,
             Self::SolidBlockMemory { .. } => QuotaKind::SolidBlockMemory,
             Self::HeaderSize { .. } => QuotaKind::HeaderSize,
+            Self::HeaderEntryCount { .. } => QuotaKind::HeaderEntryCount,
         }
     }
 }
@@ -459,6 +471,10 @@ impl std::fmt::Display for QuotaResource {
             Self::HeaderSize { max } => write!(
                 f,
                 "quota exceeded: archive header size (> {max} bytes, derived from max_file_count)"
+            ),
+            Self::HeaderEntryCount { declared, max } => write!(
+                f,
+                "quota exceeded: archive header entry count ({declared} > {max}, derived from max_file_count)"
             ),
         }
     }

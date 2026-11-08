@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `QuotaResource::HeaderSize` and the `HEADER_SIZE` quota sub-code for a 7z header over the size derived from `max_file_count`, in the CLI, Python and Node (#674, #1024).
 - Core: FreeBSD and macOS tmpfs mounts and FreeBSD `md` disks are charged to the decoder memory limit like Linux tmpfs (#959, #1024).
 - Docs: specifications 023 (glob entry selection) and 024 (encrypted ZIP and 7z, draft) (#1000, #1001, #1024).
+- Core: `QuotaResource::HeaderEntryCount` and the `HEADER_ENTRY_COUNT` quota sub-code for a 7z header that declares more entries than `max_file_count` allows, in the CLI, Python and Node (#1061).
 
 ### Changed
 
@@ -54,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking (Windows)**: link and hardlink targets resolve handle-relatively, so targets through `SUBST`, mapped drives, 8.3 names or volume GUIDs, `\x` and `C:x` targets and reparse points other than symlinks and junctions are refused, and the result no longer depends on the destination's absolute length (#958, #1024).
 - Dependencies: `sevenz-rust2` 0.25.0 and `lzma-rust2` 0.25 (#674, #769, #1024).
 - Docs: specifications 001-024 and the constitution synced with the implemented behavior (#1059).
+- **Breaking**: 7z archives whose encoded header uses a bzip2, PPMd or BCJ coder, or more than one coder, are refused as `InvalidArchive` ("unsupported header layout") (#1061).
 
 ### Fixed
 

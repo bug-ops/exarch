@@ -2535,7 +2535,7 @@ export type ProtectedPath = 'filesystem_root' | 'archive_ancestor' | 'working_di
  * Value of the `subCode` property of a `QUOTA_EXCEEDED` error: the quota
  * that was exceeded.
  */
-export type QuotaSubCode = 'FILE_COUNT' | 'TOTAL_SIZE' | 'FILE_SIZE' | 'INTEGER_OVERFLOW' | 'DECODER_MEMORY' | 'COMPRESSED_MEMBERS' | 'TREE_NODES' | 'SINK_CAPACITY' | 'SOLID_BLOCK_MEMORY' | 'HEADER_SIZE'
+export type QuotaSubCode = 'FILE_COUNT' | 'TOTAL_SIZE' | 'FILE_SIZE' | 'INTEGER_OVERFLOW' | 'DECODER_MEMORY' | 'COMPRESSED_MEMBERS' | 'TREE_NODES' | 'SINK_CAPACITY' | 'SOLID_BLOCK_MEMORY' | 'HEADER_SIZE' | 'HEADER_ENTRY_COUNT'
 
 /** A link target the archive stores. */
 export interface RecordedLinkTarget {

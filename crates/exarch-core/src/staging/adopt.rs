@@ -15,11 +15,13 @@ mod imp {
     use std::os::unix::fs::fchown;
 
     use super::StagingDir;
+    use crate::NarrowingReason;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::file_identity::IdentityCheck;
     use crate::formats::pinned_dir::EntryMode;
     use crate::formats::pinned_dir::EntryStatus;
     use crate::formats::pinned_dir::LeafBuf;
+    use crate::report::Narrowed;
     use crate::staging::acl;
     use crate::staging::acl::AclPlan;
     use crate::staging::acl::Ownership;
@@ -139,7 +141,7 @@ mod imp {
         }
 
         fn claiming(status: &EntryStatus, claim: Claim, acl: AclPlan) -> Self {
-            let mode = if acl == AclPlan::Private {
+            let mode = if matches!(acl, AclPlan::Private(_)) {
                 DirMode::PRIVATE
             } else {
                 DirMode::of_destination(status.mode)
@@ -164,13 +166,24 @@ mod imp {
             gid: u32,
             claim: Claim,
         ) -> Self {
+            Self::for_test_with_acl(mode, uid, gid, claim, AclPlan::None)
+        }
+
+        #[cfg(test)]
+        pub(in crate::staging) const fn for_test_with_acl(
+            mode: u32,
+            uid: u32,
+            gid: u32,
+            claim: Claim,
+            acl: AclPlan,
+        ) -> Self {
             Self {
                 mode: DirMode(mode),
                 owner: Some(Owner {
                     ids: Ownership { uid, gid },
                     claim,
                 }),
-                acl: AclPlan::None,
+                acl,
             }
         }
     }
@@ -222,12 +235,15 @@ mod imp {
         /// destination's uid and gid; otherwise, and when the copy fails, the
         /// root stays `0700`.
         ///
+        /// Returns every way the root ended up with less access than the
+        /// destination had.
+        ///
         /// # Errors
         ///
         /// The I/O error of opening the directory, clearing its ACL or
         /// changing its mode, or a directory that is no longer the one
         /// created.
-        pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<()> {
+        pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<Narrowed> {
             let dir = self.parent.open_dir_file(self.name.as_leaf())?;
             if FileIdentity::of_file(&dir).check(self.id) != IdentityCheck::Same {
                 return Err(io::Error::other("the staging directory was replaced"));
@@ -237,22 +253,26 @@ mod imp {
                 owner,
                 acl,
             } = adoption;
+            let mut narrowed = Narrowed::none();
             let resolution = match owner {
                 Some(owner) => {
                     acl::clear_inherited(self.parent, self.name.as_leaf())?;
-                    let root = claim_owner(&dir, owner, &mut mode)?;
+                    let root = claim_owner(&dir, owner, &mut mode, &mut narrowed)?;
                     acl::resolve(acl, owner.ids, root)
                 }
                 None => Resolution::NoAcl,
             };
             let applied = match resolution {
                 Resolution::NoAcl => dir.set_permissions(mode.permissions()),
-                Resolution::Private => dir.set_permissions(DirMode::PRIVATE.permissions()),
-                #[cfg(any(target_os = "linux", target_os = "android"))]
-                Resolution::Copy(acl) => copy_acl(&dir, &acl, mode),
+                Resolution::Private(reason) => {
+                    narrowed.push(reason);
+                    dir.set_permissions(DirMode::PRIVATE.permissions())
+                }
+                #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+                Resolution::Copy(acl) => copy_acl(&dir, &acl, mode, &mut narrowed),
             };
             self.adopted = Some(dir);
-            applied
+            applied.map(|()| narrowed)
         }
 
         /// Makes an adopted directory private again, through the descriptor
@@ -267,8 +287,14 @@ mod imp {
 
     /// Takes over as much of the destination's owner as `owner.claim` and the
     /// caller's privileges allow, drops the mode bits that would be wrong for
-    /// the result in `mode`, and returns who owns the root afterwards.
-    fn claim_owner(dir: &std::fs::File, owner: Owner, mode: &mut DirMode) -> io::Result<Ownership> {
+    /// the result in `mode`, records in `narrowed` what could not be kept, and
+    /// returns who owns the root afterwards.
+    fn claim_owner(
+        dir: &std::fs::File,
+        owner: Owner,
+        mode: &mut DirMode,
+        narrowed: &mut Narrowed,
+    ) -> io::Result<Ownership> {
         let own_destination = owner.ids.uid == dir.metadata()?.uid();
         // Best effort: only root may chown to a foreign uid, and a group
         // member to any of its groups. The outcome is read back.
@@ -279,13 +305,40 @@ mod imp {
             let _ = fchown(dir, Some(owner.ids.uid), None);
         }
         let root = Ownership::of(&dir.metadata()?);
+        if owner.claim == Claim::Full && root.uid != owner.ids.uid {
+            narrowed.push(NarrowingReason::OwnerNotKept);
+        }
         if root.gid != owner.ids.gid {
-            *mode = mode.without(DirBits::GroupAccessAndSetgid);
+            drop_bits(
+                mode,
+                DirBits::GroupAccessAndSetgid,
+                NarrowingReason::GroupNotKept,
+                narrowed,
+            );
         }
         if owner.claim == Claim::Cautious && !own_destination {
-            *mode = mode.without(DirBits::ForeignWriteAndSetgid);
+            drop_bits(
+                mode,
+                DirBits::ForeignWriteAndSetgid,
+                NarrowingReason::ForeignWriteDropped,
+                narrowed,
+            );
         }
         Ok(root)
+    }
+
+    /// Clears `bits` from `mode` and records `reason` when that removed any.
+    fn drop_bits(
+        mode: &mut DirMode,
+        bits: DirBits,
+        reason: NarrowingReason,
+        narrowed: &mut Narrowed,
+    ) {
+        let reduced = mode.without(bits);
+        if reduced != *mode {
+            *mode = reduced;
+            narrowed.push(reason);
+        }
     }
 
     /// Writes `acl` onto the root, then restores the adopted sticky and setgid
@@ -297,18 +350,54 @@ mod imp {
     /// ACL is removed again and the root stays private; when that fails too the
     /// error is returned, so the publish fails instead of exposing the root.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn copy_acl(dir: &std::fs::File, acl: &acl::PosixAcl, mode: DirMode) -> io::Result<()> {
-        let copied = acl.write_to(dir).and_then(|()| {
+    fn copy_acl(
+        dir: &std::fs::File,
+        acl: &acl::CopiedAcl,
+        mode: DirMode,
+        narrowed: &mut Narrowed,
+    ) -> io::Result<()> {
+        write_acl_then(dir, acl, narrowed, |dir| {
             let permission = if acl.has_access() {
                 dir.metadata()?.mode() & 0o777
             } else {
                 mode.permission_bits()
             };
             dir.set_permissions(mode.with_permission_bits(permission).permissions())
-        });
-        if copied.is_err() {
-            acl::PosixAcl::clear(dir)?;
+        })
+    }
+
+    /// Writes `acl` onto the root, then applies the destination's mode, so
+    /// the root is never wider than the destination while its entries are
+    /// missing; the kernel keeps the ACL across the mode change.
+    #[cfg(target_os = "macos")]
+    fn copy_acl(
+        dir: &std::fs::File,
+        acl: &acl::CopiedAcl,
+        mode: DirMode,
+        narrowed: &mut Narrowed,
+    ) -> io::Result<()> {
+        write_acl_then(dir, acl, narrowed, |dir| {
+            dir.set_permissions(mode.permissions())
+        })
+    }
+
+    /// Writes `acl` onto the root and then runs `set_mode`.
+    ///
+    /// The root stays `0700` until the ACL is written. When either step fails
+    /// the ACL is removed again, the root stays private and
+    /// [`NarrowingReason::AclCopyFailed`] is recorded; when that fails too the
+    /// error is returned, so the publish fails instead of exposing the root.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    fn write_acl_then(
+        dir: &std::fs::File,
+        acl: &acl::CopiedAcl,
+        narrowed: &mut Narrowed,
+        set_mode: impl FnOnce(&std::fs::File) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if acl.write_to(dir).and_then(|()| set_mode(dir)).is_err() {
+            acl::CopiedAcl::clear(dir)?;
             dir.set_permissions(DirMode::PRIVATE.permissions())?;
+            narrowed.push(NarrowingReason::AclCopyFailed);
         }
         Ok(())
     }
@@ -342,11 +431,13 @@ mod imp {
         fn a_rejected_acl_leaves_a_private_root_without_either_acl() {
             let temp = tempfile::tempdir().unwrap();
             let dir = std::fs::File::open(temp.path()).unwrap();
-            let acl = acl::PosixAcl::for_test(Some(vec![0xff; 7]), Some(default_blob()));
+            let acl = acl::CopiedAcl::for_test(Some(vec![0xff; 7]), Some(default_blob()));
             let mode = DirMode::of_destination(EntryMode::for_test(0o755, 0, 0));
+            let mut narrowed = Narrowed::none();
 
-            copy_acl(&dir, &acl, mode).unwrap();
+            copy_acl(&dir, &acl, mode, &mut narrowed).unwrap();
 
+            assert_eq!(narrowed.reasons(), [NarrowingReason::AclCopyFailed]);
             assert_eq!(dir.metadata().unwrap().mode() & 0o7777, 0o700);
             assert!(!has(&dir, ACCESS));
             assert!(!has(&dir, DEFAULT));
@@ -363,7 +454,7 @@ mod imp {
                 rustix::fs::XattrFlags::empty(),
             )
             .unwrap();
-            let acl = acl::PosixAcl::for_test(None, None);
+            let acl = acl::CopiedAcl::for_test(None, None);
 
             acl.write_to(&dir).unwrap();
 
@@ -452,6 +543,7 @@ mod imp {
 
     use super::StagingDir;
     use crate::formats::pinned_dir::EntryStatus;
+    use crate::report::Narrowed;
     use crate::staging::acl::AclPlan;
 
     /// Platforms without Unix modes publish the staging directory as it is.
@@ -483,8 +575,8 @@ mod imp {
             Ok(Adoption)
         }
 
-        pub(in crate::staging) fn adopt(&mut self, _adoption: Adoption) -> io::Result<()> {
-            Ok(())
+        pub(in crate::staging) fn adopt(&mut self, _adoption: Adoption) -> io::Result<Narrowed> {
+            Ok(Narrowed::none())
         }
 
         pub(in crate::staging) fn reset_private(&self) {}

@@ -55,10 +55,9 @@ impl Operation {
     /// `every_flag_matches_its_subcommand`.
     pub const fn accepts(self, flag: Flag) -> bool {
         match flag {
-            Flag::AllowSymlinks | Flag::AllowHardlinks => {
-                matches!(self, Self::Extract | Self::Verify)
-            }
-            Flag::AllowSolidArchives
+            Flag::AllowSymlinks
+            | Flag::AllowHardlinks
+            | Flag::AllowSolidArchives
             | Flag::ZipConsistency
             | Flag::MaxFiles
             | Flag::MaxTotalSize

@@ -32,10 +32,10 @@ use std::io::Write;
 use flate2::Crc;
 
 use super::bounded_read::read_prefix;
-use super::common::SpoolBacking;
-use super::common::TempSpool;
 use super::io_marker::IoMarker as _;
 use super::source_fault::ReplayChecksumMismatch;
+use super::spool::SpoolBacking;
+use super::spool::TempSpool;
 use crate::DecodeReuse;
 use crate::SecurityConfig;
 use crate::formats::zip::ZipMethod;
@@ -200,9 +200,7 @@ impl ReuseStore {
     pub(crate) fn new(plan: ReusePlan) -> Option<Self> {
         let backend = match plan.mode {
             DecodeReuse::Memory(_) => Backend::Memory,
-            DecodeReuse::TempFile(_) => {
-                Backend::Spool(SpoolFile::new(super::common::open_spool()?))
-            }
+            DecodeReuse::TempFile(_) => Backend::Spool(SpoolFile::new(super::spool::open_spool()?)),
             DecodeReuse::Off => return None,
         };
         Some(Self::with_backend(plan, backend))

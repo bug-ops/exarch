@@ -244,7 +244,7 @@ Extract an archive to the specified directory with security validation.
 | `bytes_written` | `int` | Total bytes written |
 | `duration_ms` | `int` | Extraction duration in milliseconds |
 | `files_skipped` | `int` | Number of files skipped (e.g. duplicates) |
-| `warnings` | `list[AnyExtractionWarning]` | Typed warnings (`AntiItemsSkippedWarning`, `BackupCleanupFailedWarning`): branch on `kind`, not on message text |
+| `warnings` | `list[AnyExtractionWarning]` | Typed warnings (`AntiItemsSkippedWarning`, `BackupCleanupFailedWarning`, `RootAccessNarrowedWarning` with a `reason` token): branch on `kind`, not on message text |
 
 **Raises:**
 

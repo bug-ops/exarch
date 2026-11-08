@@ -30,14 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `ConfigSetting::CompressedMemberAllowance`, `DecodeReuse::{from_parts, limit}`, `CompressionLevel::{MIN, MAX}`, `FfiKind::io_kind` and `CreationWarning::redacted`, so the bindings stop re-implementing core rules (#1048, #1053, #1056, #1058, #1065).
 - Core: extract and create poll for cancellation about every 8 MiB inside a single entry copy, so the first interrupt stops a large entry (#1045, #1065).
 - CLI: SIGTERM cancels like SIGINT with exit 143, a graceful stop ends by the signal so shell loops stop, and a forced exit writes one `Cancelled` JSON document; `signal-hook` is used on Unix, `ctrlc` on Windows only, and SIGHUP stays at its default so `nohup` keeps working (#1035, #1037, #1050, #1065).
-- Core: macOS-only dependency `exacl` detects a destination ACL for atomic extraction (#1031, #1065).
+- Core: `ExtractionWarning::RootAccessNarrowed` with a typed `NarrowingReason` reports every case where the published root ends up narrower than the destination, in the CLI JSON output, Python and Node (#1063, #1077).
+- Core: on macOS atomic extraction copies a destination ACL without inheritable entries onto the published root through the pinned descriptor, replacing the `exacl` dependency with a scoped `darwin_acl` module (#1031, #1060, #1063, #1065, #1077).
+- CLI: `list` accepts `--allow-symlinks` and `--allow-hardlinks` so its link dispositions match `extract` (#1064, #1077).
+- CI: a `freebsd.yml` workflow runs the spool classification tests in a FreeBSD VM (#1022, #1077).
 - Python: `compressed_member_allowance`, `windows_reserved_names`, `max_tar_metadata_bytes`, `max_decoder_memory` and `max_solid_compression_ratio` setters, `ListOptions.stored_targets` and `ArchiveEntry.modified` (#1052, #1056, #1065).
 - Node: `withCompressedMemberAllowance`, `withAllowWindowsReservedNames`, `withMaxTarMetadataBytes`, `withMaxDecoderMemory` and `withMaxSolidCompressionRatio`, an optional `ListOptions` on `listArchive*`, `IntegrityGaps.total`, `SkippedSummary.total` and `sizeClamped` on byte-size reports (#1052, #1055, #1056, #1065).
 - Tests: regression tests for the zip2 open-time advisories GHSA-m3j8 and GHSA-w2w4 (#1028, #1065).
+- Tests: a WinRAR-produced ZIP with deflate payload joins the ZIP corpus (#855, #1077).
 
 ### Changed
 
 - Core: `indexing_slicing` and `arithmetic_side_effects` are enforced on the format and security modules, with bounded reads and a `PerBlock` table in the 7z reader (#1032, #1074).
+- Core: include and exclude patterns without wildcards match through a hash index, so 2000 literal or suffix `--exclude` patterns cost about as much as one (#1062, #1077).
+- Docs: `DecodeReuse::TempFile` gains Linux VM timings for ext4 and tmpfs spools, and the macOS RAM-disk limit is documented; the spool code moves to its own module (#1021, #1022, #1077).
 - Docs: `exarch-cli` skill split into a 151-line `SKILL.md` and eight `references/` files within Agent Skills size limits (#1066).
 - CI: `skills` job validates `skills/` with `skills-ref` 0.1.1 and checks the SKILL.md line limit and reference links, gated by `ci-success` (#1066).
 - **Breaking**: `with_atomic` and `with_skip_duplicates` are replaced by `with_staging` and `with_existing_files`, and the extension allowlist is an `ExtensionFilter` whose empty list refuses instead of allowing all (#972, #975, #999).
@@ -89,7 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: a destination swapped during `AtomicReplace` is restored and refused with `DestinationChanged`, a 0555 destination no longer leaves its backup behind, and ZIP message classification applies to ZIP only (#1002, #1005, #1006, #1019).
 - CLI: the forced-exit hint after a second signal names what the interrupted command left behind (#1014, #1019).
 - Core: the run record keys a created file by its descriptor identity (#996, #1019).
-- Core: atomic extraction no longer publishes a root more permissive than the destination: on Linux the destination's POSIX ACL is copied, the ACL the staging root inherits from the destination's parent is cleared, and a root whose ACL cannot be copied, or is detected on macOS, is published at 0700 (#1031, #1065).
+- Core: atomic extraction no longer publishes a root more permissive than the destination: on Linux the destination's POSIX ACL is copied, the ACL the staging root inherits from the destination's parent is cleared, and a root whose ACL cannot be copied is published at 0700 (#1031, #1065).
+- CLI: a forced exit after a second signal no longer waits on a blocked stdout or stderr pipe; the write is abandoned after 500 ms (#1064, #1077).
 - CLI: `completion` no longer panics when stdout fails, and a cancelled run prints `Operation cancelled` once (#1049, #1037, #1065).
 - Python and Node: `leftover_path` survives a cancelled progress callback (#995, #1019).
 - Core: a 7z archive whose stream map would shift file contents is refused when it is opened by list, verify and extract (#769, #1024).

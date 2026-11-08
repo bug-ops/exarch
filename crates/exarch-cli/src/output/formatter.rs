@@ -385,6 +385,9 @@ impl From<&ExtractionWarning> for JsonWarning {
                 io_kind: JsonId(*io_kind),
                 reason: message.to_string(),
             }),
+            ExtractionWarning::RootAccessNarrowed { reason } => Some(JsonWarningFields::Reason {
+                reason: reason.as_str().to_owned(),
+            }),
             _ => None,
         };
         Self {
@@ -583,5 +586,15 @@ mod tests {
         };
         let json = serde_json::to_value(JsonWarning::from(&warning)).unwrap();
         assert_eq!(json["path"], "p/.exarch-backup-a\\b");
+    }
+
+    #[test]
+    fn a_narrowed_root_warning_carries_its_reason_token() {
+        for reason in exarch_core::NarrowingReason::ALL {
+            let warning = ExtractionWarning::RootAccessNarrowed { reason: *reason };
+            let json = serde_json::to_value(JsonWarning::from(&warning)).unwrap();
+            assert_eq!(json["kind"], "root_access_narrowed");
+            assert_eq!(json["reason"], reason.as_str());
+        }
     }
 }

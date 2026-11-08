@@ -346,6 +346,10 @@ impl PinnedRoot {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // scoped unsafe: the ACL attribute of an open file
+pub(crate) mod darwin_acl;
+
 #[cfg(any(unix, target_os = "wasi"))]
 mod imp {
     use std::fs::File;

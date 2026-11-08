@@ -22,6 +22,7 @@ pub(crate) mod reparse;
 pub(crate) mod run_record;
 pub(crate) mod sevenz;
 pub(crate) mod source_fault;
+pub(crate) mod spool;
 pub(crate) mod tar;
 pub(crate) mod tar_extension_headers;
 pub(crate) mod tar_metadata_limit;

@@ -8153,15 +8153,50 @@ mod interrupt {
         names
     }
 
+    /// A spawned `exarch` that is killed and reaped when the test ends, so a
+    /// failed assertion or a timeout cannot leave it running.
+    struct Reaped(std::process::Child);
+
+    impl std::ops::Deref for Reaped {
+        type Target = std::process::Child;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl std::ops::DerefMut for Reaped {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            // An already reaped child makes both calls fail, which is fine.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    trait SpawnReaped {
+        fn spawn_reaped(&mut self) -> Reaped;
+    }
+
+    impl SpawnReaped for Command {
+        fn spawn_reaped(&mut self) -> Reaped {
+            Reaped(self.spawn().expect("spawn exarch"))
+        }
+    }
+
     /// Starts `command` with a piped stderr and waits for its first
     /// per-entry line, which proves the signal handler is installed and the
     /// run is under way.
-    fn running(mut command: Command) -> std::process::Child {
+    fn running(mut command: Command) -> Reaped {
         let mut child = command
             .stderr(Stdio::piped())
             .stdout(Stdio::null())
-            .spawn()
-            .expect("spawn exarch");
+            .spawn_reaped();
         let stderr = child.stderr.take().expect("piped stderr");
         let mut lines = BufReader::new(stderr);
         let mut first = String::new();
@@ -8359,8 +8394,7 @@ mod interrupt {
             .arg(&tar)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn exarch");
+            .spawn_reaped();
         // Nothing reads past this byte, so the listing blocks on a full pipe.
         let mut first = [0_u8; 1];
         child
@@ -8417,8 +8451,7 @@ mod interrupt {
             .arg(&tar)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn exarch");
+            .spawn_reaped();
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(
             child.try_wait().expect("poll").is_none(),
@@ -8434,6 +8467,7 @@ mod interrupt {
     /// still gets exactly one document, and it is the `Cancelled` error.
     #[test]
     fn repeated_sigint_under_json_writes_one_cancelled_document() {
+        use std::io::Read as _;
         use std::os::unix::process::ExitStatusExt as _;
 
         let temp = TempDir::new().expect("temp dir");
@@ -8441,14 +8475,13 @@ mod interrupt {
         write_many_entries_tar(&tar, 40_000);
         let out = temp.path().join("out");
 
-        let child = exarch()
+        let mut child = exarch()
             .args(["--json", "extract"])
             .arg(&tar)
             .arg(&out)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn exarch");
+            .spawn_reaped();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while leftovers(temp.path()).is_empty() {
             assert!(std::time::Instant::now() < deadline, "the run never staged");
@@ -8456,18 +8489,309 @@ mod interrupt {
         }
         sigint(&child);
         sigint(&child);
-        let output = child.wait_with_output().expect("wait");
+        let mut stdout = Vec::new();
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_end(&mut stdout)
+            .expect("read stdout");
+        let status = child.wait().expect("wait");
 
         // The second signal may land after the graceful stop already ended
         // the process, which then dies by SIGINT instead of exiting 130.
         assert!(
-            output.status.code() == Some(130) || output.status.signal() == Some(2),
-            "{:?}",
-            output.status
+            status.code() == Some(130) || status.signal() == Some(2),
+            "{status:?}"
         );
         let json: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("exactly one JSON document");
+            serde_json::from_slice(&stdout).expect("exactly one JSON document");
         assert_eq!(json["status"], "error", "{json}");
         assert_eq!(json["error"]["kind"], "Cancelled", "{json}");
     }
+
+    /// Whichever path ends the run, a stdout pipe that is full and never read
+    /// must not keep the process alive once SIGINT is repeated. The graceful
+    /// stop can win the race, so this guards against a hang, not the forced
+    /// path alone.
+    #[test]
+    fn repeated_sigint_ends_the_run_despite_a_full_stdout_pipe() {
+        use std::io::Write as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        let (reader, mut filler) = std::io::pipe().expect("create pipe");
+        let stdout = filler.try_clone().expect("clone writer");
+        let written = Arc::new(AtomicUsize::new(0));
+        let progress = Arc::clone(&written);
+        std::thread::spawn(move || {
+            while filler.write_all(&[0; 512]).is_ok() {
+                progress.fetch_add(512, Ordering::SeqCst);
+            }
+        });
+        let pipe_full_at = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let before = written.load(Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if before > 0 && before == written.load(Ordering::SeqCst) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < pipe_full_at,
+                "pipe never filled"
+            );
+        }
+
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+        let mut child = exarch()
+            .args(["--json", "extract"])
+            .arg(&tar)
+            .arg(&out)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::null())
+            .spawn_reaped();
+        let staged_by = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while leftovers(temp.path()).is_empty() {
+            assert!(
+                std::time::Instant::now() < staged_by,
+                "the run never staged"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Standard signals coalesce, so two back-to-back SIGINTs can arrive as
+        // one; a user keeps pressing Ctrl-C, and so does this loop.
+        sigint(&child);
+
+        // A hang, not the 500 ms forced-exit budget, is what this bounds; the
+        // margin absorbs a machine under load.
+        let ended_by = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let status = loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Some(status) = child.try_wait().expect("poll") {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < ended_by,
+                "the run outlived repeated SIGINTs on a full stdout pipe"
+            );
+            sigint(&child);
+        };
+        assert!(
+            status.code() == Some(130) || status.signal() == Some(2),
+            "{status:?}"
+        );
+        drop(reader);
+    }
+}
+
+/// A tar.gz holding `target.txt`, a symlink and a hardlink to it, and a
+/// symlink that escapes the destination.
+fn create_links_tar_gz(path: &std::path::Path) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let file = std::fs::File::create(path).expect("create archive");
+    let mut builder = tar::Builder::new(GzEncoder::new(file, Compression::default()));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(4);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "target.txt", &b"data"[..])
+        .expect("append file");
+    for (name, kind, target) in [
+        ("sym.txt", tar::EntryType::Symlink, "target.txt"),
+        ("hard.txt", tar::EntryType::Link, "target.txt"),
+        ("escape.txt", tar::EntryType::Symlink, "../../outside"),
+    ] {
+        let mut link = tar::Header::new_gnu();
+        link.set_size(0);
+        link.set_mode(0o644);
+        link.set_entry_type(kind);
+        link.set_link_name(target).expect("set link name");
+        builder
+            .append_data(&mut link, name, std::io::empty())
+            .expect("append link");
+    }
+    builder
+        .into_inner()
+        .expect("get gz encoder")
+        .finish()
+        .expect("finish gzip");
+}
+
+fn list_links_stdout(flags: &[&str]) -> String {
+    let temp = TempDir::new().expect("create temp dir");
+    let archive = temp.path().join("links.tar.gz");
+    create_links_tar_gz(&archive);
+    let output = exarch_cmd()
+        .args(["list", "--include", "*"])
+        .args(flags)
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(output).expect("utf-8 listing")
+}
+
+fn line_of<'a>(listing: &'a str, name: &str) -> &'a str {
+    listing
+        .lines()
+        .find(|line| line.contains(name))
+        .unwrap_or_else(|| panic!("{name} not listed in\n{listing}"))
+}
+
+/// The `--json` disposition action of every selected entry of `archive`, by
+/// path.
+fn listed_actions(archive: &std::path::Path, flags: &[&str]) -> Vec<(String, String)> {
+    let stdout = exarch_cmd()
+        .args(["list", "--json", "--include", "*"])
+        .args(flags)
+        .arg(archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    json["data"]["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| {
+            (
+                entry["path"].as_str().expect("path").to_owned(),
+                entry["disposition"]["action"]
+                    .as_str()
+                    .expect("action")
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn action_of<'a>(actions: &'a [(String, String)], name: &str) -> &'a str {
+    let Some((_, action)) = actions.iter().find(|(path, _)| path == name) else {
+        panic!("{name} not listed in {actions:?}");
+    };
+    action
+}
+
+/// One flag combination of `list`: each link's disposition is the one
+/// `extract` would act on, in the text listing and in `--json`.
+fn assert_link_dispositions(flags: &[&str], symlink_lands: bool, hardlink_lands: bool) {
+    let verdict = |lands: bool| if lands { "extract" } else { "refuse" };
+    let temp = TempDir::new().expect("create temp dir");
+    let archive = temp.path().join("links.tar.gz");
+    create_links_tar_gz(&archive);
+
+    let actions = listed_actions(&archive, flags);
+    assert_eq!(action_of(&actions, "sym.txt"), verdict(symlink_lands));
+    assert_eq!(action_of(&actions, "hard.txt"), verdict(hardlink_lands));
+    assert_eq!(action_of(&actions, "escape.txt"), "refuse");
+    assert_eq!(action_of(&actions, "target.txt"), "extract");
+
+    let text = list_links_stdout(flags);
+    assert_eq!(
+        line_of(&text, "sym.txt").contains("[refused]"),
+        !symlink_lands,
+        "{text}"
+    );
+    assert_eq!(
+        line_of(&text, "hard.txt").contains("[refused]"),
+        !hardlink_lands,
+        "{text}"
+    );
+    assert!(line_of(&text, "escape.txt").contains("[refused]"), "{text}");
+}
+
+#[test]
+fn test_list_refuses_every_link_without_link_flags() {
+    assert_link_dispositions(&[], false, false);
+}
+
+#[test]
+fn test_list_allow_symlinks_lands_only_the_symlink() {
+    assert_link_dispositions(&["--allow-symlinks"], true, false);
+}
+
+#[test]
+fn test_list_allow_hardlinks_lands_only_the_hardlink() {
+    assert_link_dispositions(&["--allow-hardlinks"], false, true);
+}
+
+#[test]
+fn test_list_allow_both_link_flags_lands_both_but_never_the_escape() {
+    assert_link_dispositions(&["--allow-symlinks", "--allow-hardlinks"], true, true);
+}
+
+/// A solid 7z with Unix-mode symlinks, built the way the core sink tests build
+/// theirs: a file, a link into the tree and a link out of it.
+fn write_solid_sevenz_with_symlinks(path: &std::path::Path) {
+    use std::io::Cursor;
+
+    const UNIX_EXTENSION: u32 = 0x8000;
+    const S_IFLNK: u32 = 0o12_0000;
+
+    let mut writer = sevenz_rust2::ArchiveWriter::create(path).expect("create 7z writer");
+    let mut entries = Vec::new();
+    let mut readers = Vec::new();
+    for (name, data, link) in [
+        ("f.txt", &b"hi"[..], false),
+        ("sl", &b"f.txt"[..], true),
+        ("escape", &b"../../outside"[..], true),
+    ] {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file(name);
+        if link {
+            entry.has_windows_attributes = true;
+            entry.windows_attributes = UNIX_EXTENSION | ((S_IFLNK | 0o777) << 16);
+        }
+        entry.has_stream = true;
+        entry.size = data.len() as u64;
+        entries.push(entry);
+        readers.push(sevenz_rust2::SourceReader::new(Cursor::new(data.to_vec())));
+    }
+    writer
+        .push_archive_entries(entries, readers)
+        .expect("push solid block");
+    writer.finish().expect("finish 7z");
+}
+
+/// Reading link targets of a solid 7z needs `--allow-solid-archives`; without
+/// it `--allow-symlinks` must not fail the listing, only show the link as
+/// unreadable and refused.
+#[test]
+fn test_list_allow_symlinks_degrades_links_in_a_solid_7z_it_cannot_decode() {
+    let temp = TempDir::new().expect("create temp dir");
+    let archive = temp.path().join("links.7z");
+    write_solid_sevenz_with_symlinks(&archive);
+
+    let actions = listed_actions(&archive, &["--allow-symlinks"]);
+    assert_eq!(action_of(&actions, "sl"), "refuse", "{actions:?}");
+    assert_eq!(action_of(&actions, "escape"), "refuse", "{actions:?}");
+
+    let stdout = exarch_cmd()
+        .args(["list", "-l", "--include", "*", "--allow-symlinks"])
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(stdout).expect("utf-8 listing");
+    assert!(
+        line_of(&text, "sl").contains("(target unreadable)"),
+        "{text}"
+    );
+
+    let decoded = listed_actions(&archive, &["--allow-symlinks", "--allow-solid-archives"]);
+    assert_eq!(action_of(&decoded, "sl"), "extract", "{decoded:?}");
+    assert_eq!(action_of(&decoded, "escape"), "refuse", "{decoded:?}");
 }

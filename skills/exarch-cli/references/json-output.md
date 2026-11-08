@@ -59,7 +59,7 @@
 ```
 
 - Skip kinds (`skipped_by_kind`, only those that occurred): `duplicate`, `extension_not_allowed`, `excluded`, `hidden`, `over_max_file_size`, `symlink_unsupported`, `unreadable`, `not_selected`, `stripped_away`. `skipped_sample` holds the first 64 (`io_kind` added for `unreadable`). Text mode prints `Files skipped: N` then `kind: N` lines. Files already in the destination are `OutputExists`, not skipped.
-- `warnings` are objects keyed by `kind` with a display `message`: `anti_items_skipped` (`count`), `backup_cleanup_failed` (`path`, `identity` `verified`/`unverified`, `io_kind`) for `extract`; `zip_ratio_over_default_limit` (`entries`, `limit`, `needed_ratio`), `zip_ratio_check_failed` (`reason`), `directory_not_synced` (`io_kind`) for `create`. An unknown later kind has only `kind` and `message`.
+- `warnings` are objects keyed by `kind` with a display `message`: `anti_items_skipped` (`count`), `backup_cleanup_failed` (`path`, `identity` `verified`/`unverified`, `io_kind`) for `extract`; `zip_ratio_over_default_limit` (`entries`, `limit`, `needed_ratio`), `zip_ratio_check_failed` (`reason`), `directory_not_synced` (`io_kind`) for `create`; `root_access_narrowed` (`reason`, one warning per distinct reason) for `extract --atomic` and `--atomic --force` onto an existing destination, meaning the published root grants less access than the destination it replaced. `reason` is one of `acl_unreadable`, `destination_changed`, `unmapped_id`, `acl_has_inheritable_entries`, `ownership_differs`, `acl_copy_failed`, `group_not_kept`, `foreign_write_dropped`, `owner_not_kept`, `destination_vanished`. An unknown later kind has only `kind` and `message`.
 - `create` reports `data.output_path`.
 
 Path-traversal error example:
@@ -91,5 +91,7 @@ Mid-archive failure with `partial_report` (symlink rejected after one file extra
 - Human-readable output escapes control and invisible characters in entry paths and link targets so an archive cannot clear the screen, retitle the terminal, repaint a verdict, or disguise an extension: C0, DEL, C1 as `\xHH`; Unicode format characters (bidi controls, zero-width, U+2028/2029) and `Default_Ignorable_Code_Point` characters as `\xHH` up to U+00FF and `\u{hhhh}` above. Variation selectors survive only directly after a base they modify. Use `--json` for the exact path.
 
 ## Output streams
+
+A second SIGINT/SIGTERM during `extract` or `create` exits at once with the status of the first signal (`130` or `143`) and, under `--json`, writes one `Cancelled` error document. That report is best effort: it is written within 500 ms or abandoned, so a stdout that is blocked (full pipe, lock held) yields no document, and a timed-out write above `PIPE_BUF` (512 bytes on macOS, 4096 on Linux) can leave a partial line. Branch on the exit status, not on the document.
 
 A closed stdout (broken pipe) or a closed stderr under `-v` is success (exit `0`). Any other failure writing to stdout (full disk, EIO) exits `1` in text and JSON mode alike, so `exarch list a.zip > listing.txt` cannot exit `0` with an empty file. `completion` follows the same policy (`Error: failed to write the completions: ...`) and prints no JSON envelope.

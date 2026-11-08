@@ -5,21 +5,28 @@
 //! hold the ACL mask, and a macOS deny entry has no mode bit at all. A root
 //! given only the mode could be readable by users the destination denied.
 //!
-//! Linux and Android copy the POSIX ACL. macOS only detects an ACL. Wherever
-//! an ACL cannot be carried over faithfully the root stays private (`0700`).
-//! Other Unixes and `NFSv4` ACLs are not detected.
+//! Linux, Android and macOS copy the ACL onto the root. Wherever an ACL cannot
+//! be carried over faithfully the root stays private (`0700`) and the reason
+//! is reported as a [`NarrowingReason`](crate::NarrowingReason). Other Unixes
+//! and `NFSv4` ACLs are not detected.
 //!
 //! A staging directory made in the destination's parent also inherits that
 //! parent's default ACL (Linux) or inheritable entries (macOS). For an
 //! existing destination those are removed at creation and again at adoption,
 //! and a failure to remove them fails the run.
+//!
+//! The ACL is created before the children are, so an inheritable entry of the
+//! destination never reaches them through the root; the macOS copy therefore
+//! refuses a list that has such entries.
 
 #[cfg(unix)]
 mod imp {
     use std::os::unix::fs::MetadataExt;
 
-    // TODO(#1060, #1020): copy the ACL on macOS (exacl setfacl) and Windows
-    // (DACL) instead of falling back to 0700
+    use crate::NarrowingReason;
+
+    // TODO(#1020): copy the Windows DACL instead of falling back to a private
+    // root
 
     /// The user and group a directory belongs to.
     ///
@@ -45,9 +52,9 @@ mod imp {
     pub(in crate::staging) enum AclPlan {
         /// No ACL was found, or this platform does not look for one.
         None,
-        /// Copy the POSIX ACL onto the root.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        Copy(super::linux::PosixAcl),
+        /// Copy the ACL onto the root.
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        Copy(super::CopiedAcl),
         /// The ACL cannot be copied faithfully: the root stays `0700`.
         #[cfg_attr(
             not(any(target_os = "linux", target_os = "android", target_os = "macos")),
@@ -56,7 +63,7 @@ mod imp {
                 reason = "only platforms that look for an ACL ever fall back to a private root"
             )
         )]
-        Private,
+        Private(NarrowingReason),
     }
 
     /// What `adopt` does with an [`AclPlan`] once the root's owner is known.
@@ -65,10 +72,10 @@ mod imp {
         /// Nothing to copy; the destination's mode is applied as it is.
         NoAcl,
         /// Write this ACL onto the root.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        Copy(super::linux::PosixAcl),
-        /// Keep the root `0700`.
-        Private,
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        Copy(super::CopiedAcl),
+        /// Keep the root `0700`, for this reason.
+        Private(NarrowingReason),
     }
 
     /// Decides what to do with `plan` for a root that ended up owned by `root`
@@ -77,7 +84,7 @@ mod imp {
     /// An ACL copied onto a root with another owner or group would grant the
     /// destination's owner entry to the wrong user, so it is not copied.
     #[cfg_attr(
-        not(any(target_os = "linux", target_os = "android")),
+        not(any(target_os = "linux", target_os = "android", target_os = "macos")),
         allow(
             unused_variables,
             clippy::needless_pass_by_value,
@@ -92,11 +99,11 @@ mod imp {
         let same_owner = destination == root;
         match plan {
             AclPlan::None => Resolution::NoAcl,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
             AclPlan::Copy(acl) if same_owner => Resolution::Copy(acl),
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            AclPlan::Copy(_) => Resolution::Private,
-            AclPlan::Private => Resolution::Private,
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            AclPlan::Copy(_) => Resolution::Private(NarrowingReason::OwnershipDiffers),
+            AclPlan::Private(reason) => Resolution::Private(reason),
         }
     }
 
@@ -167,22 +174,34 @@ mod imp {
         }
 
         #[test]
-        fn a_private_plan_stays_private_whoever_owns_the_root() {
+        fn a_private_plan_stays_private_for_its_reason_whoever_owns_the_root() {
             assert_eq!(
-                resolve(AclPlan::Private, DESTINATION, DESTINATION),
-                Resolution::Private
+                resolve(
+                    AclPlan::Private(NarrowingReason::AclUnreadable),
+                    DESTINATION,
+                    DESTINATION
+                ),
+                Resolution::Private(NarrowingReason::AclUnreadable)
             );
         }
 
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        mod posix {
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        mod copied {
             use std::assert_matches;
 
             use super::*;
-            use crate::staging::acl::linux::PosixAcl;
 
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             fn plan() -> AclPlan {
-                AclPlan::Copy(PosixAcl::for_test(Some(vec![2, 0, 0, 0]), None))
+                AclPlan::Copy(crate::staging::acl::CopiedAcl::for_test(
+                    Some(vec![2, 0, 0, 0]),
+                    None,
+                ))
+            }
+
+            #[cfg(target_os = "macos")]
+            fn plan() -> AclPlan {
+                AclPlan::Copy(crate::staging::acl::CopiedAcl::for_test())
             }
 
             #[test]
@@ -199,7 +218,10 @@ mod imp {
                     gid: DESTINATION.gid + 1,
                     ..DESTINATION
                 };
-                assert_eq!(resolve(plan(), DESTINATION, root), Resolution::Private);
+                assert_eq!(
+                    resolve(plan(), DESTINATION, root),
+                    Resolution::Private(NarrowingReason::OwnershipDiffers)
+                );
             }
 
             #[test]
@@ -208,7 +230,10 @@ mod imp {
                     uid: DESTINATION.uid + 1,
                     ..DESTINATION
                 };
-                assert_eq!(resolve(plan(), DESTINATION, root), Resolution::Private);
+                assert_eq!(
+                    resolve(plan(), DESTINATION, root),
+                    Resolution::Private(NarrowingReason::OwnershipDiffers)
+                );
             }
         }
     }
@@ -223,6 +248,7 @@ mod linux {
     use rustix::io::Errno;
 
     use super::imp::AclPlan;
+    use crate::NarrowingReason;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::pinned_dir::Leaf;
     use crate::formats::pinned_dir::VettedDir;
@@ -231,12 +257,66 @@ mod linux {
     const DEFAULT: &str = "system.posix_acl_default";
     /// `XATTR_SIZE_MAX`: no extended attribute value is larger.
     const XATTR_SIZE_MAX: usize = 65_536;
+    const VERSION: u32 = 2;
+    const HEADER_LEN: usize = 4;
+    const ENTRY_LEN: usize = 8;
+    const TAG_USER: u16 = 0x02;
+    const TAG_GROUP: u16 = 0x08;
+    /// What the kernel returns for an id the reader's namespace cannot map
+    /// (`ACL_UNDEFINED_ID`). No valid named entry carries it.
+    const UNDEFINED_ID: u32 = u32::MAX;
+
+    /// A POSIX ACL extended attribute that has the version-2 header and a whole
+    /// number of 8-byte entries.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(in crate::staging) struct AclBlob(Box<[u8]>);
+
+    impl AclBlob {
+        /// Checks the shape of `bytes` as read from the kernel.
+        ///
+        /// # Errors
+        ///
+        /// [`NarrowingReason::AclUnreadable`] for a value that is too large,
+        /// has another version or has a partial entry.
+        fn parse(bytes: &[u8]) -> Result<Self, NarrowingReason> {
+            let version = bytes
+                .first_chunk::<HEADER_LEN>()
+                .map(|header| u32::from_le_bytes(*header));
+            let whole_entries = bytes
+                .len()
+                .checked_sub(HEADER_LEN)
+                .is_some_and(|rest| rest.is_multiple_of(ENTRY_LEN));
+            if version == Some(VERSION) && whole_entries && bytes.len() <= XATTR_SIZE_MAX {
+                Ok(Self(Box::from(bytes)))
+            } else {
+                Err(NarrowingReason::AclUnreadable)
+            }
+        }
+
+        /// Whether a named user or group entry carries the undefined id.
+        fn names_an_undefined_id(&self) -> bool {
+            self.0
+                .get(HEADER_LEN..)
+                .unwrap_or_default()
+                .as_chunks::<ENTRY_LEN>()
+                .0
+                .iter()
+                .any(|entry| {
+                    let tag = entry.first_chunk::<2>().map(|tag| u16::from_le_bytes(*tag));
+                    let id = entry
+                        .get(4..)
+                        .and_then(|id| id.first_chunk::<4>())
+                        .map(|id| u32::from_le_bytes(*id));
+                    matches!(tag, Some(TAG_USER | TAG_GROUP)) && id == Some(UNDEFINED_ID)
+                })
+        }
+    }
 
     /// The two POSIX ACL extended attributes of a directory, as stored.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(in crate::staging) struct PosixAcl {
-        access: Option<Box<[u8]>>,
-        default: Option<Box<[u8]>>,
+        access: Option<AclBlob>,
+        default: Option<AclBlob>,
     }
 
     impl PosixAcl {
@@ -255,7 +335,7 @@ mod linux {
         pub(in crate::staging) fn write_to(&self, dir: &File) -> io::Result<()> {
             for (name, blob) in [(DEFAULT, &self.default), (ACCESS, &self.access)] {
                 match blob {
-                    Some(blob) => {
+                    Some(AclBlob(blob)) => {
                         rustix::fs::fsetxattr(dir, name, blob, rustix::fs::XattrFlags::empty())?;
                     }
                     None => remove_blob(dir, name)?,
@@ -274,14 +354,17 @@ mod linux {
             remove_blob(dir, ACCESS)
         }
 
+        /// An ACL with these raw values, which need not be valid: the kernel
+        /// is the judge when it is written.
         #[cfg(test)]
         pub(in crate::staging) fn for_test(
             access: Option<Vec<u8>>,
             default: Option<Vec<u8>>,
         ) -> Self {
+            let raw = |bytes: Vec<u8>| AclBlob(bytes.into_boxed_slice());
             Self {
-                access: access.map(Vec::into_boxed_slice),
-                default: default.map(Vec::into_boxed_slice),
+                access: access.map(raw),
+                default: default.map(raw),
             }
         }
     }
@@ -304,11 +387,11 @@ mod linux {
     }
 
     /// One ACL attribute of a directory.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq)]
     enum Blob {
-        Present(Box<[u8]>),
+        Present(AclBlob),
         Absent,
-        Unreadable,
+        Unreadable(NarrowingReason),
     }
 
     fn read_blob(dir: &File, name: &str, buffer: &mut [u8]) -> io::Result<Blob> {
@@ -321,11 +404,26 @@ mod linux {
             Ok(len) => Ok(buffer
                 .get(..len)
                 .filter(|blob| !blob.is_empty())
-                .map_or(Blob::Absent, |blob| Blob::Present(Box::from(blob)))),
+                .map_or(Blob::Absent, |blob| {
+                    AclBlob::parse(blob).map_or_else(Blob::Unreadable, Blob::Present)
+                })),
             Err(Errno::NODATA | Errno::NOTSUP) => Ok(Blob::Absent),
             // A bad descriptor is a bug here, not a property of the directory.
             Err(Errno::BADF) => Err(Errno::BADF.into()),
-            Err(_) => Ok(Blob::Unreadable),
+            Err(_) => Ok(Blob::Unreadable(NarrowingReason::AclUnreadable)),
+        }
+    }
+
+    /// Turns a blob that names an id the reader's user namespace cannot map
+    /// into an unreadable one. The kernel returns such an id as
+    /// [`UNDEFINED_ID`] (verified inside `unshare -U`), and no valid named
+    /// entry carries it.
+    fn screen(blob: Blob) -> Blob {
+        match &blob {
+            Blob::Present(acl) if acl.names_an_undefined_id() => {
+                Blob::Unreadable(NarrowingReason::UnmappedId)
+            }
+            Blob::Present(_) | Blob::Absent | Blob::Unreadable(_) => blob,
         }
     }
 
@@ -334,8 +432,8 @@ mod linux {
     ///
     /// The directory is opened for reading, never through an `O_PATH` handle.
     /// A directory its caller cannot open for reading, an ACL that cannot be
-    /// read in full and a directory that is no longer `expected` give
-    /// [`AclPlan::Private`].
+    /// read in full or names an id the namespace cannot map, and a directory
+    /// that is no longer `expected` give [`AclPlan::Private`].
     ///
     /// # Errors
     ///
@@ -349,21 +447,25 @@ mod linux {
     ) -> io::Result<AclPlan> {
         let dir = match pin.open_dir_file(name) {
             Ok(dir) => dir,
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Ok(AclPlan::Private),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                return Ok(AclPlan::Private(NarrowingReason::AclUnreadable));
+            }
             Err(e) => return Err(e),
         };
         if !super::imp::is_expected(FileIdentity::of_file(&dir), expected) {
-            return Ok(AclPlan::Private);
+            return Ok(AclPlan::Private(NarrowingReason::DestinationChanged));
         }
         let mut buffer = vec![0_u8; XATTR_SIZE_MAX];
-        let access = read_blob(&dir, ACCESS, &mut buffer)?;
-        let default = read_blob(&dir, DEFAULT, &mut buffer)?;
+        let access = screen(read_blob(&dir, ACCESS, &mut buffer)?);
+        let default = screen(read_blob(&dir, DEFAULT, &mut buffer)?);
         Ok(plan_of(access, default))
     }
 
     fn plan_of(access: Blob, default: Blob) -> AclPlan {
         match (access, default) {
-            (Blob::Unreadable, _) | (_, Blob::Unreadable) => AclPlan::Private,
+            (Blob::Unreadable(reason), _) | (_, Blob::Unreadable(reason)) => {
+                AclPlan::Private(reason)
+            }
             (Blob::Absent, Blob::Absent) => AclPlan::None,
             (access, default) => AclPlan::Copy(PosixAcl {
                 access: present(access),
@@ -372,10 +474,10 @@ mod linux {
         }
     }
 
-    fn present(blob: Blob) -> Option<Box<[u8]>> {
+    fn present(blob: Blob) -> Option<AclBlob> {
         match blob {
             Blob::Present(bytes) => Some(bytes),
-            Blob::Absent | Blob::Unreadable => None,
+            Blob::Absent | Blob::Unreadable(_) => None,
         }
     }
 
@@ -390,18 +492,37 @@ mod linux {
 
         use super::*;
 
-        fn read_error(errno: Errno) -> io::Result<Blob> {
-            classify(Err(errno), &[])
+        const USER_OBJ: u16 = 0x01;
+        const GROUP_OBJ: u16 = 0x04;
+        const OTHER: u16 = 0x20;
+        const NO_ID: u32 = u32::MAX;
+
+        fn blob_of(entries: &[(u16, u32)]) -> Vec<u8> {
+            let mut bytes = VERSION.to_le_bytes().to_vec();
+            for &(tag, id) in entries {
+                bytes.extend_from_slice(&tag.to_le_bytes());
+                bytes.extend_from_slice(&5_u16.to_le_bytes());
+                bytes.extend_from_slice(&id.to_le_bytes());
+            }
+            bytes
         }
 
-        fn is_unreadable(blob: &io::Result<Blob>) -> bool {
-            matches!(blob, Ok(Blob::Unreadable))
+        fn present(entries: &[(u16, u32)]) -> Blob {
+            Blob::Present(AclBlob::parse(&blob_of(entries)).unwrap())
+        }
+
+        fn read_error(errno: Errno) -> io::Result<Blob> {
+            classify(Err(errno), &[])
         }
 
         #[test]
         fn a_refused_read_of_an_acl_is_unreadable() {
             for errno in [Errno::ACCESS, Errno::PERM, Errno::IO] {
-                assert!(is_unreadable(&read_error(errno)), "{errno}");
+                assert_matches!(
+                    read_error(errno),
+                    Ok(Blob::Unreadable(NarrowingReason::AclUnreadable)),
+                    "{errno}"
+                );
             }
         }
 
@@ -434,162 +555,684 @@ mod linux {
         }
 
         #[test]
+        fn a_malformed_blob_is_unreadable() {
+            let mut wrong_version = blob_of(&[(USER_OBJ, NO_ID)]);
+            wrong_version[0] = 3;
+            let mut partial = blob_of(&[(USER_OBJ, NO_ID)]);
+            partial.pop();
+            for bytes in [wrong_version, partial, vec![2, 0, 0], vec![0xff; 7]] {
+                let read = classify(Ok(bytes.len()), &bytes).unwrap();
+                assert_eq!(
+                    read,
+                    Blob::Unreadable(NarrowingReason::AclUnreadable),
+                    "{bytes:?}"
+                );
+            }
+        }
+
+        #[test]
         fn an_unreadable_blob_makes_the_plan_private_whatever_the_other_one_is() {
-            let present = || Blob::Present(Box::from([2_u8, 0, 0, 0].as_slice()));
-            assert_eq!(plan_of(Blob::Unreadable, Blob::Absent), AclPlan::Private);
-            assert_eq!(plan_of(Blob::Absent, Blob::Unreadable), AclPlan::Private);
-            assert_eq!(plan_of(present(), Blob::Unreadable), AclPlan::Private);
-            assert_eq!(plan_of(Blob::Unreadable, present()), AclPlan::Private);
+            let reason = NarrowingReason::AclUnreadable;
+            let private = AclPlan::Private(reason);
+            let entries = [(USER_OBJ, NO_ID)];
+            assert_eq!(plan_of(Blob::Unreadable(reason), Blob::Absent), private);
+            assert_eq!(plan_of(Blob::Absent, Blob::Unreadable(reason)), private);
+            assert_eq!(
+                plan_of(present(&entries), Blob::Unreadable(reason)),
+                private
+            );
+            assert_eq!(
+                plan_of(Blob::Unreadable(reason), present(&entries)),
+                private
+            );
         }
 
         #[test]
         fn two_absent_blobs_make_no_plan() {
             assert_eq!(plan_of(Blob::Absent, Blob::Absent), AclPlan::None);
         }
-    }
-}
-
-#[cfg(target_os = "macos")]
-mod macos {
-    use std::io;
-    use std::path::Path;
-
-    use exacl::AclOption;
-
-    use super::imp::AclPlan;
-    use crate::formats::file_identity::FileIdentity;
-    use crate::formats::file_identity::IdentityKey;
-    use crate::formats::pinned_dir::Leaf;
-    use crate::formats::pinned_dir::VettedDir;
-
-    /// Removes every ACL entry, inherited ones included, from the directory
-    /// `name` of `pin`, addressed through a descriptor on the entry itself.
-    ///
-    /// A macOS allow entry beats the mode bits, so a root that kept an
-    /// inherited one cannot be made private with `chmod`.
-    ///
-    /// # Errors
-    ///
-    /// A volume without ACL support (FAT, exFAT) cannot hold an inherited
-    /// entry, so its refusal counts as cleared.
-    ///
-    /// # Errors
-    ///
-    /// The I/O error of clearing the ACL, or `NotFound` when the directory's
-    /// path cannot be resolved.
-    pub(in crate::staging) fn clear_inherited(pin: &VettedDir, name: Leaf<'_>) -> io::Result<()> {
-        let path = pin
-            .entry_path(name)
-            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        cleared(exacl::setfacl(&[path], &[], AclOption::SYMLINK_ACL))
-    }
-
-    fn cleared(result: io::Result<()>) -> io::Result<()> {
-        match result {
-            Err(e) if is_unsupported(&e) => Ok(()),
-            other => other,
-        }
-    }
-
-    // exacl keeps the kind and the message of an OS error but not its code,
-    // and std maps ENOTSUP to `Uncategorized`, so the message is the only
-    // trace of it.
-    fn is_unsupported(error: &io::Error) -> bool {
-        let not_supported = io::Error::from_raw_os_error(rustix::io::Errno::NOTSUP.raw_os_error());
-        error.raw_os_error() == not_supported.raw_os_error()
-            || error.to_string().ends_with(&not_supported.to_string())
-    }
-
-    fn is_acl_free(read: io::Result<Vec<exacl::AclEntry>>) -> bool {
-        match read {
-            Ok(entries) => entries.is_empty(),
-            Err(e) => is_unsupported(&e),
-        }
-    }
-
-    /// Detects an ACL on the directory `name` inside `parent_path`.
-    ///
-    /// A non-empty ACL, an unreadable one and an entry that is no longer
-    /// `expected` give [`AclPlan::Private`]; the ACL itself is not copied.
-    ///
-    /// # Errors
-    ///
-    /// Never: every failure falls back to a private root.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "keeps the signature of the platforms that can fail"
-    )]
-    pub(in crate::staging) fn read_destination(
-        _pin: &VettedDir,
-        name: Leaf<'_>,
-        parent_path: &Path,
-        expected: FileIdentity,
-    ) -> io::Result<AclPlan> {
-        let path = parent_path.join(name.as_os_str());
-        let acl_free = is_acl_free(exacl::getfacl(&path, AclOption::SYMLINK_ACL));
-        let same_entry = rustix::fs::lstat(&path)
-            .ok()
-            .and_then(|stat| IdentityKey::of_stat(&stat).ok())
-            .is_some_and(|key| super::imp::is_expected(FileIdentity::Known(key), expected));
-        Ok(if acl_free && same_entry {
-            AclPlan::None
-        } else {
-            AclPlan::Private
-        })
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use std::io;
-
-        use super::cleared;
-        use super::is_acl_free;
-
-        fn error(kind: io::ErrorKind) -> io::Error {
-            io::Error::from(kind)
-        }
-
-        fn not_supported() -> io::Error {
-            io::Error::from_raw_os_error(rustix::io::Errno::NOTSUP.raw_os_error())
-        }
-
-        fn wrapped_not_supported() -> io::Error {
-            io::Error::other(format!("File \"/Volumes/T/d\": {}", not_supported()))
-        }
 
         #[test]
-        fn an_unsupported_clear_is_a_success() {
-            assert!(cleared(Err(not_supported())).is_ok());
-            assert!(cleared(Err(wrapped_not_supported())).is_ok());
-        }
-
-        #[test]
-        fn every_other_clear_error_stays_an_error() {
-            for kind in [
-                io::ErrorKind::PermissionDenied,
-                io::ErrorKind::NotFound,
-                io::ErrorKind::InvalidInput,
-                io::ErrorKind::Other,
-            ] {
+        fn a_named_entry_with_an_undefined_id_is_refused() {
+            for tag in [TAG_USER, TAG_GROUP] {
+                let entries = [(USER_OBJ, NO_ID), (tag, NO_ID), (OTHER, NO_ID)];
                 assert_eq!(
-                    cleared(Err(error(kind))).err().map(|e| e.kind()),
-                    Some(kind)
+                    screen(present(&entries)),
+                    Blob::Unreadable(NarrowingReason::UnmappedId),
+                    "{tag:#x}"
                 );
             }
         }
 
         #[test]
-        fn a_volume_without_acl_support_reads_as_acl_free() {
-            assert!(is_acl_free(Err(wrapped_not_supported())));
-            assert!(is_acl_free(Ok(Vec::new())));
+        fn a_mapped_named_entry_and_unnamed_undefined_ids_pass() {
+            let entries = [
+                (USER_OBJ, NO_ID),
+                (TAG_USER, 65_534),
+                (TAG_GROUP, 0),
+                (GROUP_OBJ, NO_ID),
+                (OTHER, NO_ID),
+            ];
+            assert_matches!(screen(present(&entries)), Blob::Present(_));
         }
 
         #[test]
-        fn a_refused_acl_read_is_not_acl_free() {
-            assert!(!is_acl_free(Err(error(io::ErrorKind::PermissionDenied))));
+        fn the_size_limit_of_an_attribute_is_the_boundary_of_a_readable_blob() {
+            let blob_of_len = |len: usize| {
+                let mut bytes = vec![0_u8; len];
+                bytes[..HEADER_LEN].copy_from_slice(&VERSION.to_le_bytes());
+                bytes
+            };
+            // The largest whole-entry blob is 4 bytes under the limit; the next
+            // whole-entry size is over it.
+            assert!(AclBlob::parse(&blob_of_len(XATTR_SIZE_MAX - HEADER_LEN)).is_ok());
+            assert_eq!(
+                AclBlob::parse(&blob_of_len(XATTR_SIZE_MAX + HEADER_LEN)).unwrap_err(),
+                NarrowingReason::AclUnreadable
+            );
+        }
+
+        #[test]
+        fn a_value_larger_than_the_buffer_is_unreadable_not_a_failure() {
+            assert_matches!(
+                read_error(Errno::RANGE),
+                Ok(Blob::Unreadable(NarrowingReason::AclUnreadable))
+            );
+        }
+
+        #[test]
+        fn a_real_attribute_larger_than_the_buffer_is_unreadable() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = File::open(temp.path()).unwrap();
+            // A named entry and a mask: a minimal ACL is folded into the mode.
+            let blob = blob_of(&[
+                (USER_OBJ, NO_ID),
+                (TAG_USER, 12_345),
+                (GROUP_OBJ, NO_ID),
+                (0x10, NO_ID),
+                (OTHER, NO_ID),
+            ]);
+            match rustix::fs::fsetxattr(&dir, ACCESS, &blob, rustix::fs::XattrFlags::empty()) {
+                Ok(()) => {}
+                Err(Errno::NOTSUP) => {
+                    eprintln!("skipping: the temporary directory has no POSIX ACLs");
+                    return;
+                }
+                Err(e) => panic!("setting the ACL: {e}"),
+            }
+            let mut small = vec![0_u8; 8];
+            assert_eq!(
+                read_blob(&dir, ACCESS, &mut small).unwrap(),
+                Blob::Unreadable(NarrowingReason::AclUnreadable)
+            );
+            let mut full = vec![0_u8; XATTR_SIZE_MAX];
+            assert_matches!(read_blob(&dir, ACCESS, &mut full), Ok(Blob::Present(_)));
+        }
+
+        proptest::proptest! {
+            #[test]
+            fn parsing_never_panics_and_accepts_only_whole_v2_blobs(
+                tail in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..200),
+                valid_header in proptest::prelude::any::<bool>(),
+            ) {
+                let mut bytes = if valid_header {
+                    VERSION.to_le_bytes().to_vec()
+                } else {
+                    Vec::new()
+                };
+                bytes.extend_from_slice(&tail);
+                let parsed = AclBlob::parse(&bytes);
+                if let Ok(blob) = parsed {
+                    proptest::prop_assert!(valid_header || bytes.len() >= HEADER_LEN);
+                    proptest::prop_assert_eq!((bytes.len() - HEADER_LEN) % ENTRY_LEN, 0);
+                    let _ = blob.names_an_undefined_id();
+                }
+            }
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::fs::File;
+    use std::io;
+    use std::path::Path;
+
+    use rustix::io::Errno;
+
+    use super::imp::AclPlan;
+    use crate::NarrowingReason;
+    use crate::formats::file_identity::FileIdentity;
+    use crate::formats::pinned_dir::Leaf;
+    use crate::formats::pinned_dir::VettedDir;
+    use crate::formats::pinned_dir::darwin_acl;
+    use crate::formats::pinned_dir::darwin_acl::Fetched;
+
+    /// `KAUTH_FILESEC_MAGIC`.
+    const MAGIC: u32 = 0x012c_c16d;
+    /// `KAUTH_FILESEC_NOACL` in `acl_entrycount`.
+    const NO_ACL: u32 = 0xffff_ffff;
+    /// `KAUTH_ACL_MAX_ENTRIES`.
+    const MAX_ENTRIES: u32 = 128;
+    /// Offset of `fsec_owner` in a `kauth_filesec`.
+    const OWNER_AT: usize = 4;
+    /// Offset of `acl_entrycount`; `fsec_group` ends here.
+    const COUNT_AT: usize = 36;
+    /// Size of a `kauth_filesec` without entries: magic, owner, group,
+    /// entry count and flags.
+    const HEADER_LEN: usize = 44;
+    /// Size of a `kauth_ace`: applicable GUID, flags and rights.
+    const ENTRY_LEN: usize = 24;
+    const GUID_LEN: usize = 16;
+    const ENVELOPE_LEN: usize = 12;
+    /// Offset of the `attrreference_t` in the attribute buffer.
+    const REFERENCE_AT: usize = 4;
+    /// `KAUTH_ACE_FILE_INHERIT | DIRECTORY_INHERIT | ONLY_INHERIT`.
+    const INHERIT_FLAGS: u32 = 0x20 | 0x40 | 0x100;
+
+    /// A destination's ACL as a serialized `kauth_filesec` with its owner and
+    /// group GUIDs zeroed.
+    ///
+    /// The bytes passed the checks of [`parse`]: the magic, the entry count and
+    /// the size agree, and no entry is inherited by children.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(in crate::staging) struct MacAcl(Box<[u8]>);
+
+    /// One access control entry.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Ace {
+        applicable: [u8; GUID_LEN],
+        flags: u32,
+        rights: u32,
+    }
+
+    impl MacAcl {
+        /// Writes the ACL onto `dir`.
+        ///
+        /// The kernel keeps the mode, so the caller sets it afterwards.
+        pub(in crate::staging) fn write_to(&self, dir: &File) -> io::Result<()> {
+            darwin_acl::store(dir, &self.0)
+        }
+
+        /// Removes every entry, inherited ones included, from `dir`.
+        ///
+        /// A macOS allow entry beats the mode bits, so a root that kept an
+        /// inherited one cannot be made private with `chmod`.
+        ///
+        /// # Errors
+        ///
+        /// The OS error of clearing the list; a volume without ACL support
+        /// has nothing to clear and counts as cleared.
+        pub(in crate::staging) fn clear(dir: &File) -> io::Result<()> {
+            match darwin_acl::store(dir, &no_acl()) {
+                Err(e) if is_unsupported(&e) => Ok(()),
+                other => other,
+            }
+        }
+
+        fn aces(&self) -> Vec<Ace> {
+            self.0
+                .get(HEADER_LEN..)
+                .unwrap_or_default()
+                .as_chunks::<ENTRY_LEN>()
+                .0
+                .iter()
+                .filter_map(|entry| {
+                    Some(Ace {
+                        applicable: *entry.first_chunk()?,
+                        flags: ne_u32(entry, GUID_LEN)?,
+                        rights: ne_u32(entry, GUID_LEN + 4)?,
+                    })
+                })
+                .collect()
+        }
+
+        /// An ACL with these entries, in the layout the kernel returns.
+        #[cfg(test)]
+        pub(in crate::staging) fn from_entries(entries: &[([u8; GUID_LEN], u32, u32)]) -> Self {
+            Self(filesec(entries).into_boxed_slice())
+        }
+
+        /// An ACL with these raw bytes, which need not be valid: the kernel is
+        /// the judge when it is written.
+        #[cfg(test)]
+        pub(in crate::staging) fn raw_for_test(bytes: Vec<u8>) -> Self {
+            Self(bytes.into_boxed_slice())
+        }
+
+        #[cfg(test)]
+        pub(in crate::staging) fn for_test() -> Self {
+            Self::from_entries(&[])
+        }
+    }
+
+    /// A `kauth_filesec` in the host byte order the kernel uses for it, with
+    /// zeroed owner and group.
+    fn filesec(entries: &[([u8; GUID_LEN], u32, u32)]) -> Vec<u8> {
+        let count = u32::try_from(entries.len()).unwrap_or(NO_ACL);
+        let mut bytes = Vec::with_capacity(HEADER_LEN + ENTRY_LEN * entries.len());
+        bytes.extend_from_slice(&MAGIC.to_ne_bytes());
+        bytes.extend_from_slice(&[0; COUNT_AT - OWNER_AT]);
+        bytes.extend_from_slice(&count.to_ne_bytes());
+        bytes.extend_from_slice(&0_u32.to_ne_bytes());
+        for (applicable, flags, rights) in entries {
+            bytes.extend_from_slice(applicable);
+            bytes.extend_from_slice(&flags.to_ne_bytes());
+            bytes.extend_from_slice(&rights.to_ne_bytes());
+        }
+        bytes
+    }
+
+    fn no_acl() -> Vec<u8> {
+        let mut bytes = filesec(&[]);
+        if let Some(count) = bytes.get_mut(COUNT_AT..COUNT_AT + 4) {
+            count.copy_from_slice(&NO_ACL.to_ne_bytes());
+        }
+        bytes
+    }
+
+    fn ne_u32(bytes: &[u8], at: usize) -> Option<u32> {
+        bytes
+            .get(at..)?
+            .first_chunk()
+            .map(|word| u32::from_ne_bytes(*word))
+    }
+
+    /// Reads the ACL out of the attribute buffer `fgetattrlist` filled.
+    ///
+    /// The buffer is a native-endian total length, an `attrreference_t` whose
+    /// offset is relative to the reference itself, and the `kauth_filesec` it
+    /// points at; the kernel fills the integer fields of the `kauth_filesec`
+    /// in host byte order (verified on the real kernel: the magic reads
+    /// `6d c1 2c 01` on little-endian hardware). Nothing is trusted: a magic
+    /// that does not read back as [`MAGIC`] (a byte-order mismatch included),
+    /// an out-of-range reference, too many entries or a size that does not
+    /// match the entry count is unreadable.
+    ///
+    /// # Errors
+    ///
+    /// [`NarrowingReason::AclUnreadable`] for any of the above;
+    /// [`NarrowingReason::AclHasInheritableEntries`] for a list that children
+    /// would inherit from.
+    fn parse(attribute: &[u8]) -> Result<Option<MacAcl>, NarrowingReason> {
+        let unreadable = NarrowingReason::AclUnreadable;
+        let total = ne_u32(attribute, 0)
+            .and_then(|total| usize::try_from(total).ok())
+            .filter(|total| *total >= ENVELOPE_LEN && *total <= attribute.len())
+            .ok_or(unreadable)?;
+        let offset = ne_u32(attribute, REFERENCE_AT)
+            .and_then(|offset| usize::try_from(offset.cast_signed()).ok())
+            .filter(|offset| *offset >= ENVELOPE_LEN - REFERENCE_AT)
+            .ok_or(unreadable)?;
+        let length = ne_u32(attribute, REFERENCE_AT + 4)
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or(unreadable)?;
+        if length == 0 {
+            return Ok(None);
+        }
+        let start = REFERENCE_AT.checked_add(offset).ok_or(unreadable)?;
+        let end = start.checked_add(length).ok_or(unreadable)?;
+        let filesec = attribute
+            .get(..total)
+            .and_then(|buffer| buffer.get(start..end))
+            .ok_or(unreadable)?;
+        parse_filesec(filesec)
+    }
+
+    fn parse_filesec(filesec: &[u8]) -> Result<Option<MacAcl>, NarrowingReason> {
+        let unreadable = NarrowingReason::AclUnreadable;
+        if ne_u32(filesec, 0) != Some(MAGIC) {
+            return Err(unreadable);
+        }
+        let count = ne_u32(filesec, COUNT_AT).ok_or(unreadable)?;
+        if count == NO_ACL || count == 0 {
+            return Ok(None);
+        }
+        let expected = (count <= MAX_ENTRIES)
+            .then(|| usize::try_from(count).ok())
+            .flatten()
+            .and_then(|count| count.checked_mul(ENTRY_LEN))
+            .and_then(|entries| entries.checked_add(HEADER_LEN))
+            .ok_or(unreadable)?;
+        if filesec.len() != expected {
+            return Err(unreadable);
+        }
+        let mut owned = filesec.to_vec();
+        if let Some(guids) = owned.get_mut(OWNER_AT..COUNT_AT) {
+            guids.fill(0);
+        }
+        let acl = MacAcl(owned.into_boxed_slice());
+        if acl.aces().iter().any(|ace| ace.flags & INHERIT_FLAGS != 0) {
+            return Err(NarrowingReason::AclHasInheritableEntries);
+        }
+        Ok(Some(acl))
+    }
+
+    // `fsetattrlist` reports a volume without ACL support as `ENOTSUP`.
+    fn is_unsupported(error: &io::Error) -> bool {
+        error.raw_os_error() == Some(Errno::NOTSUP.raw_os_error())
+    }
+
+    /// FAT32 and exFAT answer a read of the (constant) extended security
+    /// attribute list with `EINVAL` rather than `ENOTSUP`: no ACL can exist
+    /// there. Only the read maps it; a write that fails with `EINVAL` stays an
+    /// error so an inherited entry is never left in place.
+    fn is_attribute_unavailable(error: &io::Error) -> bool {
+        error.raw_os_error() == Some(Errno::INVAL.raw_os_error())
+    }
+
+    /// Removes every ACL entry, inherited ones included, from the directory
+    /// `name` of `pin`, addressed through a descriptor on the entry itself.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of opening the directory or of clearing its ACL; a volume
+    /// without ACL support (FAT, exFAT) cannot hold an inherited entry, so its
+    /// refusal counts as cleared.
+    pub(in crate::staging) fn clear_inherited(pin: &VettedDir, name: Leaf<'_>) -> io::Result<()> {
+        MacAcl::clear(&pin.open_dir_file(name)?)
+    }
+
+    fn plan_of(fetched: io::Result<Fetched>) -> io::Result<AclPlan> {
+        match fetched {
+            Ok(Fetched::Complete(attribute)) => Ok(match parse(&attribute) {
+                Ok(None) => AclPlan::None,
+                Ok(Some(acl)) => AclPlan::Copy(acl),
+                Err(reason) => AclPlan::Private(reason),
+            }),
+            Err(e) if is_unsupported(&e) || is_attribute_unavailable(&e) => Ok(AclPlan::None),
+            // A bad descriptor is a bug here, not a property of the directory.
+            Err(e) if e.raw_os_error() == Some(Errno::BADF.raw_os_error()) => Err(e),
+            Ok(Fetched::Truncated) | Err(_) => Ok(AclPlan::Private(NarrowingReason::AclUnreadable)),
+        }
+    }
+
+    /// Reads the ACL of the directory `name` of `pin`, which must still be the
+    /// directory `expected` names.
+    ///
+    /// The directory is opened relative to the pin without following a
+    /// symlink, its identity is compared with `expected`, and the ACL is read
+    /// through that same descriptor, so a swap of the entry cannot change
+    /// which object is read. A directory its caller cannot open for reading,
+    /// an ACL that cannot be read in full or parsed, a list with entries that
+    /// children inherit, and a directory that is no longer `expected` give
+    /// [`AclPlan::Private`].
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of opening the directory (other than a permission
+    /// failure), or a bad descriptor.
+    pub(in crate::staging) fn read_destination(
+        pin: &VettedDir,
+        name: Leaf<'_>,
+        _parent_path: &Path,
+        expected: FileIdentity,
+    ) -> io::Result<AclPlan> {
+        let dir = match pin.open_dir_file(name) {
+            Ok(dir) => dir,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                return Ok(AclPlan::Private(NarrowingReason::AclUnreadable));
+            }
+            Err(e) => return Err(e),
+        };
+        if !super::imp::is_expected(FileIdentity::of_file(&dir), expected) {
+            return Ok(AclPlan::Private(NarrowingReason::DestinationChanged));
+        }
+        plan_of(darwin_acl::fetch(&dir))
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    mod tests {
+        use std::assert_matches;
+        use std::process::Command;
+
+        use super::*;
+
+        const EVERYONE: [u8; GUID_LEN] = [
+            0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0x00, 0x00,
+            0x00, 0x0C,
+        ];
+        const KIND_DENY: u32 = 2;
+        const KIND_MASK: u32 = 0xf;
+        const FILE_INHERIT: u32 = 0x20;
+        const RIGHT_DELETE: u32 = 0x10;
+        const RIGHT_LIST: u32 = 0x2;
+
+        /// The attribute buffer `fgetattrlist` returns for `filesec`.
+        fn attribute_of(filesec: &[u8]) -> Vec<u8> {
+            let total = ENVELOPE_LEN + filesec.len();
+            let mut bytes = u32::try_from(total).unwrap().to_ne_bytes().to_vec();
+            bytes.extend_from_slice(&8_i32.to_ne_bytes());
+            bytes.extend_from_slice(&u32::try_from(filesec.len()).unwrap().to_ne_bytes());
+            bytes.extend_from_slice(filesec);
+            bytes
+        }
+
+        fn entry(flags: u32) -> ([u8; GUID_LEN], u32, u32) {
+            (EVERYONE, flags, RIGHT_LIST)
+        }
+
+        fn add_ace(path: &Path, ace: &str) {
+            let status = Command::new("/bin/chmod")
+                .args(["+a", ace])
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "chmod +a {ace:?}");
+        }
+
+        fn read_acl(dir: &File) -> Option<MacAcl> {
+            match plan_of(darwin_acl::fetch(dir)).unwrap() {
+                AclPlan::Copy(acl) => Some(acl),
+                AclPlan::None => None,
+                AclPlan::Private(reason) => panic!("unexpected {reason}"),
+            }
+        }
+
+        #[test]
+        fn a_well_formed_attribute_parses_into_its_entries() {
+            let attribute = attribute_of(&filesec(&[entry(KIND_DENY)]));
+            let acl = parse(&attribute).unwrap().unwrap();
+            assert_eq!(
+                acl.aces(),
+                [Ace {
+                    applicable: EVERYONE,
+                    flags: KIND_DENY,
+                    rights: RIGHT_LIST
+                }]
+            );
+        }
+
+        #[test]
+        fn owner_and_group_are_zeroed_in_the_copy() {
+            let mut bytes = filesec(&[entry(KIND_DENY)]);
+            bytes[OWNER_AT..COUNT_AT].fill(0x55);
+            let acl = parse(&attribute_of(&bytes)).unwrap().unwrap();
+            assert!(acl.0[OWNER_AT..COUNT_AT].iter().all(|byte| *byte == 0));
+        }
+
+        #[test]
+        fn a_magic_in_the_other_byte_order_is_unreadable() {
+            let mut bytes = filesec(&[entry(KIND_DENY)]);
+            bytes[..4].copy_from_slice(&MAGIC.swap_bytes().to_ne_bytes());
+            assert_eq!(
+                parse(&attribute_of(&bytes)).unwrap_err(),
+                NarrowingReason::AclUnreadable
+            );
+        }
+
+        #[test]
+        fn no_acl_markers_mean_no_acl() {
+            assert_matches!(parse(&attribute_of(&no_acl())), Ok(None));
+            assert_matches!(parse(&attribute_of(&filesec(&[]))), Ok(None));
+            let mut empty = attribute_of(&[]);
+            empty.truncate(ENVELOPE_LEN);
+            assert_matches!(parse(&empty), Ok(None));
+        }
+
+        #[test]
+        fn inheritable_entries_are_refused() {
+            for flags in [0x20, 0x40, 0x100, KIND_DENY | FILE_INHERIT] {
+                let attribute = attribute_of(&filesec(&[entry(KIND_DENY), entry(flags)]));
+                assert_eq!(
+                    parse(&attribute).unwrap_err(),
+                    NarrowingReason::AclHasInheritableEntries,
+                    "{flags:#x}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_limit_inherit_entry_alone_is_not_inheritance() {
+            let attribute = attribute_of(&filesec(&[entry(KIND_DENY | 0x80)]));
+            assert_matches!(parse(&attribute), Ok(Some(_)));
+        }
+
+        #[test]
+        fn malformed_attributes_are_unreadable() {
+            let good = attribute_of(&filesec(&[entry(KIND_DENY)]));
+            let with = |edit: &dyn Fn(&mut Vec<u8>)| {
+                let mut bytes = good.clone();
+                edit(&mut bytes);
+                bytes
+            };
+            let cases = [
+                with(&|b| b.truncate(8)),
+                with(&|b| b.truncate(good.len() - 1)),
+                with(&|b| b[0..4].copy_from_slice(&u32::MAX.to_ne_bytes())),
+                with(&|b| b[4..8].copy_from_slice(&(-8_i32).to_ne_bytes())),
+                with(&|b| b[4..8].copy_from_slice(&0_i32.to_ne_bytes())),
+                with(&|b| b[4..8].copy_from_slice(&i32::MAX.to_ne_bytes())),
+                with(&|b| b[8..12].copy_from_slice(&u32::MAX.to_ne_bytes())),
+                with(&|b| {
+                    b[12 + COUNT_AT..12 + COUNT_AT + 4].copy_from_slice(&2_u32.to_ne_bytes());
+                }),
+                with(&|b| {
+                    b[12 + COUNT_AT..12 + COUNT_AT + 4]
+                        .copy_from_slice(&(MAX_ENTRIES + 1).to_ne_bytes());
+                }),
+            ];
+            for (index, bytes) in cases.iter().enumerate() {
+                assert_eq!(
+                    parse(bytes).unwrap_err(),
+                    NarrowingReason::AclUnreadable,
+                    "case {index}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_deny_entry_the_kernel_returns_reads_back_with_its_semantics() {
+            let temp = tempfile::tempdir().unwrap();
+            let _clear = ClearAcl(temp.path());
+            add_ace(temp.path(), "everyone deny delete,file_inherit");
+            let dir = File::open(temp.path()).unwrap();
+
+            let Ok(Fetched::Complete(attribute)) = darwin_acl::fetch(&dir) else {
+                panic!("the attribute should be readable");
+            };
+            let reason = parse(&attribute).unwrap_err();
+
+            assert_eq!(reason, NarrowingReason::AclHasInheritableEntries);
+            let filesec = attribute.get(ENVELOPE_LEN..).unwrap();
+            assert_eq!(ne_u32(filesec, 0), Some(MAGIC), "the kernel's byte order");
+            let acl = MacAcl(filesec.into());
+            let [ace] = acl.aces().try_into().unwrap();
+            assert_eq!(ace.flags & KIND_MASK, KIND_DENY);
+            assert_ne!(ace.flags & FILE_INHERIT, 0);
+            assert_ne!(ace.rights & RIGHT_DELETE, 0);
+            assert_eq!(ace.applicable, EVERYONE);
+        }
+
+        #[test]
+        fn a_stored_acl_reads_back_and_clearing_removes_it() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = File::open(temp.path()).unwrap();
+            assert!(read_acl(&dir).is_none());
+            let acl = MacAcl::from_entries(&[entry(KIND_DENY)]);
+
+            acl.write_to(&dir).unwrap();
+
+            assert_eq!(read_acl(&dir), Some(acl));
+            MacAcl::clear(&dir).unwrap();
+            assert!(read_acl(&dir).is_none());
+        }
+
+        #[test]
+        fn a_truncated_fetch_and_an_unsupported_volume_are_told_apart() {
+            assert_matches!(
+                plan_of(Ok(Fetched::Truncated)),
+                Ok(AclPlan::Private(NarrowingReason::AclUnreadable))
+            );
+            let unsupported = io::Error::from_raw_os_error(Errno::NOTSUP.raw_os_error());
+            assert_matches!(plan_of(Err(unsupported)), Ok(AclPlan::None));
+            let denied = io::Error::from_raw_os_error(Errno::ACCESS.raw_os_error());
+            assert_matches!(
+                plan_of(Err(denied)),
+                Ok(AclPlan::Private(NarrowingReason::AclUnreadable))
+            );
+            let bad_fd = io::Error::from_raw_os_error(Errno::BADF.raw_os_error());
+            assert!(plan_of(Err(bad_fd)).is_err());
+        }
+
+        /// FAT32 and exFAT answer `EINVAL` (observed with a C probe on such a
+        /// volume); the same errno from a write is not mapped.
+        #[test]
+        fn a_volume_that_answers_einval_has_no_acl_but_a_failed_clear_stays_an_error() {
+            let einval = || io::Error::from_raw_os_error(Errno::INVAL.raw_os_error());
+            assert_matches!(plan_of(Err(einval())), Ok(AclPlan::None));
+            assert!(!is_unsupported(&einval()));
+        }
+
+        /// Removes the ACL of a test directory even when an assertion fails, so
+        /// the temporary directory can be deleted.
+        struct ClearAcl<'a>(&'a Path);
+
+        impl Drop for ClearAcl<'_> {
+            fn drop(&mut self) {
+                let _ = Command::new("/bin/chmod").args(["-N"]).arg(self.0).status();
+            }
+        }
+
+        proptest::proptest! {
+            #[test]
+            fn parsing_arbitrary_bytes_never_panics(
+                bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..300),
+            ) {
+                let _ = parse(&bytes);
+                let _ = parse_filesec(&bytes);
+            }
+
+            #[test]
+            fn parsing_with_a_valid_prefix_reaches_the_count_and_size_branches(
+                count in 0_u32..200,
+                tail in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..400),
+                declared_extra in 0_usize..4,
+            ) {
+                let mut filesec = filesec(&[]);
+                filesec[COUNT_AT..COUNT_AT + 4].copy_from_slice(&count.to_ne_bytes());
+                filesec.extend_from_slice(&tail);
+                let _ = parse_filesec(&filesec);
+                let attribute = {
+                    let total = ENVELOPE_LEN + filesec.len();
+                    let mut bytes = u32::try_from(total).unwrap().to_ne_bytes().to_vec();
+                    bytes.extend_from_slice(&8_i32.to_ne_bytes());
+                    let declared = filesec.len().saturating_sub(declared_extra);
+                    bytes.extend_from_slice(&u32::try_from(declared).unwrap().to_ne_bytes());
+                    bytes.extend_from_slice(&filesec);
+                    bytes
+                };
+                let _ = parse(&attribute);
+            }
+        }
+    }
+}
+
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+pub(super) use linux::PosixAcl as CopiedAcl;
+#[cfg(all(unix, target_os = "macos"))]
+pub(super) use macos::MacAcl as CopiedAcl;
 
 #[cfg(not(unix))]
 mod imp {
@@ -604,8 +1247,8 @@ mod imp {
     #[derive(Debug, Clone, Copy)]
     pub(in crate::staging) struct AclPlan;
 
-    // TODO(#1060, #1020): copy the ACL on macOS (exacl setfacl) and Windows
-    // (DACL) instead of falling back to 0700
+    // TODO(#1020): copy the Windows DACL instead of falling back to a private
+    // root
     #[allow(
         clippy::unnecessary_wraps,
         clippy::missing_const_for_fn,
@@ -639,5 +1282,3 @@ pub(super) use imp::clear_inherited;
 pub(super) use imp::read_destination;
 #[cfg(unix)]
 pub(super) use imp::resolve;
-#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
-pub(super) use linux::PosixAcl;

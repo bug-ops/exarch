@@ -556,20 +556,34 @@ fn verify_unchanged(pin: &VettedDir, name: &LeafBuf, expected: FileIdentity) -> 
 /// is published, so a failure anywhere earlier leaves it private. A failure to
 /// do that or to rename puts the original back.
 fn swap(
-    mut staging: StagingDir<'_>,
+    staging: StagingDir<'_>,
     dest: &Dest<'_>,
-    mut report: ExtractionReport,
+    report: ExtractionReport,
 ) -> Result<ExtractionReport> {
     let displaced = match Displaced::displace(staging.parent, dest) {
         Ok(displaced) => displaced,
         Err(refusal) => return Err(refusal.into_error(staging.discard())),
     };
-    let adopted = displaced
-        .original_permissions(dest.parent)
-        .and_then(|adoption| staging.adopt(adoption));
-    if let Err(error) = adopted {
-        let context = "failed to give the extracted content the destination's permissions";
-        return Err(roll_back(displaced, staging, &error, context, dest.path));
+    let adoption = displaced.original_permissions(dest.parent);
+    swap_adopted(staging, dest, displaced, adoption, report)
+}
+
+/// Adopts `adoption` on the staged root, publishes it over the displaced
+/// destination and removes the backup, recording on `report` every way the
+/// root ended up with less access than the destination had.
+fn swap_adopted(
+    mut staging: StagingDir<'_>,
+    dest: &Dest<'_>,
+    displaced: Displaced<'_>,
+    adoption: io::Result<Adoption>,
+    mut report: ExtractionReport,
+) -> Result<ExtractionReport> {
+    match adoption.and_then(|adoption| staging.adopt(adoption)) {
+        Ok(narrowed) => report.record_narrowing(narrowed),
+        Err(error) => {
+            let context = "failed to give the extracted content the destination's permissions";
+            return Err(roll_back(displaced, staging, &error, context, dest.path));
+        }
     }
     if let Err(error) = staging.publish(dest.name) {
         let context = "failed to move the extracted content into place";
@@ -601,6 +615,39 @@ fn roll_back(
         restore,
         staging.discard(),
     ))
+}
+
+/// Runs [`swap_adopted`] over a real destination with `adoption` and returns
+/// the report it produced.
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+pub(super) fn swap_adopted_for_test(adoption: Adoption) -> ExtractionReport {
+    use crate::formats::file_identity::identity_of;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let parent = temp.path().canonicalize().unwrap();
+    let dest_path = parent.join("dest");
+    std::fs::create_dir(&dest_path).unwrap();
+    let name = LeafBuf::of(&dest_path).unwrap();
+    let dest = Dest {
+        name: &name,
+        id: identity_of(&dest_path).unwrap(),
+        path: &dest_path,
+        parent: &parent,
+    };
+    let pin = crate::formats::pinned_dir::support::pinned_at(&parent);
+    let staging = StagingDir::create(&pin, &parent).unwrap();
+    let Ok(displaced) = Displaced::displace(&pin, &dest) else {
+        panic!("the destination should be displaced");
+    };
+    swap_adopted(
+        staging,
+        &dest,
+        displaced,
+        Ok(adoption),
+        ExtractionReport::new(),
+    )
+    .unwrap()
 }
 
 #[cfg(all(test, unix))]

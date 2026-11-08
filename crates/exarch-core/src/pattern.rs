@@ -19,9 +19,14 @@ use globset::GlobSet;
 use globset::GlobSetBuilder;
 use std::borrow::Cow;
 use std::fmt;
+use std::ops::ControlFlow;
 use std::path::Component;
 use std::path::Path;
 use std::sync::OnceLock;
+
+mod direct_index;
+
+use direct_index::DirectIndex;
 
 const GLOBSTAR: &str = "**";
 
@@ -537,13 +542,20 @@ impl EntryPattern {
 }
 
 /// How a [`PatternList`] matches its glob patterns.
-enum ListIndex {
+enum GlobIndex {
     /// One automaton over every glob pattern; `owner` maps a glob of the set
     /// back to the index of its pattern.
     Combined { globs: GlobSet, owner: Box<[usize]> },
-    /// The combined automaton could not be compiled, so each pattern matches
-    /// on its own.
+    /// The combined automaton could not be compiled, so each glob pattern
+    /// matches on its own.
     Separate,
+}
+
+/// How a [`PatternList`] matches: direct patterns through one index over the
+/// path, glob patterns through [`GlobIndex`].
+struct ListIndex {
+    direct: DirectIndex,
+    globs: GlobIndex,
 }
 
 /// An ordered list of patterns matched against an entry in one pass.
@@ -602,48 +614,66 @@ impl PatternList {
     }
 
     fn index(&self) -> &ListIndex {
-        self.index.get_or_init(|| {
-            let mut builder = GlobSetBuilder::new();
-            let mut owner = Vec::new();
-            for (position, pattern) in self.patterns.iter().enumerate() {
-                for text in pattern.glob_texts().iter().flatten() {
-                    let Ok(glob) = build_glob(text) else {
-                        return ListIndex::Separate;
-                    };
-                    builder.add(glob);
-                    owner.push(position);
-                }
-            }
-            builder
-                .build()
-                .map_or(ListIndex::Separate, |globs| ListIndex::Combined {
-                    globs,
-                    owner: owner.into_boxed_slice(),
-                })
+        self.index.get_or_init(|| ListIndex {
+            direct: DirectIndex::new(self.patterns.iter().enumerate()),
+            globs: self.glob_index(),
         })
+    }
+
+    fn glob_index(&self) -> GlobIndex {
+        let mut builder = GlobSetBuilder::new();
+        let mut owner = Vec::new();
+        for (position, pattern) in self.patterns.iter().enumerate() {
+            for text in pattern.glob_texts().iter().flatten() {
+                let Ok(glob) = build_glob(text) else {
+                    return GlobIndex::Separate;
+                };
+                builder.add(glob);
+                owner.push(position);
+            }
+        }
+        builder
+            .build()
+            .map_or(GlobIndex::Separate, |globs| GlobIndex::Combined {
+                globs,
+                owner: owner.into_boxed_slice(),
+            })
+    }
+
+    fn glob_patterns(&self) -> impl Iterator<Item = (usize, &EntryPattern)> {
+        self.patterns
+            .iter()
+            .enumerate()
+            .filter(|(_, pattern)| matches!(pattern.engine, Engine::Glob(_)))
     }
 
     /// Calls `visit` with the index of every pattern that matches `path`, a
     /// path already reduced by [`normalized`]; a pattern may be visited twice.
-    pub(crate) fn matching(&self, path: Option<&[u8]>, mut visit: impl FnMut(usize)) {
+    ///
+    /// `scratch` holds the glob matches, so a caller matching many entries
+    /// passes the same buffer each time and allocates once.
+    pub(crate) fn matching(
+        &self,
+        path: Option<&[u8]>,
+        scratch: &mut Vec<usize>,
+        mut visit: impl FnMut(usize),
+    ) {
         let Some(path) = path else { return };
-        match self.index() {
-            ListIndex::Combined { globs, owner } => {
-                for (position, pattern) in self.patterns.iter().enumerate() {
-                    if matches!(pattern.engine, Engine::Direct) && pattern.matches_normalized(path)
-                    {
-                        visit(position);
-                    }
-                }
-                let mut found = Vec::new();
-                globs.matches_candidate_into(&Candidate::from_bytes(path), &mut found);
-                found
-                    .into_iter()
-                    .filter_map(|glob| owner.get(glob).copied())
+        let index = self.index();
+        let _ = index.direct.visit(path, |position| {
+            visit(position);
+            ControlFlow::Continue(())
+        });
+        match &index.globs {
+            GlobIndex::Combined { globs, owner } => {
+                globs.matches_candidate_into(&Candidate::from_bytes(path), scratch);
+                scratch
+                    .iter()
+                    .filter_map(|glob| owner.get(*glob).copied())
                     .for_each(visit);
             }
-            ListIndex::Separate => {
-                for (position, pattern) in self.patterns.iter().enumerate() {
+            GlobIndex::Separate => {
+                for (position, pattern) in self.glob_patterns() {
                     if pattern.matches_normalized(path) {
                         visit(position);
                     }
@@ -653,21 +683,22 @@ impl PatternList {
     }
 
     /// Whether any pattern matches `path`, a path already reduced by
-    /// [`normalized`].
+    /// [`normalized`]. Never allocates.
     pub(crate) fn any_match(&self, path: Option<&[u8]>) -> bool {
         let Some(path) = path else { return false };
-        match self.index() {
-            ListIndex::Combined { globs, .. } => {
-                globs.is_match_candidate(&Candidate::from_bytes(path))
-                    || self.patterns.iter().any(|pattern| {
-                        matches!(pattern.engine, Engine::Direct) && pattern.matches_normalized(path)
-                    })
+        let index = self.index();
+        index
+            .direct
+            .visit(path, |_| ControlFlow::Break(()))
+            .is_break()
+            || match &index.globs {
+                GlobIndex::Combined { globs, .. } => {
+                    globs.is_match_candidate(&Candidate::from_bytes(path))
+                }
+                GlobIndex::Separate => self
+                    .glob_patterns()
+                    .any(|(_, pattern)| pattern.matches_normalized(path)),
             }
-            ListIndex::Separate => self
-                .patterns
-                .iter()
-                .any(|pattern| pattern.matches_normalized(path)),
-        }
     }
 }
 
@@ -1080,6 +1111,159 @@ mod tests {
         assert_eq!(refusal("C:x"), PatternRefusal::Absolute);
     }
 
+    type Positions = std::collections::BTreeSet<usize>;
+
+    fn visited(list: &PatternList, path: &[u8]) -> Positions {
+        let mut found = Positions::new();
+        list.matching(Some(path), &mut Vec::new(), |index| {
+            found.insert(index);
+        });
+        found
+    }
+
+    fn own_results(patterns: &[EntryPattern], path: &[u8]) -> Positions {
+        patterns
+            .iter()
+            .enumerate()
+            .filter(|(_, pattern)| pattern.matches_normalized(path))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn edge_patterns() -> Vec<EntryPattern> {
+        let long_name = "a".repeat(255);
+        let long_suffix = format!("*{}", "a".repeat(254));
+        let long_anchored = format!("x/{}", "a".repeat(252));
+        [
+            "*",
+            "*b",
+            "*ab",
+            "*\u{e9}",
+            "\u{e9}",
+            "x",
+            "./x",
+            "x/d",
+            "a/b",
+            "target",
+            "*.tmp",
+            "a/*",
+            &long_name,
+            &long_suffix,
+            &long_anchored,
+        ]
+        .iter()
+        .map(|text| pattern(text))
+        .collect()
+    }
+
+    fn edge_paths() -> Vec<Vec<u8>> {
+        let mut paths: Vec<Vec<u8>> = [
+            &b"b"[..],
+            b"ab",
+            b"xab",
+            b"",
+            b"/",
+            b"a//b",
+            b"a/",
+            b"/a",
+            b"a/b/c",
+            b"x",
+            b"x/y",
+            b"y/x",
+            b"a.tmp",
+            &[0xFF],
+            &[b'a', 0xFF],
+            &[0xA9],
+            &[0xC3],
+            &[b'x', b'/', 0xFF, 0xC3, 0xA9],
+        ]
+        .iter()
+        .map(|path| path.to_vec())
+        .collect();
+        paths.extend(
+            ["\u{e9}", "caf\u{e9}", "x/\u{e9}", "\u{e9}/x"]
+                .iter()
+                .map(|path| path.as_bytes().to_vec()),
+        );
+        for length in [253, 254, 255, 256, 300] {
+            let run = "a".repeat(length);
+            paths.push(run.clone().into_bytes());
+            paths.push(format!("x/{run}").into_bytes());
+            paths.push(format!("x/{run}/z").into_bytes());
+        }
+        paths.push("x/d/".repeat(300).into_bytes());
+        paths
+    }
+
+    #[test]
+    fn a_list_agrees_with_its_patterns_on_edge_paths() {
+        let patterns = edge_patterns();
+        let list = PatternList::from(patterns.clone());
+        for path in edge_paths() {
+            assert_eq!(
+                visited(&list, &path),
+                own_results(&patterns, &path),
+                "{:?}",
+                String::from_utf8_lossy(&path)
+            );
+            assert_eq!(
+                list.any_match(Some(&path)),
+                !own_results(&patterns, &path).is_empty()
+            );
+        }
+        assert!(
+            visited(&list, &[0xFF]).contains(&0),
+            "`*` matches raw bytes"
+        );
+        assert!(
+            !visited(&list, &[0xA9]).contains(&3),
+            "a split multi-byte suffix"
+        );
+        assert!(visited(&list, "caf\u{e9}".as_bytes()).contains(&3));
+    }
+
+    #[test]
+    fn the_separate_glob_fallback_agrees_with_the_combined_index() {
+        let patterns = edge_patterns();
+        let list = PatternList::from(patterns.clone());
+        let direct = DirectIndex::new(patterns.iter().enumerate());
+        assert!(
+            list.index
+                .set(ListIndex {
+                    direct,
+                    globs: GlobIndex::Separate,
+                })
+                .is_ok()
+        );
+        for path in edge_paths() {
+            assert_eq!(visited(&list, &path), own_results(&patterns, &path));
+            assert_eq!(
+                list.any_match(Some(&path)),
+                !own_results(&patterns, &path).is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn a_direct_visit_stops_at_the_first_break() {
+        let patterns: Vec<_> = ["a", "*", "a/b", "b"].iter().map(|t| pattern(t)).collect();
+        let index = DirectIndex::new(patterns.iter().enumerate());
+        let mut seen = 0;
+        let flow = index.visit(b"a/b", |_| {
+            seen += 1;
+            ControlFlow::Break(())
+        });
+        assert!(flow.is_break());
+        assert_eq!(seen, 1);
+        let mut all = 0;
+        let flow = index.visit(b"a/b", |_| {
+            all += 1;
+            ControlFlow::Continue(())
+        });
+        assert!(flow.is_continue());
+        assert!(all > 1);
+    }
+
     fn name_strategy() -> impl Strategy<Value = String> {
         "[a-c_][a-c._]{0,2}"
     }
@@ -1094,11 +1278,14 @@ mod tests {
             texts in prop::collection::vec(
                 prop::sample::select(vec![
                     "a", "*.tmp", "a/b", "a/*", "**/b", "*b*", "b/**/c", "**", "x[ab]?",
+                    "*", "*b", "*ab", "x", "./x", "a/b/c", "a", "*b",
                 ]),
                 0..8,
             ),
             parts in prop::collection::vec(
-                prop::sample::select(vec!["a", "b", "c", "xa1", "q.tmp", ".", "..", ""]),
+                prop::sample::select(vec![
+                    "a", "b", "c", "xa1", "q.tmp", ".", "..", "", "x", "ab", "xab",
+                ]),
                 0..5,
             ),
             leading in prop::sample::select(vec!["", "/", "./"]),
@@ -1109,7 +1296,8 @@ mod tests {
             let reduced = normalized(Path::new(&path));
 
             let mut matched = std::collections::BTreeSet::new();
-            list.matching(reduced.as_deref(), |index| {
+            let mut scratch = Vec::new();
+            list.matching(reduced.as_deref(), &mut scratch, |index| {
                 matched.insert(index);
             });
             let expected: std::collections::BTreeSet<_> = patterns

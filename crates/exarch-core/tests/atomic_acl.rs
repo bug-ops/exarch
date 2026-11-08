@@ -1,6 +1,7 @@
 //! Atomic publication never leaves the root more permissive than the
 //! destination it fills or replaces: the destination's ACL is copied on Linux
-//! and the root stays private when it cannot be (#1031).
+//! and macOS, and the root stays private, with a warning, when it cannot be
+//! (#1031, #1060, #1063).
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::disallowed_methods)]
@@ -12,6 +13,9 @@ use std::path::PathBuf;
 
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
+use exarch_core::ExtractionReport;
+use exarch_core::ExtractionWarning;
+use exarch_core::NarrowingReason;
 use exarch_core::SecurityConfig;
 use exarch_core::Staging;
 use tempfile::TempDir;
@@ -53,8 +57,8 @@ impl Fixture {
         }
     }
 
-    fn extract(&self, staging: Staging) {
-        ExtractRequest::new(&SecurityConfig::default())
+    fn extract(&self, staging: Staging) -> ExtractionReport {
+        let report = ExtractRequest::new(&SecurityConfig::default())
             .with_options(ExtractionOptions::default().with_staging(staging))
             .extract(&self.archive, &self.dest)
             .unwrap_or_else(|e| panic!("{staging:?}: {e}"));
@@ -63,6 +67,7 @@ impl Fixture {
             b"ok",
             "{staging:?}"
         );
+        report
     }
 }
 
@@ -85,6 +90,17 @@ fn chmod(path: &Path, mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
+fn narrowing_of(report: &ExtractionReport) -> Vec<NarrowingReason> {
+    report
+        .warnings
+        .iter()
+        .filter_map(|warning| match warning {
+            ExtractionWarning::RootAccessNarrowed { reason } => Some(*reason),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn a_destination_without_an_acl_publishes_its_mode_unchanged() {
     for staging in MODES {
@@ -97,7 +113,7 @@ fn a_destination_without_an_acl_publishes_its_mode_unchanged() {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         assert_eq!(linux::read(&fx.dest), linux::Acls::default(), "{staging:?}");
         #[cfg(target_os = "macos")]
-        assert!(macos::acl_of(&fx.dest).is_empty(), "{staging:?}");
+        assert!(macos::aces_of(&fx.dest).is_empty(), "{staging:?}");
     }
 }
 
@@ -296,11 +312,18 @@ mod linux {
     fn a_replaced_destination_its_owner_cannot_read_publishes_a_private_root() {
         let fx = Fixture::new();
         chmod(&fx.dest, 0o300);
-        let expected = if is_root(&fx.dest) { 0o300 } else { 0o700 };
+        let root = is_root(&fx.dest);
+        let expected = if root { 0o300 } else { 0o700 };
 
-        fx.extract(Staging::AtomicReplace);
+        let report = fx.extract(Staging::AtomicReplace);
 
         assert_eq!(mode_of(&fx.dest), expected);
+        let reasons = narrowing_of(&report);
+        if root {
+            assert!(reasons.is_empty(), "{reasons:?}");
+        } else {
+            assert_eq!(reasons, [NarrowingReason::AclUnreadable]);
+        }
     }
 
     /// Needs root to give the destination away, so it only runs there; on an
@@ -316,10 +339,17 @@ mod linux {
         set(&fx.dest, ACCESS, &access_acl());
         std::os::unix::fs::chown(&fx.dest, Some(1000), Some(1000)).unwrap();
 
-        fx.extract(Staging::Atomic);
+        let report = fx.extract(Staging::Atomic);
 
         assert_eq!(mode_of(&fx.dest), 0o700);
         assert_eq!(read(&fx.dest), Acls::default());
+        assert_eq!(
+            narrowing_of(&report),
+            [
+                NarrowingReason::GroupNotKept,
+                NarrowingReason::OwnershipDiffers
+            ]
+        );
     }
 }
 
@@ -327,13 +357,25 @@ mod linux {
 mod macos {
     use std::process::Command;
 
-    use exacl::AclEntry;
-    use exacl::AclOption;
-
     use super::*;
 
-    pub fn acl_of(path: &Path) -> Vec<AclEntry> {
-        exacl::getfacl(path, AclOption::SYMLINK_ACL).unwrap()
+    /// The entries `ls -led` prints for `path`, without their index.
+    pub fn aces_of(path: &Path) -> Vec<String> {
+        let output = Command::new("/bin/ls")
+            .args(["-led"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "ls -led");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let (_, ace) = line.trim().split_once(": ").unwrap();
+                ace.to_owned()
+            })
+            .collect()
     }
 
     fn add_ace(path: &Path, ace: &str) {
@@ -345,18 +387,42 @@ mod macos {
         assert!(status.success(), "chmod +a {ace:?}");
     }
 
+    /// `Staging::Atomic` refuses such a destination earlier, when it checks
+    /// that the directory is empty.
     #[test]
-    fn a_denying_acl_gives_a_private_root_without_the_acl() {
+    fn a_destination_whose_acl_denies_the_caller_a_read_publishes_a_private_root() {
         let fx = Fixture::new();
         chmod(&fx.dest, 0o755);
         add_ace(&fx.dest, "group:staff deny list,search");
         add_ace(&fx.dest, "everyone deny list,search");
-        assert_eq!(acl_of(&fx.dest).len(), 2);
+        assert_eq!(aces_of(&fx.dest).len(), 2);
 
-        fx.extract(Staging::AtomicReplace);
+        let report = fx.extract(Staging::AtomicReplace);
 
         assert_eq!(mode_of(&fx.dest), 0o700);
-        assert!(acl_of(&fx.dest).is_empty());
+        assert!(aces_of(&fx.dest).is_empty());
+        assert_eq!(narrowing_of(&report), [NarrowingReason::AclUnreadable]);
+    }
+
+    #[test]
+    fn an_acl_with_inheritable_entries_gives_a_private_root_with_a_warning() {
+        for staging in MODES {
+            let fx = Fixture::new();
+            chmod(&fx.dest, 0o755);
+            add_ace(&fx.dest, "group:staff allow list,search,file_inherit");
+            assert_eq!(aces_of(&fx.dest).len(), 1);
+
+            let report = fx.extract(staging);
+
+            assert_eq!(mode_of(&fx.dest), 0o700, "{staging:?}");
+            assert!(aces_of(&fx.dest).is_empty(), "{staging:?}");
+            assert!(aces_of(&fx.dest.join("p.txt")).is_empty(), "{staging:?}");
+            assert_eq!(
+                narrowing_of(&report),
+                [NarrowingReason::AclHasInheritableEntries],
+                "{staging:?}"
+            );
+        }
     }
 
     #[test]
@@ -368,28 +434,30 @@ mod macos {
                 fx.dest.parent().unwrap(),
                 "everyone allow list,search,read,file_inherit,directory_inherit",
             );
-            assert!(acl_of(&fx.dest).is_empty(), "{staging:?}");
+            assert!(aces_of(&fx.dest).is_empty(), "{staging:?}");
 
             fx.extract(staging);
 
             assert_eq!(mode_of(&fx.dest), 0o700, "{staging:?}");
-            assert!(acl_of(&fx.dest).is_empty(), "{staging:?}");
-            assert!(acl_of(&fx.dest.join("p.txt")).is_empty(), "{staging:?}");
+            assert!(aces_of(&fx.dest).is_empty(), "{staging:?}");
+            assert!(aces_of(&fx.dest.join("p.txt")).is_empty(), "{staging:?}");
         }
     }
 
     #[test]
-    fn named_deny_entries_give_a_private_root_without_the_acl() {
+    fn named_deny_entries_are_copied_onto_the_published_root() {
         for staging in MODES {
             let fx = Fixture::new();
             chmod(&fx.dest, 0o755);
             add_ace(&fx.dest, "user:nobody deny list,search");
             add_ace(&fx.dest, "group:_www deny list,search");
+            let before = aces_of(&fx.dest);
+            assert_eq!(before.len(), 2);
 
             fx.extract(staging);
 
-            assert_eq!(mode_of(&fx.dest), 0o700, "{staging:?}");
-            assert!(acl_of(&fx.dest).is_empty(), "{staging:?}");
+            assert_eq!(aces_of(&fx.dest), before, "{staging:?}");
+            assert_eq!(mode_of(&fx.dest), 0o755, "{staging:?}");
         }
     }
 }

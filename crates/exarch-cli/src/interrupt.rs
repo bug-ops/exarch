@@ -286,8 +286,58 @@ pub fn finish_by_signal() {
     }
 }
 
+/// How long a forced exit waits for its report to be written before it exits
+/// without it.
+#[cfg(not(target_os = "wasi"))]
+const FORCED_EXIT_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether the report of a forced exit reached the stream.
+#[cfg(not(target_os = "wasi"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delivery {
+    /// The write returned within the budget, successfully or not.
+    Written,
+    /// The write did not return within the budget, or no thread could be
+    /// started to attempt it.
+    Abandoned,
+}
+
+/// Runs `write` on a detached thread and waits at most `budget` for it to
+/// return, so a write blocked on a full pipe cannot keep the process alive.
+/// The thread is left behind when the budget runs out; the caller exits the
+/// process next, which ends it. Production ignores the returned [`Delivery`];
+/// it exists so tests can observe the outcome.
+#[cfg(not(target_os = "wasi"))]
+fn deliver_within(budget: std::time::Duration, write: impl FnOnce() + Send + 'static) -> Delivery {
+    let (done, finished) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("exarch-forced-exit".to_owned())
+        .spawn(move || {
+            write();
+            let _ = done.send(());
+        });
+    match spawned {
+        Ok(_) if finished.recv_timeout(budget).is_ok() => Delivery::Written,
+        _ => Delivery::Abandoned,
+    }
+}
+
 /// Gives up waiting for the run: reports what it leaves and exits with the
 /// status of the stop.
+///
+/// The report is written on a detached thread and abandoned after
+/// [`FORCED_EXIT_WRITE_BUDGET`], so a full stdout or stderr pipe cannot hang
+/// the exit. Consequences for the reader: if the interrupted thread holds the
+/// stdout lock, no `--json` envelope is written; a write that times out above
+/// `PIPE_BUF` (512 bytes on macOS, 4096 on Linux) can leave a partial line.
+/// The exit status is the contract; the report is best effort.
+///
+/// `process::exit` still runs std's stdout cleanup, which flushes a line the
+/// interrupted thread left buffered when the stdout lock is free, and that
+/// flush can block on a full pipe. The path is narrow, since the CLI writes
+/// whole lines, and a lock held by an abandoned writer makes the cleanup skip
+/// the flush. A `_exit`-style exit would avoid it, but it would need a scoped
+/// `unsafe` module; it is not worth that surface for a path this narrow.
 #[cfg(not(target_os = "wasi"))]
 fn forced_exit(armed: &Armed, stop: Stop) -> ! {
     use crate::output::emit_line;
@@ -298,11 +348,16 @@ fn forced_exit(armed: &Armed, stop: Stop) -> ! {
         OutputMode::Json => {
             if let Ok(document) = crate::output::forced_exit_envelope(armed.operation, &armed.hint)
             {
-                let _ = emit_line(&mut std::io::stdout(), format_args!("{document}"));
+                deliver_within(FORCED_EXIT_WRITE_BUDGET, move || {
+                    let _ = emit_line(&mut std::io::stdout(), format_args!("{document}"));
+                });
             }
         }
         OutputMode::Human(_) => {
-            let _ = writeln!(std::io::stderr(), "{}", armed.hint);
+            let hint = armed.hint.clone();
+            deliver_within(FORCED_EXIT_WRITE_BUDGET, move || {
+                let _ = writeln!(std::io::stderr(), "{hint}");
+            });
         }
     }
     std::process::exit(i32::from(ExitStatus::from(stop) as u8))
@@ -442,6 +497,78 @@ mod tests {
         interrupt.request(Stop::Terminate);
         assert_eq!(interrupt.request(Stop::Interrupt), Signal::Repeated);
         assert_eq!(decided(&interrupt, Stop::Interrupt), Stop::Terminate);
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn a_write_that_returns_is_delivered() {
+        let budget = std::time::Duration::from_secs(5);
+        assert_eq!(deliver_within(budget, || {}), Delivery::Written);
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn a_write_that_never_returns_is_abandoned_after_the_budget() {
+        let budget = std::time::Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let delivery = deliver_within(budget, || {
+            let (_keep, never) = std::sync::mpsc::channel::<()>();
+            let _ = never.recv();
+        });
+        assert_eq!(delivery, Delivery::Abandoned);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn a_writer_that_panics_is_abandoned() {
+        let budget = std::time::Duration::from_secs(5);
+        assert_eq!(
+            deliver_within(budget, || panic!("write failed")),
+            Delivery::Abandoned
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_write_blocked_on_a_full_pipe_is_abandoned_within_the_budget() {
+        use std::io::Write as _;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        const CHUNK: usize = 512;
+        let (reader, mut filler) = std::io::pipe().expect("create pipe");
+        let mut blocked = filler.try_clone().expect("clone writer");
+        let written = Arc::new(AtomicUsize::new(0));
+        let progress = Arc::clone(&written);
+        std::thread::spawn(move || {
+            while filler.write_all(&[0; CHUNK]).is_ok() {
+                progress.fetch_add(CHUNK, Ordering::SeqCst);
+            }
+        });
+
+        // The filler is stuck in a write once its byte count stops moving.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let before = written.load(Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if before > 0 && before == written.load(Ordering::SeqCst) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pipe never filled"
+            );
+        }
+
+        let started = std::time::Instant::now();
+        let delivery = deliver_within(std::time::Duration::from_millis(100), move || {
+            let _ = blocked.write_all(&[0; 4096]);
+        });
+        assert_eq!(delivery, Delivery::Abandoned);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        drop(reader);
     }
 
     #[cfg(not(target_os = "wasi"))]

@@ -73,6 +73,11 @@ SHARED = [
         ["BackupCleanupFailedWarning"],
         ["kind", "message", "path", "identity", "io_kind", "reason"],
     ),
+    (
+        "RootAccessNarrowedWarning",
+        ["RootAccessNarrowedWarning"],
+        ["kind", "message", "reason"],
+    ),
     ("ArchiveError", ["ExarchErrorBase"], ["code", "leftover_path"]),
     ("OutputExistsError", ["ExarchOutputExistsDetail"], ["conflicts", "filename"]),
     ("SourceNotFoundError", ["ExarchSourceNotFoundDetail"], ["filename"]),

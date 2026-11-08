@@ -22,7 +22,6 @@ use crate::mirror::mirror_into_core;
 use crate::utils::path_text;
 use crate::utils::utf8_path;
 use exarch_core::ArchiveError as CoreError;
-use napi::bindgen_prelude::Either3;
 use napi::bindgen_prelude::Either4;
 use napi::bindgen_prelude::Either5;
 use napi::bindgen_prelude::Either6;
@@ -643,6 +642,51 @@ pub enum ExtractionWarningKind {
     /// The backup of a replaced destination could not be removed.
     #[napi(value = "backup_cleanup_failed")]
     BackupCleanupFailed,
+    /// The published root of an atomic extraction gives less access than the
+    /// destination it replaced.
+    #[napi(value = "root_access_narrowed")]
+    RootAccessNarrowed,
+}
+
+/// Why the published root of an atomic extraction gives less access than the
+/// destination it replaced or filled.
+// Values must equal `exarch_core::NarrowingReason::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NarrowingReason {
+    /// The destination's access control list could not be read in full.
+    #[napi(value = "acl_unreadable")]
+    AclUnreadable,
+    /// The destination was no longer the directory that was pinned.
+    #[napi(value = "destination_changed")]
+    DestinationChanged,
+    /// The list names a user or group the reading process cannot map.
+    #[napi(value = "unmapped_id")]
+    UnmappedId,
+    /// The list holds entries that children inherit, which the root alone
+    /// cannot carry.
+    #[napi(value = "acl_has_inheritable_entries")]
+    AclHasInheritableEntries,
+    /// The root belongs to another user or group than the destination.
+    #[napi(value = "ownership_differs")]
+    OwnershipDiffers,
+    /// Writing the destination's list onto the root failed.
+    #[napi(value = "acl_copy_failed")]
+    AclCopyFailed,
+    /// The root could not join the destination's group, so its group access
+    /// and setgid bit were dropped.
+    #[napi(value = "group_not_kept")]
+    GroupNotKept,
+    /// The destination belongs to another user, so its group and world write
+    /// bits and setgid bit were dropped.
+    #[napi(value = "foreign_write_dropped")]
+    ForeignWriteDropped,
+    /// The root could not take the destination's owner.
+    #[napi(value = "owner_not_kept")]
+    OwnerNotKept,
+    /// The destination disappeared before its mode could be read.
+    #[napi(value = "destination_vanished")]
+    DestinationVanished,
 }
 
 /// Whether the identity of a leftover backup was confirmed before its removal
@@ -670,6 +714,21 @@ pub struct AntiItemsSkippedWarning {
     pub message: String,
     /// How many anti-items the archive holds.
     pub count: i64,
+}
+
+/// The published root of an atomic extraction gives less access than the
+/// destination it replaced or filled; one warning is raised per reason.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct RootAccessNarrowedWarning {
+    /// Always `'root_access_narrowed'`.
+    #[napi(ts_type = "'root_access_narrowed'")]
+    pub kind: ExtractionWarningKind,
+    /// The human-readable text.
+    pub message: String,
+    /// Why the access was narrowed.
+    #[napi(ts_type = "NarrowingReason | (string & {})")]
+    pub reason: String,
 }
 
 /// An extraction warning of a kind newer than this binding.
@@ -705,13 +764,17 @@ pub struct BackupCleanupFailedWarning {
     pub reason: String,
 }
 
-type ExtractionWarning =
-    Either3<AntiItemsSkippedWarning, BackupCleanupFailedWarning, UnknownExtractionWarning>;
+type ExtractionWarning = Either4<
+    AntiItemsSkippedWarning,
+    BackupCleanupFailedWarning,
+    RootAccessNarrowedWarning,
+    UnknownExtractionWarning,
+>;
 
 pub fn extraction_warning(warning: &CoreExtractionWarning) -> ExtractionWarning {
     let warning = warning.redacted();
     match &warning {
-        CoreExtractionWarning::AntiItemsSkipped { count } => Either3::A(AntiItemsSkippedWarning {
+        CoreExtractionWarning::AntiItemsSkipped { count } => Either4::A(AntiItemsSkippedWarning {
             kind: ExtractionWarningKind::AntiItemsSkipped,
             message: warning.to_string(),
             count: saturating_i64(*count),
@@ -721,7 +784,7 @@ pub fn extraction_warning(warning: &CoreExtractionWarning) -> ExtractionWarning 
             identity,
             io_kind,
             message,
-        } => Either3::B(BackupCleanupFailedWarning {
+        } => Either4::B(BackupCleanupFailedWarning {
             kind: ExtractionWarningKind::BackupCleanupFailed,
             message: warning.to_string(),
             path: path.to_string_lossy().into_owned(),
@@ -729,7 +792,14 @@ pub fn extraction_warning(warning: &CoreExtractionWarning) -> ExtractionWarning 
             io_kind: io_kind.as_str().to_owned(),
             reason: message.to_string(),
         }),
-        other => Either3::C(UnknownExtractionWarning {
+        CoreExtractionWarning::RootAccessNarrowed { reason } => {
+            Either4::C(RootAccessNarrowedWarning {
+                kind: ExtractionWarningKind::RootAccessNarrowed,
+                message: warning.to_string(),
+                reason: reason.as_str().to_owned(),
+            })
+        }
+        other => Either4::D(UnknownExtractionWarning {
             kind: other.kind().as_str().to_owned(),
             message: other.to_string(),
         }),
@@ -1571,9 +1641,10 @@ mod tests {
 
     fn extraction_message(warning: &ExtractionWarning) -> &str {
         match warning {
-            Either3::A(w) => &w.message,
-            Either3::B(w) => &w.message,
-            Either3::C(w) => &w.message,
+            Either4::A(w) => &w.message,
+            Either4::B(w) => &w.message,
+            Either4::C(w) => &w.message,
+            Either4::D(w) => &w.message,
         }
     }
 
@@ -1589,7 +1660,7 @@ mod tests {
     #[test]
     fn test_anti_items_warning_is_typed() {
         let warning = extraction_warning(&anti(3));
-        let Either3::A(typed) = warning else {
+        let Either4::A(typed) = warning else {
             panic!("expected the anti-items warning");
         };
         assert_eq!(typed.kind, ExtractionWarningKind::AntiItemsSkipped);
@@ -1605,7 +1676,7 @@ mod tests {
             io_kind: exarch_core::IoKind::PermissionDenied,
             message: "denied".into(),
         };
-        let Either3::B(typed) = extraction_warning(&core) else {
+        let Either4::B(typed) = extraction_warning(&core) else {
             panic!("expected the backup warning");
         };
         assert_eq!(typed.kind, ExtractionWarningKind::BackupCleanupFailed);
@@ -1621,6 +1692,19 @@ mod tests {
         assert!(typed.message.contains(&typed.path), "{}", typed.message);
         #[cfg(not(debug_assertions))]
         assert!(!typed.message.contains("internal"), "{}", typed.message);
+    }
+
+    #[test]
+    fn test_narrowed_root_warning_is_typed_for_every_reason() {
+        for reason in exarch_core::NarrowingReason::ALL {
+            let core = exarch_core::ExtractionWarning::RootAccessNarrowed { reason: *reason };
+            let Either4::C(typed) = extraction_warning(&core) else {
+                panic!("expected the narrowed-root warning for {reason}");
+            };
+            assert_eq!(typed.kind, ExtractionWarningKind::RootAccessNarrowed);
+            assert_eq!(typed.reason, reason.as_str());
+            assert_eq!(typed.message, core.to_string());
+        }
     }
 
     #[test]
@@ -1660,14 +1744,42 @@ mod tests {
         let extraction: Vec<_> = [
             ExtractionWarningKind::AntiItemsSkipped,
             ExtractionWarningKind::BackupCleanupFailed,
+            ExtractionWarningKind::RootAccessNarrowed,
         ]
         .into_iter()
         .map(|kind| match kind {
             ExtractionWarningKind::AntiItemsSkipped => "anti_items_skipped",
             ExtractionWarningKind::BackupCleanupFailed => "backup_cleanup_failed",
+            ExtractionWarningKind::RootAccessNarrowed => "root_access_narrowed",
         })
         .collect();
         assert_eq!(extraction, exarch_core::ExtractionWarningKind::NAMES);
+
+        let narrowing = [
+            NarrowingReason::AclUnreadable,
+            NarrowingReason::DestinationChanged,
+            NarrowingReason::UnmappedId,
+            NarrowingReason::AclHasInheritableEntries,
+            NarrowingReason::OwnershipDiffers,
+            NarrowingReason::AclCopyFailed,
+            NarrowingReason::GroupNotKept,
+            NarrowingReason::ForeignWriteDropped,
+            NarrowingReason::OwnerNotKept,
+            NarrowingReason::DestinationVanished,
+        ]
+        .map(|reason| match reason {
+            NarrowingReason::AclUnreadable => "acl_unreadable",
+            NarrowingReason::DestinationChanged => "destination_changed",
+            NarrowingReason::UnmappedId => "unmapped_id",
+            NarrowingReason::AclHasInheritableEntries => "acl_has_inheritable_entries",
+            NarrowingReason::OwnershipDiffers => "ownership_differs",
+            NarrowingReason::AclCopyFailed => "acl_copy_failed",
+            NarrowingReason::GroupNotKept => "group_not_kept",
+            NarrowingReason::ForeignWriteDropped => "foreign_write_dropped",
+            NarrowingReason::OwnerNotKept => "owner_not_kept",
+            NarrowingReason::DestinationVanished => "destination_vanished",
+        });
+        assert_eq!(narrowing, exarch_core::NarrowingReason::NAMES);
 
         let creation: Vec<_> = [
             CreationWarningKind::ZipRatioOverDefaultLimit,

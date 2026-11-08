@@ -7,6 +7,7 @@
 use exarch_core::BackupIdentity;
 use exarch_core::CreationWarning;
 use exarch_core::ExtractionWarning;
+use exarch_core::NarrowingReason;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -16,7 +17,8 @@ use pyo3::types::PyList;
 ///
 /// # Attributes
 ///
-/// * `kind` - `"anti_items_skipped"` or `"backup_cleanup_failed"`
+/// * `kind` - `"anti_items_skipped"`, `"backup_cleanup_failed"` or
+///   `"root_access_narrowed"`
 /// * `message` - Human-readable description; host paths are redacted like those
 ///   of an exception message
 #[pyclass(name = "ExtractionWarning", subclass, frozen)]
@@ -90,6 +92,26 @@ impl PyBackupCleanupFailedWarning {
     #[getter]
     const fn io_kind(&self) -> &'static str {
         self.io_kind
+    }
+}
+
+/// The published root of an atomic extraction gives less access than the
+/// destination it replaced or filled; one warning is raised per reason.
+///
+/// # Attributes
+///
+/// * `reason` - The stable token of why the access was narrowed, for example
+///   `"acl_unreadable"` or `"owner_not_kept"`
+#[pyclass(name = "RootAccessNarrowedWarning", extends = PyExtractionWarning, frozen)]
+pub struct PyRootAccessNarrowedWarning {
+    reason: NarrowingReason,
+}
+
+#[pymethods]
+impl PyRootAccessNarrowedWarning {
+    #[getter]
+    const fn reason(&self) -> &'static str {
+        self.reason.as_str()
     }
 }
 
@@ -209,6 +231,11 @@ fn extraction_warning(py: Python<'_>, warning: &ExtractionWarning) -> PyResult<P
             }),
         )
         .map(Bound::into_any),
+        ExtractionWarning::RootAccessNarrowed { reason } => Bound::new(
+            py,
+            initializer.add_subclass(PyRootAccessNarrowedWarning { reason: *reason }),
+        )
+        .map(Bound::into_any),
         _ => Bound::new(py, initializer).map(Bound::into_any),
     }
     .map(Bound::unbind)
@@ -323,6 +350,21 @@ mod tests {
                 exarch_core::sanitize_path_for_error(std::path::Path::new("/srv/private/backup"))
             );
             assert!(attr::<String>(&object, "message").contains(&path));
+        });
+    }
+
+    #[test]
+    fn root_access_narrowed_exposes_its_reason_token() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            for reason in NarrowingReason::ALL {
+                let warning = ExtractionWarning::RootAccessNarrowed { reason: *reason };
+                let object = extraction_warning(py, &warning).unwrap().into_bound(py);
+
+                assert!(object.cast::<PyRootAccessNarrowedWarning>().is_ok());
+                assert_eq!(attr::<String>(&object, "kind"), "root_access_narrowed");
+                assert_eq!(attr::<String>(&object, "reason"), reason.as_str());
+            }
         });
     }
 

@@ -35,7 +35,6 @@ console = "0.16"
 ctrlc = "3.5"
 criterion = "0.8"
 dhat = "0.3"
-exacl = "0.13"
 flate2 = "1.1"
 globset = { version = "0.4.21", default-features = false }
 indicatif = "0.18"

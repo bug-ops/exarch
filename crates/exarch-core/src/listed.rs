@@ -53,7 +53,6 @@ use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
 use crate::closed_enum::closed_enum;
 use crate::config::ExtractionOptions;
-use crate::formats::common::TempSpool;
 use crate::formats::common::open_archive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
@@ -62,6 +61,7 @@ use crate::formats::detect::detect_format;
 use crate::formats::source_fault::SourceRead;
 use crate::formats::source_fault::SourceTap;
 use crate::formats::source_fault::TapSource;
+use crate::formats::spool::TempSpool;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::traits::ArchiveFormat;
 use crate::formats::zip::ZipArchive;
@@ -559,12 +559,7 @@ impl<R: Read> SpoolTee<R> {
     /// A tee into a new spool holding at most `limit` bytes, and at most
     /// `ram_limit` where the spool lives in memory.
     fn new(inner: R, limit: u64, ram_limit: u64) -> Self {
-        Self::over(
-            inner,
-            crate::formats::common::open_spool(),
-            limit,
-            ram_limit,
-        )
+        Self::over(inner, crate::formats::spool::open_spool(), limit, ram_limit)
     }
 
     /// A tee into `spool`, or into none: without a temporary file the only
@@ -653,7 +648,7 @@ mod tests {
     use crate::ErrorCode;
     use crate::ExtractRequest;
     use crate::NoopProgress;
-    use crate::formats::common::SpoolBacking;
+    use crate::formats::spool::SpoolBacking;
     use crate::test_utils::create_test_tar;
     use tempfile::TempDir;
 

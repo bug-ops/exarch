@@ -869,6 +869,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<warning::PyExtractionWarning>()?;
     m.add_class::<warning::PyAntiItemsSkippedWarning>()?;
     m.add_class::<warning::PyBackupCleanupFailedWarning>()?;
+    m.add_class::<warning::PyRootAccessNarrowedWarning>()?;
     m.add_class::<warning::PyCreationWarning>()?;
     m.add_class::<warning::PyZipRatioOverDefaultLimitWarning>()?;
     m.add_class::<warning::PyZipRatioCheckFailedWarning>()?;
@@ -927,7 +928,11 @@ fn register_type_aliases(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add(
         "AnyExtractionWarning",
-        union_of(&["AntiItemsSkippedWarning", "BackupCleanupFailedWarning"])?,
+        union_of(&[
+            "AntiItemsSkippedWarning",
+            "BackupCleanupFailedWarning",
+            "RootAccessNarrowedWarning",
+        ])?,
     )?;
     m.add(
         "AnyCreationWarning",

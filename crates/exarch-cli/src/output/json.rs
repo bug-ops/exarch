@@ -1265,6 +1265,9 @@ mod tests {
         let warnings = [
             ExtractionWarning::AntiItemsSkipped { count: 2 },
             crate::test_support::extraction_warning("gone"),
+            ExtractionWarning::RootAccessNarrowed {
+                reason: exarch_core::NarrowingReason::AclUnreadable,
+            },
         ];
         for kind in exarch_core::ExtractionWarningKind::ALL {
             assert!(
@@ -1280,6 +1283,8 @@ mod tests {
         }
         let leftover = serde_json::to_value(JsonWarning::from(&warnings[1])).unwrap();
         assert_eq!(leftover["reason"], "gone");
+        let narrowed = serde_json::to_value(JsonWarning::from(&warnings[2])).unwrap();
+        assert_eq!(narrowed["reason"], "acl_unreadable");
     }
 
     #[test]

@@ -478,7 +478,7 @@ export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
  * the union stays closed so that discriminating on `kind` narrows, so check
  * for an unexpected token in a `default` branch.
  */
-export type ExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning
+export type ExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning | RootAccessNarrowedWarning
 
 /**
  * A condition of a creation worth surfacing that is not a skipped entry.

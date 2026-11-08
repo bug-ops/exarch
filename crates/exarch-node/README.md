@@ -360,7 +360,7 @@ interface ExtractionReport {
   durationMs: number;         // Extraction duration in milliseconds
   filesSkipped: number;       // Entries skipped, over all reasons
   skipped: { counts: { kind: SkipKind; count: number }[]; sample: SkippedEntry[]; total: number }; // by reason
-  warnings: ExtractionWarning[]; // Typed conditions worth surfacing; branch on `kind`, `message` is the text
+  warnings: ExtractionWarning[]; // Typed conditions worth surfacing (e.g. `root_access_narrowed` with a `reason`); branch on `kind`, `message` is the text
 }
 ```
 

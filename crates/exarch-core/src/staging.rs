@@ -30,6 +30,7 @@ use crate::ExistingFiles;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::IoContext;
+use crate::NarrowingReason;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::Staging;
@@ -37,6 +38,7 @@ use crate::StagingLeftover;
 use crate::destination_state::parent_or_cwd;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
+use crate::report::Narrowed;
 use crate::security::fs_view::Occupant;
 use adopt::Adoption;
 use dir::StagingDir;
@@ -209,6 +211,14 @@ fn clear_inherited_acl<'p>(staging: StagingDir<'p>, parent: &Path) -> Result<Sta
     }
 }
 
+/// The narrowing of a root whose destination vanished before its mode could
+/// be read.
+fn destination_vanished() -> Narrowed {
+    let mut narrowed = Narrowed::none();
+    narrowed.push(NarrowingReason::DestinationVanished);
+    narrowed
+}
+
 fn extract_atomic(
     output_dir: &Path,
     options: &ExtractionOptions,
@@ -238,62 +248,85 @@ fn extract_atomic(
         }
     };
 
-    let report = match extract(staging.path(), &staged_options(options), progress) {
+    let mut report = match extract(staging.path(), &staged_options(options), progress) {
         Ok(report) => report,
         Err(e) => return Err(e.rolled_back_with(staging.discard())),
     };
     if progress.is_cancelled() {
         return Err(cancelled_after(report, staging.discard()));
     }
-    match publish(&mut staging, &destination, fresh_mode, output_dir) {
+    let published = adoption_for(&destination, fresh_mode, output_dir).and_then(|adoption| {
+        publish_adopted(
+            &mut staging,
+            &destination,
+            adoption,
+            output_dir,
+            &mut report,
+        )
+    });
+    match published {
         Ok(()) => Ok(report),
         Err(error) => Err(error.rolled_back_with(staging.discard())),
     }
 }
 
-/// Gives the staging directory the destination's permissions and renames it
-/// onto the destination.
-///
-/// Both happen only now so every earlier failure leaves the staging directory
-/// private; a failure here leaves the caller to discard it.
-fn publish(
-    staging: &mut StagingDir<'_>,
+/// What the published root takes from the destination as it is now: its mode,
+/// owner and ACL when it still is a directory, else `fresh_mode`.
+fn adoption_for(
     destination: &AtomicDestination,
     fresh_mode: Option<Adoption>,
     output_dir: &Path,
-) -> Result<()> {
+) -> Result<Option<Adoption>> {
     let existing = destination
         .pin
         .status(destination.name.as_leaf())
         .map_err(ArchiveError::Io)?
         .filter(|status| status.occupant == Occupant::Directory);
-    let adoption = match existing {
-        Some(status) => {
-            let acl = acl::read_destination(
-                &destination.pin,
-                destination.name.as_leaf(),
-                &destination.parent,
-                status.identity,
-            )
-            .map_err(|e| {
+    let Some(status) = existing else {
+        return Ok(fresh_mode);
+    };
+    let acl = acl::read_destination(
+        &destination.pin,
+        destination.name.as_leaf(),
+        &destination.parent,
+        status.identity,
+    )
+    .map_err(|e| {
+        ArchiveError::Io(io_context(
+            &e,
+            "failed to read the destination's access control list",
+            output_dir,
+        ))
+    })?;
+    Ok(Some(Adoption::of_empty_destination(&status, acl)))
+}
+
+/// Gives the staging directory the permissions in `adoption` and renames it
+/// onto the destination, recording on `report` every way the root ended up
+/// with less access than the destination. No `adoption` means the destination
+/// vanished with no mode left to read: the root keeps its private mode.
+///
+/// Both happen only now so every earlier failure leaves the staging directory
+/// private; a failure here leaves the caller to discard it.
+fn publish_adopted(
+    staging: &mut StagingDir<'_>,
+    destination: &AtomicDestination,
+    adoption: Option<Adoption>,
+    output_dir: &Path,
+    report: &mut ExtractionReport,
+) -> Result<()> {
+    match adoption {
+        Some(adoption) => {
+            let narrowed = staging.adopt(adoption).map_err(|e| {
                 ArchiveError::Io(io_context(
                     &e,
-                    "failed to read the destination's access control list",
+                    "failed to give the extracted content the destination's permissions",
                     output_dir,
                 ))
             })?;
-            Some(Adoption::of_empty_destination(&status, acl))
+            report.record_narrowing(narrowed);
         }
-        None => fresh_mode,
-    };
-    if let Some(adoption) = adoption {
-        staging.adopt(adoption).map_err(|e| {
-            ArchiveError::Io(io_context(
-                &e,
-                "failed to give the extracted content the destination's permissions",
-                output_dir,
-            ))
-        })?;
+        None => report.record_narrowing(destination_vanished()),
     }
     staging
         .publish(&destination.name)

@@ -165,6 +165,7 @@ pub use report::EntryTotal;
 pub use report::ExtractionReport;
 pub use report::ExtractionWarning;
 pub use report::ExtractionWarningKind;
+pub use report::NarrowingReason;
 pub use report::NoopProgress;
 pub use report::ProgressCallback;
 pub use report::Skip;

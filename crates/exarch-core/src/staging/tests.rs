@@ -20,6 +20,7 @@ use crate::ExtractRequest;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ExtractionWarning;
+use crate::NarrowingReason;
 use crate::ProgressCallback;
 use crate::ProtectedPath;
 use crate::Restore;
@@ -930,7 +931,7 @@ mod adoption {
         let mut staging = StagingDir::create(&pin, &parent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
 
-        staging
+        let narrowed = staging
             .adopt(Adoption::for_test(
                 0o2750,
                 own.uid(),
@@ -939,6 +940,7 @@ mod adoption {
             ))
             .unwrap();
 
+        assert!(narrowed.reasons().is_empty());
         assert_eq!(mode_of(staging.path()) & 0o777, 0o750);
     }
 
@@ -954,10 +956,11 @@ mod adoption {
             return;
         }
 
-        staging
+        let narrowed = staging
             .adopt(Adoption::for_test(0o2775, own.uid(), foreign, Claim::Full))
             .unwrap();
 
+        assert_eq!(narrowed.reasons(), [NarrowingReason::GroupNotKept]);
         assert_eq!(mode_of(staging.path()), 0o705);
     }
 
@@ -969,7 +972,7 @@ mod adoption {
         let own = std::fs::metadata(&parent).unwrap();
         let foreign_uid = own.uid().wrapping_add(1);
 
-        staging
+        let narrowed = staging
             .adopt(Adoption::for_test(
                 0o2777,
                 foreign_uid,
@@ -978,6 +981,7 @@ mod adoption {
             ))
             .unwrap();
 
+        assert_eq!(narrowed.reasons(), [NarrowingReason::ForeignWriteDropped]);
         let applied = std::fs::metadata(staging.path()).unwrap();
         assert_eq!(applied.uid(), own.uid());
         assert_eq!(applied.mode() & 0o7777, 0o755);
@@ -990,7 +994,7 @@ mod adoption {
         let mut staging = StagingDir::create(&pin, &parent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
 
-        staging
+        let narrowed = staging
             .adopt(Adoption::for_test(
                 0o775,
                 own.uid(),
@@ -999,6 +1003,7 @@ mod adoption {
             ))
             .unwrap();
 
+        assert!(narrowed.reasons().is_empty());
         assert_eq!(mode_of(staging.path()) & 0o777, 0o775);
     }
 
@@ -1010,9 +1015,10 @@ mod adoption {
         let own = std::fs::metadata(&parent).unwrap();
         std::fs::write(staging.path().join("f"), b"x").unwrap();
 
-        staging
+        let narrowed = staging
             .adopt(Adoption::for_test(0o000, own.uid(), own.gid(), Claim::Full))
             .unwrap();
+        assert!(narrowed.reasons().is_empty());
         let path = staging.path().to_path_buf();
 
         assert!(staging.discard().is_none());
@@ -1030,6 +1036,172 @@ mod adoption {
         drop(staging);
 
         assert!(!path.exists());
+    }
+}
+
+/// Every [`NarrowingReason`] is produced through both publish paths.
+mod narrowing {
+    use std::os::unix::fs::MetadataExt;
+
+    use super::super::AtomicDestination;
+    use super::super::acl::AclPlan;
+    use super::super::adopt::Adoption;
+    use super::super::adopt::Claim;
+    use super::super::dir::StagingDir;
+    use super::super::publish_adopted;
+    use super::super::replace::swap_adopted_for_test;
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    struct Own {
+        uid: u32,
+        gid: u32,
+    }
+
+    /// The user and group of a directory this process creates.
+    fn own() -> Own {
+        let temp = TempDir::new().unwrap();
+        let metadata = std::fs::metadata(temp.path()).unwrap();
+        Own {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        }
+    }
+
+    fn is_root() -> bool {
+        own().uid == 0
+    }
+
+    fn reasons(report: &ExtractionReport) -> Vec<NarrowingReason> {
+        report
+            .warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                ExtractionWarning::RootAccessNarrowed { reason } => Some(*reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn atomic(adoption: Option<Adoption>) -> Vec<NarrowingReason> {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let output = parent.join("dest");
+        let destination = AtomicDestination::resolve(&output).unwrap();
+        let mut staging = StagingDir::create(&destination.pin, &destination.parent).unwrap();
+        let mut report = ExtractionReport::new();
+        publish_adopted(&mut staging, &destination, adoption, &output, &mut report).unwrap();
+        reasons(&report)
+    }
+
+    fn replace(adoption: Adoption) -> Vec<NarrowingReason> {
+        reasons(&swap_adopted_for_test(adoption))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn copy_plan(valid: bool) -> AclPlan {
+        let blob = if valid {
+            vec![2, 0, 0, 0]
+        } else {
+            vec![0xff; 7]
+        };
+        AclPlan::Copy(crate::staging::acl::CopiedAcl::for_test(Some(blob), None))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn copy_plan(valid: bool) -> AclPlan {
+        AclPlan::Copy(if valid {
+            crate::staging::acl::CopiedAcl::for_test()
+        } else {
+            crate::staging::acl::CopiedAcl::raw_for_test(vec![0xff; 5])
+        })
+    }
+
+    /// The adoption that produces `reason` on this host, or `None` when the
+    /// host cannot (a privileged caller, a platform without a copyable ACL).
+    fn adoption_for(reason: NarrowingReason) -> Option<Adoption> {
+        let me = own();
+        let foreign_uid = me.uid.wrapping_add(1);
+        let plan = |reason| AclPlan::Private(reason);
+        let full = |plan| Adoption::for_test_with_acl(0o755, me.uid, me.gid, Claim::Full, plan);
+        match reason {
+            NarrowingReason::AclUnreadable
+            | NarrowingReason::DestinationChanged
+            | NarrowingReason::UnmappedId
+            | NarrowingReason::AclHasInheritableEntries => Some(full(plan(reason))),
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            NarrowingReason::OwnershipDiffers => Some(Adoption::for_test_with_acl(
+                0o755,
+                foreign_uid,
+                me.gid,
+                Claim::Cautious,
+                copy_plan(true),
+            )),
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            NarrowingReason::AclCopyFailed => Some(full(copy_plan(false))),
+            NarrowingReason::GroupNotKept => {
+                let foreign = std::fs::metadata("/").unwrap().gid();
+                (!is_root() && foreign != me.gid)
+                    .then(|| Adoption::for_test(0o775, me.uid, foreign, Claim::Full))
+            }
+            NarrowingReason::ForeignWriteDropped => Some(Adoption::for_test(
+                0o777,
+                foreign_uid,
+                me.gid,
+                Claim::Cautious,
+            )),
+            NarrowingReason::OwnerNotKept => {
+                (!is_root()).then(|| Adoption::for_test(0o755, foreign_uid, me.gid, Claim::Full))
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+            NarrowingReason::OwnershipDiffers | NarrowingReason::AclCopyFailed => None,
+            NarrowingReason::DestinationVanished => None,
+        }
+    }
+
+    #[test]
+    fn every_reason_reaches_the_report_through_both_publish_paths() {
+        let mut seen = Vec::new();
+        for &reason in NarrowingReason::ALL {
+            let Some(adoption) = adoption_for(reason) else {
+                continue;
+            };
+            for produced in [atomic(Some(adoption.clone())), replace(adoption)] {
+                assert!(produced.contains(&reason), "{reason}: {produced:?}");
+                seen.push(reason);
+            }
+        }
+        seen.extend(atomic(None));
+        seen.sort_by_key(|reason| reason.as_str());
+        seen.dedup();
+
+        let unreachable_here = is_root()
+            || !cfg!(any(
+                target_os = "linux",
+                target_os = "android",
+                target_os = "macos"
+            ));
+        if !unreachable_here {
+            assert_eq!(seen.len(), NarrowingReason::NAMES.len(), "{seen:?}");
+        }
+        for reason in NarrowingReason::ALL {
+            let producible =
+                adoption_for(*reason).is_some() || *reason == NarrowingReason::DestinationVanished;
+            assert_eq!(seen.contains(reason), producible, "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_vanished_destination_is_reported_by_the_atomic_path() {
+        assert_eq!(atomic(None), [NarrowingReason::DestinationVanished]);
+    }
+
+    #[test]
+    fn an_unnarrowed_publication_records_nothing() {
+        let me = own();
+        let adoption = Adoption::for_test(0o755, me.uid, me.gid, Claim::Full);
+        assert!(atomic(Some(adoption.clone())).is_empty());
+        assert!(replace(adoption).is_empty());
     }
 }
 

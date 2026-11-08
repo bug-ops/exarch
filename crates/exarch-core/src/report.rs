@@ -238,6 +238,51 @@ closed_enum! {
 }
 
 closed_enum! {
+    /// Why the root of an atomic publication gives less access than the
+    /// destination it replaces or fills.
+    ///
+    /// The string form is stable and shared by every front end.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::NarrowingReason;
+    ///
+    /// assert_eq!(NarrowingReason::AclUnreadable.as_str(), "acl_unreadable");
+    /// assert!(NarrowingReason::ALL.contains(&NarrowingReason::OwnerNotKept));
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum NarrowingReason {
+        /// The destination's access control list could not be read in full.
+        AclUnreadable => "acl_unreadable",
+        /// The destination was no longer the directory that was pinned.
+        DestinationChanged => "destination_changed",
+        /// The list names a user or group the reading process cannot map.
+        UnmappedId => "unmapped_id",
+        /// The list holds entries that children inherit, which the root alone
+        /// cannot carry.
+        AclHasInheritableEntries => "acl_has_inheritable_entries",
+        /// The root belongs to another user or group than the destination, so
+        /// its list would grant the wrong principals.
+        OwnershipDiffers => "ownership_differs",
+        /// Writing the destination's list onto the root failed.
+        AclCopyFailed => "acl_copy_failed",
+        /// The root could not join the destination's group, so its group
+        /// access and setgid bit were dropped.
+        GroupNotKept => "group_not_kept",
+        /// The destination belongs to another user, so its group and world
+        /// write bits and setgid bit were dropped.
+        ForeignWriteDropped => "foreign_write_dropped",
+        /// The root could not take the destination's owner, so the owner's
+        /// access now belongs to the caller.
+        OwnerNotKept => "owner_not_kept",
+        /// The destination disappeared before its mode could be read.
+        DestinationVanished => "destination_vanished",
+    }
+}
+
+closed_enum! {
     /// The class of an [`ExtractionWarning`], without its payload.
     ///
     /// # Examples
@@ -257,6 +302,8 @@ closed_enum! {
         AntiItemsSkipped => "anti_items_skipped",
         /// [`ExtractionWarning::BackupCleanupFailed`].
         BackupCleanupFailed => "backup_cleanup_failed",
+        /// [`ExtractionWarning::RootAccessNarrowed`].
+        RootAccessNarrowed => "root_access_narrowed",
     }
 }
 
@@ -295,6 +342,13 @@ pub enum ExtractionWarning {
         /// The failure text, redacted like an I/O error message.
         message: Box<str>,
     },
+
+    /// The published root of an atomic extraction gives less access than the
+    /// destination it replaced or filled; one warning is raised per reason.
+    RootAccessNarrowed {
+        /// Why the access was narrowed.
+        reason: NarrowingReason,
+    },
 }
 
 impl ExtractionWarning {
@@ -304,6 +358,7 @@ impl ExtractionWarning {
         match self {
             Self::AntiItemsSkipped { .. } => ExtractionWarningKind::AntiItemsSkipped,
             Self::BackupCleanupFailed { .. } => ExtractionWarningKind::BackupCleanupFailed,
+            Self::RootAccessNarrowed { .. } => ExtractionWarningKind::RootAccessNarrowed,
         }
     }
 
@@ -322,7 +377,7 @@ impl ExtractionWarning {
     #[must_use]
     pub fn redacted(&self) -> Self {
         match self {
-            Self::AntiItemsSkipped { .. } => self.clone(),
+            Self::AntiItemsSkipped { .. } | Self::RootAccessNarrowed { .. } => self.clone(),
             Self::BackupCleanupFailed {
                 path,
                 identity,
@@ -360,6 +415,10 @@ impl fmt::Display for ExtractionWarning {
                     path.display()
                 )
             }
+            Self::RootAccessNarrowed { reason } => write!(
+                f,
+                "the published root gives less access than the destination it replaced ({reason})"
+            ),
             Self::AntiItemsSkipped { count } => {
                 let noun = if *count == 1 {
                     "anti-item"
@@ -372,6 +431,34 @@ impl fmt::Display for ExtractionWarning {
                 )
             }
         }
+    }
+}
+
+/// The reasons an atomic publication narrowed the root's access, to be
+/// recorded on the report.
+///
+/// Only [`ExtractionReport::record_narrowing`] consumes it, and it is
+/// `#[must_use]`, so a publication path that drops it fails `-D warnings`.
+#[derive(Debug, Default)]
+#[must_use = "record the narrowing on the report"]
+pub(crate) struct Narrowed(Vec<NarrowingReason>);
+
+impl Narrowed {
+    /// A publication that narrowed nothing.
+    pub(crate) const fn none() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Adds `reason`, once.
+    pub(crate) fn push(&mut self, reason: NarrowingReason) {
+        if !self.0.contains(&reason) {
+            self.0.push(reason);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reasons(&self) -> &[NarrowingReason] {
+        &self.0
     }
 }
 
@@ -413,6 +500,15 @@ impl ExtractionReport {
     /// Adds a warning to the report.
     pub fn add_warning(&mut self, warning: ExtractionWarning) {
         self.warnings.push(warning);
+    }
+
+    pub(crate) fn record_narrowing(&mut self, narrowed: Narrowed) {
+        self.warnings.extend(
+            narrowed
+                .0
+                .into_iter()
+                .map(|reason| ExtractionWarning::RootAccessNarrowed { reason }),
+        );
     }
 
     /// Returns how many entries were skipped, over all reasons.

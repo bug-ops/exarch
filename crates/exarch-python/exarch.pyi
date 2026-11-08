@@ -75,7 +75,19 @@ _IoKind = Literal[
     "Other",
 ]
 _BackupIdentity = Literal["verified", "unverified"]
-_ExtractionWarningKind = Literal["anti_items_skipped", "backup_cleanup_failed"]
+_NarrowingReason = Literal[
+    "acl_unreadable",
+    "destination_changed",
+    "unmapped_id",
+    "acl_has_inheritable_entries",
+    "ownership_differs",
+    "acl_copy_failed",
+    "group_not_kept",
+    "foreign_write_dropped",
+    "owner_not_kept",
+    "destination_vanished",
+]
+_ExtractionWarningKind = Literal["anti_items_skipped", "backup_cleanup_failed", "root_access_narrowed"]  # noqa: E501  # fmt: skip
 _CreationWarningKind = Literal["zip_ratio_over_default_limit", "zip_ratio_check_failed", "directory_not_synced"]  # noqa: E501  # fmt: skip
 _InvalidArchiveSubCode = Literal[
     "TAR_AMBIGUITY",
@@ -990,7 +1002,7 @@ class ExtractionWarning:
 
     @property
     def kind(self) -> _ExtractionWarningKind | str:
-        """The condition: ``"anti_items_skipped"`` or ``"backup_cleanup_failed"``."""
+        """The condition: ``"anti_items_skipped"``, ``"backup_cleanup_failed"`` or ``"root_access_narrowed"``."""  # noqa: E501
         ...
 
     @property
@@ -1038,7 +1050,21 @@ class BackupCleanupFailedWarning(ExtractionWarning):
         """The failure text, redacted like an I/O error message."""
         ...
 
-AnyExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning
+@final
+class RootAccessNarrowedWarning(ExtractionWarning):
+    """
+    The published root of an atomic extraction gives less access than the
+    destination it replaced or filled; one warning is raised per reason.
+    """
+
+    @property
+    def kind(self) -> Literal["root_access_narrowed"]: ...
+    @property
+    def reason(self) -> _NarrowingReason | str:
+        """Why the access was narrowed."""
+        ...
+
+AnyExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning | RootAccessNarrowedWarning  # noqa: E501  # fmt: skip
 
 class CreationWarning:
     """

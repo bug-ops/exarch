@@ -478,7 +478,7 @@ export type StoredMemoryEntry = Exclude<MemoryEntry, MemoryHardlinkEntry>
  * the union stays closed so that discriminating on `kind` narrows, so check
  * for an unexpected token in a `default` branch.
  */
-export type ExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning
+export type ExtractionWarning = AntiItemsSkippedWarning | BackupCleanupFailedWarning | RootAccessNarrowedWarning
 
 /**
  * A condition of a creation worth surfacing that is not a skipped entry.
@@ -2265,7 +2265,7 @@ export interface ExtractionReport {
 }
 
 /** Class of an extraction warning. */
-export type ExtractionWarningKind = 'anti_items_skipped' | 'backup_cleanup_failed'
+export type ExtractionWarningKind = 'anti_items_skipped' | 'backup_cleanup_failed' | 'root_access_narrowed'
 
 /** The `kind` of a [`MemoryFileEntry`]. */
 export type FileKind = 'file'
@@ -2683,6 +2683,12 @@ export interface NameCollision {
   second: string
 }
 
+/**
+ * Why the published root of an atomic extraction gives less access than the
+ * destination it replaced or filled.
+ */
+export type NarrowingReason = 'acl_unreadable' | 'destination_changed' | 'unmapped_id' | 'acl_has_inheritable_entries' | 'ownership_differs' | 'acl_copy_failed' | 'group_not_kept' | 'foreign_write_dropped' | 'owner_not_kept' | 'destination_vanished'
+
 /** A link target above the host's name limits. */
 export interface OversizedLinkTarget {
   /** Always `'oversized'`. */
@@ -2741,6 +2747,19 @@ export interface RefuseDisposition {
  * (`restore` property of an `IO_ERROR` raised by `'atomic_replace'`).
  */
 export type RestoreOutcome = 'not_needed' | 'restored' | 'failed'
+
+/**
+ * The published root of an atomic extraction gives less access than the
+ * destination it replaced or filled; one warning is raised per reason.
+ */
+export interface RootAccessNarrowedWarning {
+  /** Always `'root_access_narrowed'`. */
+  kind: 'root_access_narrowed'
+  /** The human-readable text. */
+  message: string
+  /** Why the access was narrowed. */
+  reason: NarrowingReason | (string & {})
+}
 
 /** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
 export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH'

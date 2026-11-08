@@ -157,6 +157,16 @@ closed_enum! {
         /// is refused with `OutputExists`, because the rename cannot replace
         /// an existing directory there.
         ///
+        /// On Linux and Android the destination's POSIX ACL (access and
+        /// default) is copied onto the published root; the default ACL applies
+        /// to the root only, so content already extracted in staging does not
+        /// inherit it, unlike in-place extraction. When the ACL cannot be
+        /// copied faithfully (not readable, the root could not take the
+        /// destination's owner and group, a write failure), the root is
+        /// private (`0700`). On macOS an ACL on the destination is detected
+        /// and gives a `0700` root; it is not copied. Other Unixes and `NFSv4`
+        /// ACLs are not detected.
+        ///
         /// Cleanup is best-effort if the process is terminated via SIGKILL.
         Atomic => "atomic",
 
@@ -200,6 +210,16 @@ closed_enum! {
         /// and setgid instead of exposing them to another group. Windows has no
         /// Unix modes: the staging directory inherits the ACL of the
         /// destination's parent, not that of the destination.
+        ///
+        /// On Linux and Android the destination's POSIX ACL (access and
+        /// default) is copied onto the published root; the default ACL applies
+        /// to the root only, so content already extracted in staging does not
+        /// inherit it, unlike in-place extraction. When the ACL cannot be
+        /// copied faithfully (not readable, the root could not take the
+        /// destination's owner and group, a write failure), the root is
+        /// private (`0700`). On macOS an ACL on the destination is detected
+        /// and gives a `0700` root; it is not copied. Other Unixes and `NFSv4`
+        /// ACLs are not detected.
         AtomicReplace => "atomic_replace",
     }
 }
@@ -680,9 +700,10 @@ pub struct SecurityConfig {
 
     /// Maximum number of entries that can be extracted.
     ///
-    /// The extraction API counts files, symlinks and hardlinks, not
-    /// directories. `list` and `verify`, and the CLI's `extract` (which lists
-    /// the archive first), count every entry.
+    /// Every entry counts once, in every format and command: files,
+    /// directories, links, and entries the selection or the extension
+    /// allowlist skips, and duplicates skipped under
+    /// [`ExistingFiles::Skip`].
     pub max_file_count: Limit<NonZeroUsize>,
 
     /// Maximum path depth allowed.
@@ -810,32 +831,31 @@ pub struct SecurityConfig {
     ///   [`max_file_count`](Self::max_file_count) entry plus 64 KiB is refused
     ///   too, as `QuotaExceeded { HeaderSize }`, which holds the table built
     ///   from it in proportion to the permitted file count. Every entry of the
-    ///   header counts toward that size, directories and links included, though
-    ///   extraction counts only files against `max_file_count`: an archive with
-    ///   many directories may need a higher `max_file_count` to open. A header
-    ///   that declares more entries than `max_file_count` plus a small
-    ///   allowance is refused before its entry table is built, as
-    ///   `QuotaExceeded { HeaderEntryCount }`, for a plain header and for an
-    ///   encoded header with one copy, LZMA or LZMA2 coder. A header that is
-    ///   present but whose count cannot be read (another coder, several coders,
-    ///   an unfollowable layout) is refused as `InvalidArchive`. The memory the
-    ///   header's entry table needs grows with the number of permitted files,
-    ///   so a higher `max_file_count` raises the memory a header may need. With
-    ///   an unbounded `max_file_count` (`Limit::Unbounded`; `None` in the
-    ///   Python and Node bindings) only this limit caps the header. The buffer
-    ///   that receives a decoded header (about twice the limit) is not capped
-    ///   separately. The dictionary is held to `max_decoder_memory` alone
-    ///   whenever the header's declared size can be read; a header whose size
-    ///   cannot be read is held to the stricter of the two caps. The memory
-    ///   checks are `QuotaExceeded { DecoderMemory }`. Both come from `list`,
-    ///   `verify` and `extract`, with the limit that was exceeded as `max`.
-    ///   Blocks are charged the smaller of their dictionary and twice their
-    ///   unpack size instead. 7-Zip sizes the header dictionary to the header
-    ///   (4 KiB for a few files, 192 KiB at 3,000 files, 1 MiB at 60,000) and
-    ///   the LZMA model adds about 22 KiB, so a limit below roughly 26 KiB
-    ///   refuses every 7z archive with an encoded header, `list` included;
-    ///   archives with a plain header are held only to the header's own size
-    ///   and the entry cap.
+    ///   header counts toward that size, directories and links included, and
+    ///   every entry counts against `max_file_count`. A header that declares
+    ///   more entries than `max_file_count` plus a small allowance (for anti
+    ///   items, which extraction skips without counting) is refused before its
+    ///   entry table is built, as `QuotaExceeded { HeaderEntryCount }`, for a
+    ///   plain header and for an encoded header with one copy, LZMA or LZMA2
+    ///   coder. A header that is present but whose count cannot be read
+    ///   (another coder, several coders, an unfollowable layout) is refused as
+    ///   `InvalidArchive`. The memory the header's entry table needs grows with
+    ///   the number of permitted files, so a higher `max_file_count` raises the
+    ///   memory a header may need. With an unbounded `max_file_count`
+    ///   (`Limit::Unbounded`; `None` in the Python and Node bindings) only this
+    ///   limit caps the header. The buffer that receives a decoded header
+    ///   (about twice the limit) is not capped separately. The dictionary is
+    ///   held to `max_decoder_memory` alone whenever the header's declared size
+    ///   can be read; a header whose size cannot be read is held to the
+    ///   stricter of the two caps. The memory checks are `QuotaExceeded {
+    ///   DecoderMemory }`. Both come from `list`, `verify` and `extract`, with
+    ///   the limit that was exceeded as `max`. Blocks are charged the smaller
+    ///   of their dictionary and twice their unpack size instead. 7-Zip sizes
+    ///   the header dictionary to the header (4 KiB for a few files, 192 KiB at
+    ///   3,000 files, 1 MiB at 60,000) and the LZMA model adds about 22 KiB, so
+    ///   a limit below roughly 26 KiB refuses every 7z archive with an encoded
+    ///   header, `list` included; archives with a plain header are held only to
+    ///   the header's own size and the entry cap.
     ///
     /// Other codecs are bounded by their format (bzip2 blocks of at most
     /// 900 KB). Not exposed through the CLI or language bindings.
@@ -1224,7 +1244,7 @@ impl SecurityConfig {
     }
 
     /// Adds an include glob pattern, parsed with the grammar of `create -x`
-    /// (see [`ExcludePattern`](crate::ExcludePattern)).
+    /// (see [`EntryPattern`](crate::EntryPattern)).
     ///
     /// Only entries that match an include pattern (and no exclude pattern) are
     /// extracted. A pattern that matches nothing in the archive fails the
@@ -1253,7 +1273,7 @@ impl SecurityConfig {
     }
 
     /// Adds an exclude glob pattern, parsed with the grammar of `create -x`
-    /// (see [`ExcludePattern`](crate::ExcludePattern)).
+    /// (see [`EntryPattern`](crate::EntryPattern)).
     ///
     /// An exclude pattern always wins over an include pattern. One that
     /// matches nothing is not an error.
@@ -1824,6 +1844,74 @@ impl DecodeReuse {
             Self::Off => DecodeReuseKind::Off,
             Self::Memory(_) => DecodeReuseKind::Memory,
             Self::TempFile(_) => DecodeReuseKind::TempFile,
+        }
+    }
+
+    /// The limit of a mode that keeps entries, or `None` for
+    /// [`Off`](Self::Off).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DecodeReuse;
+    /// use exarch_core::ReuseLimit;
+    ///
+    /// assert_eq!(DecodeReuse::Off.limit(), None);
+    /// assert_eq!(
+    ///     DecodeReuse::Memory(ReuseLimit::DEFAULT).limit(),
+    ///     Some(ReuseLimit::DEFAULT)
+    /// );
+    /// ```
+    #[must_use]
+    pub const fn limit(self) -> Option<ReuseLimit> {
+        match self {
+            Self::Off => None,
+            Self::Memory(limit) | Self::TempFile(limit) => Some(limit),
+        }
+    }
+
+    /// Builds a mode from the two settings a front end collects separately.
+    ///
+    /// A missing `limit` means [`ReuseLimit::DEFAULT`] for `Memory` and
+    /// `TempFile`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::DecodeReuseLimit`] when `kind` is `Off` and a limit is
+    /// given, because `Off` keeps nothing for a limit to bound.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DecodeReuse;
+    /// use exarch_core::DecodeReuseKind;
+    /// use exarch_core::ReuseLimit;
+    ///
+    /// assert_eq!(
+    ///     DecodeReuse::from_parts(DecodeReuseKind::Memory, None)?,
+    ///     DecodeReuse::Memory(ReuseLimit::DEFAULT)
+    /// );
+    /// assert_eq!(
+    ///     DecodeReuse::from_parts(DecodeReuseKind::Off, None)?,
+    ///     DecodeReuse::Off
+    /// );
+    /// assert!(DecodeReuse::from_parts(DecodeReuseKind::Off, Some(ReuseLimit::MAX)).is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn from_parts(kind: DecodeReuseKind, limit: Option<ReuseLimit>) -> crate::Result<Self> {
+        match (kind, limit) {
+            (DecodeReuseKind::Off, None) => Ok(Self::Off),
+            (DecodeReuseKind::Off, Some(_)) => Err(crate::ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::DecodeReuseLimit,
+                problem: ConfigProblem::NotSupported,
+            }),
+            (DecodeReuseKind::Memory, limit) => {
+                Ok(Self::Memory(limit.unwrap_or(ReuseLimit::DEFAULT)))
+            }
+            (DecodeReuseKind::TempFile, limit) => {
+                Ok(Self::TempFile(limit.unwrap_or(ReuseLimit::DEFAULT)))
+            }
         }
     }
 }

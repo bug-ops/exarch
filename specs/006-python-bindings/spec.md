@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-06
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -194,7 +194,10 @@ THEN extraction respects those settings
 | FR-112 | Reports and `PartialExtraction` exceptions SHALL carry typed warnings (`ExtractionWarning` and `CreationWarning` bases with `kind` and `message`, one final subclass per core variant, aliases `AnyExtractionWarning` and `AnyCreationWarning`; `warnings` was `list[str]`); every I/O exception and `VerificationIssue` SHALL carry `io_kind` (core `IoKind` token; `ErrorKind::OutOfMemory` is an `OSError`, not `MemoryError`); `InvalidArchiveError.non_utf8_entry_path` SHALL be set for a non-UTF-8 entry path; a `TarEntryTruncated` is `InvalidArchiveError` with `sub_code == "TAR_READER"`; `EntryNameCollision` on create is `InvalidConfigurationError(source_paths)`; paths cross the boundary as `os.fsdecode` plus `BoundaryPath::parse_os`, so bytes and surrogate-escaped paths reach core | must |
 | FR-113 | Every exception SHALL carry `leftover_path` (`str | None`, redacted like a message): the staging directory or empty output reservation a failure left on disk, also on a progress-callback cancellation; the I/O `OSError` attributes `restore`, `backup_path`, `leftover_path` and `filename` SHALL always be set (`None` when they do not apply); `OutputExistsError.filename` (and the `DestinationOccupied` refusal) and `SourceNotFoundError.filename` SHALL name the redacted path (#995, #1009) | must |
 | FR-114 | `InvalidConfigurationError.unmatched_patterns` SHALL replace `patterns` as the attribute naming the include patterns that matched no entry; `VerificationReport` SHALL expose `suspicious_entries` and `format`; `sub_code` SHALL be typed as the union of the four sub-code literals; `create_archive*` take `durability: str | None = None` (`None` is the default `"synced"`); the stub and the Node `index.d.ts` SHALL agree on every enumerable token of the core `ALL` tables, checked by `test_binding_parity.py`, which CI also runs on a change to the Node stubs (#1009, #1011) | must |
-| FR-115 | `ArchiveManifest.dispositions` SHALL be an attribute (not a method taking a `SecurityConfig`) holding the `EntryDisposition` list core computed when the archive was listed, under that call's config; each item has the class attribute `action` (`"extract"` for `ExtractDisposition` with `landing`, `"skip"` for `SkipDisposition` with `kind`), derived from core `DispositionKind`; an entry validation refuses is not reported (#1009, #998) | must |
+| FR-115 | `ArchiveManifest.dispositions` SHALL be an attribute (not a method taking a `SecurityConfig`) holding the `EntryDisposition` list core computed when the archive was listed, under that call's config; each item has the class attribute `action` (`"extract"` for `ExtractDisposition` with `landing`, `"skip"` for `SkipDisposition` with `kind`), derived from core `DispositionKind`; an entry validation refuses or that cannot be placed is a `RefuseDisposition` with `action` `"refuse"` and no payload (#1009, #998, #1036) | must |
+| FR-116 | `ArchiveEntry.modified` SHALL be exposed, as in Node and core, and `exarch.pyi` SHALL declare it (#1052) | must |
+| FR-117 | A core token the binding was not built to know SHALL pass through error attributes as its `as_str` text and SHALL degrade in reports to an `Unknown*` class (`UnknownExtractionWarning`, `UnknownCreationWarning`, `UnknownDisposition`, `UnknownMemoryEntry`, ...) carrying the token, instead of failing the call (#1054) | must |
+| FR-118 | `SecurityConfig` SHALL expose the relaxable core settings an error names in `relaxable_by`, as builders and properties: `allow_windows_reserved_names`, `max_tar_metadata_bytes`, `max_decoder_memory`, `compressed_member_allowance`, `max_solid_compression_ratio`, and `ListOptions.stored_targets`, with the integer rules of FR-098 (#1056) | must |
 
 ## 4. Non-Functional Requirements
 

@@ -75,6 +75,10 @@ impl PrePass for SinkPrePass<'_> {
         Ok(FilePlan::Reserve)
     }
 
+    fn charge_skipped(&mut self) -> Result<()> {
+        self.core.charge_skipped()
+    }
+
     fn reserve_symlink(&mut self, size: u64) -> Result<()> {
         self.core.reserve_symlink(size)
     }

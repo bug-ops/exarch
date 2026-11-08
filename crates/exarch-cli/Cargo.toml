@@ -26,7 +26,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tempfile.workspace = true
 
-[target.'cfg(not(target_os = "wasi"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
+signal-hook.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 ctrlc.workspace = true
 
 [dev-dependencies]

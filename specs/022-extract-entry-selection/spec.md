@@ -12,7 +12,7 @@ tags:
   - rust
 created: 2026-11-06
 status: implemented
-updated: 2026-11-06
+updated: 2026-11-08
 related:
   - "[[plan]]"
   - "[[tasks]]"
@@ -218,10 +218,10 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-040 | An entry skipped by selection or stripping SHALL NOT be charged to `max_total_size` or `max_file_size`, SHALL create no directory, and SHALL be counted in `files_skipped`, whatever the destination state; for `max_file_count` it SHALL be charged exactly as an allowlist-skipped entry is, which the audit of #831 and #846 fixed as: extraction charges no allowlist or selection skip, `list` charges the count alone, and `verify` charges the count alone (verify previously charged the full size and was aligned) | must |
+| FR-040 | An entry skipped by selection or stripping SHALL NOT be charged to `max_total_size` or `max_file_size`, SHALL create no directory, and SHALL be counted in `files_skipped`, whatever the destination state; for `max_file_count` it SHALL be charged exactly as an allowlist-skipped entry is, which since #1038 is: every entry, skipped ones included, is charged once to `max_file_count` by extract, `list` and `verify` alike (`list` and `verify` charge the count alone, never the size) | must |
 | FR-041 | `SkipKind` SHALL gain distinct kinds for "not selected" and "stripped away" (working names `NotSelected`, `StrippedAway`), so `ExtractionReport::skipped`, CLI `--json` `skipped_by_kind` and both bindings can tell them apart from `Duplicate` and `ExtensionNotAllowed` | must |
 | FR-042 | WHEN a compressed TAR is extracted, THE SYSTEM SHALL bound the decode of entries skipped by selection or stripping exactly as it bounds allowlist and duplicate skips: past `max_file_size` and `max_total_size`, skipped data SHALL NOT decode to more than `max_compression_ratio` times the compressed input read so far, else `ZipBomb` with scope `SkippedEntries` ([[002-format-handlers/spec]] FR-053, #863); an archive that extracts without a selection SHALL NOT be refused because of it | must |
-| FR-043 | WHEN an `include` pattern matches no entry in the whole archive (also an empty one), THE SYSTEM SHALL fail after the full scan and before the hardlink pass, with no pre-pass, with the top-level `ArchiveError::UnmatchedInclude { patterns }` naming every unmatched pattern (FFI kind `InvalidConfiguration`, setting `entry_include`); the error SHALL be wrapped in `Partial` when entries were written; `Atomic` staging SHALL roll back; `verify` reports it as an archive issue | must |
+| FR-043 | WHEN an `include` pattern matches no entry in the whole archive (also an empty one), THE SYSTEM SHALL fail after the full scan and before the hardlink pass, with no pre-pass, with the top-level `ArchiveError::UnmatchedInclude { patterns }` naming every unmatched pattern (FFI kind `InvalidConfiguration`, setting `entry_include`); the error SHALL be wrapped in `Partial` when entries were written; `Atomic` staging SHALL roll back; `list` fails with it in `ListMode::Strict` only (the verify pre-flight does not), and `verify` still reports it as an archive issue (#1033) | must |
 | FR-044 | An exclude pattern that matches nothing SHALL NOT be an error | must |
 | FR-045 | Progress callbacks SHALL report skipped entries (selected-out or stripped) as skipped, not as processed, and the entry counts the callback sees SHALL stay consistent with `ExtractionReport` | should |
 
@@ -232,7 +232,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 | FR-050 | `ListRequest` and `VerifyRequest` SHALL accept the same selection and rewrite value as extraction and SHALL interpret it with the same code; there SHALL be no second implementation of matching or stripping | must |
 | FR-051 | `ArchiveManifest::landing_paths` and `landings` SHALL project through the selection and rewrite stored in the manifest (never one taken from the config argument): entries not selected and entries stripped away SHALL be omitted, and every other landing SHALL be the rewritten path ([[019-verify-and-list-model/spec]] FR-060) | must |
 | FR-052 | `verify` SHALL report as issues every refusal `extract` raises for the same selection (traversal after stripping, link escape, hardlink to a non-extracted target, collisions that fail, placement conflicts, over-long landings), so a passing `verify` with a selection never precedes a failing `extract` with it | must |
-| FR-053 | `list` SHALL let the caller tell which entries a selection would extract and where each would land: `ArchiveManifest` stores the selection it was listed with (`selection()`), and `ArchiveManifest::dispositions(&SecurityConfig)` yields each entry with `Disposition::{Extract(LandingPath), Skip(SkipKind)}`; the config supplies only limits and policies, as for `landing_paths`, never the selection; an entry whose validation refuses is not reported; `ArchiveManifest::total_size()` keeps counting every entry; every scanned entry is still charged to `max_file_count` | must |
+| FR-053 | `list` SHALL let the caller tell which entries a selection would extract and where each would land: `ArchiveManifest` stores the selection it was listed with (`selection()`), and `ArchiveManifest::dispositions(&SecurityConfig)` yields each entry with `Disposition::{Extract(LandingPath), Skip(SkipKind), Refuse}`, where `Refuse` is an entry that validation or policy refuses or that cannot be placed (#1036); the config supplies only limits and policies, as for `landing_paths`, never the selection; `ArchiveManifest::total_size()` keeps counting every entry; every scanned entry is still charged to `max_file_count` | must |
 | FR-054 | `verify` SHALL keep validating the original path of every entry, selected or not, as `extract` does (FR-011); unselected entries SHALL NOT produce link, placement or collision findings of their own | must |
 
 ### Flatten
@@ -275,7 +275,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
 | `EntrySelection` (working) | Validated include and exclude pattern lists; default selects everything | `include`, `exclude`; `selects(&NormalizedPath) -> Selected` |
-| `EntryPattern` (alias of the creation `ExcludePattern`) | One parsed pattern; opaque glob value since #1000 ([[023-entry-selection-glob-patterns/spec]]) | `TryFrom<&str>`, `Display`, `matches(&Path)`; was `Exact`, `Prefix`, `Suffix`, `Path` |
+| `EntryPattern` (formerly the creation `ExcludePattern`, renamed in #1041) | One parsed pattern; opaque glob value since #1000 ([[023-entry-selection-glob-patterns/spec]]) | `TryFrom<&str>`, `Display`, `matches(&Path)`; was `Exact`, `Prefix`, `Suffix`, `Path` |
 | `PathRewrite` (working) | Closed enum for how a validated path becomes a landing | `Keep`, `Strip(StripComponents)`, `Flatten` |
 | `StripComponents` (working) | Newtype: 1 up to the maximum path depth; never zero | boundary parse from `u64`/`i64` |
 | `Selected` (working) | Result of testing an entry: extract it, or leave it out for a stated reason | `Extract`, `Skip(NotSelected \| StrippedAway)` |
@@ -410,7 +410,7 @@ All sixteen questions from the research draft were resolved by the user's approv
 - [[015-atomic-force-destination-swap-hardening/spec]] — `--atomic --force` swap
 - [[019-verify-and-list-model/spec]] — `landing_paths`, `landings`, verify models extraction (FR-060, FR-061)
 - [[020-reader-sink-and-in-memory-api/spec]] — sinks run the same gates
-- [[021-create-staging-and-output-policy/spec]] — the pattern grammar (`ExcludePattern`) reused here; create `--strip-prefix`
+- [[021-create-staging-and-output-policy/spec]] — the pattern grammar (`EntryPattern`) reused here; create `--strip-prefix`
 - [[023-entry-selection-glob-patterns/spec]] — glob grammar that replaces the four-variant grammar (#1000)
 - [python/cpython `tarfile`](https://docs.python.org/3/library/tarfile.html#tarfile.TarFile.extractall) — `extractall(members=...)` and the `filter` callable
 - [PEP 706](https://peps.python.org/pep-0706/) — `tarfile` extraction filters

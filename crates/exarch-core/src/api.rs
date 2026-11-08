@@ -344,8 +344,6 @@ pub fn list_archive<P: AsRef<Path>>(
 /// Hardlinks are materialized after every other entry, so their path and
 /// target are validated against the final tree.
 ///
-/// # Limitations
-///
 /// Name lengths are checked on the entry's relative path. Extraction adds the
 /// destination prefix, so a long destination can make extraction fail with
 /// `File name too long` for an entry `verify` accepted.

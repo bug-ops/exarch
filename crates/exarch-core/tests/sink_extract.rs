@@ -347,11 +347,11 @@ fn skipped_duplicate_hardlink_is_counted_and_not_delivered() {
     assert!(report.warnings.is_empty());
 }
 
-fn tree_node_quota(error: &ArchiveError) -> Option<usize> {
+fn file_count_quota(error: &ArchiveError) -> Option<usize> {
     match error {
-        ArchiveError::PartialExtraction(partial) => tree_node_quota(partial.cause()),
+        ArchiveError::PartialExtraction(partial) => file_count_quota(partial.cause()),
         ArchiveError::QuotaExceeded {
-            resource: exarch_core::QuotaResource::TreeNodes { max },
+            resource: exarch_core::QuotaResource::FileCount { max, .. },
         } => Some(*max),
         _ => None,
     }
@@ -364,7 +364,7 @@ fn small_tree_config() -> SecurityConfig {
 }
 
 #[test]
-fn a_flood_of_directory_entries_exhausts_the_node_budget() {
+fn a_flood_of_directory_entries_exhausts_the_file_count() {
     let mut sink = RecordingSink::default();
     let entries: Vec<_> = (0..16)
         .map(|i| sink_support::tar_dir(&format!("d{i}/")))
@@ -373,24 +373,7 @@ fn a_flood_of_directory_entries_exhausts_the_node_budget() {
         .with_options(SinkOptions::default())
         .extract(tar_reader(&entries), &mut sink)
         .unwrap_err();
-    assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[test]
-fn case_variant_directories_charge_the_node_budget() {
-    let mut sink = RecordingSink::default();
-    let entries: Vec<_> = [
-        "aaaa/", "Aaaa/", "aAaa/", "aaAa/", "aaaA/", "AAaa/", "AaAa/",
-    ]
-    .into_iter()
-    .map(sink_support::tar_dir)
-    .collect();
-    let error = SinkExtractRequest::new(&small_tree_config())
-        .with_options(SinkOptions::default())
-        .extract(tar_reader(&entries), &mut sink)
-        .unwrap_err();
-    assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
+    assert_eq!(file_count_quota(&error), Some(2), "{error:?}");
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -402,7 +385,7 @@ fn case_variant_directories_do_not_alias_on_a_case_sensitive_host() {
         .map(sink_support::tar_dir)
         .collect();
     let config = SecurityConfig::default()
-        .with_max_file_count(exarch_core::non_zero!(2))
+        .with_max_file_count(exarch_core::non_zero!(4))
         .with_max_path_depth(exarch_core::non_zero!(2));
     SinkExtractRequest::new(&config)
         .with_options(SinkOptions::default())

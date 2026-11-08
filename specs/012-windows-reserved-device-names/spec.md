@@ -274,7 +274,10 @@ new persisted or transmitted entity is introduced.
   text before the first `.` with trailing spaces trimmed (so `NUL.tar.gz`,
   `aux.` and `CON ` match, while `file.CON` and `COM10` do not), and the set
   is `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, the superscript
-  forms `COM` and `LPT` followed by `¹`, `²` or `³`, `CONIN$` and `CONOUT$`.
+  forms `COM` and `LPT` followed by `¹`, `²`, `³` or `⁴` to `⁹`, `CONIN$`, `CONOUT$`,
+  `CLOCK$` and `CONFIG$` (#1030: a superset of the lists of zip2 9.4.1 and 9.4.2;
+  whether Windows 10/11 treat the extra names as devices is unconfirmed, so the
+  list errs on the side of refusal).
   Link targets of symlinks and hardlinks get the same component check
   (`safe_symlink.rs`, `security/hardlink.rs`).
 

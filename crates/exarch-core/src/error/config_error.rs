@@ -47,6 +47,8 @@ closed_enum! {
         MaxTarMetadataBytes => "max_tar_metadata_bytes",
         /// `SecurityConfig::max_decoder_memory`.
         MaxDecoderMemory => "max_decoder_memory",
+        /// `SecurityConfig::compressed_member_allowance`.
+        CompressedMemberAllowance => "compressed_member_allowance",
         /// The decompression budget of an integrity check.
         DecompressionBudget => "decompression_budget",
         /// An entry of the extension allowlist.
@@ -159,6 +161,7 @@ impl ConfigSetting {
             | Self::MaxSolidBlockMemory
             | Self::MaxTarMetadataBytes
             | Self::MaxDecoderMemory
+            | Self::CompressedMemberAllowance
             | Self::StripPrefix
             | Self::Durability
             | Self::MaxBytes => self.as_str(),
@@ -239,12 +242,12 @@ pub enum ConfigProblem {
     },
     /// The entry contains a NUL byte.
     ContainsNul,
-    /// A creation exclude pattern the matcher does not support.
-    ExcludePatternRefused {
+    /// A glob pattern the matcher does not support.
+    PatternRefused {
         /// The refused pattern text, cut to the maximum entry length.
         pattern: String,
         /// Why the pattern is refused.
-        reason: ExcludeRefusal,
+        reason: PatternRefusal,
     },
     /// The path exists and is not a directory.
     NotADirectory,
@@ -301,18 +304,18 @@ impl ProtectedPath {
 }
 
 closed_enum! {
-    /// Why a creation exclude pattern is refused.
+    /// Why a glob entry pattern is refused.
     ///
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::ExcludeRefusal;
+    /// use exarch_core::PatternRefusal;
     ///
-    /// assert_eq!(ExcludeRefusal::BraceAlternation.as_str(), "brace_alternation");
+    /// assert_eq!(PatternRefusal::BraceAlternation.as_str(), "brace_alternation");
     /// ```
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[non_exhaustive]
-    pub enum ExcludeRefusal {
+    pub enum PatternRefusal {
         /// The pattern is empty
         Empty => "empty",
         /// The pattern is longer than the maximum entry length
@@ -344,7 +347,7 @@ closed_enum! {
     }
 }
 
-impl ExcludeRefusal {
+impl PatternRefusal {
     /// A short explanation for a message.
     #[must_use]
     pub const fn explanation(self) -> &'static str {
@@ -426,7 +429,7 @@ impl fmt::Display for ConfigProblem {
                 write!(f, "exceeds maximum length of {max} bytes (got {got} bytes)")
             }
             Self::ContainsNul => f.write_str("contains null bytes - potential security issue"),
-            Self::ExcludePatternRefused { pattern, reason } => {
+            Self::PatternRefused { pattern, reason } => {
                 write!(f, "{pattern:?} {}", reason.explanation())
             }
             Self::NotADirectory => f.write_str("is not a directory"),

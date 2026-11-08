@@ -35,6 +35,8 @@ use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
 use crate::error::IntoJsError;
+use crate::mirror::mirror_from_closed_core;
+use crate::mirror::mirror_into_core;
 use crate::report::MAX_SAFE_INTEGER;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
@@ -103,14 +105,10 @@ pub enum ZipConsistencyPolicy {
     Ignore,
 }
 
-impl From<ZipConsistencyPolicy> for CorePolicy {
-    fn from(policy: ZipConsistencyPolicy) -> Self {
-        match policy {
-            ZipConsistencyPolicy::Enforce => Self::Enforce,
-            ZipConsistencyPolicy::Ignore => Self::Ignore,
-        }
-    }
-}
+mirror_into_core!(
+    ZipConsistencyPolicy => CorePolicy,
+    [Enforce, Ignore]
+);
 
 impl TryFrom<CorePolicy> for ZipConsistencyPolicy {
     type Error = Error;
@@ -144,15 +142,10 @@ pub enum ExistingFiles {
     Refuse,
 }
 
-impl From<ExistingFiles> for CoreExistingFiles {
-    fn from(policy: ExistingFiles) -> Self {
-        match policy {
-            ExistingFiles::Skip => Self::Skip,
-            ExistingFiles::Overwrite => Self::Overwrite,
-            ExistingFiles::Refuse => Self::Refuse,
-        }
-    }
-}
+mirror_into_core!(
+    ExistingFiles => CoreExistingFiles,
+    [Skip, Overwrite, Refuse]
+);
 
 impl TryFrom<CoreExistingFiles> for ExistingFiles {
     type Error = Error;
@@ -188,25 +181,15 @@ pub enum DecodeReuseKind {
     TempFile,
 }
 
-impl From<DecodeReuseKind> for CoreDecodeReuseKind {
-    fn from(kind: DecodeReuseKind) -> Self {
-        match kind {
-            DecodeReuseKind::Off => Self::Off,
-            DecodeReuseKind::Memory => Self::Memory,
-            DecodeReuseKind::TempFile => Self::TempFile,
-        }
-    }
-}
+mirror_into_core!(
+    DecodeReuseKind => CoreDecodeReuseKind,
+    [Off, Memory, TempFile]
+);
 
-impl From<CoreDecodeReuseKind> for DecodeReuseKind {
-    fn from(kind: CoreDecodeReuseKind) -> Self {
-        match kind {
-            CoreDecodeReuseKind::Off => Self::Off,
-            CoreDecodeReuseKind::Memory => Self::Memory,
-            CoreDecodeReuseKind::TempFile => Self::TempFile,
-        }
-    }
-}
+mirror_from_closed_core!(
+    CoreDecodeReuseKind => DecodeReuseKind,
+    [Off, Memory, TempFile]
+);
 
 /// How extraction stages its output before it is visible at the destination.
 ///
@@ -229,15 +212,10 @@ pub enum Staging {
     AtomicReplace,
 }
 
-impl From<Staging> for CoreStaging {
-    fn from(staging: Staging) -> Self {
-        match staging {
-            Staging::InPlace => Self::InPlace,
-            Staging::Atomic => Self::Atomic,
-            Staging::AtomicReplace => Self::AtomicReplace,
-        }
-    }
-}
+mirror_into_core!(
+    Staging => CoreStaging,
+    [InPlace, Atomic, AtomicReplace]
+);
 
 impl TryFrom<CoreStaging> for Staging {
     type Error = Error;
@@ -356,8 +334,8 @@ impl SecurityConfig {
 
     /// Sets the maximum file count.
     ///
-    /// `extractArchive` counts files, symlinks and hardlinks, not directories;
-    /// `listArchive` and `verifyArchive` count every entry.
+    /// Every entry counts in every operation and format: files, directories,
+    /// links and skipped entries.
     ///
     /// # Errors
     ///
@@ -420,6 +398,83 @@ impl SecurityConfig {
     pub fn with_allow_solid_archives(&mut self, allow: bool) -> &Self {
         self.inner.solid_archives = self.inner.solid_archives.with_allowed(allow);
         self
+    }
+
+    /// Allows or denies Windows reserved device names (`CON`, `NUL`, `COM1`,
+    /// ...) as path components.
+    ///
+    /// Only consulted when extracting on Windows; it has no effect elsewhere.
+    /// Denied by default.
+    #[napi(js_name = "withAllowWindowsReservedNames")]
+    pub fn with_allow_windows_reserved_names(&mut self, allow: bool) -> &Self {
+        self.inner.allowed.windows_reserved_names = exarch_core::Admit::from_allowed(allow);
+        self
+    }
+
+    /// Sets the budget in bytes for TAR metadata and for the decoded bytes
+    /// that follow the end-of-archive marker of a compressed TAR.
+    ///
+    /// Default: 4 MiB.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_tar_metadata_bytes`)
+    /// if `size` is not a positive whole number of bytes.
+    #[napi(js_name = "withMaxTarMetadataBytes")]
+    pub fn with_max_tar_metadata_bytes(&mut self, env: Env, size: f64) -> Result<&Self> {
+        self.try_set_max_tar_metadata_bytes(size)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Sets the memory in bytes a decoder may use for its dictionary or
+    /// window.
+    ///
+    /// Default: 256 MiB.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_decoder_memory`) if
+    /// `size` is not a positive whole number of bytes.
+    #[napi(js_name = "withMaxDecoderMemory")]
+    pub fn with_max_decoder_memory(&mut self, env: Env, size: f64) -> Result<&Self> {
+        self.try_set_max_decoder_memory(size)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Sets the base number of gzip members or bzip2 streams a compressed TAR
+    /// may hold; every 16 KiB of decoded output adds one more.
+    ///
+    /// Default: 10,000.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is
+    /// `compressed_member_allowance`) if `count` is not a positive whole
+    /// number.
+    #[napi(js_name = "withCompressedMemberAllowance")]
+    pub fn with_compressed_member_allowance(&mut self, env: Env, count: f64) -> Result<&Self> {
+        self.try_set_compressed_member_allowance(count)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Sets the compression ratio limit of a solid 7z block.
+    ///
+    /// It exists only while solid archives are allowed, so call
+    /// `withAllowSolidArchives(true)` first.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is
+    /// `max_solid_compression_ratio`) if `ratio` is not a positive finite
+    /// number, or while solid archives are not allowed.
+    #[napi(js_name = "withMaxSolidCompressionRatio")]
+    pub fn with_max_solid_compression_ratio(&mut self, env: Env, ratio: f64) -> Result<&Self> {
+        self.try_set_max_solid_compression_ratio(ratio)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
     }
 
     /// Sets how ZIP archives with ambiguous structure are handled.
@@ -783,6 +838,41 @@ impl SecurityConfig {
             .map(|limits| saturating_i64(limits.max_block_memory.get()))
     }
 
+    /// Whether Windows reserved device names are allowed as path components.
+    #[napi(getter)]
+    pub fn get_allow_windows_reserved_names(&self) -> bool {
+        self.inner.allowed.windows_reserved_names.is_allowed()
+    }
+
+    /// Budget in bytes for TAR metadata.
+    #[napi(getter)]
+    pub fn get_max_tar_metadata_bytes(&self) -> i64 {
+        saturating_i64(self.inner.max_tar_metadata_bytes.get())
+    }
+
+    /// Memory in bytes a decoder may use for its dictionary or window.
+    #[napi(getter)]
+    pub fn get_max_decoder_memory(&self) -> i64 {
+        saturating_i64(self.inner.max_decoder_memory.get())
+    }
+
+    /// Base number of gzip members or bzip2 streams a compressed TAR may
+    /// hold.
+    #[napi(getter)]
+    pub fn get_compressed_member_allowance(&self) -> i64 {
+        saturating_i64(self.inner.compressed_member_allowance.get())
+    }
+
+    /// Compression ratio limit of a solid 7z block, or `null` while solid
+    /// archives are not allowed.
+    #[napi(getter)]
+    pub fn get_max_solid_compression_ratio(&self) -> Option<f64> {
+        self.inner
+            .solid_archives
+            .limits()
+            .map(|limits| limits.max_ratio.get())
+    }
+
     /// List of allowed file extensions, or `null` when every extension is
     /// allowed.
     ///
@@ -952,6 +1042,47 @@ impl SecurityConfig {
         Ok(())
     }
 
+    /// Env-free core of `withMaxTarMetadataBytes`.
+    fn try_set_max_tar_metadata_bytes(&mut self, size: f64) -> std::result::Result<(), CoreError> {
+        self.inner.max_tar_metadata_bytes = byte_count(ConfigSetting::MaxTarMetadataBytes, size)?;
+        Ok(())
+    }
+
+    /// Env-free core of `withMaxDecoderMemory`.
+    fn try_set_max_decoder_memory(&mut self, size: f64) -> std::result::Result<(), CoreError> {
+        self.inner.max_decoder_memory = byte_count(ConfigSetting::MaxDecoderMemory, size)?;
+        Ok(())
+    }
+
+    /// Env-free core of `withCompressedMemberAllowance`.
+    fn try_set_compressed_member_allowance(
+        &mut self,
+        count: f64,
+    ) -> std::result::Result<(), CoreError> {
+        self.inner.compressed_member_allowance =
+            byte_count(ConfigSetting::CompressedMemberAllowance, count)?;
+        Ok(())
+    }
+
+    /// Env-free core of `withMaxSolidCompressionRatio`.
+    fn try_set_max_solid_compression_ratio(
+        &mut self,
+        ratio: f64,
+    ) -> std::result::Result<(), CoreError> {
+        let ratio = RatioLimit::parse(ConfigSetting::MaxSolidCompressionRatio, ratio)?;
+        let Some(limits) = self.inner.solid_archives.limits() else {
+            return Err(CoreError::InvalidConfiguration {
+                setting: ConfigSetting::MaxSolidCompressionRatio,
+                problem: ConfigProblem::NotSupported,
+            });
+        };
+        self.inner.solid_archives = self
+            .inner
+            .solid_archives
+            .with_limits(limits.with_max_ratio(ratio))?;
+        Ok(())
+    }
+
     /// Env-free core of `addAllowedExtension`, so the validation is testable
     /// without a JS environment.
     fn try_add_allowed_extension(&mut self, ext: &str) -> std::result::Result<(), CoreError> {
@@ -1079,7 +1210,7 @@ fn parse_patterns(
 ///
 /// | Setting | Default Value |
 /// |---------|--------------|
-/// | `compression_level` | 6 (balanced) |
+/// | `compression_level` | exarch-core's default level (`compressionLevel` reports it) |
 /// | `preserve_permissions` | true |
 /// | `follow_symlinks` | false (secure) |
 /// | `include_hidden` | false |
@@ -1273,7 +1404,7 @@ impl CreationConfig {
 impl CreationConfig {
     /// Env-free core of `addExcludePattern`.
     fn try_add_exclude_pattern(&mut self, pattern: &str) -> std::result::Result<(), CoreError> {
-        let pattern = exarch_core::ExcludePattern::try_from(pattern)?;
+        let pattern = exarch_core::EntryPattern::try_from(pattern)?;
         self.inner.exclude_patterns.push(pattern);
         Ok(())
     }
@@ -1285,7 +1416,7 @@ impl CreationConfig {
     ) -> std::result::Result<(), CoreError> {
         self.inner.exclude_patterns = patterns
             .iter()
-            .map(|pattern| exarch_core::ExcludePattern::try_from(pattern.as_str()))
+            .map(|pattern| exarch_core::EntryPattern::try_from(pattern.as_str()))
             .collect::<std::result::Result<_, _>>()?;
         Ok(())
     }
@@ -1506,12 +1637,10 @@ impl SinkOptions {
     /// The most bytes kept for reuse, or `null` while decode reuse is `'off'`.
     #[napi(getter)]
     pub fn get_decode_reuse_limit(&self) -> Option<i64> {
-        match self.inner.decode_reuse {
-            DecodeReuse::Memory(limit) | DecodeReuse::TempFile(limit) => {
-                Some(saturating_i64(limit.get()))
-            }
-            _ => None,
-        }
+        self.inner
+            .decode_reuse
+            .limit()
+            .map(|limit| saturating_i64(limit.get()))
     }
 }
 
@@ -1527,27 +1656,93 @@ impl SinkOptions {
                 positive_from_f64(ConfigSetting::DecodeReuseLimit, bytes).map(ReuseLimit::new)
             })
             .transpose()?;
-        self.inner.decode_reuse = match (mode, limit) {
-            (DecodeReuseKind::Off, None) => DecodeReuse::Off,
-            (DecodeReuseKind::Off, Some(_)) => {
-                return Err(CoreError::InvalidConfiguration {
-                    setting: ConfigSetting::DecodeReuseLimit,
-                    problem: ConfigProblem::NotSupported,
-                });
-            }
-            (DecodeReuseKind::Memory, limit) => {
-                DecodeReuse::Memory(limit.unwrap_or(ReuseLimit::DEFAULT))
-            }
-            (DecodeReuseKind::TempFile, limit) => {
-                DecodeReuse::TempFile(limit.unwrap_or(ReuseLimit::DEFAULT))
-            }
-        };
+        self.inner.decode_reuse = DecodeReuse::from_parts(mode.into(), limit)?;
         Ok(())
     }
 
     /// Returns the inner `CoreSinkOptions`.
     pub fn to_core(&self) -> exarch_core::SinkOptions {
         self.inner
+    }
+}
+
+/// Whether listing reads the symlink targets a 7z archive keeps in compressed
+/// entry data.
+///
+/// Reading them decodes part of the archive, which in a solid block can be
+/// most of it, so `'skip'` is the default and reports such a target as
+/// `'unread'`. Other formats always report their targets.
+// Values must equal the core `StoredTargets` variants, lower-cased.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredTargets {
+    /// Leave 7z link targets unread (the default).
+    #[napi(value = "skip")]
+    Skip,
+    /// Read the targets, decoding the blocks that hold them.
+    #[napi(value = "read")]
+    Read,
+}
+
+impl From<StoredTargets> for exarch_core::StoredTargets {
+    fn from(targets: StoredTargets) -> Self {
+        match targets {
+            StoredTargets::Skip => Self::Skip,
+            StoredTargets::Read => Self::Read,
+        }
+    }
+}
+
+/// Options controlling listing behavior (non-security).
+///
+/// # Defaults
+///
+/// | Setting | Default Value |
+/// |---------|--------------|
+/// | `storedTargets` | `'skip'` |
+#[napi]
+#[derive(Debug, Clone)]
+pub struct ListOptions {
+    stored_targets: StoredTargets,
+}
+
+#[napi]
+impl ListOptions {
+    /// Creates a new `ListOptions` with defaults (7z link targets unread).
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            stored_targets: StoredTargets::Skip,
+        }
+    }
+
+    /// Creates a `ListOptions` with defaults.
+    ///
+    /// This is equivalent to calling `new ListOptions()`.
+    #[napi(factory)]
+    pub fn default() -> Self {
+        Self::new()
+    }
+
+    /// Sets whether the link targets a 7z archive keeps in entry data are
+    /// read.
+    #[napi(js_name = "withStoredTargets")]
+    pub fn with_stored_targets(&mut self, targets: StoredTargets) -> &Self {
+        self.stored_targets = targets;
+        self
+    }
+
+    /// Whether 7z link targets are read.
+    #[napi(getter)]
+    pub fn get_stored_targets(&self) -> StoredTargets {
+        self.stored_targets
+    }
+}
+
+impl ListOptions {
+    /// The inner core options.
+    pub fn to_core(&self) -> exarch_core::ListOptions {
+        exarch_core::ListOptions::default().with_stored_targets(self.stored_targets.into())
     }
 }
 
@@ -2432,8 +2627,8 @@ mod tests {
             err,
             CoreError::InvalidConfiguration {
                 setting: ConfigSetting::ExcludePattern,
-                problem: ConfigProblem::ExcludePatternRefused {
-                    reason: exarch_core::ExcludeRefusal::ContainsNul,
+                problem: ConfigProblem::PatternRefused {
+                    reason: exarch_core::PatternRefusal::ContainsNul,
                     ..
                 }
             }
@@ -2466,13 +2661,13 @@ mod tests {
     #[test]
     fn test_creation_config_add_exclude_pattern_refuses_unsupported_glob_syntax() {
         for (shape, reason) in [
-            ("{a}", exarch_core::ExcludeRefusal::BraceAlternation),
-            ("[a", exarch_core::ExcludeRefusal::UnterminatedClass),
-            ("{a,b}", exarch_core::ExcludeRefusal::ContainsComma),
-            ("!a.txt", exarch_core::ExcludeRefusal::LeadingNegation),
-            ("a**b", exarch_core::ExcludeRefusal::UnsupportedWildcard),
-            (" .env", exarch_core::ExcludeRefusal::PaddedWithBlank),
-            ("a,b", exarch_core::ExcludeRefusal::ContainsComma),
+            ("{a}", exarch_core::PatternRefusal::BraceAlternation),
+            ("[a", exarch_core::PatternRefusal::UnterminatedClass),
+            ("{a,b}", exarch_core::PatternRefusal::ContainsComma),
+            ("!a.txt", exarch_core::PatternRefusal::LeadingNegation),
+            ("a**b", exarch_core::PatternRefusal::UnsupportedWildcard),
+            (" .env", exarch_core::PatternRefusal::PaddedWithBlank),
+            ("a,b", exarch_core::PatternRefusal::ContainsComma),
         ] {
             let mut config = CreationConfig::new();
             let err = config.try_add_exclude_pattern(shape).unwrap_err();
@@ -2480,7 +2675,7 @@ mod tests {
                 err,
                 CoreError::InvalidConfiguration {
                     setting: ConfigSetting::ExcludePattern,
-                    problem: ConfigProblem::ExcludePatternRefused { reason: got, .. }
+                    problem: ConfigProblem::PatternRefused { reason: got, .. }
                 } if got == reason,
                 "{shape}"
             );

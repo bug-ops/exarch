@@ -312,7 +312,7 @@ Builder-style security configuration.
 config = exarch.SecurityConfig()
 config = config.with_max_file_size(100 * 1024 * 1024)  # 100 MB per file
 config = config.with_max_total_size(1024 * 1024 * 1024)  # 1 GB total
-config = config.with_max_file_count(10_000)  # Max 10k files
+config = config.with_max_file_count(10_000)  # Max 10k entries
 config = config.with_max_compression_ratio(50.0)  # Zip bomb threshold
 config = config.add_allowed_extension(".txt")  # Extension allowlist
 config = config.add_allowed_extension(".md")
@@ -330,7 +330,22 @@ config = config.with_parallel_decode_memory(
 )  # 7z LZMA2 lookahead memory (default 128 MiB); None decodes on one thread
 # Each extract/verify call may start up to 16 worker threads and hold its own
 # lookahead, so concurrent calls multiply both.
+config = config.with_allow_windows_reserved_names(True)  # CON, NUL, ... (refused by default)
+config = config.with_max_tar_metadata_bytes(
+    8 * 1024 * 1024
+)  # TAR header/metadata bytes between entries (default 4 MiB)
+config = config.with_max_decoder_memory(512 * 1024 * 1024)  # Decoder memory (default 256 MiB)
+config = config.with_compressed_member_allowance(
+    20_000
+)  # Base gzip members / bzip2 streams of a compressed TAR (default 10,000)
+config = config.with_max_solid_compression_ratio(
+    500.0
+)  # Solid 7z block ratio; needs with_allow_solid_archives first
 ```
+
+Every setting an error names in `relaxable_by` has a setter. `list_archive*` takes `options=ListOptions().with_stored_targets()` to read the 7z link targets that a listing leaves unread by default.
+
+**Newer core values.** Output tokens (`kind`, `code`, `sub_code`, `io_kind`, entry and disposition kinds, ...) are the strings `exarch-core` emits, so a value added to the core after your stubs were written still arrives as a plain `str`; an unknown report class falls back to its base class (`ArchiveEntry`, `LinkTarget` with `state == "unknown"`, `EntryDisposition`, `MemoryEntry`, `ExtractionWarning`, `CreationWarning`) instead of raising.
 
 **Patterns.** Include, exclude and `CreationConfig` exclude patterns share one glob grammar (matched case-sensitively on raw bytes, `\` is a separator):
 
@@ -345,7 +360,7 @@ config = config.with_parallel_decode_memory(
 
 `{a,b}`, a leading `!`, `a**b`, negated or POSIX classes, unterminated classes and commas are refused (`InvalidConfigurationError`, `setting` is `exclude_pattern`, `entry_include` or `entry_exclude`).
 
-**Entry selection.** Include and exclude patterns, `strip_components` and `flatten` live in `SecurityConfig`, so `extract_archive*`, `list_archive*` and `verify_archive*` apply them identically (`manifest.dispositions` shows where each listed entry lands or why it is skipped, under the config passed to `list_archive*`). Order of operations: the entry name is validated, matched against the patterns on its original (pre-strip) path, stripped or flattened, and the new name is validated again. An exclude pattern wins over an include pattern, an include pattern that matches nothing fails the extraction (`InvalidConfigurationError`, `setting == "entry_include"`, `unmatched_patterns`), and `staging="atomic_replace"` refuses a selection.
+**Entry selection.** Include and exclude patterns, `strip_components` and `flatten` live in `SecurityConfig`, so `extract_archive*`, `list_archive*` and `verify_archive*` apply them identically (`manifest.dispositions` shows where each listed entry lands, why it is skipped, or that it is refused, under the config passed to `list_archive*`). Order of operations: the entry name is validated, matched against the patterns on its original (pre-strip) path, stripped or flattened, and the new name is validated again. An exclude pattern wins over an include pattern, an include pattern that matches nothing fails the extraction (`InvalidConfigurationError`, `setting == "entry_include"`, `unmatched_patterns`), and `staging="atomic_replace"` refuses a selection.
 
 ## Security Features
 

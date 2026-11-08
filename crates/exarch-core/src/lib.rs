@@ -18,11 +18,11 @@
 //! # }
 //! ```
 
-#![deny(unsafe_code)]
-#![warn(missing_docs)]
+// Crate-local on purpose: the bin and cdylib crates export nearly every `pub`
+// item, so `unreachable_pub` would flag them. `pub(crate)` marks internal items
+// in private modules; `redundant_pub_crate` contradicts `unreachable_pub` and
+// would push them back to `pub`.
 #![warn(unreachable_pub)]
-// `pub(crate)` marks internal items in private modules; `redundant_pub_crate`
-// contradicts `unreachable_pub` and would push them back to `pub`.
 #![allow(clippy::redundant_pub_crate)]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
@@ -38,6 +38,7 @@ mod inspection;
 mod limit;
 mod listed;
 mod path_text;
+mod pattern;
 mod reader;
 mod report;
 mod request;
@@ -86,7 +87,6 @@ pub use error::ConfigProblem;
 pub use error::ConfigSetting;
 pub use error::EndRecordKind;
 pub use error::ErrorCode;
-pub use error::ExcludeRefusal;
 pub use error::FfiDetail;
 pub use error::FfiErrorMessage;
 pub use error::FfiKind;
@@ -103,6 +103,7 @@ pub use error::NativeKind;
 pub use error::Partial;
 pub use error::PartialOutcome;
 pub use error::PartialWrites;
+pub use error::PatternRefusal;
 pub use error::PolicySetting;
 pub use error::PortableHazard;
 pub use error::ProtectedPath;
@@ -178,7 +179,6 @@ pub use request::OutputFormat;
 pub use request::OutputPolicy;
 pub use request::SinkExtractRequest;
 pub use request::VerifyRequest;
-pub use selection::EntryPattern;
 pub use selection::EntrySelection;
 pub use selection::PathRewrite;
 pub use selection::StripComponents;
@@ -189,7 +189,7 @@ pub use creation::CreationConfig;
 pub use creation::CreationReport;
 pub use creation::CreationWarning;
 pub use creation::CreationWarningKind;
-pub use creation::ExcludePattern;
+pub use pattern::EntryPattern;
 pub use writer::ArchiveWriter;
 
 // Re-export inspection types

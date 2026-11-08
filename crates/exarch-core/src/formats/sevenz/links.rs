@@ -17,6 +17,7 @@ use crate::SecurityConfig;
 use crate::copy::CopyError;
 use crate::formats::common;
 use crate::formats::source_fault::ReadFamily;
+use crate::formats::source_fault::is_sevenz_checksum;
 use crate::inspection::integrity::Charge;
 use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
@@ -265,15 +266,6 @@ pub(super) fn blocks_closed_to_links(
     closed
 }
 
-/// Whether `error` is the checksum failure sevenz-rust2 raises for an entry
-/// whose data was read to its end, which leaves the block stream aligned.
-pub(super) fn is_entry_checksum_error(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .and_then(|inner| inner.downcast_ref::<sevenz_rust2::Error>())
-        .is_some_and(|inner| matches!(inner, sevenz_rust2::Error::ChecksumVerificationFailed))
-}
-
 /// Reads past a file the walk does not want, ignoring its own checksum failure
 /// so the rest of its block stays aligned.
 pub(super) fn drain_unwanted(
@@ -283,7 +275,7 @@ pub(super) fn drain_unwanted(
     if is_sevenz_payload(file) {
         match io::copy(&mut (&mut *reader).take(file.size), &mut io::sink()) {
             Ok(_) => {}
-            Err(e) if is_entry_checksum_error(&e) => {}
+            Err(e) if is_sevenz_checksum(&e) => {}
             Err(e) => return Err(sevenz_rust2::Error::Io(e, "link walk".into())),
         }
     }

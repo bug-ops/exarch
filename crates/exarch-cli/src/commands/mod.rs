@@ -1,5 +1,14 @@
 //! Command implementations.
 
+use crate::cli::PolicyFlags;
+use crate::error::convert_error;
+use crate::operation::Operation;
+use exarch_core::ArchiveError;
+use exarch_core::ConfigSetting;
+use exarch_core::SecurityConfig;
+use exarch_core::non_zero_usize;
+use std::path::Path;
+
 pub mod completion;
 pub mod create;
 pub mod extract;
@@ -57,15 +66,6 @@ impl CommandError {
 
 /// What a command returns.
 pub type CommandResult = Result<Outcome, CommandError>;
-
-use crate::cli::PolicyFlags;
-use crate::error::convert_error;
-use crate::operation::Operation;
-use exarch_core::ArchiveError;
-use exarch_core::ConfigSetting;
-use exarch_core::SecurityConfig;
-use exarch_core::non_zero_usize;
-use std::path::Path;
 
 /// The configuration `flags` describe on top of `base`: limits, link policy,
 /// ZIP policy, decode lookahead and the path-depth limit, then the selection,

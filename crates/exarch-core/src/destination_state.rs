@@ -33,15 +33,20 @@ pub enum DestinationState {
     NotFresh,
 }
 
+/// The directory holding `path`; the working directory when `path` is a bare
+/// name and so has an empty parent.
+pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 impl DestinationState {
     /// Classifies `destination` without following a symlink at its final
     /// name. An empty parent (`out/`) means the current directory.
     #[must_use]
     pub fn probe(destination: &Path) -> Self {
-        let parent = destination
-            .parent()
-            .filter(|parent| !parent.is_empty())
-            .unwrap_or_else(|| Path::new("."));
+        let parent = parent_or_cwd(destination);
         let absent = matches!(
             destination.symlink_metadata(),
             Err(ref error) if error.kind() == io::ErrorKind::NotFound

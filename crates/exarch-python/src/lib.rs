@@ -17,6 +17,7 @@ mod warning;
 
 use config::PyCreationConfig;
 use config::PyExtractionOptions;
+use config::PyListOptions;
 use config::PySecurityConfig;
 use config::PyVerificationOptions;
 use error::attach_extraction_report;
@@ -88,16 +89,17 @@ const _: () = assert!(
 ///
 /// ## GIL Release and TOCTOU
 ///
-/// The GIL is released during extraction for performance. This creates a
-/// Time-Of-Check-Time-Of-Use (TOCTOU) race condition where the archive file
-/// could be modified between validation and extraction. This is an accepted
-/// tradeoff for performance. For untrusted archives, ensure exclusive access
-/// to the archive file during extraction.
+/// The GIL is released during extraction so other Python threads keep running.
+/// That does not change the race: the archive and the destination are paths,
+/// so another process (or thread) can change either between the checks and the
+/// writes whether or not the GIL is held. For untrusted archives, keep other
+/// writers away from the archive file and the destination during extraction.
 ///
 /// ## Input Validation
 ///
 /// - Paths containing null bytes are rejected (security)
-/// - Paths exceeding 4096 bytes are rejected (`DoS` prevention)
+/// - Paths longer than the core path limit (`MAX_PATH_LENGTH`, 4096 bytes) are
+///   rejected (`DoS` prevention)
 /// - All validation happens at the Python boundary before calling core library
 ///
 /// # Examples
@@ -138,9 +140,6 @@ fn extract_archive(
     let options = PyExtractionOptions::snapshot(options);
 
     // Release GIL during I/O-heavy extraction
-    // NOTE: TOCTOU race condition - archive contents can change between check
-    // and extraction. This is an accepted limitation when releasing the GIL
-    // for performance.
     let report = catch_panic_as_py_err("extraction", || {
         py.detach(|| {
             ExtractRequest::new(&config)
@@ -341,6 +340,8 @@ fn output_file(
 ///
 /// * `archive_path` - Path to archive file (str or pathlib.Path)
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+/// * `options` - Optional `ListOptions`; `ListOptions().with_stored_targets()`
+///   reads the 7z link targets that listing leaves unread by default
 ///
 /// # Returns
 ///
@@ -362,20 +363,25 @@ fn output_file(
 ///     print(f"{entry.path}: {entry.size} bytes")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, config=None))]
+#[pyo3(signature = (archive_path, config=None, options=None))]
 fn list_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PySecurityConfig>>,
+    options: Option<PyRef<'_, PyListOptions>>,
 ) -> PyResult<PyArchiveManifest> {
     let archive_path = path_to_boundary(py, archive_path)?;
     let config = PySecurityConfig::snapshot(config);
+    let options = PyListOptions::snapshot(options);
 
-    let manifest = catch_panic_as_py_err("archive listing", || {
-        py.detach(|| ListRequest::new(&config).list(&archive_path))
-    })?;
-
-    Ok(PyArchiveManifest::new(manifest, &config))
+    catch_panic_as_py_err("archive listing", || {
+        py.detach(|| {
+            ListRequest::new(&config)
+                .with_options(options)
+                .list(&archive_path)
+                .map(|manifest| PyArchiveManifest::new(manifest, &config))
+        })
+    })
 }
 
 /// Verify archive security.
@@ -651,7 +657,7 @@ fn merge_progress_result<T>(
 ///
 /// The GIL is released during extraction whether or not a callback is given;
 /// the callback takes it back for each call. The TOCTOU caveat from
-/// `extract_archive` still applies.
+/// `extract_archive` applies unchanged.
 ///
 /// ## A raising `progress` cancels the extraction
 ///
@@ -832,6 +838,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySecurityConfig>()?;
     m.add_class::<PyCreationConfig>()?;
     m.add_class::<PyExtractionOptions>()?;
+    m.add_class::<PyListOptions>()?;
     m.add_class::<PyVerificationOptions>()?;
 
     // Report classes
@@ -842,6 +849,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<report::PyEntryDisposition>()?;
     m.add_class::<report::PyExtractDisposition>()?;
     m.add_class::<report::PySkipDisposition>()?;
+    m.add_class::<report::PyRefuseDisposition>()?;
     m.add_class::<report::PyArchiveFile>()?;
     m.add_class::<report::PyArchiveDirectory>()?;
     m.add_class::<report::PyArchiveSymlink>()?;
@@ -915,7 +923,7 @@ fn register_type_aliases(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add(
         "AnyEntryDisposition",
-        union_of(&["ExtractDisposition", "SkipDisposition"])?,
+        union_of(&["ExtractDisposition", "SkipDisposition", "RefuseDisposition"])?,
     )?;
     m.add(
         "AnyExtractionWarning",

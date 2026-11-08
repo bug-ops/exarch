@@ -227,31 +227,6 @@ fn the_linux_host_model_keeps_case_variants_apart() {
 }
 
 #[test]
-fn portable_case_variant_directories_charge_the_node_budget() {
-    let entries: Vec<_> = [
-        "aaaa/", "Aaaa/", "aAaa/", "aaAa/", "aaaA/", "AAaa/", "AaAa/", "aAAa/",
-    ]
-    .into_iter()
-    .map(sink_support::tar_dir)
-    .collect();
-    let config = SecurityConfig::default()
-        .with_max_file_count(exarch_core::non_zero!(2))
-        .with_max_path_depth(exarch_core::non_zero!(2));
-    let (result, _) = run(tar_archive(&entries), PathModel::Portable, &config);
-    let mut error = &result.unwrap_err();
-    while let ArchiveError::PartialExtraction(partial) = error {
-        error = partial.cause();
-    }
-    assert_matches!(
-        error,
-        ArchiveError::QuotaExceeded {
-            resource: exarch_core::QuotaResource::TreeNodes { max: 5 }
-        },
-        "{error:?}"
-    );
-}
-
-#[test]
 fn portable_symlink_chain_leaving_the_root_is_refused() {
     let (result, sink) = run(
         tar_archive(&[tar_symlink("up", "."), tar_symlink("d", "up/..")]),

@@ -398,7 +398,22 @@ impl FfiKind {
     pub const fn setting(&self) -> Option<ConfigSetting> {
         match self {
             Self::InvalidConfiguration { setting } => *setting,
-            _ => None,
+            Self::PathTraversal
+            | Self::SymlinkEscape
+            | Self::HardlinkEscape
+            | Self::ZipBomb { .. }
+            | Self::ZipInconsistency
+            | Self::QuotaExceeded { .. }
+            | Self::SecurityViolation { .. }
+            | Self::InvalidArchive { .. }
+            | Self::Io(_)
+            | Self::InvalidPermissions
+            | Self::Cancelled
+            | Self::SourceNotFound
+            | Self::SourceNotAccessible
+            | Self::OutputExists
+            | Self::InvalidCompressionLevel
+            | Self::UnknownFormat => None,
         }
     }
 
@@ -450,6 +465,44 @@ impl FfiKind {
             Self::InvalidCompressionLevel => ErrorCode::InvalidCompressionLevel,
             Self::UnknownFormat => ErrorCode::UnknownFormat,
             Self::InvalidConfiguration { .. } => ErrorCode::InvalidConfiguration,
+        }
+    }
+
+    /// The I/O error kind, if this is a [`FfiKind::Io`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::io::ErrorKind;
+    ///
+    /// use exarch_core::FfiKind;
+    ///
+    /// assert_eq!(
+    ///     FfiKind::Io(ErrorKind::NotFound).io_kind(),
+    ///     Some(ErrorKind::NotFound)
+    /// );
+    /// assert_eq!(FfiKind::Cancelled.io_kind(), None);
+    /// ```
+    #[must_use]
+    pub const fn io_kind(&self) -> Option<std::io::ErrorKind> {
+        match self {
+            Self::Io(kind) => Some(*kind),
+            Self::PathTraversal
+            | Self::SymlinkEscape
+            | Self::HardlinkEscape
+            | Self::ZipBomb { .. }
+            | Self::ZipInconsistency
+            | Self::QuotaExceeded { .. }
+            | Self::SecurityViolation { .. }
+            | Self::InvalidArchive { .. }
+            | Self::InvalidPermissions
+            | Self::Cancelled
+            | Self::SourceNotFound
+            | Self::SourceNotAccessible
+            | Self::OutputExists
+            | Self::InvalidCompressionLevel
+            | Self::UnknownFormat
+            | Self::InvalidConfiguration { .. } => None,
         }
     }
 }
@@ -803,7 +856,27 @@ impl ArchiveError {
             | Self::OutputExists { .. }
             | Self::DestinationOccupied { .. }
             | Self::OutputReservationLeft { .. } => self.redacted_path(),
-            _ => None,
+            Self::Io(_)
+            | Self::InvalidArchive(_)
+            | Self::TarAmbiguity(_)
+            | Self::TarTrailer(_)
+            | Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::ZipBomb(_)
+            | Self::ZipInconsistency(_)
+            | Self::InvalidPermissions { .. }
+            | Self::QuotaExceeded { .. }
+            | Self::SecurityViolation { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::Cancelled
+            | Self::UnmatchedInclude { .. }
+            | Self::ReplaceFailed(_)
+            | Self::PartialExtraction(_) => None,
         }
     }
 
@@ -815,7 +888,29 @@ impl ArchiveError {
                 .leftover
                 .as_ref()
                 .map(|leftover| sanitize_path_for_error(&leftover.path)),
-            _ => None,
+            Self::Io(_)
+            | Self::InvalidArchive(_)
+            | Self::TarAmbiguity(_)
+            | Self::TarTrailer(_)
+            | Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::ZipBomb(_)
+            | Self::ZipInconsistency(_)
+            | Self::InvalidPermissions { .. }
+            | Self::QuotaExceeded { .. }
+            | Self::SecurityViolation { .. }
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::OutputExists { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::Cancelled
+            | Self::DestinationOccupied { .. }
+            | Self::UnmatchedInclude { .. }
+            | Self::PartialExtraction(_) => None,
         }
     }
 
@@ -860,7 +955,56 @@ impl ArchiveError {
                     path: format_entry_path_for_error(path),
                 }
             }
-            _ => FfiDetail::None,
+            Self::InvalidConfiguration {
+                problem:
+                    ConfigProblem::RemovesWholeName { .. }
+                    | ConfigProblem::Zero
+                    | ConfigProblem::Negative
+                    | ConfigProblem::NotFinite
+                    | ConfigProblem::NotWholeNumber
+                    | ConfigProblem::TooLarge { .. }
+                    | ConfigProblem::NotSet
+                    | ConfigProblem::NoneProvided
+                    | ConfigProblem::NoParent
+                    | ConfigProblem::NotSupported
+                    | ConfigProblem::CannotTargetSink
+                    | ConfigProblem::NotAtStart
+                    | ConfigProblem::Empty
+                    | ConfigProblem::BlankOrControl
+                    | ConfigProblem::PaddedWithBlank
+                    | ConfigProblem::ContainsSeparator
+                    | ConfigProblem::InnerDot
+                    | ConfigProblem::DotEntry
+                    | ConfigProblem::NotOneOf { .. }
+                    | ConfigProblem::NotCreatable { .. }
+                    | ConfigProblem::TooLong { .. }
+                    | ConfigProblem::ContainsNul
+                    | ConfigProblem::PatternRefused { .. }
+                    | ConfigProblem::NotADirectory
+                    | ConfigProblem::IsSymlink,
+                ..
+            }
+            | Self::Io(_)
+            | Self::InvalidArchive(_)
+            | Self::TarAmbiguity(_)
+            | Self::TarTrailer(_)
+            | Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::ZipBomb(_)
+            | Self::ZipInconsistency(_)
+            | Self::InvalidPermissions { .. }
+            | Self::QuotaExceeded { .. }
+            | Self::SecurityViolation { .. }
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::OutputExists { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::Cancelled
+            | Self::OutputReservationLeft { .. }
+            | Self::PartialExtraction(_) => FfiDetail::None,
         }
     }
 
@@ -960,7 +1104,31 @@ fn redacted_problem(problem: &ConfigProblem) -> std::borrow::Cow<'_, ConfigProbl
             first: sanitize_path_for_error(first).into(),
             second: sanitize_path_for_error(second).into(),
         }),
-        other => Cow::Borrowed(other),
+        ConfigProblem::ReplacesProtectedPath { .. }
+        | ConfigProblem::Zero
+        | ConfigProblem::Negative
+        | ConfigProblem::NotFinite
+        | ConfigProblem::NotWholeNumber
+        | ConfigProblem::TooLarge { .. }
+        | ConfigProblem::NotSet
+        | ConfigProblem::NoneProvided
+        | ConfigProblem::NoParent
+        | ConfigProblem::NotSupported
+        | ConfigProblem::CannotTargetSink
+        | ConfigProblem::NotAtStart
+        | ConfigProblem::Empty
+        | ConfigProblem::BlankOrControl
+        | ConfigProblem::PaddedWithBlank
+        | ConfigProblem::ContainsSeparator
+        | ConfigProblem::InnerDot
+        | ConfigProblem::DotEntry
+        | ConfigProblem::NotOneOf { .. }
+        | ConfigProblem::NotCreatable { .. }
+        | ConfigProblem::TooLong { .. }
+        | ConfigProblem::ContainsNul
+        | ConfigProblem::PatternRefused { .. }
+        | ConfigProblem::NotADirectory
+        | ConfigProblem::IsSymlink => Cow::Borrowed(problem),
     }
 }
 

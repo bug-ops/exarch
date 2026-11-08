@@ -62,13 +62,13 @@ impl Operation {
             | Flag::ZipConsistency
             | Flag::MaxFiles
             | Flag::MaxTotalSize
-            | Flag::MaxCompressionRatio => {
+            | Flag::MaxCompressionRatio
+            | Flag::Include
+            | Flag::StripComponents
+            | Flag::Flatten => {
                 matches!(self, Self::Extract | Self::List | Self::Verify)
             }
             Flag::Exclude | Flag::MaxFileSize => true,
-            Flag::Include | Flag::StripComponents | Flag::Flatten => {
-                matches!(self, Self::Extract | Self::List | Self::Verify)
-            }
             Flag::AllowedExtensions | Flag::Atomic | Flag::BannedComponent | Flag::MaxPathDepth => {
                 matches!(self, Self::Extract)
             }
@@ -98,6 +98,26 @@ closed_list! {
         MaxTotalSize => "--max-total-size",
         StripComponents => "--strip-components",
         ZipConsistency => "--zip-consistency",
+    }
+}
+
+/// The selection flags `extract --atomic --force` cannot be combined with: it
+/// replaces the whole destination, so a partial selection has no meaning.
+pub const ATOMIC_FORCE_REFUSED: [Flag; 4] = [
+    Flag::Include,
+    Flag::Exclude,
+    Flag::StripComponents,
+    Flag::Flatten,
+];
+
+/// Joins `items` as "A", "A or B" or "A, B, or C", with `word` in place of
+/// `or`.
+pub fn join_words(word: &str, items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [a, b] => format!("{a} {word} {b}"),
+        [init @ .., last] => format!("{}, {word} {last}", init.join(", ")),
     }
 }
 
@@ -134,6 +154,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn words_are_joined_by_count() {
+        assert_eq!(join_words("or", &[]), "");
+        assert_eq!(join_words("or", &["a"]), "a");
+        assert_eq!(join_words("and", &["a", "b"]), "a and b");
+        assert_eq!(join_words("or", &["a", "b", "c"]), "a, b, or c");
     }
 
     #[test]

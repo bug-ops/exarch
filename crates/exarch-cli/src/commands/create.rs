@@ -13,17 +13,23 @@ use exarch_core::CompressionLevel;
 use exarch_core::ConfigSetting;
 use exarch_core::CreateRequest;
 use exarch_core::CreationConfig;
-use exarch_core::ExcludePattern;
+use exarch_core::EntryPattern;
 use exarch_core::Limit;
 use exarch_core::OutputFile;
 use std::num::NonZeroU64;
 
+/// Runs `create`: builds the archive inside the armed interrupt window and
+/// prints the report once the window is closed.
+///
+/// # Errors
+///
+/// The core failure of the run, or the CLI's own refusal of a flag value.
 pub fn execute(
     args: &CreateArgs,
     formatter: &mut dyn OutputFormatter,
     mode: OutputMode,
 ) -> CommandResult {
-    interrupt::install(&args.output, interrupt::Run::Create);
+    let guard = interrupt::install(&args.output, interrupt::Run::Create, mode);
 
     let max_file_size = match args.max_file_size {
         Some(size) => Limit::<NonZeroU64>::parse(ConfigSetting::MaxFileSize, size)?,
@@ -38,25 +44,28 @@ pub fn execute(
         .with_max_file_size(max_file_size)
         .with_preserve_permissions(args.preserve_permissions);
     if let Some(level) = args.compression_level {
-        let level = CompressionLevel::try_from(level)?;
+        let level = CompressionLevel::from_i128(i128::from(level))?;
         config = config.with_compression_level(level);
     }
 
     // Add user exclude patterns to defaults
     for pattern in &args.exclude {
-        let pattern = ExcludePattern::try_from(pattern.as_str())?;
+        let pattern = EntryPattern::try_from(pattern.as_str())?;
         config.exclude_patterns.push(pattern);
     }
 
-    let mut progress = progress_for(mode, BarLength::Discover, Operation::Create);
+    let mut progress = progress_for(mode, BarLength::Discover, Operation::Create, &guard);
     let output = if args.force {
         OutputFile::replace(&args.output)
     } else {
         OutputFile::create_new(&args.output)
     };
-    let report = CreateRequest::new(&config)
+    let result = CreateRequest::new(&config)
         .with_progress(progress.as_mut())
-        .create(&output, &args.sources)?;
+        .create(&output, &args.sources);
+    drop(progress);
+    drop(guard);
+    let report = result?;
 
     formatter.format_creation_result(&args.output, &report)?;
 

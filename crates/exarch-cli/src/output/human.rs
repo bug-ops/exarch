@@ -37,7 +37,7 @@ use std::path::Path;
 
 /// Human-readable formatter writing non-error output to `O` and error output
 /// to `E`. Defaults to the process stdout/stderr terminals; tests can inject
-/// in-memory writers via [`HumanFormatter::with_writers`] to capture output.
+/// in-memory writers (`with_writers`) to capture output.
 pub struct HumanFormatter<O: Write = Term, E: Write = Term> {
     verbosity: Verbosity,
     styler: Styler,
@@ -152,6 +152,7 @@ fn disposition_suffix(disposition: Option<&Disposition>, name: &Path) -> String 
             format!("  [lands at {}]", TerminalEntry::new(landing.as_path()))
         }
         Some(Disposition::Skip(kind)) => format!("  [skipped: {kind}]"),
+        Some(Disposition::Refuse) => "  [refused]".to_owned(),
         Some(_) => "  [disposition unknown]".to_owned(),
     }
 }
@@ -169,7 +170,7 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
     /// Creates a formatter writing to the given writers, with `use_colors`
     /// set explicitly rather than auto-detected — lets tests assert on
     /// deterministic output regardless of TTY state.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn with_writers(out: O, err: E, verbosity: Verbosity, use_colors: bool) -> Self {
         Self {
             verbosity,
@@ -181,14 +182,14 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
 
     /// Returns a reference to the non-error output writer.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn out(&self) -> &O {
         &self.out
     }
 
     /// Returns a reference to the error output writer.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn err(&self) -> &E {
         &self.err
     }
@@ -348,11 +349,17 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             )?;
             emit_line(
                 &mut f.out,
-                format_args!("  Files extracted: {}", report.files_extracted),
+                format_args!(
+                    "  Files extracted: {}",
+                    Self::format_number(report.files_extracted)
+                ),
             )?;
             emit_line(
                 &mut f.out,
-                format_args!("  Directories: {}", report.directories_created),
+                format_args!(
+                    "  Directories: {}",
+                    Self::format_number(report.directories_created)
+                ),
             )?;
             emit_line(
                 &mut f.out,
@@ -364,7 +371,10 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             if f.verbosity == Verbosity::Verbose {
                 emit_line(
                     &mut f.out,
-                    format_args!("  Symlinks: {}", report.symlinks_created),
+                    format_args!(
+                        "  Symlinks: {}",
+                        Self::format_number(report.symlinks_created)
+                    ),
                 )?;
                 emit_line(
                     &mut f.out,
@@ -491,7 +501,10 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             if report.suspicious_entries() > 0 {
                 emit_line(
                     &mut f.out,
-                    format_args!("  Suspicious entries: {}", report.suspicious_entries()),
+                    format_args!(
+                        "  Suspicious entries: {}",
+                        Self::format_number(report.suspicious_entries())
+                    ),
                 )?;
             }
 
@@ -623,7 +636,7 @@ mod tests {
         );
         assert!(text.contains("Files extracted: 3"));
         assert!(text.contains("Directories: 1"));
-        assert!(text.contains("Total size: 2.0 KB"));
+        assert!(text.contains("Total size: 2.0 KiB"));
         assert!(!text.contains("Symlinks:"));
     }
 
@@ -699,7 +712,7 @@ mod tests {
         assert!(text.contains("Archive created: out.tar.gz"));
         assert!(text.contains("Files added:      2"));
         assert!(text.contains("Directories:      1"));
-        assert!(text.contains("Total size:       1.0 KB"));
+        assert!(text.contains("Total size:       1.0 KiB"));
     }
 
     #[test]
@@ -844,8 +857,8 @@ mod tests {
         )
         .unwrap();
         let text = out_text(&f);
-        assert!(text.contains("1.0 KB"));
-        assert!(text.contains("Total: 2 files, 1.0 KB"));
+        assert!(text.contains("1.0 KiB"));
+        assert!(text.contains("Total: 2 files, 1.0 KiB"));
     }
 
     #[test]
@@ -1242,10 +1255,18 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_disposition_has_its_own_text() {
+        assert_eq!(
+            disposition_suffix(Some(&Disposition::Refuse), Path::new("x")),
+            "  [refused]"
+        );
+    }
+
+    #[test]
     fn every_disposition_has_dedicated_text() {
         let (manifest, config) = crate::test_support::selected_manifest();
         let dispositions = Dispositions::of(&manifest, &config);
-        let mut seen = Vec::new();
+        let mut seen = vec![Disposition::Refuse.kind()];
         for (index, entry) in manifest.entries().iter().enumerate() {
             let disposition = dispositions.get(index).unwrap();
             let text = disposition_suffix(Some(disposition), Path::new("renamed"));

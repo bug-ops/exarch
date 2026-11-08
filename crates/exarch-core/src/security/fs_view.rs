@@ -917,10 +917,9 @@ pub(crate) struct NodeBudget {
 impl NodeBudget {
     /// A budget of `max_file_count * max_path_depth + 1` names: enough for
     /// `max_file_count` files, each at the deepest allowed path with no name
-    /// shared. Explicit directory entries and aliases spend it too although
-    /// `max_file_count` does not count directories, so an archive of many
-    /// directories can exhaust it while within the file limit; raise
-    /// `max_file_count` or `max_path_depth` to allow more. Unbounded when
+    /// shared. Every entry, directories included, counts against
+    /// `max_file_count`, so the budget backs that limit as a second bound on
+    /// the tree. Unbounded when
     /// `max_file_count` is [`Limit::Unbounded`](crate::Limit::Unbounded); a
     /// product that overflows saturates at `usize::MAX`.
     #[must_use]
@@ -2230,6 +2229,17 @@ mod tests {
         let err = t.try_insert(Path::new("d"), Node::Dir).unwrap_err();
         assert_matches!(err, PlaceError::Budget(NodeBudgetExceeded { max: 3 }));
         assert!(!t.exists(Path::new("/dest/d")));
+    }
+
+    #[test]
+    fn an_exhausted_node_budget_maps_to_the_tree_nodes_quota() {
+        let error = ArchiveError::from(NodeBudgetExceeded { max: 7 });
+        assert_matches!(
+            error,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::TreeNodes { max: 7 }
+            }
+        );
     }
 
     #[test]

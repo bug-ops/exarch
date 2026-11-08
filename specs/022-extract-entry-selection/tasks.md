@@ -86,7 +86,7 @@ graph TD
 
 - **Spec**: FR-004
 - **Files**: `creation/filters.rs`, new `selection` module, `lib.rs` root re-exports
-- **Do**: move the `ExcludePattern` grammar (`Exact`, `Prefix`, `Suffix`, `Path`, replaced by the glob grammar of spec 023, `TryFrom<&str>`, `Display`, `ConfigSetting` selection by caller) to a shared module and expose it as `EntryPattern`; `creation::ExcludePattern` becomes the same type. The refusal setting is a parameter of the parser (`ExcludePattern` for create, `EntryInclude`/`EntryExclude` for extraction).
+- **Do**: move the exclude-pattern grammar (`Exact`, `Prefix`, `Suffix`, `Path`, replaced by the glob grammar of spec 023, `TryFrom<&str>`, `Display`, `ConfigSetting` selection by caller) to a shared module and expose it as `EntryPattern` (since #1041 the only name; the former `ExcludePattern` and `ExcludeRefusal` are `EntryPattern` and `PatternRefusal`). The refusal setting is a parameter of the parser (`ExcludePattern` for create, `EntryInclude`/`EntryExclude` for extraction).
 - **Acceptance**: the existing create tests pass unchanged; one grammar test suite covers both; no second parser exists.
 - **Complexity**: S
 

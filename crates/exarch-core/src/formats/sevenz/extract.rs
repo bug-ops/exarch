@@ -116,6 +116,9 @@ pub(crate) trait PrePass {
     /// Checks a file entry against what already occupies its destination.
     fn file(&mut self, safe_path: &SafePath) -> Result<FilePlan>;
 
+    /// Charges an entry the extraction will skip to `max_file_count`.
+    fn charge_skipped(&mut self) -> Result<()>;
+
     /// Reserves quota for a symlink.
     fn reserve_symlink(&mut self, size: u64) -> Result<()>;
 
@@ -222,10 +225,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         config,
                     )?;
                     if !common::is_extension_allowed(safe_path.as_path(), config) {
+                        pre.charge_skipped()?;
                         continue;
                     }
-                    if pre.file(&safe_path)? == FilePlan::Reserve {
-                        pre.reserve_file(entry.size)?;
+                    match pre.file(&safe_path)? {
+                        FilePlan::Reserve => pre.reserve_file(entry.size)?,
+                        FilePlan::Skip => pre.charge_skipped()?,
                     }
                 }
             }

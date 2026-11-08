@@ -11,6 +11,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use super::acl;
 use super::io_context;
 use crate::ArchiveError;
 use crate::Result;
@@ -79,6 +80,21 @@ impl<'p> StagingDir<'p> {
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
             .identity;
         Ok(staging)
+    }
+
+    /// Removes the ACL the directory inherited from the parent it was created
+    /// in, before anything is extracted into it.
+    ///
+    /// A directory that replaces an existing destination takes that
+    /// destination's access control, never the parent's: an inherited entry
+    /// would make the published root, and everything extracted under it,
+    /// more permissive than the destination.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of clearing an ACL the directory has.
+    pub(super) fn clear_inherited_acl(&self) -> io::Result<()> {
+        acl::clear_inherited(self.parent, self.name.as_leaf())
     }
 
     /// The staging directory's logical path.

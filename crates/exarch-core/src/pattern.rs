@@ -1,18 +1,19 @@
 //! Glob patterns that select archive entries.
 //!
 //! One grammar serves `create --exclude` and the extraction include/exclude
-//! lists. [`ExcludePattern`] hides its matching engine: no `globset` type
+//! lists. [`EntryPattern`] hides its matching engine: no `globset` type
 //! appears in a public signature, so the dependency can change without a
 //! semver break.
 
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
-use crate::ExcludeRefusal;
+use crate::PatternRefusal;
 use crate::Result;
 use crate::security::boundary::MAX_CONFIG_ENTRY_LENGTH;
 use globset::Candidate;
 use globset::ErrorKind;
+use globset::Glob;
 use globset::GlobBuilder;
 use globset::GlobSet;
 use globset::GlobSetBuilder;
@@ -20,6 +21,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::path::Component;
 use std::path::Path;
+use std::sync::OnceLock;
 
 const GLOBSTAR: &str = "**";
 
@@ -95,39 +97,42 @@ enum Engine {
 /// (patterns cannot negate), `{` and `}` (no alternation), `**` glued to
 /// other characters (`a**b`), negated (`[!x]`), POSIX (`[[:alpha:]]`) or
 /// non-ASCII classes, an unterminated class, and a class range outside
-/// `0-9`, `a-z` and `A-Z`. See [`ExcludeRefusal`].
+/// `0-9`, `a-z` and `A-Z`. See [`PatternRefusal`].
 ///
 /// # Resources
 ///
 /// Pattern length is bounded; the number of patterns is not. Each pattern
 /// that uses `*`, `?`, `[` or `**` owns a compiled matcher whose lazily
 /// grown search cache can reach 10 MiB per thread under adversarial input.
+/// A list of patterns used for selection or exclusion compiles one combined
+/// matcher instead, so matching an entry is one scan and the cache does not
+/// grow with the number of patterns.
 ///
 /// # Examples
 ///
 /// ```
-/// use exarch_core::ExcludePattern;
+/// use exarch_core::EntryPattern;
 /// use std::path::Path;
 ///
-/// let tmp = ExcludePattern::try_from("*.tmp")?;
+/// let tmp = EntryPattern::try_from("*.tmp")?;
 /// assert!(tmp.matches(Path::new("cache/a.tmp")));
 /// assert!(!tmp.matches(Path::new("cache/a.txt")));
 ///
-/// let rs = ExcludePattern::try_from("src/**/*.rs")?;
+/// let rs = EntryPattern::try_from("src/**/*.rs")?;
 /// assert!(rs.matches(Path::new("src/a/b/lib.rs")));
 /// assert!(rs.matches(Path::new("src/lib.rs")));
 /// assert!(!rs.matches(Path::new("tests/lib.rs")));
 ///
-/// let out = ExcludePattern::try_from("build/out")?;
+/// let out = EntryPattern::try_from("build/out")?;
 /// assert!(out.matches(Path::new("build/out/bin/app")));
 /// assert!(!out.matches(Path::new("src/build/out")));
 ///
-/// assert!(ExcludePattern::try_from("a{b,c}").is_err());
-/// assert!(ExcludePattern::try_from("!keep").is_err());
+/// assert!(EntryPattern::try_from("a{b,c}").is_err());
+/// assert!(EntryPattern::try_from("!keep").is_err());
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 #[derive(Clone)]
-pub struct ExcludePattern {
+pub struct EntryPattern {
     shape: Shape,
     engine: Engine,
 }
@@ -137,30 +142,30 @@ const _: () = {
         T: Send + Sync + Unpin + std::panic::UnwindSafe + std::panic::RefUnwindSafe,
     >() {
     }
-    auto_traits::<ExcludePattern>();
+    auto_traits::<EntryPattern>();
 };
 
-impl PartialEq for ExcludePattern {
+impl PartialEq for EntryPattern {
     fn eq(&self, other: &Self) -> bool {
         self.shape == other.shape
     }
 }
 
-impl Eq for ExcludePattern {}
+impl Eq for EntryPattern {}
 
-impl std::hash::Hash for ExcludePattern {
+impl std::hash::Hash for EntryPattern {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.shape.hash(state);
     }
 }
 
-impl fmt::Debug for ExcludePattern {
+impl fmt::Debug for EntryPattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ExcludePattern({self})")
+        write!(f, "EntryPattern({self})")
     }
 }
 
-impl ExcludePattern {
+impl EntryPattern {
     /// A pattern naming one literal component, for the built-in defaults.
     pub(crate) fn literal_name(name: &'static str) -> Self {
         Self {
@@ -178,7 +183,7 @@ impl ExcludePattern {
         }
     }
 
-    fn from_shape(shape: Shape) -> std::result::Result<Self, ExcludeRefusal> {
+    fn from_shape(shape: Shape) -> std::result::Result<Self, PatternRefusal> {
         let engine = engine_for(&shape)?;
         Ok(Self { shape, engine })
     }
@@ -189,23 +194,23 @@ impl ExcludePattern {
     /// [`ConfigSetting::ExcludePattern`] for creation,
     /// [`ConfigSetting::EntryInclude`] or [`ConfigSetting::EntryExclude`] for
     /// extraction. [`TryFrom<&str>`] is the creation form. The syntax and its
-    /// meaning are described on [`ExcludePattern`].
+    /// meaning are described on [`EntryPattern`].
     ///
     /// # Errors
     ///
     /// Returns [`ArchiveError::InvalidConfiguration`] naming `setting`, with
-    /// [`ConfigProblem::ExcludePatternRefused`], which names the pattern and an
-    /// [`ExcludeRefusal`] for the refused shape.
+    /// [`ConfigProblem::PatternRefused`], which names the pattern and an
+    /// [`PatternRefusal`] for the refused shape.
     ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::ConfigSetting;
-    /// use exarch_core::ExcludePattern;
+    /// use exarch_core::EntryPattern;
     ///
-    /// let pattern = ExcludePattern::parse_for(ConfigSetting::EntryInclude, "docs/api")?;
+    /// let pattern = EntryPattern::parse_for(ConfigSetting::EntryInclude, "docs/api")?;
     /// assert_eq!(pattern.to_string(), "docs/api");
-    /// assert!(ExcludePattern::parse_for(ConfigSetting::EntryInclude, "a**b").is_err());
+    /// assert!(EntryPattern::parse_for(ConfigSetting::EntryInclude, "a**b").is_err());
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn parse_for(setting: ConfigSetting, text: &str) -> Result<Self> {
@@ -222,10 +227,10 @@ impl ExcludePattern {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::ExcludePattern;
+    /// use exarch_core::EntryPattern;
     /// use std::path::Path;
     ///
-    /// let p = ExcludePattern::try_from("build/out")?;
+    /// let p = EntryPattern::try_from("build/out")?;
     /// assert!(p.matches(Path::new("build//out/./x")));
     /// assert!(!p.matches(Path::new("build/../out")));
     /// # Ok::<(), exarch_core::ArchiveError>(())
@@ -258,10 +263,10 @@ impl ExcludePattern {
     }
 }
 
-impl TryFrom<&str> for ExcludePattern {
+impl TryFrom<&str> for EntryPattern {
     type Error = ArchiveError;
 
-    /// Parses a creation exclude pattern; see [`ExcludePattern::parse_for`].
+    /// Parses a creation exclude pattern; see [`EntryPattern::parse_for`].
     ///
     /// # Errors
     ///
@@ -271,7 +276,7 @@ impl TryFrom<&str> for ExcludePattern {
     }
 }
 
-impl std::str::FromStr for ExcludePattern {
+impl std::str::FromStr for EntryPattern {
     type Err = ArchiveError;
 
     fn from_str(text: &str) -> Result<Self> {
@@ -279,7 +284,7 @@ impl std::str::FromStr for ExcludePattern {
     }
 }
 
-impl fmt::Display for ExcludePattern {
+impl fmt::Display for EntryPattern {
     /// Writes the normalized pattern text; parsing it again gives an equal
     /// pattern. An anchored name keeps a trailing `/` (`target/`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -292,11 +297,11 @@ impl fmt::Display for ExcludePattern {
     }
 }
 
-fn refuse(setting: ConfigSetting, text: &str, reason: ExcludeRefusal) -> ArchiveError {
+fn refuse(setting: ConfigSetting, text: &str, reason: PatternRefusal) -> ArchiveError {
     let end = text.floor_char_boundary(MAX_CONFIG_ENTRY_LENGTH);
     ArchiveError::InvalidConfiguration {
         setting,
-        problem: ConfigProblem::ExcludePatternRefused {
+        problem: ConfigProblem::PatternRefused {
             pattern: text.get(..end).unwrap_or(text).to_owned(),
             reason,
         },
@@ -313,28 +318,28 @@ fn is_blank(c: char) -> bool {
     c.is_ascii_whitespace() || c.is_ascii_control()
 }
 
-fn parse_shape(text: &str) -> std::result::Result<Shape, ExcludeRefusal> {
+fn parse_shape(text: &str) -> std::result::Result<Shape, PatternRefusal> {
     if text.len() > MAX_CONFIG_ENTRY_LENGTH {
-        return Err(ExcludeRefusal::TooLong);
+        return Err(PatternRefusal::TooLong);
     }
     if text.contains('\0') {
-        return Err(ExcludeRefusal::ContainsNul);
+        return Err(PatternRefusal::ContainsNul);
     }
     if text.is_empty() {
-        return Err(ExcludeRefusal::Empty);
+        return Err(PatternRefusal::Empty);
     }
     if text.contains(',') {
-        return Err(ExcludeRefusal::ContainsComma);
+        return Err(PatternRefusal::ContainsComma);
     }
     if text.contains(['{', '}']) {
-        return Err(ExcludeRefusal::BraceAlternation);
+        return Err(PatternRefusal::BraceAlternation);
     }
 
     let text = text.replace('\\', "/");
     // Anchoring is decided on the raw text, before empty and `.` segments go.
     let anchored = text.contains('/');
     if text.starts_with('/') || (anchored && Path::new(&text).has_root()) {
-        return Err(ExcludeRefusal::Absolute);
+        return Err(PatternRefusal::Absolute);
     }
 
     let segments: Vec<&str> = text
@@ -343,13 +348,13 @@ fn parse_shape(text: &str) -> std::result::Result<Shape, ExcludeRefusal> {
         .collect();
     if segments.is_empty() {
         return Err(if text == "." {
-            ExcludeRefusal::DotEntry
+            PatternRefusal::DotEntry
         } else {
-            ExcludeRefusal::Empty
+            PatternRefusal::Empty
         });
     }
     if segments.contains(&"..") {
-        return Err(ExcludeRefusal::DotEntry);
+        return Err(PatternRefusal::DotEntry);
     }
     if segments
         .first()
@@ -358,7 +363,7 @@ fn parse_shape(text: &str) -> std::result::Result<Shape, ExcludeRefusal> {
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
     {
-        return Err(ExcludeRefusal::Absolute);
+        return Err(PatternRefusal::Absolute);
     }
     segments
         .iter()
@@ -382,10 +387,10 @@ fn parse_shape(text: &str) -> std::result::Result<Shape, ExcludeRefusal> {
         return Ok(Shape::MatchAll);
     };
     if first.starts_with(is_blank) || last.ends_with(is_blank) {
-        return Err(ExcludeRefusal::PaddedWithBlank);
+        return Err(PatternRefusal::PaddedWithBlank);
     }
     if first.starts_with('!') {
-        return Err(ExcludeRefusal::LeadingNegation);
+        return Err(PatternRefusal::LeadingNegation);
     }
     Ok(match kept.as_slice() {
         [name] if !anchored => Shape::Floating((*name).into()),
@@ -397,12 +402,12 @@ fn parse_shape(text: &str) -> std::result::Result<Shape, ExcludeRefusal> {
 ///
 /// Stricter than `globset` on purpose: a disagreement between the two parsers
 /// can only refuse a pattern, never widen what it matches.
-fn scan_segment(segment: &str) -> std::result::Result<(), ExcludeRefusal> {
+fn scan_segment(segment: &str) -> std::result::Result<(), PatternRefusal> {
     if segment == GLOBSTAR {
         return Ok(());
     }
     if segment.contains(GLOBSTAR) {
-        return Err(ExcludeRefusal::UnsupportedWildcard);
+        return Err(PatternRefusal::UnsupportedWildcard);
     }
     let bytes = segment.as_bytes();
     let mut i = 0;
@@ -417,19 +422,19 @@ fn scan_segment(segment: &str) -> std::result::Result<(), ExcludeRefusal> {
 
 /// Validates the class whose first member is at `start`; returns the index
 /// just past its closing `]`.
-fn scan_class(bytes: &[u8], start: usize) -> std::result::Result<usize, ExcludeRefusal> {
+fn scan_class(bytes: &[u8], start: usize) -> std::result::Result<usize, PatternRefusal> {
     if matches!(bytes.get(start), Some(b'!' | b'^')) {
-        return Err(ExcludeRefusal::UnsupportedClass);
+        return Err(PatternRefusal::UnsupportedClass);
     }
     let mut i = start;
     loop {
-        let &member = bytes.get(i).ok_or(ExcludeRefusal::UnterminatedClass)?;
+        let &member = bytes.get(i).ok_or(PatternRefusal::UnterminatedClass)?;
         let first = i == start;
         if member == b']' && !first {
             return Ok(i + 1);
         }
         if !member.is_ascii() || (member == b'[' && bytes.get(i + 1) == Some(&b':')) {
-            return Err(ExcludeRefusal::UnsupportedClass);
+            return Err(PatternRefusal::UnsupportedClass);
         }
         let range_end = match (bytes.get(i + 1), bytes.get(i + 2)) {
             (Some(b'-'), Some(end)) if *end != b']' => Some(*end),
@@ -437,16 +442,16 @@ fn scan_class(bytes: &[u8], start: usize) -> std::result::Result<usize, ExcludeR
         };
         if let Some(end) = range_end {
             if !end.is_ascii() {
-                return Err(ExcludeRefusal::UnsupportedClass);
+                return Err(PatternRefusal::UnsupportedClass);
             }
             if !is_alnum_range(member, end) {
-                return Err(ExcludeRefusal::InvalidClassRange);
+                return Err(PatternRefusal::InvalidClassRange);
             }
             i += 3;
             continue;
         }
         if member == b'-' && !first && bytes.get(i + 1) != Some(&b']') {
-            return Err(ExcludeRefusal::InvalidClassRange);
+            return Err(PatternRefusal::InvalidClassRange);
         }
         i += 1;
     }
@@ -470,31 +475,44 @@ fn is_direct(shape: &Shape) -> bool {
     }
 }
 
-fn engine_for(shape: &Shape) -> std::result::Result<Engine, ExcludeRefusal> {
+fn engine_for(shape: &Shape) -> std::result::Result<Engine, PatternRefusal> {
     if is_direct(shape) {
         return Ok(Engine::Direct);
     }
     glob_engine(shape)
 }
 
+/// The glob texts for `shape`: its own glob plus its subtree twin, or `None`
+/// for a shape that matches every path.
+fn glob_texts(shape: &Shape) -> Option<[String; 2]> {
+    match shape {
+        Shape::MatchAll => None,
+        Shape::Floating(pattern) => Some([format!("**/{pattern}"), format!("**/{pattern}/**")]),
+        Shape::Anchored(pattern) => Some([pattern.to_string(), format!("{pattern}/**")]),
+    }
+}
+
+/// The one place a glob text is compiled, so a single pattern and a combined
+/// list can never disagree on the flags.
+fn build_glob(text: &str) -> std::result::Result<Glob, PatternRefusal> {
+    GlobBuilder::new(text)
+        .literal_separator(true)
+        .backslash_escape(false)
+        .case_insensitive(false)
+        .allow_unclosed_class(false)
+        .empty_alternates(false)
+        .build()
+        .map_err(|error| glob_refusal(error.kind()))
+}
+
 /// The glob engine for `shape`: the shape's own glob plus its subtree twin.
-fn glob_engine(shape: &Shape) -> std::result::Result<Engine, ExcludeRefusal> {
-    let texts = match shape {
-        Shape::MatchAll => return Ok(Engine::Direct),
-        Shape::Floating(pattern) => [format!("**/{pattern}"), format!("**/{pattern}/**")],
-        Shape::Anchored(pattern) => [pattern.to_string(), format!("{pattern}/**")],
+fn glob_engine(shape: &Shape) -> std::result::Result<Engine, PatternRefusal> {
+    let Some(texts) = glob_texts(shape) else {
+        return Ok(Engine::Direct);
     };
     let mut builder = GlobSetBuilder::new();
     for text in &texts {
-        let glob = GlobBuilder::new(text)
-            .literal_separator(true)
-            .backslash_escape(false)
-            .case_insensitive(false)
-            .allow_unclosed_class(false)
-            .empty_alternates(false)
-            .build()
-            .map_err(|error| glob_refusal(error.kind()))?;
-        builder.add(glob);
+        builder.add(build_glob(text)?);
     }
     builder
         .build()
@@ -502,10 +520,154 @@ fn glob_engine(shape: &Shape) -> std::result::Result<Engine, ExcludeRefusal> {
         .map_err(|error| glob_refusal(error.kind()))
 }
 
-fn glob_refusal(kind: &ErrorKind) -> ExcludeRefusal {
+fn glob_refusal(kind: &ErrorKind) -> PatternRefusal {
     match kind {
-        ErrorKind::InvalidRange(..) => ExcludeRefusal::InvalidClassRange,
-        _ => ExcludeRefusal::UnsupportedSyntax,
+        ErrorKind::InvalidRange(..) => PatternRefusal::InvalidClassRange,
+        _ => PatternRefusal::UnsupportedSyntax,
+    }
+}
+
+impl EntryPattern {
+    fn glob_texts(&self) -> Option<[String; 2]> {
+        match self.engine {
+            Engine::Direct => None,
+            Engine::Glob(_) => glob_texts(&self.shape),
+        }
+    }
+}
+
+/// How a [`PatternList`] matches its glob patterns.
+enum ListIndex {
+    /// One automaton over every glob pattern; `owner` maps a glob of the set
+    /// back to the index of its pattern.
+    Combined { globs: GlobSet, owner: Box<[usize]> },
+    /// The combined automaton could not be compiled, so each pattern matches
+    /// on its own.
+    Separate,
+}
+
+/// An ordered list of patterns matched against an entry in one pass.
+///
+/// Compiled on first use, so building a list pattern by pattern stays linear.
+#[derive(Default)]
+pub(crate) struct PatternList {
+    patterns: Box<[EntryPattern]>,
+    index: OnceLock<ListIndex>,
+}
+
+impl Clone for PatternList {
+    fn clone(&self) -> Self {
+        Self::from(self.patterns.to_vec())
+    }
+}
+
+impl PartialEq for PatternList {
+    fn eq(&self, other: &Self) -> bool {
+        self.patterns == other.patterns
+    }
+}
+
+impl Eq for PatternList {}
+
+impl fmt::Debug for PatternList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.patterns.iter()).finish()
+    }
+}
+
+impl From<Vec<EntryPattern>> for PatternList {
+    fn from(patterns: Vec<EntryPattern>) -> Self {
+        Self {
+            patterns: patterns.into_boxed_slice(),
+            index: OnceLock::new(),
+        }
+    }
+}
+
+impl PatternList {
+    /// The patterns, in the order they were added.
+    pub(crate) fn as_slice(&self) -> &[EntryPattern] {
+        &self.patterns
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// This list with `pattern` appended.
+    pub(crate) fn pushed(self, pattern: EntryPattern) -> Self {
+        let mut patterns = self.patterns.into_vec();
+        patterns.push(pattern);
+        Self::from(patterns)
+    }
+
+    fn index(&self) -> &ListIndex {
+        self.index.get_or_init(|| {
+            let mut builder = GlobSetBuilder::new();
+            let mut owner = Vec::new();
+            for (position, pattern) in self.patterns.iter().enumerate() {
+                for text in pattern.glob_texts().iter().flatten() {
+                    let Ok(glob) = build_glob(text) else {
+                        return ListIndex::Separate;
+                    };
+                    builder.add(glob);
+                    owner.push(position);
+                }
+            }
+            builder
+                .build()
+                .map_or(ListIndex::Separate, |globs| ListIndex::Combined {
+                    globs,
+                    owner: owner.into_boxed_slice(),
+                })
+        })
+    }
+
+    /// Calls `visit` with the index of every pattern that matches `path`, a
+    /// path already reduced by [`normalized`]; a pattern may be visited twice.
+    pub(crate) fn matching(&self, path: Option<&[u8]>, mut visit: impl FnMut(usize)) {
+        let Some(path) = path else { return };
+        match self.index() {
+            ListIndex::Combined { globs, owner } => {
+                for (position, pattern) in self.patterns.iter().enumerate() {
+                    if matches!(pattern.engine, Engine::Direct) && pattern.matches_normalized(path)
+                    {
+                        visit(position);
+                    }
+                }
+                let mut found = Vec::new();
+                globs.matches_candidate_into(&Candidate::from_bytes(path), &mut found);
+                found
+                    .into_iter()
+                    .filter_map(|glob| owner.get(glob).copied())
+                    .for_each(visit);
+            }
+            ListIndex::Separate => {
+                for (position, pattern) in self.patterns.iter().enumerate() {
+                    if pattern.matches_normalized(path) {
+                        visit(position);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether any pattern matches `path`, a path already reduced by
+    /// [`normalized`].
+    pub(crate) fn any_match(&self, path: Option<&[u8]>) -> bool {
+        let Some(path) = path else { return false };
+        match self.index() {
+            ListIndex::Combined { globs, .. } => {
+                globs.is_match_candidate(&Candidate::from_bytes(path))
+                    || self.patterns.iter().any(|pattern| {
+                        matches!(pattern.engine, Engine::Direct) && pattern.matches_normalized(path)
+                    })
+            }
+            ListIndex::Separate => self
+                .patterns
+                .iter()
+                .any(|pattern| pattern.matches_normalized(path)),
+        }
     }
 }
 
@@ -542,21 +704,21 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn pattern(text: &str) -> ExcludePattern {
-        ExcludePattern::try_from(text).unwrap()
+    fn pattern(text: &str) -> EntryPattern {
+        EntryPattern::try_from(text).unwrap()
     }
 
-    fn glob_only(text: &str) -> ExcludePattern {
+    fn glob_only(text: &str) -> EntryPattern {
         let shape = parse_shape(text).unwrap();
         let engine = glob_engine(&shape).unwrap();
-        ExcludePattern { shape, engine }
+        EntryPattern { shape, engine }
     }
 
-    fn refusal(text: &str) -> ExcludeRefusal {
-        match ExcludePattern::try_from(text) {
+    fn refusal(text: &str) -> PatternRefusal {
+        match EntryPattern::try_from(text) {
             Err(ArchiveError::InvalidConfiguration {
                 setting: ConfigSetting::ExcludePattern,
-                problem: ConfigProblem::ExcludePatternRefused { reason, .. },
+                problem: ConfigProblem::PatternRefused { reason, .. },
             }) => reason,
             other => panic!("{text:?} must be refused with a typed reason, got {other:?}"),
         }
@@ -690,58 +852,58 @@ mod tests {
             assert_eq!(p.to_string(), shown, "{text}");
             assert_eq!(pattern(shown), p, "{text}");
         }
-        assert_eq!(refusal("./!x"), ExcludeRefusal::LeadingNegation);
-        assert_eq!(refusal("**/!x"), ExcludeRefusal::LeadingNegation);
-        assert_eq!(refusal("**/ x"), ExcludeRefusal::PaddedWithBlank);
-        assert_eq!(refusal("a/b /"), ExcludeRefusal::PaddedWithBlank);
-        assert_eq!(refusal("./ x"), ExcludeRefusal::PaddedWithBlank);
-        assert_eq!(refusal("* /**/"), ExcludeRefusal::PaddedWithBlank);
+        assert_eq!(refusal("./!x"), PatternRefusal::LeadingNegation);
+        assert_eq!(refusal("**/!x"), PatternRefusal::LeadingNegation);
+        assert_eq!(refusal("**/ x"), PatternRefusal::PaddedWithBlank);
+        assert_eq!(refusal("a/b /"), PatternRefusal::PaddedWithBlank);
+        assert_eq!(refusal("./ x"), PatternRefusal::PaddedWithBlank);
+        assert_eq!(refusal("* /**/"), PatternRefusal::PaddedWithBlank);
     }
 
     #[test]
     fn every_refused_shape_names_a_typed_reason() {
         let long = "x".repeat(MAX_CONFIG_ENTRY_LENGTH + 1);
-        let cases: [(&str, ExcludeRefusal); 40] = [
-            ("", ExcludeRefusal::Empty),
-            ("./", ExcludeRefusal::Empty),
-            ("bad\0nul", ExcludeRefusal::ContainsNul),
-            (&long, ExcludeRefusal::TooLong),
-            ("..", ExcludeRefusal::DotEntry),
-            (".", ExcludeRefusal::DotEntry),
-            ("../x", ExcludeRefusal::DotEntry),
-            ("a/../b", ExcludeRefusal::DotEntry),
-            ("/abs", ExcludeRefusal::Absolute),
-            ("\\abs", ExcludeRefusal::Absolute),
-            ("/", ExcludeRefusal::Absolute),
-            ("a**b", ExcludeRefusal::UnsupportedWildcard),
-            ("***", ExcludeRefusal::UnsupportedWildcard),
-            ("**a", ExcludeRefusal::UnsupportedWildcard),
-            ("a/**b/c", ExcludeRefusal::UnsupportedWildcard),
-            ("!a.txt", ExcludeRefusal::LeadingNegation),
-            ("{a}", ExcludeRefusal::BraceAlternation),
-            ("a}", ExcludeRefusal::BraceAlternation),
-            ("a[!x]b", ExcludeRefusal::UnsupportedClass),
-            ("a[^x]b", ExcludeRefusal::UnsupportedClass),
-            ("[\u{e9}]", ExcludeRefusal::UnsupportedClass),
-            ("[[:alpha:]]", ExcludeRefusal::UnsupportedClass),
-            ("[a", ExcludeRefusal::UnterminatedClass),
-            ("[", ExcludeRefusal::UnterminatedClass),
-            ("[]", ExcludeRefusal::UnterminatedClass),
-            ("[a/b]", ExcludeRefusal::UnterminatedClass),
-            ("[a\\b]", ExcludeRefusal::UnterminatedClass),
-            ("x[.-9]y", ExcludeRefusal::InvalidClassRange),
-            ("x[+-0]y", ExcludeRefusal::InvalidClassRange),
-            ("[--0]", ExcludeRefusal::InvalidClassRange),
-            ("[*-0]", ExcludeRefusal::InvalidClassRange),
-            ("[]-a]", ExcludeRefusal::InvalidClassRange),
-            ("[c-a]", ExcludeRefusal::InvalidClassRange),
-            ("[a-c-e]", ExcludeRefusal::InvalidClassRange),
-            ("[0-z]", ExcludeRefusal::InvalidClassRange),
-            (" .env", ExcludeRefusal::PaddedWithBlank),
-            (".env ", ExcludeRefusal::PaddedWithBlank),
-            ("a\t", ExcludeRefusal::PaddedWithBlank),
-            ("a,b", ExcludeRefusal::ContainsComma),
-            ("{a,b}", ExcludeRefusal::ContainsComma),
+        let cases: [(&str, PatternRefusal); 40] = [
+            ("", PatternRefusal::Empty),
+            ("./", PatternRefusal::Empty),
+            ("bad\0nul", PatternRefusal::ContainsNul),
+            (&long, PatternRefusal::TooLong),
+            ("..", PatternRefusal::DotEntry),
+            (".", PatternRefusal::DotEntry),
+            ("../x", PatternRefusal::DotEntry),
+            ("a/../b", PatternRefusal::DotEntry),
+            ("/abs", PatternRefusal::Absolute),
+            ("\\abs", PatternRefusal::Absolute),
+            ("/", PatternRefusal::Absolute),
+            ("a**b", PatternRefusal::UnsupportedWildcard),
+            ("***", PatternRefusal::UnsupportedWildcard),
+            ("**a", PatternRefusal::UnsupportedWildcard),
+            ("a/**b/c", PatternRefusal::UnsupportedWildcard),
+            ("!a.txt", PatternRefusal::LeadingNegation),
+            ("{a}", PatternRefusal::BraceAlternation),
+            ("a}", PatternRefusal::BraceAlternation),
+            ("a[!x]b", PatternRefusal::UnsupportedClass),
+            ("a[^x]b", PatternRefusal::UnsupportedClass),
+            ("[\u{e9}]", PatternRefusal::UnsupportedClass),
+            ("[[:alpha:]]", PatternRefusal::UnsupportedClass),
+            ("[a", PatternRefusal::UnterminatedClass),
+            ("[", PatternRefusal::UnterminatedClass),
+            ("[]", PatternRefusal::UnterminatedClass),
+            ("[a/b]", PatternRefusal::UnterminatedClass),
+            ("[a\\b]", PatternRefusal::UnterminatedClass),
+            ("x[.-9]y", PatternRefusal::InvalidClassRange),
+            ("x[+-0]y", PatternRefusal::InvalidClassRange),
+            ("[--0]", PatternRefusal::InvalidClassRange),
+            ("[*-0]", PatternRefusal::InvalidClassRange),
+            ("[]-a]", PatternRefusal::InvalidClassRange),
+            ("[c-a]", PatternRefusal::InvalidClassRange),
+            ("[a-c-e]", PatternRefusal::InvalidClassRange),
+            ("[0-z]", PatternRefusal::InvalidClassRange),
+            (" .env", PatternRefusal::PaddedWithBlank),
+            (".env ", PatternRefusal::PaddedWithBlank),
+            ("a\t", PatternRefusal::PaddedWithBlank),
+            ("a,b", PatternRefusal::ContainsComma),
+            ("{a,b}", PatternRefusal::ContainsComma),
         ];
         for (text, expected) in cases {
             assert_eq!(refusal(text), expected, "{text:?}");
@@ -753,7 +915,7 @@ mod tests {
         for text in [
             "[a-c]", "[0-9]", "[-a]", "[a-]", "[]a]", "[a-cx-z]", "[*]", "[?]", "[[]", "a]",
         ] {
-            assert!(ExcludePattern::try_from(text).is_ok(), "{text}");
+            assert!(EntryPattern::try_from(text).is_ok(), "{text}");
         }
         assert!(selects("[*]x", "*x"));
         assert!(!selects("[*]x", "ax"));
@@ -769,7 +931,7 @@ mod tests {
 
     #[test]
     fn a_refusal_message_quotes_the_pattern() {
-        let err = ExcludePattern::try_from("{a}").unwrap_err();
+        let err = EntryPattern::try_from("{a}").unwrap_err();
         let ArchiveError::InvalidConfiguration { setting, problem } = err else {
             panic!("expected an invalid configuration");
         };
@@ -790,7 +952,7 @@ mod tests {
         assert!(!selects("a/*", "a/../a/b"));
         for text in ["x", "x/y", "**", "*", "y", "/x"]
             .iter()
-            .filter_map(|t| ExcludePattern::try_from(*t).ok())
+            .filter_map(|t| EntryPattern::try_from(*t).ok())
         {
             for path in ["x/../y", "/x", "..", "", "."] {
                 assert!(!text.matches(Path::new(path)), "{text} {path}");
@@ -836,15 +998,15 @@ mod tests {
     #[test]
     fn defaults_select_a_sample_path() {
         let defaults = [
-            (ExcludePattern::literal_name(".git"), ".git/config"),
-            (ExcludePattern::literal_name(".DS_Store"), "a/.DS_Store"),
-            (ExcludePattern::suffix_name(".tmp"), "x/y.tmp"),
+            (EntryPattern::literal_name(".git"), ".git/config"),
+            (EntryPattern::literal_name(".DS_Store"), "a/.DS_Store"),
+            (EntryPattern::suffix_name(".tmp"), "x/y.tmp"),
         ];
         for (p, sample) in defaults {
             assert!(p.matches(Path::new(sample)), "{p}");
         }
-        assert_eq!(ExcludePattern::suffix_name(".tmp"), pattern("*.tmp"));
-        assert_eq!(ExcludePattern::literal_name(".git"), pattern(".git"));
+        assert_eq!(EntryPattern::suffix_name(".tmp"), pattern("*.tmp"));
+        assert_eq!(EntryPattern::literal_name(".git"), pattern(".git"));
     }
 
     #[cfg(unix)]
@@ -896,18 +1058,18 @@ mod tests {
     fn the_length_limit_is_255_bytes() {
         let at_limit = "x".repeat(MAX_CONFIG_ENTRY_LENGTH);
         assert_eq!(MAX_CONFIG_ENTRY_LENGTH, 255);
-        assert!(ExcludePattern::try_from(at_limit.as_str()).is_ok());
-        assert_eq!(refusal(&format!("{at_limit}x")), ExcludeRefusal::TooLong);
+        assert!(EntryPattern::try_from(at_limit.as_str()).is_ok());
+        assert_eq!(refusal(&format!("{at_limit}x")), PatternRefusal::TooLong);
     }
 
     #[test]
     fn a_drive_prefix_is_refused_on_every_host() {
         for text in ["C:x", "c:", "C:/x", "C:\\x", "./C:x"] {
-            assert_eq!(refusal(text), ExcludeRefusal::Absolute, "{text}");
+            assert_eq!(refusal(text), PatternRefusal::Absolute, "{text}");
         }
-        assert!(ExcludePattern::try_from("**/C:x").is_ok());
-        assert!(ExcludePattern::try_from("ab:c").is_ok());
-        assert!(ExcludePattern::try_from("x/C:y").is_ok());
+        assert!(EntryPattern::try_from("**/C:x").is_ok());
+        assert!(EntryPattern::try_from("ab:c").is_ok());
+        assert!(EntryPattern::try_from("x/C:y").is_ok());
     }
 
     #[cfg(windows)]
@@ -915,7 +1077,7 @@ mod tests {
     fn host_separators_and_prefixes() {
         assert!(pattern("src/c/*.rs").matches(Path::new("src\\c\\two.rs")));
         assert!(!pattern("src/c/*.rs").matches(Path::new("C:\\src\\c\\two.rs")));
-        assert_eq!(refusal("C:x"), ExcludeRefusal::Absolute);
+        assert_eq!(refusal("C:x"), PatternRefusal::Absolute);
     }
 
     fn name_strategy() -> impl Strategy<Value = String> {
@@ -927,6 +1089,39 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn a_list_matches_exactly_as_its_patterns_do(
+            texts in prop::collection::vec(
+                prop::sample::select(vec![
+                    "a", "*.tmp", "a/b", "a/*", "**/b", "*b*", "b/**/c", "**", "x[ab]?",
+                ]),
+                0..8,
+            ),
+            parts in prop::collection::vec(
+                prop::sample::select(vec!["a", "b", "c", "xa1", "q.tmp", ".", "..", ""]),
+                0..5,
+            ),
+            leading in prop::sample::select(vec!["", "/", "./"]),
+        ) {
+            let patterns: Vec<_> = texts.iter().map(|text| pattern(text)).collect();
+            let list = PatternList::from(patterns.clone());
+            let path = format!("{leading}{}", parts.join("/"));
+            let reduced = normalized(Path::new(&path));
+
+            let mut matched = std::collections::BTreeSet::new();
+            list.matching(reduced.as_deref(), |index| {
+                matched.insert(index);
+            });
+            let expected: std::collections::BTreeSet<_> = patterns
+                .iter()
+                .enumerate()
+                .filter(|(_, pattern)| pattern.matches(Path::new(&path)))
+                .map(|(index, _)| index)
+                .collect();
+            prop_assert_eq!(&matched, &expected, "{:?} vs {:?}", texts, path);
+            prop_assert_eq!(list.any_match(reduced.as_deref()), !expected.is_empty());
+        }
+
         #[test]
         fn legacy_shapes_select_the_same_entries(
             name in name_strategy(),
@@ -981,7 +1176,7 @@ mod tests {
                 !path.contains('\\')
                     && path.split('/').all(|s| !s.is_empty() && s != "." && s != "..")
             );
-            if let Ok(p) = ExcludePattern::try_from(text.as_str())
+            if let Ok(p) = EntryPattern::try_from(text.as_str())
                 && p.matches(Path::new(&path))
             {
                 let some_component = Path::new(&path)
@@ -993,8 +1188,8 @@ mod tests {
 
         #[test]
         fn parse_display_round_trips_and_never_panics(text in "\\PC{0,24}") {
-            if let Ok(p) = ExcludePattern::try_from(text.as_str()) {
-                let again = ExcludePattern::try_from(p.to_string().as_str());
+            if let Ok(p) = EntryPattern::try_from(text.as_str()) {
+                let again = EntryPattern::try_from(p.to_string().as_str());
                 prop_assert_eq!(again.ok(), Some(p));
             }
         }

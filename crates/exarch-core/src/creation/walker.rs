@@ -15,6 +15,7 @@ use crate::creation::filters;
 use crate::creation::source::source_error;
 use crate::creation::source::walk_error;
 use crate::creation::staged::ExcludedOutput;
+use crate::pattern::PatternList;
 use std::collections::HashMap;
 use std::fs::Metadata;
 use std::ops::Deref;
@@ -35,6 +36,7 @@ pub(crate) struct FilteredWalker<'a> {
     root: &'a Path,
     config: &'a CreationConfig,
     excluded: &'a ExcludedOutput,
+    exclude_patterns: PatternList,
 }
 
 static NOTHING_EXCLUDED: ExcludedOutput = ExcludedOutput::none();
@@ -47,6 +49,7 @@ impl<'a> FilteredWalker<'a> {
             root,
             config,
             excluded: &NOTHING_EXCLUDED,
+            exclude_patterns: filters::exclude_list(config),
         }
     }
 
@@ -119,10 +122,11 @@ impl<'a> FilteredWalker<'a> {
         }
         let relative = filters::compute_archive_path(entry.path(), self.root, self.config)?;
         match ArchiveEntryName::from_relative(&relative) {
-            Some(name) => filters::skip_reason(&name, self.config).map_or_else(
-                || self.build_filtered_entry(entry, relative),
-                |kind| Ok(Some(WalkItem::Skipped(Skip::new(kind, name.to_path_buf())))),
-            ),
+            Some(name) => filters::skip_reason(&name, self.config, &self.exclude_patterns)
+                .map_or_else(
+                    || self.build_filtered_entry(entry, relative),
+                    |kind| Ok(Some(WalkItem::Skipped(Skip::new(kind, name.to_path_buf())))),
+                ),
             // No name left: the walk root, or an entry `strip_prefix` emptied.
             None if !self.config.include_hidden && filters::is_hidden(entry.path()) => Ok(None),
             None => self.build_filtered_entry(entry, relative),
@@ -393,7 +397,7 @@ pub(crate) fn collect_entries<P: AsRef<Path>>(
                     .ok_or_else(|| {
                         ArchiveError::Io(std::io::Error::other(IoContext::new(
                             "cannot determine filename for source path",
-                            path.display().to_string(),
+                            crate::path_text(path),
                         )))
                     })?
                     .into()
@@ -433,7 +437,7 @@ fn get_file_size(metadata: &Metadata) -> u64 {
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
-    use crate::creation::ExcludePattern;
+    use crate::pattern::EntryPattern;
     use std::assert_matches;
     use std::fs;
     use tempfile::TempDir;
@@ -508,7 +512,7 @@ mod tests {
         fs::write(root.join("build/keep.txt"), "k").unwrap();
 
         let config = CreationConfig::default()
-            .with_exclude_patterns(vec![ExcludePattern::try_from("build/out").unwrap()]);
+            .with_exclude_patterns(vec![EntryPattern::try_from("build/out").unwrap()]);
         let collected = collect_entries(&[root], &config, &ExcludedOutput::none()).unwrap();
 
         let paths: Vec<_> = collected
@@ -608,8 +612,8 @@ mod tests {
         fs::write(root.join("also.log"), "skip").unwrap();
 
         let config = CreationConfig::default().with_exclude_patterns(vec![
-            ExcludePattern::try_from("*.tmp").unwrap(),
-            ExcludePattern::try_from("*.log").unwrap(),
+            EntryPattern::try_from("*.tmp").unwrap(),
+            EntryPattern::try_from("*.log").unwrap(),
         ]);
 
         let walker = FilteredWalker::new(root, &config);
@@ -1117,7 +1121,7 @@ mod tests {
         fs::write(root.join(".hidden"), "hidden").unwrap();
 
         let config = CreationConfig::default()
-            .with_exclude_patterns(vec![ExcludePattern::try_from("*.tmp").unwrap()])
+            .with_exclude_patterns(vec![EntryPattern::try_from("*.tmp").unwrap()])
             .with_include_hidden(false);
 
         let sources = [root];

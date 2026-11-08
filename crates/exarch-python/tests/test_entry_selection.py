@@ -307,6 +307,18 @@ def test_list_reports_the_disposition_of_every_entry(project):
     assert exarch.AnyEntryDisposition is not None
 
 
+def test_an_unmatched_include_fails_a_listing_as_extract_does(project):
+    config = (
+        exarch.SecurityConfig().add_include_pattern("proj/README.md").add_include_pattern("nope")
+    )
+
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        exarch.list_archive(project, config)
+
+    assert info.value.setting == "entry_include"
+    assert info.value.unmatched_patterns == ["nope"]
+
+
 def test_a_manifest_keeps_the_selection_it_was_listed_with(project):
     listed_with = exarch.SecurityConfig().add_include_pattern("proj/README.md")
     manifest = exarch.list_archive(project, listed_with)
@@ -321,6 +333,7 @@ def test_a_manifest_keeps_the_selection_it_was_listed_with(project):
     assert actions == {"proj/README.md": "extract", "proj/src/main.rs": "skip"}
     assert exarch.ExtractDisposition.action == "extract"
     assert exarch.SkipDisposition.action == "skip"
+    assert exarch.RefuseDisposition.action == "refuse"
 
 
 def test_verify_applies_the_same_selection(project):
@@ -373,3 +386,14 @@ def test_selection_survives_a_config_copy_through_the_progress_variant(project, 
 
     assert _files(out) == ["README.md"]
     assert seen
+
+
+def test_an_entry_that_cannot_be_placed_is_listed_as_refuse(temp_dir):
+    archive = _tar(temp_dir, [("f", b"x"), ("f/g", b"y")])
+
+    manifest = exarch.list_archive(archive)
+
+    refused = [d for d in manifest.dispositions if d.action == "refuse"]
+    assert [str(d.path) for d in refused] == ["f/g"]
+    assert isinstance(refused[0], exarch.RefuseDisposition)
+    assert [d.action for d in manifest.dispositions] == ["extract", "refuse"]

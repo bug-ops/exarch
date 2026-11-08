@@ -11,6 +11,7 @@ use crate::ProgressArgs;
 use crate::ProgressCallback;
 use crate::ProgressDispatch;
 use crate::abort::AbortBinding;
+use crate::config::ListOptions;
 use crate::config::SecurityConfig;
 use crate::config::VerificationOptions;
 use crate::error::Operation;
@@ -30,10 +31,13 @@ fn list_core(
     data: impl IntoSource,
     config: &exarch_core::SecurityConfig,
     format: Option<ArchiveType>,
+    options: exarch_core::ListOptions,
 ) -> CoreResult<ArchiveManifest> {
     data.run(format, |reader| {
         ArchiveManifest::from_core(
-            exarch_core::ListRequest::new(config).list_reader(reader)?,
+            exarch_core::ListRequest::new(config)
+                .with_options(options)
+                .list_reader(reader)?,
             config,
         )
     })
@@ -46,11 +50,11 @@ fn verify_core(
     format: Option<ArchiveType>,
 ) -> CoreResult<VerificationReport> {
     data.run(format, |reader| {
-        VerificationReport::try_from(
+        Ok(VerificationReport::from(
             exarch_core::VerifyRequest::new(config)
                 .with_options(options)
                 .verify_reader(reader)?,
-        )
+        ))
     })
 }
 
@@ -58,6 +62,7 @@ fn list_with_progress_core(
     data: impl IntoSource,
     config: &exarch_core::SecurityConfig,
     format: Option<ArchiveType>,
+    options: exarch_core::ListOptions,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
 ) -> CoreResult<ArchiveManifest> {
@@ -70,6 +75,7 @@ fn list_with_progress_core(
             data.run(format, |reader| {
                 ArchiveManifest::from_core(
                     exarch_core::ListRequest::new(config)
+                        .with_options(options)
                         .with_progress(progress)
                         .list_reader(reader)?,
                     config,
@@ -95,12 +101,12 @@ fn verify_with_progress_core(
         data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
-                VerificationReport::try_from(
+                Ok(VerificationReport::from(
                     exarch_core::VerifyRequest::new(config)
                         .with_options(options)
                         .with_progress(progress)
                         .verify_reader(reader)?,
-                )
+                ))
             })
         },
         |source, _| ProgressCallbackError::VerifyCallback { source },
@@ -145,14 +151,16 @@ pub fn list_archive_bytes<'env>(
     config: Option<&SecurityConfig>,
     format: Option<ArchiveType>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
+    options: Option<&ListOptions>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
+    let options = options.map_or_default(ListOptions::to_core);
     let (data, detach) = AbortableSource::bind(data, signal);
 
     spawn_blocking_promise_with(
         env,
         "archive listing",
-        move || list_core(data, &config_owned, format),
+        move || list_core(data, &config_owned, format, options),
         Ok,
         move |env| detach.run(env),
     )
@@ -187,12 +195,14 @@ pub fn list_archive_bytes_sync(
     data: Uint8Array,
     config: Option<&SecurityConfig>,
     format: Option<ArchiveType>,
+    options: Option<&ListOptions>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let options = options.map_or_default(ListOptions::to_core);
 
     run_sync(env, "archive listing", || {
-        list_core(&*data, config_ref, format)
+        list_core(&*data, config_ref, format, options)
     })
 }
 
@@ -329,8 +339,10 @@ pub fn list_archive_bytes_with_progress<'env>(
     #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
+    options: Option<&ListOptions>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
+    let options = options.map_or_default(ListOptions::to_core);
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
     let (data, detach) = AbortableSource::bind(data, signal);
 
@@ -342,6 +354,7 @@ pub fn list_archive_bytes_with_progress<'env>(
                 data,
                 &config_owned,
                 format,
+                options,
                 progress,
                 ProgressDispatch::Awaited,
             )
@@ -461,15 +474,18 @@ pub fn list_archive_bytes_with_progress_sync(
     config: Option<&SecurityConfig>,
     format: Option<ArchiveType>,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
+    options: Option<&ListOptions>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let options = options.map_or_default(ListOptions::to_core);
 
     run_sync(env, "archive listing with progress", move || {
         list_with_progress_core(
             &*data,
             config_ref,
             format,
+            options,
             progress,
             ProgressDispatch::Deferred,
         )

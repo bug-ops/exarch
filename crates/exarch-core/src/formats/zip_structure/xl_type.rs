@@ -18,9 +18,9 @@
 use flate2::Crc;
 
 use super::extra_fields;
-use super::le32;
 use crate::formats::common::SpecialFile;
 use crate::formats::common::UnixFileType;
+use crate::formats::le::le32;
 use crate::formats::zip::ZipEntryKind;
 use crate::formats::zip::zip_entry_kind;
 

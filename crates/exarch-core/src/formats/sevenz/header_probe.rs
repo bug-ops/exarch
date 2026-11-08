@@ -23,10 +23,11 @@ use lzma_rust2::LzmaReader;
 use lzma_rust2::lzma_get_memory_usage_by_props;
 use lzma_rust2::lzma2_get_memory_usage;
 
+use super::SIGNATURE_HEADER_LEN;
 use super::SIGNATURE_HEADER_SIZE;
 use super::header::SEVENZ_MAGIC;
+use crate::formats::le::le64;
 
-const SIGNATURE_LEN: usize = 32;
 const K_END: u8 = 0x00;
 const K_HEADER: u8 = 0x01;
 const K_ARCHIVE_PROPERTIES: u8 = 0x02;
@@ -114,10 +115,10 @@ enum NextHeader {
 }
 
 fn next_header<R: Read + Seek>(source: &mut R) -> io::Result<NextHeader> {
-    let mut start = [0u8; SIGNATURE_LEN];
+    let mut start = [0u8; SIGNATURE_HEADER_LEN];
     source.read_exact(&mut start)?;
-    let le = |at: usize| u64::from_le_bytes(start[at..at + 8].try_into().unwrap_or_default());
-    let (offset, size) = (le(12), le(20));
+    let offset = le64::<12, SIGNATURE_HEADER_LEN>(&start);
+    let size = le64::<20, SIGNATURE_HEADER_LEN>(&start);
     let Some(at) = SIGNATURE_HEADER_SIZE.checked_add(offset) else {
         return Ok(NextHeader::Foreign);
     };
@@ -202,7 +203,7 @@ fn read_header<R: Read + Seek>(
     source.seek(SeekFrom::Start(0)).map_err(io)?;
     let (at, size) = match next_header(source).map_err(io)? {
         NextHeader::At { at, size } => (at, size),
-        NextHeader::Absent if length > SIGNATURE_LEN as u64 => return Err(Stop::Unmodelled),
+        NextHeader::Absent if length > SIGNATURE_HEADER_SIZE => return Err(Stop::Unmodelled),
         NextHeader::Absent | NextHeader::Foreign => return Err(Stop::NotApplicable),
     };
     if size > max_bytes {

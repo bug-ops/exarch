@@ -27,19 +27,14 @@ use crate::Admit;
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
-use crate::ExcludePattern;
 use crate::Result;
 use crate::SkipKind;
 use crate::Violation;
-use crate::creation::exclude_pattern::normalized;
+use crate::pattern::EntryPattern;
+use crate::pattern::PatternList;
+use crate::pattern::normalized;
 use crate::security::fs_view::LinkKind;
 use crate::security::validator::NodeKind;
-
-/// A glob entry pattern, with the grammar of creation excludes.
-///
-/// The same type as [`ExcludePattern`]: `create -x` and extraction share one
-/// parser, so a pattern means the same thing in both directions.
-pub type EntryPattern = ExcludePattern;
 
 /// How many leading path components extraction drops from every entry.
 ///
@@ -174,17 +169,9 @@ pub enum PathRewrite {
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EntrySelection {
-    include: Box<[EntryPattern]>,
-    exclude: Box<[EntryPattern]>,
+    include: PatternList,
+    exclude: PatternList,
     rewrite: PathRewrite,
-}
-
-/// Appends to a boxed slice, which keeps the selection at two words per list
-/// instead of a vector's three.
-fn push(patterns: Box<[EntryPattern]>, pattern: EntryPattern) -> Box<[EntryPattern]> {
-    let mut patterns = patterns.into_vec();
-    patterns.push(pattern);
-    patterns.into_boxed_slice()
 }
 
 impl EntrySelection {
@@ -197,13 +184,13 @@ impl EntrySelection {
     /// The include patterns; empty selects every entry.
     #[must_use]
     pub fn include(&self) -> &[EntryPattern] {
-        &self.include
+        self.include.as_slice()
     }
 
     /// The exclude patterns.
     #[must_use]
     pub fn exclude(&self) -> &[EntryPattern] {
-        &self.exclude
+        self.exclude.as_slice()
     }
 
     /// How selected entries are rewritten.
@@ -215,14 +202,14 @@ impl EntrySelection {
     /// Adds an include pattern.
     #[must_use]
     pub fn with_include(mut self, pattern: EntryPattern) -> Self {
-        self.include = push(std::mem::take(&mut self.include), pattern);
+        self.include = std::mem::take(&mut self.include).pushed(pattern);
         self
     }
 
     /// Adds an exclude pattern.
     #[must_use]
     pub fn with_exclude(mut self, pattern: EntryPattern) -> Self {
-        self.exclude = push(std::mem::take(&mut self.exclude), pattern);
+        self.exclude = std::mem::take(&mut self.exclude).pushed(pattern);
         self
     }
 
@@ -287,14 +274,14 @@ impl EntrySelection {
     /// Replaces the include patterns; the rewrite is kept.
     #[must_use]
     pub fn with_include_list(mut self, patterns: Vec<EntryPattern>) -> Self {
-        self.include = patterns.into_boxed_slice();
+        self.include = patterns.into();
         self
     }
 
     /// Replaces the exclude patterns; the rewrite is kept.
     #[must_use]
     pub fn with_exclude_list(mut self, patterns: Vec<EntryPattern>) -> Self {
-        self.exclude = patterns.into_boxed_slice();
+        self.exclude = patterns.into();
         self
     }
 
@@ -316,21 +303,8 @@ impl EntrySelection {
         hits: Option<&IncludeHits>,
     ) -> Result<Decision> {
         let normalized = normalized(original);
-        let matches = |pattern: &EntryPattern| {
-            normalized
-                .as_deref()
-                .is_some_and(|path| pattern.matches_normalized(path))
-        };
-        let mut included = self.include.is_empty();
-        for (index, pattern) in self.include.iter().enumerate() {
-            if matches(pattern) {
-                included = true;
-                if let Some(hits) = hits {
-                    hits.record(index);
-                }
-            }
-        }
-        if !included || self.exclude.iter().any(matches) {
+        let path = normalized.as_deref();
+        if !self.record_includes(path, hits) || self.exclude.any_match(path) {
             return Ok(Decision::Skip(SkipKind::NotSelected));
         }
         Ok(match (self.rewrite, shape) {
@@ -380,6 +354,45 @@ impl EntrySelection {
             Ok(Decision::Extract(Placement::Rewritten(rewritten))) => Some(Cow::Owned(rewritten.0)),
             Ok(Decision::Skip(_)) => None,
         }
+    }
+
+    /// Records which include patterns match `path` and tells whether the entry
+    /// is included: some pattern matched, or there is none.
+    fn record_includes(&self, path: Option<&[u8]>, hits: Option<&IncludeHits>) -> bool {
+        let mut included = self.include.is_empty();
+        self.include.matching(path, |index| {
+            included = true;
+            if let Some(hits) = hits {
+                hits.record(index);
+            }
+        });
+        included
+    }
+
+    /// Fails when an include pattern matches none of the listed entries.
+    ///
+    /// For `list`, which has no extraction to record hits as it goes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::UnmatchedInclude`] naming every unmatched
+    /// pattern.
+    pub(crate) fn require_includes_matched<'a>(
+        &self,
+        entries: impl IntoIterator<Item = &'a Path>,
+    ) -> Result<()> {
+        if self.include.is_empty() {
+            return Ok(());
+        }
+        let hits = IncludeHits::of(self);
+        for raw in entries {
+            let normal: PathBuf = raw
+                .components()
+                .filter(|component| matches!(component, Component::Normal(_)))
+                .collect();
+            self.record_includes(normalized(&normal).as_deref(), Some(&hits));
+        }
+        hits.require_all_matched(self)
     }
 
     /// The hardlink target to validate for the link entry `link`, mapped as an
@@ -557,7 +570,13 @@ pub(crate) struct IncludeHits(Box<[Cell<bool>]>);
 impl IncludeHits {
     /// A record with one slot per include pattern of `selection`.
     pub(crate) fn of(selection: &EntrySelection) -> Self {
-        Self(selection.include.iter().map(|_| Cell::new(false)).collect())
+        Self(
+            selection
+                .include()
+                .iter()
+                .map(|_| Cell::new(false))
+                .collect(),
+        )
     }
 
     fn record(&self, index: usize) {
@@ -573,7 +592,7 @@ impl IncludeHits {
     /// Returns [`ArchiveError::UnmatchedInclude`] naming every such pattern.
     pub(crate) fn require_all_matched(&self, selection: &EntrySelection) -> Result<()> {
         let unmatched: Box<[EntryPattern]> = selection
-            .include
+            .include()
             .iter()
             .zip(self.0.iter())
             .filter(|(_, hit)| !hit.get())

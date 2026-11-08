@@ -314,7 +314,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | Path traversal `../` or absolute path | `ArchiveError::PathTraversal` |
 | File exceeds `max_file_size` | `ArchiveError::QuotaExceeded { resource: FileSizeBytes }` |
 | Total size exceeds `max_total_size` | `ArchiveError::QuotaExceeded { resource: TotalSizeBytes }` |
-| File count exceeds `max_file_count` | `ArchiveError::QuotaExceeded { resource: FileCount }` |
+| Entry count (every entry, directories and links included) exceeds `max_file_count` | `ArchiveError::QuotaExceeded { resource: FileCount }` |
 | Compression ratio > `max_compression_ratio` | `ArchiveError::ZipBomb` |
 | Symlink with `allowed.symlinks = false` | Entry skipped (not an error) |
 | Symlink pointing outside output_dir | `ArchiveError::SymlinkEscape` |
@@ -341,7 +341,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | SC-005 | Test coverage (new code) | All security checks have property-based or integration tests |
 | SC-006 | Doc-test pass rate | 100% — `cargo test --doc --workspace --all-features` must pass |
 | SC-007 | Clippy clean | Zero warnings with `--all-features --all-targets -D warnings` |
-| SC-008 | MSRV compliance | `cargo check -p exarch-core --all-features` passes on Rust 1.99.1 |
+| SC-008 | MSRV compliance | The CI `msrv` job checks the whole workspace (`exarch-core`, `exarch-cli`, `exarch-python`, `exarch-node`) on Rust 1.99.1, as every crate inherits `rust-version.workspace` (#1057) |
 | SC-009 | Atomic extraction correctness | No partial output on extraction failure; temp dir cleaned up |
 
 ## 8. Agent Boundaries

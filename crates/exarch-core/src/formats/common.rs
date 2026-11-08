@@ -42,7 +42,7 @@ pub(crate) use crate::SpecialFile;
 use crate::Violation;
 use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
-use crate::copy::copy_bounded;
+use crate::copy::copy_cancellable;
 use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
 use crate::formats::occupant::OccupantAction;
@@ -514,11 +514,12 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // `written_at` never holds a pre-existing entry, so nothing else is lost.
     let guard = written_at.guard(&parent, leaf);
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
-    let bytes_written = copy_bounded(
+    let bytes_written = copy_cancellable(
         reader,
         &mut buffered_writer,
         copy_buffer,
         Some(expected_size),
+        &mut *progress,
     )
     .map_err(|error| faults.classify(error))?;
     buffered_writer.flush()?;
@@ -806,13 +807,15 @@ pub(crate) fn check_directory_occupant(
 /// # Platform Support
 ///
 /// - **Unix**: Full symlink support via `std::os::unix::fs::symlink`
-/// - **Other platforms**: Returns `SecurityViolation` error
+/// - **Other platforms**: Refuses through [`require_symlink_creation`]
 ///
 /// # Error Behavior
 ///
-/// If the symlink already exists, the function will fail with an I/O error.
-/// Unlike `create_directory`, this function is NOT idempotent - it does not
-/// overwrite existing symlinks or files at the target path.
+/// What an occupied path does follows `options.existing_files`: `Skip` keeps
+/// the occupant and records the skip, `Overwrite` replaces a file but never a
+/// symlink or directory, and `Refuse` fails with `DestinationOccupied` for an
+/// occupant this run did not create. A symlink that already holds the same
+/// target is skipped as unchanged under every policy.
 ///
 /// # Arguments
 ///
@@ -832,9 +835,14 @@ pub(crate) fn check_directory_occupant(
 /// - Symlink creation fails (including when target path already exists)
 /// - Removing an existing path fails when the policy is
 ///   `ExistingFiles::Overwrite`
-/// - A symlink with a different target occupies the path and `skip_duplicates`
-///   is false (one with the same target is skipped as unchanged)
-#[allow(unused_variables)]
+/// - A symlink with a different target occupies the path
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        reason = "only the Unix path reads the entry, the handles and the options"
+    )
+)]
 #[cfg_attr(
     not(unix),
     expect(
@@ -849,9 +857,9 @@ pub(crate) fn create_symlink<P: ParentCheck>(
     dirs: DirWalker,
     options: SinkOptions,
 ) -> Result<()> {
-    let duplicates = options.existing_files;
     #[cfg(unix)]
     {
+        let duplicates = options.existing_files;
         let target_path = safe_symlink.target_path();
 
         let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link())?;
@@ -1111,9 +1119,16 @@ pub(crate) fn copy_file_content_with_permit(
     mut to: File,
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<u64> {
-    copy_bounded(&mut from, &mut to, copy_buffer, Some(permit.into_bytes()))
-        .map_err(hardlink_target_changed)
+    copy_cancellable(
+        &mut from,
+        &mut to,
+        copy_buffer,
+        Some(permit.into_bytes()),
+        progress,
+    )
+    .map_err(hardlink_target_changed)
 }
 
 #[cfg(test)]
@@ -1637,6 +1652,7 @@ mod tests {
                 File::create(&to).expect("create copy"),
                 &mut CopyBuffer::new(),
                 permit,
+                &mut NoopProgress,
             );
             if ok {
                 assert_eq!(result.expect("exact length copies"), 100_000);

@@ -3,10 +3,11 @@
 
 use super::links::LinkStorage;
 use super::links::link_storage;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::copy::CopyBuffer;
-use crate::copy::copy_bounded;
+use crate::copy::copy_cancellable;
 use crate::formats::common;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
@@ -71,6 +72,7 @@ pub(super) fn write_file_direct(
     leaf: Leaf<'_>,
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<u64> {
     let file = parent.create_new(leaf, None)?;
     // A decode failure partway through the copy would otherwise leave a
@@ -87,8 +89,14 @@ pub(super) fn write_file_direct(
     // 64KiB write buffering to cut per-file syscall count (finding M2),
     // matching TAR/ZIP's common::extract_file_with_permit.
     let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
-    let bytes_written = copy_bounded(reader, &mut writer, copy_buffer, Some(permit.into_bytes()))
-        .map_err(|error| faults.classify(error))?;
+    let bytes_written = copy_cancellable(
+        reader,
+        &mut writer,
+        copy_buffer,
+        Some(permit.into_bytes()),
+        progress,
+    )
+    .map_err(|error| faults.classify(error))?;
     writer.flush()?;
     guard.persist();
     Ok(bytes_written)
@@ -136,6 +144,10 @@ pub(super) fn write_file_direct(
 /// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
 /// fails, or if the actual decompressed byte count exceeds or falls short of
 /// the permit's byte count.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the permits and the progress callback are threaded through from the caller; a parameter struct adds indirection"
+)]
 pub(super) fn write_file_with_permit(
     reader: &mut dyn Read,
     faults: ReadFaults<'_>,
@@ -144,6 +156,7 @@ pub(super) fn write_file_with_permit(
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
     replace: ReplacePermit,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<u64> {
     write_file_with_permit_using(
         reader,
@@ -153,6 +166,7 @@ pub(super) fn write_file_with_permit(
         copy_buffer,
         permit,
         replace,
+        progress,
         TempLeaf::next,
     )
 }
@@ -192,6 +206,7 @@ pub(super) fn write_file_with_permit_using(
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
     replace: ReplacePermit,
+    progress: &mut dyn ProgressCallback,
     next_candidate: impl FnMut() -> TempLeaf,
 ) -> Result<u64> {
     let (temp, temp_file) =
@@ -207,8 +222,14 @@ pub(super) fn write_file_with_permit_using(
     // adversarial review, finding M2), matching TAR/ZIP's
     // common::extract_file_with_permit.
     let mut writer = std::io::BufWriter::with_capacity(64 * 1024, temp_file);
-    let bytes_written = copy_bounded(reader, &mut writer, copy_buffer, Some(permit.into_bytes()))
-        .map_err(|error| faults.classify(error))?;
+    let bytes_written = copy_cancellable(
+        reader,
+        &mut writer,
+        copy_buffer,
+        Some(permit.into_bytes()),
+        progress,
+    )
+    .map_err(|error| faults.classify(error))?;
     writer.flush()?;
     // Explicit close before rename: renaming a still-open file is fine on
     // Unix but the handle should not outlive its purpose regardless.

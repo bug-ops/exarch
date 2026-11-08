@@ -119,10 +119,16 @@ describe('createArchiveWithProgress (async)', () => {
 
   it('invokes the callback exactly once per entry with (path, total, current, bytesWritten)', async () => {
     const calls = [];
-    const report = await createArchiveWithProgress(outputPath, [sourceDir], null, (err, arg) => {
-      calls.push(arg);
-      assertProgressCallShape(err, arg);
-    });
+    const report = await createArchiveWithProgress(
+      outputPath,
+      [sourceDir],
+      null,
+      null,
+      (err, arg) => {
+        calls.push(arg);
+        assertProgressCallShape(err, arg);
+      }
+    );
 
     assert.ok(report.filesAdded >= 2);
     assert.ok(fs.existsSync(outputPath));
@@ -135,7 +141,7 @@ describe('createArchiveWithProgress (async)', () => {
   });
 
   it('creates the archive normally when progress is null', async () => {
-    const report = await createArchiveWithProgress(outputPath, [sourceDir], null, null);
+    const report = await createArchiveWithProgress(outputPath, [sourceDir], null, null, null);
 
     assert.ok(report.filesAdded >= 2);
     assert.ok(fs.existsSync(outputPath));
@@ -177,6 +183,7 @@ describe('createArchiveWithProgress bytesWritten staleness (parity with exarch-p
     await createArchiveWithProgress(
       outputPath,
       [sourceDir],
+      null,
       null,
       (_err, [entryPath, , , bytesWritten]) => {
         const name = entryPath.split('/').pop();

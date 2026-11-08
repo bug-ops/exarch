@@ -193,13 +193,33 @@ impl AsRef<Path> for LeafBuf {
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EntryMode {
-    pub(crate) bits: u32,
-    pub(crate) uid: u32,
-    pub(crate) gid: u32,
+    bits: u32,
+    uid: u32,
+    gid: u32,
 }
 
 #[cfg(unix)]
 impl EntryMode {
+    /// The permission, setuid, setgid and sticky bits.
+    pub(crate) const fn bits(self) -> u32 {
+        self.bits
+    }
+
+    /// The owning user id.
+    pub(crate) const fn uid(self) -> u32 {
+        self.uid
+    }
+
+    /// The owning group id.
+    pub(crate) const fn gid(self) -> u32 {
+        self.gid
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(bits: u32, uid: u32, gid: u32) -> Self {
+        Self { bits, uid, gid }
+    }
+
     #[allow(
         clippy::useless_conversion,
         reason = "`st_mode` is `u16` on macOS and `u32` on Linux"

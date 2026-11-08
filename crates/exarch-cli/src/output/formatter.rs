@@ -118,12 +118,18 @@ pub trait OutputFormatter {
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Envelope<T> {
+    /// The command ran to completion; `data` is its result.
     Success {
+        /// The command that produced the result.
         operation: Operation,
+        /// The command's result.
         data: T,
     },
+    /// The command failed.
     Error {
+        /// The command that failed.
         operation: Operation,
+        /// What went wrong.
         error: JsonError,
     },
 }
@@ -163,7 +169,9 @@ impl<T: StableId> Serialize for JsonId<T> {
 /// a failure that has no core error behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonKind {
+    /// The code of the core error behind the failure.
     Code(ErrorCode),
+    /// A CLI failure with no core error behind it.
     Generic,
 }
 
@@ -208,10 +216,13 @@ impl Serialize for JsonKind {
 /// what a script reads instead of parsing the message.
 #[derive(Debug, Serialize)]
 pub struct JsonDiscriminants {
+    /// The finer classification of the failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_code: Option<JsonId<SubCode>>,
+    /// The `SecurityConfig` setting whose value refused the entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relaxable_by: Option<JsonId<PolicySetting>>,
+    /// The configuration setting or input that was refused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setting: Option<JsonId<ConfigSetting>>,
     /// The I/O failure class of an `IoError`, the token the Python and Node
@@ -239,7 +250,9 @@ impl From<&FfiKind> for JsonDiscriminants {
 /// need not parse the message.
 #[derive(Debug, Serialize)]
 pub struct JsonRefusal {
+    /// The error code of the refusal.
     pub code: JsonKind,
+    /// The sub-code, policy setting and configuration setting of the refusal.
     #[serde(flatten)]
     pub discriminants: JsonDiscriminants,
 }
@@ -253,11 +266,34 @@ impl From<&FfiKind> for JsonRefusal {
     }
 }
 
+/// A host filesystem path in the `--json` envelope: one rule for every field
+/// a script acts on (`output_path`, `leftover_path`, a backup `path`), apart
+/// from archive entry names, which keep their injective `path_text` rendering.
+///
+/// A path that is valid UTF-8 is the exact string, so `rm -rf "$path"` finds
+/// the directory even when its name holds a backslash. A path that is not
+/// valid UTF-8 cannot be a JSON string without losing bytes, so only then is
+/// it rendered with the injective `path_text` escape (`\xNN` for undecodable
+/// bytes, `\x5C` for a backslash), which tells the two cases apart for the
+/// reader but is no longer usable verbatim as a path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct HostPath(String);
+
+impl From<&Path> for HostPath {
+    fn from(path: &Path) -> Self {
+        Self(path.to_str().map_or_else(|| path_text(path), str::to_owned))
+    }
+}
+
 /// One skipped entry in a report's bounded sample.
 #[derive(Debug, Serialize)]
 pub struct JsonSkip {
+    /// The reason the entry was skipped, as the core names it.
     pub kind: &'static str,
+    /// The entry's name, rendered injectively.
     pub path: String,
+    /// The I/O failure class of an entry skipped because of one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub io_kind: Option<JsonId<IoKind>>,
 }
@@ -266,8 +302,11 @@ pub struct JsonSkip {
 /// reasons that occurred) and a bounded sample of the individual entries.
 #[derive(Debug, Serialize)]
 pub struct JsonSkips {
+    /// How many entries were skipped, for any reason.
     pub files_skipped: usize,
+    /// How many were skipped for each reason that occurred.
     pub skipped_by_kind: BTreeMap<&'static str, usize>,
+    /// A bounded sample of the skipped entries.
     pub skipped_sample: Vec<JsonSkip>,
 }
 
@@ -311,7 +350,7 @@ enum JsonWarningFields {
         count: u64,
     },
     LeftoverBackup {
-        path: String,
+        path: HostPath,
         identity: &'static str,
         io_kind: JsonId<IoKind>,
         reason: String,
@@ -341,7 +380,7 @@ impl From<&ExtractionWarning> for JsonWarning {
                 io_kind,
                 message,
             } => Some(JsonWarningFields::LeftoverBackup {
-                path: path_text(path),
+                path: HostPath::from(path.as_path()),
                 identity: identity.as_str(),
                 io_kind: JsonId(*io_kind),
                 reason: message.to_string(),
@@ -388,12 +427,18 @@ impl From<&CreationWarning> for JsonWarning {
 /// report of a stopped one.
 #[derive(Debug, Serialize)]
 pub struct JsonExtractionCounts {
+    /// Files written.
     pub files_extracted: usize,
+    /// Directories created.
     pub directories_created: usize,
+    /// Symbolic links created.
     pub symlinks_created: usize,
+    /// Bytes written to files.
     pub bytes_written: u64,
+    /// What the run left out.
     #[serde(flatten)]
     pub skips: JsonSkips,
+    /// The conditions of the run worth surfacing.
     pub warnings: Vec<JsonWarning>,
 }
 
@@ -414,15 +459,19 @@ impl From<&ExtractionReport> for JsonExtractionCounts {
 /// mid-archive.
 #[derive(Debug, Serialize)]
 pub struct JsonPartialReport {
+    /// What the stopped run had done.
     #[serde(flatten)]
     pub counts: JsonExtractionCounts,
+    /// Whether those writes were kept, rolled back or never made.
     pub writes: JsonId<PartialWrites>,
 }
 
 /// Structured error object in JSON output
 #[derive(Debug, Serialize)]
 pub struct JsonError {
+    /// The category of the failure.
     pub kind: JsonKind,
+    /// The failure, stated once, without its advice.
     pub message: String,
     /// Advice for the reader, apart from the message; absent when there is
     /// none. Several hints are joined by newlines.
@@ -437,7 +486,7 @@ pub struct JsonError {
     /// A staging directory or reservation file the failed run left behind;
     /// what the user must clean up.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub leftover_path: Option<String>,
+    pub leftover_path: Option<HostPath>,
     /// `relaxable_by` is the stable id of the `SecurityConfig` setting whose
     /// current value refused the entry (only for a `SecurityViolation` a
     /// setting relaxes); `sub_code` the finer classification (always for a
@@ -450,6 +499,7 @@ pub struct JsonError {
 }
 
 impl JsonError {
+    /// An error of `kind` with `message` and nothing else.
     pub fn new(kind: JsonKind, message: impl Into<String>) -> Self {
         Self {
             kind,
@@ -462,24 +512,28 @@ impl JsonError {
         }
     }
 
+    /// Names the archive-relative paths an occupied destination refused.
     #[must_use]
     pub fn with_conflicts(mut self, conflicts: Vec<String>) -> Self {
         self.conflicts = Some(conflicts);
         self
     }
 
+    /// Names the staging directory or reservation file the run left behind.
     #[must_use]
-    pub fn with_leftover_path(mut self, path: Option<String>) -> Self {
+    pub fn with_leftover_path(mut self, path: Option<HostPath>) -> Self {
         self.leftover_path = path;
         self
     }
 
+    /// Sets the advice that goes with the message, when there is any.
     #[must_use]
     pub fn with_hint(mut self, hint: Option<String>) -> Self {
         self.hint = hint;
         self
     }
 
+    /// Attaches the report of a run that stopped part-way.
     #[must_use]
     pub fn with_partial(mut self, report: JsonPartialReport) -> Self {
         self.partial_report = Some(Box::new(report));
@@ -492,5 +546,42 @@ impl JsonError {
     pub fn with_ffi_kind(mut self, kind: &FfiKind) -> Self {
         self.discriminants = Some(JsonDiscriminants::from(kind));
         self
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_utf8_host_path_is_the_exact_string() {
+        let json = serde_json::to_value(HostPath::from(Path::new("out/.exarch-a\\x5Cb"))).unwrap();
+        assert_eq!(json, "out/.exarch-a\\x5Cb");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_host_path_is_escaped_not_merged() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let first = PathBuf::from(std::ffi::OsStr::from_bytes(b"out/\xff.tar"));
+        let second = PathBuf::from(std::ffi::OsStr::from_bytes(b"out/\xfe.tar"));
+        let render = |path: &Path| serde_json::to_value(HostPath::from(path)).unwrap();
+        assert_eq!(render(&first), "out/\\xFF.tar");
+        assert_ne!(render(&first), render(&second));
+    }
+
+    #[test]
+    fn a_leftover_backup_warning_names_the_exact_host_path() {
+        let warning = ExtractionWarning::BackupCleanupFailed {
+            path: PathBuf::from("p/.exarch-backup-a\\b"),
+            identity: exarch_core::BackupIdentity::Verified,
+            io_kind: IoKind::Other,
+            message: "x".into(),
+        };
+        let json = serde_json::to_value(JsonWarning::from(&warning)).unwrap();
+        assert_eq!(json["path"], "p/.exarch-backup-a\\b");
     }
 }

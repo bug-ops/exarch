@@ -321,9 +321,15 @@ fn benchmark_skipped_entries(c: &mut Criterion) {
         .try_add_allowed_extension("md")
         .unwrap();
     let excluded = SecurityConfig::default().try_add_exclude("*.txt").unwrap();
+    let mut fifty = SecurityConfig::default();
+    for i in 0..49 {
+        fifty = fifty.try_add_exclude(&format!("*.never{i}")).unwrap();
+    }
+    let fifty_excludes = fifty.try_add_exclude("*.txt").unwrap();
     for (name, config) in [
         ("extension_allowlist", allowlist),
         ("exclude_pattern", excluded),
+        ("fifty_exclude_patterns", fifty_excludes),
     ] {
         let zip_data_file = write_archive("archive.zip", &zip_data);
         group.bench_function(name, |b| {

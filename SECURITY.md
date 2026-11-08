@@ -33,7 +33,7 @@ This library implements archive extraction with security as a primary design goa
 
 - **Zip Bomb Detection**: Monitors compression ratios to detect decompression bombs
 - **File Size Limits**: Configurable limits on individual file and total extraction sizes
-- **File Count Limits**: Prevents DoS via excessive file creation
+- **File Count Limits**: Caps the number of archive entries (files, directories and links), preventing DoS via excessive entry creation
 - **Path Depth Limits**: Prevents deep directory nesting attacks
 
 ### In-Memory Extraction

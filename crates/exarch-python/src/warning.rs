@@ -215,12 +215,13 @@ fn extraction_warning(py: Python<'_>, warning: &ExtractionWarning) -> PyResult<P
 }
 
 fn creation_warning(py: Python<'_>, warning: &CreationWarning) -> PyResult<Py<PyAny>> {
+    let warning = warning.redacted();
     let base = PyCreationWarning {
         kind: warning.kind().as_str(),
         message: warning.to_string(),
     };
     let initializer = PyClassInitializer::from(base);
-    match warning {
+    match &warning {
         CreationWarning::ZipRatioOverDefaultLimit {
             entries,
             limit,

@@ -26,9 +26,11 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use super::StagedRun;
+use super::acl;
 use super::adopt::Adoption;
 use super::adopt::make_removable;
 use super::cancelled_after;
+use super::clear_inherited_acl;
 use super::dir::StagingDir;
 use super::io_context;
 use super::parent_or_cwd;
@@ -336,7 +338,7 @@ pub(super) fn run(
         parent,
         path,
     } = target;
-    let staging = StagingDir::create(&pin, &parent)?;
+    let staging = clear_inherited_acl(StagingDir::create(&pin, &parent)?, &parent)?;
 
     let report = match extract(staging.path(), &staged_options(options), progress) {
         Ok(report) => report,
@@ -470,10 +472,16 @@ impl<'a> Displaced<'a> {
         Err(io::Error::from(io::ErrorKind::AlreadyExists))
     }
 
-    /// The permissions of the destination that was displaced, read from the
-    /// verified directory itself.
-    fn original_permissions(&self) -> Adoption {
-        Adoption::of(&self.backup)
+    /// The permissions and ACL of the destination that was displaced, read
+    /// from the verified directory itself, which now sits in `parent`.
+    fn original_permissions(&self, parent: &Path) -> io::Result<Adoption> {
+        let acl = acl::read_destination(
+            self.pin,
+            self.backup_name.as_leaf(),
+            parent,
+            self.backup.identity,
+        )?;
+        Ok(Adoption::of(&self.backup, acl))
     }
 
     /// Moves the backup back and disarms the guard.
@@ -556,7 +564,10 @@ fn swap(
         Ok(displaced) => displaced,
         Err(refusal) => return Err(refusal.into_error(staging.discard())),
     };
-    if let Err(error) = staging.adopt(displaced.original_permissions()) {
+    let adopted = displaced
+        .original_permissions(dest.parent)
+        .and_then(|adoption| staging.adopt(adoption));
+    if let Err(error) = adopted {
         let context = "failed to give the extracted content the destination's permissions";
         return Err(roll_back(displaced, staging, &error, context, dest.path));
     }

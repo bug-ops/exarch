@@ -17,6 +17,7 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::closed_enum::closed_enum;
+use crate::formats::io_marker::IoMarker as _;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::AdmittedSize;
@@ -495,10 +496,7 @@ impl MemorySink {
     }
 
     fn full(&self) -> io::Error {
-        io::Error::new(
-            io::ErrorKind::QuotaExceeded,
-            SinkFull::new(self.limit.bytes().get()),
-        )
+        SinkFull::new(self.limit.bytes().get()).into_io()
     }
 
     pub(crate) fn usage(&self) -> SinkUsage {

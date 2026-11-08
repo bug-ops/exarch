@@ -104,6 +104,7 @@ mod utils;
 use abort::AbortHandle;
 use config::CreationConfig;
 use config::ExtractionOptions;
+use config::ListOptions;
 use config::SecurityConfig;
 use config::VerificationOptions;
 use error::Failure;
@@ -147,16 +148,17 @@ const _: () = assert!(
 ///
 /// ## Thread Safety and TOCTOU
 ///
-/// The extraction runs on a tokio blocking-pool worker thread. This creates
-/// a Time-Of-Check-Time-Of-Use (TOCTOU) race condition where the archive
-/// file could be modified between validation and extraction. This is an
-/// accepted tradeoff for async performance. For untrusted archives, ensure
-/// exclusive access to the archive file during extraction.
+/// The archive is opened once and read as a stream, so validation and
+/// extraction see the same file contents. Another process can still replace
+/// or modify the file on disk while it is read, whether the call is sync or
+/// async: blocking the calling thread does not prevent that. For untrusted
+/// archives that other processes can write to, copy the archive to a private
+/// location or hold an exclusive lock on it for the duration of the call.
 ///
 /// ## Input Validation
 ///
 /// - Paths containing null bytes are rejected (security)
-/// - Paths exceeding 4096 bytes are rejected (`DoS` prevention)
+/// - Paths longer than core's `MAX_PATH_LENGTH` are rejected (`DoS` prevention)
 /// - Boundary validation runs before the core call; a rejection is a
 ///   `SECURITY_VIOLATION`
 ///
@@ -233,15 +235,13 @@ pub fn extract_archive<'env>(
     let options_owned: exarch_core::ExtractionOptions =
         options.map_or_default(|o| o.as_core().clone());
 
-    // NOTE: TOCTOU race condition - archive contents can change between
-    // validation and extraction. This is an accepted limitation for async I/O.
-    // For maximum security with untrusted archives, use extractArchiveSync()
-    // or ensure exclusive file access (e.g., flock) during extraction.
+    // NOTE: another process can modify the archive file while it is read;
+    // sync and async calls are equally exposed (see the TOCTOU notes above).
     spawn_blocking_promise(
         env,
         "archive extraction",
         move || extract_core(&archive_path, &output_dir, &config_owned, &options_owned),
-        ExtractionReport::try_from,
+        |report| Ok(ExtractionReport::from(report)),
     )
 }
 
@@ -312,7 +312,7 @@ pub fn extract_archive_sync(
     run_sync(env, "archive extraction", || {
         extract_core(&archive_path, &output_dir, config_ref, options_ref)
     })
-    .and_then(ExtractionReport::try_from)
+    .map(ExtractionReport::from)
 }
 
 /// Options of `createArchive` and its variants.
@@ -397,7 +397,7 @@ pub fn create_archive<'env>(
         env,
         "archive creation",
         move || create_core(&output_path, &sources, &config_owned, &options),
-        CreationReport::try_from,
+        |report| Ok(CreationReport::from(report)),
     )
 }
 
@@ -461,7 +461,7 @@ pub fn create_archive_sync(
     run_sync(env, "archive creation", || {
         create_core(&output_path, &sources, config_ref, &options)
     })
-    .and_then(CreationReport::try_from)
+    .map(CreationReport::from)
 }
 
 /// JavaScript source for a factory that wraps a progress callback so any
@@ -597,6 +597,7 @@ impl FromNapiValue for ProgressCallback {
 /// * `output_path` - Path to output archive file
 /// * `sources` - Array of source files/directories to include
 /// * `config` - Optional `CreationConfig` (uses defaults if omitted)
+/// * `options` - Optional `CreateOptions` (format, overwrite, durability)
 /// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
 ///   string, total: number | null, current: number, bytesWritten: number]) =>
 ///   void`
@@ -645,6 +646,7 @@ impl FromNapiValue for ProgressCallback {
 ///   'output.tar.gz',
 ///   ['source_dir/'],
 ///   null,
+///   null,
 ///   (err, [path, total, current, bytesWritten]) => {
 ///     console.log(`${current}/${total}: ${path}`);
 ///   },
@@ -657,9 +659,9 @@ pub fn create_archive_with_progress<'env>(
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
+    options: Option<CreateOptions>,
     #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
-    options: Option<CreateOptions>,
 ) -> Result<PromiseRaw<'env, CreationReport>> {
     let config_owned: exarch_core::CreationConfig = config.map_or_default(|c| c.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
@@ -678,7 +680,7 @@ pub fn create_archive_with_progress<'env>(
                 ProgressDispatch::Awaited,
             )
         },
-        CreationReport::try_from,
+        |report| Ok(CreationReport::from(report)),
     )
 }
 
@@ -712,6 +714,9 @@ fn create_with_progress_core(
 ///
 /// * `archive_path` - Path to archive file
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+/// * `options` - Optional `ListOptions`; `new
+///   ListOptions().withStoredTargets('read')` reads the link targets a 7z
+///   archive keeps in entry data (default: left `'unread'`)
 ///
 /// # Returns
 ///
@@ -735,13 +740,15 @@ pub fn list_archive<'env>(
     env: &'env Env,
     archive_path: String,
     config: Option<&SecurityConfig>,
+    options: Option<&ListOptions>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
+    let options = options.map_or_default(ListOptions::to_core);
 
     spawn_blocking_promise(
         env,
         "archive listing",
-        move || list_core(&archive_path, &config_owned),
+        move || list_core(&archive_path, &config_owned, options),
         Ok,
     )
 }
@@ -749,10 +756,13 @@ pub fn list_archive<'env>(
 fn list_core(
     archive_path: &str,
     config: &exarch_core::SecurityConfig,
+    options: exarch_core::ListOptions,
 ) -> CoreResult<ArchiveManifest> {
     let archive_path = boundary_path(archive_path)?;
     ArchiveManifest::from_core(
-        exarch_core::ListRequest::new(config).list(&archive_path)?,
+        exarch_core::ListRequest::new(config)
+            .with_options(options)
+            .list(&archive_path)?,
         config,
     )
 }
@@ -789,12 +799,14 @@ pub fn list_archive_sync(
     env: Env,
     archive_path: String,
     config: Option<&SecurityConfig>,
+    options: Option<&ListOptions>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let options = options.map_or_default(ListOptions::to_core);
 
     run_sync(env, "archive listing", || {
-        list_core(&archive_path, config_ref)
+        list_core(&archive_path, config_ref, options)
     })
 }
 
@@ -855,11 +867,11 @@ fn verify_core(
     options: exarch_core::VerificationOptions,
 ) -> CoreResult<VerificationReport> {
     let archive_path = boundary_path(archive_path)?;
-    VerificationReport::try_from(
+    Ok(VerificationReport::from(
         exarch_core::VerifyRequest::new(config)
             .with_options(options)
             .verify(&archive_path)?,
-    )
+    ))
 }
 
 /// Verify archive security (sync).
@@ -1036,7 +1048,7 @@ pub fn extract_archive_with_progress<'env>(
                 |source, report| ProgressCallbackError::ExtractionCallback { source, report },
             )
         },
-        ExtractionReport::try_from,
+        |report| Ok(ExtractionReport::from(report)),
     )
 }
 
@@ -1327,8 +1339,15 @@ mod tests {
 
     #[test]
     fn test_list_rejects_invalid_archive_path() {
-        assert_boundary_violation(list_core("/tmp/test\0x.tar", &security()), "null bytes");
-        assert_boundary_violation(list_core(&long_path(), &security()), "maximum length");
+        let options = exarch_core::ListOptions::default();
+        assert_boundary_violation(
+            list_core("/tmp/test\0x.tar", &security(), options),
+            "null bytes",
+        );
+        assert_boundary_violation(
+            list_core(&long_path(), &security(), options),
+            "maximum length",
+        );
     }
 
     #[test]

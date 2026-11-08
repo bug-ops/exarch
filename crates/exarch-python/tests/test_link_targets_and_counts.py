@@ -1,5 +1,6 @@
 """7z symlink targets stay unread by `list_archive`, and links count against
-`max_file_count` in `extract_archive` (issues #718, #719)."""
+`max_file_count` in `extract_archive` (issues #718, #719); directories count
+too (#1038)."""
 
 import io
 import sys
@@ -108,16 +109,28 @@ def test_extract_accepts_symlinks_at_max_file_count(temp_dir):
     assert sorted(p.name for p in (temp_dir / "out").iterdir()) == ["link0", "link1"]
 
 
-def test_extract_does_not_count_directories_against_max_file_count(temp_dir):
-    archive = temp_dir / "dirs.tar"
-    with tarfile.open(archive, "w") as tar:
+def _tar_with_dirs_and_file(path):
+    with tarfile.open(path, "w") as tar:
         for name in ("a", "b", "c"):
             tar.addfile(_dir_info(name))
         data = b"x"
         info = tarfile.TarInfo(name="a/f.txt")
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
-    config = exarch.SecurityConfig().with_max_file_count(1)
+    return path
+
+
+def test_extract_counts_directories_against_max_file_count(temp_dir):
+    archive = _tar_with_dirs_and_file(temp_dir / "dirs.tar")
+    config = exarch.SecurityConfig().with_max_file_count(3)
+
+    with pytest.raises(exarch.QuotaExceededError):
+        exarch.extract_archive(str(archive), str(temp_dir / "out"), config)
+
+
+def test_extract_accepts_directories_at_max_file_count(temp_dir):
+    archive = _tar_with_dirs_and_file(temp_dir / "dirs.tar")
+    config = exarch.SecurityConfig().with_max_file_count(4)
 
     exarch.extract_archive(str(archive), str(temp_dir / "out"), config)
 

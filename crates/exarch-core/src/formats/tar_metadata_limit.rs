@@ -169,8 +169,7 @@ use crate::SecurityConfig;
 use crate::Violation;
 use crate::ZipBombDetails;
 use crate::ZipBombScope;
-use crate::error::violation::fmt_tar_read_budget;
-use crate::error::violation::fmt_tar_synthetic_budget;
+use crate::formats::io_marker::IoMarker;
 use crate::security::Compressed;
 use crate::security::Uncompressed;
 
@@ -327,10 +326,7 @@ impl BudgetState {
         );
         self.metering.store(false, Ordering::Relaxed);
         let _ = self.skip_trip.set(details);
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            SkippedEntriesExceeded(details),
-        ))
+        Err(SkippedEntriesExceeded(details).into_io())
     }
 }
 
@@ -445,12 +441,10 @@ impl TarReadBudget {
     fn cumulative_synthetic_violation(&self) -> Option<io::Error> {
         let total = self.0.cumulative_synthetic.load(Ordering::Relaxed);
         (total > CUMULATIVE_SYNTHETIC_CAP_BYTES).then(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                TarCumulativeSyntheticBudgetExceeded {
-                    limit: CUMULATIVE_SYNTHETIC_CAP_BYTES,
-                },
-            )
+            TarCumulativeSyntheticBudgetExceeded {
+                limit: CUMULATIVE_SYNTHETIC_CAP_BYTES,
+            }
+            .into_io()
         })
     }
 }
@@ -468,71 +462,54 @@ fn saturating_add_counter(counter: &AtomicU64, by: u64) -> u64 {
 /// Marker error surfaced when more than the configured limit is read from a
 /// [`BudgetedReader`] while armed. Recovered via [`budget_violation`] and
 /// converted into an `ArchiveError::SecurityViolation`.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{}", Violation::TarMetadataBudget { limit: *limit })]
 struct TarReadBudgetExceeded {
     limit: u64,
 }
 
-impl std::fmt::Display for TarReadBudgetExceeded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt_tar_read_budget(f, self.limit)
-    }
-}
-
-impl std::error::Error for TarReadBudgetExceeded {}
+impl IoMarker for TarReadBudgetExceeded {}
 
 /// Marker error surfaced when the cross-entry
 /// [`CUMULATIVE_SYNTHETIC_CAP_BYTES`] budget is exceeded. Recovered via
 /// [`budget_violation`] and converted into
 /// an `ArchiveError::SecurityViolation`, the same as
 /// [`TarReadBudgetExceeded`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{}", Violation::TarSyntheticBudget { limit: *limit })]
 struct TarCumulativeSyntheticBudgetExceeded {
     limit: u64,
 }
 
-impl std::fmt::Display for TarCumulativeSyntheticBudgetExceeded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt_tar_synthetic_budget(f, self.limit)
-    }
-}
-
-impl std::error::Error for TarCumulativeSyntheticBudgetExceeded {}
+impl IoMarker for TarCumulativeSyntheticBudgetExceeded {}
 
 /// Marker error surfaced when the payload of a skipped entry decodes past the
 /// ratio bound. Recovered via [`budget_violation`] and converted into
 /// `ZipBomb { SkippedEntries }`.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("skipped entries decode past the compression ratio bound")]
 struct SkippedEntriesExceeded(ZipBombDetails);
 
-impl std::fmt::Display for SkippedEntriesExceeded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "skipped entries decode past the compression ratio bound")
-    }
-}
-
-impl std::error::Error for SkippedEntriesExceeded {}
+impl IoMarker for SkippedEntriesExceeded {}
 
 /// Marker error raised by the xz decoder wrapper when the stream needs more
 /// memory than `max_decoder_memory` allows. Recovered via [`budget_violation`]
 /// and converted into `QuotaExceeded { DecoderMemory }`.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("decoder memory limit of {max} bytes exceeded")]
 pub(crate) struct DecoderMemoryExceeded {
     pub max: u64,
 }
 
-impl std::fmt::Display for DecoderMemoryExceeded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "decoder memory limit of {} bytes exceeded", self.max)
-    }
+impl IoMarker for DecoderMemoryExceeded {
+    const KIND: io::ErrorKind = io::ErrorKind::Other;
 }
-
-impl std::error::Error for DecoderMemoryExceeded {}
 
 /// Marker error raised when a gzip or bzip2 stream starts more members than
 /// its allowance admits. Recovered via [`budget_violation`] and converted into
 /// `QuotaExceeded { CompressedMembers }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("compressed member {members} exceeds the allowance of {allowance}")]
 pub(crate) struct CompressedMembersExceeded {
     /// The member that was refused, counting from one.
     pub members: u64,
@@ -540,17 +517,9 @@ pub(crate) struct CompressedMembersExceeded {
     pub allowance: u64,
 }
 
-impl std::fmt::Display for CompressedMembersExceeded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "compressed member {} exceeds the allowance of {}",
-            self.members, self.allowance
-        )
-    }
+impl IoMarker for CompressedMembersExceeded {
+    const KIND: io::ErrorKind = io::ErrorKind::Other;
 }
-
-impl std::error::Error for CompressedMembersExceeded {}
 
 /// Classifies a stream error raised while decoding or reading an archive.
 ///

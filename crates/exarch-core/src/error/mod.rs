@@ -15,7 +15,7 @@ pub(crate) mod zip_inconsistency;
 
 pub use config_error::ConfigProblem;
 pub use config_error::ConfigSetting;
-pub use config_error::ExcludeRefusal;
+pub use config_error::PatternRefusal;
 pub use config_error::ProtectedPath;
 pub use io_context::IoContext;
 pub use io_kind::IoKind;

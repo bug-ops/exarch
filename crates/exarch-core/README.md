@@ -48,7 +48,7 @@ use exarch_core::{non_zero, ratio_limit, Extension, ExtensionFilter, SecurityCon
 let config = SecurityConfig::default()
     .with_max_file_size(non_zero!(100 * 1024 * 1024))    // 100 MB per file
     .with_max_total_size(non_zero!(1024 * 1024 * 1024))  // 1 GB total
-    .with_max_file_count(non_zero!(10_000))              // Max 10k files
+    .with_max_file_count(non_zero!(10_000))              // Max 10k entries (files, directories and links all count)
     .with_max_compression_ratio(ratio_limit!(50.0)) // 50x compression limit
     .with_allowed_extensions(ExtensionFilter::only(vec![
         Extension::try_from(".tar")?,
@@ -115,12 +115,12 @@ println!("Created {} files", report.files_added);
 `create_archive` replaces an existing output atomically once the archive is complete; a failed creation leaves the output as it was. Use `CreateRequest` with an `OutputFile` to refuse an existing file or to state the format:
 
 ```rust
-use exarch_core::{CreateRequest, CreationConfig, ExcludePattern, OutputFile};
+use exarch_core::{CreateRequest, CreationConfig, EntryPattern, OutputFile};
 use exarch_core::CompressionLevel;
 
 let config = CreationConfig::default()
     .with_compression_level(CompressionLevel::try_from(9u8)?)
-    .with_exclude_patterns(vec![ExcludePattern::try_from("*.log")?, ExcludePattern::try_from("target/")?]);
+    .with_exclude_patterns(vec![EntryPattern::try_from("*.log")?, EntryPattern::try_from("target/")?]);
 let report = CreateRequest::new(&config).create(
     &OutputFile::create_new("project.tar.gz"),
     &["src/", "Cargo.toml", "README.md"],

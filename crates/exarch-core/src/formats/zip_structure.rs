@@ -111,6 +111,12 @@ use super::chunk_search::ChunkSource;
 use super::chunk_search::Flow;
 use super::chunk_search::search_chunks;
 use super::common;
+use super::le::le16;
+use super::le::le32;
+use super::le::le64;
+use super::le::u16_at;
+use super::le::u32_at;
+use super::le::u64_at;
 use super::source_fault::FaultSlot;
 use super::source_fault::SourceTap;
 use super::zip::ZipMethod;
@@ -1596,7 +1602,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                     }
                 }
                 Signature::LocalHeader => {
-                    let name_len = le_u16(hit.bytes, 26)
+                    let name_len = u16_at(hit.bytes, 26)
                         .map(usize::from)
                         .filter(|n| LFH_FIXED_LEN + n <= hit.bytes.len());
                     let Some(name_len) = name_len else {
@@ -2112,8 +2118,8 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         let mut fixed = [0u8; FIXED];
         self.read_header_bytes(start, &mut fixed, reads)?;
         let (Some(name_len), Some(extra_len)) = (
-            le_u16(&fixed, lengths.name).map(usize::from),
-            le_u16(&fixed, lengths.extra).map(usize::from),
+            u16_at(&fixed, lengths.name).map(usize::from),
+            u16_at(&fixed, lengths.extra).map(usize::from),
         ) else {
             return Ok(None);
         };
@@ -2268,7 +2274,7 @@ fn find_ignored_end_records<R: Read + Seek>(
         if window[at..at + 4] != EOCD_SIGNATURE {
             continue;
         }
-        let Some(comment_len) = le_u16(&window, at + 20).map(usize::from) else {
+        let Some(comment_len) = u16_at(&window, at + 20).map(usize::from) else {
             continue;
         };
         let Some(comment) = window.get(at + EOCD_FIXED_LEN..at + EOCD_FIXED_LEN + comment_len)
@@ -2302,7 +2308,7 @@ fn is_used_record<R: Read + Seek>(
     file_len: u64,
     map: &DirectoryMap,
 ) -> Result<bool> {
-    let Some(directory) = le_u32(window, at + 16) else {
+    let Some(directory) = u32_at(window, at + 16) else {
         return Ok(false);
     };
     if directory != u32::MAX {
@@ -2317,7 +2323,7 @@ fn is_used_record<R: Read + Seek>(
     if locator[..4] != ZIP64_LOCATOR_SIGNATURE {
         return Ok(false);
     }
-    let Some(end_record) = le_u64(locator, 8) else {
+    let Some(end_record) = u64_at(locator, 8) else {
         return Ok(false);
     };
     for position in [end_record.saturating_add(map.archive_offset), end_record] {
@@ -2334,63 +2340,6 @@ fn is_used_record<R: Read + Seek>(
         return Ok(directory.saturating_add(map.archive_offset) == map.directory_start);
     }
     Ok(false)
-}
-
-/// Little-endian `u16` at `at`, or `None` when `bytes` is too short.
-pub(super) fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
-    bytes
-        .get(at..)?
-        .first_chunk()
-        .copied()
-        .map(u16::from_le_bytes)
-}
-
-/// Little-endian `u32` at `at`, or `None` when `bytes` is too short.
-pub(super) fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    bytes
-        .get(at..)?
-        .first_chunk()
-        .copied()
-        .map(u32::from_le_bytes)
-}
-
-/// Little-endian `u64` at `at`, or `None` when `bytes` is too short.
-pub(super) fn le_u64(bytes: &[u8], at: usize) -> Option<u64> {
-    bytes
-        .get(at..)?
-        .first_chunk()
-        .copied()
-        .map(u64::from_le_bytes)
-}
-
-/// Little-endian `u16` at the constant offset `AT` of a fixed-size header; an
-/// offset past the end does not compile.
-pub(super) const fn le16<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u16 {
-    const { assert!(AT + 2 <= N) };
-    u16::from_le_bytes([bytes[AT], bytes[AT + 1]])
-}
-
-/// Little-endian `u32` at the constant offset `AT` of a fixed-size header; an
-/// offset past the end does not compile.
-pub(super) const fn le32<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u32 {
-    const { assert!(AT + 4 <= N) };
-    u32::from_le_bytes([bytes[AT], bytes[AT + 1], bytes[AT + 2], bytes[AT + 3]])
-}
-
-/// Little-endian `u64` at the constant offset `AT` of a fixed-size header; an
-/// offset past the end does not compile.
-pub(super) const fn le64<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u64 {
-    const { assert!(AT + 8 <= N) };
-    u64::from_le_bytes([
-        bytes[AT],
-        bytes[AT + 1],
-        bytes[AT + 2],
-        bytes[AT + 3],
-        bytes[AT + 4],
-        bytes[AT + 5],
-        bytes[AT + 6],
-        bytes[AT + 7],
-    ])
 }
 
 /// An extra field whose declared length runs past its block, which makes a

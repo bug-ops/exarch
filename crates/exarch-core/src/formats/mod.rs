@@ -7,6 +7,8 @@ pub(crate) mod detect;
 pub(crate) mod dir_walker;
 pub(crate) mod file_identity;
 pub(crate) mod handle_resolution;
+pub(crate) mod io_marker;
+pub(crate) mod le;
 pub(crate) mod occupant;
 pub(crate) mod pinned_dir;
 #[cfg(any(windows, test))]

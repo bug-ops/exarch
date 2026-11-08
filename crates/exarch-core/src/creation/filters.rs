@@ -8,6 +8,8 @@ use crate::Result;
 use crate::SkipKind;
 use crate::Violation;
 use crate::creation::config::CreationConfig;
+use crate::pattern::PatternList;
+use crate::pattern::normalized;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -18,15 +20,24 @@ use std::path::PathBuf;
 /// when it matches an exclude pattern. The size limit is checked separately,
 /// where the size is known.
 #[must_use]
-pub(crate) fn skip_reason(archive_path: &Path, config: &CreationConfig) -> Option<SkipKind> {
+pub(crate) fn skip_reason(
+    archive_path: &Path,
+    config: &CreationConfig,
+    excluded: &PatternList,
+) -> Option<SkipKind> {
     if !config.include_hidden && is_hidden(archive_path) {
         return Some(SkipKind::Hidden);
     }
-    config
-        .exclude_patterns
-        .iter()
-        .any(|pattern| pattern.matches(archive_path))
+    excluded
+        .any_match(normalized(archive_path).as_deref())
         .then_some(SkipKind::Excluded)
+}
+
+/// The exclude patterns of `config` as one list, built once per run so each
+/// entry is matched in a single pass.
+#[must_use]
+pub(crate) fn exclude_list(config: &CreationConfig) -> PatternList {
+    PatternList::from(config.exclude_patterns.clone())
 }
 
 /// Checks if a path is hidden (starts with '.').
@@ -78,11 +89,15 @@ pub(crate) fn compute_archive_path(
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
-    use crate::creation::exclude_pattern::ExcludePattern;
+    use crate::pattern::EntryPattern;
     use std::path::PathBuf;
 
-    fn pattern(text: &str) -> ExcludePattern {
-        ExcludePattern::try_from(text).unwrap()
+    fn skip_reason(path: &Path, config: &CreationConfig) -> Option<SkipKind> {
+        super::skip_reason(path, config, &exclude_list(config))
+    }
+
+    fn pattern(text: &str) -> EntryPattern {
+        EntryPattern::try_from(text).unwrap()
     }
 
     #[cfg(unix)]

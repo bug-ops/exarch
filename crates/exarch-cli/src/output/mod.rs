@@ -14,6 +14,8 @@ use exarch_core::SkipKind;
 use exarch_core::Skips;
 use human::HumanFormatter;
 use json::JsonFormatter;
+#[cfg(not(target_os = "wasi"))]
+pub use json::forced_exit_envelope;
 use std::io;
 use std::io::Write;
 
@@ -100,6 +102,15 @@ pub fn emit_line<W: Write>(writer: &mut W, args: std::fmt::Arguments<'_>) -> io:
     tolerate_closed(writer.write_all(line.as_bytes()))
 }
 
+/// Writes `bytes` in one call, with the same policy as [`emit_line`].
+///
+/// # Errors
+///
+/// Any write failure except a closed reader (see [`tolerate_closed`]).
+pub fn emit_bytes<W: Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
+    tolerate_closed(writer.write_all(bytes))
+}
+
 /// Writes a single blank line in one call. See [`emit_line`].
 pub fn emit_blank<W: Write>(writer: &mut W) -> io::Result<()> {
     tolerate_closed(writer.write_all(b"\n"))
@@ -133,7 +144,8 @@ pub fn create_formatter(mode: OutputMode) -> Box<dyn OutputFormatter> {
 }
 
 /// Converts a byte count into a human-readable string using binary
-/// (1024-based) units, tiered from bytes up to terabytes.
+/// (1024-based) units labelled as such (`KiB` to `TiB`), as the help text
+/// spells sizes.
 pub fn humanize_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -141,13 +153,13 @@ pub fn humanize_bytes(bytes: u64) -> String {
     const TB: u64 = GB * 1024;
 
     if bytes >= TB {
-        format!("{:.1} TB", bytes as f64 / TB as f64)
+        format!("{:.1} TiB", bytes as f64 / TB as f64)
     } else if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
+        format!("{:.1} GiB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
+        format!("{:.1} MiB", bytes as f64 / MB as f64)
     } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
+        format!("{:.1} KiB", bytes as f64 / KB as f64)
     } else {
         format!("{bytes} B")
     }
@@ -219,33 +231,33 @@ mod tests {
 
     #[test]
     fn test_humanize_bytes_kilobytes() {
-        assert_eq!(humanize_bytes(1024), "1.0 KB");
-        assert_eq!(humanize_bytes(1536), "1.5 KB");
-        assert_eq!(humanize_bytes(2048), "2.0 KB");
+        assert_eq!(humanize_bytes(1024), "1.0 KiB");
+        assert_eq!(humanize_bytes(1536), "1.5 KiB");
+        assert_eq!(humanize_bytes(2048), "2.0 KiB");
     }
 
     #[test]
     fn test_humanize_bytes_megabytes() {
-        assert_eq!(humanize_bytes(1024 * 1024), "1.0 MB");
-        assert_eq!(humanize_bytes(1536 * 1024), "1.5 MB");
-        assert_eq!(humanize_bytes(2 * 1024 * 1024), "2.0 MB");
+        assert_eq!(humanize_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(humanize_bytes(1536 * 1024), "1.5 MiB");
+        assert_eq!(humanize_bytes(2 * 1024 * 1024), "2.0 MiB");
     }
 
     #[test]
     fn test_humanize_bytes_gigabytes() {
-        assert_eq!(humanize_bytes(1024 * 1024 * 1024), "1.0 GB");
-        assert_eq!(humanize_bytes(1536 * 1024 * 1024), "1.5 GB");
-        assert_eq!(humanize_bytes(2 * 1024 * 1024 * 1024), "2.0 GB");
+        assert_eq!(humanize_bytes(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(humanize_bytes(1536 * 1024 * 1024), "1.5 GiB");
+        assert_eq!(humanize_bytes(2 * 1024 * 1024 * 1024), "2.0 GiB");
     }
 
     #[test]
     fn test_humanize_bytes_terabytes() {
-        assert_eq!(humanize_bytes(1024_u64.pow(4)), "1.0 TB");
+        assert_eq!(humanize_bytes(1024_u64.pow(4)), "1.0 TiB");
     }
 
     #[test]
     fn test_humanize_bytes_edge_cases() {
         // u64::MAX = 18446744073709551615 bytes = 16777216.0 TB (TB = 1024^4)
-        assert_eq!(humanize_bytes(u64::MAX), "16777216.0 TB");
+        assert_eq!(humanize_bytes(u64::MAX), "16777216.0 TiB");
     }
 }

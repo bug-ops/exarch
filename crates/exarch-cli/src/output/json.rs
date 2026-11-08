@@ -3,6 +3,7 @@
 use super::emit_line;
 use super::formatter::Dispositions;
 use super::formatter::Envelope;
+use super::formatter::HostPath;
 use super::formatter::JsonError;
 use super::formatter::JsonExtractionCounts;
 use super::formatter::JsonId;
@@ -81,9 +82,27 @@ fn link_target_of(kind: &ManifestEntryKind) -> Option<JsonLinkTarget> {
     }
 }
 
+/// The document a forced exit writes in `--json` mode: a `Cancelled` error
+/// envelope with `hint` as advice, so a run cut short still ends with exactly
+/// one JSON document on stdout.
+///
+/// # Errors
+///
+/// A serialization failure, which these plain string fields cannot produce.
+#[cfg(not(target_os = "wasi"))]
+pub fn forced_exit_envelope(operation: Operation, hint: &str) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(&Envelope::<()>::Error {
+        operation,
+        error: JsonError::new(
+            JsonKind::Code(exarch_core::ErrorCode::Cancelled),
+            "Operation cancelled",
+        )
+        .with_hint(Some(hint.to_owned())),
+    })
+}
+
 /// JSON formatter writing envelopes to `W`. Defaults to process stdout;
-/// tests can inject an in-memory writer via [`JsonFormatter::with_writer`]
-/// to capture output.
+/// tests can inject an in-memory writer (`with_writer`) to capture output.
 pub struct JsonFormatter<W: Write = Stdout> {
     out: W,
 }
@@ -98,14 +117,14 @@ impl JsonFormatter<Stdout> {
 
 impl<W: Write> JsonFormatter<W> {
     /// Creates a formatter writing to the given writer.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn with_writer(out: W) -> Self {
         Self { out }
     }
 
     /// Returns a reference to the underlying writer.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn writer(&self) -> &W {
         &self.out
     }
@@ -125,7 +144,7 @@ impl<W: Write> JsonFormatter<W> {
 ///
 /// `action` is the core's [`DispositionKind`](exarch_core::DispositionKind)
 /// token, so a new core variant reaches the output under its own name; only
-/// its payload fields wait for a case here.
+/// its payload fields wait for a case here. `refuse` carries no payload.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 struct JsonDisposition {
     action: &'static str,
@@ -272,7 +291,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
     ) -> Result<()> {
         #[derive(Serialize)]
         struct CreationOutput {
-            output_path: String,
+            output_path: HostPath,
             files_added: usize,
             directories_added: usize,
             symlinks_added: usize,
@@ -289,7 +308,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         self.success(
             Operation::Create,
             CreationOutput {
-                output_path: output_path.display().to_string(),
+                output_path: HostPath::from(output_path),
                 files_added: report.files_added,
                 directories_added: report.directories_added,
                 symlinks_added: report.symlinks_added,
@@ -333,14 +352,23 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             json_error =
                 json_error.with_conflicts(conflicts.iter().map(|c| path_text(c)).collect());
         }
-        json_error = json_error.with_leftover_path(leftover_path(error).map(path_text));
+        json_error = json_error.with_leftover_path(leftover_path(error).map(HostPath::from));
         if let Some(kind) = &ffi_kind {
             json_error = json_error.with_ffi_kind(kind);
         }
-        let _ = self.output(&Envelope::<()>::Error {
+        let written = self.output(&Envelope::<()>::Error {
             operation,
             error: json_error,
         });
+        if let Err(error) = written {
+            // The document is the only report of the failure, so a stdout
+            // that cannot take it is named on stderr; a closed stderr leaves
+            // nothing more to do.
+            let _ = writeln!(
+                io::stderr(),
+                "Error: could not write the JSON error document: {error}"
+            );
+        }
     }
 
     fn format_manifest(
@@ -675,6 +703,42 @@ mod tests {
 
         let clean = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
         assert!(clean["error"].get("leftover_path").is_none());
+    }
+
+    #[test]
+    fn the_leftover_path_keeps_a_backslash_of_the_host_name() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let err = ArchiveError::Cancelled.rolled_back_with(Some(
+            exarch_core::StagingLeftover::new(PathBuf::from("out/a\\b/.exarch-AbC123")),
+        ));
+        let converted = crate::error::convert_error(Operation::Extract, err, Path::new("a.tar"));
+        f.format_error(Operation::Extract, &converted);
+        assert_eq!(
+            parsed(&f)["error"]["leftover_path"],
+            "out/a\\b/.exarch-AbC123"
+        );
+    }
+
+    #[test]
+    fn a_forced_exit_is_one_cancelled_error_document() {
+        let document =
+            forced_exit_envelope(Operation::Create, "an unfinished file may remain").unwrap();
+        let json: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["operation"], "create");
+        assert_eq!(json["error"]["kind"], "Cancelled");
+        assert_eq!(json["error"]["hint"], "an unfinished file may remain");
+    }
+
+    #[test]
+    fn the_created_output_path_keeps_a_backslash_of_the_host_name() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        f.format_creation_result(
+            Path::new("out\\dir.tar"),
+            &exarch_core::CreationReport::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed(&f)["data"]["output_path"], "out\\dir.tar");
     }
 
     #[test]
@@ -1174,7 +1238,7 @@ mod tests {
     fn every_disposition_has_a_dedicated_json_action_and_payload() {
         let (manifest, config) = crate::test_support::selected_manifest();
         let dispositions = Dispositions::of(&manifest, &config);
-        let mut seen = Vec::new();
+        let mut seen = vec![Disposition::Refuse.kind()];
         for index in 0..manifest.entries().len() {
             let disposition = dispositions.get(index).unwrap();
             let json = JsonDisposition::from(disposition);
@@ -1188,6 +1252,12 @@ mod tests {
         for kind in exarch_core::DispositionKind::ALL {
             assert!(seen.contains(kind), "no fixture entry is {kind}");
         }
+    }
+
+    #[test]
+    fn a_refused_disposition_serializes_as_a_bare_action() {
+        let json = serde_json::to_value(JsonDisposition::from(&Disposition::Refuse)).unwrap();
+        assert_eq!(json, serde_json::json!({"action": "refuse"}));
     }
 
     #[test]

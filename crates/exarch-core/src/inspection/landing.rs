@@ -88,7 +88,7 @@ impl AsRef<Path> for LandingPath {
     }
 }
 
-/// What extraction does with a listed entry that validation accepts.
+/// What extraction does with a listed entry.
 ///
 /// # Examples
 ///
@@ -126,6 +126,8 @@ pub enum Disposition {
     Extract(LandingPath),
     /// The entry is validated but not extracted, for this reason.
     Skip(SkipKind),
+    /// The entry is refused by validation or policy, or cannot be placed.
+    Refuse,
 }
 
 closed_enum! {
@@ -139,7 +141,7 @@ closed_enum! {
     /// use exarch_core::DispositionKind;
     ///
     /// assert_eq!(DispositionKind::Skip.as_str(), "skip");
-    /// assert_eq!(DispositionKind::NAMES, &["extract", "skip"]);
+    /// assert_eq!(DispositionKind::NAMES, &["extract", "skip", "refuse"]);
     /// ```
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     #[non_exhaustive]
@@ -148,6 +150,8 @@ closed_enum! {
         Extract => "extract",
         /// The entry is validated but left out
         Skip => "skip",
+        /// The entry is refused by validation or policy, or cannot be placed
+        Refuse => "refuse",
     }
 }
 
@@ -165,12 +169,14 @@ impl Disposition {
     ///     Disposition::Skip(SkipKind::NotSelected).kind(),
     ///     DispositionKind::Skip
     /// );
+    /// assert_eq!(Disposition::Refuse.kind(), DispositionKind::Refuse);
     /// ```
     #[must_use]
     pub const fn kind(&self) -> DispositionKind {
         match self {
             Self::Extract(_) => DispositionKind::Extract,
             Self::Skip(_) => DispositionKind::Skip,
+            Self::Refuse => DispositionKind::Refuse,
         }
     }
 }
@@ -247,19 +253,19 @@ impl ArchiveManifest {
         self.dispositions(config)
             .filter_map(|(entry, disposition)| match disposition {
                 Disposition::Extract(landing) => Some((entry, landing)),
-                Disposition::Skip(_) => None,
+                Disposition::Skip(_) | Disposition::Refuse => None,
             })
     }
 
-    /// Every entry that validation accepts, with what extraction does with it:
-    /// where it lands, or why it is left out.
+    /// Every entry, with what extraction does with it: where it lands, why it
+    /// is left out, or that it is refused.
     ///
     /// The selection is the one the manifest was listed with
     /// ([`selection`](Self::selection)), never one taken from `config`, so the
     /// answer cannot disagree with the listing; `config` supplies the limits
-    /// and policies. An entry the validation refuses or that cannot be placed
-    /// is not reported, as in [`landing_paths`](Self::landing_paths), which
-    /// is the extracted subset of this.
+    /// and policies. An entry the validation or the policy refuses, or that
+    /// cannot be placed, is [`Disposition::Refuse`];
+    /// [`landing_paths`](Self::landing_paths) is the extracted subset of this.
     ///
     /// An entry is skipped as [`SkipKind::NotSelected`] when the selection
     /// leaves it out, as [`SkipKind::StrippedAway`] when stripping removes its
@@ -280,9 +286,11 @@ impl ArchiveManifest {
         let judged: Vec<_> = self
             .entries()
             .iter()
-            .filter_map(|entry| {
-                land(entry, self.selection(), config, &root, &mut tree)
-                    .map(|disposition| (entry, disposition))
+            .map(|entry| {
+                (
+                    entry,
+                    land(entry, self.selection(), config, &root, &mut tree),
+                )
             })
             .collect();
         judged.into_iter()
@@ -361,6 +369,18 @@ impl ArchiveManifest {
 }
 
 fn land(
+    entry: &ArchiveEntry,
+    selection: &EntrySelection,
+    config: &SecurityConfig,
+    root: &VirtualRoot,
+    tree: &mut VirtualTree,
+) -> Disposition {
+    judge(entry, selection, config, root, tree).unwrap_or(Disposition::Refuse)
+}
+
+/// The disposition of an entry extraction can act on, or `None` when the
+/// validation refuses it or it cannot be placed.
+fn judge(
     entry: &ArchiveEntry,
     selection: &EntrySelection,
     config: &SecurityConfig,

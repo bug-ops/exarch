@@ -24,7 +24,7 @@ use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
 use exarch_core::CreationConfig;
 use exarch_core::Durability;
-use exarch_core::ExcludePattern;
+use exarch_core::EntryPattern;
 use exarch_core::OutputFile;
 use std::fs;
 use std::hint::black_box;
@@ -365,10 +365,10 @@ fn benchmark_path_filtering(c: &mut Criterion) {
     let hidden_path = Path::new(".gitignore");
     let temp_path = Path::new("file.tmp");
 
-    // Benchmark ExcludePattern::matches
-    let exact = ExcludePattern::try_from(".gitignore").unwrap();
-    let suffix = ExcludePattern::try_from("*.tmp").unwrap();
-    let prefix = ExcludePattern::try_from("file*").unwrap();
+    // Benchmark EntryPattern::matches
+    let exact = EntryPattern::try_from(".gitignore").unwrap();
+    let suffix = EntryPattern::try_from("*.tmp").unwrap();
+    let prefix = EntryPattern::try_from("file*").unwrap();
     group.bench_function("matches_pattern_exact", |b| {
         b.iter(|| exact.matches(black_box(hidden_path)));
     });
@@ -387,7 +387,7 @@ fn benchmark_path_filtering(c: &mut Criterion) {
         ("matches_glob_single_star", "src/*/nested/*/file.rs"),
         ("matches_glob_class", "[a-c]*.tmp"),
     ] {
-        let glob = ExcludePattern::try_from(text).unwrap();
+        let glob = EntryPattern::try_from(text).unwrap();
         group.bench_function(name, |b| {
             b.iter(|| glob.matches(black_box(deep_path)));
         });

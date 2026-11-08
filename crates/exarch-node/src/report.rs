@@ -1,7 +1,6 @@
 //! Node.js bindings for `ExtractionReport`.
 
 use exarch_core::ArchiveType as CoreArchiveType;
-use exarch_core::BackupIdentity as CoreBackupIdentity;
 use exarch_core::CheckStatus as CoreCheckStatus;
 use exarch_core::CreatableFormat as CoreCreatableFormat;
 use exarch_core::CreationWarning as CoreCreationWarning;
@@ -9,32 +8,24 @@ use exarch_core::Durability as CoreDurability;
 use exarch_core::ExtractionReport as CoreReport;
 use exarch_core::ExtractionWarning as CoreExtractionWarning;
 use exarch_core::IntegrityGaps as CoreIntegrityGaps;
-use exarch_core::IntegrityStatus as CoreIntegrityStatus;
-use exarch_core::IssueCategory as CoreIssueCategory;
 use exarch_core::IssueSeverity as CoreIssueSeverity;
 use exarch_core::ManifestEntryType as CoreManifestEntryType;
-use exarch_core::UnverifiedReason as CoreUnverifiedReason;
 use exarch_core::VerificationStatus as CoreVerificationStatus;
 use napi::Error;
-use napi::Result;
 use napi_derive::napi;
 
 use crate::CoreResult;
-use crate::error::ConfigSetting;
-use crate::error::ErrorCode;
 use crate::error::Failure;
-use crate::error::IoKind;
-use crate::error::PolicySetting;
-use crate::error::SubCodeValue;
-use crate::error::sub_code_value;
+use crate::mirror::mirror_from_closed_core;
 use crate::mirror::mirror_from_core;
+use crate::mirror::mirror_into_core;
 use crate::utils::path_text;
 use crate::utils::utf8_path;
 use exarch_core::ArchiveError as CoreError;
-use napi::bindgen_prelude::Either;
 use napi::bindgen_prelude::Either3;
 use napi::bindgen_prelude::Either4;
 use napi::bindgen_prelude::Either5;
+use napi::bindgen_prelude::Either6;
 
 pub fn saturating_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -48,15 +39,52 @@ pub fn saturating_millis(duration: std::time::Duration) -> i64 {
     saturating_i64(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// [`saturating_i64`] for a `usize`.
+/// An entry or item count as an exact JavaScript number.
+///
+/// A count above `2^53 - 1` would need more entries than any host can hold, so
+/// the clamp cannot be observed and carries no flag.
 pub fn saturating_usize(n: usize) -> i64 {
     saturating_i64(u64::try_from(n).unwrap_or(u64::MAX))
 }
 
-/// `n` as a JavaScript size or count, clamped to [`MAX_SAFE_INTEGER`] so the
-/// number is exact.
+/// `n` as a JavaScript number, clamped to [`MAX_SAFE_INTEGER`] so the number is
+/// exact. Byte sizes go through [`ByteSize`], which records the clamp.
 pub fn saturating_i64(n: u64) -> i64 {
     i64::try_from(n.min(MAX_SAFE_INTEGER)).unwrap_or(i64::MAX)
+}
+
+/// A byte size as a JavaScript number, with whether it was clamped.
+///
+/// An archive declares its sizes, so a value above `2^53 - 1` is attacker
+/// controlled; the flag keeps it apart from a real value of exactly
+/// `2^53 - 1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteSize {
+    /// The size, at most `2^53 - 1`.
+    pub value: i64,
+    /// Whether the real size was above `2^53 - 1`.
+    pub clamped: bool,
+}
+
+impl ByteSize {
+    /// Converts `bytes`, clamping to `2^53 - 1`.
+    pub fn new(bytes: u64) -> Self {
+        Self {
+            value: saturating_i64(bytes),
+            clamped: bytes > MAX_SAFE_INTEGER,
+        }
+    }
+
+    /// Converts a `usize` length.
+    pub fn from_len(len: usize) -> Self {
+        Self::new(u64::try_from(len).unwrap_or(u64::MAX))
+    }
+
+    /// Whether either of two sizes was clamped, for an object with two size
+    /// fields.
+    pub const fn either_clamped(self, other: Self) -> bool {
+        self.clamped || other.clamped
+    }
 }
 
 pub fn unknown_variant(what: &str, wire: &str) -> Error {
@@ -93,36 +121,17 @@ pub enum ArchiveType {
     SevenZ,
 }
 
-impl TryFrom<CoreArchiveType> for ArchiveType {
-    type Error = Error;
+mirror_from_core!(
+    ArchiveType,
+    CoreArchiveType,
+    "archive type",
+    [Tar, TarGz, TarBz2, TarXz, TarZst, Zip, SevenZ]
+);
 
-    fn try_from(value: CoreArchiveType) -> Result<Self> {
-        Ok(match value {
-            CoreArchiveType::Tar => Self::Tar,
-            CoreArchiveType::TarGz => Self::TarGz,
-            CoreArchiveType::TarBz2 => Self::TarBz2,
-            CoreArchiveType::TarXz => Self::TarXz,
-            CoreArchiveType::TarZst => Self::TarZst,
-            CoreArchiveType::Zip => Self::Zip,
-            CoreArchiveType::SevenZ => Self::SevenZ,
-            other => return Err(unknown_variant("archive type", other.as_str())),
-        })
-    }
-}
-
-impl From<ArchiveType> for CoreArchiveType {
-    fn from(value: ArchiveType) -> Self {
-        match value {
-            ArchiveType::Tar => Self::Tar,
-            ArchiveType::TarGz => Self::TarGz,
-            ArchiveType::TarBz2 => Self::TarBz2,
-            ArchiveType::TarXz => Self::TarXz,
-            ArchiveType::TarZst => Self::TarZst,
-            ArchiveType::Zip => Self::Zip,
-            ArchiveType::SevenZ => Self::SevenZ,
-        }
-    }
-}
+mirror_into_core!(
+    ArchiveType => CoreArchiveType,
+    [Tar, TarGz, TarBz2, TarXz, TarZst, Zip, SevenZ]
+);
 
 /// Archive format that can be created: `ArchiveType` without `'SevenZ'`.
 // Values must equal `exarch_core::CreatableFormat::NAMES`.
@@ -149,18 +158,10 @@ pub enum CreatableFormat {
     Zip,
 }
 
-impl From<CreatableFormat> for CoreCreatableFormat {
-    fn from(value: CreatableFormat) -> Self {
-        match value {
-            CreatableFormat::Tar => Self::Tar,
-            CreatableFormat::TarGz => Self::TarGz,
-            CreatableFormat::TarBz2 => Self::TarBz2,
-            CreatableFormat::TarXz => Self::TarXz,
-            CreatableFormat::TarZst => Self::TarZst,
-            CreatableFormat::Zip => Self::Zip,
-        }
-    }
-}
+mirror_into_core!(
+    CreatableFormat => CoreCreatableFormat,
+    [Tar, TarGz, TarBz2, TarXz, TarZst, Zip]
+);
 
 /// Whether a created archive is flushed to stable storage before success is
 /// reported.
@@ -182,14 +183,10 @@ pub enum Durability {
     Unsynced,
 }
 
-impl From<Durability> for CoreDurability {
-    fn from(value: Durability) -> Self {
-        match value {
-            Durability::Synced => Self::Synced,
-            Durability::Unsynced => Self::Unsynced,
-        }
-    }
-}
+mirror_into_core!(
+    Durability => CoreDurability,
+    [Synced, Unsynced]
+);
 
 /// Manifest entry type.
 // Values must equal `exarch_core::ManifestEntryType::as_str`.
@@ -210,16 +207,10 @@ pub enum ManifestEntryType {
     Hardlink,
 }
 
-impl From<CoreManifestEntryType> for ManifestEntryType {
-    fn from(value: CoreManifestEntryType) -> Self {
-        match value {
-            CoreManifestEntryType::File => Self::File,
-            CoreManifestEntryType::Directory => Self::Directory,
-            CoreManifestEntryType::Symlink => Self::Symlink,
-            CoreManifestEntryType::Hardlink => Self::Hardlink,
-        }
-    }
-}
+mirror_from_closed_core!(
+    CoreManifestEntryType => ManifestEntryType,
+    [File, Directory, Symlink, Hardlink]
+);
 
 /// Overall verification status.
 // Values must equal `exarch_core::VerificationStatus::as_str`.
@@ -237,15 +228,10 @@ pub enum VerificationStatus {
     Warning,
 }
 
-impl From<CoreVerificationStatus> for VerificationStatus {
-    fn from(value: CoreVerificationStatus) -> Self {
-        match value {
-            CoreVerificationStatus::Pass => Self::Pass,
-            CoreVerificationStatus::Fail => Self::Fail,
-            CoreVerificationStatus::Warning => Self::Warning,
-        }
-    }
-}
+mirror_from_closed_core!(
+    CoreVerificationStatus => VerificationStatus,
+    [Pass, Fail, Warning]
+);
 
 /// Status of a single check category.
 // Values must equal `exarch_core::CheckStatus::as_str`.
@@ -266,16 +252,10 @@ pub enum CheckStatus {
     Skipped,
 }
 
-impl From<CoreCheckStatus> for CheckStatus {
-    fn from(value: CoreCheckStatus) -> Self {
-        match value {
-            CoreCheckStatus::Pass => Self::Pass,
-            CoreCheckStatus::Fail => Self::Fail,
-            CoreCheckStatus::Warning => Self::Warning,
-            CoreCheckStatus::Skipped => Self::Skipped,
-        }
-    }
-}
+mirror_from_closed_core!(
+    CoreCheckStatus => CheckStatus,
+    [Pass, Fail, Warning, Skipped]
+);
 
 /// Result of the payload integrity check.
 // Values must equal `exarch_core::IntegrityStatus::as_str`.
@@ -296,19 +276,12 @@ pub enum IntegrityStatus {
     Skipped,
 }
 
-impl TryFrom<CoreIntegrityStatus> for IntegrityStatus {
-    type Error = Error;
-
-    fn try_from(value: CoreIntegrityStatus) -> Result<Self> {
-        Ok(match value {
-            CoreIntegrityStatus::Pass => Self::Pass,
-            CoreIntegrityStatus::Fail => Self::Fail,
-            CoreIntegrityStatus::Incomplete => Self::Incomplete,
-            CoreIntegrityStatus::Skipped => Self::Skipped,
-            other => return Err(unknown_variant("integrity status", other.as_str())),
-        })
-    }
-}
+mirror_from_core!(
+    IntegrityStatus,
+    exarch_core::IntegrityStatus,
+    "integrity status",
+    [Pass, Fail, Incomplete, Skipped]
+);
 
 /// Why part of the payload was not verified by the integrity check.
 // Values must equal `exarch_core::UnverifiedReason::as_str`.
@@ -345,31 +318,31 @@ pub enum UnverifiedReason {
     DescriptorTail,
 }
 
-impl TryFrom<CoreUnverifiedReason> for UnverifiedReason {
-    type Error = Error;
-
-    fn try_from(value: CoreUnverifiedReason) -> Result<Self> {
-        Ok(match value {
-            CoreUnverifiedReason::OverBudget => Self::OverBudget,
-            CoreUnverifiedReason::ResourceLimit => Self::ResourceLimit,
-            CoreUnverifiedReason::SolidPolicy => Self::SolidPolicy,
-            CoreUnverifiedReason::SizeCeiling => Self::SizeCeiling,
-            CoreUnverifiedReason::UncoveredBlockCrc => Self::UncoveredBlockCrc,
-            CoreUnverifiedReason::NotDecodable => Self::NotDecodable,
-            CoreUnverifiedReason::NoEndMarker => Self::NoEndMarker,
-            CoreUnverifiedReason::PathTooLong => Self::PathTooLong,
-            CoreUnverifiedReason::DescriptorTail => Self::DescriptorTail,
-            other => return Err(unknown_variant("unverified reason", other.as_str())),
-        })
-    }
-}
+mirror_from_core!(
+    UnverifiedReason,
+    exarch_core::UnverifiedReason,
+    "unverified reason",
+    [
+        OverBudget,
+        ResourceLimit,
+        SolidPolicy,
+        SizeCeiling,
+        UncoveredBlockCrc,
+        NotDecodable,
+        NoEndMarker,
+        PathTooLong,
+        DescriptorTail
+    ]
+);
 
 /// Number of items left unverified for one reason.
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct UnverifiedCount {
-    /// Why the items were not verified.
-    pub reason: UnverifiedReason,
+    /// Why the items were not verified: an `UnverifiedReason`, or a token newer
+    /// than this binding.
+    #[napi(ts_type = "UnverifiedReason | (string & {})")]
+    pub reason: String,
     /// Number of items.
     pub count: i64,
 }
@@ -380,48 +353,48 @@ pub struct UnverifiedCount {
 pub struct UnverifiedEntry {
     /// Entry path inside the archive.
     pub path: String,
-    /// Why the entry was not verified.
-    pub reason: UnverifiedReason,
+    /// Why the entry was not verified: an `UnverifiedReason`, or a token newer
+    /// than this binding.
+    #[napi(ts_type = "UnverifiedReason | (string & {})")]
+    pub reason: String,
 }
 
 /// What a requested integrity check left unverified.
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct IntegrityGaps {
-    /// Unverified items per reason; reasons with no items are absent.
+    /// Unverified items per reason; reasons with no items are absent. An
+    /// array here; the Python binding exposes a dict keyed by the reason.
     pub counts: Vec<UnverifiedCount>,
     /// Unverified entries listed by path, up to a fixed cap (see `omitted`).
     pub entries: Vec<UnverifiedEntry>,
     /// Entries with a path that did not fit `entries`.
     pub omitted: i64,
+    /// Total unverified items over all reasons.
+    pub total: i64,
 }
 
-impl TryFrom<&CoreIntegrityGaps> for IntegrityGaps {
-    type Error = Error;
-
-    fn try_from(gaps: &CoreIntegrityGaps) -> Result<Self> {
-        Ok(Self {
+impl From<&CoreIntegrityGaps> for IntegrityGaps {
+    fn from(gaps: &CoreIntegrityGaps) -> Self {
+        Self {
             counts: gaps
                 .counts()
-                .map(|(reason, count)| {
-                    Ok(UnverifiedCount {
-                        reason: reason.try_into()?,
-                        count: saturating_i64(count),
-                    })
+                .map(|(reason, count)| UnverifiedCount {
+                    reason: reason.as_str().to_owned(),
+                    count: saturating_i64(count),
                 })
-                .collect::<Result<_>>()?,
+                .collect(),
             entries: gaps
                 .entries()
                 .iter()
-                .map(|e| {
-                    Ok(UnverifiedEntry {
-                        path: path_text(e.path()),
-                        reason: e.reason().try_into()?,
-                    })
+                .map(|e| UnverifiedEntry {
+                    path: path_text(e.path()),
+                    reason: e.reason().as_str().to_owned(),
                 })
-                .collect::<Result<_>>()?,
+                .collect(),
             omitted: saturating_i64(gaps.omitted()),
-        })
+            total: saturating_i64(gaps.total()),
+        }
     }
 }
 
@@ -447,17 +420,10 @@ pub enum IssueSeverity {
     Critical,
 }
 
-impl From<CoreIssueSeverity> for IssueSeverity {
-    fn from(value: CoreIssueSeverity) -> Self {
-        match value {
-            CoreIssueSeverity::Info => Self::Info,
-            CoreIssueSeverity::Low => Self::Low,
-            CoreIssueSeverity::Medium => Self::Medium,
-            CoreIssueSeverity::High => Self::High,
-            CoreIssueSeverity::Critical => Self::Critical,
-        }
-    }
-}
+mirror_from_closed_core!(
+    CoreIssueSeverity => IssueSeverity,
+    [Info, Low, Medium, High, Critical]
+);
 
 /// Issue category.
 // Values must equal `exarch_core::IssueCategory::as_str`.
@@ -520,33 +486,31 @@ pub enum IssueCategory {
     ArchiveNote,
 }
 
-impl TryFrom<CoreIssueCategory> for IssueCategory {
-    type Error = Error;
-
-    fn try_from(value: CoreIssueCategory) -> Result<Self> {
-        Ok(match value {
-            CoreIssueCategory::PathTraversal => Self::PathTraversal,
-            CoreIssueCategory::SymlinkEscape => Self::SymlinkEscape,
-            CoreIssueCategory::HardlinkEscape => Self::HardlinkEscape,
-            CoreIssueCategory::ZipBomb => Self::ZipBomb,
-            CoreIssueCategory::InvalidPermissions => Self::InvalidPermissions,
-            CoreIssueCategory::QuotaExceeded => Self::QuotaExceeded,
-            CoreIssueCategory::SecurityPolicy => Self::SecurityPolicy,
-            CoreIssueCategory::InvalidArchive => Self::InvalidArchive,
-            CoreIssueCategory::SuspiciousPath => Self::SuspiciousPath,
-            CoreIssueCategory::ExecutableFile => Self::ExecutableFile,
-            CoreIssueCategory::CorruptData => Self::CorruptData,
-            CoreIssueCategory::IntegrityIncomplete => Self::IntegrityIncomplete,
-            CoreIssueCategory::HeaderMismatch => Self::HeaderMismatch,
-            CoreIssueCategory::DuplicateEntry => Self::DuplicateEntry,
-            CoreIssueCategory::OverlappingEntries => Self::OverlappingEntries,
-            CoreIssueCategory::HiddenEntry => Self::HiddenEntry,
-            CoreIssueCategory::NameCollision => Self::NameCollision,
-            CoreIssueCategory::ArchiveNote => Self::ArchiveNote,
-            other => return Err(unknown_variant("issue category", other.as_str())),
-        })
-    }
-}
+mirror_from_core!(
+    IssueCategory,
+    exarch_core::IssueCategory,
+    "issue category",
+    [
+        PathTraversal,
+        SymlinkEscape,
+        HardlinkEscape,
+        ZipBomb,
+        InvalidPermissions,
+        QuotaExceeded,
+        SecurityPolicy,
+        InvalidArchive,
+        SuspiciousPath,
+        ExecutableFile,
+        CorruptData,
+        IntegrityIncomplete,
+        HeaderMismatch,
+        DuplicateEntry,
+        OverlappingEntries,
+        HiddenEntry,
+        NameCollision,
+        ArchiveNote
+    ]
+);
 
 /// Why an entry was left out of an extraction or a creation.
 // Values must equal `exarch_core::SkipKind::as_str`.
@@ -603,10 +567,12 @@ mirror_from_core!(
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct SkipCount {
-    /// Why the entries were skipped.
-    pub kind: SkipKind,
-    /// How many entries, saturated at `2^32 - 1`.
-    pub count: u32,
+    /// Why the entries were skipped: a `SkipKind`, or a token newer than this
+    /// binding.
+    #[napi(ts_type = "SkipKind | (string & {})")]
+    pub kind: String,
+    /// How many entries.
+    pub count: i64,
 }
 
 /// One skipped entry.
@@ -616,10 +582,13 @@ pub struct SkippedEntry {
     /// The entry path as the operation names it, rendered injectively: a
     /// backslash is `\x5C` and each invalid byte is `\xNN`.
     pub path: String,
-    /// Why the entry was skipped.
-    pub kind: SkipKind,
+    /// Why the entry was skipped: a `SkipKind`, or a token newer than this
+    /// binding.
+    #[napi(ts_type = "SkipKind | (string & {})")]
+    pub kind: String,
     /// The I/O failure behind an `'unreadable'` skip.
-    pub io_kind: Option<IoKind>,
+    #[napi(ts_type = "IoKind | (string & {})")]
+    pub io_kind: Option<String>,
 }
 
 /// Everything an operation left out: exact counts per reason plus a bounded
@@ -627,41 +596,39 @@ pub struct SkippedEntry {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct SkippedSummary {
-    /// Exact count per reason; reasons with no skip are absent.
+    /// Exact count per reason; reasons with no skip are absent. An array
+    /// here; the Python binding exposes a dict keyed by the reason.
     pub counts: Vec<SkipCount>,
     /// The first skipped entries in the order they were skipped, at most 64.
     pub sample: Vec<SkippedEntry>,
+    /// Total skipped entries over all reasons.
+    pub total: i64,
 }
 
-impl TryFrom<&exarch_core::Skips> for SkippedSummary {
-    type Error = Error;
-
-    fn try_from(skips: &exarch_core::Skips) -> Result<Self> {
-        Ok(Self {
+impl From<&exarch_core::Skips> for SkippedSummary {
+    fn from(skips: &exarch_core::Skips) -> Self {
+        Self {
             counts: exarch_core::SkipKind::ALL
                 .iter()
                 .filter_map(|kind| {
                     let count = skips.count(*kind);
-                    (count > 0).then(|| {
-                        Ok(SkipCount {
-                            kind: SkipKind::try_from(*kind)?,
-                            count: saturating_u32(count),
-                        })
+                    (count > 0).then(|| SkipCount {
+                        kind: kind.as_str().to_owned(),
+                        count: saturating_usize(count),
                     })
                 })
-                .collect::<Result<_>>()?,
+                .collect(),
             sample: skips
                 .sample()
                 .iter()
-                .map(|skip| {
-                    Ok(SkippedEntry {
-                        path: path_text(&skip.path),
-                        kind: SkipKind::try_from(skip.kind)?,
-                        io_kind: skip.io_kind.map(IoKind::from),
-                    })
+                .map(|skip| SkippedEntry {
+                    path: path_text(&skip.path),
+                    kind: skip.kind.as_str().to_owned(),
+                    io_kind: skip.io_kind.map(|kind| kind.as_str().to_owned()),
                 })
-                .collect::<Result<_>>()?,
-        })
+                .collect(),
+            total: saturating_usize(skips.total()),
+        }
     }
 }
 
@@ -701,8 +668,18 @@ pub struct AntiItemsSkippedWarning {
     pub kind: ExtractionWarningKind,
     /// The human-readable text.
     pub message: String,
-    /// How many anti-items the archive holds, saturated at `2^53 - 1`.
+    /// How many anti-items the archive holds.
     pub count: i64,
+}
+
+/// An extraction warning of a kind newer than this binding.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnknownExtractionWarning {
+    /// The warning's token, as core spells it.
+    pub kind: String,
+    /// The human-readable text.
+    pub message: String,
 }
 
 /// The backup of the original destination, kept for an atomic replacement,
@@ -719,47 +696,43 @@ pub struct BackupCleanupFailedWarning {
     /// name only in release builds.
     pub path: String,
     /// Whether the backup's identity was confirmed before the removal failed.
-    pub identity: BackupIdentity,
+    #[napi(ts_type = "BackupIdentity | (string & {})")]
+    pub identity: String,
     /// The kind of the removal failure.
-    pub io_kind: IoKind,
+    #[napi(ts_type = "IoKind | (string & {})")]
+    pub io_kind: String,
     /// The removal failure's text, redacted like an I/O error message.
     pub reason: String,
 }
 
-type ExtractionWarning = Either<AntiItemsSkippedWarning, BackupCleanupFailedWarning>;
+type ExtractionWarning =
+    Either3<AntiItemsSkippedWarning, BackupCleanupFailedWarning, UnknownExtractionWarning>;
 
-fn backup_identity(identity: CoreBackupIdentity) -> Result<BackupIdentity> {
-    match identity {
-        CoreBackupIdentity::Verified => Ok(BackupIdentity::Verified),
-        CoreBackupIdentity::Unverified => Ok(BackupIdentity::Unverified),
-        other => Err(unknown_variant("backup identity", other.as_str())),
-    }
-}
-
-pub fn extraction_warning(warning: &CoreExtractionWarning) -> Result<ExtractionWarning> {
+pub fn extraction_warning(warning: &CoreExtractionWarning) -> ExtractionWarning {
     let warning = warning.redacted();
     match &warning {
-        CoreExtractionWarning::AntiItemsSkipped { count } => {
-            Ok(Either::A(AntiItemsSkippedWarning {
-                kind: ExtractionWarningKind::AntiItemsSkipped,
-                message: warning.to_string(),
-                count: saturating_i64(*count),
-            }))
-        }
+        CoreExtractionWarning::AntiItemsSkipped { count } => Either3::A(AntiItemsSkippedWarning {
+            kind: ExtractionWarningKind::AntiItemsSkipped,
+            message: warning.to_string(),
+            count: saturating_i64(*count),
+        }),
         CoreExtractionWarning::BackupCleanupFailed {
             path,
             identity,
             io_kind,
             message,
-        } => Ok(Either::B(BackupCleanupFailedWarning {
+        } => Either3::B(BackupCleanupFailedWarning {
             kind: ExtractionWarningKind::BackupCleanupFailed,
             message: warning.to_string(),
             path: path.to_string_lossy().into_owned(),
-            identity: backup_identity(*identity)?,
-            io_kind: IoKind::from(*io_kind),
+            identity: identity.as_str().to_owned(),
+            io_kind: io_kind.as_str().to_owned(),
             reason: message.to_string(),
-        })),
-        other => Err(unknown_variant("extraction warning", other.kind().as_str())),
+        }),
+        other => Either3::C(UnknownExtractionWarning {
+            kind: other.kind().as_str().to_owned(),
+            message: other.to_string(),
+        }),
     }
 }
 
@@ -789,8 +762,8 @@ pub struct ZipRatioOverDefaultLimitWarning {
     pub kind: CreationWarningKind,
     /// The human-readable text.
     pub message: String,
-    /// How many entries are over the limit, saturated at `2^32 - 1`.
-    pub entries: u32,
+    /// How many entries are over the limit.
+    pub entries: i64,
     /// The default extraction ratio limit.
     pub limit: f64,
     /// The smallest ratio limit that admits every entry.
@@ -820,41 +793,60 @@ pub struct DirectoryNotSyncedWarning {
     /// The human-readable text.
     pub message: String,
     /// The kind of the sync failure.
-    pub io_kind: IoKind,
+    #[napi(ts_type = "IoKind | (string & {})")]
+    pub io_kind: String,
 }
 
-type CreationWarning =
-    Either3<ZipRatioOverDefaultLimitWarning, ZipRatioCheckFailedWarning, DirectoryNotSyncedWarning>;
+/// A creation warning of a kind newer than this binding.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnknownCreationWarning {
+    /// The warning's token, as core spells it.
+    pub kind: String,
+    /// The human-readable text.
+    pub message: String,
+}
 
-fn creation_warning(warning: &CoreCreationWarning) -> Result<CreationWarning> {
+type CreationWarning = Either4<
+    ZipRatioOverDefaultLimitWarning,
+    ZipRatioCheckFailedWarning,
+    DirectoryNotSyncedWarning,
+    UnknownCreationWarning,
+>;
+
+fn creation_warning(warning: &CoreCreationWarning) -> CreationWarning {
+    let warning = warning.redacted();
     let message = warning.to_string();
-    match warning {
+    match &warning {
         CoreCreationWarning::ZipRatioOverDefaultLimit {
             entries,
             limit,
             needed_ratio,
-        } => Ok(Either3::A(ZipRatioOverDefaultLimitWarning {
+        } => Either4::A(ZipRatioOverDefaultLimitWarning {
             kind: CreationWarningKind::ZipRatioOverDefaultLimit,
             message,
-            entries: saturating_u32(*entries),
+            entries: saturating_usize(*entries),
             limit: *limit,
             needed_ratio: *needed_ratio,
-        })),
+        }),
         CoreCreationWarning::ZipRatioCheckFailed { reason } => {
-            Ok(Either3::B(ZipRatioCheckFailedWarning {
+            Either4::B(ZipRatioCheckFailedWarning {
                 kind: CreationWarningKind::ZipRatioCheckFailed,
                 message,
                 reason: reason.clone(),
-            }))
+            })
         }
         CoreCreationWarning::DirectoryNotSynced { io_kind } => {
-            Ok(Either3::C(DirectoryNotSyncedWarning {
+            Either4::C(DirectoryNotSyncedWarning {
                 kind: CreationWarningKind::DirectoryNotSynced,
                 message,
-                io_kind: IoKind::from(*io_kind),
-            }))
+                io_kind: io_kind.as_str().to_owned(),
+            })
         }
-        other => Err(unknown_variant("creation warning", other.kind().as_str())),
+        other => Either4::D(UnknownCreationWarning {
+            kind: other.kind().as_str().to_owned(),
+            message,
+        }),
     }
 }
 
@@ -865,17 +857,19 @@ fn creation_warning(warning: &CoreCreationWarning) -> Result<CreationWarning> {
 #[derive(Debug, Clone)]
 pub struct ExtractionReport {
     /// Number of files successfully extracted.
-    pub files_extracted: u32,
+    pub files_extracted: i64,
     /// Number of directories created.
-    pub directories_created: u32,
+    pub directories_created: i64,
     /// Number of symlinks created.
-    pub symlinks_created: u32,
+    pub symlinks_created: i64,
     /// Total bytes written to disk.
     pub bytes_written: i64,
+    /// `true` when `bytesWritten` exceeded `2^53 - 1` and was clamped to it.
+    pub size_clamped: bool,
     /// Extraction duration in milliseconds.
     pub duration_ms: i64,
     /// Number of entries skipped, over all reasons.
-    pub files_skipped: u32,
+    pub files_skipped: i64,
     /// The skipped entries by reason.
     pub skipped: SkippedSummary,
     /// Conditions worth surfacing that are not skipped entries; branch on
@@ -884,27 +878,20 @@ pub struct ExtractionReport {
     pub warnings: Vec<ExtractionWarning>,
 }
 
-impl TryFrom<CoreReport> for ExtractionReport {
-    type Error = Error;
-
-    fn try_from(report: CoreReport) -> Result<Self> {
-        // Use saturating conversions to prevent silent wraparound on overflow
-        // This ensures audit trails remain accurate even for very large
-        // extractions
-        Ok(Self {
-            files_extracted: saturating_u32(report.files_extracted),
-            directories_created: saturating_u32(report.directories_created),
-            symlinks_created: saturating_u32(report.symlinks_created),
-            bytes_written: saturating_i64(report.bytes_written),
+impl From<CoreReport> for ExtractionReport {
+    fn from(report: CoreReport) -> Self {
+        let bytes_written = ByteSize::new(report.bytes_written);
+        Self {
+            files_extracted: saturating_usize(report.files_extracted),
+            directories_created: saturating_usize(report.directories_created),
+            symlinks_created: saturating_usize(report.symlinks_created),
+            bytes_written: bytes_written.value,
+            size_clamped: bytes_written.clamped,
             duration_ms: saturating_millis(report.duration),
-            files_skipped: saturating_u32(report.files_skipped()),
-            skipped: SkippedSummary::try_from(&report.skipped)?,
-            warnings: report
-                .warnings
-                .iter()
-                .map(extraction_warning)
-                .collect::<Result<_>>()?,
-        })
+            files_skipped: saturating_usize(report.files_skipped()),
+            skipped: SkippedSummary::from(&report.skipped),
+            warnings: report.warnings.iter().map(extraction_warning).collect(),
+        }
     }
 }
 
@@ -915,20 +902,23 @@ impl TryFrom<CoreReport> for ExtractionReport {
 #[derive(Debug, Clone)]
 pub struct CreationReport {
     /// Number of files added to the archive.
-    pub files_added: u32,
+    pub files_added: i64,
     /// Number of directories added to the archive.
-    pub directories_added: u32,
+    pub directories_added: i64,
     /// Number of symlinks added to the archive.
-    pub symlinks_added: u32,
+    pub symlinks_added: i64,
     /// Total bytes written to the archive (uncompressed).
     pub bytes_written: i64,
     /// Total bytes in the final archive (compressed).
     pub bytes_compressed: i64,
+    /// `true` when `bytesWritten` or `bytesCompressed` exceeded `2^53 - 1` and
+    /// was clamped to it.
+    pub size_clamped: bool,
     /// Duration of the creation operation in milliseconds.
     pub duration_ms: i64,
     /// Number of entries skipped, over all reasons (filters, size limit,
     /// unreadable entries, unsupported symlinks).
-    pub files_skipped: u32,
+    pub files_skipped: i64,
     /// The skipped entries by reason.
     pub skipped: SkippedSummary,
     /// Conditions worth surfacing that are not skipped entries; branch on
@@ -937,25 +927,22 @@ pub struct CreationReport {
     pub warnings: Vec<CreationWarning>,
 }
 
-impl TryFrom<exarch_core::CreationReport> for CreationReport {
-    type Error = Error;
-
-    fn try_from(report: exarch_core::CreationReport) -> Result<Self> {
-        Ok(Self {
-            files_added: saturating_u32(report.files_added),
-            directories_added: saturating_u32(report.directories_added),
-            symlinks_added: saturating_u32(report.symlinks_added),
-            bytes_written: saturating_i64(report.bytes_written),
-            bytes_compressed: saturating_i64(report.bytes_compressed),
+impl From<exarch_core::CreationReport> for CreationReport {
+    fn from(report: exarch_core::CreationReport) -> Self {
+        let bytes_written = ByteSize::new(report.bytes_written);
+        let bytes_compressed = ByteSize::new(report.bytes_compressed);
+        Self {
+            files_added: saturating_usize(report.files_added),
+            directories_added: saturating_usize(report.directories_added),
+            symlinks_added: saturating_usize(report.symlinks_added),
+            bytes_written: bytes_written.value,
+            bytes_compressed: bytes_compressed.value,
+            size_clamped: bytes_written.either_clamped(bytes_compressed),
             duration_ms: saturating_millis(report.duration),
-            files_skipped: saturating_u32(report.files_skipped()),
-            skipped: SkippedSummary::try_from(&report.skipped)?,
-            warnings: report
-                .warnings
-                .iter()
-                .map(creation_warning)
-                .collect::<Result<_>>()?,
-        })
+            files_skipped: saturating_usize(report.files_skipped()),
+            skipped: SkippedSummary::from(&report.skipped),
+            warnings: report.warnings.iter().map(creation_warning).collect(),
+        }
     }
 }
 
@@ -970,15 +957,18 @@ pub struct ArchiveManifest {
     #[napi(ts_type = "Array<ArchiveEntry>")]
     pub entries: Vec<ArchiveEntry>,
     /// Total number of entries.
-    pub total_entries: u32,
+    pub total_entries: i64,
     /// Total uncompressed size in bytes.
     pub total_size: i64,
-    /// Archive format.
-    pub format: ArchiveType,
-    /// What extraction would do with each entry validation accepts: where it
-    /// lands, or why it is left out. The selection is the one the listing's
-    /// `SecurityConfig` carried and that config supplies the limits and
-    /// policies; an entry validation refuses is not reported.
+    /// `true` when `totalSize` exceeded `2^53 - 1` and was clamped to it.
+    pub size_clamped: bool,
+    /// Archive format: an `ArchiveType`, or a token newer than this binding.
+    #[napi(ts_type = "ArchiveType | (string & {})")]
+    pub format: String,
+    /// What extraction would do with each entry: where it lands, why it is
+    /// left out, or that validation refuses it. The selection is the one the
+    /// listing's `SecurityConfig` carried and that config supplies the limits
+    /// and policies.
     #[napi(ts_type = "Array<EntryDisposition>")]
     pub dispositions: Vec<EntryDisposition>,
 }
@@ -994,9 +984,9 @@ impl ArchiveManifest {
         manifest: exarch_core::ArchiveManifest,
         config: &exarch_core::SecurityConfig,
     ) -> CoreResult<Self> {
-        let total_entries = saturating_u32(manifest.total_entries());
-        let total_size = saturating_i64(manifest.total_size());
-        let format = ArchiveType::try_from(manifest.format()).map_err(Failure::Native)?;
+        let total_entries = saturating_usize(manifest.total_entries());
+        let total_size = ByteSize::new(manifest.total_size());
+        let format = manifest.format().as_str().to_owned();
         let dispositions = manifest
             .dispositions(config)
             .map(|(entry, disposition)| entry_disposition(&entry.path, disposition))
@@ -1008,7 +998,8 @@ impl ArchiveManifest {
                 .map(|entry| archive_entry(&entry))
                 .collect::<CoreResult<_>>()?,
             total_entries,
-            total_size,
+            total_size: total_size.value,
+            size_clamped: total_size.clamped,
             format,
             dispositions,
         })
@@ -1026,13 +1017,16 @@ pub enum DispositionKind {
     /// The entry is validated but not written.
     #[napi(value = "skip")]
     Skip,
+    /// The entry is refused by validation or policy, or cannot be placed.
+    #[napi(value = "refuse")]
+    Refuse,
 }
 
 mirror_from_core!(
     DispositionKind,
     exarch_core::DispositionKind,
     "disposition kind",
-    [Extract, Skip]
+    [Extract, Skip, Refuse]
 );
 
 /// An entry that extraction writes.
@@ -1058,34 +1052,61 @@ pub struct SkipDisposition {
     pub action: DispositionKind,
     /// The entry's path in the archive.
     pub path: String,
-    /// Why it is left out, for example `'not_selected'` or `'stripped_away'`.
-    pub kind: SkipKind,
+    /// Why it is left out, for example `'not_selected'` or `'stripped_away'`: a
+    /// `SkipKind`, or a token newer than this binding.
+    #[napi(ts_type = "SkipKind | (string & {})")]
+    pub kind: String,
 }
 
-type EntryDisposition = Either<ExtractDisposition, SkipDisposition>;
+/// An entry that is refused by validation or policy, or cannot be placed.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct RefuseDisposition {
+    /// Always `'refuse'`.
+    #[napi(ts_type = "'refuse'")]
+    pub action: DispositionKind,
+    /// The entry's path in the archive.
+    pub path: String,
+}
+
+/// A disposition of an action newer than this binding.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnknownDisposition {
+    /// The action's token, as core spells it.
+    pub action: String,
+    /// The entry's path in the archive.
+    pub path: String,
+}
+
+type EntryDisposition =
+    Either4<ExtractDisposition, SkipDisposition, RefuseDisposition, UnknownDisposition>;
 
 fn entry_disposition(
     path: &std::path::Path,
     disposition: exarch_core::Disposition,
 ) -> CoreResult<EntryDisposition> {
     let path = utf8_path(path)?;
-    let action = DispositionKind::try_from(disposition.kind()).map_err(Failure::Native)?;
-    match disposition {
-        exarch_core::Disposition::Extract(landing) => Ok(Either::A(ExtractDisposition {
-            action,
+    Ok(match disposition {
+        exarch_core::Disposition::Extract(landing) => Either4::A(ExtractDisposition {
+            action: DispositionKind::Extract,
             path,
             landing: utf8_path(landing.as_path())?,
-        })),
-        exarch_core::Disposition::Skip(kind) => Ok(Either::B(SkipDisposition {
-            action,
+        }),
+        exarch_core::Disposition::Skip(kind) => Either4::B(SkipDisposition {
+            action: DispositionKind::Skip,
             path,
-            kind: SkipKind::try_from(kind).map_err(Failure::Native)?,
-        })),
-        _ => Err(Failure::Native(unknown_variant(
-            "entry disposition",
-            "unknown",
-        ))),
-    }
+            kind: kind.as_str().to_owned(),
+        }),
+        exarch_core::Disposition::Refuse => Either4::C(RefuseDisposition {
+            action: DispositionKind::Refuse,
+            path,
+        }),
+        other => Either4::D(UnknownDisposition {
+            action: other.kind().as_str().to_owned(),
+            path,
+        }),
+    })
 }
 
 /// How a link target is recorded.
@@ -1158,38 +1179,56 @@ pub struct OversizedLinkTarget {
     pub state: LinkTargetState,
     /// Length of the stored target in bytes.
     pub bytes: i64,
+    /// `true` when `bytes` exceeded `2^53 - 1` and was clamped to it.
+    pub size_clamped: bool,
 }
 
-type LinkTarget = Either5<
+/// A link target of a state newer than this binding.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnknownLinkTarget {
+    /// The state's token. Core offers no accessor for the token of a variant
+    /// this binding does not know, so it is always `'unknown'`.
+    pub state: String,
+}
+
+type LinkTarget = Either6<
     RecordedLinkTarget,
     MissingLinkTarget,
     UnreadLinkTarget,
     UnreadableLinkTarget,
     OversizedLinkTarget,
+    UnknownLinkTarget,
 >;
 
 fn link_target(target: &exarch_core::LinkTarget) -> CoreResult<LinkTarget> {
     use exarch_core::LinkTarget as Core;
 
     Ok(match target {
-        Core::Recorded(path) => Either5::A(RecordedLinkTarget {
+        Core::Recorded(path) => Either6::A(RecordedLinkTarget {
             state: LinkTargetState::Recorded,
             path: utf8_path(path)?,
         }),
-        Core::Missing => Either5::B(MissingLinkTarget {
+        Core::Missing => Either6::B(MissingLinkTarget {
             state: LinkTargetState::Missing,
         }),
-        Core::Unread => Either5::C(UnreadLinkTarget {
+        Core::Unread => Either6::C(UnreadLinkTarget {
             state: LinkTargetState::Unread,
         }),
-        Core::Unreadable => Either5::D(UnreadableLinkTarget {
+        Core::Unreadable => Either6::D(UnreadableLinkTarget {
             state: LinkTargetState::Unreadable,
         }),
-        Core::Oversized { bytes } => Either5::E(OversizedLinkTarget {
-            state: LinkTargetState::Oversized,
-            bytes: saturating_i64(u64::try_from(*bytes).unwrap_or(u64::MAX)),
+        Core::Oversized { bytes } => {
+            let bytes = ByteSize::from_len(*bytes);
+            Either6::E(OversizedLinkTarget {
+                state: LinkTargetState::Oversized,
+                bytes: bytes.value,
+                size_clamped: bytes.clamped,
+            })
+        }
+        _ => Either6::F(UnknownLinkTarget {
+            state: "unknown".to_owned(),
         }),
-        _ => return Err(Failure::Native(unknown_variant("link target", "unknown"))),
     })
 }
 
@@ -1206,6 +1245,9 @@ pub struct ManifestFileEntry {
     pub size: i64,
     /// Compressed size in bytes (if the format reports one).
     pub compressed_size: Option<i64>,
+    /// `true` when a size field of this entry exceeded `2^53 - 1` and was
+    /// clamped to it.
+    pub size_clamped: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
     /// Modification time (milliseconds since Unix epoch).
@@ -1223,6 +1265,9 @@ pub struct ManifestDirectoryEntry {
     pub entry_type: ManifestEntryType,
     /// Compressed size in bytes (if the format reports one).
     pub compressed_size: Option<i64>,
+    /// `true` when a size field of this entry exceeded `2^53 - 1` and was
+    /// clamped to it.
+    pub size_clamped: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
     /// Modification time (milliseconds since Unix epoch).
@@ -1240,6 +1285,9 @@ pub struct ManifestSymlinkEntry {
     pub entry_type: ManifestEntryType,
     /// Compressed size in bytes (if the format reports one).
     pub compressed_size: Option<i64>,
+    /// `true` when a size field of this entry exceeded `2^53 - 1` and was
+    /// clamped to it.
+    pub size_clamped: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
     /// Modification time (milliseconds since Unix epoch).
@@ -1261,6 +1309,9 @@ pub struct ManifestHardlinkEntry {
     pub entry_type: ManifestEntryType,
     /// Compressed size in bytes (if the format reports one).
     pub compressed_size: Option<i64>,
+    /// `true` when a size field of this entry exceeded `2^53 - 1` and was
+    /// clamped to it.
+    pub size_clamped: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
     /// Modification time (milliseconds since Unix epoch).
@@ -1270,14 +1321,29 @@ pub struct ManifestHardlinkEntry {
     pub target: LinkTarget,
 }
 
+/// An entry of a type newer than this binding.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnknownManifestEntry {
+    /// Entry path (relative, as stored in archive).
+    pub path: String,
+    /// The entry type's token, as core spells it.
+    pub entry_type: String,
+}
+
 /// One entry of a listing, discriminated by `entryType`.
-pub type ArchiveEntry =
-    Either4<ManifestFileEntry, ManifestDirectoryEntry, ManifestSymlinkEntry, ManifestHardlinkEntry>;
+pub type ArchiveEntry = Either5<
+    ManifestFileEntry,
+    ManifestDirectoryEntry,
+    ManifestSymlinkEntry,
+    ManifestHardlinkEntry,
+    UnknownManifestEntry,
+>;
 
 /// The fields every entry kind carries.
 struct EntryCommon {
     path: String,
-    compressed_size: Option<i64>,
+    compressed_size: Option<ByteSize>,
     mode: Option<u32>,
     modified: Option<i64>,
 }
@@ -1288,7 +1354,7 @@ fn entry_common(entry: &exarch_core::ArchiveEntry) -> CoreResult<EntryCommon> {
             .utf8_path()
             .map_err(|malformation| Failure::from(CoreError::from(malformation)))?
             .to_owned(),
-        compressed_size: entry.compressed_size().map(saturating_i64),
+        compressed_size: entry.compressed_size().map(ByteSize::new),
         mode: entry.mode.map(exarch_core::RawMode::get),
         modified: entry.modified.and_then(|t| {
             t.duration_since(std::time::UNIX_EPOCH)
@@ -1307,39 +1373,51 @@ fn archive_entry(entry: &exarch_core::ArchiveEntry) -> CoreResult<ArchiveEntry> 
         mode,
         modified,
     } = entry_common(entry)?;
+    let compressed = compressed_size.map(|size| size.value);
+    let compressed_clamped = compressed_size.is_some_and(|size| size.clamped);
     Ok(match &entry.kind {
-        Kind::File { .. } => Either4::A(ManifestFileEntry {
-            path,
-            entry_type: ManifestEntryType::File,
-            size: saturating_i64(entry.size()),
-            compressed_size,
-            mode,
-            modified,
-        }),
-        Kind::Directory => Either4::B(ManifestDirectoryEntry {
+        Kind::File { .. } => {
+            let size = ByteSize::new(entry.size());
+            Either5::A(ManifestFileEntry {
+                path,
+                entry_type: ManifestEntryType::File,
+                size: size.value,
+                compressed_size: compressed,
+                size_clamped: size.clamped || compressed_clamped,
+                mode,
+                modified,
+            })
+        }
+        Kind::Directory => Either5::B(ManifestDirectoryEntry {
             path,
             entry_type: ManifestEntryType::Directory,
-            compressed_size,
+            compressed_size: compressed,
+            size_clamped: compressed_clamped,
             mode,
             modified,
         }),
-        Kind::Symlink { target } => Either4::C(ManifestSymlinkEntry {
+        Kind::Symlink { target } => Either5::C(ManifestSymlinkEntry {
             path,
             entry_type: ManifestEntryType::Symlink,
-            compressed_size,
+            compressed_size: compressed,
+            size_clamped: compressed_clamped,
             mode,
             modified,
             target: link_target(target)?,
         }),
-        Kind::Hardlink { target } => Either4::D(ManifestHardlinkEntry {
+        Kind::Hardlink { target } => Either5::D(ManifestHardlinkEntry {
             path,
             entry_type: ManifestEntryType::Hardlink,
-            compressed_size,
+            compressed_size: compressed,
+            size_clamped: compressed_clamped,
             mode,
             modified,
             target: link_target(target)?,
         }),
-        _ => return Err(Failure::Native(unknown_variant("entry kind", "unknown"))),
+        other => Either5::E(UnknownManifestEntry {
+            path,
+            entry_type: other.entry_type().as_str().to_owned(),
+        }),
     })
 }
 
@@ -1352,8 +1430,10 @@ fn archive_entry(entry: &exarch_core::ArchiveEntry) -> CoreResult<ArchiveEntry> 
 pub struct VerificationReport {
     /// Overall verification status.
     pub status: VerificationStatus,
-    /// Integrity check result.
-    pub integrity_status: IntegrityStatus,
+    /// Integrity check result: an `IntegrityStatus`, or a token newer than this
+    /// binding.
+    #[napi(ts_type = "IntegrityStatus | (string & {})")]
+    pub integrity_status: String,
     /// What the integrity check left unverified; absent unless the check was
     /// requested.
     pub integrity_gaps: Option<IntegrityGaps>,
@@ -1363,50 +1443,37 @@ pub struct VerificationReport {
     #[napi(ts_type = "Array<VerificationIssue>")]
     pub issues: Vec<VerificationIssue>,
     /// Total entries scanned.
-    pub total_entries: u32,
+    pub total_entries: i64,
     /// Entries flagged as suspicious.
-    pub suspicious_entries: u32,
+    pub suspicious_entries: i64,
     /// Total uncompressed size.
     pub total_size: i64,
-    /// Archive format.
-    pub format: ArchiveType,
+    /// `true` when `totalSize` exceeded `2^53 - 1` and was clamped to it.
+    pub size_clamped: bool,
+    /// Archive format: an `ArchiveType`, or a token newer than this binding.
+    #[napi(ts_type = "ArchiveType | (string & {})")]
+    pub format: String,
 }
 
-impl TryFrom<exarch_core::VerificationReport> for VerificationReport {
-    type Error = Failure;
-
-    fn try_from(report: exarch_core::VerificationReport) -> std::result::Result<Self, Failure> {
-        let status = report.status().into();
-        let integrity_status = report
-            .integrity_status()
-            .try_into()
-            .map_err(Failure::Native)?;
-        let integrity_gaps = report
-            .integrity_gaps()
-            .map(IntegrityGaps::try_from)
-            .transpose()
-            .map_err(Failure::Native)?;
-        let security_status = report.security_status().into();
-        let total_entries = saturating_u32(report.total_entries());
-        let suspicious_entries = saturating_u32(report.suspicious_entries());
-        let total_size = saturating_i64(report.total_size());
-        let format = ArchiveType::try_from(report.format()).map_err(Failure::Native)?;
-        Ok(Self {
-            status,
-            integrity_status,
-            integrity_gaps,
-            security_status,
+impl From<exarch_core::VerificationReport> for VerificationReport {
+    fn from(report: exarch_core::VerificationReport) -> Self {
+        let total_size = ByteSize::new(report.total_size());
+        Self {
+            status: report.status().into(),
+            integrity_status: report.integrity_status().as_str().to_owned(),
+            integrity_gaps: report.integrity_gaps().map(IntegrityGaps::from),
+            security_status: report.security_status().into(),
+            total_entries: saturating_usize(report.total_entries()),
+            suspicious_entries: saturating_usize(report.suspicious_entries()),
+            total_size: total_size.value,
+            size_clamped: total_size.clamped,
+            format: report.format().as_str().to_owned(),
             issues: report
                 .into_issues()
                 .into_iter()
-                .map(VerificationIssue::try_from)
-                .collect::<Result<_>>()
-                .map_err(Failure::Native)?,
-            total_entries,
-            suspicious_entries,
-            total_size,
-            format,
-        })
+                .map(VerificationIssue::from)
+                .collect(),
+        }
     }
 }
 
@@ -1421,8 +1488,9 @@ impl TryFrom<exarch_core::VerificationReport> for VerificationReport {
 pub struct VerificationIssue {
     /// Issue severity level.
     pub severity: IssueSeverity,
-    /// Issue category.
-    pub category: IssueCategory,
+    /// Issue category: an `IssueCategory`, or a token newer than this binding.
+    #[napi(ts_type = "IssueCategory | (string & {})")]
+    pub category: String,
     /// Entry path that triggered issue (if applicable); a path that is not
     /// valid UTF-8 or contains a backslash is rendered injectively: a backslash
     /// is `\x5C` and each invalid byte is `\xNN`.
@@ -1430,51 +1498,48 @@ pub struct VerificationIssue {
     /// Human-readable description.
     pub message: String,
     /// The `ErrorCode` extraction would fail with, for a refusal.
-    pub code: Option<ErrorCode>,
+    #[napi(ts_type = "ErrorCode | (string & {})")]
+    pub code: Option<String>,
     /// Finer classification of the refusal.
     #[napi(
-        ts_type = "InvalidArchiveSubCode | SecurityViolationSubCode | QuotaSubCode | ZipBombSubCode"
+        ts_type = "InvalidArchiveSubCode | SecurityViolationSubCode | QuotaSubCode | ZipBombSubCode | (string & {})"
     )]
-    pub sub_code: Option<SubCodeValue>,
+    pub sub_code: Option<String>,
     /// The `SecurityConfig` setting that relaxes the refusal.
-    pub relaxable_by: Option<PolicySetting>,
+    #[napi(ts_type = "PolicySetting | (string & {})")]
+    pub relaxable_by: Option<String>,
     /// The configuration setting an `INVALID_CONFIGURATION` refusal names.
-    pub setting: Option<ConfigSetting>,
+    #[napi(ts_type = "ConfigSetting | (string & {})")]
+    pub setting: Option<String>,
     /// The kind of an `IO_ERROR` refusal.
-    pub io_kind: Option<IoKind>,
+    #[napi(ts_type = "IoKind | (string & {})")]
+    pub io_kind: Option<String>,
     /// The permission bits (raw archive mode) of an `'Invalid Permissions'`
     /// refusal or of an `'Executable File'` finding.
     pub mode: Option<u32>,
 }
 
-impl TryFrom<exarch_core::VerificationIssue> for VerificationIssue {
-    type Error = Error;
-
-    fn try_from(issue: exarch_core::VerificationIssue) -> Result<Self> {
+impl From<exarch_core::VerificationIssue> for VerificationIssue {
+    fn from(issue: exarch_core::VerificationIssue) -> Self {
         let kind = issue.ffi_kind();
-        Ok(Self {
+        Self {
             severity: issue.severity().into(),
-            category: issue.category().try_into()?,
+            category: issue.category().as_str().to_owned(),
             entry_path: issue.entry_path().map(path_text),
             message: issue.message(),
-            code: kind
-                .map(|kind| ErrorCode::try_from(kind.code()))
-                .transpose()?,
-            sub_code: issue.sub_code().map(sub_code_value).transpose()?,
+            code: kind.map(|kind| kind.code().as_str().to_owned()),
+            sub_code: issue.sub_code().map(|code| code.as_str().to_owned()),
             relaxable_by: kind
                 .and_then(exarch_core::FfiKind::relaxable_by)
-                .map(PolicySetting::try_from)
-                .transpose()?,
+                .map(|setting| setting.as_str().to_owned()),
             setting: kind
                 .and_then(exarch_core::FfiKind::setting)
-                .map(ConfigSetting::try_from)
-                .transpose()?,
-            io_kind: match kind {
-                Some(exarch_core::FfiKind::Io(io_kind)) => Some(IoKind::from(*io_kind)),
-                _ => None,
-            },
+                .map(|setting| setting.as_str().to_owned()),
+            io_kind: kind
+                .and_then(exarch_core::FfiKind::io_kind)
+                .map(|kind| exarch_core::IoKind::from(kind).as_str().to_owned()),
             mode: issue.mode().map(exarch_core::RawMode::get),
-        })
+        }
     }
 }
 
@@ -1506,23 +1571,25 @@ mod tests {
 
     fn extraction_message(warning: &ExtractionWarning) -> &str {
         match warning {
-            Either::A(w) => &w.message,
-            Either::B(w) => &w.message,
-        }
-    }
-
-    fn creation_message(warning: &CreationWarning) -> &str {
-        match warning {
             Either3::A(w) => &w.message,
             Either3::B(w) => &w.message,
             Either3::C(w) => &w.message,
         }
     }
 
+    fn creation_message(warning: &CreationWarning) -> &str {
+        match warning {
+            Either4::A(w) => &w.message,
+            Either4::B(w) => &w.message,
+            Either4::C(w) => &w.message,
+            Either4::D(w) => &w.message,
+        }
+    }
+
     #[test]
     fn test_anti_items_warning_is_typed() {
-        let warning = extraction_warning(&anti(3)).unwrap();
-        let Either::A(typed) = warning else {
+        let warning = extraction_warning(&anti(3));
+        let Either3::A(typed) = warning else {
             panic!("expected the anti-items warning");
         };
         assert_eq!(typed.kind, ExtractionWarningKind::AntiItemsSkipped);
@@ -1534,16 +1601,16 @@ mod tests {
     fn test_backup_cleanup_warning_is_typed_and_redacts_the_path_like_errors() {
         let core = exarch_core::ExtractionWarning::BackupCleanupFailed {
             path: std::path::PathBuf::from("/srv/internal/app/.backup-123"),
-            identity: CoreBackupIdentity::Unverified,
+            identity: exarch_core::BackupIdentity::Unverified,
             io_kind: exarch_core::IoKind::PermissionDenied,
             message: "denied".into(),
         };
-        let Either::B(typed) = extraction_warning(&core).unwrap() else {
+        let Either3::B(typed) = extraction_warning(&core) else {
             panic!("expected the backup warning");
         };
         assert_eq!(typed.kind, ExtractionWarningKind::BackupCleanupFailed);
-        assert_eq!(typed.identity, BackupIdentity::Unverified);
-        assert_eq!(typed.io_kind, IoKind::PermissionDenied);
+        assert_eq!(typed.identity, "unverified");
+        assert_eq!(typed.io_kind, "PermissionDenied");
         assert_eq!(
             typed.path,
             exarch_core::sanitize_path_for_error(std::path::Path::new(
@@ -1563,9 +1630,8 @@ mod tests {
             entries: 2,
             limit: 100.0,
             needed_ratio: 250.0,
-        })
-        .unwrap();
-        let Either3::A(over) = over else {
+        });
+        let Either4::A(over) = over else {
             panic!("expected the ratio warning");
         };
         assert_eq!(over.kind, CreationWarningKind::ZipRatioOverDefaultLimit);
@@ -1574,20 +1640,19 @@ mod tests {
             (2, 100.0, 250.0)
         );
 
-        let failed = creation_warning(&Core::ZipRatioCheckFailed { reason: "r".into() }).unwrap();
-        let Either3::B(failed) = failed else {
+        let failed = creation_warning(&Core::ZipRatioCheckFailed { reason: "r".into() });
+        let Either4::B(failed) = failed else {
             panic!("expected the check-failed warning");
         };
         assert_eq!(failed.reason, "r");
 
         let synced = creation_warning(&Core::DirectoryNotSynced {
             io_kind: exarch_core::IoKind::PermissionDenied,
-        })
-        .unwrap();
-        let Either3::C(synced) = synced else {
+        });
+        let Either4::C(synced) = synced else {
             panic!("expected the not-synced warning");
         };
-        assert_eq!(synced.io_kind, IoKind::PermissionDenied);
+        assert_eq!(synced.io_kind, "PermissionDenied");
     }
 
     #[test]
@@ -1623,7 +1688,7 @@ mod tests {
                 BackupIdentity::Verified => "verified",
                 BackupIdentity::Unverified => "unverified",
             });
-        assert_eq!(identity, CoreBackupIdentity::NAMES);
+        assert_eq!(identity, exarch_core::BackupIdentity::NAMES);
     }
 
     #[test]
@@ -1645,17 +1710,21 @@ mod tests {
         unreadable.io_kind = Some(exarch_core::IoKind::PermissionDenied);
         skips.record(unreadable).unwrap();
 
-        let summary = SkippedSummary::try_from(&skips).unwrap();
+        let summary = SkippedSummary::from(&skips);
 
-        let counts: Vec<(SkipKind, u32)> =
-            summary.counts.iter().map(|c| (c.kind, c.count)).collect();
-        assert_eq!(
-            counts,
-            [(SkipKind::Duplicate, 2), (SkipKind::Unreadable, 1)]
-        );
+        let counts: Vec<(&str, i64)> = summary
+            .counts
+            .iter()
+            .map(|c| (c.kind.as_str(), c.count))
+            .collect();
+        assert_eq!(counts, [("duplicate", 2), ("unreadable", 1)]);
+        assert_eq!(summary.total, 3);
         assert_eq!(summary.sample.len(), 3);
-        assert_eq!(summary.sample[2].kind, SkipKind::Unreadable);
-        assert_eq!(summary.sample[2].io_kind, Some(IoKind::PermissionDenied));
+        assert_eq!(summary.sample[2].kind, "unreadable");
+        assert_eq!(
+            summary.sample[2].io_kind.as_deref(),
+            Some("PermissionDenied")
+        );
         assert_eq!(summary.sample[0].io_kind, None);
     }
 
@@ -1673,7 +1742,7 @@ mod tests {
         core_report.skipped = skipped(1);
         core_report.add_warning(anti(1));
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.files_extracted, 10);
         assert_eq!(report.directories_created, 5);
@@ -1688,7 +1757,7 @@ mod tests {
     #[test]
     fn test_extraction_report_zero_values() {
         let core_report = CoreReport::new();
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.files_extracted, 0);
         assert_eq!(report.directories_created, 0);
@@ -1706,7 +1775,7 @@ mod tests {
         core_report.bytes_written = 10_000_000_000; // 10 GB
         core_report.duration = Duration::from_hours(1);
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.files_extracted, 100_000);
         assert_eq!(report.bytes_written, 10_000_000_000);
@@ -1720,7 +1789,7 @@ mod tests {
         core_report.add_warning(anti(2));
         core_report.add_warning(anti(3));
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.warnings.len(), 3);
         assert_eq!(extraction_message(&report.warnings[0]), anti(1).to_string());
@@ -1733,7 +1802,7 @@ mod tests {
         let mut core_report = CoreReport::new();
         core_report.duration = Duration::from_hours(2);
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(
             report.duration_ms, 7_200_000,
@@ -1746,7 +1815,7 @@ mod tests {
         let mut core_report = CoreReport::new();
         core_report.duration = Duration::from_secs(0);
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.duration_ms, 0, "zero duration should be 0 ms");
     }
@@ -1756,7 +1825,7 @@ mod tests {
         let mut core_report = CoreReport::new();
         core_report.duration = Duration::from_micros(1500); // 1.5 ms
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(
             report.duration_ms, 1,
@@ -1771,7 +1840,7 @@ mod tests {
         core_report.add_warning(anti(2));
         core_report.add_warning(anti(3));
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.warnings.len(), 3, "should have 3 warnings");
         assert_eq!(
@@ -1808,7 +1877,7 @@ mod tests {
         let expected = warning.to_string();
         core_report.add_warning(warning);
 
-        let report = CreationReport::try_from(core_report).unwrap();
+        let report = CreationReport::from(core_report);
 
         assert_eq!(report.files_added, 10);
         assert_eq!(report.directories_added, 5);
@@ -1851,7 +1920,7 @@ mod tests {
         core_entry.mode = Some(exarch_core::RawMode::new(0o644));
         core_entry.modified = Some(UNIX_EPOCH + std::time::Duration::from_secs(1000));
 
-        let Either4::A(entry) = archive_entry(&core_entry).unwrap() else {
+        let Either5::A(entry) = archive_entry(&core_entry).unwrap() else {
             panic!("a regular file converts to a file entry");
         };
 
@@ -1874,26 +1943,26 @@ mod tests {
                 ManifestEntryKind::Symlink { target },
             )
         };
-        let Either4::C(recorded) = archive_entry(&entry(Core::Recorded("a/b".into()))).unwrap()
+        let Either5::C(recorded) = archive_entry(&entry(Core::Recorded("a/b".into()))).unwrap()
         else {
             panic!("a symlink converts to a symlink entry");
         };
         assert_matches!(
             recorded.target,
-            Either5::A(RecordedLinkTarget { ref path, .. }) if path == "a/b"
+            Either6::A(RecordedLinkTarget { ref path, .. }) if path == "a/b"
         );
-        let Either4::C(oversized) = archive_entry(&entry(Core::Oversized { bytes: 9000 })).unwrap()
+        let Either5::C(oversized) = archive_entry(&entry(Core::Oversized { bytes: 9000 })).unwrap()
         else {
             panic!("a symlink converts to a symlink entry");
         };
         assert_matches!(
             oversized.target,
-            Either5::E(OversizedLinkTarget { bytes: 9000, .. })
+            Either6::E(OversizedLinkTarget { bytes: 9000, .. })
         );
-        let Either4::C(unread) = archive_entry(&entry(Core::Unread)).unwrap() else {
+        let Either5::C(unread) = archive_entry(&entry(Core::Unread)).unwrap() else {
             panic!("a symlink converts to a symlink entry");
         };
-        assert_matches!(unread.target, Either5::C(_));
+        assert_matches!(unread.target, Either6::C(_));
     }
 
     #[cfg(unix)]
@@ -1938,7 +2007,7 @@ mod tests {
 
         assert_eq!(manifest.total_entries, 2);
         assert_eq!(manifest.dispositions.len(), 2);
-        let Either::A(extract) = &manifest.dispositions[0] else {
+        let Either4::A(extract) = &manifest.dispositions[0] else {
             panic!("the selected file extracts");
         };
         assert_eq!(extract.action, DispositionKind::Extract);
@@ -1946,14 +2015,27 @@ mod tests {
             (extract.path.as_str(), extract.landing.as_str()),
             ("keep/a/b.txt", "b.txt")
         );
-        let Either::B(skip) = &manifest.dispositions[1] else {
+        let Either4::B(skip) = &manifest.dispositions[1] else {
             panic!("the other file is left out");
         };
         assert_eq!(skip.action, DispositionKind::Skip);
         assert_eq!(
-            (skip.path.as_str(), skip.kind),
-            ("other.txt", SkipKind::NotSelected)
+            (skip.path.as_str(), skip.kind.as_str()),
+            ("other.txt", "not_selected")
         );
+    }
+
+    #[test]
+    fn a_refused_disposition_maps_to_its_own_object() {
+        let Either4::C(refused) = entry_disposition(
+            std::path::Path::new("bad/x"),
+            exarch_core::Disposition::Refuse,
+        )
+        .unwrap() else {
+            panic!("refuse maps to the refuse object");
+        };
+        assert_eq!(refused.action, DispositionKind::Refuse);
+        assert_eq!(refused.path, "bad/x");
     }
 
     #[test]
@@ -1971,7 +2053,7 @@ mod tests {
 
         assert_eq!(manifest.total_entries, 10);
         assert_eq!(manifest.total_size, 5000);
-        assert_eq!(manifest.format, ArchiveType::TarGz);
+        assert_eq!(manifest.format, "TarGz");
     }
 
     // VerificationReport tests
@@ -1986,10 +2068,10 @@ mod tests {
         let core_report =
             exarch_core::VerificationReport::from_entry_issues(&core_manifest, |_| Vec::new());
 
-        let report = VerificationReport::try_from(core_report).unwrap();
+        let report = VerificationReport::from(core_report);
 
         assert_eq!(report.status, VerificationStatus::Pass);
-        assert_eq!(report.integrity_status, IntegrityStatus::Skipped);
+        assert_eq!(report.integrity_status, "SKIPPED");
         assert_eq!(report.security_status, CheckStatus::Pass);
         assert_eq!(report.total_entries, 10);
         assert_eq!(report.suspicious_entries, 0);
@@ -2000,8 +2082,8 @@ mod tests {
     fn test_security_policy_issue_conversion_and_status() {
         let core_issue = policy_issue();
 
-        let issue = VerificationIssue::try_from(core_issue).unwrap();
-        assert_eq!(issue.category, IssueCategory::SecurityPolicy);
+        let issue = VerificationIssue::from(core_issue);
+        assert_eq!(issue.category, "Security Policy");
 
         let mut manifest = exarch_core::ArchiveManifest::new(exarch_core::ArchiveType::Tar);
         manifest
@@ -2014,7 +2096,7 @@ mod tests {
             .unwrap();
         let core_report =
             exarch_core::VerificationReport::from_entry_issues(&manifest, |_| vec![policy_issue()]);
-        let report = VerificationReport::try_from(core_report).unwrap();
+        let report = VerificationReport::from(core_report);
         assert_eq!(report.security_status, CheckStatus::Fail);
     }
 
@@ -2031,28 +2113,23 @@ mod tests {
             Some(PathBuf::from("../etc/passwd")),
         );
 
-        let issue = VerificationIssue::try_from(core_issue).unwrap();
+        let issue = VerificationIssue::from(core_issue);
 
         assert_eq!(issue.severity, IssueSeverity::Critical);
-        assert_eq!(issue.category, IssueCategory::PathTraversal);
+        assert_eq!(issue.category, "Path Traversal");
         assert_eq!(issue.entry_path, Some("../etc/passwd".to_string()));
         assert_eq!(issue.message, "Path traversal detected: ../etc/passwd");
-        assert_eq!(issue.code, Some(ErrorCode::PathTraversal));
+        assert_eq!(issue.code.as_deref(), Some("PATH_TRAVERSAL"));
         assert!(issue.sub_code.is_none());
         assert_eq!(issue.relaxable_by, None);
     }
 
     #[test]
     fn test_policy_refusal_issue_carries_sub_code_and_setting() {
-        let issue = VerificationIssue::try_from(policy_issue()).unwrap();
+        let issue = VerificationIssue::from(policy_issue());
 
-        assert_eq!(issue.code, Some(ErrorCode::SecurityViolation));
-        assert_matches!(
-            issue.sub_code,
-            Some(Either4::B(
-                crate::error::SecurityViolationSubCode::Encrypted
-            ))
-        );
+        assert_eq!(issue.code.as_deref(), Some("SECURITY_VIOLATION"));
+        assert_eq!(issue.sub_code.as_deref(), Some("ENCRYPTED"));
         assert_eq!(issue.relaxable_by, None);
     }
 
@@ -2064,20 +2141,19 @@ mod tests {
         };
         let core_issue = exarch_core::VerificationIssue::from_error(&error, None);
 
-        let issue = VerificationIssue::try_from(core_issue).unwrap();
+        let issue = VerificationIssue::from(core_issue);
 
         assert_eq!(issue.mode, Some(0o4755));
     }
 
     #[test]
     fn test_executable_heuristic_carries_the_raw_mode() {
-        let issue = VerificationIssue::try_from(exarch_core::VerificationIssue::new(
+        let issue = VerificationIssue::from(exarch_core::VerificationIssue::new(
             exarch_core::IssueSeverity::Low,
             exarch_core::Finding::Heuristic(exarch_core::Heuristic::ExecutableFile {
                 mode: exarch_core::RawMode::new(0o755),
             }),
-        ))
-        .unwrap();
+        ));
 
         assert_eq!(issue.mode, Some(0o755));
         assert_eq!(issue.code, None);
@@ -2085,11 +2161,10 @@ mod tests {
 
     #[test]
     fn test_heuristic_issue_carries_no_refusal_properties() {
-        let issue = VerificationIssue::try_from(exarch_core::VerificationIssue::new(
+        let issue = VerificationIssue::from(exarch_core::VerificationIssue::new(
             exarch_core::IssueSeverity::Low,
             exarch_core::Finding::Heuristic(exarch_core::Heuristic::SuspiciousExtension),
-        ))
-        .unwrap();
+        ));
 
         assert_eq!(issue.code, None);
         assert!(issue.sub_code.is_none());
@@ -2098,18 +2173,13 @@ mod tests {
 
     // CR-004: Overflow/saturating conversion tests
     #[test]
-    fn test_extraction_report_saturates_files_extracted_at_u32_max() {
+    fn test_extraction_report_counts_are_exact_beyond_u32() {
         let mut core_report = CoreReport::new();
-        // Set to value > u32::MAX
         core_report.files_extracted = (u32::MAX as usize) + 1000;
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
-        assert_eq!(
-            report.files_extracted,
-            u32::MAX,
-            "files_extracted should saturate to u32::MAX"
-        );
+        assert_eq!(report.files_extracted, i64::from(u32::MAX) + 1000);
     }
 
     #[test]
@@ -2118,12 +2188,24 @@ mod tests {
         // Set to value > MAX_SAFE
         core_report.bytes_written = u64::MAX;
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(
             report.bytes_written, MAX_SAFE,
             "bytes_written should saturate to MAX_SAFE"
         );
+        assert!(report.size_clamped);
+    }
+
+    #[test]
+    fn test_exact_size_is_not_flagged_as_clamped() {
+        let mut core_report = CoreReport::new();
+        core_report.bytes_written = MAX_SAFE as u64;
+
+        let report = ExtractionReport::from(core_report);
+
+        assert_eq!(report.bytes_written, MAX_SAFE);
+        assert!(!report.size_clamped);
     }
 
     #[test]
@@ -2133,7 +2215,7 @@ mod tests {
         // MAX_SAFE ms is about 292 million years, so use u64::MAX seconds
         core_report.duration = Duration::from_secs(u64::MAX);
 
-        let report = ExtractionReport::try_from(core_report).unwrap();
+        let report = ExtractionReport::from(core_report);
 
         assert_eq!(
             report.duration_ms, MAX_SAFE,
@@ -2142,17 +2224,13 @@ mod tests {
     }
 
     #[test]
-    fn test_creation_report_saturates_files_added_at_u32_max() {
+    fn test_creation_report_counts_are_exact_beyond_u32() {
         let mut core_report = exarch_core::CreationReport::new();
         core_report.files_added = (u32::MAX as usize) + 1000;
 
-        let report = CreationReport::try_from(core_report).unwrap();
+        let report = CreationReport::from(core_report);
 
-        assert_eq!(
-            report.files_added,
-            u32::MAX,
-            "files_added should saturate to u32::MAX"
-        );
+        assert_eq!(report.files_added, i64::from(u32::MAX) + 1000);
     }
 
     #[test]
@@ -2160,7 +2238,7 @@ mod tests {
         let mut core_report = exarch_core::CreationReport::new();
         core_report.bytes_written = u64::MAX;
 
-        let report = CreationReport::try_from(core_report).unwrap();
+        let report = CreationReport::from(core_report);
 
         assert_eq!(
             report.bytes_written, MAX_SAFE,
@@ -2173,7 +2251,7 @@ mod tests {
         let mut core_report = exarch_core::CreationReport::new();
         core_report.bytes_compressed = u64::MAX;
 
-        let report = CreationReport::try_from(core_report).unwrap();
+        let report = CreationReport::from(core_report);
 
         assert_eq!(
             report.bytes_compressed, MAX_SAFE,
@@ -2185,6 +2263,31 @@ mod tests {
     fn test_saturating_u32_clamps_at_u32_max() {
         assert_eq!(saturating_u32(7), 7);
         assert_eq!(saturating_u32((u32::MAX as usize) + 1000), u32::MAX);
+    }
+
+    #[test]
+    fn test_byte_size_flags_only_a_real_clamp() {
+        assert_eq!(
+            ByteSize::new(7),
+            ByteSize {
+                value: 7,
+                clamped: false
+            }
+        );
+        assert_eq!(
+            ByteSize::new(MAX_SAFE_INTEGER),
+            ByteSize {
+                value: MAX_SAFE,
+                clamped: false
+            }
+        );
+        assert_eq!(
+            ByteSize::new(MAX_SAFE_INTEGER + 1),
+            ByteSize {
+                value: MAX_SAFE,
+                clamped: true
+            }
+        );
     }
 
     #[test]
@@ -2214,7 +2317,7 @@ mod tests {
     fn test_archive_entry_saturates_size_at_max_safe_integer() {
         let core_entry = sized_entry("test.txt", u64::MAX);
 
-        let Either4::A(entry) = archive_entry(&core_entry).unwrap() else {
+        let Either5::A(entry) = archive_entry(&core_entry).unwrap() else {
             panic!("a regular file converts to a file entry");
         };
 
@@ -2226,7 +2329,7 @@ mod tests {
         let mut core_entry = sized_entry("test.txt", 1024);
         core_entry.compression = exarch_core::EntryCompression::Entry(Compressed(u64::MAX));
 
-        let Either4::A(entry) = archive_entry(&core_entry).unwrap() else {
+        let Either5::A(entry) = archive_entry(&core_entry).unwrap() else {
             panic!("a regular file converts to a file entry");
         };
 
@@ -2280,7 +2383,7 @@ mod tests {
 
     #[test]
     fn test_issue_category_try_from_covers_every_core_variant() {
-        let mapped: Vec<_> = CoreIssueCategory::ALL
+        let mapped: Vec<_> = exarch_core::IssueCategory::ALL
             .iter()
             .map(|v| IssueCategory::try_from(*v).unwrap())
             .collect();
@@ -2289,7 +2392,7 @@ mod tests {
 
     #[test]
     fn test_integrity_status_try_from_covers_every_core_variant() {
-        let mapped: Vec<_> = CoreIntegrityStatus::ALL
+        let mapped: Vec<_> = exarch_core::IntegrityStatus::ALL
             .iter()
             .map(|v| IntegrityStatus::try_from(*v).unwrap())
             .collect();
@@ -2298,7 +2401,7 @@ mod tests {
 
     #[test]
     fn test_unverified_reason_try_from_covers_every_core_variant() {
-        let mapped: Vec<_> = CoreUnverifiedReason::ALL
+        let mapped: Vec<_> = exarch_core::UnverifiedReason::ALL
             .iter()
             .map(|v| UnverifiedReason::try_from(*v).unwrap())
             .collect();
@@ -2359,8 +2462,8 @@ mod tests {
             union_line("Durability", CoreDurability::ALL, CoreDurability::as_str),
             union_line(
                 "IssueCategory",
-                CoreIssueCategory::ALL,
-                CoreIssueCategory::as_str,
+                exarch_core::IssueCategory::ALL,
+                exarch_core::IssueCategory::as_str,
             ),
             union_line(
                 "IssueSeverity",
@@ -2380,18 +2483,18 @@ mod tests {
             ),
             union_line(
                 "BackupIdentity",
-                CoreBackupIdentity::ALL,
-                CoreBackupIdentity::as_str,
+                exarch_core::BackupIdentity::ALL,
+                exarch_core::BackupIdentity::as_str,
             ),
             union_line(
                 "IntegrityStatus",
-                CoreIntegrityStatus::ALL,
-                CoreIntegrityStatus::as_str,
+                exarch_core::IntegrityStatus::ALL,
+                exarch_core::IntegrityStatus::as_str,
             ),
             union_line(
                 "UnverifiedReason",
-                CoreUnverifiedReason::ALL,
-                CoreUnverifiedReason::as_str,
+                exarch_core::UnverifiedReason::ALL,
+                exarch_core::UnverifiedReason::as_str,
             ),
             union_line(
                 "ManifestEntryType",

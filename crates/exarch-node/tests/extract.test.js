@@ -175,6 +175,7 @@ describe('extractArchive (async)', () => {
         assert.strictEqual(err.writes, 'kept');
         assert.strictEqual(err.filesExtracted, 0);
         assert.strictEqual(err.bytesWritten, 0);
+        assert.strictEqual(err.sizeClamped, false);
         assert.strictEqual(err.filesSkipped, 1);
         assert.deepStrictEqual(err.warnings, []);
         return true;

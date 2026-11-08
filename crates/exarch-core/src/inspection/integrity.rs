@@ -28,7 +28,8 @@ use crate::copy::copy_bounded;
 use crate::copy::declared_size_exceeded;
 use crate::error::TrailerCorruption;
 use crate::formats::compression::CompressionCodec;
-use crate::formats::compression::is_trailing_data;
+use crate::formats::compression::TrailingData;
+use crate::formats::io_marker::IoMarker;
 use crate::formats::source_fault::ReadFamily;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::source_fault::ReadVerdict;
@@ -114,6 +115,8 @@ impl DecodeFailure {
             CopyError::Overflow => Self::ResourceLimit(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::IntegerOverflow,
             }),
+            // Verification copies through `copy_bounded`, which never polls.
+            CopyError::Cancelled => Self::NotDecodable(ArchiveError::Cancelled),
         }
     }
 
@@ -159,7 +162,9 @@ impl DecodeFailure {
         match self {
             Self::Checksum | Self::Malformed(_) => {
                 let cause = match &self {
-                    Self::Malformed(e) if is_trailing_data(e) => TrailerCorruption::TrailingData,
+                    Self::Malformed(e) if TrailingData::find(e).is_some() => {
+                        TrailerCorruption::TrailingData
+                    }
                     _ => TrailerCorruption::Decoder,
                 };
                 ArchiveError::TarTrailer(TarTrailerRefusal::Corrupt {
@@ -698,7 +703,7 @@ mod tests {
     #[test]
     fn test_classification_replay_checksum_mismatch() {
         assert_matches!(
-            read_failure(crate::formats::source_fault::ReplayChecksumMismatch::into_io()),
+            read_failure(crate::formats::source_fault::ReplayChecksumMismatch.into_io()),
             DecodeFailure::Checksum
         );
     }

@@ -14,6 +14,7 @@ use exarch_core::ExtensionFilter;
 use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::Limit;
+use exarch_core::ListOptions as CoreListOptions;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
 use exarch_core::PathRewrite;
@@ -21,7 +22,9 @@ use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
 use exarch_core::RequestedLevel;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
+use exarch_core::SolidLimits;
 use exarch_core::Staging;
+use exarch_core::StoredTargets;
 use exarch_core::StripComponents;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
@@ -113,7 +116,11 @@ impl From<f64> for PyRatio {
 
 impl PyRatio {
     fn limit(self) -> PyResult<RatioLimit> {
-        RatioLimit::parse(ConfigSetting::MaxCompressionRatio, self.0).map_err(convert_error)
+        self.limit_of(ConfigSetting::MaxCompressionRatio)
+    }
+
+    fn limit_of(self, setting: ConfigSetting) -> PyResult<RatioLimit> {
+        RatioLimit::parse(setting, self.0).map_err(convert_error)
     }
 }
 
@@ -178,12 +185,10 @@ const fn count_bound(limit: Limit<NonZeroUsize>) -> Option<usize> {
     }
 }
 
-fn parse_exclude_patterns(patterns: &[String]) -> PyResult<Vec<exarch_core::ExcludePattern>> {
+fn parse_exclude_patterns(patterns: &[String]) -> PyResult<Vec<exarch_core::EntryPattern>> {
     patterns
         .iter()
-        .map(|pattern| {
-            exarch_core::ExcludePattern::try_from(pattern.as_str()).map_err(convert_error)
-        })
+        .map(|pattern| exarch_core::EntryPattern::try_from(pattern.as_str()).map_err(convert_error))
         .collect()
 }
 
@@ -220,10 +225,11 @@ fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
 /// * `max_total_size` - Maximum total size for all files in bytes (default: 500
 ///   MB)
 /// * `max_compression_ratio` - Maximum compression ratio allowed (default:
-///   100.0); not applied to solid 7z blocks, which use a fixed 1000x limit
-/// * `max_file_count` - Maximum number of files, symlinks and hardlinks that
-///   `extract_archive` creates, directories not counted; `list_archive` and
-///   `verify_archive` count every entry (default: 10,000)
+///   100.0); not applied to solid 7z blocks, which use
+///   `max_solid_compression_ratio`
+/// * `max_file_count` - Maximum number of entries; every entry counts in every
+///   operation and format: files, directories, links and skipped entries
+///   (default: 10,000)
 /// * `max_path_depth` - Maximum path depth allowed (default: 32)
 /// * `preserve_permissions` - Preserve file permissions from archive (default:
 ///   False)
@@ -231,6 +237,16 @@ fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
 ///   every extension (the default); an empty list is refused, and assigning
 ///   `None` is the only way to clear the list
 /// * `banned_path_components` - List of banned path components
+/// * `allow_windows_reserved_names` - Whether names Windows reserves (`CON`,
+///   `NUL`, ...) are extracted (default: False)
+/// * `max_tar_metadata_bytes` - Most bytes of TAR header and metadata records
+///   between two entries (default: 4 MiB)
+/// * `max_decoder_memory` - Most memory in bytes a compressed-TAR or 7z decoder
+///   may hold (default: 256 MiB)
+/// * `compressed_member_allowance` - Base number of gzip members or bzip2
+///   streams a compressed TAR may hold (default: 10,000)
+/// * `max_solid_compression_ratio` - Compression ratio limit of a whole solid
+///   7z block, or `None` while solid archives are not allowed
 ///
 /// # Examples
 ///
@@ -303,8 +319,8 @@ impl PySecurityConfig {
 
     /// Sets the maximum compression ratio.
     ///
-    /// Solid 7z blocks are exempt: each block is checked as a whole against a
-    /// fixed 1000x limit that is configurable only from the Rust API.
+    /// Solid 7z blocks are exempt: each block is checked as a whole against the
+    /// limit of `with_max_solid_compression_ratio` (default 1000).
     ///
     /// # Errors
     ///
@@ -361,6 +377,78 @@ impl PySecurityConfig {
     fn with_allow_world_writable(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
         slf.inner.allowed.world_writable = exarch_core::Admit::from_allowed(allow);
         slf
+    }
+
+    /// Allows or denies names Windows reserves (`CON`, `NUL`, ...).
+    ///
+    /// Refused by default on every platform, because an archive extracted here
+    /// may be unpacked on Windows later.
+    #[pyo3(signature = (allow=true))]
+    fn with_allow_windows_reserved_names(
+        mut slf: PyRefMut<'_, Self>,
+        allow: bool,
+    ) -> PyRefMut<'_, Self> {
+        slf.inner.allowed.windows_reserved_names = exarch_core::Admit::from_allowed(allow);
+        slf
+    }
+
+    /// Sets the most bytes of TAR header and metadata records (GNU long names,
+    /// PAX headers, sparse blocks) read between two consecutive entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if `size` is zero, negative or above 2**64 - 1.
+    fn with_max_tar_metadata_bytes(
+        mut slf: PyRefMut<'_, Self>,
+        size: PyInteger,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.max_tar_metadata_bytes = size.positive(ConfigSetting::MaxTarMetadataBytes)?;
+        Ok(slf)
+    }
+
+    /// Sets the most memory in bytes a decoder may hold while decoding a
+    /// compressed TAR or a 7z block.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if `size` is zero, negative or above 2**64 - 1.
+    fn with_max_decoder_memory(
+        mut slf: PyRefMut<'_, Self>,
+        size: PyInteger,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.max_decoder_memory = size.positive(ConfigSetting::MaxDecoderMemory)?;
+        Ok(slf)
+    }
+
+    /// Sets the base number of gzip members or bzip2 streams a compressed TAR
+    /// may hold; every 16 KiB of decoded output adds one more.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if `count` is zero, negative or above 2**64 - 1.
+    fn with_compressed_member_allowance(
+        mut slf: PyRefMut<'_, Self>,
+        count: PyInteger,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.compressed_member_allowance =
+            count.positive(ConfigSetting::CompressedMemberAllowance)?;
+        Ok(slf)
+    }
+
+    /// Sets the compression ratio limit of a whole solid 7z block.
+    ///
+    /// The limit exists only while `allow_solid_archives` is `True`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if `ratio` is not a positive finite number or solid
+    /// archives are not allowed.
+    fn with_max_solid_compression_ratio(
+        mut slf: PyRefMut<'_, Self>,
+        ratio: PyRatio,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.try_set_max_solid_compression_ratio(ratio)?;
+        Ok(slf)
     }
 
     /// Allows or denies solid 7z archives.
@@ -707,6 +795,61 @@ impl PySecurityConfig {
         self.try_set_max_solid_block_memory(value)
     }
 
+    /// Returns the compression ratio limit of a whole solid 7z block, or
+    /// `None` while solid archives are not allowed.
+    #[getter]
+    fn get_max_solid_compression_ratio(&self) -> Option<f64> {
+        self.inner
+            .solid_archives
+            .limits()
+            .map(|limits| limits.max_ratio.get())
+    }
+
+    #[setter]
+    fn set_max_solid_compression_ratio(&mut self, value: PyRatio) -> PyResult<()> {
+        self.try_set_max_solid_compression_ratio(value)
+    }
+
+    /// Returns whether names Windows reserves are allowed.
+    #[getter]
+    fn get_allow_windows_reserved_names(&self) -> bool {
+        self.inner.allowed.windows_reserved_names.is_allowed()
+    }
+
+    #[getter]
+    fn get_max_tar_metadata_bytes(&self) -> u64 {
+        self.inner.max_tar_metadata_bytes.get()
+    }
+
+    #[setter]
+    fn set_max_tar_metadata_bytes(&mut self, value: PyInteger) -> PyResult<()> {
+        self.inner.max_tar_metadata_bytes = value.positive(ConfigSetting::MaxTarMetadataBytes)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn get_max_decoder_memory(&self) -> u64 {
+        self.inner.max_decoder_memory.get()
+    }
+
+    #[setter]
+    fn set_max_decoder_memory(&mut self, value: PyInteger) -> PyResult<()> {
+        self.inner.max_decoder_memory = value.positive(ConfigSetting::MaxDecoderMemory)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn get_compressed_member_allowance(&self) -> u64 {
+        self.inner.compressed_member_allowance.get()
+    }
+
+    #[setter]
+    fn set_compressed_member_allowance(&mut self, value: PyInteger) -> PyResult<()> {
+        self.inner.compressed_member_allowance =
+            value.positive(ConfigSetting::CompressedMemberAllowance)?;
+        Ok(())
+    }
+
     /// Returns a copy of the allowed extensions list, or `None` when every
     /// extension is allowed.
     ///
@@ -928,6 +1071,23 @@ impl PySecurityConfig {
     /// Shared by the builder and the property setter of `flatten`.
     fn set_flatten(&mut self, flatten: bool) {
         self.inner.selection = std::mem::take(&mut self.inner.selection).with_flatten(flatten);
+    }
+
+    /// Shared by the builder and the property setter of
+    /// `max_solid_compression_ratio`.
+    fn try_set_max_solid_compression_ratio(&mut self, ratio: PyRatio) -> PyResult<()> {
+        let ratio = ratio.limit_of(ConfigSetting::MaxSolidCompressionRatio)?;
+        let solid = self.inner.solid_archives;
+        let limits = solid.limits().ok_or_else(|| {
+            PyInteger::refuse(
+                ConfigSetting::MaxSolidCompressionRatio,
+                ConfigProblem::NotSupported,
+            )
+        })?;
+        self.inner.solid_archives = solid
+            .with_limits(SolidLimits::with_max_ratio(limits, ratio))
+            .map_err(convert_error)?;
+        Ok(())
     }
 
     /// Shared by the builder and the property setter of
@@ -1431,6 +1591,84 @@ impl PyVerificationOptions {
     }
 }
 
+/// Options controlling listing behavior.
+///
+/// Listing a 7z archive leaves link targets unread by default, so it decodes no
+/// entry data; `with_stored_targets` reads them.
+///
+/// # Attributes
+///
+/// * `stored_targets` - Whether link targets kept in entry data are read
+///   (default: `False`)
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import ListOptions, list_archive
+///
+/// manifest = list_archive("archive.7z", options=ListOptions().with_stored_targets())
+/// ```
+#[pyclass(name = "ListOptions")]
+#[derive(Clone)]
+pub struct PyListOptions {
+    inner: CoreListOptions,
+}
+
+#[pymethods]
+impl PyListOptions {
+    /// Creates a new `ListOptions` with defaults (link targets unread).
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: CoreListOptions::default(),
+        }
+    }
+
+    /// Creates a `ListOptions` with defaults.
+    #[staticmethod]
+    fn default() -> Self {
+        Self::new()
+    }
+
+    /// Sets whether link targets kept in entry data are read, which decodes the
+    /// blocks that hold them.
+    #[pyo3(signature = (read=true))]
+    fn with_stored_targets(mut slf: PyRefMut<'_, Self>, read: bool) -> PyRefMut<'_, Self> {
+        slf.inner.stored_targets = if read {
+            StoredTargets::Read
+        } else {
+            StoredTargets::Skip
+        };
+        slf
+    }
+
+    /// Whether link targets kept in entry data are read.
+    #[getter]
+    fn get_stored_targets(&self) -> bool {
+        self.inner.stored_targets == StoredTargets::Read
+    }
+
+    /// Returns a debug string representation.
+    fn __repr__(&self) -> String {
+        format!(
+            "ListOptions(stored_targets={})",
+            if self.get_stored_targets() {
+                "True"
+            } else {
+                "False"
+            }
+        )
+    }
+}
+
+impl PyListOptions {
+    /// A copy of the inner `CoreListOptions`, or the default; see
+    /// [`PySecurityConfig::snapshot`] for why it is owned.
+    pub fn snapshot(options: Option<PyRef<'_, Self>>) -> CoreListOptions {
+        options.map_or_else(CoreListOptions::default, |o| o.inner)
+    }
+}
+
 impl PyVerificationOptions {
     /// A copy of the inner `CoreVerificationOptions`, or the default; see
     /// [`PySecurityConfig::snapshot`] for why it is owned.
@@ -1450,6 +1688,25 @@ mod tests {
     use exarch_core::MAX_CONFIG_ENTRY_LENGTH;
 
     use super::*;
+
+    #[test]
+    fn documented_numbers_follow_core_constants() {
+        assert_eq!(
+            CompressionLevel::DEFAULT.get(),
+            6,
+            "docs and exarch.pyi say 6"
+        );
+        assert_eq!(
+            exarch_core::MAX_PATH_LENGTH,
+            4096,
+            "docs of extract_archive say 4096"
+        );
+        assert_eq!(
+            SolidLimits::DEFAULT.max_ratio.get(),
+            1000.0,
+            "docs and exarch.pyi say 1000"
+        );
+    }
 
     #[test]
     fn test_default_config() {

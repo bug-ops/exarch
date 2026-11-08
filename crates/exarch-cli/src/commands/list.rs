@@ -32,7 +32,7 @@ const fn manifest_view(args: &ListArgs) -> ManifestView {
 pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = security_config(args, SecurityConfig::default())?;
 
-    let stored_targets = if args.read_link_targets {
+    let stored_targets = if args.read_link_targets || args.links.allow_symlinks {
         StoredTargets::Read
     } else {
         StoredTargets::Skip

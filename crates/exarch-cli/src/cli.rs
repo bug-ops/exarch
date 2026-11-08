@@ -70,8 +70,8 @@ pub struct CompletionArgs {
     pub shell: Shell,
 }
 
-/// Link policy flags shared by `extract` and `verify`, so both commands
-/// accept and reject the same archives.
+/// Link policy flags shared by `extract`, `list` and `verify`, so the three
+/// commands accept and reject the same archives.
 #[derive(clap::Args, Clone, Copy)]
 pub struct LinkPolicyArgs {
     /// Allow symlinks (within extraction directory)
@@ -673,7 +673,11 @@ pub struct ListArgs {
     #[command(flatten)]
     pub selection: SelectionArgs,
 
+    #[command(flatten)]
+    pub links: LinkPolicyArgs,
+
     /// Read 7z symlink targets, which decodes the blocks that hold them
+    /// (implied by --allow-symlinks)
     #[arg(long)]
     pub read_link_targets: bool,
 
@@ -692,6 +696,10 @@ impl PolicyFlags for ListArgs {
 
     fn selection(&self) -> &SelectionArgs {
         &self.selection
+    }
+
+    fn links(&self) -> Option<LinkPolicyArgs> {
+        Some(self.links)
     }
 }
 

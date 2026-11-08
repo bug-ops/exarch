@@ -8471,3 +8471,100 @@ mod interrupt {
         assert_eq!(json["error"]["kind"], "Cancelled", "{json}");
     }
 }
+
+/// A tar.gz holding `target.txt`, a symlink and a hardlink to it, and a
+/// symlink that escapes the destination.
+fn create_links_tar_gz(path: &std::path::Path) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let file = std::fs::File::create(path).expect("create archive");
+    let mut builder = tar::Builder::new(GzEncoder::new(file, Compression::default()));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(4);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "target.txt", &b"data"[..])
+        .expect("append file");
+    for (name, kind, target) in [
+        ("sym.txt", tar::EntryType::Symlink, "target.txt"),
+        ("hard.txt", tar::EntryType::Link, "target.txt"),
+        ("escape.txt", tar::EntryType::Symlink, "../../outside"),
+    ] {
+        let mut link = tar::Header::new_gnu();
+        link.set_size(0);
+        link.set_mode(0o644);
+        link.set_entry_type(kind);
+        link.set_link_name(target).expect("set link name");
+        builder
+            .append_data(&mut link, name, std::io::empty())
+            .expect("append link");
+    }
+    builder
+        .into_inner()
+        .expect("get gz encoder")
+        .finish()
+        .expect("finish gzip");
+}
+
+fn list_links_stdout(flags: &[&str]) -> String {
+    let temp = TempDir::new().expect("create temp dir");
+    let archive = temp.path().join("links.tar.gz");
+    create_links_tar_gz(&archive);
+    let output = exarch_cmd()
+        .args(["list", "--include", "*"])
+        .args(flags)
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(output).expect("utf-8 listing")
+}
+
+fn line_of<'a>(listing: &'a str, name: &str) -> &'a str {
+    listing
+        .lines()
+        .find(|line| line.contains(name))
+        .unwrap_or_else(|| panic!("{name} not listed in\n{listing}"))
+}
+
+/// `list` takes the link flags of `extract`, and each link's disposition is
+/// the one `extract` would act on.
+#[test]
+fn test_list_link_flags_set_the_link_dispositions() {
+    let none = list_links_stdout(&[]);
+    assert!(line_of(&none, "sym.txt").contains("[refused]"), "{none}");
+    assert!(line_of(&none, "hard.txt").contains("[refused]"), "{none}");
+
+    let symlinks = list_links_stdout(&["--allow-symlinks"]);
+    assert!(
+        !line_of(&symlinks, "sym.txt").contains("[refused]"),
+        "{symlinks}"
+    );
+    assert!(
+        line_of(&symlinks, "hard.txt").contains("[refused]"),
+        "{symlinks}"
+    );
+    assert!(
+        line_of(&symlinks, "escape.txt").contains("[refused]"),
+        "{symlinks}"
+    );
+
+    let hardlinks = list_links_stdout(&["--allow-hardlinks"]);
+    assert!(
+        line_of(&hardlinks, "sym.txt").contains("[refused]"),
+        "{hardlinks}"
+    );
+    assert!(
+        !line_of(&hardlinks, "hard.txt").contains("[refused]"),
+        "{hardlinks}"
+    );
+
+    let both = list_links_stdout(&["--allow-symlinks", "--allow-hardlinks"]);
+    assert!(!line_of(&both, "sym.txt").contains("[refused]"), "{both}");
+    assert!(!line_of(&both, "hard.txt").contains("[refused]"), "{both}");
+    assert!(line_of(&both, "escape.txt").contains("[refused]"), "{both}");
+}

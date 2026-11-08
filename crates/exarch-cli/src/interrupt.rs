@@ -330,6 +330,13 @@ fn deliver_within(budget: std::time::Duration, write: impl FnOnce() + Send + 'st
 /// stdout lock, no `--json` envelope is written; a write that times out above
 /// `PIPE_BUF` (512 bytes on macOS, 4096 on Linux) can leave a partial line.
 /// The exit status is the contract; the report is best effort.
+///
+/// `process::exit` still runs std's stdout cleanup, which flushes a line the
+/// interrupted thread left buffered when the stdout lock is free, and that
+/// flush can block on a full pipe. The path is narrow, since the CLI writes
+/// whole lines, and a lock held by an abandoned writer makes the cleanup skip
+/// the flush. A `_exit`-style exit would avoid it but needs `unsafe`, which
+/// the workspace denies.
 #[cfg(not(target_os = "wasi"))]
 fn forced_exit(armed: &Armed, stop: Stop) -> ! {
     use crate::output::emit_line;
@@ -519,6 +526,48 @@ mod tests {
             deliver_within(budget, || panic!("write failed")),
             Delivery::Abandoned
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_write_blocked_on_a_full_pipe_is_abandoned_within_the_budget() {
+        use std::io::Write as _;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        const CHUNK: usize = 512;
+        let (reader, mut filler) = std::io::pipe().expect("create pipe");
+        let mut blocked = filler.try_clone().expect("clone writer");
+        let written = Arc::new(AtomicUsize::new(0));
+        let progress = Arc::clone(&written);
+        std::thread::spawn(move || {
+            while filler.write_all(&[0; CHUNK]).is_ok() {
+                progress.fetch_add(CHUNK, Ordering::SeqCst);
+            }
+        });
+
+        // The filler is stuck in a write once its byte count stops moving.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let before = written.load(Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if before > 0 && before == written.load(Ordering::SeqCst) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pipe never filled"
+            );
+        }
+
+        let started = std::time::Instant::now();
+        let delivery = deliver_within(std::time::Duration::from_millis(100), move || {
+            let _ = blocked.write_all(&[0; 4096]);
+        });
+        assert_eq!(delivery, Delivery::Abandoned);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        drop(reader);
     }
 
     #[cfg(not(target_os = "wasi"))]

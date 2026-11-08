@@ -1052,6 +1052,8 @@ mod narrowing {
     use super::super::dir::StagingDir;
     use super::super::publish_adopted;
     use super::super::replace::swap_adopted_for_test;
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    use super::super::replace::swap_adopted_in;
     use super::*;
 
     #[derive(Clone, Copy)]
@@ -1159,6 +1161,81 @@ mod narrowing {
             NarrowingReason::OwnershipDiffers | NarrowingReason::AclCopyFailed => None,
             NarrowingReason::DestinationVanished => None,
         }
+    }
+
+    /// The root published as `parent/dest` is `0700` and carries no ACL.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    fn assert_private_without_acl(parent: &Path) {
+        let pin = crate::formats::pinned_dir::VettedDir::open_path(parent).unwrap();
+        let name = crate::formats::pinned_dir::LeafBuf::of(&parent.join("dest")).unwrap();
+        let id = pin.status(name.as_leaf()).unwrap().unwrap().identity;
+        assert_eq!(mode_of(&parent.join("dest")), 0o700);
+        assert_eq!(
+            crate::staging::acl::read_destination(&pin, name.as_leaf(), parent, id).unwrap(),
+            AclPlan::None
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn a_root_with_an_acl_to_copy_stays_private_and_aclless_until_the_rename() {
+        let me = own();
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let pin = crate::formats::pinned_dir::VettedDir::open_path(&parent).unwrap();
+        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
+
+        let root = staging
+            .adopt(Adoption::for_test_with_acl(
+                0o755,
+                me.uid,
+                me.gid,
+                Claim::Full,
+                copy_plan(true),
+            ))
+            .unwrap();
+
+        assert!(root.reasons().is_empty());
+        assert_eq!(mode_of(staging.path()), 0o700);
+        let plan = crate::staging::acl::read_destination(
+            &pin,
+            staging.name.as_leaf(),
+            &parent,
+            staging.id,
+        );
+        assert_eq!(plan.unwrap(), AclPlan::None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn a_copy_that_fails_after_the_rename_succeeds_with_a_private_root_and_no_acl() {
+        let me = own();
+        let adoption =
+            || Adoption::for_test_with_acl(0o755, me.uid, me.gid, Claim::Full, copy_plan(false));
+
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let output = parent.join("dest");
+        let destination = AtomicDestination::resolve(&output).unwrap();
+        let mut staging =
+            StagingDir::create(&destination.pin, &destination.parent, Seed::Absent).unwrap();
+        let mut report = ExtractionReport::new();
+        publish_adopted(
+            &mut staging,
+            &destination,
+            Some(adoption()),
+            &output,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(reasons(&report), [NarrowingReason::AclCopyFailed]);
+        assert_private_without_acl(&parent);
+
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let report = swap_adopted_in(&parent, adoption(), |_| Seed::Absent);
+        assert_eq!(reasons(&report), [NarrowingReason::AclCopyFailed]);
+        assert_private_without_acl(&parent);
     }
 
     #[test]
@@ -1427,7 +1504,7 @@ mod seeding {
     }
 
     #[test]
-    fn an_absent_destination_keeps_the_parents_inheritance_and_probes_the_umask() {
+    fn an_absent_destination_probes_the_umask_and_removes_the_probe() {
         let (_temp, parent, pin, seed) = stage(|_| Seed::Absent);
 
         let mut staging = StagingDir::create(&pin, &parent, seed).unwrap();

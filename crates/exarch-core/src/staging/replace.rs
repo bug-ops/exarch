@@ -576,8 +576,9 @@ fn swap(
 }
 
 /// Adopts `adoption` on the staged root, publishes it over the displaced
-/// destination and removes the backup, recording on `report` every way the
-/// root ended up with less access than the destination had.
+/// destination, finishes the root with the destination's ACL and removes the
+/// backup, recording on `report` every way the root ended up with less access
+/// than the destination had.
 fn swap_adopted(
     mut staging: StagingDir<'_>,
     dest: &Dest<'_>,
@@ -585,17 +586,21 @@ fn swap_adopted(
     adoption: io::Result<Adoption>,
     mut report: ExtractionReport,
 ) -> Result<ExtractionReport> {
-    match adoption.and_then(|adoption| staging.adopt(adoption)) {
-        Ok(narrowed) => report.record_narrowing(narrowed),
+    let root = match adoption.and_then(|adoption| staging.adopt(adoption)) {
+        Ok(root) => root,
         Err(error) => {
             let context = "failed to give the extracted content the destination's permissions";
             return Err(roll_back(displaced, staging, &error, context, dest.path));
         }
-    }
-    if let Err(error) = staging.publish(dest.name) {
-        let context = "failed to move the extracted content into place";
-        return Err(roll_back(displaced, staging, &error, context, dest.path));
-    }
+    };
+    let published = match staging.publish(dest.name) {
+        Ok(published) => published,
+        Err(error) => {
+            let context = "failed to move the extracted content into place";
+            return Err(roll_back(displaced, staging, &error, context, dest.path));
+        }
+    };
+    report.record_narrowing(root.finish(published));
     displaced.discard(&mut report);
     Ok(report)
 }
@@ -633,10 +638,22 @@ pub(super) fn swap_adopted_for_test(
     adoption: Adoption,
     seed: impl FnOnce(FileIdentity) -> Seed,
 ) -> ExtractionReport {
+    let temp = tempfile::TempDir::new().unwrap();
+    swap_adopted_in(&temp.path().canonicalize().unwrap(), adoption, seed)
+}
+
+/// Like [`swap_adopted_for_test`] inside `parent`, which keeps the published
+/// destination `parent/dest` for the caller to inspect.
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+pub(super) fn swap_adopted_in(
+    parent: &Path,
+    adoption: Adoption,
+    seed: impl FnOnce(FileIdentity) -> Seed,
+) -> ExtractionReport {
     use crate::formats::file_identity::identity_of;
 
-    let temp = tempfile::TempDir::new().unwrap();
-    let parent = temp.path().canonicalize().unwrap();
+    let parent = parent.to_path_buf();
     let dest_path = parent.join("dest");
     std::fs::create_dir(&dest_path).unwrap();
     let name = LeafBuf::of(&dest_path).unwrap();

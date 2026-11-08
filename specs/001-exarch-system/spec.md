@@ -366,7 +366,8 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 - Add `#[allow(unsafe_code)]` without explicit justification in PR description
 - Remove existing security checks or lower default quota limits without a security review
 - Add `unwrap()` or `expect()` outside of test modules
-- Bypass clippy lints with `#[allow(...)]` without a comment explaining why
+- Bypass clippy lints with `#[allow(...)]` or `#[expect(...)]` without a comment or `reason = "..."` explaining why
+- Use unchecked indexing, slicing or arithmetic on header-declared values in `formats/**` or `security/**`; use `get`, `checked_*` or `saturating_*` with a restrictive outcome on failure (FR-072 of [[002-format-handlers/spec]])
 
 ## 9. Open Questions
 

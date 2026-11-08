@@ -1,0 +1,41 @@
+name: FreeBSD
+
+# The only job that runs the spool classification against a real FreeBSD
+# kernel: `fstatfs` fields and `md` memory disks are not reachable from the
+# Linux, macOS or Windows runners in ci.yml.
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - crates/exarch-core/src/formats/spool.rs
+      - .github/workflows/freebsd.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spool-tests:
+    name: Spool tests (FreeBSD)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run spool tests in a FreeBSD VM
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: '15.0'
+          usesh: true
+          prepare: |
+            pkg install -y curl ca_root_nss
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          run: |
+            set -eu
+            . "$HOME/.cargo/env"
+            cargo test -p exarch-core --lib --all-features spool_tests

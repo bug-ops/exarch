@@ -1,0 +1,75 @@
+# extract: full flag reference
+
+`exarch extract <ARCHIVE> [OUTPUT_DIR]`. Always pass `OUTPUT_DIR` (default is the CWD). Common flags are in `SKILL.md`; this file holds the rest and the edge cases.
+
+## Quotas and limits
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--max-files` | 10000 | Counts every entry once in every format and command: directories, links, and entries skipped by a selection or `--allowed-extensions`. `QuotaExceeded` past it. `0` refused. |
+| `--max-total-size` | 500 MB | Cumulative extracted size; suffixes `K/M/G/T`, either case. `0` refused. |
+| `--max-file-size` | 50 MB | Single file; same syntax. `0` refused. |
+| `--max-compression-ratio` | 100 | Uncompressed/compressed ratio. Applies to ZIP and non-solid 7z. Fractions allowed (`2.5`); `0`, negative, and non-finite refused as `InvalidConfiguration` (setting `max_compression_ratio`). Also on `list`/`verify`. |
+| `--max-path-depth` | 32 | Components per entry. `0` refused. An entry name over the host length limit fails with `I/O error: file name too long`. |
+| `--parallel-decode-memory <SIZE\|off>` | 128M | 7z only: memory for decoding LZMA2 runs ahead on worker threads. `off` = one thread; `0` refused. |
+
+Notes on the ratio:
+- Solid 7z blocks are not ratio-checked per entry; with `--allow-solid-archives` each block is checked as a whole against a fixed 1000x limit (Rust API only).
+- An entry with declared data but zero compressed bytes is always a `ZipBomb` (ratio `unbounded`); its hint says the size metadata is inconsistent.
+- For a compressed TAR, entries left undecoded by `--allowed-extensions` or duplicate skipping are bounded too: past `--max-file-size` and `--max-total-size`, skipped data may decode to at most ratio x the compressed input read so far, else `ZipBomb` with scope `skipped entries`. Raise `--max-compression-ratio` for such a case.
+
+## Policy flags
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--preserve-permissions` | off | setuid/setgid stripped regardless. |
+| `--allow-symlinks` | off | Accept symlinks that resolve inside the destination. Link targets with unresolvable `..` are always rejected. `extract` never writes through a symlink already below the destination: by default `path component is a symlink: <path>` (`SecurityViolation`, `relaxable_by` `symlinks`); with the flag a pre-existing link is accepted only if it resolves to a directory inside the destination. One that leaves the destination fails `SymlinkEscape`; a dangling, looping, or file-pointing one fails `refusing to create <entry> under the existing symlink at <parent>` (not relaxable). A symlinked destination root is accepted. |
+| `--allow-hardlinks` | off | Hardlinks resolving inside the destination. |
+| `--allow-absolute-paths` | off | For ZIP the leading root and any drive/UNC/verbatim/device prefix is stripped (`/tmp/x` lands at `<dest>/tmp/x`). |
+| `--allow-world-writable` | off | Allow mode `0o002`. |
+| `--allow-solid-archives` | off | Solid 7z (memory-exhaustion vector; trusted archives only). |
+| `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. `ignore` keeps the central-directory view and raises no structural finding; use only for trusted producers. See [formats.md](formats.md). |
+| `--decode-reuse <off\|memory\|temp-file>` | memory | ZIP only. Where the structural check keeps decoded deflate/bzip2/zstd output so extraction does not decode twice. `memory` keeps up to 256 MiB in RAM, `temp-file` up to 256 MiB in an unnamed temp file (plaintext in the temp dir until the run ends), `off` keeps nothing. No effect under `--zip-consistency ignore`. Invalid value: exit `2`. |
+| `--banned-component <C>` | `.git .ssh .gnupg .aws .kube .docker .env` | Replaces the default list. Repeatable and comma-separable; tokens trimmed. A token with `/` or `\`, or equal to `.`/`..`, or a non-empty value with no token (`,`) is an error. |
+| `--allowed-extensions <EXT>` | all | Regular files only. Repeatable or comma-separated; leading dot optional, case-insensitive. A value that can never match (`tar.gz`, `a/b`) or names no extension (`,`, `""`) is an error. Order of checks: path first, then allowlist, then quotas: a skipped file is not charged to size quotas, creates no directories, and counts in `files_skipped`. A skipped entry with an unsafe path is refused, not skipped. |
+
+## Selection: `--include`, `--exclude`, `--strip-components`, `--flatten`
+
+All four also exist on `list` and `verify`.
+
+- `--include <GLOB>` / `--exclude <GLOB>`: repeatable; exclude is applied after include and wins. Same grammar as `create --exclude` ([create.md](create.md)); a match also selects everything below it. Quote patterns. Patterns match the entry path as `list` shows it, before stripping; a leading `./` is not a component.
+- `*` and `?` never cross `/`, and a pattern without `/` matches at any depth (unlike bsdtar, which anchors at the archive root).
+- An `--include` that matches no entry is an error after the scan (`InvalidConfiguration`, setting `entry_include`); nothing is kept under `--atomic` or for a TAR into a new destination, while a non-atomic ZIP or an existing destination keeps what was written earlier. An unmatched `--exclude` is fine. Left-out entries count as `skipped_by_kind.not_selected`.
+- `--strip-components <N>`: drop N leading components; an entry with N or fewer components is skipped (`stripped_away`). `0` and negatives are `InvalidConfiguration`; N above `--max-path-depth` is refused. A hardlink whose target is stripped or unselected is refused as `SecurityViolation` (`sub_code` `LINK_TARGET`); a symlink keeps its target text; a hardlink target containing `..` under any selection is `PathTraversal`.
+- `--flatten`: every file lands at the destination top level under its final component; directories are skipped (`stripped_away`); a selected link entry is refused (`SecurityViolation`, `LINK_POLICY`). Same-name files follow the duplicate rule. Conflicts with `--strip-components` (exit `2`).
+
+## `--force`
+
+A regular file is replaced by writing a sibling temp file and renaming over it (like `mv -f`): other hardlinks to the old file keep their content. The destination parent must be writable; a read-only existing file is replaced; owner, ACLs, and xattrs of the old file are not preserved. The new file gets the entry's mode (a ZIP entry without Unix attributes gets `0664`; with no mode at all, `0666 & ~umask`).
+
+Without `--force`, anything already at the landing of a file, link, or hardlink is a conflict, as is a non-directory at the landing of a directory; the check covers implied parent directories and fails before writing with `OutputExists` and the full `error.conflicts` list. Under `--force` a file or link where the archive needs a directory is still refused (`--force cannot replace a file with a directory`). Within one archive, a later entry at an already-written path is skipped as `duplicate` (without `--force`) or overwrites it (with). Under `--force` an existing symlink with another target is never re-pointed (`refusing to replace the existing symlink`); a symlink with the same target is left alone, so re-extracting into the same output succeeds.
+
+## `--atomic`
+
+Extract into a hidden staging directory (`0700`) in the destination's parent and rename into place only on success. Failure discards staging and leaves the destination unchanged (`partial_report.writes` `"rolled_back"`).
+
+- The destination must be missing or an empty directory; a non-empty one fails `OutputExists` with `HINT: Use --force to overwrite.` A symlinked destination is resolved and must be empty.
+- With `--force` the existing directory is renamed aside, the new content renamed in, then the old directory removed, so a failure leaves either old or new content. It needs search (execute) permission on the parent, not read.
+- `--atomic --force` refuses before extracting (`InvalidConfiguration`, setting `output_path`): `.`, `..`, any directory containing the working directory or the archive, a filesystem root, a file, or a symlink (pass the resolved path). It cannot combine with `--include`, `--exclude`, `--strip-components`, or `--flatten` (`InvalidConfiguration`, setting `entry_selection`); plain `--atomic` can.
+- Unix: the published root takes the mode of the destination it replaces or fills (never setuid). With `--force` it also takes the owner as far as the caller may (only root can give a directory away; an unjoinable group drops group bits and setgid). Plain `--atomic` onto an empty directory never takes the uid and takes the group only when the caller owns the destination; a destination owned by someone else also loses group/world write.
+- ACLs: on Linux and Android the destination's POSIX ACL (access and default) is copied onto the root; the default ACL lands on the root only, so already-extracted content does not inherit it. If it cannot be copied faithfully the root is `0700`. On macOS an ACL is detected and yields a `0700` root. Other Unixes and NFSv4 ACLs are not detected.
+- Windows: staging inherits the ACL of the destination's parent; plain `--atomic` onto an existing empty directory fails `OutputExists`.
+- A failed swap is an error whose message says whether the destination is unchanged or restored and where a backup is left (`IoError`).
+- Plain (non-atomic) `extract` resolves a symlinked destination via `canonicalize()` and writes through it, like `tar -C`.
+
+## Pre-flight listing and partial extraction
+
+Non-atomic extract into an existing destination first lists the archive (same quotas) to detect conflicts and size the progress bar. Quota violations there fail with a plain error and **no** `partial_report`; only checks needing the real destination (symlink/hardlink escape) can leave a partial extraction.
+
+The list pass is skipped for a TAR extracted with `--atomic`, or into a not-yet-existing destination whose parent exists. Such runs are atomic: any refusal leaves nothing on disk and reports `writes: "rolled_back"`; staging can grow up to `--max-total-size`. For an existing destination, a gz/bz2/xz TAR decoding to at most 256 MiB is decoded once (the list pass spools to an unnamed temp file in `TMPDIR`); otherwise it is decoded twice.
+
+## Cancellation
+
+`extract` and `create` turn SIGINT and SIGTERM into a cancelled run (SIGHUP keeps its default so `nohup` works; no handling on WASI). The first signal stops the run, core discards the `.exarch-XXXXXX` staging entry, and the process re-raises the signal: exit `130` (SIGINT) or `143` (SIGTERM), `error.kind` `Cancelled`, message `Operation cancelled`, `partial_report.writes` `"rolled_back"` once entries were written. `--atomic` and `create` leave the destination or previous archive as it was; an in-place `extract` keeps written entries (`"kept"`). The stop is noticed at entry boundaries, inside a large entry's copy, and per entry during the listing pass.
+
+A second signal exits at once with the first signal's status and, in text mode, prints what may remain: a `.exarch-*` temp file (`create`), a `.exarch-*` staging directory (`extract --atomic`), or the written entries (in-place `extract`). Only `extract --atomic --force` mentions the `.exarch-backup-*` entry, which is the original destination: if the destination is missing, rename it back instead of deleting it. Under `--json` the forced exit prints one `Cancelled` error document. `list`, `verify`, and `completion` install no handler.

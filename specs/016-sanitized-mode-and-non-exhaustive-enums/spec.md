@@ -9,7 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-09-02
-updated: 2026-11-05
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -121,13 +121,13 @@ THEN the downstream crate's build breaks with "non-exhaustive patterns" only if 
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-001 | `security::sanitize_permissions` SHALL return `SanitizedMode` instead of `u32`; `SanitizedMode` SHALL have no public constructor, no `Default` impl, and its single field SHALL be private, so it is assemblable only via `sanitize_permissions` | must |
+| FR-001 | `security::sanitize_permissions(RawMode, &SecurityConfig)` SHALL take the archive's `RawMode` and return `SanitizedMode` instead of `u32`; `SanitizedMode` SHALL have no public constructor, no `Default` impl, and its single field SHALL be private, so it is assemblable only via `sanitize_permissions` | must |
 | FR-002 | `SanitizedMode` SHALL expose `as_u32(self) -> u32` as the sole accessor for recovering the raw mode value | must |
 | FR-003 | The mode carried by `ValidatedFile` (formerly `ValidatedEntry::mode()` and `EntryValidator::validate_entry()`'s sanitized output, removed in #900), and `formats::common::create_file_with_mode`/`extract_file_with_permit` SHALL take `Option<SanitizedMode>` instead of `Option<u32>` | must |
-| FR-004 | `ArchiveError`, `QuotaResource`, `formats::detect::ArchiveType`, `formats::compression::CompressionCodec`, `inspection::report::IssueCategory`, and `types::entry_type::EntryType` (crate-private since #900) SHALL be marked `#[non_exhaustive]` | must |
+| FR-004 | `ArchiveError`, `QuotaResource`, `formats::detect::ArchiveType`, `formats::compression::CompressionCodec`, `inspection::report::IssueCategory`, and `types::entry_type::EntryType` (crate-private since #900, so no longer public API) SHALL be marked `#[non_exhaustive]` | must |
 | FR-005 | `creation::walker::EntryType` (`pub(crate)`-only) SHALL NOT be marked `#[non_exhaustive]`, since the attribute has no effect on a type never nameable outside the crate | must |
 | FR-006 | Every internal exhaustive `match` inside `exarch-core` on one of the six newly-`#[non_exhaustive]` enums SHALL continue to compile unchanged — `#[non_exhaustive]` only restricts matching *from outside the defining crate* | must |
-| FR-007 | `exarch-cli`'s `error::convert_extraction_error` and `output::json::extraction_error_kind`, and `exarch-node`'s and `exarch-python`'s `convert_error` functions, SHALL add a wildcard arm (`_ =>`) to every `match` on `ArchiveError`/`QuotaResource` that previously matched exhaustively, mapping an unrecognized future variant to a generic fallback message rather than failing to compile | must |
+| FR-007 | The CLI, Python and Node error conversion SHALL derive kind, message and detail from one core mapping (`ArchiveError::into_ffi_message`, `FfiKind`, `ErrorCode`, the exhaustive `FfiDetail`; #1010), so a new `ArchiveError` variant is classified once in `exarch-core`; where a front end matches a `#[non_exhaustive]` core enum itself (`ZipBombScope`, `QuotaKind`, `ConfigProblem`, `ErrorCode`), it SHALL carry a wildcard arm that degrades to no hint or to the base error class instead of failing to compile | must |
 
 ## 4. Non-Functional Requirements
 
@@ -144,16 +144,17 @@ THEN the downstream crate's build breaks with "non-exhaustive patterns" only if 
 |--------|-------------|----------------|
 | `SanitizedMode` | Newtype wrapping a Unix permission mode that has already passed through `sanitize_permissions`; sole producer is `sanitize_permissions` | Single private `u32` field; not constructible via tuple-struct syntax outside `exarch-core` (verified by a `trybuild` UI test); `as_u32(self) -> u32` accessor |
 | `ArchiveError` | Top-level error enum for extraction/creation/listing/verification failures | Now `#[non_exhaustive]`; since v0.7.0 its `SecurityViolation` variant is `#[non_exhaustive]` too (it carries a typed `Violation` kind) |
-| `QuotaResource` | Enum identifying which quota dimension was exceeded (`FileCount`, `TotalSize`, `FileSize`, `IntegerOverflow`, and `DecoderMemory` since v0.7.0) | Now `#[non_exhaustive]` |
+| `QuotaResource` | Enum identifying which quota dimension was exceeded (`FileCount`, `TotalSize`, `FileSize`, `IntegerOverflow`, `DecoderMemory`, `CompressedMembers`, `TreeNodes`, `SinkCapacity`, `SolidBlockMemory`, `HeaderSize`) | Now `#[non_exhaustive]` |
 | `formats::detect::ArchiveType` | Enum of supported archive formats | Now `#[non_exhaustive]` |
 | `formats::compression::CompressionCodec` | Enum of supported compression codecs | Now `#[non_exhaustive]` |
 | `inspection::report::IssueCategory` | Enum of verification issue categories | Now `#[non_exhaustive]` |
-| `types::entry_type::EntryType` | Public enum of archive entry kinds (distinct from `pub(crate)` `creation::walker::EntryType`, which is unaffected) | Now `#[non_exhaustive]` |
+| `types::entry_type::EntryType` | Archive entry kinds; `pub(crate)` since #900 (distinct from `creation::walker::EntryType`, which is unaffected) | `#[non_exhaustive]`, not nameable outside the crate |
 
 > [!note] v0.7.0: the pattern extends to new public enums
 > Enums added in v0.7.0 are `#[non_exhaustive]` from the start: `PolicySetting`, `ZipBombScope`,
 > `PartialWrites` (a `Discarded` variant was added in v0.8.0, #800, #808), `ZipConsistencyPolicy`, `ParallelDecode`, `StoredTargets` and `IntegrityCheck`;
 > `SecurityViolation` (and, until #900, `ValidatedEntryType::Hardlink`) are `#[non_exhaustive]` variants (#652, #671, #688, #757).
+> v0.9.0 adds `Staging`, `ExistingFiles`, `PermissionPolicy`, `ExtensionFilter`, `DispositionKind` and `CreationWarningKind` the same way (#972, #975, #995, #999).
 > v0.8.0 adds `FfiKind`, `ErrorCode`, `PartialOutcome`, `ReaderFormatError`, `PathModel`, `CreatableFormat`, `SeekableFormat`, `MemoryEntryKind` and `SinkOptions` as `#[non_exhaustive]` from the start, and `ArchiveError::ReaderFormat` and `QuotaResource::{TreeNodes, SinkCapacity}` as new variants of existing `#[non_exhaustive]` types (#768, #787, #808).
 
 ## 6. Edge Cases and Error Handling
@@ -162,8 +163,7 @@ THEN the downstream crate's build breaks with "non-exhaustive patterns" only if 
 |----------|-------------------|
 | External code attempts `SanitizedMode(0o644)` via tuple-struct call syntax | Does not compile — `SanitizedMode`'s field is private; a `trybuild` UI test (`tests/ui/sanitized_mode_forge_via_tuple_struct.rs`) pins the exact `E0423` diagnostic |
 | `create_file_with_mode`/`extract_file_with_permit` called with a raw `u32` in place of `Option<SanitizedMode>` | Does not compile — both functions require `Option<SanitizedMode>` |
-| `exarch-cli`'s `error::convert_extraction_error` or `output::json::extraction_error_kind` matching on `ArchiveError` against a future variant added after this match was written | Falls through to a generic fallback arm (`"Error while processing '{archive}'"` / `"Error"`) instead of failing to compile |
-| `exarch-node`'s or `exarch-python`'s `convert_error` matching on `ArchiveError`/`QuotaResource` against a future variant | Falls through to a generic fallback (`"UNKNOWN: unrecognized archive error"` / `ArchiveError::new_err("unrecognized archive error")`, and the quota-specific `"QUOTA_EXCEEDED: quota exceeded"` / `"quota exceeded"` fallbacks) instead of failing to compile |
+| A front end (`exarch-cli`, `exarch-python`, `exarch-node`) meets an `ArchiveError` variant added after it was written | Nothing to add there: kind, message and detail come from core's `into_ffi_message`; a variant of a nested `#[non_exhaustive]` enum the front end matches itself falls through to its wildcard arm (no hint, or the base error class) |
 | A hand-written match inside `exarch-core` itself on one of the six enums, written before this change | Continues to compile unchanged — `#[non_exhaustive]` only restricts matching from *outside* the defining crate |
 
 ## 7. Success Criteria

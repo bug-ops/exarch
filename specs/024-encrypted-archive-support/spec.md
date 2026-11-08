@@ -11,7 +11,7 @@ tags:
   - parity
   - rust
 created: 2026-11-06
-updated: 2026-11-06
+updated: 2026-11-08
 status: draft
 related:
   - "[[constitution]]"
@@ -50,7 +50,17 @@ exarch refuses encrypted content by policy. The README states "Solid and encrypt
 | sevenz-rust2 crate | n/a | n/a | yes (AES-256/SHA-256 coder `06F10701`) | password-based decoder |
 | libarchive_oxide 0.2.0 | not stated | read/write | read | file or prompt, never argv |
 
-exarch builds zip with `default-features = false`, so AES is compiled out today; sevenz-rust2's `aes256` is already on.
+exarch builds zip with `default-features = false`, so AES is compiled out today; sevenz-rust2's `aes256` is already on (default features).
+
+#### Behavior in the code today (verified 2026-11-08)
+
+| Aspect | Current behavior |
+|--------|------------------|
+| Error | Any encrypted ZIP entry or 7z archive is refused as `ArchiveError::SecurityViolation` carrying `Violation::EncryptedEntry { name }` (ZIP, per entry) or `Violation::EncryptedArchive` (ZIP archive-level and 7z); machine code `SECURITY_VIOLATION`, `sub_code` `ENCRYPTED`, no `relaxable_by`. There is no `PasswordRequired`, `WrongPassword` or other encryption error type |
+| Password input | None on any surface: no CLI flag, no config or request field, no binding argument. The 7z handlers open archives with `sevenz_rust2::Password::empty()`, and `is_password_error` maps upstream `PasswordRequired` and `MaybeBadPassword` to the refusal above |
+| ZIP | `zip` is `~9.4` (lockfile 9.4.1) without the `aes-crypto` feature; `entry.encrypted()` is refused in list, verify and extract |
+| `list` and `verify` | They refuse an encrypted ZIP the same way as `extract`; entries are not listed with an "encrypted" mark, and verify reports the refusal as an issue |
+| Docs | README and the CLI skill state that encrypted 7z archives are rejected |
 
 Enabling decryption turns exarch from "refuses opaque content" into "processes attacker-influenced ciphertext plus a secret". The upstream history shows the risk: zip 9.x fixed GHSA-8hxf-qr8p-62x4 (AES HMAC bypass on premature EOF), GHSA-c9rm-qm35-rhqf (HMAC skipped when the decompressor stops early) and GHSA-v59p-pxfc-8xvf (non-constant-time AES password verification).
 
@@ -150,7 +160,7 @@ SO THAT I know what to do
 ```
 GIVEN an encrypted archive and no password
 WHEN extract runs
-THEN PasswordRequired is returned (today's refusal, unchanged) and the destination is untouched
+THEN PasswordRequired is returned (it replaces today's `SECURITY_VIOLATION` / `ENCRYPTED` refusal, see Q11) and the destination is untouched
 ```
 
 ### US-008: A hostile archive cannot burn CPU through the KDF
@@ -192,7 +202,7 @@ THEN the operation fails with KdfCostExceeded before the first content derivatio
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-020 | Errors SHALL be typed, in a `sub_code` family `ENCRYPTED`: `PasswordRequired` (no password; today's refusal), `WrongPassword` (ZIP AES verifier mismatch), `AuthenticationFailed` (HMAC mismatch: tampered, or a wrong password that passed the 2-byte verifier), `WrongPasswordOrCorrupt` (7z has no verifier: a supplied password plus a CRC or decoder failure), `WeakEncryptionRefused` (ZipCrypto, and 7z "raw key" mode, FR-031), `KdfCostExceeded` (FR-032). Distinguishing wrong from tampered is accepted: whoever holds the archive can guess offline anyway, and rate limiting belongs to the caller | must |
+| FR-020 | Errors SHALL be typed, in a `sub_code` family `ENCRYPTED`: `PasswordRequired` (no password; replaces today's `Violation::EncryptedArchive` and `EncryptedEntry` refusal), `WrongPassword` (ZIP AES verifier mismatch), `AuthenticationFailed` (HMAC mismatch: tampered, or a wrong password that passed the 2-byte verifier), `WrongPasswordOrCorrupt` (7z has no verifier: a supplied password plus a CRC or decoder failure), `WeakEncryptionRefused` (ZipCrypto, and 7z "raw key" mode, FR-031), `KdfCostExceeded` (FR-032). Distinguishing wrong from tampered is accepted: whoever holds the archive can guess offline anyway, and rate limiting belongs to the caller | must |
 
 ### KDF cost
 
@@ -333,6 +343,7 @@ The implementation PR meets all of these or does not merge:
 > - **Q7**: the typed reason for admission refusing powers 25 to 62 (this spec uses `KdfCostExceeded`; the plan names none).
 > - **Q8**: behavior when a password is supplied for an archive with no encrypted entries (ignore, or warn); the research draft left it open and the plan is silent.
 > - **Q9**: whether `list` without a password should also work for header-encrypted 7z (the plan says `PasswordRequired`, so no).
+> - **Q11**: today `ENCRYPTED` is one `sub_code` of `SECURITY_VIOLATION` (`Violation::EncryptedArchive`, `EncryptedEntry`). FR-020 describes a family of six reasons under that name; decide whether they stay `Violation` variants with sub-code `ENCRYPTED` (keeping the bindings' `SecurityViolationSubCode` stable) or become a new error code, and whether a plain `PasswordRequired` keeps `SECURITY_VIOLATION` for callers that match it today.
 > - **Q10**: how the `max_kdf_work` accounting covers the several passes over the blocks (charge per pass, or arrange that derivations are shared); found when aligning this spec with the code on 2026-11-07, not covered by the plan.
 
 ## 10. See Also

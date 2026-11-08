@@ -9,7 +9,7 @@ tags:
   - rust
   - bug
 created: 2026-08-02
-updated: 2026-11-06
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -27,9 +27,10 @@ related:
 > excludes the archive root itself (consistent with ZIP), matching FR-003. See
 > [[002-format-handlers/spec]] for the current data-model description.
 >
-> Since 0.7.0 (#652) the per-codec functions are replaced by one
-> `create_tar_with_progress(output, codec: Option<CompressionCodec>, ...)`, which
-> calls the shared `create_tar_internal_with_progress`; the directory entry is
+> Since 0.7.0 (#652) the per-codec functions are replaced by one function over
+> `codec: Option<CompressionCodec>`, which since 0.9.0 is the crate-private
+> `write_tar` (the public `creation::{tar,zip}::create_*` were removed, #908, #912);
+> it calls the shared `create_tar_internal_with_progress`; the directory entry is
 > written by `add_directory_to_tar`. TAR headers store permission bits only
 > (`mode & 0o7777`), and with `preserve_permissions` off a directory gets mode
 > `0o755`.
@@ -86,8 +87,8 @@ directories.
 
 ### Out of Scope
 
-- 7z archive creation (not implemented; `FormatCreator` is not implemented
-  for 7z per [[002-format-handlers/spec]])
+- 7z archive creation (not implemented; `CreatableFormat` has no 7z
+  variant per [[002-format-handlers/spec]])
 - Changing ZIP's directory-handling behavior (already correct, used as the
   reference implementation)
 - Retroactively repairing TAR archives already created with the buggy code
@@ -157,7 +158,7 @@ AND  extracting either archive reproduces the same directory structure
 |----|------------|----------|
 | FR-001 | WHEN `create_tar_internal_with_progress` encounters an `EntryType::Directory` entry, THE SYSTEM SHALL write a directory entry to the `tar::Builder` stream (e.g. via `append_dir`) before advancing the tracker, mirroring the ZIP handler's `add_directory` call | must |
 | FR-002 | WHEN a directory entry is successfully written to the TAR stream, THE SYSTEM SHALL increment `CreationReport::directories_added`; if writing fails, the error SHALL propagate via `Result` and the counter SHALL NOT be incremented | must |
-| FR-003 | WHERE the directory is the archive root (empty relative `archive_path`), THE SYSTEM SHALL skip writing a directory entry for it, consistent with ZIP's existing root-skip behavior (`crates/exarch-core/src/creation/zip.rs` lines 184-185) | must |
+| FR-003 | WHERE the directory is the archive root (empty relative `archive_path`), THE SYSTEM SHALL skip writing a directory entry for it, consistent with ZIP's existing root-skip behavior (`crates/exarch-core/src/creation/zip.rs`) | must |
 | FR-004 | WHEN a written TAR directory entry is extracted via `extract_archive`, THE SYSTEM SHALL recreate the corresponding directory on disk, including empty and nested-empty directories | must |
 | FR-005 | THE SYSTEM SHALL apply the same fix uniformly to all four TAR variants (plain `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`) by fixing the single shared function `create_tar_internal_with_progress`, without duplicating logic per variant | must |
 | FR-006 | WHEN a TAR directory entry is written, THE SYSTEM SHALL set directory-appropriate header metadata (entry type `Directory`, permission bits only (`mode & 0o7777`, or `0o755` when `preserve_permissions` is off; extraction sanitizes them), and a trailing `/` in the archive path per TAR convention) consistent with how `tar` crate directory entries are conventionally written | should |
@@ -225,12 +226,12 @@ AND  extracting either archive reproduces the same directory structure
 
 - [NEEDS CLARIFICATION: Should the `skills/exarch-cli/SKILL.md` documentation be updated to explicitly state that TAR (post-fix) and ZIP both preserve empty directories, given the project rule that skills must be updated when documented behavior changes?]
 - [NEEDS CLARIFICATION: Is a CHANGELOG entry for this fix a `fix:` (PATCH, since it corrects `directories_added` and empty-directory loss without changing the public API surface) or does the `directories_added` count change for existing callers count as a behavior change worth calling out more prominently (e.g. in migration notes)?]
-- [NEEDS CLARIFICATION: Should directory entries in TAR carry the source directory's actual permission bits (via `sanitize_permissions`), or a fixed default mode, for parity with how file entries currently handle permissions in `tar.rs`?]
+- Resolved (FR-006, FR-008): a directory entry carries the source mode bits under `PermissionPolicy::Preserve` and `0o755` under `Normalize`, in TAR and ZIP alike.
 
 ## 10. See Also
 
 - [[constitution]] — project principles (security-first, format abstraction)
 - [[MOC-specs]] — all specifications
-- [[002-format-handlers/spec]] — `ArchiveFormat`/`FormatCreator` trait definitions; `ZipArchive` reference implementation for directory handling
+- [[002-format-handlers/spec]] — `ArchiveFormat` trait and creation dispatch; `write_zip` reference implementation for directory handling
 - `crates/exarch-core/src/creation/tar.rs` — buggy code location (`create_tar_internal_with_progress`, `EntryType::Directory` arm)
-- `crates/exarch-core/src/creation/zip.rs` — reference implementation (`EntryType::Directory` arm, lines 182-193)
+- `crates/exarch-core/src/creation/zip.rs` — reference implementation (`write_zip`, `EntryType::Directory` arm)

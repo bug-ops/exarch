@@ -30,7 +30,7 @@ related:
 > **Subsystem**: exarch-core / config, creation
 > **MSRV**: Rust 1.99.1
 > **Origin**: #433, #434, #435 (`SecurityConfig`), #443 (`CreationConfig`) — v0.6.0
-> **Status**: implemented — this spec documents shipped behavior, extracted from
+> **Status**: obsolete since #898 (shipped in v0.6.0, removed in 0.9.0) — documented shipped behavior, extracted from
 > [[003-config-api/spec]] because it introduces a reusable pattern (typestate-enforced
 > validation) worth tracking as its own unit
 

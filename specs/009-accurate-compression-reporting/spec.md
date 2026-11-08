@@ -9,7 +9,7 @@ tags:
   - rust
   - bug
 created: 2026-08-02
-updated: 2026-08-04
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -20,19 +20,20 @@ related:
 
 # Feature: Accurate Compression Reporting in CreationReport
 
-> [!success] Implemented (#402, v0.6.0)
-> `bytes_compressed` is now measured from the real on-disk archive file size,
-> queried after the writer/encoder is fully flushed and finished, for ZIP and
-> all TAR variants (including plain `.tar`) — resolving FR-005 in favor of the
-> filesystem-metadata approach over instrumenting the writer chain. The
-> now-unused `crate::io::CountingWriter` was removed entirely (it is no longer
-> part of the codebase, not merely repositioned).
->
-> Since 0.7.0 (#652) the four per-codec wrappers named in FR-004 are replaced by
-> one `create_tar_with_progress(output, codec: Option<CompressionCodec>, ...)`
-> (`None` is plain `.tar`), which sets `bytes_compressed` from
-> `std::fs::metadata(output)` after the encoder is finished; the ZIP path does
-> the same.
+> [!success] Implemented (#402, v0.6.0), mechanism changed in 0.9.0
+> `bytes_compressed` is the number of bytes the finished archive occupies, for ZIP
+> and all TAR variants (including plain `.tar`). v0.6.0 measured it from
+> `std::fs::metadata` of the output file and removed the old `CountingWriter`.
+> The request API of 0.9.0 (`CreateRequest::{create, write, to_bytes}`, see
+> [[021-create-staging-and-output-policy/spec]]) also writes into caller-supplied
+> writers with no path, so the value is now taken from the writer itself: TAR
+> counts the bytes that reach the output through a crate-private `CountingWriter`
+> placed below the encoder (`write_tar`, after the encoder is finished and
+> flushed), and ZIP reads `stream_position()` after `ZipWriter::finish` and flush
+> (`write_zip`). Both equal the archive size for a file, a `Vec` or any writer.
+> The per-codec wrappers named in FR-004 no longer exist; `write_tar` takes
+> `codec: Option<CompressionCodec>` (`None` is plain `.tar`) and calls the shared
+> `create_tar_internal_with_progress`.
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / creation
@@ -94,8 +95,8 @@ size) for ZIP and for every TAR variant, so `compression_ratio()` and
 - Changing the *formulas* of `compression_ratio()` / `compression_percentage()`
   in `crates/exarch-core/src/creation/report.rs` — this spec fixes the input
   data (`bytes_compressed`), not the derivation logic
-- 7z archive creation (not implemented; `FormatCreator` is not implemented for
-  7z per [[002-format-handlers/spec]])
+- 7z archive creation (not implemented; `CreatableFormat` has no 7z variant
+  per [[002-format-handlers/spec]])
 - Extraction-side compression-ratio / zip-bomb detection
   (`security::zipbomb::validate_compression_ratio`,
   `inspection/verify.rs`, `inspection/manifest.rs::compression_ratio()`) —
@@ -174,11 +175,11 @@ Use EARS notation. Prefix with FR-NNN.
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-001 | WHEN a ZIP archive creation completes (`create_zip_internal_with_progress` in `crates/exarch-core/src/creation/zip.rs`), THE SYSTEM SHALL set `report.bytes_compressed` to the actual number of bytes written to the final `.zip` file on disk | must |
-| FR-002 | WHEN a TAR-family archive creation completes (`create_tar_internal_with_progress` in `crates/exarch-core/src/creation/tar.rs`), THE SYSTEM SHALL set `report.bytes_compressed` to the actual number of bytes written to the final output file on disk, measured after compression (post-encoder), for `.tar.gz`, `.tar.bz2`, `.tar.xz`, and `.tar.zst` | must |
+| FR-001 | WHEN a ZIP archive creation completes (`write_zip` in `crates/exarch-core/src/creation/zip.rs`), THE SYSTEM SHALL set `report.bytes_compressed` to the actual number of bytes of the finished archive (the writer position after `ZipWriter::finish` and flush) | must |
+| FR-002 | WHEN a TAR-family archive creation completes (`create_tar_internal_with_progress` in `crates/exarch-core/src/creation/tar.rs`), THE SYSTEM SHALL set `report.bytes_compressed` to the actual number of bytes that reached the output, counted below the encoder after it is finished and flushed (`write_tar`), for `.tar.gz`, `.tar.bz2`, `.tar.xz`, and `.tar.zst` | must |
 | FR-003 | WHEN a plain `.tar` (uncompressed) archive creation completes, THE SYSTEM SHALL set `report.bytes_compressed` to the actual on-disk size of the `.tar` file, keeping `bytes_compressed` semantics ("actual final archive size") consistent across all TAR variants and ZIP | must |
-| FR-004 | THE SYSTEM SHALL apply the TAR fix uniformly to all TAR variants by fixing the single shared function `create_tar_internal_with_progress` and/or its four public wrappers (`create_tar_with_progress`, `create_tar_gz_with_progress`, `create_tar_bz2_with_progress`, `create_tar_xz_with_progress`, `create_tar_zst_with_progress`), without duplicating measurement logic per variant | must |
-| FR-005 | WHERE measuring bytes at the writer-instrumentation level is insufficient for a given format (e.g. `zip::ZipWriter` requires `Write + Seek`, and `crate::io::CountingWriter` only implements `Write`, so it cannot transparently wrap a seekable file mid-chain without additional work), THE SYSTEM SHALL instead measure the final on-disk file size directly (e.g. via a filesystem metadata query on the completed output file) after the archive writer/encoder is fully flushed and finished | must |
+| FR-004 | THE SYSTEM SHALL apply the TAR fix uniformly to all TAR variants by fixing the single shared function `create_tar_internal_with_progress` and its one caller `write_tar` (the per-codec public wrappers were removed, #652, #912), without duplicating measurement logic per variant | must |
+| FR-005 | WHERE measuring bytes at the writer-instrumentation level is insufficient for a given format (e.g. `zip::ZipWriter` requires `Write + Seek`, and `crate::io::CountingWriter` only implements `Write`, so it cannot transparently wrap a seekable file mid-chain without additional work), THE SYSTEM SHALL instead measure the size of the finished archive directly (v0.6.0: a filesystem metadata query on the completed output file; since 0.9.0: the seekable writer's `stream_position()` for ZIP, which also serves writers with no path), after the archive writer/encoder is fully flushed and finished | must |
 | FR-006 | THE SYSTEM SHALL preserve `bytes_written` semantics unchanged (uncompressed/original source bytes) — only `bytes_compressed` and its consumers (`compression_ratio()`, `compression_percentage()`) are affected by this fix | must |
 | FR-007 | WHEN a compression encoder or archive writer fails during `finish()`/close, THE SYSTEM SHALL propagate the error via `Result` and SHALL NOT populate a misleading `bytes_compressed` value for a partially-written or failed archive | must |
 
@@ -197,7 +198,7 @@ Use EARS notation. Prefix with FR-NNN.
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
 | `CreationReport` | Report returned by `create_archive` / `_with_progress` and format-specific creation functions | `bytes_written: u64` (unchanged: uncompressed/original size), `bytes_compressed: u64` (fixed by this spec: actual final on-disk archive size, post-compression) |
-| `CountingWriter` (`crate::io::CountingWriter`) | Existing `Write`-wrapping byte counter, currently mis-positioned around the pre-compression TAR stream | Only implements `Write` (not `Seek`); cannot transparently wrap ZIP's seekable file writer without further changes — a filesystem-metadata-based measurement is the simpler uniform fix (see FR-005) |
+| `CountingWriter` (`writer.rs`, crate-private) | `Write`-wrapping byte counter; since 0.9.0 it sits below the TAR encoder, so it counts the compressed bytes | Only implements `Write` (not `Seek`), so ZIP uses `stream_position()` instead (see FR-005) |
 | `compression_ratio()` / `compression_percentage()` (`crates/exarch-core/src/creation/report.rs`) | Derived metrics computed from `bytes_written` and `bytes_compressed` | Formulas unchanged by this spec; correctness of their *output* depends entirely on `bytes_compressed` being accurate (this spec's fix) |
 
 ## 6. Edge Cases and Error Handling
@@ -224,7 +225,7 @@ Use EARS notation. Prefix with FR-NNN.
 ## 8. Agent Boundaries
 
 ### Always (without asking)
-- Fix `bytes_compressed` population for ZIP in `crates/exarch-core/src/creation/zip.rs` and for all TAR variants via the shared `create_tar_internal_with_progress` (and/or its four public wrappers) in `crates/exarch-core/src/creation/tar.rs`
+- Keep `bytes_compressed` populated for ZIP in `crates/exarch-core/src/creation/zip.rs` (`write_zip`) and for all TAR variants through `write_tar` and the shared `create_tar_internal_with_progress` in `crates/exarch-core/src/creation/tar.rs`
 - Measure the actual final on-disk archive size only after all writers/encoders are fully finished/flushed, to avoid measuring incomplete buffered output
 - Run the full pre-commit check suite (`cargo +nightly fmt --check`, `cargo clippy --all-targets --all-features --workspace -- -D warnings`, `cargo nextest run --workspace --all-features --exclude exarch-python --exclude exarch-node`, `cargo test --doc --workspace --all-features`) before proposing the change is complete
 - Add/extend integration tests per format/variant that assert `bytes_compressed` is close to the real on-disk file size (using `std::fs::metadata` in the test as ground truth)
@@ -242,7 +243,7 @@ Use EARS notation. Prefix with FR-NNN.
 
 ## 9. Open Questions
 
-- [NEEDS CLARIFICATION: Should `bytes_compressed` be measured via a filesystem metadata query (`std::fs::metadata(output_path)?.len()`) taken after all writers close, or by restructuring the writer chain per format (e.g. wrapping the innermost `File` in a `CountingWriter` before the ZIP/TAR/encoder layers) so no extra syscall is needed? The metadata-query approach is simpler and format-uniform but requires the output path to remain a `Path` (not an arbitrary in-memory `Write` destination) — does the public API (`create_zip`, `create_tar_gz`, etc., and their `_with_progress` variants) guarantee a file-backed destination in all cases, or are there in-memory/`Write`-generic callers where this would not apply?]
+- Resolved: the writer-based design of 0.9.0 supplies the value without a path (see the note at the top); `CreateRequest::write` and `to_bytes` report the length of the bytes they produced.
 - [NEEDS CLARIFICATION: Is this fix a `fix:` (PATCH), given that `bytes_compressed`'s *value* changes for all existing callers even though the field name/type/schema does not — should the CHANGELOG entry call out the value-semantics change prominently for consumers who may have built dashboards or alerts around the previous (always 0/100%, or near-1.0) values?]
 - [NEEDS CLARIFICATION: Should the `skills/exarch-cli/SKILL.md` documentation (and any `--json` schema examples it contains) be updated to reflect that `bytes_compressed`, `compression_ratio`, and `compression_percentage` now report real, non-trivial values, given the project rule that skills must be updated when documented `--json` output behavior changes?]
 
@@ -250,10 +251,10 @@ Use EARS notation. Prefix with FR-NNN.
 
 - [[constitution]] — project principles (security-first, format abstraction)
 - [[MOC-specs]] — all specifications
-- [[002-format-handlers/spec]] — `ArchiveFormat`/`FormatCreator` trait definitions; ZIP and TAR creation implementations
+- [[002-format-handlers/spec]] — `ArchiveFormat` trait and creation dispatch; ZIP and TAR creation implementations
 - [[003-config-api/spec]] — `CreationConfig` / report shape used across creation APIs
-- `crates/exarch-core/src/creation/zip.rs` — missing `bytes_compressed` assignment
-- `crates/exarch-core/src/creation/tar.rs:270` — mis-positioned `CountingWriter` measuring pre-compression bytes
+- `crates/exarch-core/src/creation/zip.rs` — `write_zip` sets `bytes_compressed` from `stream_position()`
+- `crates/exarch-core/src/creation/tar.rs` — `write_tar` sets it from the `CountingWriter` below the encoder
 - `crates/exarch-core/src/creation/report.rs` — `CreationReport`, `compression_ratio()`, `compression_percentage()`
-- `crates/exarch-core/src/io/counting.rs` — `CountingWriter` (`Write`-only; cannot wrap seekable ZIP writer transparently)
+- `crates/exarch-core/src/writer.rs` — `CountingWriter` (`Write`-only; cannot wrap seekable ZIP writer transparently)
 - `crates/exarch-core/src/security/zipbomb.rs` — `validate_compression_ratio`, the (correct, unaffected) extraction-side reference implementation for computing compression ratios from real sizes

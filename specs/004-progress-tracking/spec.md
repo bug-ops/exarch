@@ -8,8 +8,8 @@ tags:
   - progress
   - rust
 created: 2026-05-20
-updated: 2026-11-06
-status: draft
+updated: 2026-11-08
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -53,7 +53,7 @@ reporters without modifying `exarch-core`.
 
 ### Out of Scope
 
-- Cancellation via the progress callback (potential future addition — see Open Questions)
+- Cancellation by a callback return value (cancellation is the polled `is_cancelled`, FR-055 to FR-057)
 - Estimated time remaining (ETA) calculation
 - Thread-safe multi-producer progress reporting
 
@@ -135,8 +135,8 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 | FR-050 | `SinkExtractRequest::with_progress` and `CreateRequest::with_progress` (`write`, `to_bytes`) SHALL follow the same contract as `ExtractRequest::with_progress` (v0.8.0, #778, #787; request types since #912) | must |
 | FR-051 | WHEN an archive is created, THE SYSTEM SHALL NOT report the source root as an entry, so `total_entries` and the progress count drop by one per source directory; a file or symlink emptied by `strip_prefix` is `InvalidConfiguration` (`ConfigProblem::RemovesWholeName`) and an emptied directory is skipped; the callbacks SHALL be paired by one `EntryCompleteGuard` (`ProgressTracker::begin`) that fires `on_entry_complete` for every started entry, including a failed one, replacing the manual `on_entry_start`/`on_entry_complete` calls; TAR extraction SHALL use the same guard, so a TAR entry that fails is also closed (v0.8.0, #874, #880, #888; #904) | must |
 | FR-052 | `ExtractionReport` and `CreationReport` SHALL be `#[non_exhaustive]` and SHALL carry `skipped: Skips` instead of a skipped-file counter and skip warning strings; `files_skipped()` is derived from it (#905, #906) | must |
-| FR-053 | `SkipKind` SHALL be a closed `#[non_exhaustive]` enum with seven kinds (`Duplicate`, `ExtensionNotAllowed`, `Excluded`, `Hidden`, `OverMaxFileSize`, `SymlinkUnsupported`, `Unreadable`); `Skip { kind, path, io_kind: Option<io::ErrorKind> }`; `Skips` SHALL keep a count per kind plus a sample bounded by `Skips::SAMPLE_CAP` (64) and expose `total()`, `count(kind)`, `sample()`, `is_empty()`; recording a skip SHALL fail closed with `QuotaExceeded { IntegerOverflow }` on counter overflow (`Unreadable` has no producer yet) (#906) | must |
-| FR-054 | The remaining report warnings SHALL be typed `#[non_exhaustive]` enums with `Display` that keeps the former text: `ExtractionWarning::{AntiItemsSkipped { count }, BackupCleanupFailed { path, identity_unverified, error }}` and `CreationWarning::{ZipRatioOverDefaultLimit, ZipRatioCheckFailed}`; a skipped entry SHALL NOT also appear as a warning string (#906) | must |
+| FR-053 | `SkipKind` SHALL be a closed `#[non_exhaustive]` enum with nine kinds (`Duplicate`, `ExtensionNotAllowed`, `NotSelected`, `StrippedAway`, `Excluded`, `Hidden`, `OverMaxFileSize`, `SymlinkUnsupported`, `Unreadable`); `Skip { kind, path, io_kind: Option<io::ErrorKind> }`; `Skips` SHALL keep a count per kind plus a sample bounded by `Skips::SAMPLE_CAP` (64) and expose `total()`, `count(kind)`, `sample()`, `is_empty()`; recording a skip SHALL fail closed with `QuotaExceeded { IntegerOverflow }` on counter overflow (`Unreadable` has no producer yet) (#906) | must |
+| FR-054 | The remaining report warnings SHALL be typed `#[non_exhaustive]` enums with `Display` that keeps the former text: `ExtractionWarning::{AntiItemsSkipped { count }, BackupCleanupFailed { path, identity: BackupIdentity, io_kind, message }}` and `CreationWarning::{ZipRatioOverDefaultLimit, ZipRatioCheckFailed, DirectoryNotSynced { io_kind }}`, each with a `kind()` returning a closed `*WarningKind` whose `as_str` is the stable token used by the CLI, Python and Node; a skipped entry SHALL NOT also appear as a warning string (#906) | must |
 | FR-055 | `ProgressCallback::is_cancelled(&mut self) -> bool` (default `false`) SHALL let a callback that hit an error of its own (a raising script callback, a closed channel) stop a creation: creation checks it and then returns `ArchiveError::Cancelled`, the staged output is discarded and a previous archive at the output path stays untouched; the Python adapter reports a raised exception through it (the callback's exception wins over the core `Cancelled`, `KeyboardInterrupt` included) and the Node adapter does the same for a throwing callback (`PROGRESS_CALLBACK_ERROR`); extraction, list and verify are cancelled the same way (FR-056) (#931, #973, #990) | must |
 | FR-056 | `EntryCompleteGuard::try_start` SHALL poll `ProgressCallback::is_cancelled` at the start of every entry in TAR, ZIP and 7z extraction, list, verify and the creation `ProgressTracker::begin` (which now returns `Result`); a stop returns `ArchiveError::Cancelled` (error code `CANCELLED`, `FfiKind::Cancelled`), and extraction wraps it in `Partial` when files were written; `ArchiveError::is_cancelled()` SHALL see through `Partial` | must |
 | FR-057 | Creation SHALL poll once more after the entry loop and before publishing the output; staged extraction SHALL poll after extraction and before the `Atomic` rename and before the `AtomicReplace` displace step; a single entry is not interruptible and the docs SHALL say so | must |
@@ -159,7 +159,6 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 | `NoopProgress` | Zero-overhead implementation of `ProgressCallback` | All methods are no-ops; intended as the default |
 | `EntryPosition` / `EntryTotal` | Position passed to `on_entry_start` (#904) | `current: NonZeroUsize`; `total: Known(usize) \| Unknown` |
 | `SkipKind` / `Skip` / `Skips` | Typed skip accounting in `ExtractionReport` and `CreationReport` (#906) | counts per kind, bounded sample, `total()`, `count()`, `sample()` |
-| `ExtractionContext` | Per-extraction state passed through TAR helper functions to reduce arity | Holds references to config, options, output dir, and progress callback |
 
 ### Trait Signature
 
@@ -175,11 +174,9 @@ ProgressCallback: Send
 > `on_complete` is called only on successful completion. Implementors must not
 > use it for cleanup — use the `Err` return path from `extract_archive` instead.
 
-> [!note] ExtractionContext
-> `ExtractionContext<'_, '_>` is a private TAR helper struct introduced in v0.4.0
-> that groups `tally`, the skip counters, `config`, and `progress` to reduce helper
-> function arity. ZIP has an analogous `ZipExtractionContext`. It is not part of the public
-> API but is documented here because `ProgressCallback` is passed through it.
+> [!note] Internal state
+> The progress callback travels through private per-format state (for example
+> `ZipExtractionContext`) and the `EntryCompleteGuard` of FR-051; neither is public API.
 
 ## 6. Edge Cases and Error Handling
 
@@ -213,12 +210,12 @@ ProgressCallback: Send
 - Call `on_entry_start` before writing any bytes for an entry
 - Call `on_entry_complete` after writing all bytes for an entry
 - Call `on_complete` only on full success, never on error
-- Pass `&mut dyn ProgressCallback` through `ExtractionContext` to avoid arity growth
+- Open every entry through `EntryCompleteGuard` so start and complete stay paired and cancellation is polled
 
 ### Ask First
 - Adding new methods to `ProgressCallback` (trait breaking change)
 - Adding a variant to `SkipKind` (closed enum: every consumer mirrors it and has an `ALL` drift test)
-- Adding cancellation support (architectural decision)
+- Changing how cancellation is polled (`is_cancelled`, FR-055 to FR-057)
 
 ### Never
 - Call `on_complete` on partial or failed extraction
@@ -227,8 +224,8 @@ ProgressCallback: Send
 
 ## 9. Open Questions
 
-- [NEEDS CLARIFICATION: Should `ProgressCallback` expose a cancellation mechanism (e.g., `on_entry_start` returns `bool` where `false` aborts extraction)? This would allow callers to cancel mid-archive without waiting for the operation to finish.]
-- [NEEDS CLARIFICATION: `on_bytes_written` receives the byte count of one finished file, not cumulative bytes and not per-chunk bytes — verify this matches the CLI indicatif integration.]
+- [RESOLVED: cancellation is `ProgressCallback::is_cancelled`, polled at entry boundaries (FR-055 to FR-057, #973, #990); `on_entry_start` still returns nothing.]
+- [RESOLVED: `on_bytes_written` receives the byte count of one finished file (FR-045); the CLI sums it for the bar message and advances per entry.]
 
 ## 10. See Also
 
@@ -238,7 +235,7 @@ ProgressCallback: Send
 - [[005-cli/spec]] — indicatif-based `ProgressCallback` implementation
 - [[021-create-staging-and-output-policy/spec]] — creation skips (`Excluded`, `Hidden`, `OverMaxFileSize`, `SymlinkUnsupported`)
 - [[006-python-bindings/spec]] — `PyProgressAdapter` and GIL interaction; callback exception propagation
-- [[007-node-bindings/spec]] — `NodeProgressAdapter`, `createArchiveWithProgress`/`Sync`, primitive-throw hardening
+- [[007-node-bindings/spec]] — `NodeProgressAdapter`, `createArchiveWithProgress`, primitive-throw hardening
 - [[019-verify-and-list-model/spec]] — listing and verification passes that report progress
 - [[020-reader-sink-and-in-memory-api/spec]] — reader, sink and writer variants of the progress-reporting calls
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

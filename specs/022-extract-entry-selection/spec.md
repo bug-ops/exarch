@@ -37,7 +37,7 @@ related:
 > **Subsystem**: exarch-core / `config` (extraction options), `request` (`ExtractRequest`, `ListRequest`, `VerifyRequest`, `SinkExtractRequest`), `security` (`SafePath`, `ValidatorCore`), `inspection::landing`, `formats::{tar,zip,sevenz}`; surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
 > **MSRV**: Rust 1.99.1
 > **Origin**: #967 (competitive parity research, P2). No prior request or `wontfix` found in open or closed issues.
-> **Status**: implemented in the #981 batch PR. The open questions are resolved in section 9; HOW is in [[plan]], the task list in [[tasks]]. Section 11 lists where the as-built behavior differs from the first plan.
+> **Status**: implemented in the #981 batch PR; the pattern grammar was replaced by globs in #1024 (spec 023). The open questions are resolved in section 9; HOW is in [[plan]], the task list in [[tasks]]. Section 11 lists where the as-built behavior differs from the first plan.
 
 > [!note] Working names
 > `EntrySelection`, `PathRewrite`, `StripComponents`, `SkipKind::NotSelected` and `SkipKind::StrippedAway` are the shipped identifiers.
@@ -58,7 +58,7 @@ A caller states, in one validated value, which entries to extract and how many l
 
 ### Out of Scope
 
-- A glob engine (superseded once #1000 is merged, which lands before this text: [[023-entry-selection-glob-patterns/spec]] adds one; the text below is the shipped #981 behavior). Patterns use exactly the grammar that `create -x/--exclude` accepts today (`Exact`, `Prefix`, `Suffix`, `Path`; see [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021). `**`, `?`, character classes, braces and negation stay refused.
+- A glob engine in the #981 batch. It shipped afterwards (#1000, #1024): [[023-entry-selection-glob-patterns/spec]] replaces the grammar this spec first reused (`Exact`, `Prefix`, `Suffix`, `Path`; see [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021) with `*`, `?`, positive classes and a whole-component `**`. Braces, negation and regular expressions stay refused. Where this spec names a pattern shape, the shape is the 023 `Shape` (anchored or floating).
 - Regular expressions, and tar-style `s/old/new/` name transforms.
 - A new overwrite policy. Collisions follow the existing `ExistingFiles {Skip, Overwrite, Refuse}` rules (and `--force` mapping to `Overwrite`); this spec adds no variant and no default.
 - A caller-supplied filter callback in `exarch-core` or the bindings (see section 9, Q16: user code per entry cannot be modeled by `verify`).
@@ -182,7 +182,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 | FR-003 | `StripComponents` SHALL be a newtype that cannot hold zero or a value above the destination's maximum path depth; runtime values (CLI, Python, Node) SHALL enter through one `limit.rs`-style boundary function that refuses `0`, negatives, non-integers and out-of-range values as `InvalidConfiguration` naming the setting | must |
 | FR-004 | Selection patterns SHALL be the same typed pattern value and the same parser as the creation exclude patterns (one grammar, one `TryFrom<&str>`, one `Display`); a refused shape SHALL be refused at construction with `InvalidConfiguration` and the pattern named; no unparsed string SHALL be stored | must |
 | FR-005 | WHEN an entry is tested against a selection, THE SYSTEM SHALL match the pattern against the archive entry path after the same normalization landing uses (`./`, leading `/`, `\` separators and drive prefixes handled as extraction does) and before any stripping; matching SHALL compare raw path component bytes, so a non-UTF-8 name is matched, not skipped | must |
-| FR-006 | An entry SHALL be selected if and only if it matches at least one include pattern (or there are none) and matches no exclude pattern; an exclude pattern SHALL always win; a `Path` pattern SHALL select the named entry and its subtree | must |
+| FR-006 | An entry SHALL be selected if and only if it matches at least one include pattern (or there are none) and matches no exclude pattern; an exclude pattern SHALL always win; an anchored pattern SHALL select the named entry and its subtree ([[023-entry-selection-glob-patterns/spec]] FR-020) | must |
 | FR-007 | Selection SHALL apply to every entry kind (file, directory, symlink, hardlink), not only regular files as the extension allowlist does; the allowlist SHALL keep applying, after selection, to the regular files that remain | must |
 
 ### Order of operations and validation
@@ -385,7 +385,7 @@ All sixteen questions from the research draft were resolved by the user's approv
 |-------|----------|
 | Differential corpus (SC-001) | Run against bsdtar 3.x for strip 0 to 3 (unix, skipped when bsdtar is missing); GNU tar, node-tar and cpython `tarfile` were not run. The test compares under `ExistingFiles::Overwrite` because bsdtar overwrites |
 | `max_path_depth` | A strip count is validated against `max_path_depth` when it is set; lowering the depth afterwards does not revalidate it |
-| Strip count validation | A strip count is validated against `max_path_depth` when it is built, so the call order of `max_path_depth` and the strip setter matters; the docs say so. Node `setStripComponents(null)` removes a strip and keeps a flatten, as Python `strip_components = None` does |
+| Strip count validation | A strip count is validated against `max_path_depth` when it is built, so the call order of `max_path_depth` and the strip setter matters; the docs say so. Node `withStripComponents(null)` removes a strip and keeps a flatten, as Python `strip_components = None` does |
 | Absolute hardlink target | Where `allow_absolute_paths` admits absolute names, `map_link_target` drops the root or drive prefix as an entry name does, so the target is selected, stripped and flattened with the entry of that name and a fully stripped or unselected target is `HardlinkTargetNotExtracted`; where absolute paths are refused the root is kept and the validator refuses the target exactly as without a selection (#997) |
 | Binding selection helpers | One set of core builders (`EntrySelection::with_strip`, `with_flatten`, `with_include_list`, `with_exclude_list`) replaces the helpers duplicated in Python and Node (#998) |
 | Per-run state | `finish_scan` on `ExtractTarget` runs the unmatched-include check for TAR, ZIP and 7z, host and sinks, also on empty archives |

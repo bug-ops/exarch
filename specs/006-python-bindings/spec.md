@@ -10,7 +10,7 @@ tags:
   - rust
 created: 2026-05-20
 updated: 2026-11-06
-status: draft
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -129,7 +129,7 @@ SO THAT I can catch specific error types in a try/except block
 ```
 GIVEN an archive with a path traversal entry
 WHEN extract_archive() is called
-THEN PathTraversalError (a subclass of ExarchError) is raised
+THEN PathTraversalError (a subclass of ArchiveError) is raised
 ```
 
 ### US-005: Python Config Classes
@@ -155,17 +155,17 @@ THEN extraction respects those settings
 | FR-073 | WHEN no Python progress callback is provided, THE SYSTEM SHALL release the GIL during extraction/creation | must |
 | FR-074 | WHEN a Python progress callback is provided, THE SYSTEM SHALL NOT release the GIL (callback requires GIL to invoke Python) | must |
 | FR-075 | Rust `ArchiveError` variants SHALL map to specific Python exception types; `SourceNotFound` → `SourceNotFoundError` (also `FileNotFoundError`), `SourceNotAccessible` → `SourceNotAccessibleError` (also `OSError`, not `PermissionError`, because the variant covers any read failure such as `EIO` or `ELOOP`; the instance carries `errno` from the OS error, `strerror` and `filename`), `OutputExists` → `OutputExistsError` (also `FileExistsError`), `InvalidCompressionLevel` → `InvalidCompressionLevelError` and `InvalidConfiguration` → `InvalidConfigurationError` (both also `ValueError`; see FR-094); `PartialExtraction` → the specific inner exception type (e.g. `SymlinkEscapeError`, `QuotaExceededError`) with `files_extracted` and `bytes_written` attributes attached to that exception; since v0.8.0 the class, message and attributes all derive from one `exarch_core::ArchiveError::into_ffi_message()` (a typed `FfiKind` plus `PartialOutcome`), and the binding only picks the Python class per `FfiKind` (`FfiKind::Io(kind)` maps to the matching `OSError`; core `ReaderFormat` errors map to `UnknownFormatError` for an unrecognized format and `ValueError` otherwise) (#758, #768) | must |
-| FR-076 | ALL Python exception types SHALL be subclasses of `ExarchError(Exception)` | must |
+| FR-076 | ALL Python exception types SHALL be subclasses of `ArchiveError(Exception)` | must |
 | FR-077 | `PySecurityConfig` and `PyCreationConfig` SHALL expose the same fluent builder API as the Rust counterparts | must |
 | FR-078 | `PyExtractionReport`, `PyCreationReport`, `PyArchiveManifest`, and `PyVerificationReport` SHALL expose all fields as Python attributes | must |
-| FR-079 | WHEN `CoreError::PartialExtraction` (a `Partial` consumed through `into_ffi_message()`, #907) is converted to a Python exception, THE SYSTEM SHALL attach `files_skipped: int`, `skipped` (FR-100) and `warnings: list[str]` (in addition to the existing `files_extracted`/`bytes_written`) — `exarch-core` has populated these on the report since v0.6.0 #505, and this binding was the one call site not yet forwarding them (v0.6.0, #508) | must |
+| FR-079 | WHEN `CoreError::PartialExtraction` (a `Partial` consumed through `into_ffi_message()`, #907) is converted to a Python exception, THE SYSTEM SHALL attach `files_skipped: int`, `skipped` (FR-100) and `warnings` (typed objects since FR-112) (in addition to the existing `files_extracted`/`bytes_written`) — `exarch-core` has populated these on the report since v0.6.0 #505, and this binding was the one call site not yet forwarding them (v0.6.0, #508) | must |
 | FR-080 | WHEN a Python progress callback raises during extraction or creation, THE SYSTEM SHALL capture the exception (not discard it) and, if the underlying operation otherwise succeeds, re-raise it to the caller carrying `files_extracted`/`files_added`, `bytes_written`, and a `progress_callback_error = True` marker attribute; if the operation also fails, the core error stays primary with the callback's exception chained via `__cause__` (v0.6.0, #489 — previously silently swallowed via `let _ = ...`) | must |
 | FR-081 | ALL path-carrying `ArchiveError` variants SHALL be redacted for release-build Python exception messages via the shared core redaction helpers (the public `sanitize_path_for_error`, `sanitize_io_error_for_error` and `format_entry_path_for_error`, re-exported at the `exarch_core` root), not a Python-crate-local copy; `PathTraversal`/`SymlinkEscape`/`HardlinkEscape`/`InvalidPermissions` (archive-relative, attacker-authored paths) SHALL keep the full path in both debug and release builds, while `SourceNotFound`/`SourceNotAccessible`/`OutputExists`/`UnknownFormat`/`Io` (host-derived paths) SHALL redact to filename-only (or `ErrorKind` description for `Io`) in release builds (v0.6.0, #453, #462, #463) | must |
 | FR-082 | `verify_archive(archive_path, config=None, options=None)` SHALL accept a `VerificationOptions`; `VerificationOptions().with_integrity_check(budget=None)` decodes the payload to the decoder's EOF (default budget 500 MiB, independent of `max_total_size`; `ValueError` for a zero or negative budget), otherwise `integrity_status` is `"SKIPPED"` (v0.7.0, #670) | must |
 | FR-083 | `VerificationReport` SHALL expose `integrity_status` (`"OK"`, `"FAILED"`, `"INCOMPLETE"`, `"SKIPPED"`), `integrity_gaps` (`None` unless the check ran, else `IntegrityGaps` with `counts`, `entries` of `UnverifiedEntry(path, reason)`, `omitted`, `total`) and `security_status`; report enum-like getters return strings annotated with `Literal` types in `exarch.pyi` (v0.7.0, #624, #672, #684) | must |
 | FR-084 | `SecurityConfig` SHALL expose `with_parallel_decode_memory(size: int \| None)` (`None` decodes on one thread; default 128 MiB, 1 GiB for `permissive()`; `ValueError` for zero, negative or above 2**64 - 1) and `with_zip_consistency("enforce" \| "ignore")` (default `"enforce"`; `ValueError` for any other string), each with a matching property (v0.7.0, #671, #688) | must |
 | FR-085 | `SecurityViolationError` SHALL carry a `relaxable_by` attribute: the stable id of the `SecurityConfig` setting that refused the entry (`"symlinks"`, `"hardlinks"`, `"solid_archives"`, `"banned_components"`, `"max_path_depth"`, `"windows_reserved_names"`, `"max_tar_metadata_bytes"`), or `None` (class default) when no setting relaxes the refusal (v0.7.0, #741, #757) | must |
-| FR-086 | WHEN `CoreError::PartialExtraction` is converted, THE SYSTEM SHALL always attach `writes` (`"kept"`, `"rolled_back"` or, for an in-memory extraction, `"discarded"`) to the raised exception and attach `files_extracted`, `bytes_written`, `files_skipped` and `warnings` only when `writes == "kept"`; after an `ExtractionOptions.atomic` rollback, or an in-memory extraction that dropped its entries, the counters describe a discarded run and are omitted (v0.7.0, #735, #747; v0.8.0, #800, #808) | must |
+| FR-086 | WHEN `CoreError::PartialExtraction` is converted, THE SYSTEM SHALL always attach `writes` (`"kept"`, `"rolled_back"` or, for an in-memory extraction, `"discarded"`) to the raised exception and attach `files_extracted`, `bytes_written`, `files_skipped` and `warnings` only when `writes == "kept"`; after an atomic-staging rollback, or an in-memory extraction that dropped its entries, the counters describe a discarded run and are omitted (v0.7.0, #735, #747; v0.8.0, #800, #808) | must |
 | FR-087 | `ArchiveError::ZipBomb` SHALL map to `ZipBombError` (including an entry claiming data from zero compressed bytes, previously `InvalidArchiveError`), and `ArchiveError::ZipInconsistency` SHALL map to the new `ZipInconsistencyError`, a subclass of `SecurityViolationError` (v0.7.0, #653, #671) | must |
 | FR-088 | THE SYSTEM SHALL expose in-memory functions that take and return bytes: `list_archive_bytes(data, config=None, format=None)`, `verify_archive_bytes(data, config=None, options=None, format=None)`, `extract_archive_to_memory(data, config=None, options=None, max_bytes=None, path_model=None, format=None)` (`options` is a `SinkOptions`, FR-096) returning `MemoryExtraction(report, entries)` of per-kind `MemoryEntry` classes (FR-097), and `create_archive_to_bytes(sources, format, config=None)` returning `CreatedArchive(data, report)`; `format` is detected from the leading bytes when `None`; `atomic` is unsupported for extraction; `max_bytes` defaults to the config's `max_total_size`; `path_model` is `"host"` or `"portable"`; `"SevenZ"` cannot be created; all validation is in `exarch-core` ([[020-reader-sink-and-in-memory-api/spec]]; v0.8.0, #776, #787, #790) | must |
 | FR-089 | THE SYSTEM SHALL expose `extract_archive_to_memory_with_progress`, `list_archive_bytes_with_progress` and `verify_archive_bytes_with_progress`, each taking a `progress` callback of `(path, total, current, bytes_written)` (`total` is `None` while unknown, FR-100) with the GIL held; the in-memory functions without a callback SHALL release the GIL. A callback that raises after the operation succeeded SHALL discard the result and raise the callback's exception with `progress_callback_error = True` (an in-memory extraction also carries `writes == "discarded"`); if the operation failed, the core error stays primary with the callback's exception as `__cause__` (v0.8.0, #783, #784, #790) | must |
@@ -173,13 +173,13 @@ THEN extraction respects those settings
 | FR-091 | `InvalidArchiveError` and `SecurityViolationError` SHALL carry a `sub_code` attribute (a string id, `None` when the failure is not classified) and `InvalidConfiguration` errors a `setting` attribute, from the same `FfiKind` as the CLI `--json` fields (v0.8.0, #865, #870, #887, #894, #946) | must |
 | FR-092 | The in-memory functions (`list_archive_bytes`, `verify_archive_bytes`, `extract_archive_to_memory`, their `_with_progress` variants and `extract_archive_to_callback`) SHALL accept `data` as bytes or as a binary file object, whose read failure surfaces unchanged (v0.8.0, #828) | must |
 | FR-093 | THE SYSTEM SHALL expose `extract_archive_to_callback(data, on_entry, config=None, options=None, path_model=None, format=None)`, delivering each verified entry to a callable through `extract_reader_to_callback` and re-raising the callable's exception unchanged; a non-callable `on_entry` is a `TypeError` (v0.8.0, #842, #860, #884) | must |
-| FR-094 | EVERY Python exception SHALL carry an instance attribute `code` (the stable `ErrorCode` id) set at raise time; `OutputExistsError(ArchiveError, FileExistsError)`, `SourceNotFoundError(ArchiveError, FileNotFoundError)`, `SourceNotAccessibleError(ArchiveError, PermissionError)`, `InvalidConfigurationError(ArchiveError, ValueError)` (with `setting`) and `InvalidCompressionLevelError(ArchiveError, ValueError)` SHALL be real classes built at module init with `builtins.type` over two bases and kept in a `PyOnceLock`, so both `except ArchiveError` and `except FileExistsError` (etc.) catch them; `_ErrorCode` and `_ConfigSetting` `Literal` aliases in `exarch.pyi` are under drift tests against core (#919) | must |
+| FR-094 | EVERY Python exception SHALL carry an instance attribute `code` (the stable `ErrorCode` id) set at raise time; `OutputExistsError(ArchiveError, FileExistsError)`, `SourceNotFoundError(ArchiveError, FileNotFoundError)`, `SourceNotAccessibleError(ArchiveError, OSError)`, `InvalidConfigurationError(ArchiveError, ValueError)` (with `setting`) and `InvalidCompressionLevelError(ArchiveError, ValueError)` SHALL be real classes built at module init with `builtins.type` over two bases and kept in a `PyOnceLock`, so both `except ArchiveError` and `except FileExistsError` (etc.) catch them; `_ErrorCode` and `_ConfigSetting` `Literal` aliases in `exarch.pyi` are under drift tests against core (#919) | must |
 | FR-095 | `create_archive` and `create_archive_with_progress` SHALL take `format: str \| None` (an `ArchiveType` string shared with `create_archive_to_bytes`) and `overwrite: bool = True`; `overwrite=False` maps to `OutputFile::create_new` and raises `OutputExistsError`; the default is `Replace`, so `OutputExistsError` is raised only for `overwrite=False`; creation is staged and atomic (see [[021-create-staging-and-output-policy/spec]]); a refused exclude pattern raises `InvalidConfigurationError` with `setting == "exclude_pattern"` (#915, #931, #916) | must |
 | FR-096 | The in-memory and callback functions SHALL take a frozen `SinkOptions(existing_files="skip", decode_reuse="off", decode_reuse_limit=None)` instead of `ExtractionOptions` (passing `ExtractionOptions` is a `TypeError`; a limit under `"off"` is a `ValueError`; the limit clamps to the core 256 MiB maximum) (#926) | must |
 | FR-097 | `MemoryEntry` SHALL be a base class (`path`) with `MemoryFile` (`data`, `mode`), `MemoryDirectory`, `MemorySymlink` and `MemoryHardlink` (each only its own attributes, a `kind` class attribute from `MemoryEntryKind::as_str`), and `AnyMemoryEntry` in the stub; `ArchiveEntry` SHALL be a base class (`path`, `entry_type`, `compressed_size`, `mode`, `compression_ratio`) with `ArchiveFile` (the only class with `size`), `ArchiveDirectory`, `ArchiveSymlink` and `ArchiveHardlink`; link targets SHALL be `LinkTarget` subclasses by state (`RecordedLinkTarget.path`, `MissingLinkTarget`, `UnreadLinkTarget`, `UnreadableLinkTarget`, `OversizedLinkTarget.bytes`; a 7z symlink is `UnreadLinkTarget`); `is_symlink`, `is_hardlink`, `symlink_target` and `hardlink_target` are removed; drift tests cover every kind and link state (#923, #910) | must |
 | FR-098 | Integer limit setters and builders SHALL accept a Python `int` (a `bool` is a `TypeError`) through core `positive_from_i128`, and negative, zero and oversized integers (including beyond `i128`) SHALL raise `InvalidConfigurationError` with `setting`, never `OverflowError`; `max_file_size`, `max_total_size` and `max_file_count` getters return `None` when unbounded; `parallel_decode_memory` errors carry `setting == "parallel_decode_memory"`; an out-of-range compression level raises `InvalidCompressionLevelError`; `max_solid_block_memory` is `None` and its setter raises `InvalidConfigurationError` while solid archives are refused; an unknown `zip_consistency`, creatable or archive `format`, `path_model`, `decode_reuse` or skip kind raises `InvalidConfigurationError` with `setting` (`zip_consistency`, `archive_format`/`creation_format`, `path_model`, `decode_reuse`, `skip_kind`) and problem `NotOneOf`, and `SinkOptions.decode_reuse_limit` of 0, negative, oversized (`TooLarge`) or with `decode_reuse="off"` (`NotSupported`) raises it with `decode_reuse_limit`; a `bool` limit or ratio is a `TypeError` and `10**400` as a ratio is `NotFinite` (#921, #913, #911) | must |
 | FR-099 | `QuotaExceededError` and `ZipBombError` SHALL carry `sub_code` (quota kind or zip-bomb scope literal, including `SOLID_BLOCK_MEMORY` and `HEADER_SIZE`), and `InvalidArchiveError.sub_code` SHALL include `TAR_READER` and `SEVENZ_READER`, with `_QuotaSubCode`, `_ZipBombSubCode` and `_InvalidArchiveSubCode` literals under drift tests derived from `SubCode` (#918, #930, #896) | must |
-| FR-100 | The progress callback SHALL receive `(path, total, current, bytes_written)` with `total` `None` while the count is unknown (TAR streams) and `current` counting from 1 (`ProgressCallbackFn = Callable[[str, int \| None, int, int], None]`); reports and partial-extraction exceptions SHALL carry `skipped` (`Skipped` with `total`, per-kind `counts`, a bounded `sample` of `Skip(kind, path, io_kind)`, `count(kind)`, `len()`; `_SkipKind` literal under a drift test), `files_skipped` stays derived, and `warnings` stay `list[str]` from the typed warnings (`Skip.io_kind` is the `io::ErrorKind` display text, not a stable code) (#904, #906) | must |
+| FR-100 | The progress callback SHALL receive `(path, total, current, bytes_written)` with `total` `None` while the count is unknown (TAR streams) and `current` counting from 1 (`ProgressCallbackFn = Callable[[str, int \| None, int, int], None]`); reports and partial-extraction exceptions SHALL carry `skipped` (`Skipped` with `total`, per-kind `counts`, a bounded `sample` of `Skip(kind, path, io_kind)`, `count(kind)`, `len()`; `_SkipKind` literal under a drift test), `files_skipped` stays derived, and `warnings` are the typed warning objects of FR-112 (`Skip.io_kind` is the `io::ErrorKind` display text, not a stable code) (#904, #906) | must |
 | FR-101 | Paths of entries, skips, verification issues, unverified entries and progress callbacks SHALL be converted from `&OsStr` with `os.fsdecode` (surrogateescape on Unix), so two entries never share a name and no `to_string_lossy` remains; the in-memory path still refuses a non-UTF-8 entry name; on Windows the conversion is not lossless for unpaired surrogates (#925) | must |
 | FR-102 | `VerificationIssue` SHALL expose `code`, `sub_code`, `relaxable_by`, `setting` (from `FfiKind` and `SubCode`) and `mode` (the raw mode of an executable-file or invalid-permissions finding, from core `VerificationIssue::mode()`); `context` is removed (#899) | must |
 | FR-103 | File inputs SHALL be split once, in `FileInput::new`, into `Seekable` and `Stream` (`StreamFile` has no `Seek`), and `parse_zip_consistency` SHALL share core's `parse_one` (#928) | should |
@@ -212,8 +212,8 @@ THEN extraction respects those settings
 |--------|-------------|----------------|
 | `PySecurityConfig` | Python class wrapping `SecurityConfig` | Fluent builder methods all use `with_` prefix: `with_max_file_size()`, `with_allow_symlinks()`, `with_allow_hardlinks()`, `with_allow_absolute_paths()`, `with_allow_world_writable()`, `with_allow_solid_archives()`, etc.; scalar getters (`max_file_size`, `max_total_size`, etc.) return values directly |
 | `PyCreationConfig` | Python class wrapping `CreationConfig` | Same fluent builder methods; `with_max_file_size(size: int \| None)` takes `None` for no limit and refuses `0` with `ValueError` (#893, #946) |
-| `PyExtractionReport` | Python class wrapping `ExtractionReport` | `files_extracted`, `bytes_written`, `duration`, `warnings`, `skipped`, `files_skipped` |
-| `PyCreationReport` | Python class wrapping `CreationReport` | `files_added`, `bytes_written`, `duration`, `skipped`, `warnings` |
+| `PyExtractionReport` | Python class wrapping `ExtractionReport` | `files_extracted`, `directories_created`, `symlinks_created`, `bytes_written`, `duration_ms`, `files_skipped`, `skipped`, `warnings` |
+| `PyCreationReport` | Python class wrapping `CreationReport` | `files_added`, `directories_added`, `symlinks_added`, `bytes_written`, `bytes_compressed`, `duration_ms`, `files_skipped`, `skipped`, `warnings` |
 | `Skipped` / `Skip` | Typed skip accounting (#906) | `total`, `counts`, `sample`, `count(kind)`, `len()` / `kind`, `path`, `io_kind` |
 | `SinkOptions` | Frozen options of the in-memory and callback functions (#926) | `existing_files`, `decode_reuse`, `decode_reuse_limit` |
 | `ArchiveEntry` family | Listing entries by kind (#923, #910) | `ArchiveFile`, `ArchiveDirectory`, `ArchiveSymlink`, `ArchiveHardlink`; `LinkTarget` subclasses |
@@ -227,8 +227,7 @@ THEN extraction respects those settings
 ### Python Exception Hierarchy
 
 ```
-ExarchError(Exception)           # catch-all alias; same class as ArchiveError
-ArchiveError(Exception)          # base exception (renamed from ExtractionError in v0.4.1); every instance has `code`
+ArchiveError(Exception)          # base exception and catch-all (renamed from ExtractionError in v0.4.1); every instance has `code`
   OutputExistsError(ArchiveError, FileExistsError)            # #919
   SourceNotFoundError(ArchiveError, FileNotFoundError)        # #919
   SourceNotAccessibleError(ArchiveError, OSError)             # #919, #956
@@ -260,7 +259,7 @@ exception when `exarch-core` wraps the inner error in `CoreError::PartialExtract
 Since v0.7.0 these counters are attached only while the written files remain on disk
 (`writes == "kept"`); an atomic rollback attaches `writes == "rolled_back"` and no counters.
 Use `getattr(e, "writes", None) == "kept"` to detect files left on disk.
-`ExarchError` is the catch-all base for any extraction failure.
+`ArchiveError` is the catch-all base for any failure.
 
 > [!note] Error mapping corrections (#209, #210, #251)
 > - `SourceNotFound`, `SourceNotAccessible`, and `OutputExists` now raise
@@ -282,10 +281,10 @@ Use `getattr(e, "writes", None) == "kept"` to detect files left on disk.
 # Module: exarch
 
 def extract_archive(archive_path, output_dir, config=None, options=None) -> ExtractionReport
-def extract_archive_with_progress(archive_path, output_dir, config=None, progress=None) -> ExtractionReport
+def extract_archive_with_progress(archive_path, output_dir, config=None, progress=None, options=None) -> ExtractionReport
     # GIL held when progress callback is provided; released otherwise
-def create_archive(output_path, sources, config=None, format=None, overwrite=True) -> CreationReport
-def create_archive_with_progress(output_path, sources, config=None, progress=None, format=None, overwrite=True) -> CreationReport
+def create_archive(output_path, sources, config=None, format=None, overwrite=True, durability=None) -> CreationReport
+def create_archive_with_progress(output_path, sources, config=None, progress=None, format=None, overwrite=True, durability=None) -> CreationReport
 def list_archive(archive_path, config=None) -> ArchiveManifest
 def verify_archive(archive_path, config=None, options=None) -> VerificationReport
 
@@ -303,20 +302,20 @@ class SinkOptions:  # frozen
     def __init__(self, existing_files: Literal["skip", "overwrite", "refuse"] = "skip", decode_reuse: str = "off", decode_reuse_limit: int | None = None)
 
 class ExtractionOptions:
-    def with_atomic(self, atomic: bool = True) -> ExtractionOptions
-    def with_existing_files(self, existing_files: Literal["skip", "overwrite", "refuse"]) -> ExtractionOptions
+    def with_staging(self, value: Literal["in_place", "atomic", "atomic_replace"]) -> ExtractionOptions
+    def with_existing_files(self, value: Literal["skip", "overwrite", "refuse"]) -> ExtractionOptions
+    def build(self) -> ExtractionOptions
     @property
-    def atomic(self) -> bool
-    @atomic.setter
-    def atomic(self, value: bool) -> None
+    def staging(self) -> Literal["in_place", "atomic", "atomic_replace"]
+    @staging.setter
+    def staging(self, value: Literal["in_place", "atomic", "atomic_replace"]) -> None
     @property
     def existing_files(self) -> Literal["skip", "overwrite", "refuse"]
 ```
 
 > [!note] v0.5.0: `ExtractionOptions` and `extract_archive_with_progress` added
 > Both `extract_archive` and `extract_archive_with_progress` accept an optional `options`
-> parameter of type `ExtractionOptions`. `ExtractionOptions.atomic` triggers staging-directory
-> extraction with atomic rename; `ExtractionOptions.existing_files` (default `"skip"`; since #981 it replaces `skip_duplicates`) decides what happens to an occupied landing. `with_atomic` and `with_existing_files` are the fluent builder methods.
+> parameter of type `ExtractionOptions`. `ExtractionOptions.staging` (since #981 it replaces `atomic`, FR-111) selects in-place, staged atomic or atomic-replace extraction; `ExtractionOptions.existing_files` (default `"skip"`; since #981 it replaces `skip_duplicates`) decides what happens to an occupied landing. `with_staging` and `with_existing_files` are the fluent builder methods.
 
 > [!note] v0.5.0: builder method naming
 > All Python `SecurityConfig` builder methods that previously omitted `with_` (`allow_symlinks`,
@@ -364,7 +363,7 @@ class ExtractionOptions:
 ### Always (without asking)
 - Validate paths at the Python boundary before calling into Rust
 - Release GIL during Rust calls when no Python progress callback is present
-- Map every `ArchiveError` variant to a Python exception subclass of `ExarchError`
+- Map every `ArchiveError` variant to a Python exception subclass of `ArchiveError`
 - Keep all security logic in `exarch-core`; Python crate contains only type mapping
 
 ### Ask First

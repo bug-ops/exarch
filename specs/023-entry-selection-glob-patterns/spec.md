@@ -11,8 +11,8 @@ tags:
   - parity
   - rust
 created: 2026-11-06
-updated: 2026-11-06
-status: planned
+updated: 2026-11-08
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -32,7 +32,7 @@ related:
 > **Subsystem**: exarch-core / `ExcludePattern` (grammar and matcher shared by creation excludes and extraction `EntrySelection`); surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
 > **MSRV**: Rust 1.99.1
 > **Origin**: #1000 (research finding, P3, enhancement), found after PR #999. Spec 022 lists a glob engine as out of scope.
-> **Status**: planned. Aligned with the code of trk-t4-glob on 2026-11-07 (`crates/exarch-core/src/creation/exclude_pattern.rs`, SKILL.md `--include` row). This spec merges after the #1000 implementation PR (track S lands after T4), so from the merge on its requirements describe the shipped behavior; until then it describes the target. The design is decided (architect plan rev 3, critic rounds 1 and 2 folded in) and is being implemented under #1000; this spec states WHAT the shipped behavior must be. Section 9 lists what the plan leaves open.
+> **Status**: implemented in #1024 (closes #1000). Verified against `crates/exarch-core/src/creation/exclude_pattern.rs` on 2026-11-08: grammar, refusal reasons, `Shape`, `Engine` and `Display` match the requirements below; no divergence from the design was found. Section 9 lists what stays open.
 
 > [!note] Working names
 > `ExcludePattern` (alias `EntryPattern`, the type spec 022 reuses), `ExcludeRefusal`, `Shape` and `Engine` (`Direct` or `Glob`) are the identifiers of the code.
@@ -218,7 +218,7 @@ Every check below runs on the text after `\` is rewritten to `/`, so `[a\b]` is 
 | FR-101 | Rust, Python and Node SHALL parse through the single core boundary function (`ExcludePattern::try_from`); bindings keep their `str` inputs and only map types and errors (`ArchiveError::into_ffi_message()`); no binding type changes, only refused-shape tests and docs | must |
 | FR-102 | CLI help, Rust docs (with doc-tests), Python and Node docs and the README files SHALL carry the grammar table and one example each for `*`, `**` and the cross-component rule; the `ExcludePattern` docs SHALL state the 10 MiB per-thread lazy cache that globset allows per compiled set | must |
 | FR-103 | `skills/exarch-cli/SKILL.md` SHALL be updated in the same change and verified against the running binary | must |
-| FR-104 | The create-side semantics of [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021 and the out-of-scope line of [[022-extract-entry-selection/spec]] are amended in this change (done in this PR); the `CHANGELOG.md` SHALL record the breaking changes: `ExcludePattern` opaque, `ExcludeRefusal` variants changed (the codes `wildcard_with_separator` and `glob_metacharacter` are gone from `ExcludeRefusal::as_str` and messages; the CLI JSON envelope carries only the message, whose text changed), `Display` of an anchored single segment now ends in `/`, `matches` returns false for a path with a root, prefix or `..` component (`main` matched `/build/x` against `build`), `-x '*'` and `**` are accepted and exclude everything, a `]` outside a class is a literal, and a drive-prefixed first segment (`C:x`, so also a floating `a:b`) is refused on every host | must |
+| FR-104 | The create-side semantics of [[021-create-staging-and-output-policy/spec]] FR-019 to FR-021 and the out-of-scope line of [[022-extract-entry-selection/spec]] are amended in this change (done in #1024); the `CHANGELOG.md` SHALL record the breaking changes: `ExcludePattern` opaque, `ExcludeRefusal` variants changed (the codes `wildcard_with_separator` and `glob_metacharacter` are gone from `ExcludeRefusal::as_str` and messages; the CLI JSON envelope carries only the message, whose text changed), `Display` of an anchored single segment now ends in `/`, `matches` returns false for a path with a root, prefix or `..` component (`main` matched `/build/x` against `build`), `-x '*'` and `**` are accepted and exclude everything, a `]` outside a class is a literal, and a drive-prefixed first segment (`C:x`, so also a floating `a:b`) is refused on every host | must |
 
 ## 4. Non-Functional Requirements
 
@@ -231,7 +231,7 @@ Every check below runs on the text after `\` is rewritten to `/`, so `[a\b]` is 
 | NFR-005 | Performance | Met by the performance review's measurement; no follow-up is planned. The `benches/creation.rs` bench carries glob legs; the comparison with the previous code used release-CLI scratch binaries on 100000 synthetic paths (the tracked `cargo bench` suite was not run against `main`): default excludes +7 ns per entry (+8%); ten patterns of the old shapes +60 ns per entry (+24%, because `temp*` and `cache*` prefix shapes moved to the glob engine); ten real glob patterns 147 ns per entry; compiling a pattern set 32 microseconds. Against about 80 microseconds per extracted entry that is under 0.1%, so one `GlobSet` per pattern stays; the lists are not compiled into one set. Lists of hundreds of glob patterns scale linearly (about 15 ns per glob per entry) and would need re-measuring |
 | NFR-006 | Maintainability | One matcher, one grammar, one `Display`; the literal path is a proven-equal shortcut (FR-023), not a second grammar |
 | NFR-007 | Dependencies | `globset` is a private dependency of `exarch-core` only (`cargo tree -i globset` lists nothing else), adds no duplicate crate (`multiple-versions = "deny"`), passes `cargo deny --all-features check` and can be bumped without a semver break |
-| NFR-008 | Portability | The same pattern selects the same entries on Linux, macOS and Windows. The Windows test `host_separators_and_prefixes` (`#[cfg(windows)]`, in `exclude_pattern.rs`) asserts that `src/c/*.rs` matches `src\c\two.rs`, does not match `C:\src\c\two.rs`, and that `C:x` is `Absolute`; it was added in a fix round, has not been run locally (no Windows host; only `clippy --target x86_64-pc-windows-gnu` ran) and first runs on `windows-latest` in CI |
+| NFR-008 | Portability | The same pattern selects the same entries on Linux, macOS and Windows. The Windows test `host_separators_and_prefixes` (`#[cfg(windows)]`, in `exclude_pattern.rs`) asserts that `src/c/*.rs` matches `src\c\two.rs`, does not match `C:\src\c\two.rs`, and that `C:x` is `Absolute`; it was added in a fix round, could not be run locally (no Windows host) and passed on `windows-latest` in the #1024 CI run |
 
 ## 5. Data Model
 
@@ -331,7 +331,7 @@ The differential corpus (`tests/entry_selection_differential.rs`) includes only 
 
 > [!question] Still open
 > - **Q1 (follow-up)**: negated classes (`[!x]` as `[^x]` that also excludes `/`) and non-ASCII class members are refused in v1; a follow-up is possible. File one only if demand appears.
-> - **Q7**: a Windows run of `host_separators_and_prefixes` and of the drive-prefix test is still pending (CI only).
+> - None. Q7 (Windows run of `host_separators_and_prefixes` and the drive-prefix test) passed on `windows-latest` in the #1024 CI run.
 
 > [!success] Resolved by the code
 > Q2 (POSIX class variant): `UnsupportedClass`. Q3 (`!` and padding checks on normalized segments): done on the first non-`**` and the last segment (FR-013). Q4 (infallible `*.tmp` default): `suffix_name`. Q5 (NFR-005): measured, no fixed threshold (NFR-005). The comma-before-brace order is `ContainsComma` first.

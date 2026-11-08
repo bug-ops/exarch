@@ -27,6 +27,11 @@ related:
 > handlers (#230, #242). Skipped entries are recorded in
 > `ExtractionReport::files_skipped` with a warning.
 
+> [!note] Superseded in 0.9.0
+> `EntryValidator` was removed and the allowlist is an `ExtensionFilter` (`Any` by default,
+> `Only` for a non-empty list); an empty list is refused as `InvalidConfiguration` instead of
+> allowing every file, and skips are recorded as `SkipKind::ExtensionNotAllowed` (#972, #999).
+
 ## Progress
 
 - [x] T001: Enforce `allowed_extensions` in `EntryValidator`

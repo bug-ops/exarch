@@ -13,12 +13,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::disallowed_methods)]
 
+use exarch_core::ArchiveError;
 use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
+use std::assert_matches;
 use std::io::Write as _;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
@@ -485,7 +487,13 @@ fn sevenz_skipped_duplicate_counts_against_the_file_limit() {
         .extract(archive.path(), dest.path())
         .unwrap_err();
 
-    assert!(format!("{error:?}").contains("FileCount"), "{error:?}");
+    assert_matches!(
+        error,
+        ArchiveError::QuotaExceeded {
+            resource: exarch_core::QuotaResource::FileCount { .. }
+        },
+        "{error:?}"
+    );
 }
 
 /// `ExistingFiles::Overwrite`: a pre-existing *regular file* (not a symlink) at

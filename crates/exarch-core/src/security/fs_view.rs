@@ -2232,6 +2232,17 @@ mod tests {
     }
 
     #[test]
+    fn an_exhausted_node_budget_maps_to_the_tree_nodes_quota() {
+        let error = ArchiveError::from(NodeBudgetExceeded { max: 7 });
+        assert_matches!(
+            error,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::TreeNodes { max: 7 }
+            }
+        );
+    }
+
+    #[test]
     fn node_budget_charges_implicit_parents() {
         let mut t = budgeted(2, CollisionRecording::Record);
         let err = t.try_insert(Path::new("a/b/c"), Node::File).unwrap_err();

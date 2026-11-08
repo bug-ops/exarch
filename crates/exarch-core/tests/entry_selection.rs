@@ -951,6 +951,14 @@ fn list_refuses_an_unmatched_include_and_verify_reports_it() {
 
         let report = verify_archive(&archive, &config).unwrap();
         assert_eq!(report.status(), VerificationStatus::Fail, "{format:?}");
+        assert!(
+            report.issues().iter().any(|issue| {
+                issue.category() == exarch_core::IssueCategory::InvalidArchive
+                    && issue.message().contains("include pattern matched no entry")
+            }),
+            "{format:?}: {:?}",
+            report.issues()
+        );
 
         let matched = base().try_add_include("a").unwrap();
         assert!(list_archive(&archive, &matched).is_ok(), "{format:?}");
@@ -959,7 +967,7 @@ fn list_refuses_an_unmatched_include_and_verify_reports_it() {
 
 #[test]
 fn an_entry_that_cannot_be_placed_is_reported_as_refused() {
-    for format in [Format::Tar, Format::Zip] {
+    for format in FORMATS {
         let work = TempDir::new().unwrap();
         let archive = format.write(
             work.path(),
@@ -1098,13 +1106,9 @@ fn verify_models_the_selected_extraction() {
 }
 
 #[test]
-fn verify_reports_an_unmatched_include_and_a_hardlink_to_a_skipped_target() {
+fn verify_reports_a_hardlink_to_a_skipped_target() {
     let work = TempDir::new().unwrap();
     let archive = Format::Tar.write(work.path(), &hardlinked());
-
-    let unmatched = base().try_add_include("zzz").unwrap();
-    let report = verify_archive(&archive, &unmatched).unwrap();
-    assert_eq!(report.status(), VerificationStatus::Fail);
 
     let dangling = base().try_add_include("top/l").unwrap();
     let report = verify_archive(&archive, &dangling).unwrap();

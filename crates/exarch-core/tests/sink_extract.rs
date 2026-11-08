@@ -376,23 +376,6 @@ fn a_flood_of_directory_entries_exhausts_the_file_count() {
     assert_eq!(file_count_quota(&error), Some(2), "{error:?}");
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[test]
-fn case_variant_directories_charge_the_file_count() {
-    let mut sink = RecordingSink::default();
-    let entries: Vec<_> = [
-        "aaaa/", "Aaaa/", "aAaa/", "aaAa/", "aaaA/", "AAaa/", "AaAa/",
-    ]
-    .into_iter()
-    .map(sink_support::tar_dir)
-    .collect();
-    let error = SinkExtractRequest::new(&small_tree_config())
-        .with_options(SinkOptions::default())
-        .extract(tar_reader(&entries), &mut sink)
-        .unwrap_err();
-    assert_eq!(file_count_quota(&error), Some(2), "{error:?}");
-}
-
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[test]
 fn case_variant_directories_do_not_alias_on_a_case_sensitive_host() {

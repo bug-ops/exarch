@@ -162,6 +162,7 @@ fn ghsa_m3j8_flood_heap_does_not_grow_with_eocd_count() {
 
 #[test]
 fn ghsa_w2w4_locator_offset_beyond_record_is_rejected_without_panic() {
+    let _only = PROFILER.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = TempDir::new().unwrap();
     let path = write_fixture(&dir, "far.zip", &locator_archive(u64::MAX / 2, 1, 0));
 
@@ -170,6 +171,7 @@ fn ghsa_w2w4_locator_offset_beyond_record_is_rejected_without_panic() {
 
 #[test]
 fn ghsa_w2w4_locator_offset_just_past_record_is_rejected() {
+    let _only = PROFILER.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = TempDir::new().unwrap();
     let path = write_fixture(&dir, "near.zip", &locator_archive(10_000, 1, 0));
 
@@ -178,6 +180,7 @@ fn ghsa_w2w4_locator_offset_just_past_record_is_rejected() {
 
 #[test]
 fn ghsa_w2w4_multi_disk_locator_is_rejected() {
+    let _only = PROFILER.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = TempDir::new().unwrap();
     let path = write_fixture(&dir, "disks.zip", &locator_archive(0, 5, 0));
 

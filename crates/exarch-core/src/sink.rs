@@ -313,13 +313,16 @@ impl SinkFull {
 ///
 /// # Memory used by validation
 ///
-/// The model that validates paths holds every name the archive spells, charged
-/// to a budget of `max_file_count * max_path_depth + 1` names (a directory
-/// entry and each differently spelled alias of a name cost one name, whatever
-/// the entry type); an archive that passes it fails with
-/// [`QuotaResource::TreeNodes`]. With the
-/// default limits that is 320001 names. Measured on macOS in a release build,
-/// 320000 directory entries into a sink that stores nothing peaked at 176 MB
+/// The model that validates paths holds every name the archive spells. Every
+/// entry, directories and links included, counts against `max_file_count`, so
+/// an archive with too many entries fails with [`QuotaResource::FileCount`].
+/// The model also keeps a backstop budget of
+/// `max_file_count * max_path_depth + 1` names; an entry spells at most
+/// `max_path_depth` names, so only a failure to enforce the entry count could
+/// reach it, and it would then fail with [`QuotaResource::TreeNodes`]. With the
+/// default limits the model holds at most 320001 names. Measured on macOS in a
+/// release build, 320000 directory entries into a sink that stores nothing
+/// peaked at 176 MB
 /// resident with 7-byte names and 223 MB with 99-byte names (about 1.6 bytes
 /// per name byte on top of about 550 bytes per name), so names of 255 bytes
 /// reach roughly 300 MB. [`MemoryLimit`] counts the payload, the path bytes

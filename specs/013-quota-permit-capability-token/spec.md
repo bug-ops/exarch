@@ -9,7 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-08-04
-updated: 2026-11-05
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -109,11 +109,11 @@ quota tracking entirely or charging quota for entries that turn out to be skippe
 
 **Acceptance criteria:**
 ```
-GIVEN 7z's skip_duplicates check, which must inspect the destination path before
-      deciding whether to extract an entry
-WHEN the 7z host target validates the path first (ValidatorCore::validate_entry_path_in, path only)
+GIVEN 7z's duplicate check (ExistingFiles::Skip), which must inspect the destination path
+      before deciding whether to extract an entry
+WHEN the 7z pre-pass validates the path first (ValidatorCore::validate_entry_path_in, path only)
 THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_file)
-     once it has decided the entry is not a duplicate — quota is never charged for a
+     once it has decided the entry is not a duplicate (FilePlan::Reserve) — quota is never charged for a
      skipped entry (v0.8.0: these are methods of ValidatorCore; the
      public EntryValidator::validate_entry_path and reserve_file were removed, #808, and EntryValidator itself in #900)
 ```
@@ -122,11 +122,11 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-001 | `QuotaTracker::reserve` (renamed from `record_file`) SHALL be the sole public producer of `QuotaPermit` (the crate-private `QuotaTracker::charge` is the only other); the type SHALL have no public constructor, `Default` impl, `Clone`, or `Copy` | must |
+| FR-001 | `QuotaTracker::reserve` (renamed from `record_file`) SHALL be the sole public producer of `QuotaPermit` (the crate-private `QuotaTracker::charge` is the only other); `QuotaTracker` itself is public only behind the `testing` feature; the type SHALL have no public constructor, `Default` impl, `Clone`, or `Copy` | must |
 | FR-002 | `ValidatedFile` SHALL embed a `QuotaPermit`, so a validated file proof with no quota charge is unrepresentable (`ValidatedEntryType::File` was this requirement until #900 removed the enum) | must |
 | FR-003 | `ValidatorCore::charge_hardlink` (renamed from `record_hardlink`, then `reserve_hardlink`, in v0.7.0; a method of `EntryValidator` until #900) SHALL return a standalone `QuotaPermit` for hardlink targets, whose size is only known in a second extraction pass, decoupled from the entry's own path validation; it SHALL take the `EntryCount` the first pass obtained, so the entry is charged bytes without being counted twice | must |
 | FR-004 | `ValidatorCore::validate_entry_path_in` (takes a `NodeKind` and returns an `EntryPath<SafePath>`; `EntryValidator::validate_entry_path` until v0.7.0, removed in #808) SHALL split path validation out of `validate_entry`, so callers that must inspect the destination before deciding whether to reserve quota (7z's duplicate-skip check) are not forced to reserve quota just to obtain the validated path | must |
-| FR-005 | `ValidatorCore::reserve_file` (`EntryValidator::reserve_file` until v0.7.0) SHALL mirror `charge_hardlink`'s decoupling for the 7z duplicate-skip case: quota is reserved only *after* the destination is inspected and the entry is confirmed not to be a skipped duplicate | must |
+| FR-005 | `ValidatorCore::reserve_file` (`EntryValidator::reserve_file` until v0.7.0) SHALL mirror `charge_hardlink`'s decoupling for the 7z duplicate-skip case: quota is reserved only *after* the destination is inspected and the entry is confirmed not to be a skipped duplicate; the 7z pre-pass (`PrePass::reserve_file`, its own `ValidatorCore`) discards that permit, since it only checks the quota before any write, and the write path obtains its permit from `validate_file_in` | must |
 | FR-006 | EVERY format's file-write path (TAR, ZIP, 7z) SHALL consume its `QuotaPermit` by value at the point of writing, not merely hold a shared reference to it | must |
 | FR-007 | WHERE an extraction target needs an owned `QuotaPermit`, it SHALL obtain it from the typed `ValidatedFile` that `ValidatorCore::validate_file_in` returns (`security::admitted`, v0.8.0, #793, #808), which carries the permit by value; `ValidatedEntry::into_parts()` (v0.6.0 to v0.7.0) and `ValidatedEntry` itself (#900) were removed; `EntrySink::create_file` and `create_file_from` receive the permit's bytes as the `Copy` `AdmittedSize` (`QuotaPermit::into_admitted`, #909), so a sink cannot be handed a size that was not charged | must |
 | FR-008 | Since v0.8.0 (#793, #808) the TAR, ZIP and 7z handlers SHALL NOT match on a validated-entry enum; each entry kind is admitted through its own `ExtractTarget::validate_*` method returning its own typed proof, and only `validate_file` yields a `ValidatedFile` carrying a permit, so a permit cannot be bound for another kind and the ZIP runtime fail-closed guard of v0.6.0 is no longer needed (`ValidatedEntryType` and `EntryValidator::validate_entry` were removed, #900) | must |
@@ -165,7 +165,7 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 | A hand-written format handler tries to construct a `ValidatedFile` directly with a forged/absent permit | Does not compile — no public path to a `QuotaPermit` exists outside `QuotaTracker::reserve` |
 | TAR hardlink extraction (the original #428 gap) | `ValidatorCore::charge_hardlink` charges the target's on-disk size before `copy_file_with_permit` runs, spending the `EntryCount` taken in the first pass; TAR's hardlink copy path consumes the permit by value, so a single reservation cannot be spent twice |
 | Many symlink or hardlink entries in one archive | Each counts against `max_file_count` in `extract`, so a link flood is bounded like a file flood (`QuotaExceeded { FileCount }`) |
-| 7z file write with `skip_duplicates` | `validate_entry_path_in` runs first (no charge); if the entry is not a duplicate, `reserve_file` charges quota only then — a skipped duplicate never consumes any of the file-count/byte-size allotment |
+| 7z file write under `ExistingFiles::Skip` | `validate_entry_path_in` runs first (no charge); if the entry is not a duplicate, `reserve_file` charges quota only then — a skipped duplicate never consumes any of the file-count/byte-size allotment |
 | A handler attempting to write a non-file entry with a permit | Not expressible since v0.8.0: only `validate_file` returns a permit-carrying `ValidatedFile` (v0.6.0 to v0.7.0: ZIP carried a runtime fail-closed guard, TAR an exhaustive `match`) |
 | A future format handler adds a new write path and forgets to reserve quota | Does not compile — a `ValidatedFile` can only be obtained from `ValidatorCore::validate_file_in`, and a sink needs the `AdmittedSize` derived from its permit (#900, #909) |
 

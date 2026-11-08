@@ -10,7 +10,7 @@ tags:
   - security
   - rust
 created: 2026-11-04
-updated: 2026-11-06
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -63,7 +63,7 @@ against the entry name the user sees in `list`.
 - Atomic replace of an extraction destination (see [[015-atomic-force-destination-swap-hardening/spec]])
 - Preserving owner, ACLs or extended attributes of a replaced archive
 - Writing to a FIFO, a device or `/dev/stdout` (use `CreateRequest::write` with a writer)
-- `fsync` of the parent directory after the rename
+- Durability beyond `Durability::Synced` (a stronger guarantee than `sync_all` of the file and a best-effort sync of the parent directory, FR-027)
 
 ## 2. User Stories
 
@@ -219,7 +219,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | `OutputPolicy` | Whether an existing file may be replaced | `CreateNew`, `Replace` |
 | `OutputFormat` | How the archive format is chosen | `FromExtension`, `Explicit(CreatableFormat)` |
 | `OutputFile` | The archive file a creation writes | `create_new`, `replace`, `with_format`, `path`, `policy`, `format` |
-| `StagedOutput` | Crate-private temporary file next to the target; deleted on drop | `begin(target, policy)`, `parts()`, `commit()` |
+| `StagedOutput` | Crate-private temporary file next to the target; deleted on drop | `begin(target, policy)`, `parts()`, `commit(Durability)` |
 | `ExcludedOutput` | Crate-private pair of names (target, staged file) plus the canonical parent that the walker must skip | `excludes(path)` |
 | `ExcludePattern` | Parsed exclude pattern (opaque since #1000, see [[023-entry-selection-glob-patterns/spec]]) | `matches(&Path)`; `skip_reason(archive_path, config)`; was `Exact`, `Prefix`, `Suffix`, `Path` |
 | `CreateRequest<'a>` | Creation under a `CreationConfig` with optional progress | `with_progress`, `create(&OutputFile, sources)`, `write(ArchiveWriter, sources)`, `to_bytes(CreatableFormat, sources)` |
@@ -243,7 +243,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | A hidden directory below a source root (`.git`, `.ssh`) without `include_hidden` | Never entered; one `hidden` skip for the directory, so a large hidden tree costs nothing (faster than walking and filtering it) |
 | A hidden source root named by the caller, a file source, or `include_hidden = true` | Unchanged: archived |
 | `--follow-symlinks` and a link `keys -> .ssh` | The visible name of the link decides: archived |
-| Pattern `target/` or `src/gen` | `Path`, anchored at the archive root |
+| Pattern `target/` or `src/gen` | Anchored at the archive root (a pattern with a `/`), matching that path and its subtree |
 | Pattern `file?.txt`, `[ab]`, `build/*`, `src/**/*.o` | Accepted as globs (spec 023); before #1000 refused as `glob_metacharacter` or `wildcard_with_separator` |
 | Pattern `*.{a,b}`, `a,b`, `!x` or `" a"` | Refused (`contains_comma`, `leading_negation`, `padded_with_blank`; `{a}` alone is `brace_alternation`); the message names the pattern |
 | A non-UTF-8 file name and a pattern | Matched by raw bytes |
@@ -269,7 +269,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 
 ### Ask First
 - Preserving owner, ACLs or xattrs of a replaced file
-- Syncing the parent directory after the rename
+- Making a failed parent directory sync an error instead of `DirectoryNotSynced`
 - Adding an `OutputPolicy` variant (the enum is `#[non_exhaustive]`)
 
 ### Never

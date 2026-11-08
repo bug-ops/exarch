@@ -10,6 +10,7 @@ tags:
   - rust
   - typestate
 created: 2026-10-19
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -138,7 +139,7 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 | FR-005 | WHEN `verify_archive` runs on an inconsistent ZIP THE SYSTEM SHALL record each finding as an `inspection::report::IssueCategory` variant (new variant(s) for header inconsistency, duplicate entry, overlapping entries) in `VerificationReport.issues` rather than propagating an error, per the constitution's verify-reporting rule | must |
 | FR-006 | WHEN `verify_archive` runs on a ZIP THE SYSTEM SHALL report the true number of entries in the central directory, including entries sharing a name, regardless of the configured policy | must |
 | FR-007 | WHEN `list_archive` runs on a ZIP containing duplicate names under the Ignore policy THE SYSTEM SHALL list every entry rather than collapsing duplicates. **Resolved:** the under-count originates in the `zip` crate's name index, which keeps one slot per name (first record's position, last record's data) and drops the other records, so they cannot be listed. Ignore lists the crate's view and keeps "last entry wins" extraction; `verify` still reports the raw record count and, under Enforce, a duplicate-entry finding | should |
-| FR-008 | THE SYSTEM SHALL expose the policy as a two-state enum (working name `HeaderConsistencyPolicy { Enforce, Ignore }`, final naming in plan) stored on `SecurityConfig`, settable through a fluent `with_*` builder on the `Unvalidated` state only, immutable once `Validated`, consistent with [[014-config-typestate-validation/spec]] | must |
+| FR-008 | THE SYSTEM SHALL expose the policy as a two-state enum `ZipConsistencyPolicy { Enforce, Ignore }` stored as `SecurityConfig::zip_consistency` and set through `SecurityConfig::with_zip_consistency`; `SecurityConfig` has no validation typestate since #898 (the original `Unvalidated`/`Validated` design of [[014-config-typestate-validation/spec]] is obsolete) | must |
 | FR-009 | THE SYSTEM SHALL NOT represent the policy as a `bool`, string, or untyped map at any layer (core, CLI, Python, Node) | must |
 | FR-010 | THE SYSTEM SHALL expose the policy through `exarch-cli` (typed `clap` value enum), `exarch-python` and `exarch-node` with identical semantics; the bindings SHALL only map the type and convert the error/issue variants, with all checking logic remaining in `exarch-core` | must |
 | FR-011 | WHEN a new error or issue variant is added THE SYSTEM SHALL keep `ArchiveError` and `IssueCategory` `#[non_exhaustive]` and update the wildcard-arm conversions in CLI, Python and Node so an unmapped variant has a generic fallback (per [[016-sanitized-mode-and-non-exhaustive-enums/spec]]) | must |
@@ -161,17 +162,17 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 | NFR-006 | API stability | The new config field, enum, error variant(s) and issue category variant(s) are public API changes; document in `CHANGELOG.md` under `[Unreleased]` (pre-1.0.0, no deprecation window); if the default is Enforce this is also a behavior change for existing callers and must be called out as such |
 | NFR-007 | Compatibility | A compatibility corpus of legitimate ZIPs produced by common tools must pass under the default policy (see section 7, SC-004) |
 | NFR-008 | Documentation | Every new `pub` item has a `///` doc comment with runnable `# Examples` for non-trivial APIs; docs build with `RUSTDOCFLAGS="-D warnings"` |
-| NFR-009 | Dependencies | No new dependency for the structural checks; the work uses the already-locked `zip` 9.0.5 API (9.1.0 since 0.7.0). The constitution's Technology Stack line still lists `zip` 9.0.0-pre2 and should be refreshed when this lands. The same change adds `unicode-normalization` as a macOS-only dependency for the name folding of #654 |
+| NFR-009 | Dependencies | No new dependency for the structural checks; the work uses the `zip` header-check API (9.0.5 when specified, `~9.4` since #971). The constitution's Technology Stack line still lists `zip` 9.0.0-pre2 and should be refreshed when this lands. The same change adds `unicode-normalization` as a macOS-only dependency for the name folding of #654 |
 
 ## 5. Data Model
 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
-| `HeaderConsistencyPolicy` (working name) | Two-state, `Copy` policy enum on `SecurityConfig` (and `SecurityConfigFields`); `Enforce` runs the checks, `Ignore` preserves current behavior | Variants `Enforce`, `Ignore`; default per decision in section 9; plain data, no validation state of its own |
-| `HeaderInconsistencyKind` (working name) | Typed enum naming what disagreed or was structurally invalid | `NameMismatch`, `UnicodePathMismatch`, `CompressionMethodMismatch`, `EncryptionFlagMismatch`, `DataDescriptorFlagMismatch`, `ModifiedTimeMismatch`, `DataDescriptorMismatch`, `DuplicateName`, `OverlappingEntries`; `#[non_exhaustive]`; exact set follows what the crate can report distinguishably (plan phase) |
-| `ArchiveError::HeaderInconsistency` (working name) | New error variant returned by `extract`/`list` on rejection | `kind: HeaderInconsistencyKind`, entry index, central-directory name (archive-relative, attacker-controlled, so not redacted per the constitution's redaction rule) |
-| `IssueCategory` additions | New `inspection::report::IssueCategory` variant(s) for verify findings (for example `HeaderInconsistency`, `DuplicateEntry`, `OverlappingEntries`; final split in plan) | Display text follows the existing `=> "Title Case"` convention in the `closed_enum` macro |
-| `SecurityConfigFields` addition | New public field holding the policy | Default set in `SecurityConfig::default()` |
+| `ZipConsistencyPolicy` | Two-state, `Copy` policy enum stored as `SecurityConfig::zip_consistency`; `Enforce` (default, also in `permissive()`) runs the checks, `Ignore` preserves central-directory-only behavior | `Enforce`, `Ignore`; `as_str()` is `enforce` / `ignore`; plain data |
+| `ZipInconsistency` | Typed finding carried by `ArchiveError::ZipInconsistency(ZipInconsistency)` and by verify issues | `HeaderMismatch`, `HeaderUncomparable`, `DuplicateName`, `OverlappingEntries`, `HiddenLocalHeader`, `StrayCentralRecord`, `StrayEndRecord`, `DescriptorOverrun`, `XlTypeDivergence`, `NonRegularPayload`, `StreamEndUnknown`, `UncountedCentralRecords`, `IgnoredEndRecord` (see section 11) |
+| `ZipHeaderField` | Typed name of the header field that disagreed in a `HeaderMismatch` (replaces the working name `HeaderInconsistencyKind`) | `FileName`, `UnicodePath`, `CompressionMethod`, `EncryptionFlag`, `DataDescriptorFlag`, `ModifiedTime`, `Crc32`, `CompressedSize`, `UncompressedSize` and the zip 9.4 refusals of [[002-format-handlers/spec]] FR-064 |
+| `IssueCategory` additions | `inspection::report::IssueCategory` variants for verify findings | `HeaderMismatch`, `DuplicateEntry`, `OverlappingEntries`, `HiddenEntry` (and `NameCollision`); display text follows the `=> "Title Case"` convention of `closed_enum!` |
+| `SecurityConfig::zip_consistency` | Public field holding the policy | Default `Enforce` in `SecurityConfig::default()` |
 
 ## 6. Edge Cases and Error Handling
 
@@ -249,7 +250,7 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 > **Resolved:** see FR-007. Original question: see FR-007. Establish where the 1-entry undercount originates, and decide whether Ignore keeps "last entry wins" extraction or listing shows all entries while extraction behavior is unchanged.]
 
 > [!question] Exact policy and enum naming
-> **Resolved:** `ZipConsistencyPolicy { Enforce, Ignore }`, `SecurityConfig::with_zip_consistency`, CLI `--zip-consistency <enforce|ignore>`, Python `with_zip_consistency("enforce" | "ignore")`, Node `setZipConsistency`, error `ArchiveError::ZipInconsistency(ZipInconsistency)`. Original question: final names for the policy enum, the `SecurityConfig` builder method, the CLI flag and the Python/Node surface; align with the naming conventions already used for typed enums in the bindings.]
+> **Resolved:** `ZipConsistencyPolicy { Enforce, Ignore }`, `SecurityConfig::with_zip_consistency`, CLI `--zip-consistency <enforce|ignore>`, Python `with_zip_consistency("enforce" | "ignore")`, Node `withZipConsistency` (`setZipConsistency` before 0.9.0, #1009, #1019), error `ArchiveError::ZipInconsistency(ZipInconsistency)`. Original question: final names for the policy enum, the `SecurityConfig` builder method, the CLI flag and the Python/Node surface; align with the naming conventions already used for typed enums in the bindings.]
 
 ## 10. See Also
 

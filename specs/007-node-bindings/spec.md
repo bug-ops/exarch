@@ -10,7 +10,7 @@ tags:
   - rust
 created: 2026-05-20
 updated: 2026-11-06
-status: draft
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -127,7 +127,7 @@ SO THAT I can customize extraction limits in JavaScript
 
 **Acceptance criteria:**
 ```
-GIVEN new SecurityConfig().maxFileSize(200 * 1024 * 1024).allowSymlinks(false)
+GIVEN new SecurityConfig().withMaxFileSize(200 * 1024 * 1024).withAllowSymlinks(false)
 WHEN passed to extractArchive()
 THEN extraction respects those settings
 ```
@@ -142,14 +142,14 @@ THEN extraction respects those settings
 | FR-083 | Every rejected Promise and synchronous throw SHALL be an `Error` (`ExarchError` in `index.d.ts`) whose `message` is the human-readable description only and whose machine-readable data is in typed properties built from `exarch_core::ArchiveError::into_ffi_message()` (BREAKING in v0.8.0, #758, #760, #768): `code` (`ErrorCode`, the stable upper-snake core code, or `PROGRESS_CALLBACK_ERROR`), `relaxableBy?` (`PolicySetting`), `writes?` (`PartialWrites`: `'kept'`, `'rolled_back'`, `'discarded'`), and, when `writes === 'kept'`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`; when `PartialExtraction` wraps an inner error, `code` is the inner error's code. The types `ErrorCode`, `PolicySetting`, `PartialWrites` and `ExarchError` (a union discriminated on `writes`, including `ExarchNativeError` for binding-raised errors whose `code` is napi's status string) are exported | must |
 | FR-084 | `SecurityConfig` and `CreationConfig` SHALL be exposed as JavaScript classes with fluent builder methods; `SecurityConfig` SHALL expose `allowSolidArchives` getter consistent with `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable` | must |
 | FR-085 | `ExtractionReport`, `CreationReport`, `ArchiveManifest`, and `VerificationReport` SHALL be exposed as JavaScript objects with typed fields | must |
-| FR-088 | `ExtractionOptions` SHALL be exposed as a JavaScript class with builder methods `withAtomic(bool?)` and `withSkipDuplicates(bool?)`; both `extractArchive` and `extractArchiveWithProgress` SHALL accept an optional `options` parameter | must |
+| FR-088 | `ExtractionOptions` SHALL be exposed as a JavaScript class with builder methods `withStaging` and `withExistingFiles` (FR-115, FR-118; they replaced `withAtomic` and `withSkipDuplicates`); both `extractArchive` and `extractArchiveWithProgress` SHALL accept an optional `options` parameter | must |
 | FR-089 | ALL async operations SHALL wrap the core call with `catch_unwind` inside `spawn_blocking`; panics in `exarch-core` SHALL be converted to JavaScript errors and SHALL NOT abort the Node.js process | must |
 | FR-090 | `extractArchiveWithProgress(archivePath, outputDir, config?, options?, progress?)` SHALL accept an optional `ThreadsafeFunction` callback with signature `(path: string, total: number \| null, current: number, bytesWritten: number) => void` (`total` is `null` while the count is unknown, FR-110); numeric callback arguments are `number` (not `bigint`) | must |
 | FR-086 | napi-rs SHALL generate TypeScript `.d.ts` files for all exported functions and classes | must |
 | FR-087 | ALL path arguments SHALL accept `string` type in JavaScript | must |
-| FR-091 | `SecurityConfig.withAllowSymlinks`/`withAllowHardlinks`/`withAllowAbsolutePaths`/`withAllowWorldWritable`/`withAllowSolidArchives`/`withPreservePermissions`, `CreationConfig.withPreservePermissions`/`withFollowSymlinks`/`withIncludeHidden`, and `ExtractionOptions.withSkipDuplicates`/`withAtomic` SHALL take a mandatory `boolean` argument, not `Option<bool>` resolved via `.unwrap_or(true)`; omitting the argument, or passing explicit `undefined`/`null`, SHALL be a compile-time TypeScript error / runtime napi error rather than silently flipping the flag to the permissive `true` state (v0.6.0, #442, BREAKING) | must |
-| FR-092 | WHEN a `PartialExtraction` error is converted to a JS error, THE SYSTEM SHALL set `writes` and, only while the written files remain (`'kept'`), the properties `filesExtracted`, `bytesWritten`, `filesSkipped` and `warnings` (an `Array<string>`); an atomic rollback sets only `writes: 'rolled_back'` and an in-memory extraction that dropped its entries only `writes: 'discarded'`. Before v0.8.0 these were appended to the message as ` \| writes=kept, filesExtracted=N, ...` (v0.6.0, #508; v0.7.0, #747; v0.8.0, #760, #768, #800, #808) | must |
-| FR-093 | WHEN a progress callback throws (an `Error`/object, or a bare primitive) during `extractArchiveWithProgress` or `createArchiveWithProgress`, THE SYSTEM SHALL capture it (via `call_async_catch` plus a JS shim that pre-empts napi-rs's primitive-throw escalation) and reject the returned Promise instead of crashing the process with `napi_fatal_exception`; `createArchiveWithProgressSync` cannot use the awaiting dispatch (would deadlock the blocked event loop) and remains a documented, unaffected exception — a throw there surfaces as an ordinary `uncaughtException` (v0.6.0, #465, #473) | must |
+| FR-091 | `SecurityConfig.withAllowSymlinks`/`withAllowHardlinks`/`withAllowAbsolutePaths`/`withAllowWorldWritable`/`withAllowSolidArchives`/`withPreservePermissions`, `CreationConfig.withPreservePermissions`/`withFollowSymlinks`/`withIncludeHidden`, and the former `ExtractionOptions.withSkipDuplicates`/`withAtomic` (now `withExistingFiles`/`withStaging`, enum arguments) SHALL take a mandatory `boolean` argument, not `Option<bool>` resolved via `.unwrap_or(true)`; omitting the argument, or passing explicit `undefined`/`null`, SHALL be a compile-time TypeScript error / runtime napi error rather than silently flipping the flag to the permissive `true` state (v0.6.0, #442, BREAKING) | must |
+| FR-092 | WHEN a `PartialExtraction` error is converted to a JS error, THE SYSTEM SHALL set `writes` and, only while the written files remain (`'kept'`), the properties `filesExtracted`, `bytesWritten`, `filesSkipped` and `warnings` (typed objects, FR-119); an atomic rollback sets only `writes: 'rolled_back'` and an in-memory extraction that dropped its entries only `writes: 'discarded'`. Before v0.8.0 these were appended to the message as ` \| writes=kept, filesExtracted=N, ...` (v0.6.0, #508; v0.7.0, #747; v0.8.0, #760, #768, #800, #808) | must |
+| FR-093 | WHEN a progress callback throws (an `Error`/object, or a bare primitive) during `extractArchiveWithProgress` or `createArchiveWithProgress`, THE SYSTEM SHALL capture it (via `call_async_catch` plus a JS shim that pre-empts napi-rs's primitive-throw escalation) and reject the returned Promise instead of crashing the process with `napi_fatal_exception`; the synchronous creation variant that would have deadlocked the blocked event loop was removed in #953 (v0.6.0, #465, #473) | must |
 | FR-094 | ALL path-carrying `ArchiveError` variants SHALL be redacted for release-build error messages via the shared core redaction helpers (the public `sanitize_path_for_error`, `sanitize_io_error_for_error` and `format_entry_path_for_error`, re-exported at the `exarch_core` root), matching the Python binding's policy (archive-relative paths never redacted; host-derived paths redacted to filename-only or `ErrorKind` description) (v0.6.0, #453, #463) | must |
 | FR-095 | `verifyArchive(archivePath, config?, options?)` (and `verifyArchiveSync`) SHALL accept a `VerificationOptions` class; `withIntegrityCheck(budget?)` decodes the payload to the decoder's EOF (default budget 500 MiB, independent of `maxTotalSize`; error for a zero or negative budget), otherwise `integrityStatus` is `'SKIPPED'` (v0.7.0, #670) | must |
 | FR-096 | `VerificationReport` SHALL expose `status`, `integrityStatus`, `integrityGaps?` (absent unless the check ran: `counts: UnverifiedCount[]`, `entries: UnverifiedEntry[]`, `omitted`), `securityStatus`, `issues`, `totalEntries`, `suspiciousEntries`, `totalSize` and `format`; report enum fields are typed string unions in `index.d.ts` (`VerificationStatus`, `CheckStatus`, `IntegrityStatus`, `IssueSeverity`, `IssueCategory`, `UnverifiedReason`, `ManifestEntryType`, `ArchiveType`, `ZipConsistencyPolicy`) (v0.7.0, #624, #672, #684) | must |
@@ -165,11 +165,11 @@ THEN extraction respects those settings
 | FR-106 | `ExarchError` SHALL be a discriminated union that pairs each `code` with its properties (`ExarchCoreError` = every shape but `ExarchNativeError`; `INVALID_ARCHIVE` with optional `InvalidArchiveSubCode`, `SECURITY_VIOLATION` with a required `SecurityViolationSubCode` and optional `relaxableBy`, `QUOTA_EXCEEDED` and `ZIP_BOMB` with a required `QuotaSubCode` or `ZipBombSubCode`, `INVALID_CONFIGURATION` with `setting`, `IO_ERROR` with a required `ioKind: IoKind`), crossed with `writes`; `IoKind` is a stable string enum of 24 `io::ErrorKind` values plus `Other`; mirror enums have reverse drift tests (`mirror_maps_to_core!`) and `InvalidArchiveSubCode` includes `TAR_READER` and `SEVENZ_READER` (#924, #920, #918, #930, #896) | must |
 | FR-107 | The in-memory and callback functions SHALL take a `SinkOptions` class (`withExistingFiles`, `existingFiles`, `withDecodeReuse(mode, limit?)`, `decodeReuse`, `decodeReuseLimit`) instead of `ExtractionOptions` (passing `ExtractionOptions` throws `InvalidArg` synchronously; `atomic` cannot be requested) (#926) | must |
 | FR-108 | `MemoryEntry` SHALL be a union discriminated by `kind` (`MemoryFileEntry`, `MemoryDirectoryEntry`, `MemorySymlinkEntry`, `MemoryHardlinkEntry`) and `MemoryExtraction.entries` SHALL be `StoredMemoryEntry[]` (no hardlink); `listArchive*` entries SHALL be `ArchiveEntry` = `ManifestFileEntry \| ManifestDirectoryEntry \| ManifestSymlinkEntry \| ManifestHardlinkEntry` discriminated by `entryType` with `size` only on files, `mode` the raw archive mode and links carrying `target: LinkTarget` (`recorded { path }`, `missing`, `unread`, `unreadable`, `oversized { bytes }`); `symlinkTarget` and `hardlinkTarget` are removed (#923, #910) | must |
-| FR-109 | `SecurityConfig` count, depth and size setters (and `CreationConfig.withMaxFileSize`) SHALL take a JS number through core `positive_from_f64`: negative, fractional, non-finite, zero and above 2^53-1 are `INVALID_CONFIGURATION` with `setting`; `maxFileCount` is `number \| null` (null is unbounded); `withParallelDecodeMemory`, `withIntegrityCheck` and `addExcludePattern` throw `INVALID_CONFIGURATION` with `parallel_decode_memory`, `decompression_budget` and `exclude_pattern`; `getMaxSolidBlockMemory` is `number \| null` and its setter throws `INVALID_CONFIGURATION` while solid archives are refused; every path argument goes through `BoundaryPath::parse` and only the parsed value reaches core (#917, #921, #927, #911) | must |
-| FR-110 | The progress callback tuple SHALL be `ProgressArgs = [path, total: number \| null, current, bytesWritten]` with `total` `null` while the count is unknown; reports SHALL carry `skipped: SkippedSummary { counts: { kind, count }[], sample: SkippedEntry[] }` (kind typed `SkipKind`, `ioKind?: IoKind`), `filesSkipped` is the total over all reasons, `warnings` stay `string[]`, and the error object of a kept partial extraction carries `skipped` as well as `filesSkipped`; the tuple is the exported alias `ProgressArgs` in every progress-taking function, listing and verification included (#904, #906) | must |
+| FR-109 | `SecurityConfig` count, depth and size setters (and `CreationConfig.withMaxFileSize`) SHALL take a JS number through core `positive_from_f64`: negative, fractional, non-finite, zero and above 2^53-1 are `INVALID_CONFIGURATION` with `setting`; `maxFileCount` is `number \| null` (null is unbounded); `withParallelDecodeMemory`, `withIntegrityCheck` and `addExcludePattern` throw `INVALID_CONFIGURATION` with `parallel_decode_memory`, `decompression_budget` and `exclude_pattern`; the `maxSolidBlockMemory` getter is `number \| null` and its setter throws `INVALID_CONFIGURATION` while solid archives are refused; every path argument goes through `BoundaryPath::parse` and only the parsed value reaches core (#917, #921, #927, #911) | must |
+| FR-110 | The progress callback tuple SHALL be `ProgressArgs = [path, total: number \| null, current, bytesWritten]` with `total` `null` while the count is unknown; reports SHALL carry `skipped: SkippedSummary { counts: { kind, count }[], sample: SkippedEntry[] }` (kind typed `SkipKind`, `ioKind?: IoKind`), `filesSkipped` is the total over all reasons, `warnings` are typed objects (FR-119), and the error object of a kept partial extraction carries `skipped` as well as `filesSkipped`; the tuple is the exported alias `ProgressArgs` in every progress-taking function, listing and verification included (#904, #906) | must |
 | FR-111 | `VerificationIssue` SHALL carry `code`, `subCode`, `relaxableBy`, `setting` and `ioKind` from the core finding (typed as the generated fields intersected with `ExarchErrorCodeDetail \| HeuristicIssueDetail`); `context` is removed; `mode?: number` carries the raw mode of an invalid-permissions finding (#899) | must |
 | FR-112 | Listing SHALL refuse a non-UTF-8 entry name or link target with `INVALID_ARCHIVE` (`ENTRY_NAME`) through core `ArchiveEntry::utf8_path()`; verify issue paths, integrity gap paths, skip samples and progress paths SHALL use an injective `path_text` rendering (core `exarch_core::path_text`: `\` is written `\x5C`, each invalid Unix byte `\xNN`, each unpaired UTF-16 unit `\uNNNN`), so a literal name `a\xFFb` and a name with the byte 0xFF stay distinct; a caller cannot recover the original bytes (no `pathBytes` field); the `INVALID_ARCHIVE` error of a refused listing carries the same rendering as `nonUtf8EntryPath` (#925) | must |
-| FR-113 | `createArchive*` SHALL take an optional trailing `CreateOptions { format?: CreatableFormat, overwrite?: boolean, durability?: Durability }` (`createArchiveWithProgress` after the progress argument; `CreatableFormat` is a napi string enum without `'SevenZ'`, so `'SevenZ'` is a TypeScript compile error and a napi `InvalidArg` refusal; `Durability` is `'Synced' | 'Unsynced'`, see [[021-create-staging-and-output-policy/spec]] FR-027): the default replaces an existing output atomically (`OutputFile::replace`), `overwrite: false` maps to `create_new` and rejects with `OUTPUT_EXISTS`, `format` maps to `OutputFile::with_format` and `'SevenZ'` is refused; a failed creation leaves any previous archive untouched (see [[021-create-staging-and-output-policy/spec]]); a progress callback that throws cancels the creation (nothing is written, `PROGRESS_CALLBACK_ERROR`, typed `ExarchErrorReadCallback`/`ExarchErrorCreationCallback`); `addExcludePattern` parses with core `ExcludePattern::try_from` (#912, #915, #931, #916) | must |
+| FR-113 | `createArchive*` SHALL take an optional trailing `CreateOptions { format?: CreatableFormat, overwrite?: boolean, durability?: Durability }` (`createArchiveWithProgress` after the progress argument; `CreatableFormat` is a napi string enum without `'SevenZ'`, so `'SevenZ'` is a TypeScript compile error and a napi `InvalidArg` refusal; `Durability` is `'synced' | 'unsynced'`, see [[021-create-staging-and-output-policy/spec]] FR-027): the default replaces an existing output atomically (`OutputFile::replace`), `overwrite: false` maps to `create_new` and rejects with `OUTPUT_EXISTS`, `format` maps to `OutputFile::with_format` and `'SevenZ'` is refused; a failed creation leaves any previous archive untouched (see [[021-create-staging-and-output-policy/spec]]); a progress callback that throws cancels the creation (nothing is written, `PROGRESS_CALLBACK_ERROR`, typed `ExarchErrorReadCallback`/`ExarchErrorCreationCallback`); `addExcludePattern` parses with core `ExcludePattern::try_from` (#912, #915, #931, #916) | must |
 | FR-114 | `createArchiveToBytes` and `createArchiveToBytesSync` SHALL take `format: CreatableFormat`; the Node `ConfigSetting` mirror SHALL include `'durability'`, and a test SHALL pin that the napi `CreatableFormat` and `Durability` values equal the core `NAMES` | must |
 | FR-115 | `ExtractionOptions` and `SinkOptions` SHALL take `existingFiles` as the napi string enum `ExistingFiles` (`'skip' | 'overwrite' | 'refuse'`, default `'skip'`) through `withExistingFiles` and the `existingFiles` getter (`withSkipDuplicates` and `skipDuplicates` are removed; the `SinkOptions` setters are `with*`); `refuse` surfaces a pre-existing file as `OUTPUT_EXISTS` with `conflicts: string[]` of entry names, leaves it untouched and counts an in-archive duplicate as skipped | must |
 | FR-116 | `SecurityConfig` `allowedExtensions` SHALL be `string[] | null` (`null` for Any); `withAllowedExtensions(null)` SHALL clear it, `withAllowedExtensions([])` SHALL throw `INVALID_CONFIGURATION` with setting `allowed_extension` and problem `Empty`, and `undefined` is a napi `InvalidArg`, not a clear; `withBannedComponents(string[])` and `CreationConfig.withExcludePatterns(string[])` validate the whole list before replacing it and keep their meaning for `[]` (an empty ban or exclude list is not fail-open) | must |
@@ -180,6 +180,7 @@ THEN extraction respects those settings
 | FR-121 | A `Disposition` SHALL be discriminated by `action` (`'extract'` with `landing`, `'skip'` with `kind: SkipKind`), replacing the former `kind: 'extract' \| 'skip'` and `reason`; the values derive from core `DispositionKind::as_str` and `SkipKind`, and a parity test checks that every enumerable token of the core `ALL` tables (`ErrorCode`, sub-codes, `SkipKind`, `IoKind`, `DispositionKind`, `RestoreKind`, `ExtractionWarningKind`, `CreationWarningKind`) appears in the Node stub (#1011, #1010) | must |
 | FR-122 | `SOURCE_NOT_FOUND` SHALL carry `path`, and `OUTPUT_EXISTS` (including a refused `DestinationOccupied`) SHALL carry `path`, both redacted like an error message; `leftoverPath` SHALL name a staging directory or empty output reservation that a failure left on disk, on every error that core reports one for, including a progress-callback cancellation (`PROGRESS_CALLBACK_ERROR` through `CallbackCancelled`/`CreationCancelled`) (#995, #1009) | must |
 | FR-123 | The `backup_cleanup_failed` extraction warning SHALL carry `reason`, the removal failure text redacted like an I/O error message; the progress tuple's `bytesWritten` slot stays `0` (only `on_entry_start` dispatches and no byte of that entry is written yet), which `index.d.ts` documents (#1012) | should |
+| FR-124 | `SecurityConfig` SHALL carry the entry selection of [[022-extract-entry-selection/spec]] FR-104 (`addIncludePattern`, `withIncludePatterns`, `addExcludePattern`, `withExcludePatterns`, `withStripComponents(number \| null)`, `withFlatten(boolean)`); patterns use the glob grammar of [[023-entry-selection-glob-patterns/spec]] and a refused pattern is `INVALID_CONFIGURATION` with `setting` `entry_include` or `entry_exclude`; an include that matched no entry rejects with `INVALID_CONFIGURATION` carrying `unmatchedPatterns: string[]`; the binding adds no matching logic | must |
 
 ## 4. Non-Functional Requirements
 
@@ -197,8 +198,8 @@ THEN extraction respects those settings
 |--------|-------------|----------------|
 | `SecurityConfig` (JS class) | JavaScript class wrapping Rust `SecurityConfig` | Fluent builder: `withMaxFileSize()`, `withMaxTotalSize()`, `withAllowSymlinks()`, `withZipConsistency()`, `withParallelDecodeMemory()`, etc. |
 | `CreationConfig` (JS class) | JavaScript class wrapping Rust `CreationConfig` | Fluent builder: `withCompressionLevel()`, `withFollowSymlinks()`, etc. |
-| `ExtractionReport` (JS object) | Result of extraction | `filesExtracted`, `directoriesCreated`, `bytesWritten`, `duration`, `warnings` |
-| `CreationReport` (JS object) | Result of creation | `filesAdded`, `bytesWritten`, `duration` |
+| `ExtractionReport` (JS object) | Result of extraction | `filesExtracted`, `directoriesCreated`, `symlinksCreated`, `bytesWritten`, `durationMs`, `filesSkipped`, `skipped`, `warnings` |
+| `CreationReport` (JS object) | Result of creation | `filesAdded`, `directoriesAdded`, `symlinksAdded`, `bytesWritten`, `bytesCompressed`, `durationMs`, `filesSkipped`, `skipped`, `warnings` |
 | `ArchiveManifest` (JS object) | Archive listing result | `totalEntries`, `totalSize`, `format`, `entries` |
 | `VerificationReport` (JS object) | Verification result | `status`, `integrityStatus`, `integrityGaps`, `securityStatus`, `issues`, `totalEntries`, `suspiciousEntries`, `totalSize`, `format` |
 | `MemoryExtraction` / `MemoryEntry` / `CreatedArchive` (JS objects) | Results of the in-memory functions (v0.8.0; unions since #923) | `report`, `entries: StoredMemoryEntry[]` / `kind`-discriminated `MemoryFileEntry`, `MemoryDirectoryEntry`, `MemorySymlinkEntry`, `MemoryHardlinkEntry` / `data`, `report` |
@@ -230,7 +231,8 @@ function extractArchiveWithProgress(
 function createArchive(
     outputPath: string,
     sources: string[],
-    config?: CreationConfig
+    config?: CreationConfig,
+    options?: CreateOptions   // { format?, overwrite?, durability? }, FR-113
 ): Promise<CreationReport>
 
 function listArchive(
@@ -264,6 +266,8 @@ class SecurityConfig {
     withZipConsistency(policy: ZipConsistencyPolicy): this
     withParallelDecodeMemory(size?: number | null): this
     withMaxSolidBlockMemory(size: number): this  // INVALID_CONFIGURATION while solid archives are refused
+    // Selection (specs 022, 023): addIncludePattern, withIncludePatterns, addExcludePattern,
+    // withExcludePatterns, withStripComponents(count | null), withFlatten(flatten)
     // Getters
     get allowSymlinks(): boolean
     get allowHardlinks(): boolean
@@ -287,17 +291,19 @@ class VerificationOptions {
 }
 
 class CreationConfig {
-    withCompressionLevel(level: number): this  // non-integer or out-of-range input is InvalidArg
+    withCompressionLevel(level: number): this  // non-integer or out-of-range input is INVALID_COMPRESSION_LEVEL
     withFollowSymlinks(follow: boolean): this
     withIncludeHidden(include: boolean): this
     addExcludePattern(pattern: string): this
+    withExcludePatterns(patterns: string[]): this
     withMaxFileSize(size: number | null): this  // null = no limit; 0 is INVALID_CONFIGURATION
 }
 
 class ExtractionOptions {
-    withAtomic(atomic: boolean): this
+    withStaging(staging: 'in_place' | 'atomic' | 'atomic_replace'): this
     withExistingFiles(existingFiles: 'skip' | 'overwrite' | 'refuse'): this
-    get atomic(): boolean
+    get staging(): Staging
+    get existingFiles(): ExistingFiles
 }
 ```
 

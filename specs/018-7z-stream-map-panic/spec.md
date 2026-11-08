@@ -11,6 +11,7 @@ tags:
   - typestate
   - robustness
 created: 2026-10-26
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -31,7 +32,7 @@ related:
 > **MSRV**: Rust 1.99.1
 > **Origin**: continuous-improvement finding at HEAD `c95a85b` ; issue #746, fixed by #752 (0.7.0)
 > **Type / priority**: bug (panic / denial of service on untrusted input), P1
-> **Dependency**: `sevenz-rust2` 0.24.1 when implemented (#752); 0.24.2 minimum since v0.8.0 (#770), which rejects the header itself at open
+> **Dependency**: `sevenz-rust2` 0.24.1 when implemented (#752); 0.24.2 minimum since v0.8.0 (#770), which rejects the header itself at open; 0.25.0 minimum since #1024
 > **Status**: implemented in #752, narrowed in v0.8.0 (#751, #770: see FR-002, FR-003 and FR-011 below); the wrapper is `SevenZHeader`, obtained only from `read_sevenz_header` (`formats/sevenz/header.rs`); see the resolutions in section 9
 
 ## 1. Overview
@@ -87,7 +88,7 @@ A 7z archive whose parsed stream map does not cover every block is rejected with
 ### Out of Scope
 
 - Fixing or forking `sevenz-rust2`; bumping it (the fix is unreleased)
-- Other 7z hardening (encoded-header memory limit #674, dropped stream file #675); separate issues. Update: #674 (header bounded by `max_decoder_memory` through `read_with_memory_limit`) and #769 (fewer streamed files than sub-streams, refused by sevenz-rust2 0.25 at read) are specified in [[002-format-handlers/spec]] FR-069 (the header read is held to `max_decoder_memory` and to an entry budget of `max_file_count * 256 bytes + 64 KiB`, refused as `QuotaExceeded { HeaderSize }` and `QuotaExceeded { DecoderMemory }` respectively; the decoded-header buffer and the table built from a header inside the cap are not separately bounded) and FR-070
+- Other 7z hardening (encoded-header memory limit #674, dropped stream file #675); separate issues. Update: #674 (header bounded by `max_decoder_memory` through `read_with_memory_limit`) and #769 (fewer streamed files than sub-streams, refused by sevenz-rust2 0.25 at read) are specified in [[002-format-handlers/spec]] FR-069 (the header read is held to `max_decoder_memory` and to an entry budget derived from `max_file_count`, refused as `QuotaExceeded { HeaderSize }` and `QuotaExceeded { DecoderMemory }` respectively; the decoded-header buffer and the table built from a header inside the cap are not separately bounded) and FR-070
 - Rewriting the 7z handler beyond what the typed wrapper requires
 - Changing the CLI, Python or Node public surface (no new flags, options or types)
 - Auditing every other `sevenz-rust2` panic class (this spec covers the stream-map invariant only)
@@ -154,7 +155,7 @@ THEN every such index goes through the validated wrapper
 | FR-009 | THE SYSTEM SHALL keep a regression test that opens the 66-byte upstream vector through `extract_archive`, `verify_archive` and `list_archive` (and the CLI) and asserts `ArchiveError::InvalidArchive` for each | must |
 | FR-010 | THE SYSTEM SHALL ship the vector as a committed fixture that the fuzz seed assembly (`fuzz/seed-corpus.sh`) places into the `sevenz` corpus (location: section 9) | must |
 | FR-011 | WHEN `sevenz-rust2` releases a version that rejects this header at open THE PROJECT SHOULD re-evaluate the open-time check for that case and record the outcome (keep the wrapper, drop only the redundant branch); the check is not blocked on that release. Done for 0.24.2 in #751 and #770 (FR-012) | should |
-| FR-012 | WITH `sevenz-rust2` 0.24.2 as the minimum version (v0.8.0, #770), THE SYSTEM SHALL rely on upstream, which rejects a header with streams info and no files info at open (`no files info`) and builds every table sized to the blocks and files, so `SevenZHeader::check` SHALL retain only the pack-stream-offsets check (the offsets length must equal the pack stream count, which upstream leaves empty for a header that lists pack streams but no blocks); FR-002 and FR-003 are no longer checked by exarch for the block, file and span tables, and the 66-byte vector still yields `InvalidArchive` with the `failed to open 7z archive:` prefix through `list`, `verify` and `extract` | must |
+| FR-012 | WITH `sevenz-rust2` 0.24.2 as the minimum version (v0.8.0, #770), THE SYSTEM SHALL rely on upstream, which rejects a header with streams info and no files info at open (`no files info`) and builds every table sized to the blocks and files, so `SevenZHeader::check` SHALL retain only the pack-stream-offsets check (the offsets length must equal the pack stream count, which upstream leaves empty for a header that lists pack streams but no blocks); FR-002 and FR-003 are no longer checked by exarch for the block, file and span tables, and the 66-byte vector still yields `InvalidArchive` with the `failed to open 7z archive:` prefix through `list`, `verify` and `extract`; the minimum is 0.25.0 since #1024 (see [[002-format-handlers/spec]] FR-070) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -173,7 +174,7 @@ THEN every such index goes through the validated wrapper
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
 | Parsed 7z archive (`sevenz_rust2::Archive`) | Dependency type with public `blocks`, `files`, `stream_map`; can be inconsistent when produced by the crate from a hostile header | `blocks`, `files`, `stream_map` |
-| Validated 7z archive (new, name in plan) | Newtype around the parsed archive, constructible only by the single open function; carries the proof that the stream map covers every block | the parsed archive, read-only access |
+| `SevenZHeader` (`formats/sevenz/header.rs`) | Newtype around the parsed archive, constructible only by the single open function; carries the proof that the stream map covers every block | the parsed archive, read-only access |
 | `StreamMap` invariant | Relationship between three lengths and the index ranges they hold | see FR-002, FR-003 |
 
 > [!note] Design as shipped
@@ -255,7 +256,7 @@ THEN every such index goes through the validated wrapper
 
 - [[constitution]] — project principles (deny-by-default, invariants in types, verify reporting)
 - [[MOC-specs]] — all specifications
-- [[001-security-pipeline/spec]] — validation pipeline; the typed-wrapper pattern follows `SafePath` / `ValidatedEntry`
+- [[001-security-pipeline/spec]] — validation pipeline; the typed-wrapper pattern follows `SafePath` / `ValidatedFile`
 - [[002-format-handlers/spec]] — 7z handler
 - [[011-ffi-panic-boundary-simplification/spec]] — why bindings see an exception while the CLI and Rust API abort
 - [[016-sanitized-mode-and-non-exhaustive-enums/spec]] — newtype and `#[non_exhaustive]` conventions

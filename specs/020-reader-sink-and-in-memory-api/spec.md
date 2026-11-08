@@ -10,7 +10,7 @@ tags:
   - in-memory
   - bindings
 created: 2026-11-02
-updated: 2026-11-06
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -22,6 +22,7 @@ related:
   - "[[006-python-bindings/spec]]"
   - "[[007-node-bindings/spec]]"
   - "[[019-verify-and-list-model/spec]]"
+  - "[[022-extract-entry-selection/spec]]"
 ---
 
 # Feature: Reader, Sink and In-Memory API
@@ -251,6 +252,7 @@ SO THAT a web handler never writes an untrusted archive to disk
 | FR-105 | The sink occupant decisions (`stage_file`, symlink and hardlink in `sink.rs`) SHALL be exhaustive `match`es over `ExistingFiles`; `Refuse` SHALL route only to refuse or skip, never to a replace; a sink holds only this run's entries, so `Refuse` there skips an in-archive duplicate as `Skip` does | must |
 | FR-106 | Source reads and destination writes SHALL be classified apart at the sink copy: a write fault of the sink or disk stays `Io`; a read fault stays `Io` when the source tap recorded one, else it is `InvalidArchive` with the family malformation; overrun and overflow keep their meaning (GHSA-5j8q). The classifier is `ReadFaults { tap, family: ReadFamily {Tar, Zip, SevenZ, Opaque} }`, passed through `ExtractTarget::file` | must |
 | FR-107 | Concrete format handlers (`TarArchive`, `ZipArchive`, `SevenZArchive`, the `ArchiveFormat` trait, `open_tar_*`) SHALL be crate-private and the `formats` module `pub(crate)`; the root re-exports `ArchiveType`, `CreatableFormat`, `CompressionCodec` and `detect_format`; the other public modules become private after the root `pub use` block carries each public item; tests, benches, `examples/dhat_extraction.rs` and the fuzz targets use the request API (`ExtractRequest`, `ArchiveReader::of_type` with `SinkExtractRequest` or `ListRequest::list_reader`) or become in-crate unit tests; the `testing` feature stays limited to security primitives ([[002-format-handlers/spec]] FR-062) | must |
+| FR-108 | A sink run SHALL apply `SecurityConfig::selection` like a path-based extraction: an unselected entry is skipped and counted (`not_selected`, `stripped_away`), the path delivered to the sink is the landing path of the rewritten entry, and the unmatched-include check runs at the end of the scan (`finish_scan`, also for an empty archive) as `ArchiveError::UnmatchedInclude`; the selection applies to `MemorySink`, `CallbackSink` and a custom `EntrySink` alike ([[022-extract-entry-selection/spec]] FR-016) | must |
 
 ## 4. Non-Functional Requirements
 

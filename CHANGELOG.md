@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking**: `max_decoder_memory` also applies when a 7z archive is opened, and the header size is capped at `max_file_count` x 256 B + 64 KiB, so an archive with many entries or directories may need a higher `--max-files` (#674, #1024).
 - **Breaking (Windows)**: link and hardlink targets resolve handle-relatively, so targets through `SUBST`, mapped drives, 8.3 names or volume GUIDs, `\x` and `C:x` targets and reparse points other than symlinks and junctions are refused, and the result no longer depends on the destination's absolute length (#958, #1024).
 - Dependencies: `sevenz-rust2` 0.25.0 and `lzma-rust2` 0.25 (#674, #769, #1024).
+- Docs: specifications 001-024 and the constitution synced with the implemented behavior (#1059).
 
 ### Fixed
 

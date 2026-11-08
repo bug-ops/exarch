@@ -10,6 +10,7 @@ tags:
   - windows
   - rust
 created: 2026-08-03
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -264,9 +265,11 @@ new persisted or transmitted entity is introduced.
   space and a component containing `:` as `SecurityViolation`, with no
   opt-out, so the opt-out admits only reserved device names (0.7.0, #652,
   #653, #700).
-- **Resolved: Windows only.** The check runs under `cfg!(windows)` in
-  `SafePath::validate`; the pure helpers are platform-independent and a Unix
-  test pins that `folder/CON.txt` is accepted off Windows.
+- **Resolved: Windows host or `PathModel::Portable` only.** The component check
+  (`check_component_for`, `types/safe_path.rs`) applies the reserved-name rule on a
+  Windows host under `Host` and on every host under `Portable`; the pure helpers
+  are platform-independent and a Unix test pins that `folder/CON.txt` is accepted
+  off Windows under `Host`.
 - Deviations from FR-001 and FR-004 as shipped: the compared name is the
   text before the first `.` with trailing spaces trimmed (so `NUL.tar.gz`,
   `aux.` and `CON ` match, while `file.CON` and `COM10` do not), and the set
@@ -290,19 +293,13 @@ new persisted or transmitted entity is introduced.
   safe extraction should check platform-specific filename semantics,
   citing Windows reserved names as an example; the trigger for this
   finding
-- `crates/exarch-core/src/types/safe_path.rs` lines 723-736 — existing
-  `#[cfg(windows)] test_safe_path_windows_reserved_names`, currently only
-  asserting the call does not panic, with a comment documenting the gap
-  this spec closes
-- `crates/exarch-core/src/types/safe_path.rs` lines 182-224 — the
-  single-pass per-component validation loop where `banned_path_components`
-  is currently checked and where the reserved-name check should be folded
-  in (FR-001, NFR-002)
-- `crates/exarch-core/src/config.rs` lines 207-232 (`SecurityConfigFields`
-  defaults, including `banned_path_components`), line 667
-  (`with_banned_path_components` builder precedent for FR-003), lines
-  748-759 (`is_path_component_allowed` — case-insensitive exact-match
-  precedent that FR-004 extends with extension-stripping semantics)
+- `crates/exarch-core/src/types/safe_path.rs` — `is_windows_reserved_component`,
+  `check_windows_component` and the per-component loop of FR-001 and NFR-002
+  (the original `#[cfg(windows)]` test that only asserted no panic was replaced
+  by tests asserting the outcomes of FR-006)
+- `crates/exarch-core/src/config.rs` — `AllowedFeatures::windows_reserved_names`,
+  `with_allow_windows_reserved_names` (FR-003) and `is_path_component_allowed`,
+  the case-insensitive exact-match precedent
 - `.claude/rules/continuous-improvement.md` — Reference Projects section
   tracking `python/cpython tarfile` for CVE/vulnerability-class monitoring;
   CVE & Vulnerability-Class Monitoring section defining the sweep process

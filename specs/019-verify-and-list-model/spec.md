@@ -9,7 +9,7 @@ tags:
   - rust
   - inspection
 created: 2026-10-26
-updated: 2026-11-06
+updated: 2026-11-08
 status: implemented
 related:
   - "[[constitution]]"
@@ -22,6 +22,7 @@ related:
   - "[[017-zip-header-consistency/spec]]"
   - "[[018-7z-stream-map-panic/spec]]"
   - "[[020-reader-sink-and-in-memory-api/spec]]"
+  - "[[022-extract-entry-selection/spec]]"
 ---
 
 # Feature: Verify and List Reporting Model
@@ -75,11 +76,11 @@ SO THAT a regular file cannot carry a target and an absent target is never mista
 **Acceptance criteria:**
 ```
 GIVEN a 7z archive with a symlink and the default ListOptions
-WHEN list_archive_with_options() runs
+WHEN ListRequest::list() runs with the default ListOptions
 THEN the entry kind is Symlink { target: LinkTarget::Unread } and no entry data was decoded
 
 GIVEN the same archive with StoredTargets::Read
-WHEN list_archive_with_options() runs
+WHEN ListRequest::list() runs with ListOptions::with_stored_targets(StoredTargets::Read)
 THEN the target is LinkTarget::Recorded(path)
 ```
 
@@ -111,7 +112,7 @@ rather than silently passed
 **Acceptance criteria:**
 ```
 GIVEN VerificationOptions::default().with_integrity(IntegrityCheck::DecodeToEof(budget))
-WHEN verify_archive_with_options() runs on a corrupt payload
+WHEN VerifyRequest::verify() runs with those options on a corrupt payload
 THEN integrity_status() is Fail and a High CorruptData issue is present
 
 GIVEN a budget that cannot cover part of the payload
@@ -131,8 +132,8 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-001 | `ArchiveManifest` SHALL keep its fields private; `entries()`, `into_entries()`, `total_entries()`, `total_size()`, `format()` and `oversized_entries()` are the accessors, and `add_entry` SHALL fail with `ArchiveError::InvalidArchive` when the total size would overflow `u64` | must |
-| FR-002 | `ArchiveEntry` SHALL be `#[non_exhaustive]` with public fields `path`, `kind: ManifestEntryKind`, `size`, `compression: EntryCompression`, `mode: Option<u32>`, `modified: Option<SystemTime>`, and be constructed with `ArchiveEntry::new(path, kind, size)` (compression `Unknown`, mode and modified unset) | must |
+| FR-001 | `ArchiveManifest` SHALL keep its fields private; `entries()`, `into_entries()`, `total_entries()`, `total_size()`, `format()`, `oversized_entries()` and `selection()` are the accessors (`with_selection(format, EntrySelection)` builds a manifest that keeps the selection it was listed with), and `add_entry` SHALL fail with `ArchiveError::InvalidArchive` when the total size would overflow `u64` | must |
+| FR-002 | `ArchiveEntry` SHALL be `#[non_exhaustive]` with public fields `path`, `kind: ManifestEntryKind`, `compression: EntryCompression`, `mode: Option<RawMode>`, `modified: Option<SystemTime>`, and be constructed with `ArchiveEntry::new(path, kind)` (compression `Unknown`, mode and modified unset); the size is `ArchiveEntry::size()` (FR-057) | must |
 | FR-003 | `ManifestEntryKind` SHALL be `#[non_exhaustive]` with variants `File`, `Directory`, `Symlink { target: LinkTarget }`, `Hardlink { target: LinkTarget }`, so only link kinds can carry a target; helpers `entry_type()` (to `ManifestEntryType`), `is_link()`, `symlink_target()`, `hardlink_target()`, `link_target()` | must |
 | FR-004 | `LinkTarget` SHALL be `#[non_exhaustive]` with variants `Recorded(PathBuf)` (within the host's name limits), `Missing` (archive stores no target), `Unread` (stored in compressed entry data and not read), `Unreadable` (a 7z reparse point, or a target whose read was attempted and failed), `Oversized { bytes }` (only the length is kept); `path()` SHALL return `Some` only for `Recorded`; `classify(path, LinkKind)` SHALL return `Recorded` or `Oversized` by the host name limits | must |
 | FR-005 | `Missing` and `Oversized` targets and `OversizedEntry` records SHALL occur only in the manifest produced by `verify`'s pre-flight listing, where they become report issues; a bare listing SHALL fail instead | must |
@@ -211,6 +212,7 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | FR-062 | `VerificationIssue` SHALL keep the typed refusal in every front end: CLI `--json` adds `code`, `sub_code`, `relaxable_by` and `setting`, Python `VerificationIssue` the same plus `mode`, Node `code`, `subCode`, `relaxableBy`, `setting` and `ioKind` (see [[005-cli/spec]] FR-120) (#899) | must |
 | FR-063 | `ManifestEntryType`, `CheckStatus`, `IssueSeverity` and `VerificationStatus` SHALL be closed enums (`closed_enum`) with `ALL`, documented as closed by design; two entries whose names differ only in invalid bytes SHALL not be folded into one `NameCollision` under the host path model (#905, #925) | must |
 | FR-064 | `inspection::{list,verify}::*_with_progress` SHALL be crate-private, taking options by value, with the public surface being the request types (#912); since #1007 every item not re-exported from the crate root is `pub(crate)` and `unreachable_pub` is enforced at crate level, so `pub` means public API | must |
+| FR-065 | `ArchiveManifest::dispositions(&SecurityConfig)` SHALL yield every entry that validation accepts with a `Disposition::{Extract(LandingPath), Skip(SkipKind)}` (`DispositionKind` `extract` or `skip` is the stable token); the selection is the one stored in the manifest, never one taken from the config, and the skip reason is the first that applies among `NotSelected`, `StrippedAway` and `ExtensionNotAllowed`; `landing_paths` is the extracted subset of it, and `list` shows it per entry only under a non-default selection ([[022-extract-entry-selection/spec]], [[005-cli/spec]] FR-139) (#995, #998, #1011, #1019) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -225,9 +227,10 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
-| `ArchiveManifest` | Listing result | private entries, oversized records, total size, `ArchiveType` |
+| `ArchiveManifest` | Listing result | private entries, oversized records, total size, `ArchiveType`, the `EntrySelection` it was listed with; `landing_paths`, `landings`, `dispositions` |
 | `ArchiveEntry` | One listed entry | `path`, `kind`, `compression`, `mode: Option<RawMode>`, `modified`; `size()` (0 unless a regular file); `utf8_path() -> Result<&str, Malformation>` |
 | `ManifestEntryKind` | Entry kind with its link target | `File { size: Uncompressed }`, `Directory`, `Symlink { target }`, `Hardlink { target }` |
+| `Disposition` / `DispositionKind` | What a selection does to a listed entry (`#[non_exhaustive]`; the kind is a closed enum) | `Extract(LandingPath)`, `Skip(SkipKind)`; `extract`, `skip` |
 | `LandingPath` | Destination-relative path an entry lands at, a lexical-stage newtype (not a `SafePath`; no containment claim) | `as_path()`, `into_path_buf()`, `AsRef<Path>` |
 | `ManifestEntryType` | Closed wire tag of a kind | `File`, `Directory`, `Symlink`, `Hardlink` |
 | `LinkTarget` | Target as far as listing kept it | `Recorded`, `Missing`, `Unread`, `Unreadable`, `Oversized { bytes }` |

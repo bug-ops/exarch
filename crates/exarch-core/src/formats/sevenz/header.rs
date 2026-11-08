@@ -9,6 +9,9 @@
 //! blocks, is closed in `SevenZHeader::check`.
 
 use super::header_probe::DeclaredHeader;
+use super::header_probe::HeaderEntries;
+use super::header_probe::Refusal;
+use super::header_probe::header_entries;
 use super::header_probe::probe;
 use crate::ArchiveError;
 use crate::Malformation;
@@ -196,27 +199,34 @@ impl SevenZHeader {
 /// 7-Zip, py7zr and the sevenz-rust2 writer spend about `2 * (path length + 1)`
 /// plus 20 to 45 bytes per entry, so 256 admits an average path of about 120
 /// characters in an archive that holds exactly `max_file_count` entries (an
-/// archive with fewer entries gets proportionally more room per entry). The
-/// memory the entry table needs grows with the header size, so the cap grows
-/// with the number of permitted entries.
+/// archive with fewer entries gets proportionally more room per entry). This
+/// bounds the buffer that holds the header; the number of entries the header
+/// declares, which sizes the entry table, is held to `max_file_count`
+/// separately.
 const HEADER_BYTES_PER_ENTRY: u64 = 256;
 
 /// Header bytes allowed on top of the per-entry budget: stream and folder
 /// descriptions.
 const HEADER_BYTES_BASE: u64 = 64 * 1024;
 
+/// Header entries allowed on top of `max_file_count`: entries extraction does
+/// not count against it (anti items, skipped entries) and small archives.
+const HEADER_ENTRIES_BASE: u64 = 1024;
+
 /// What the parse of a 7z header may use.
 ///
 /// `memory` is what sevenz-rust2 holds the raw and decoded header sizes and
 /// the header coder's declared dictionary or model to, in whole KiB.
-/// `entry_bytes` additionally caps the plain or decoded header, whose size
-/// bounds the entry table; it is checked here from the declared sizes
-/// ([`probe`]) so that it does not also cap the header dictionary, which some
-/// writers set to 8 MiB or more for small archives.
+/// `entry_bytes` additionally caps the plain or decoded header, which bounds
+/// the entry table; it is checked here from the declared sizes ([`probe`]) so
+/// that it does not also cap the header dictionary, which some writers set to
+/// 8 MiB or more for small archives. `entries` caps the number of entries the
+/// header declares, which the header size alone does not bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HeaderLimit {
     memory: NonZeroU64,
     entry_bytes: NonZeroU64,
+    entries: u64,
 }
 
 impl HeaderLimit {
@@ -225,6 +235,7 @@ impl HeaderLimit {
     pub(crate) const UNLIMITED: Self = Self {
         memory: NonZeroU64::MAX,
         entry_bytes: NonZeroU64::MAX,
+        entries: u64::MAX,
     };
 
     /// The limit of `config`: `max_decoder_memory`, and the header bytes its
@@ -241,6 +252,7 @@ impl HeaderLimit {
         Self {
             memory: max_decoder_memory,
             entry_bytes: NonZeroU64::new(entry_bytes).unwrap_or(NonZeroU64::MAX),
+            entries: max_file_count.saturating_add(HEADER_ENTRIES_BASE),
         }
     }
 
@@ -290,15 +302,19 @@ fn kib(limit: NonZeroU64) -> usize {
 /// Opens the 7z header of `source`, the only place one is parsed.
 ///
 /// A plain header, or an encoded header's declared decoded size, over
-/// [`HeaderLimit`]'s entry cap is refused before the parse; the entry table
-/// sevenz-rust2 builds grows with that size. The parse itself is held to
-/// `max_decoder_memory` on the raw header size, the decoded header size and
-/// the header coder's declared dictionary or model (not the output-bounded
-/// window that blocks are charged). Not bounded: the buffer that receives the
-/// decoded header (about twice its limit at most), the entry table of a header
-/// within the limit, and block decoding,
-/// whose windows admission estimates separately. A header the probe does not
-/// recognise is held to the entry cap on every quantity.
+/// [`HeaderLimit`]'s entry cap is refused before the parse. The entry table
+/// sevenz-rust2 builds has one slot per entry the header declares, so the
+/// declared count is read first (a plain header, or an encoded header with one
+/// copy, LZMA or LZMA2 coder) and a header that declares more entries than
+/// `max_file_count` plus a small allowance is refused whatever its size. A
+/// header that is present but whose count cannot be read (another coder, a
+/// layout the probe does not follow, a zeroed start header on a file longer
+/// than an empty archive) is refused as unreadable rather than parsed. The
+/// parse itself is held to `max_decoder_memory` on the raw header size, the
+/// decoded header size and the header coder's declared dictionary or model
+/// (not the output-bounded window that blocks are charged). Not bounded: the
+/// buffer that receives the decoded header (about twice its limit at most) and
+/// block decoding, whose windows admission estimates separately.
 ///
 /// A password requirement is [`common::encrypted_archive_error`]. The valid
 /// 32-byte empty archive, which `sevenz-rust2` reports as `UnexpectedEof`,
@@ -307,9 +323,12 @@ fn kib(limit: NonZeroU64) -> usize {
 /// # Errors
 ///
 /// Returns [`ArchiveError::InvalidArchive`] for a header that does not parse
-/// or that lists pack streams without a stream-map offset for each, and
+/// or that lists pack streams without a stream-map offset for each or whose
+/// entry count cannot be read, and
 /// [`ArchiveError::QuotaExceeded`] with [`QuotaResource::HeaderSize`] when the
-/// header is larger than `max_file_count` permits and
+/// header is larger than `max_file_count` permits,
+/// [`QuotaResource::HeaderEntryCount`] when it declares more entries than
+/// `max_file_count` plus a small allowance and
 /// [`QuotaResource::DecoderMemory`] when it needs more than
 /// `max_decoder_memory`.
 pub(crate) fn read_sevenz_header<R: Read + Seek>(
@@ -317,7 +336,7 @@ pub(crate) fn read_sevenz_header<R: Read + Seek>(
     limit: HeaderLimit,
 ) -> Result<SevenZHeader> {
     let cap = limit.header_cap();
-    let parse_limit = match probe(source) {
+    let parse_limit = match probe(source, cap.bytes().get()) {
         DeclaredHeader::Plain { bytes: size } | DeclaredHeader::Encoded { decoded: size } => {
             if size > cap.bytes().get() {
                 return Err(cap.refusal());
@@ -326,6 +345,26 @@ pub(crate) fn read_sevenz_header<R: Read + Seek>(
         }
         DeclaredHeader::Unrecognized => cap,
     };
+    match header_entries(source, cap.bytes().get(), kib(limit.memory)) {
+        HeaderEntries::Declared(declared) if declared.get() > limit.entries => {
+            return Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::HeaderEntryCount {
+                    declared: declared.get(),
+                    max: limit.entries,
+                },
+            });
+        }
+        HeaderEntries::Unmodelled => {
+            return Err(ArchiveError::from(Malformation::SevenZHeaderUnreadable {
+                detail: "unsupported header layout: the number of entries cannot be read".into(),
+            }));
+        }
+        HeaderEntries::Refused(Refusal::Encrypted) => return Err(common::encrypted_archive_error()),
+        HeaderEntries::Refused(Refusal::Memory) => {
+            return Err(HeaderCap::Memory(limit.memory).refusal());
+        }
+        HeaderEntries::Declared(_) | HeaderEntries::NotApplicable => {}
+    }
     source.seek(SeekFrom::Start(0)).map_err(ArchiveError::Io)?;
     let tap = SourceTap::default();
     let parsed = Archive::read_with_memory_limit(
@@ -439,6 +478,16 @@ mod tests {
         );
         let zero = HeaderLimit::from_limits(memory, 0);
         assert_eq!(zero.entry_bytes.get(), HEADER_BYTES_BASE);
+    }
+
+    #[test]
+    fn the_entry_limit_is_max_file_count_plus_the_allowance_and_saturates() {
+        let memory = NonZeroU64::new(1 << 30).unwrap();
+        assert_eq!(
+            HeaderLimit::from_limits(memory, 1000).entries,
+            1000 + HEADER_ENTRIES_BASE
+        );
+        assert_eq!(HeaderLimit::from_limits(memory, u64::MAX).entries, u64::MAX);
     }
 
     #[test]

@@ -104,13 +104,20 @@
 //! entry table sevenz-rust2 builds grows with the decoded header, it bounds
 //! that table too. A refusal of the size derived from `max_file_count` is
 //! `QuotaExceeded { HeaderSize }`, any other `QuotaExceeded { DecoderMemory }`.
-//! Not bounded: the buffer that receives the decoded header (about twice the
-//! limit at most), and the entry table of a header within the limit, whose
-//! memory grows with the number of permitted files. Unlike a block, whose
-//! window is charged as `min(dictionary, 2 * unpack size)`, the header coder is
-//! charged its declared dictionary, so a very small `max_decoder_memory`
-//! refuses most 7-Zip archives at open (see
-//! [`crate::SecurityConfig::max_decoder_memory`]).
+//! The number of entries the header declares sizes the entry table, so it is
+//! read before the table is built (a plain header, or an encoded header with
+//! one copy, LZMA or LZMA2 coder) and held to `max_file_count` plus a small
+//! allowance, as `QuotaExceeded { HeaderEntryCount }`. A header that is present
+//! but whose count cannot be read (another coder, several coders, an
+//! unfollowable layout, a missing start header on a file longer than an empty
+//! archive) is refused as `InvalidArchive` before it is parsed. The count is
+//! read in a separate pass from the parse, the same window the header size
+//! probe already has; a source that changes between the two reads is outside
+//! the model. Not bounded: the buffer that receives the decoded header (about
+//! twice the limit at most). Unlike a block, whose window is charged as
+//! `min(dictionary, 2 * unpack size)`, the header coder is charged its declared
+//! dictionary, so a very small `max_decoder_memory` refuses most 7-Zip
+//! archives at open (see [`crate::SecurityConfig::max_decoder_memory`]).
 //!
 //! # Examples
 //!

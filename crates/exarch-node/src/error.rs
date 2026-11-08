@@ -261,6 +261,10 @@ pub enum QuotaSubCode {
     /// The size of an archive header, bounded by the file count limit.
     #[napi(value = "HEADER_SIZE")]
     HeaderSize,
+    /// The number of entries an archive header declares, bounded by the file
+    /// count limit.
+    #[napi(value = "HEADER_ENTRY_COUNT")]
+    HeaderEntryCount,
 }
 
 /// Value of the `subCode` property of a `ZIP_BOMB` error: what the refused
@@ -772,7 +776,8 @@ mirror_from_core!(
         TreeNodes,
         SinkCapacity,
         SolidBlockMemory,
-        HeaderSize
+        HeaderSize,
+        HeaderEntryCount
     ]
 );
 mirror_from_core!(
@@ -1696,7 +1701,8 @@ mod tests {
             TreeNodes,
             SinkCapacity,
             SolidBlockMemory,
-            HeaderSize
+            HeaderSize,
+            HeaderEntryCount
         ]
     );
 

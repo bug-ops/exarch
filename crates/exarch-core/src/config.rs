@@ -812,25 +812,30 @@ pub struct SecurityConfig {
     ///   from it in proportion to the permitted file count. Every entry of the
     ///   header counts toward that size, directories and links included, though
     ///   extraction counts only files against `max_file_count`: an archive with
-    ///   many directories may need a higher `max_file_count` to open. The
-    ///   memory the header's entry table needs grows with the number of
-    ///   permitted files, so a higher `max_file_count` raises the memory a
-    ///   header may need. With an unbounded `max_file_count`
-    ///   (`Limit::Unbounded`; `None` in the Python and Node bindings) only this
-    ///   limit caps the header. The buffer that receives a decoded header
-    ///   (about twice the limit) is not capped separately. The dictionary is
-    ///   held to `max_decoder_memory` alone for the usual header layout (one
-    ///   coder, a record under 4 KiB); for any other layout (two coders, such
-    ///   as a filter plus LZMA, or encrypted headers) it is held to the
-    ///   stricter of the two caps. The memory checks are `QuotaExceeded {
-    ///   DecoderMemory }`. Both come from `list`, `verify` and `extract`, with
-    ///   the limit that was exceeded as `max`. Blocks are charged the smaller
-    ///   of their dictionary and twice their unpack size instead. 7-Zip sizes
-    ///   the header dictionary to the header (4 KiB for a few files, 192 KiB at
-    ///   3,000 files, 1 MiB at 60,000) and the LZMA model adds about 22 KiB, so
-    ///   a limit below roughly 26 KiB refuses every 7z archive with an encoded
-    ///   header, `list` included; archives with a plain header are held only to
-    ///   the header's own size and the entry cap.
+    ///   many directories may need a higher `max_file_count` to open. A header
+    ///   that declares more entries than `max_file_count` plus a small
+    ///   allowance is refused before its entry table is built, as
+    ///   `QuotaExceeded { HeaderEntryCount }`, for a plain header and for an
+    ///   encoded header with one copy, LZMA or LZMA2 coder. A header that is
+    ///   present but whose count cannot be read (another coder, several coders,
+    ///   an unfollowable layout) is refused as `InvalidArchive`. The memory the
+    ///   header's entry table needs grows with the number of permitted files,
+    ///   so a higher `max_file_count` raises the memory a header may need. With
+    ///   an unbounded `max_file_count` (`Limit::Unbounded`; `None` in the
+    ///   Python and Node bindings) only this limit caps the header. The buffer
+    ///   that receives a decoded header (about twice the limit) is not capped
+    ///   separately. The dictionary is held to `max_decoder_memory` alone
+    ///   whenever the header's declared size can be read; a header whose size
+    ///   cannot be read is held to the stricter of the two caps. The memory
+    ///   checks are `QuotaExceeded { DecoderMemory }`. Both come from `list`,
+    ///   `verify` and `extract`, with the limit that was exceeded as `max`.
+    ///   Blocks are charged the smaller of their dictionary and twice their
+    ///   unpack size instead. 7-Zip sizes the header dictionary to the header
+    ///   (4 KiB for a few files, 192 KiB at 3,000 files, 1 MiB at 60,000) and
+    ///   the LZMA model adds about 22 KiB, so a limit below roughly 26 KiB
+    ///   refuses every 7z archive with an encoded header, `list` included;
+    ///   archives with a plain header are held only to the header's own size
+    ///   and the entry cap.
     ///
     /// Other codecs are bounded by their format (bzip2 blocks of at most
     /// 900 KB). Not exposed through the CLI or language bindings.

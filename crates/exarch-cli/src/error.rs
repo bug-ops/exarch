@@ -782,6 +782,15 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
                  (--max-files) plus 64 KiB. --max-files raises that size, and with it the memory \
                  a header's entry table may need.",
             ),
+        QuotaKind::HeaderEntryCount => message
+            .lit("Archive header entry count too large for '")
+            .path(archive)
+            .lit(
+                "'\nThe header of this 7z archive declares more entries than the permitted file \
+                 count (--max-files) plus a small allowance; directories and links count too. \
+                 --max-files raises that limit, and with it the memory a header's entry table \
+                 may need.",
+            ),
         QuotaKind::SolidBlockMemory => message
             .lit("Solid block size limit exceeded for '")
             .path(archive)

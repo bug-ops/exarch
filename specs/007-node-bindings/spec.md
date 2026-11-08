@@ -343,7 +343,7 @@ Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.
 | `ZipBomb` | `ZIP_BOMB` (also an entry claiming data from zero compressed bytes, v0.7.0, #653), with a `subCode` (`ZipBombSubCode`: `ENTRY`, `SOLID_BLOCK`, `SKIPPED_ENTRIES`) |
 | `ZipInconsistency` | `ZIP_INCONSISTENCY` (v0.7.0, #671) |
 | `InvalidPermissions` | `INVALID_PERMISSIONS` |
-| `QuotaExceeded` | `QUOTA_EXCEEDED`, with a `subCode` (`QuotaSubCode`, ten values including `SOLID_BLOCK_MEMORY` and `HEADER_SIZE`) |
+| `QuotaExceeded` | `QUOTA_EXCEEDED`, with a `subCode` (`QuotaSubCode`, eleven values including `SOLID_BLOCK_MEMORY`, `HEADER_SIZE` and `HEADER_ENTRY_COUNT`) |
 | `SecurityViolation` | `SECURITY_VIOLATION`, with `relaxableBy` set only when a setting relaxes the refusal (v0.7.0, #741, #757) and `subCode` always set to a `SecurityViolationSubCode` (v0.8.0, #865); a path rejected at the JS boundary (null byte, too long) is also `SECURITY_VIOLATION` |
 | `UnknownFormat`, `ReaderFormat(Unrecognized)` | `UNKNOWN_FORMAT` |
 | `InvalidConfiguration`, `ReaderFormat(NeedsSeek \| NotAtStart)` | `INVALID_CONFIGURATION` (also a rejected setter value), with `setting` naming the `ConfigSetting` when it names one (v0.8.0, #870, #894) |

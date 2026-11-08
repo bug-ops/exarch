@@ -220,6 +220,7 @@ impl SubCode {
         Self::Quota(QuotaKind::SinkCapacity),
         Self::Quota(QuotaKind::SolidBlockMemory),
         Self::Quota(QuotaKind::HeaderSize),
+        Self::Quota(QuotaKind::HeaderEntryCount),
     ];
     /// Every sub-code of a zip-bomb error, in [`ZipBombScope::ALL`] order.
     pub const ZIP_BOMB_ALL: &'static [Self] = &[
@@ -254,6 +255,7 @@ const fn quota_sub_code(kind: QuotaKind) -> &'static str {
         QuotaKind::SinkCapacity => "SINK_CAPACITY",
         QuotaKind::SolidBlockMemory => "SOLID_BLOCK_MEMORY",
         QuotaKind::HeaderSize => "HEADER_SIZE",
+        QuotaKind::HeaderEntryCount => "HEADER_ENTRY_COUNT",
     }
 }
 
@@ -1479,6 +1481,24 @@ mod tests {
         assert_eq!(
             err.ffi_kind().sub_code().map(SubCode::as_str),
             Some("HEADER_SIZE")
+        );
+    }
+
+    #[test]
+    fn a_header_entry_count_refusal_names_both_counts() {
+        let resource = QuotaResource::HeaderEntryCount {
+            declared: 11,
+            max: 10,
+        };
+        assert_eq!(resource.kind(), QuotaKind::HeaderEntryCount);
+        assert_eq!(
+            resource.to_string(),
+            "quota exceeded: archive header entry count (11 > 10, derived from max_file_count)"
+        );
+        let err = ArchiveError::QuotaExceeded { resource };
+        assert_eq!(
+            err.ffi_kind().sub_code().map(SubCode::as_str),
+            Some("HEADER_ENTRY_COUNT")
         );
     }
 

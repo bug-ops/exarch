@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Core: `indexing_slicing` and `arithmetic_side_effects` are enforced on the format and security modules, with bounded reads and a `PerBlock` table in the 7z reader (#1032, #1074).
 - Docs: `exarch-cli` skill split into a 151-line `SKILL.md` and eight `references/` files within Agent Skills size limits (#1066).
 - CI: `skills` job validates `skills/` with `skills-ref` 0.1.1 and checks the SKILL.md line limit and reference links, gated by `ci-success` (#1066).
 - **Breaking**: `with_atomic` and `with_skip_duplicates` are replaced by `with_staging` and `with_existing_files`, and the extension allowlist is an `ExtensionFilter` whose empty list refuses instead of allowing all (#972, #975, #999).

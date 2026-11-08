@@ -2594,8 +2594,10 @@ fn test_payload_by_block_skips_anti_items_and_stream_less_files() {
     let slots = [None, Some(a), Some(empty), Some(b)];
 
     assert_eq!(
-        payload_by_block(&SevenZHeader::assume_checked(archive), &slots),
-        [vec![(1, a), (3, b)]]
+        payload_by_block(&SevenZHeader::assume_checked(archive), &slots)
+            .iter()
+            .collect::<Vec<_>>(),
+        [&vec![(1, a), (3, b)]]
     );
 }
 

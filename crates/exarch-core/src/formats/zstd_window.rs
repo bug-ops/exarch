@@ -187,12 +187,16 @@ impl<'a, R: Read + Seek> Cursor<'a, R> {
     }
 
     const fn consumed(&self) -> u64 {
-        self.pos - self.start
+        self.pos.saturating_sub(self.start)
     }
 
     fn array<const N: usize>(&mut self) -> io::Result<Option<[u8; N]>> {
         let width = u64::try_from(N).unwrap_or(u64::MAX);
-        if self.end - self.pos < width {
+        if self
+            .end
+            .checked_sub(self.pos)
+            .is_none_or(|left| left < width)
+        {
             self.cut = true;
             return Ok(None);
         }
@@ -203,7 +207,7 @@ impl<'a, R: Read + Seek> Cursor<'a, R> {
         let mut bytes = [0u8; N];
         match self.reader.read_exact(&mut bytes) {
             Ok(()) => {
-                self.pos += width;
+                self.pos = self.pos.saturating_add(width);
                 Ok(Some(bytes))
             }
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -215,11 +219,11 @@ impl<'a, R: Read + Seek> Cursor<'a, R> {
     }
 
     fn skip(&mut self, len: u64) -> bool {
-        if self.end - self.pos < len {
+        if self.end.checked_sub(self.pos).is_none_or(|left| left < len) {
             self.cut = true;
             return false;
         }
-        self.pos += len;
+        self.pos = self.pos.saturating_add(len);
         self.synced = len == 0 && self.synced;
         true
     }
@@ -277,7 +281,12 @@ impl<'a, R: Read + Seek> Cursor<'a, R> {
             };
             Some(byte)
         };
-        let dictionary_width = [0, 1, 2, 4][usize::from(descriptor & 3)];
+        let dictionary_width = match descriptor & 3 {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 4,
+        };
         if !self.skip(dictionary_width) {
             self.broken = true;
             return Ok(None);
@@ -304,17 +313,15 @@ impl<'a, R: Read + Seek> Cursor<'a, R> {
             _ => 8,
         };
         let mut bytes = [0u8; 8];
-        let mut taken = 0;
-        while taken < width {
+        for slot in bytes.iter_mut().take(width) {
             let Some([byte]) = self.array::<1>()? else {
                 return Ok(ContentSize::Cut);
             };
-            bytes[taken] = byte;
-            taken += 1;
+            *slot = byte;
         }
         let value = u64::from_le_bytes(bytes);
         Ok(ContentSize::Declared(if flag == 1 {
-            value + 256
+            value.saturating_add(256)
         } else {
             value
         }))
@@ -351,7 +358,7 @@ impl<'a, R: Read + Seek> Cursor<'a, R> {
 
 fn window_of_descriptor(byte: u8) -> ZstdWindow {
     let base = 1u64 << (10 + u32::from(byte >> 3));
-    ZstdWindow::of_bytes(base + (base >> 3) * u64::from(byte & 7))
+    ZstdWindow::of_bytes(base.saturating_add((base >> 3).saturating_mul(u64::from(byte & 7))))
 }
 
 #[cfg(test)]

@@ -31,6 +31,7 @@ use std::io::Write;
 
 use flate2::Crc;
 
+use super::bounded_read::read_prefix;
 use super::common::SpoolBacking;
 use super::common::TempSpool;
 use super::io_marker::IoMarker as _;
@@ -497,8 +498,11 @@ impl Capture<'_> {
                 len: self.written,
             }
         };
-        let sequence = self.store.next_sequence;
-        self.store.next_sequence += 1;
+        let Some(next) = self.store.next_sequence.checked_add(1) else {
+            self.store.disable();
+            return;
+        };
+        let sequence = std::mem::replace(&mut self.store.next_sequence, next);
         self.store.order.insert(sequence, self.key);
         self.store.index.insert(self.key, Slot { sequence, kept });
     }
@@ -530,15 +534,15 @@ impl Write for Capture<'_> {
             Backend::Spool(spool) => {
                 let ok = spool.writer.write_all(buf).is_ok();
                 if ok {
-                    spool.len += n;
+                    spool.len = spool.len.saturating_add(n);
                 }
                 ok
             }
             Backend::Dead => false,
         };
         if kept {
-            self.store.used += n;
-            self.written += n;
+            self.store.used = self.store.used.saturating_add(n);
+            self.written = self.written.saturating_add(n);
             self.crc.update(buf);
         } else {
             self.open = false;
@@ -588,10 +592,11 @@ impl<S: Read> ReplayReader<S> {
 
 impl<S: Read> Read for ReplayReader<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
+        let filled = read_prefix(&mut self.inner, buf)?;
+        let n = filled.len();
         if n > 0 {
-            self.crc.update(&buf[..n]);
-            self.read += n as u64;
+            self.crc.update(filled);
+            self.read = self.read.saturating_add(n as u64);
         } else if !buf.is_empty() {
             if self.read != self.key.size.0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());

@@ -105,6 +105,8 @@ use zip::ZipArchive as ZipReader;
 use zip::ZipReadOptions;
 use zip::result::ZipError;
 
+use super::bounded_read::copy_prefix;
+use super::bounded_read::invalid_data;
 use super::chunk_search::ChunkEnd;
 use super::chunk_search::ChunkPlan;
 use super::chunk_search::ChunkSource;
@@ -285,13 +287,14 @@ enum_with_all! {
     }
 }
 
-const _: () = {
-    let mut i = 0;
-    while i < Slot::ALL.len() {
-        assert!(Slot::ALL[i].index() == i);
-        i += 1;
+const fn slots_in_order(rest: &[Slot], at: usize) -> bool {
+    match rest {
+        [] => true,
+        [first, tail @ ..] => first.index() == at && slots_in_order(tail, at.saturating_add(1)),
     }
-};
+}
+
+const _: () = assert!(slots_in_order(&Slot::ALL, 0));
 
 impl Slot {
     const fn limit(self) -> usize {
@@ -338,9 +341,14 @@ pub(crate) struct Findings {
 impl Findings {
     /// Keeps the finding unless its kind is full, in which case it is only
     /// counted and `false` is returned.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`Slot::index` is below `Slot::ALL.len()`, checked at compile time"
+    )]
     fn try_push(&mut self, slot: Slot, make: impl FnOnce() -> ZipInconsistency) -> bool {
-        if self.kept[slot.index()] < slot.limit() {
-            self.kept[slot.index()] += 1;
+        let kept = &mut self.kept[slot.index()];
+        if *kept < slot.limit() {
+            *kept = kept.saturating_add(1);
             self.items.push(make());
             true
         } else {
@@ -500,8 +508,8 @@ impl<R: Read + Seek> Windowed<R> {
     }
 
     fn advance(&mut self, read: usize) {
-        self.cursor += read as u64;
-        self.inner_position = self.inner_position.map(|p| p + read as u64);
+        self.cursor = self.cursor.saturating_add(read as u64);
+        self.inner_position = self.inner_position.and_then(|p| p.checked_add(read as u64));
     }
 }
 
@@ -509,9 +517,8 @@ impl<R: Read + Seek> Read for Windowed<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let cached = self.cached();
         if !cached.is_empty() {
-            let n = cached.len().min(buf.len());
-            buf[..n].copy_from_slice(&cached[..n]);
-            self.cursor += n as u64;
+            let n = copy_prefix(buf, cached)?;
+            self.cursor = self.cursor.saturating_add(n as u64);
             return Ok(n);
         }
         self.position_inner()?;
@@ -531,10 +538,11 @@ impl<R: Read + Seek> Read for Windowed<R> {
             self.inner_position = None;
         })?;
         self.window.truncate(filled);
-        let n = filled.min(buf.len());
-        buf[..n].copy_from_slice(&self.window[..n]);
+        let n = copy_prefix(buf, &self.window)?;
         self.advance(n);
-        self.inner_position = self.inner_position.map(|p| p + (filled - n) as u64);
+        self.inner_position = self
+            .inner_position
+            .and_then(|p| p.checked_add(filled.saturating_sub(n) as u64));
         Ok(n)
     }
 }
@@ -1135,7 +1143,9 @@ impl CentralRecord {
     }
 
     fn variable_len(&self) -> u64 {
-        u64::from(self.name_len) + u64::from(self.extra_len) + u64::from(self.comment_len)
+        u64::from(self.name_len)
+            .saturating_add(u64::from(self.extra_len))
+            .saturating_add(u64::from(self.comment_len))
     }
 }
 
@@ -1239,12 +1249,12 @@ fn walk_directory<R: Read + Seek>(
         shadowed_headers: HashSet::new(),
         uncounted: 0,
     };
-    let mut visited = 0;
+    let mut visited = 0usize;
 
     while last_mapped.is_some_and(|last| position <= last) {
         let record = CentralRecord::read(reader).ok_or_else(census_disagreement)?;
         if mapped.contains(&position) {
-            visited += 1;
+            visited = visited.saturating_add(1);
             skip(reader, record.variable_len())?;
         } else {
             let ordinal = CentralRecordOrdinal::new(walk.counted);
@@ -1254,17 +1264,17 @@ fn walk_directory<R: Read + Seek>(
                 record: ordinal,
                 name: crate::bytes_text(&name),
             });
-            walk.shadowed += 1;
+            walk.shadowed = walk.shadowed.saturating_add(1);
             walk.shadowed_headers
                 .insert(u64::from(record.local_offset).saturating_add(map.archive_offset));
             skip(
                 reader,
-                u64::from(record.extra_len) + u64::from(record.comment_len),
+                u64::from(record.extra_len).saturating_add(u64::from(record.comment_len)),
             )?;
         }
-        walk.counted += 1;
+        walk.counted = walk.counted.saturating_add(1);
         position = position
-            .checked_add(CDFH_FIXED_LEN as u64 + record.variable_len())
+            .checked_add((CDFH_FIXED_LEN as u64).saturating_add(record.variable_len()))
             .ok_or_else(census_disagreement)?;
     }
     if visited != mapped.len() {
@@ -1273,7 +1283,7 @@ fn walk_directory<R: Read + Seek>(
 
     while let Some(record) = CentralRecord::read(reader) {
         skip(reader, record.variable_len())?;
-        walk.uncounted += 1;
+        walk.uncounted = walk.uncounted.saturating_add(1);
     }
     Ok(walk)
 }
@@ -1602,18 +1612,18 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                     }
                 }
                 Signature::LocalHeader => {
-                    let name_len = u16_at(hit.bytes, 26)
+                    let candidate = u16_at(hit.bytes, 26)
                         .map(usize::from)
-                        .filter(|n| LFH_FIXED_LEN + n <= hit.bytes.len());
-                    let Some(name_len) = name_len else {
+                        .and_then(|n| LFH_FIXED_LEN.checked_add(n))
+                        .and_then(|len| hit.bytes.get(..len));
+                    let Some(candidate) = candidate else {
                         return Ok(if hit.end == ChunkEnd::Last {
                             Flow::Next
                         } else {
                             Flow::NeedMore
                         });
                     };
-                    let candidate = &hit.bytes[..LFH_FIXED_LEN + name_len];
-                    if is_plausible_prefix_header(candidate, end - found)
+                    if is_plausible_prefix_header(candidate, end.checked_sub(found))
                         && !findings.try_push(Slot::Hidden, || {
                             ZipInconsistency::HiddenLocalHeader {
                                 offset: found,
@@ -1704,8 +1714,9 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         let mut at_end = [0u8; DESCRIPTOR_LOOKAHEAD];
         let available = self.file_len.saturating_sub(layout.end);
         let len = usize::try_from(available).map_or(at_end.len(), |n| n.min(at_end.len()));
-        self.read_at(layout.end, &mut at_end[..len])?;
-        let resume = streaming_resume(layout, exit, local, &at_end[..len]);
+        let window = at_end.get_mut(..len).ok_or_else(invalid_data)?;
+        self.read_at(layout.end, window)?;
+        let resume = streaming_resume(layout, exit, local, window);
         if resume.position(layout.end).is_none_or(|p| p > next) {
             findings.push_with(Slot::DescriptorOverrun, || {
                 ZipInconsistency::DescriptorOverrun {
@@ -1947,7 +1958,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         if followed == Followed::ByDirectory || position < self.next_unjudged {
             return;
         }
-        self.next_unjudged = position + 1;
+        self.next_unjudged = position.saturating_add(1);
         if !findings.try_push(kind.slot(), || kind.finding(position)) {
             self.exhausted = true;
         }
@@ -1965,14 +1976,16 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         if position < self.next_unjudged || self.is_known(position) {
             return;
         }
-        self.next_unjudged = position + 1;
+        self.next_unjudged = position.saturating_add(1);
         // In a gap, a header whose fixed part reaches into the directory reads
         // the directory's bytes: the tail of a descriptor whose size field
         // spells the signature looks like one. A name running past the
         // directory is still a header, and so is any header inside an entry's
         // declared range.
         let fits = region != HiddenRegion::Gap
-            || position + LFH_FIXED_LEN as u64 <= self.map.directory_start;
+            || position
+                .checked_add(LFH_FIXED_LEN as u64)
+                .is_none_or(|end| end <= self.map.directory_start);
         if is_reachable_header(header)
             && fits
             && !findings.try_push(Slot::Hidden, || ZipInconsistency::HiddenLocalHeader {
@@ -2044,14 +2057,20 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
     /// Scans the extra block of every central record, by entry index; `None`
     /// where a reader would reject the record.
     fn central_xl_scans(&mut self) -> Result<Vec<Option<XlScan>>> {
-        let starts = &self.map.central_starts;
-        let mut order: Vec<usize> = (0..starts.len()).collect();
-        order.sort_unstable_by_key(|&index| starts[index]);
-        let mut scans = vec![None; starts.len()];
-        for index in order {
+        let mut order: Vec<(usize, u64)> = self
+            .map
+            .central_starts
+            .iter()
+            .copied()
+            .enumerate()
+            .collect();
+        order.sort_unstable_by_key(|&(_, start)| start);
+        let mut scans = vec![None; order.len()];
+        for (index, start) in order {
             let header =
-                self.read_header::<CDFH_FIXED_LEN>(starts[index], CDFH_LENGTHS, Reads::Uncounted)?;
-            scans[index] = header.and_then(|h| XlScan::parse(h.host(), &h.extra));
+                self.read_header::<CDFH_FIXED_LEN>(start, CDFH_LENGTHS, Reads::Uncounted)?;
+            *scans.get_mut(index).ok_or_else(invalid_data)? =
+                header.and_then(|h| XlScan::parse(h.host(), &h.extra));
         }
         Ok(scans)
     }
@@ -2123,8 +2142,8 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         ) else {
             return Ok(None);
         };
-        let name_start = start + FIXED as u64;
-        let extra_start = name_start + name_len as u64;
+        let name_start = start.saturating_add(FIXED as u64);
+        let extra_start = name_start.saturating_add(name_len as u64);
         if extra_start.saturating_add(extra_len as u64) > self.file_len {
             return Ok(None);
         }
@@ -2216,8 +2235,9 @@ impl<const FIXED: usize> RawHeader<FIXED> {
 ///
 /// `candidate` is the fixed header and the name it declares; `room` is the
 /// number of prefix bytes from the hit to the archive start, which the
-/// header, extra field and (without a data descriptor) data must fit in.
-fn is_plausible_prefix_header(candidate: &[u8], room: u64) -> bool {
+/// header, extra field and (without a data descriptor) data must fit in;
+/// `None` when it is not known, which counts as fitting.
+fn is_plausible_prefix_header(candidate: &[u8], room: Option<u64>) -> bool {
     let Some(header) = candidate.first_chunk::<LFH_FIXED_LEN>() else {
         return false;
     };
@@ -2230,21 +2250,22 @@ fn is_plausible_prefix_header(candidate: &[u8], room: u64) -> bool {
     {
         return false;
     }
-    let mut needed =
-        (LFH_FIXED_LEN + name_len) as u64 + u64::from(le16::<28, LFH_FIXED_LEN>(header));
+    let mut needed = (LFH_FIXED_LEN.saturating_add(name_len) as u64)
+        .saturating_add(u64::from(le16::<28, LFH_FIXED_LEN>(header)));
     if flags & DATA_DESCRIPTOR_FLAG == 0 {
         let compressed = le32::<18, LFH_FIXED_LEN>(header);
         if compressed != u32::MAX {
-            needed += u64::from(compressed);
+            needed = needed.saturating_add(u64::from(compressed));
         }
     }
     // Last, because it is the only check that costs more than a field read: a
     // header that passed the others has a zero high version byte, so in a run
     // of such headers each name scan ends at the next one.
-    needed <= room
+    room.is_none_or(|room| needed <= room)
         && candidate
-            .get(LFH_FIXED_LEN..LFH_FIXED_LEN + name_len)
-            .is_some_and(|name| !name.contains(&0))
+            .get(LFH_FIXED_LEN..)
+            .and_then(|rest| rest.get(..name_len))
+            .is_none_or(|name| !name.contains(&0))
 }
 
 /// Reports end records after the one the `zip` crate used.
@@ -2265,20 +2286,23 @@ fn find_ignored_end_records<R: Read + Seek>(
     findings: &mut Findings,
 ) -> Result<()> {
     let start = file_len.saturating_sub(EOCD_SEARCH_WINDOW);
-    let mut window = vec![0u8; usize::try_from(file_len - start).unwrap_or(0)];
+    let mut window = vec![0u8; usize::try_from(file_len.min(EOCD_SEARCH_WINDOW)).unwrap_or(0)];
     reader.seek(SeekFrom::Start(start))?;
     reader.read_exact(&mut window)?;
 
     let mut candidates = Vec::new();
     for at in (0..window.len().saturating_sub(EOCD_FIXED_LEN - 1)).rev() {
-        if window[at..at + 4] != EOCD_SIGNATURE {
+        if !window
+            .get(at..)
+            .is_some_and(|tail| tail.starts_with(&EOCD_SIGNATURE))
+        {
             continue;
         }
-        let Some(comment_len) = u16_at(&window, at + 20).map(usize::from) else {
+        let Some(comment_len) = u16_at(&window, at.saturating_add(20)).map(usize::from) else {
             continue;
         };
-        let Some(comment) = window.get(at + EOCD_FIXED_LEN..at + EOCD_FIXED_LEN + comment_len)
-        else {
+        let body = at.saturating_add(EOCD_FIXED_LEN);
+        let Some(comment) = window.get(body..body.saturating_add(comment_len)) else {
             continue;
         };
         if comment == map.comment && is_used_record(reader, &window, at, file_len, map)? {
@@ -2289,11 +2313,11 @@ fn find_ignored_end_records<R: Read + Seek>(
             }
             return Ok(());
         }
-        candidates.push(start + at as u64);
+        candidates.push(start.saturating_add(at as u64));
     }
-    if candidates.len() > 1 {
+    if let [first, _, ..] = candidates.as_slice() {
         findings.push_with(Slot::IgnoredEnd, || ZipInconsistency::IgnoredEndRecord {
-            offset: candidates[0],
+            offset: *first,
         });
     }
     Ok(())
@@ -2308,7 +2332,7 @@ fn is_used_record<R: Read + Seek>(
     file_len: u64,
     map: &DirectoryMap,
 ) -> Result<bool> {
-    let Some(directory) = u32_at(window, at + 16) else {
+    let Some(directory) = u32_at(window, at.saturating_add(16)) else {
         return Ok(false);
     };
     if directory != u32::MAX {
@@ -2320,7 +2344,7 @@ fn is_used_record<R: Read + Seek>(
     else {
         return Ok(false);
     };
-    if locator[..4] != ZIP64_LOCATOR_SIGNATURE {
+    if !locator.starts_with(&ZIP64_LOCATOR_SIGNATURE) {
         return Ok(false);
     }
     let Some(end_record) = u64_at(locator, 8) else {

@@ -1,5 +1,11 @@
 //! Archive format implementations.
 
+#![cfg_attr(
+    not(test),
+    warn(clippy::indexing_slicing, clippy::arithmetic_side_effects)
+)]
+
+pub(crate) mod bounded_read;
 pub(crate) mod chunk_search;
 pub(crate) mod common;
 pub(crate) mod compression;

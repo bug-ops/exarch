@@ -120,10 +120,10 @@ pub(crate) fn parse(buf: &[u8]) -> Result<ReparseTarget, ReparseError> {
     if relative {
         return Ok(ReparseTarget::Relative(name));
     }
-    if !name.starts_with(&NT_PREFIX) {
-        return Err(ReparseError::NotNtPath);
+    match name.first_chunk_mut::<{ NT_PREFIX.len() }>() {
+        Some(prefix) if *prefix == NT_PREFIX => *prefix = VERBATIM_PREFIX,
+        _ => return Err(ReparseError::NotNtPath),
     }
-    name[..VERBATIM_PREFIX.len()].copy_from_slice(&VERBATIM_PREFIX);
     Ok(ReparseTarget::Absolute(name))
 }
 

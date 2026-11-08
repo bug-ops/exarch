@@ -62,15 +62,17 @@ fn octal_value(field: &[u8]) -> Option<u64> {
         .skip_while(|&&b| b == b' ')
         .take_while(|b| (b'0'..=b'7').contains(b))
         .try_fold(0u64, |acc, &b| {
-            acc.checked_mul(8)?.checked_add(u64::from(b - b'0'))
+            acc.checked_mul(8)?
+                .checked_add(u64::from(b.checked_sub(b'0')?))
         })
 }
 
 fn declared_size(block: &[u8; BLOCK]) -> Result<u64> {
     let field = &block[SIZE_FIELD];
     let value = if is_plain_base256(field) {
-        field[BASE256_VALUE]
-            .as_array::<8>()
+        field
+            .get(BASE256_VALUE)
+            .and_then(|value| value.as_array::<8>())
             .copied()
             .map(u64::from_be_bytes)
     } else if is_plain_octal(field) {
@@ -95,9 +97,15 @@ fn verify_checksum(block: &[u8; BLOCK]) -> Result<()> {
             field: TarHeaderField::Checksum,
         })?;
     let byte_sum = |bytes: &[u8]| bytes.iter().map(|&b| u32::from(b)).sum::<u32>();
-    let actual = u64::from(byte_sum(&block[..CHECKSUM_FIELD.start]))
-        + u64::from(byte_sum(&block[CHECKSUM_FIELD.end..]))
-        + CHECKSUM_SPACES;
+    let (Some(head), Some(tail)) = (
+        block.get(..CHECKSUM_FIELD.start),
+        block.get(CHECKSUM_FIELD.end..),
+    ) else {
+        return Err(TarAmbiguity::ChecksumMismatch.into());
+    };
+    let actual = u64::from(byte_sum(head))
+        .saturating_add(u64::from(byte_sum(tail)))
+        .saturating_add(CHECKSUM_SPACES);
     (declared == actual).ok_or(TarAmbiguity::ChecksumMismatch.into())
 }
 
@@ -105,8 +113,11 @@ fn verify_checksum(block: &[u8; BLOCK]) -> Result<()> {
 /// where the `tar` crate looks for the next header.
 fn first_header_offset(window_start: u64) -> Result<usize> {
     let block = BLOCK as u64;
-    let padding = (block - window_start % block) % block;
-    usize::try_from(padding).map_err(|_| TarAmbiguity::WindowMismatch.into())
+    window_start
+        .checked_next_multiple_of(block)
+        .and_then(|boundary| boundary.checked_sub(window_start))
+        .and_then(|padding| usize::try_from(padding).ok())
+        .ok_or_else(|| TarAmbiguity::WindowMismatch.into())
 }
 
 /// Verifies the bytes `tar` read to reach an entry.
@@ -153,10 +164,15 @@ pub(super) fn check_window(
         }
         seen.push(kind);
 
-        let body_start = offset + BLOCK;
-        let body = usize::try_from(size)
+        let body_start = offset
+            .checked_add(BLOCK)
+            .ok_or(TarAmbiguity::WindowMismatch)?;
+        let body_end = usize::try_from(size)
             .ok()
-            .and_then(|len| bytes.get(body_start..body_start.checked_add(len)?))
+            .and_then(|len| body_start.checked_add(len))
+            .ok_or(TarAmbiguity::WindowMismatch)?;
+        let body = bytes
+            .get(body_start..body_end)
             .ok_or(TarAmbiguity::WindowMismatch)?;
         if kind == TarExtensionKind::Pax {
             check_record_framing(body)?;
@@ -164,7 +180,6 @@ pub(super) fn check_window(
         } else {
             check_long_record(kind, body)?;
         }
-        let body_end = body_start + body.len();
         offset = body_start
             .checked_add(body.len().next_multiple_of(BLOCK))
             .ok_or(TarAmbiguity::WindowMismatch)?;
@@ -214,7 +229,7 @@ fn check_final_header(
     header_pos: u64,
     file_pos: u64,
 ) -> Result<()> {
-    let at_end = offset + BLOCK == window.bytes().len();
+    let at_end = offset.checked_add(BLOCK) == Some(window.bytes().len());
     let position = window.start().saturating_add(offset as u64);
     if !at_end || position != header_pos || window.end() != file_pos {
         return Err(TarAmbiguity::WindowMismatch.into());
@@ -253,6 +268,14 @@ mod tests {
         assert_matches!(
             result,
             Err(ArchiveError::TarAmbiguity(found)) if found == *expected
+        );
+    }
+
+    #[test]
+    fn a_window_start_that_overflows_the_next_block_is_refused() {
+        assert_refused(
+            first_header_offset(u64::MAX).map(drop),
+            &TarAmbiguity::WindowMismatch,
         );
     }
 

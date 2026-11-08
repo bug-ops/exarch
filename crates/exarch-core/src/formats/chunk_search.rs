@@ -8,6 +8,7 @@
 
 use std::ops::Range;
 
+use super::bounded_read::invalid_data;
 use crate::Result;
 
 /// Where the bytes of a search come from.
@@ -99,31 +100,35 @@ where
     let mut base = range.start;
     loop {
         let held = buf.len();
-        let read_from = base + held as u64;
+        let read_from = base.saturating_add(held as u64);
         let want =
             usize::try_from(range.end.saturating_sub(read_from)).map_or(chunk, |n| n.min(chunk));
-        buf.resize(held + want, 0);
-        let got = source.read_chunk(read_from, &mut buf[held..])?;
-        buf.truncate(held + got);
-        let last = got < want || read_from + got as u64 >= range.end;
+        buf.resize(held.saturating_add(want), 0);
+        let (_, fresh) = buf.split_at_mut_checked(held).ok_or_else(invalid_data)?;
+        let got = source.read_chunk(read_from, fresh)?;
+        buf.truncate(held.saturating_add(got));
+        let last = got < want || read_from.saturating_add(got as u64) >= range.end;
         let end = if last { ChunkEnd::Last } else { ChunkEnd::More };
 
         let mut keep_from = buf.len().saturating_sub(carried_signature);
         let mut finish = false;
         let mut next = 0;
-        while let Some((relative, kind)) = find(&buf[next..]) {
-            let index = next + relative;
-            next = index + 1;
+        while let Some((relative, kind)) = find(buf.get(next..).ok_or_else(invalid_data)?) {
+            let index = next.saturating_add(relative);
+            next = index.saturating_add(1);
             let hit = Hit {
-                offset: base + index as u64,
-                bytes: &buf[index..],
+                offset: base.saturating_add(index as u64),
+                bytes: buf.get(index..).ok_or_else(invalid_data)?,
                 kind,
                 end,
             };
             match judge(source, hit)? {
                 Flow::Next => {}
                 Flow::NeedMore => {
-                    if !last && buf.len() - index < plan.max_lookahead + plan.signature_len {
+                    if !last
+                        && buf.len().saturating_sub(index)
+                            < plan.max_lookahead.saturating_add(plan.signature_len)
+                    {
                         keep_from = keep_from.min(index);
                         break;
                     }
@@ -136,7 +141,7 @@ where
             return Ok(());
         }
         buf.drain(..keep_from);
-        base += keep_from as u64;
+        base = base.saturating_add(keep_from as u64);
     }
 }
 

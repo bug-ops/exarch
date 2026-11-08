@@ -159,6 +159,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use super::bounded_read::invalid_data;
+use super::bounded_read::read_prefix;
 use super::source_fault::TapSource;
 use super::tar_extension_headers::PrecedingEntry;
 use super::tar_extension_headers::check_entry_headers;
@@ -603,7 +605,7 @@ impl<R: Read> Read for BudgetedReader<R> {
         }
 
         let consumed = self.state.consumed.load(Ordering::Relaxed);
-        if consumed >= allowance {
+        let Some(remaining) = allowance.checked_sub(consumed).filter(|&left| left > 0) else {
             // The budget is exhausted, but a well-formed archive whose
             // metadata happens to end exactly at the configured limit must
             // not be rejected: distinguish "the underlying stream also ends
@@ -622,14 +624,15 @@ impl<R: Read> Read for BudgetedReader<R> {
                 }
                 Err(e) => Err(e),
             };
-        }
+        };
 
-        let remaining = allowance - consumed;
         let want = usize::try_from(remaining)
             .unwrap_or(usize::MAX)
             .min(buf.len());
-        let n = self.inner.read(&mut buf[..want])?;
-        self.state.record(&buf[..n]);
+        let (window, _) = buf.split_at_mut_checked(want).ok_or_else(invalid_data)?;
+        let filled = read_prefix(&mut self.inner, window)?;
+        let n = filled.len();
+        self.state.record(filled);
         self.state.consumed.fetch_add(n as u64, Ordering::Relaxed);
         self.state.total_read.fetch_add(n as u64, Ordering::Relaxed);
         self.state.meter_skipped(n)?;
@@ -787,8 +790,8 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
                 Ok(0) | Err(_) => break,
                 Ok(n) => n as u64,
             };
-            output_so_far += n;
-            let read_since_start = self.budget.total_read() - total_read_at_start;
+            output_so_far = output_so_far.saturating_add(n);
+            let read_since_start = self.budget.total_read().saturating_sub(total_read_at_start);
             synthetic = output_so_far.saturating_sub(read_since_start);
             if let Err(e) = on_chunk(n) {
                 outcome = Err(e);
@@ -1099,7 +1102,7 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
             self.poisoned = true;
             return Some(Err(self.budget.classify(&err)));
         }
-        let start = self.budget.total_read() - self.origin;
+        let start = self.budget.total_read().saturating_sub(self.origin);
         self.budget.arm();
         let result = self.entries.next();
         self.budget.disarm();

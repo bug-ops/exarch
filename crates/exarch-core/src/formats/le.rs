@@ -34,6 +34,11 @@ pub(crate) fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
 
 /// Little-endian `u16` at the constant offset `AT` of a fixed-size header; an
 /// offset past the end does not compile.
+#[expect(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "AT + width <= N is asserted at compile time"
+)]
 pub(crate) const fn le16<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u16 {
     const { assert!(AT + 2 <= N) };
     u16::from_le_bytes([bytes[AT], bytes[AT + 1]])
@@ -41,6 +46,11 @@ pub(crate) const fn le16<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u1
 
 /// Little-endian `u32` at the constant offset `AT` of a fixed-size header; an
 /// offset past the end does not compile.
+#[expect(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "AT + width <= N is asserted at compile time"
+)]
 pub(crate) const fn le32<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u32 {
     const { assert!(AT + 4 <= N) };
     u32::from_le_bytes([bytes[AT], bytes[AT + 1], bytes[AT + 2], bytes[AT + 3]])
@@ -48,6 +58,11 @@ pub(crate) const fn le32<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u3
 
 /// Little-endian `u64` at the constant offset `AT` of a fixed-size header; an
 /// offset past the end does not compile.
+#[expect(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "AT + width <= N is asserted at compile time"
+)]
 pub(crate) const fn le64<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u64 {
     const { assert!(AT + 8 <= N) };
     u64::from_le_bytes([

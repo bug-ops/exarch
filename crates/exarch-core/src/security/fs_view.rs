@@ -951,7 +951,7 @@ impl NodeBudget {
         if self.used >= self.max {
             return Err(NodeBudgetExceeded { max: self.max });
         }
-        self.used += 1;
+        self.used = self.used.saturating_add(1);
         Ok(())
     }
 }
@@ -1499,10 +1499,18 @@ impl VirtualTree {
         Ok(())
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "ids come from `nodes.len()` and nodes are never removed"
+    )]
     fn node(&self, id: usize) -> &TreeNode {
         &self.nodes[id]
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "ids come from `nodes.len()` and nodes are never removed"
+    )]
     fn node_mut(&mut self, id: usize) -> &mut TreeNode {
         &mut self.nodes[id]
     }
@@ -1617,7 +1625,7 @@ impl VirtualTree {
         let mut pending: VecDeque<Component<'_>> = rel.components().collect();
         let mut stack = vec![ROOT];
         let mut current = PathBuf::new();
-        let mut hops = 0;
+        let mut hops = 0usize;
 
         while let Some(component) = pending.pop_front() {
             match component {
@@ -1654,7 +1662,7 @@ impl VirtualTree {
                             current.push(&self.node(id).name);
                         }
                         Node::Symlink(target) => {
-                            hops += 1;
+                            hops = hops.saturating_add(1);
                             if hops > self.model.limits().hops {
                                 return Err(io::Error::other("too many levels of symbolic links"));
                             }

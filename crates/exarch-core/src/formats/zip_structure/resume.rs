@@ -114,19 +114,19 @@ impl DescriptorWidth {
     /// the sizes of `layout`, carrying its CRC when `crc` says to compare it.
     fn matches(self, at_end: &[u8], layout: &EntryLayout, crc: CrcCheck) -> bool {
         let (compressed, size) = (layout.compressed, layout.size);
-        let sizes_at = if self.signed() {
+        let (crc_at, sizes_at) = if self.signed() {
             if !at_end.starts_with(&DATA_DESCRIPTOR_SIGNATURE) {
                 return false;
             }
-            8
+            (4, 8)
         } else {
-            4
+            (0, 4)
         };
-        if crc == CrcCheck::Compared && u32_at(at_end, sizes_at - 4) != Some(layout.crc32) {
+        if crc == CrcCheck::Compared && u32_at(at_end, crc_at) != Some(layout.crc32) {
             return false;
         }
-        let field = if self.wide() { 8 } else { 4 };
-        let Some(sizes) = at_end.get(sizes_at..sizes_at + 2 * field) else {
+        let (field, pair) = if self.wide() { (8, 16) } else { (4, 8) };
+        let Some(sizes) = at_end.get(sizes_at..).and_then(|rest| rest.get(..pair)) else {
             return false;
         };
         let read = |at: usize| {

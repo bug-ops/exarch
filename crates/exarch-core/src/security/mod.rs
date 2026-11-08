@@ -1,5 +1,10 @@
 //! Security validation modules.
 
+#![cfg_attr(
+    not(test),
+    warn(clippy::indexing_slicing, clippy::arithmetic_side_effects)
+)]
+
 pub(crate) mod admitted;
 pub(crate) mod boundary;
 pub(crate) mod context;

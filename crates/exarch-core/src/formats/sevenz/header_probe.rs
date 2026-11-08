@@ -240,7 +240,9 @@ fn fits(needed_kib: u32, memory_kib: usize) -> Result<(), Stop> {
 /// The LZMA2 dictionary size a properties byte declares.
 fn lzma2_dictionary(property: u8) -> Option<u32> {
     match property {
-        0..=39 => Some((2 | u32::from(property & 1)) << (property / 2 + 11)),
+        0..=39 => {
+            (2 | u32::from(property & 1)).checked_shl(u32::from(property / 2).saturating_add(11))
+        }
         40 => Some(u32::MAX),
         _ => None,
     }
@@ -258,7 +260,7 @@ fn decode_header<R: Read + Seek>(
         return Err(Stop::Refused(Refusal::Encrypted));
     }
     let decoded = record.decoded().ok_or(Stop::Unmodelled)?;
-    let coder = record.coders[0];
+    let coder = record.coders.first().copied().ok_or(Stop::Unmodelled)?;
     if decoded > max_bytes {
         return Err(Stop::Unmodelled);
     }
@@ -414,10 +416,12 @@ impl<'a> Bytes<'a> {
         let mut value = 0u64;
         for extra in 0..8u32 {
             let mask = 0x80u8 >> extra;
+            let shift = extra.saturating_mul(8);
             if first & mask == 0 {
-                return Some(value | (u64::from(first & (mask - 1)) << (8 * extra)));
+                let high = u64::from(first & mask.saturating_sub(1)).checked_shl(shift)?;
+                return Some(value | high);
             }
-            value |= u64::from(self.byte()?) << (8 * extra);
+            value |= u64::from(self.byte()?).checked_shl(shift)?;
         }
         Some(value)
     }

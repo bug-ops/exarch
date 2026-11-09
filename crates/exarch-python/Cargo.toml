@@ -30,7 +30,7 @@ pyo3.workspace = true
 # testing extension modules.
 default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
-abi3 = ["pyo3/abi3-py39"]
+abi3 = ["pyo3/abi3-py311"]
 # Exposes `_trigger_panic_for_testing()`, a deliberate-panic hook used by the
 # #395 regression test to verify the catch_unwind -> PyRuntimeError
 # conversion end-to-end through the real Python API. Never enabled for

@@ -138,6 +138,7 @@ fn assert_replace_reproduces_in_place_creation(sddl: &str) {
     fs::create_dir(&dest).unwrap();
     dacl_probe::set_dacl_from_sddl(&dest, sddl);
     let before = dacl_probe::read(&dest);
+    assert_eq!(before.null, sddl.contains("NO_ACCESS_CONTROL"));
     let (dir, file) = made_in_place(&temp, sddl);
 
     let report = extract_report(&dest, &archive, Staging::AtomicReplace);
@@ -168,7 +169,9 @@ fn a_protected_destination_dacl_is_copied_and_its_children_derive_from_it() {
 fn an_unprotected_destination_dacl_is_copied_with_its_inherited_entries() {
     let me = dacl_probe::current_user();
 
-    assert_replace_reproduces_in_place_creation(&format!("D:AI(A;OICI;FA;;;{me})(A;OICI;FR;;;BU)"));
+    assert_replace_reproduces_in_place_creation(&format!(
+        "D:AI(A;OICI;FA;;;{me})(A;OICI;FR;;;BU)(A;OICIID;FR;;;BA)"
+    ));
 }
 
 #[test]
@@ -182,17 +185,7 @@ fn a_creator_owner_entry_resolves_for_each_child_as_it_does_in_place() {
 
 #[test]
 fn a_null_destination_dacl_is_copied_as_a_null_dacl() {
-    let temp = TempDir::new().unwrap();
-    let dest = temp.path().join("out");
-    fs::create_dir(&dest).unwrap();
-    dacl_probe::set_dacl_from_sddl(&dest, "D:PNO_ACCESS_CONTROL");
-    assert!(dacl_probe::read(&dest).null, "the fixture has a DACL");
-
     assert_replace_reproduces_in_place_creation("D:PNO_ACCESS_CONTROL");
-
-    let archive = archive_in(&temp);
-    extract(&dest, &archive, Staging::AtomicReplace);
-    assert!(dacl_probe::read(&dest).null);
 }
 
 #[test]

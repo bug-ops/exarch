@@ -185,10 +185,7 @@ mod tests {
         buffer[FILE_NAME_LENGTH..FILE_NAME_LENGTH + 4]
             .copy_from_slice(&u32::MAX.wrapping_sub(1).to_le_bytes());
 
-        assert!(matches!(
-            names(&buffer),
-            Err(Refusal::Truncated | Refusal::Overflow)
-        ));
+        std::assert_matches!(names(&buffer), Err(Refusal::Truncated | Refusal::Overflow));
     }
 
     #[test]

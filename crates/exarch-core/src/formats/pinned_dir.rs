@@ -1108,7 +1108,7 @@ mod imp {
                     let parent = parent.descriptor();
                     if !parent.has_inheritable_entries()? {
                         return Err(io::Error::other(
-                            "the parent has no inheritable entries; the tree stays owner-only",
+                            "the parent has no inheritable entries; the root stays owner-only",
                         ));
                     }
                     let creator = SecurityDescriptor::read(handle, Part::OwnerAndGroup)?;
@@ -1117,7 +1117,7 @@ mod imp {
                         DaclState::Present { entries } if entries > 0 => {}
                         DaclState::Present { .. } | DaclState::Null => {
                             return Err(io::Error::other(
-                                "the parent has no inheritable entries; the tree stays owner-only",
+                                "the parent has no inheritable entries; the root stays owner-only",
                             ));
                         }
                     }

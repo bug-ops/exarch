@@ -790,7 +790,7 @@ mod imp {
     enum RootTarget {
         /// Rewrite the root and the tree below it.
         Rewrite(RootDacl),
-        /// Leave the tree owner-only and report why.
+        /// Leave the root owner-only and report why.
         Private(NarrowingReason),
     }
 
@@ -813,7 +813,8 @@ mod imp {
         ///
         /// The directory is published already, so a failure is not an error:
         /// [`NarrowingReason::AclCopyFailed`] is recorded and the root stays
-        /// owner-only, which the walk guarantees by rewriting it last.
+        /// owner-only, which the walk guarantees by rewriting it last. Entries
+        /// the walk had already rewritten keep their new DACLs.
         pub(in crate::staging) fn finish(self, _published: Published) -> Narrowed {
             let mut narrowed = Narrowed::none();
             match self.target {
@@ -844,7 +845,7 @@ mod imp {
         /// what it is to be given.
         ///
         /// A fresh root reads its parent's descriptor through the pinned
-        /// parent; one that cannot be read leaves the tree owner-only.
+        /// parent; one that cannot be read leaves the root owner-only.
         ///
         /// # Errors
         ///

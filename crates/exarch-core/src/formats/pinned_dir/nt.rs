@@ -270,7 +270,7 @@ unsafe fn create_with(
 struct OwnerOnlyDescriptor(PSECURITY_DESCRIPTOR);
 
 impl OwnerOnlyDescriptor {
-    /// Builds the descriptor from the SID of the process token's user.
+    /// Builds the descriptor from the SID of the effective token's user.
     ///
     /// # Errors
     ///

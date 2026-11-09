@@ -1825,7 +1825,7 @@ mod imp {
         /// would have inherited from it.
         Copy(DirSecurity),
         /// The destination's DACL cannot be read or no longer is the one that
-        /// was displaced: the tree stays owner-only.
+        /// was displaced: the root stays owner-only.
         Private(NarrowingReason),
     }
 

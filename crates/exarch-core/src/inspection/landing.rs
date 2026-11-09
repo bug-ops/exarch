@@ -672,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_path_through_a_symlink_lands_at_the_resolved_path() {
         let mut builder = tar::Builder::new(Vec::new());
         tar_entry(&mut builder, b"d/", tar::EntryType::Directory, "");

@@ -8887,6 +8887,7 @@ fn action_of<'a>(actions: &'a [(String, String)], name: &str) -> &'a str {
 /// One flag combination of `list`: each link's disposition is the one
 /// `extract` would act on, in the text listing and in `--json`.
 fn assert_link_dispositions(flags: &[&str], symlink_lands: bool, hardlink_lands: bool) {
+    let symlink_lands = symlink_lands && cfg!(unix);
     let verdict = |lands: bool| if lands { "extract" } else { "refuse" };
     let temp = TempDir::new().expect("create temp dir");
     let archive = temp.path().join("links.tar.gz");
@@ -8992,7 +8993,8 @@ fn test_list_allow_symlinks_degrades_links_in_a_solid_7z_it_cannot_decode() {
     );
 
     let decoded = listed_actions(&archive, &["--allow-symlinks", "--allow-solid-archives"]);
-    assert_eq!(action_of(&decoded, "sl"), "extract", "{decoded:?}");
+    let decoded_link = if cfg!(unix) { "extract" } else { "refuse" };
+    assert_eq!(action_of(&decoded, "sl"), decoded_link, "{decoded:?}");
     assert_eq!(action_of(&decoded, "escape"), "refuse", "{decoded:?}");
 }
 

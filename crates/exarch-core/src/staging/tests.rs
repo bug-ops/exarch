@@ -156,6 +156,17 @@ fn cause(error: &ArchiveError) -> &ArchiveError {
     }
 }
 
+/// The cause of a swap that failed after the extraction, which keeps the
+/// extraction's counts as a rolled-back partial extraction.
+fn swap_cause(error: &ArchiveError) -> &ArchiveError {
+    let ArchiveError::PartialExtraction(partial) = error else {
+        panic!("a swap failure must keep the extraction counts: {error:?}");
+    };
+    assert_eq!(partial.writes(), PartialWrites::RolledBack);
+    assert!(partial.report().files_extracted > 0);
+    partial.cause()
+}
+
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap()
 }
@@ -617,7 +628,7 @@ fn a_destination_swapped_during_extraction_is_not_replaced() {
         .unwrap_err();
 
     assert_matches!(
-        error,
+        swap_cause(&error),
         ArchiveError::SecurityViolation {
             kind: Violation::DestinationChanged
         }
@@ -645,7 +656,7 @@ fn a_failed_swap_restores_the_original_destination() {
         .extract(&dest, Staging::AtomicReplace, &mut hooks)
         .unwrap_err();
 
-    match error {
+    match swap_cause(&error) {
         ArchiveError::ReplaceFailed(failure) => {
             assert_matches!(failure.restore, Restore::Restored);
             assert!(failure.leftover.is_none());
@@ -698,6 +709,42 @@ fn a_read_only_destination_is_replaced_and_its_backup_removed() {
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert_eq!(read(&dest.join("a.txt")), "new a");
     assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
+}
+
+#[test]
+fn an_unlistable_destination_is_refused_by_name_and_left_untouched() {
+    for mode in [0o311, 0o000] {
+        let fx = Fixture::new();
+        let dest = fx.dest();
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode)).unwrap();
+        if std::fs::read_dir(&dest).is_ok() {
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipping: directory permissions are not enforced (running as root?)");
+            return;
+        }
+
+        let result = fx.extract(&dest, Staging::Atomic, &mut Hooks::default());
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = result.unwrap_err();
+        let ArchiveError::Io(io) = &error else {
+            panic!("{mode:o}: expected Io, got {error:?}");
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied, "{mode:o}");
+        let name = dest.file_name().unwrap().to_string_lossy().into_owned();
+        let text = io.to_string();
+        assert!(
+            text.contains("cannot list the destination"),
+            "{mode:o}: {text}"
+        );
+        assert!(text.contains(&name), "{mode:o}: {text}");
+        assert!(
+            std::fs::read_dir(&dest).unwrap().next().is_none(),
+            "{mode:o}"
+        );
+        assert!(fx.leftovers().is_empty(), "{mode:o}: {:?}", fx.leftovers());
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
@@ -827,7 +874,7 @@ fn a_destination_recreated_before_a_replace_swaps_is_refused() {
         .unwrap_err();
 
     assert_matches!(
-        error,
+        swap_cause(&error),
         ArchiveError::SecurityViolation {
             kind: Violation::DestinationChanged
         }
@@ -1283,9 +1330,34 @@ mod narrowing {
     use super::super::replace::swap_adopted_for_test;
     #[cfg(acl_copy)]
     use super::super::replace::swap_adopted_in;
+    use super::super::replace::swap_adoption_in;
     use super::*;
     use crate::formats::pinned_dir::Gid;
     use crate::formats::pinned_dir::Uid;
+
+    #[test]
+    fn a_failed_adoption_restores_the_destination_and_keeps_the_counts() {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let mut report = ExtractionReport::new();
+        report.files_extracted = 3;
+
+        let error = swap_adoption_in(
+            &parent,
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            |_| Seed::Absent,
+            report,
+        )
+        .unwrap_err();
+
+        match swap_cause(&error) {
+            ArchiveError::ReplaceFailed(failure) => {
+                assert_matches!(failure.restore, Restore::Restored);
+            }
+            other => panic!("expected ReplaceFailed, got {other}"),
+        }
+        assert!(parent.join("dest").is_dir());
+    }
 
     #[derive(Clone, Copy)]
     struct Own {

@@ -22,6 +22,7 @@ use crate::ConfigSetting;
 use crate::CreationWarning;
 use crate::Result;
 use crate::STAGING_PREFIX;
+use crate::destination_state::parent_or_cwd;
 use crate::request::Durability;
 use crate::request::OutputPolicy;
 
@@ -164,15 +165,13 @@ impl StagedOutput {
     /// be created.
     pub(crate) fn begin(target: &Path, policy: OutputPolicy) -> Result<Self> {
         let name = target.file_name().ok_or_else(unsupported_target)?;
-        let parent = target.parent().ok_or(ArchiveError::InvalidConfiguration {
-            setting: ConfigSetting::OutputPath,
-            problem: ConfigProblem::NoParent,
-        })?;
-        let parent = fs::canonicalize(if parent.is_empty() {
-            Path::new(".")
-        } else {
-            parent
-        })?;
+        if target.parent().is_none() {
+            return Err(ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::OutputPath,
+                problem: ConfigProblem::NoParent,
+            });
+        }
+        let parent = fs::canonicalize(parent_or_cwd(target))?;
         let target = parent.join(name);
 
         let occupant = Occupant::inspect(&target)?;

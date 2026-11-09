@@ -1011,6 +1011,10 @@ pub struct CreationReport {
     pub total_items: i64,
     /// Whether any warning was raised.
     pub has_warnings: bool,
+    /// Uncompressed bytes divided by archive bytes; `0` when either is zero.
+    pub compression_ratio: f64,
+    /// Space saved, as a percentage of the uncompressed bytes.
+    pub compression_percentage: f64,
 }
 
 impl From<exarch_core::CreationReport> for CreationReport {
@@ -1030,6 +1034,8 @@ impl From<exarch_core::CreationReport> for CreationReport {
             warnings: report.warnings.iter().map(creation_warning).collect(),
             total_items: saturating_usize(report.total_items()),
             has_warnings: report.has_warnings(),
+            compression_ratio: report.compression_ratio(),
+            compression_percentage: report.compression_percentage(),
         }
     }
 }
@@ -1349,6 +1355,9 @@ pub struct ManifestFileEntry {
     /// before it, clamped to `±(2^53 - 1)`. Absent only when the archive
     /// stores no time.
     pub modified: Option<i64>,
+    /// Uncompressed size divided by the compressed size the entry owns; absent
+    /// when none can be attributed to it (TAR, solid members, empty entries).
+    pub compression_ratio: Option<f64>,
 }
 
 /// A directory in a listing.
@@ -1487,6 +1496,7 @@ fn archive_entry(entry: &exarch_core::ArchiveEntry) -> CoreResult<ArchiveEntry> 
                 size_clamped: size.clamped || compressed_clamped,
                 mode,
                 modified,
+                compression_ratio: entry.compression_ratio(),
             })
         }
         Kind::Directory => Either5::B(ManifestDirectoryEntry {
@@ -1554,6 +1564,10 @@ pub struct VerificationReport {
     /// Archive format: an `ArchiveType`, or a token newer than this binding.
     #[napi(ts_type = "ArchiveType | (string & {})")]
     pub format: String,
+    /// Whether the archive is safe: `status` is `'PASS'`.
+    pub is_safe: bool,
+    /// Whether any issue is `'CRITICAL'`.
+    pub has_critical_issues: bool,
 }
 
 impl From<exarch_core::VerificationReport> for VerificationReport {
@@ -1569,6 +1583,8 @@ impl From<exarch_core::VerificationReport> for VerificationReport {
             total_size: total_size.value,
             size_clamped: total_size.clamped,
             format: report.format().as_str().to_owned(),
+            is_safe: report.is_safe(),
+            has_critical_issues: report.has_critical_issues(),
             issues: report
                 .into_issues()
                 .into_iter()

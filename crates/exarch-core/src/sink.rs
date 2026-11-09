@@ -68,6 +68,7 @@ use crate::security::permissions::SanitizedMode;
 use crate::security::quota::AdmittedSize;
 use crate::security::quota::EntryCount;
 use crate::security::validator::ValidatorCore;
+use crate::selection::EntryShape;
 use crate::types::CheckedLinkTarget;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -627,11 +628,9 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
         common::checked_add_bytes(tally.report.bytes_written, size.get())?;
 
         let rel = path.as_path();
-        // The tree holds only what this run delivered, so under `Refuse` every
-        // occupant is a duplicate of an earlier entry and is skipped, as under
-        // `Skip`; an occupant this run did not create cannot exist here.
         if let Some(occupant) = self.tree.occupant(rel) {
-            match occupied_action(tally.options.existing_files, rel)? {
+            let policy = tally.options.existing_files;
+            match occupied_action(policy, EntryShape::File, occupant, rel)? {
                 OccupantAction::Skip => {
                     tally.record_duplicate_skip(rel)?;
                     return Ok(None);
@@ -715,14 +714,23 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
 
 /// What to do with a path the sink tree already holds.
 ///
-/// The tree holds only what this run delivered, so under `Refuse` every
-/// occupant is a duplicate of an earlier entry and is skipped, as under
-/// `Skip`; an occupant this run did not create cannot exist here.
-fn occupied_action(policy: ExistingFiles, rel: &Path) -> Result<OccupantAction> {
-    policy.on_occupant(|| true, || common::destination_occupied(Path::new(""), rel))
+/// The tree holds only what this run delivered, so `Refuse` skips exactly the
+/// occupants `is_run_duplicate` accepts and refuses the rest, as the host does.
+fn occupied_action(
+    policy: ExistingFiles,
+    arriving: EntryShape,
+    occupant: Occupant,
+    rel: &Path,
+) -> Result<OccupantAction> {
+    policy.on_occupant(
+        arriving,
+        || Ok(Some(occupant)),
+        || true,
+        || common::destination_occupied(Path::new(""), rel),
+    )
 }
 
-fn place_error(error: PlaceError) -> ArchiveError {
+pub(crate) fn place_error(error: PlaceError) -> ArchiveError {
     match error {
         PlaceError::Conflict(conflict) => conflict.into_archive_error(),
         PlaceError::Budget(exceeded) => exceeded.into(),
@@ -899,8 +907,10 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         let rel = link.as_path();
         let target = symlink.target_path();
         if let Some(occupant) = self.tree.occupant(rel) {
+            let policy = tally.options.existing_files;
+            let arriving = EntryShape::Link(LinkKind::Symlink);
             if matches!(
-                occupied_action(tally.options.existing_files, rel)?,
+                occupied_action(policy, arriving, occupant, rel)?,
                 OccupantAction::Skip
             ) {
                 return tally.record_duplicate_skip(rel).map(drop);
@@ -978,8 +988,10 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                 target: target.as_path().to_path_buf(),
             }));
         }
-        if self.tree.occupant(link.as_path()).is_some() {
-            return match occupied_action(tally.options.existing_files, link.as_path())? {
+        if let Some(occupant) = self.tree.occupant(link.as_path()) {
+            let policy = tally.options.existing_files;
+            let arriving = EntryShape::Link(LinkKind::Hardlink);
+            return match occupied_action(policy, arriving, occupant, link.as_path())? {
                 OccupantAction::Skip => common::record_duplicate_skip(tally.report, link.as_path()),
                 OccupantAction::Replace(_) => {
                     Err(ArchiveError::from(Malformation::DuplicateEntry {

@@ -9,9 +9,10 @@
 //! [`ProgressCallback::is_cancelled`] once more before anything is published.
 //!
 //! Inside the staging directory nothing but this run's own files can exist, so
-//! [`ExistingFiles::Skip`] is raised to [`ExistingFiles::Refuse`]: in-archive
-//! duplicates are still skipped through the run record, but a file planted in
-//! the staging directory is refused instead of being kept and published.
+//! [`ExistingFiles::Skip`] is raised to [`ExistingFiles::Refuse`]: a file or link
+//! over a directory the run made is refused, an in-archive duplicate of a file
+//! is still skipped through the run record, and a file planted in the staging
+//! directory is refused instead of being kept and published.
 
 mod acl;
 mod adopt;
@@ -318,13 +319,22 @@ impl AtomicDestination {
     }
 }
 
+/// Whether `dir` has no entries; a directory the caller cannot list is an
+/// error naming it, since its emptiness cannot be checked.
 fn is_empty_dir(dir: &Path) -> Result<bool> {
-    let mut entries = std::fs::read_dir(dir).map_err(ArchiveError::Io)?;
+    let unlistable = |error: io::Error| {
+        ArchiveError::Io(io_context(
+            &error,
+            "cannot list the destination to check that it is empty",
+            dir,
+        ))
+    };
+    let mut entries = std::fs::read_dir(dir).map_err(unlistable)?;
     entries
         .next()
         .transpose()
         .map(|first| first.is_none())
-        .map_err(ArchiveError::Io)
+        .map_err(unlistable)
 }
 
 /// Wraps `error` with a static `context` and the `path` it concerns.

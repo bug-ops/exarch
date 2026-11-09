@@ -1,10 +1,13 @@
 //! Which landings the current run created itself.
 //!
 //! Under [`ExistingFiles::Refuse`] an occupied landing is refused, except when
-//! the run made the occupant: a second archive entry for the same path is a
-//! duplicate and is skipped, as under [`ExistingFiles::Skip`]. The record tells
-//! the two apart. It is kept per run, by the pinned destination, and is filled
-//! only under `Refuse`.
+//! the run made the occupant and it is a file or a symlink: a second archive
+//! entry for the same path is a duplicate and is skipped, as under
+//! [`ExistingFiles::Skip`]. A directory the run made is never a duplicate, but
+//! the record keeps it too, so a refusal can say that the archive itself made
+//! the occupant. The record tells an entry the run made from one it did not. It
+//! is kept per run, by the pinned destination; files are recorded only under
+//! `Refuse`, directories always.
 //!
 //! A staged run keeps a [`Recording::Ledger`] instead: every entry the run
 //! creates is recorded whatever `ExistingFiles` says, and the ledger outlives
@@ -132,12 +135,11 @@ impl RunRecord {
 
     /// Records that the run just created the directory `leaf` in `dir`.
     ///
-    /// Directories only matter to a [`Recording::Ledger`]: a duplicate check
-    /// never asks about one.
+    /// A duplicate check never skips a directory, but a refusal asks whether
+    /// the run made the occupant, so directories are recorded under every
+    /// [`Recording`].
     pub(crate) fn note_directory(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
-        if self.recording == Recording::Ledger {
-            self.insert(key_of(dir, leaf, rel));
-        }
+        self.insert(key_of(dir, leaf, rel));
     }
 
     /// Like [`note`](Self::note) for the file `leaf` the run just created and
@@ -341,7 +343,7 @@ mod tests {
         }
 
         assert!(!duplicates.created_with(key("made")));
-        assert!(!duplicates.created_with(key("sub")));
+        assert!(duplicates.created_with(key("sub")));
         assert!(ledger.created_with(key("made")));
         assert!(ledger.created_with(key("sub")));
     }

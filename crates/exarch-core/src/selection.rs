@@ -464,7 +464,7 @@ impl EntrySelection {
             // A refused absolute target is refused by the validator whatever
             // the selection says; reporting it as not extracted would blame
             // the selection for a refusal that including it would not lift.
-            Decision::Skip(_) if !root.as_os_str().is_empty() => TargetMapping::Unchanged,
+            Decision::Skip(_) if !root.is_empty() => TargetMapping::Unchanged,
             Decision::Skip(_) => TargetMapping::NotExtracted,
             Decision::Extract(Placement::Unchanged) => TargetMapping::Mapped(root.join(normalized)),
             Decision::Extract(Placement::Rewritten(rewritten)) => {

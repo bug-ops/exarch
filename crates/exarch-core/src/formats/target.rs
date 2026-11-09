@@ -30,6 +30,7 @@ use crate::security::admitted::ValidatedHardlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::LinkBase;
+use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PinnedHostFs;
 use crate::security::hardlink::HardlinkTarget;
@@ -38,6 +39,7 @@ use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::validator::Gated;
 use crate::security::validator::ValidatorCore;
+use crate::selection::EntryShape;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -528,6 +530,8 @@ impl ExtractTarget for HostTarget<'_> {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let action = tally.options.existing_files.on_occupant(
+                    EntryShape::Link(LinkKind::Hardlink),
+                    || link_dir.probe(link_leaf),
                     || {
                         self.root
                             .created()

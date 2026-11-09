@@ -2620,7 +2620,7 @@ fn test_create_compression_level_refusal_is_exit_1() {
         .arg(fixture_path("sample.txt"))
         .assert()
         .code(1)
-        .stderr(predicates::str::contains("between 1 and 9"));
+        .stderr(predicates::str::contains("must be 1-9"));
 }
 
 #[test]
@@ -7905,7 +7905,7 @@ fn test_create_negative_compression_level_is_exit_1() {
         .arg(fixture_path("sample.txt"))
         .assert()
         .code(1)
-        .stderr(predicates::str::contains("between 1 and 9"));
+        .stderr(predicates::str::contains("must be 1-9"));
 }
 
 /// A whole number beyond `i64` is core's out-of-range refusal (exit 1), while
@@ -7921,7 +7921,7 @@ fn test_create_huge_compression_level_is_exit_1_and_text_is_usage_error() {
         .arg(fixture_path("sample.txt"))
         .assert()
         .code(1)
-        .stderr(predicates::str::contains("between 1 and 9"));
+        .stderr(predicates::str::contains("must be 1-9"));
     for text in ["abc", "", "-", "1.5"] {
         exarch_cmd()
             .arg("create")
@@ -8495,9 +8495,18 @@ mod interrupt {
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::null())
             .spawn_reaped();
-        // The three-entry run ends well within this wait, so the signals
-        // below find the process past its armed window, blocked on the report.
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        // The destination appears when core publishes it, which is the end of
+        // the run; the grace covers the guard dropping before the report
+        // blocks.
+        let published = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !out.exists() {
+            assert!(
+                std::time::Instant::now() < published,
+                "the run never published the destination"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
         for _ in 0..3 {
             sigint(&child);
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -8878,6 +8887,7 @@ fn action_of<'a>(actions: &'a [(String, String)], name: &str) -> &'a str {
 /// One flag combination of `list`: each link's disposition is the one
 /// `extract` would act on, in the text listing and in `--json`.
 fn assert_link_dispositions(flags: &[&str], symlink_lands: bool, hardlink_lands: bool) {
+    let symlink_lands = symlink_lands && cfg!(unix);
     let verdict = |lands: bool| if lands { "extract" } else { "refuse" };
     let temp = TempDir::new().expect("create temp dir");
     let archive = temp.path().join("links.tar.gz");
@@ -8983,7 +8993,8 @@ fn test_list_allow_symlinks_degrades_links_in_a_solid_7z_it_cannot_decode() {
     );
 
     let decoded = listed_actions(&archive, &["--allow-symlinks", "--allow-solid-archives"]);
-    assert_eq!(action_of(&decoded, "sl"), "extract", "{decoded:?}");
+    let decoded_link = if cfg!(unix) { "extract" } else { "refuse" };
+    assert_eq!(action_of(&decoded, "sl"), decoded_link, "{decoded:?}");
     assert_eq!(action_of(&decoded, "escape"), "refuse", "{decoded:?}");
 }
 
@@ -9239,7 +9250,7 @@ fn test_create_negative_overrange_compression_level_is_exit_1_with_a_readable_me
         .assert()
         .code(1)
         .stderr(predicates::str::contains(
-            "Invalid compression level (an out-of-range integer): must be between 1 and 9.",
+            "Invalid compression level: must be 1-9, got an out-of-range integer",
         ));
 }
 
@@ -9261,6 +9272,69 @@ fn tar_of(entries: &[(&str, tar::EntryType, &str)]) -> Vec<u8> {
         builder.append(&header, data).unwrap();
     }
     builder.into_inner().unwrap()
+}
+
+/// A file over a directory the archive made fails every write mode, names the
+/// entry and not a staging path, and promises no help from `--force`.
+#[test]
+fn test_extract_file_over_an_archive_directory_hints_no_flag_in_every_mode() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dir.tar");
+    std::fs::write(
+        &archive,
+        tar_of(&[
+            ("x/a", tar::EntryType::Regular, ""),
+            ("x", tar::EntryType::Regular, ""),
+        ]),
+    )
+    .expect("write archive");
+    let modes: [(&str, &[&str], bool); 5] = [
+        ("fresh", &[], false),
+        ("in place", &[], true),
+        ("atomic", &["--atomic"], false),
+        ("force", &["--force"], true),
+        ("atomic force", &["--atomic", "--force"], true),
+    ];
+    for (name, flags, existing) in modes {
+        let out = temp.path().join(name.replace(' ', "-"));
+        if existing {
+            std::fs::create_dir(&out).expect("create destination");
+        }
+        let assert = exarch_cmd()
+            .arg("extract")
+            .args(flags)
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .failure();
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8");
+        assert!(!stderr.contains(".exarch-"), "{name}: {stderr}");
+        assert!(!stderr.contains("Use --force"), "{name}: {stderr}");
+        assert!(
+            stderr.contains("no flag allows that") || stderr.contains("refusing to replace"),
+            "{name}: {stderr}"
+        );
+    }
+}
+
+/// An existing file in a destination whose name looks like a staging directory
+/// is still the destination's own, which `--force` replaces.
+#[test]
+fn test_extract_onto_an_existing_file_in_an_exarch_named_destination_hints_force() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("a.tar");
+    std::fs::write(&archive, tar_of(&[("f", tar::EntryType::Regular, "")])).expect("write archive");
+    let out = temp.path().join(".exarch-mine");
+    std::fs::create_dir(&out).expect("create destination");
+    std::fs::write(out.join("f"), "old").expect("write existing file");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Use --force to overwrite."));
 }
 
 const LINK_FLAGS: [&str; 2] = ["--allow-hardlinks", "--allow-symlinks"];

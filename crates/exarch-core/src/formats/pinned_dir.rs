@@ -26,8 +26,10 @@
 //! Other Unix targets and WASI have no such mode and open directories
 //! read-only, so there a directory without read permission fails with
 //! `EACCES` where path-based code worked. None of them is a shipped target for
-//! the bindings or the CLI release builds. FreeBSD opens with `O_SEARCH` only
-//! where a directory's attributes are read or changed ([`DirHandle`]).
+//! the bindings or the CLI release builds. FreeBSD, NetBSD and illumos open
+//! with `O_SEARCH` only where a directory's attributes are read or changed
+//! ([`DirHandle`]); on NetBSD and illumos neither that open nor the `fchmod`
+//! through it is verified, so any failure there falls back to the read handle.
 //!
 //! On Windows a [`VettedDir`] is a directory handle. Below the root, a junction
 //! or symlink is opened as itself and refused. The root is opened the same
@@ -121,6 +123,15 @@ impl<'a> Leaf<'a> {
         }
     }
 
+    /// `name` as a leaf, or `None` unless it is exactly one normal component.
+    pub(crate) fn of_name(name: &'a OsStr) -> Option<Self> {
+        let mut components = Path::new(name).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(only)), None) if only == name => Some(Self(name)),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn as_os_str(self) -> &'a OsStr {
         self.0
     }
@@ -169,13 +180,7 @@ impl LeafBuf {
     /// or a root, which have no usable final name.
     pub(crate) fn of(path: &Path) -> Option<Self> {
         let name = path.file_name()?;
-        let mut components = Path::new(name).components();
-        match (components.next(), components.next()) {
-            (Some(Component::Normal(only)), None) if only == name => {
-                Some(Self(name.to_os_string()))
-            }
-            _ => None,
-        }
+        Leaf::of_name(name).map(|leaf| Self(leaf.as_os_str().to_os_string()))
     }
 
     /// `prefix` followed by 64 random bits in hex.
@@ -310,8 +315,8 @@ pub(crate) struct EntryStatus {
 #[cfg(unix)]
 #[derive(Debug)]
 pub(crate) enum DirHandle {
-    /// `O_PATH` on Linux and Android, `O_SEARCH` on Apple platforms and
-    /// FreeBSD.
+    /// `O_PATH` on Linux and Android, `O_SEARCH` on Apple platforms, FreeBSD,
+    /// NetBSD and illumos.
     Search(std::fs::File),
     /// Opened for reading.
     Read(std::fs::File),
@@ -515,8 +520,21 @@ mod imp {
     /// open it for reading, so it has no such handle.
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     const MODE_ACCESS: OFlags = DIR_ACCESS;
-    #[cfg(target_os = "freebsd")]
+    #[cfg(any(target_os = "freebsd", target_os = "netbsd", target_os = "illumos"))]
     const MODE_ACCESS: OFlags = OFlags::from_bits_retain(libc::O_SEARCH.cast_unsigned());
+
+    /// Whether the search-only open and the `fchmod` through it are unverified
+    /// on this target: any failure then falls back to the read handle, which
+    /// is what the platform did before.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos"
+    ))]
+    const SEARCH_UNVERIFIED: bool = cfg!(any(target_os = "netbsd", target_os = "illumos"));
 
     /// Opens a directory without following a symlink, with the platform's
     /// permission-light access mode.
@@ -684,10 +702,12 @@ mod imp {
         /// mode), refusing a symlink, through a handle that needs no read
         /// access to it where the platform has one.
         ///
-        /// Apple platforms and FreeBSD open it search-only (`O_SEARCH`) and,
-        /// for a directory that is readable but not searchable, for reading;
-        /// Linux and Android use an `O_PATH` handle. Other Unix open it for
-        /// reading, so a mode that denies that read still fails there.
+        /// Apple platforms, FreeBSD, NetBSD and illumos open it search-only
+        /// (`O_SEARCH`) and, for a directory that is readable but not
+        /// searchable, for reading; NetBSD and illumos also fall back to
+        /// reading on any other failure of the search-only open. Linux and
+        /// Android use an `O_PATH` handle. Other Unix open it for reading, so a
+        /// mode that denies that read still fails there.
         ///
         /// # Errors
         ///
@@ -696,7 +716,9 @@ mod imp {
             target_os = "linux",
             target_os = "android",
             target_vendor = "apple",
-            target_os = "freebsd"
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "illumos"
         ))]
         pub(crate) fn open_dir_for_metadata(&self, name: Leaf<'_>) -> io::Result<DirHandle> {
             let searched = open_directory_with(MODE_ACCESS, |flags| {
@@ -704,7 +726,7 @@ mod imp {
             });
             match searched {
                 Ok(fd) => Ok(DirHandle::Search(File::from(fd))),
-                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                Err(e) if SEARCH_UNVERIFIED || e.kind() == io::ErrorKind::PermissionDenied => {
                     self.open_dir_file(name).map(DirHandle::Read)
                 }
                 Err(e) => Err(e),
@@ -723,12 +745,14 @@ mod imp {
                 target_os = "linux",
                 target_os = "android",
                 target_vendor = "apple",
-                target_os = "freebsd"
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "illumos"
             ))
         ))]
         pub(crate) fn open_dir_for_metadata(&self, name: Leaf<'_>) -> io::Result<DirHandle> {
-            // TODO(#1126): NetBSD, illumos, OpenBSD and DragonFly have no
-            // verified handle that accepts `fchmod` without read access.
+            // TODO(#1137): OpenBSD and DragonFly have no search-only open flag
+            // in libc.
             self.open_dir_file(name).map(DirHandle::Read)
         }
 
@@ -737,7 +761,9 @@ mod imp {
         /// `expected` names.
         ///
         /// An identity the volume cannot provide is not a mismatch. Linux and
-        /// Android fall back to a read handle where `/proc` is not mounted. See
+        /// Android fall back to a read handle where `/proc` is not mounted, and
+        /// NetBSD and illumos where the `fchmod` through the search handle
+        /// fails. See
         /// [`open_dir_for_metadata`](Self::open_dir_for_metadata) for the
         /// handles.
         ///
@@ -757,6 +783,10 @@ mod imp {
             match dir.chmod(mode) {
                 #[cfg(any(target_os = "linux", target_os = "android"))]
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    self.set_dir_mode_through_read_handle(name, expected, mode)
+                }
+                #[cfg(any(target_os = "netbsd", target_os = "illumos"))]
+                Err(_) if matches!(dir, DirHandle::Search(_)) => {
                     self.set_dir_mode_through_read_handle(name, expected, mode)
                 }
                 other => other,
@@ -786,8 +816,15 @@ mod imp {
         }
 
         /// `set_dir_mode` for a Linux without `/proc`, where an `O_PATH`
-        /// handle cannot be chmod'ed: the directory is opened for reading.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
+        /// handle cannot be chmod'ed, and for NetBSD and illumos when the
+        /// search handle refuses the change: the directory is opened for
+        /// reading, and its identity is checked again.
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "netbsd",
+            target_os = "illumos"
+        ))]
         pub(crate) fn set_dir_mode_through_read_handle(
             &self,
             name: Leaf<'_>,
@@ -1433,6 +1470,7 @@ impl Drop for TempFileGuard<'_> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 pub(crate) mod support {
+    use std::ffi::OsStr;
     use std::path::Path;
 
     use super::Leaf;
@@ -1440,7 +1478,7 @@ pub(crate) mod support {
     use super::VettedDir;
 
     pub(crate) fn leaf(name: &str) -> Leaf<'_> {
-        Leaf::from_component(Path::new(name).components().next().unwrap()).unwrap()
+        Leaf::of_name(OsStr::new(name)).unwrap()
     }
 
     pub(crate) fn pinned_at(path: &Path) -> VettedDir {
@@ -1705,7 +1743,9 @@ mod tests {
         target_os = "linux",
         target_os = "android",
         target_vendor = "apple",
-        target_os = "freebsd"
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos"
     ))]
     #[test]
     fn set_dir_mode_reaches_a_directory_whatever_access_its_mode_grants() {
@@ -1720,7 +1760,12 @@ mod tests {
             let result = dir.set_dir_mode(leaf("locked"), id, &fs::Permissions::from_mode(0o700));
 
             if mode == 0o000
-                && cfg!(any(target_vendor = "apple", target_os = "freebsd"))
+                && cfg!(any(
+                    target_vendor = "apple",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "illumos"
+                ))
                 && fs::metadata(temp.path()).unwrap().uid() != 0
             {
                 // Neither search nor read is allowed, so no handle exists.
@@ -1866,6 +1911,8 @@ mod windows_tests {
         };
         assert!(ace.allows);
         assert!(!ace.inherited());
+        assert_eq!(ace.flags, dacl_probe::OICI);
+        assert_eq!(ace.mask, dacl_probe::FILE_ALL_ACCESS);
         assert_eq!(ace.sid, dacl_probe::current_user());
     }
 
@@ -1886,6 +1933,7 @@ mod windows_tests {
                 panic!("expected exactly one entry, got {:?}", dacl.aces);
             };
             assert!(ace.allows && ace.inherited());
+            assert_eq!(ace.mask, dacl_probe::FILE_ALL_ACCESS);
             assert_eq!(ace.sid, dacl_probe::current_user());
         }
     }

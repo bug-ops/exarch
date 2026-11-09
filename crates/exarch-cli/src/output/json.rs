@@ -698,6 +698,34 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_swap_envelope_keeps_the_counts_and_names_the_leftover() {
+        use exarch_core::Restore;
+
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let mut report = exarch_core::ExtractionReport::new();
+        report.files_extracted = 3;
+        let swap = ArchiveError::ReplaceFailed(exarch_core::ReplaceFailure::new(
+            io::Error::from(io::ErrorKind::PermissionDenied),
+            Restore::Restored,
+            Some(exarch_core::StagingLeftover::new(PathBuf::from(
+                "out/.exarch-AbC123",
+            ))),
+        ));
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            swap,
+            report,
+            exarch_core::PartialWrites::RolledBack,
+        ));
+        let converted = crate::error::convert_error(Operation::Extract, err, Path::new("a.tar"));
+        f.format_error(Operation::Extract, &converted);
+        let v = parsed(&f);
+        assert_eq!(v["error"]["kind"], "IoError");
+        assert_eq!(v["error"]["partial_report"]["files_extracted"], 3);
+        assert_eq!(v["error"]["partial_report"]["writes"], "rolled_back");
+        assert_eq!(v["error"]["leftover_path"], "out/.exarch-AbC123");
+    }
+
+    #[test]
     fn test_error_envelope_names_the_leftover_staging_directory() {
         let mut f = JsonFormatter::with_writer(Vec::new());
         let err = ArchiveError::Cancelled.rolled_back_with(Some(

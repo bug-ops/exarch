@@ -1833,6 +1833,16 @@ mod tests {
             10_000,
             "docs say 10,000"
         );
+        assert_eq!(
+            exarch_core::ReuseLimit::MAX.get(),
+            256 * 1024 * 1024,
+            "docs of withDecodeReuse say at most 256 MiB"
+        );
+        assert_eq!(
+            exarch_core::ReuseLimit::DEFAULT.get(),
+            32 * 1024 * 1024,
+            "docs of withDecodeReuse say default 32 MiB"
+        );
     }
 
     #[test]

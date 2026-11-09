@@ -211,12 +211,14 @@ impl PyExtractionReport {
         extraction_warnings(py, &self.inner.warnings)
     }
 
-    /// Returns total number of items processed.
+    /// Total number of items processed.
+    #[getter]
     fn total_items(&self) -> usize {
         self.inner.total_items()
     }
 
-    /// Returns whether any warnings were generated.
+    /// Whether any warnings were generated.
+    #[getter]
     fn has_warnings(&self) -> bool {
         self.inner.has_warnings()
     }
@@ -322,10 +324,12 @@ impl PyCreationReport {
         creation_warnings(py, &self.inner.warnings)
     }
 
+    #[getter]
     fn total_items(&self) -> usize {
         self.inner.total_items()
     }
 
+    #[getter]
     fn has_warnings(&self) -> bool {
         self.inner.has_warnings()
     }

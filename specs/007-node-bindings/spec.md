@@ -22,6 +22,9 @@ related:
 
 # Feature: Node.js Bindings
 
+> [!note] Revision 2026-11-09: report helpers and level text (#1136, #1134)
+> `isSafe`, `hasCriticalIssues`, `compressionRatio` and `compressionPercentage` join the report surface (FR-130); the level error text is core's.
+
 > [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > `ExarchError` union, `IoKind`, `SinkOptions`, entry unions, number-to-limit boundary, `total: null`, skipped summary, injective path rendering and staged `createArchive`. See FR-106 to FR-113; rows that conflict (FR-090, FR-101) are rewritten in place.
 
@@ -186,6 +189,7 @@ THEN extraction respects those settings
 | FR-127 | A core token the binding was not built to know (a variant of a `#[non_exhaustive]` enum added later) SHALL pass through error fields (`setting`, `subCode`, `relaxableBy`) as its `as_str` text, and SHALL degrade in reports to an `Unknown*` value (`UnknownDisposition`, `UnknownExtractionWarning`, `UnknownCreationWarning`, `UnknownLinkTarget`, `UnknownManifestEntry`, `UnknownMemoryEntry`) carrying the token instead of failing the whole call (#1054) | must |
 | FR-128 | `SecurityConfig` SHALL expose setters for the relaxable core settings an error names in `relaxableBy`: `withAllowWindowsReservedNames`, `withMaxTarMetadataBytes`, `withMaxDecoderMemory`, `withCompressedMemberAllowance`, `withMaxSolidCompressionRatio`, and `ListOptions` `withStoredTargets`, each through the core boundary parsers and refusing zero and out-of-range values as `INVALID_CONFIGURATION` (#1056) | must |
 | FR-129 | Every Node function SHALL take its arguments in ONE order: required inputs, `config`, operation `options`, specific arguments, `format`, `progress`, `signal` (BREAKING): `listArchiveBytes`, `listArchiveBytesSync`, `listArchiveBytesWithProgress` and `listArchiveBytesWithProgressSync` take `options` before `format`; `argument-order.test.js` pins it. The config getters `zipConsistency`, `existingFiles`, `staging` and `storedTargets` SHALL return the core token as a widened string and SHALL never throw on a core variant the binding does not know, and `ConfigSetting` SHALL include `'stored_targets'`; reports gain `totalItems` and `hasWarnings` (#1096, #1098, #1102) | must |
+| FR-130 | `VerificationReport` SHALL expose `isSafe` (`status` is `'PASS'`) and `hasCriticalIssues` (any issue is `'CRITICAL'`); `CreationReport` SHALL expose `compressionRatio` and `compressionPercentage`, and `ManifestFileEntry` an optional `compressionRatio` (uncompressed size over the compressed size the entry owns; absent when none can be attributed: TAR, solid members, empty entries), mirroring the core and Python helpers; an out-of-range or `NaN` `withCompressionLevel` input is `INVALID_COMPRESSION_LEVEL` with core's `invalid compression level: must be 1-9, got {level}` text; `index.d.ts` is the napi-generated file (#1136, #1134) | must |
 
 ## 4. Non-Functional Requirements
 

@@ -129,6 +129,28 @@ impl std::fmt::Display for RequestedLevel {
     }
 }
 
+/// Who made the entry that occupies a path a run was about to write.
+///
+/// It decides what can help: an existing entry may be overwritten or removed,
+/// while a conflict with an entry the run itself made is inherent to the
+/// archive and no option of the caller changes it.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::OccupiedBy;
+///
+/// assert_ne!(OccupiedBy::Existing, OccupiedBy::Archive);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OccupiedBy {
+    /// An entry that was there before the run, or whose maker is unknown.
+    Existing,
+    /// An entry the run itself created earlier from the archive.
+    Archive,
+}
+
 /// Compression ratio of a checked size pair.
 ///
 /// `Unbounded` replaces a division by zero, so a ratio is never infinite or
@@ -638,7 +660,7 @@ pub enum ArchiveError {
     },
 
     /// Invalid compression level.
-    #[error("invalid compression level {level}, must be 1-9")]
+    #[error("invalid compression level: must be 1-9, got {level}")]
     InvalidCompressionLevel {
         /// The level that was asked for.
         level: RequestedLevel,
@@ -685,6 +707,8 @@ pub enum ArchiveError {
         destination: PathBuf,
         /// The archive-relative paths that are occupied.
         conflicts: Box<[PathBuf]>,
+        /// Who made the occupying entry.
+        by: OccupiedBy,
     },
 
     /// An include pattern of the selection matched no entry of the archive.
@@ -1292,6 +1316,24 @@ impl ArchiveError {
 }
 
 impl ArchiveError {
+    /// A [`Self::DestinationOccupied`] that says `by` made the occupant; any
+    /// other error is returned unchanged.
+    #[must_use]
+    pub(crate) fn occupied_by(self, by: OccupiedBy) -> Self {
+        match self {
+            Self::DestinationOccupied {
+                destination,
+                conflicts,
+                ..
+            } => Self::DestinationOccupied {
+                destination,
+                conflicts,
+                by,
+            },
+            other => other,
+        }
+    }
+
     /// Wraps `err` in [`Self::PartialExtraction`] if `report` recorded any
     /// processed items, skipped files, or warnings, otherwise returns `err`
     /// unchanged.
@@ -2238,6 +2280,7 @@ mod tests {
                 ArchiveError::DestinationOccupied {
                     destination: path(),
                     conflicts: Box::new([path()]),
+                    by: OccupiedBy::Existing,
                 },
                 Classes::NONE,
             ),

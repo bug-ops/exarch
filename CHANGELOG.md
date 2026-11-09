@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: regression tests for the zip2 open-time advisories GHSA-m3j8 and GHSA-w2w4 (#1028, #1065).
 - Tests: a WinRAR-produced ZIP with deflate payload joins the ZIP corpus (#855, #1077).
 - Core: `staging_place`, `StagingPlace`, `StagedOutputKind`, `STAGING_PREFIX`, `BACKUP_PREFIX`, `LinkTargetState`, `StoredTargets` tokens, `UnixTime`, `SolidArchives::with_max_ratio` and `Skips::counts` (#1096, #1097, #1098, #1099, #1102, #1114).
+- Core: `CompressionLevel: TryFrom<RequestedLevel>` and one core-owned `InvalidCompressionLevel` message used by the CLI, Python and Node (#1134, #1135, #1141).
+- Node: `isSafe`, `hasCriticalIssues`, `compressionRatio` and `compressionPercentage` on reports and manifest entries, as in Python (#1136, #1141).
+- Core: NetBSD and illumos open directories search-only for mode changes and fall back to the read handle on any error (#1126, #1141).
+- Tests: `dispositions_match_extraction` compares `dispositions()` with the per-entry outcome of extraction over TAR, ZIP and 7z (#1132, #1141).
 
 ### Changed
 
@@ -102,6 +106,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking**: a failed publish of a plain `--atomic` extraction returns `PartialExtraction` with the extraction counts and cause `OutputExists` instead of the bare error (#1083, #1129).
 - Core: the LZMA2 dictionary-size formula exists once for 7z admission and the header probe (#1073, #1129).
 - Python: tests pin the errors for non-str and lone-surrogate string-enum values (#1094, #1129).
+- **Breaking (core)**: extraction refuses a file or link over a directory the archive created in every CLI extract mode, `--atomic` and `--force` included, and in the sink under `ExistingFiles::Refuse`, instead of skipping it as a duplicate, and `ArchiveError::DestinationOccupied` gains `by: OccupiedBy` so the CLI hint no longer suggests `--force` where it cannot help (#1132, #1141).
+- **Breaking (Python)**: `with_stored_targets` requires its argument, `total_items` and `has_warnings` on the reports are properties, and `SinkOptions` takes its defaults from core (#1136, #1141).
+- **Breaking (CLI, Python, Node)**: the compression-level error reads `invalid compression level: must be 1-9, got N` everywhere (#1134, #1141).
+- Core: `list` and extraction share one run-occupant rule and `list` refusals carry a typed `ArchiveError` (#1125, #1127, #1130, #1132, #1141).
+- Core: plain `--atomic` onto an empty destination that cannot be listed fails with an error naming the destination (#1131, #1141).
+- Core: a failed `--atomic --force` swap keeps the extraction counts in `partial_report`, and the CLI no longer says the destination is unchanged after a failed restore (#1124, #1141).
+- Core: the Win32 result check, the leaf-name constructor and the owner-only descriptor are written once, and the descriptor is built from the SID bytes (#1134, #1141).
+- CLI: `raise_hint`, the forced-exit hint, signal mapping and the interrupt tests are typed and synchronised on events (#1135, #1141).
+- Python, Node: stale solid-ratio, decode-reuse and `modified` unit documentation is corrected and guarded by tests (#1136, #1141).
+- Core: `verify` says extraction fails over a directory occupant unless existing entries are skipped (#1132, #1141).
 
 ### Fixed
 
@@ -142,6 +156,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `--atomic --force` onto a destination the caller cannot delete is refused before the extraction, and the 0311 backup is removed on FreeBSD (#1085, #1087, #1129).
 - Core: `list` skips a duplicate symlink as `extract` does on hosts that can create symlinks (#1120, #1129).
 - CI: the musl wheel is built with the hash-locked maturin in a digest-pinned container, and a FreeBSD job runs the backup-removal test as an unprivileged user (#1118, #1087, #1129).
+- CLI: a forced exit keeps the interrupt window locked, so `--json` prints exactly one document (#1133, #1141).
+- Core: `list` agrees with extraction for a repeated file name, a hardlink over an earlier symlink and a symlink on a host without symlink creation (#1125, #1127, #1130, #1141).
+- CI: patchelf is installed from a hash-locked requirements export and the musl build toolchain is pinned to Rust 1.99.1 (#1128, #1141).
 
 ## [0.9.0] - 2026-11-05
 

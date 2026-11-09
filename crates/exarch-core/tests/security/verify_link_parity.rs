@@ -67,6 +67,7 @@ fn link_config() -> SecurityConfig {
 
 struct Outcome {
     categories: Vec<IssueCategory>,
+    messages: Vec<String>,
     status: VerificationStatus,
     extracted: exarch_core::Result<exarch_core::ExtractionReport>,
     base: TempDir,
@@ -96,6 +97,11 @@ fn run_verify_and_extract(items: &[Item], plant: impl FnOnce(&std::path::Path)) 
             .issues()
             .iter()
             .map(exarch_core::VerificationIssue::category)
+            .collect(),
+        messages: report
+            .issues()
+            .iter()
+            .map(exarch_core::VerificationIssue::message)
             .collect(),
         status: report.status(),
         extracted,
@@ -144,7 +150,8 @@ fn assert_link_placement_is_a_security_finding(items: &[Item]) -> Outcome {
 }
 
 /// Overwriting cannot replace a directory with a symlink, so `--force` fails
-/// closed there; default extraction skips the link, so verify only notes it.
+/// closed there, and so does extraction that refuses existing entries; default
+/// extraction skips the link, so verify only notes it and says when it fails.
 fn assert_overwrite_note(items: &[Item]) {
     let outcome = run_verify_and_extract(items, |_| {});
     assert_eq!(outcome.status, VerificationStatus::Pass, "{items:?}");
@@ -153,6 +160,12 @@ fn assert_overwrite_note(items: &[Item]) {
         outcome.categories,
         [IssueCategory::InvalidArchive],
         "{items:?}"
+    );
+    assert!(
+        outcome.messages[0]
+            .contains("fails at d, as does any caller that does not skip existing entries"),
+        "{items:?}: {:?}",
+        outcome.messages
     );
 }
 

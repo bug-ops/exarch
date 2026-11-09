@@ -13,8 +13,8 @@
 /// test builds only.
 ///
 /// The mirrors give the TypeScript unions their members; the `every_*` tests
-/// in `error.rs` use these conversions to fail the test suite when core gains a
-/// variant that no mirror lists.
+/// in `error.rs`, `config.rs` and `report.rs` use these conversions to fail the
+/// test suite when core gains a variant that no mirror lists.
 macro_rules! mirror_from_core {
     ($mirror:ty, $core:ty, $what:literal, [$($variant:ident),+ $(,)?]) => {
         #[cfg(test)]

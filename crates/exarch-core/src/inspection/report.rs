@@ -751,7 +751,9 @@ pub enum Heuristic {
         kind: NameCollisionKind,
     },
     /// Extraction with overwrite enabled would fail at a path an earlier
-    /// entry holds; default extraction skips the entry.
+    /// entry holds. Default extraction skips the entry. Extraction that
+    /// refuses existing entries skips it as a duplicate when the earlier entry
+    /// is a file or a symlink and fails when it is a directory.
     #[non_exhaustive]
     OverwriteConflict {
         /// The destination-relative path of the conflict.
@@ -824,6 +826,15 @@ impl Heuristic {
                  filesystems",
                 escaped_path(existing),
                 escaped_path(incoming)
+            ),
+            Self::OverwriteConflict {
+                rel,
+                occupant: occupant @ PathOccupant::Directory,
+            } => format!(
+                "every CLI extract mode fails at {}, as does any caller that does not skip \
+                 existing entries: an earlier entry is a {}",
+                crate::path_text(rel),
+                occupant.noun()
             ),
             Self::OverwriteConflict { rel, occupant } => format!(
                 "extraction with overwrite fails at {}: an earlier entry is a {} (default \
@@ -1103,6 +1114,7 @@ impl VerificationIssue {
             ArchiveError::DestinationOccupied {
                 destination,
                 conflicts,
+                ..
             } => medium_invalid_archive(format!(
                 "Destination occupied: {} holds {} of the paths to extract",
                 destination.display(),

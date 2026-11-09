@@ -24,6 +24,8 @@ use windows_sys::Win32::Security::ACL_REVISION;
 use windows_sys::Win32::Security::ACL_SIZE_INFORMATION;
 use windows_sys::Win32::Security::AclSizeInformation;
 use windows_sys::Win32::Security::AddAccessAllowedAceEx;
+use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
 use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
@@ -47,14 +49,18 @@ use windows_sys::Win32::Security::UNPROTECTED_DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
-use super::nt::current_user_sid;
-use super::nt::sid_to_string;
+use super::nt::security::EffectiveToken;
+use super::nt::security::TokenUser;
+use super::nt::win32;
 
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const READ_CONTROL: u32 = 0x0002_0000;
-const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+/// The `FILE_ALL_ACCESS` mask.
+pub(crate) const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
 const OBJECT_INHERIT_ACE: u8 = 0x01;
 const CONTAINER_INHERIT_ACE: u8 = 0x02;
+/// `OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE`, the `OICI` of SDDL.
+pub(crate) const OICI: u8 = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
 
 /// One entry of a DACL.
 #[derive(Debug, PartialEq, Eq)]
@@ -63,6 +69,8 @@ pub(crate) struct Ace {
     pub(crate) allows: bool,
     /// The `AceFlags` byte (`INHERITED_ACE` is 0x10).
     pub(crate) flags: u8,
+    /// The access mask; zero for an entry that is not an allow entry.
+    pub(crate) mask: u32,
     /// The SID in string form.
     pub(crate) sid: String,
 }
@@ -124,7 +132,47 @@ impl Drop for Impersonation {
 
 /// The string SID of the user running the tests.
 pub(crate) fn current_user() -> String {
-    current_user_sid().unwrap()
+    sid_string_of(&EffectiveToken::open().unwrap().user().unwrap())
+}
+
+/// The string form of the SID of `user`.
+pub(in crate::formats) fn sid_string_of(user: &TokenUser) -> String {
+    // SAFETY: `user` owns a valid SID.
+    unsafe { sid_to_string(user.sid()) }.unwrap()
+}
+
+/// The string form of `sid`.
+///
+/// # Safety
+///
+/// `sid` must point at a valid SID.
+unsafe fn sid_to_string(sid: *mut std::ffi::c_void) -> io::Result<String> {
+    let mut slot = MaybeUninit::<*mut u16>::uninit();
+    // SAFETY: the caller guarantees `sid` is a valid SID, and `slot` is valid
+    // for writes.
+    win32(unsafe { ConvertSidToStringSidW(sid, slot.as_mut_ptr()) })?;
+    // SAFETY: the call succeeded, so it wrote the string pointer to `slot`.
+    let text = NonNull::new(unsafe { slot.assume_init() })
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    let parsed = String::from_utf16(&wide_text(text.as_ptr()))
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData));
+    // SAFETY: `text` was allocated by `ConvertSidToStringSidW` with
+    // `LocalAlloc`, the copy above no longer reads it, and it is freed once.
+    unsafe { LocalFree(text.as_ptr().cast()) };
+    parsed
+}
+
+/// A copy of the NUL-terminated UTF-16 string at `text`, without the NUL.
+fn wide_text(text: *const u16) -> Vec<u16> {
+    // SAFETY: the callers pass a NUL-terminated string the OS allocated, so
+    // every offset up to the NUL is readable.
+    unsafe {
+        let mut len = 0;
+        while *text.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(text, len).to_vec()
+    }
 }
 
 /// Reads the DACL of the file or directory at `path`, following a link there.
@@ -254,19 +302,7 @@ pub(crate) fn restrict_to_current_user_without_inheritance(path: &Path) {
 pub(crate) fn set_dacl_from_sddl(path: &Path, sddl: &str) {
     use std::os::windows::ffi::OsStrExt;
 
-    let text: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
-    // SAFETY: `text` is NUL-terminated, `descriptor` is valid for writes and
-    // the size out-pointer is null, which the API allows.
-    let ok = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            text.as_ptr(),
-            SDDL_REVISION_1,
-            &raw mut descriptor,
-            null_mut(),
-        )
-    };
-    assert_ne!(ok, 0, "the SDDL string {sddl} does not parse");
+    let descriptor = parse_sddl(sddl);
     let mut present = 0;
     let mut defaulted = 0;
     let mut acl: *mut ACL = null_mut();
@@ -311,6 +347,60 @@ pub(crate) fn set_dacl_from_sddl(path: &Path, sddl: &str) {
     assert_eq!(code, ERROR_SUCCESS, "SetNamedSecurityInfoW failed");
 }
 
+/// The descriptor `sddl` describes, allocated with `LocalAlloc`; the caller
+/// frees it.
+fn parse_sddl(sddl: &str) -> PSECURITY_DESCRIPTOR {
+    let text: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `text` is NUL-terminated, `descriptor` is valid for writes and
+    // the size out-pointer is null, which the API allows.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text.as_ptr(),
+            SDDL_REVISION_1,
+            &raw mut descriptor,
+            null_mut(),
+        )
+    };
+    assert_ne!(ok, 0, "the SDDL string {sddl} does not parse");
+    descriptor
+}
+
+/// The DACL of the valid `descriptor` as an SDDL string.
+pub(crate) fn dacl_sddl_of(descriptor: *const std::ffi::c_void) -> String {
+    let mut text: *mut u16 = null_mut();
+    // SAFETY: `descriptor` is a valid descriptor, `text` is valid for writes
+    // and the length out-pointer is null, which the API allows.
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor.cast_mut(),
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &raw mut text,
+            null_mut(),
+        )
+    };
+    assert_ne!(
+        ok, 0,
+        "ConvertSecurityDescriptorToStringSecurityDescriptorW failed"
+    );
+    let sddl = String::from_utf16(&wide_text(text)).unwrap();
+    // SAFETY: `text` is no longer used and is freed once.
+    unsafe { LocalFree(text.cast()) };
+    sddl
+}
+
+/// `sddl` as the OS writes it back after parsing: SID aliases such as `SY` and
+/// the order of flags no longer depend on how the string was spelled.
+pub(crate) fn normalized_sddl(sddl: &str) -> String {
+    let descriptor = parse_sddl(sddl);
+    let normalized = dacl_sddl_of(descriptor);
+    // SAFETY: `descriptor` was allocated by the parse with `LocalAlloc` and is
+    // no longer used.
+    unsafe { LocalFree(descriptor) };
+    normalized
+}
+
 fn control(descriptor: PSECURITY_DESCRIPTOR) -> u16 {
     let mut control = 0_u16;
     let mut revision = 0_u32;
@@ -337,9 +427,7 @@ fn entries(acl: *const ACL) -> io::Result<Vec<Ace>> {
             AclSizeInformation,
         )
     };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(ok)?;
     (0..size.AceCount).map(|index| entry(acl, index)).collect()
 }
 
@@ -347,9 +435,7 @@ fn entry(acl: *const ACL, index: u32) -> io::Result<Ace> {
     let mut slot = MaybeUninit::uninit();
     // SAFETY: `acl` is a valid ACL, `index` is below its entry count, and
     // `slot` is valid for writes.
-    if unsafe { GetAce(acl, index, slot.as_mut_ptr()) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(unsafe { GetAce(acl, index, slot.as_mut_ptr()) })?;
     // SAFETY: `GetAce` returned non-zero, so it wrote the entry pointer to
     // `slot`.
     let ace = NonNull::new(unsafe { slot.assume_init() })
@@ -361,6 +447,19 @@ fn entry(acl: *const ACL, index: u32) -> io::Result<Ace> {
     Ok(Ace {
         allows,
         flags: header.AceFlags,
+        mask: if allows {
+            // SAFETY: the entry is an `ACCESS_ALLOWED_ACE` (checked above), so
+            // its mask is inside the entry.
+            unsafe {
+                ace.as_ptr()
+                    .cast::<u8>()
+                    .add(offset_of!(ACCESS_ALLOWED_ACE, Mask))
+                    .cast::<u32>()
+                    .read_unaligned()
+            }
+        } else {
+            0
+        },
         sid: if allows {
             // SAFETY: the entry is an `ACCESS_ALLOWED_ACE` (checked above), so
             // its SID starts at `SidStart`, inside the entry.

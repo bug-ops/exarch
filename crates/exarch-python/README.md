@@ -342,7 +342,7 @@ config = config.with_max_solid_compression_ratio(
 )  # Solid 7z block ratio; needs with_allow_solid_archives first
 ```
 
-Every setting an error names in `relaxable_by` has a setter. `list_archive*` takes `options=ListOptions().with_stored_targets()` (`"skip"` or `"read"`, default `"read"` when called without an argument) to read the 7z link targets that a listing leaves unread by default.
+Every setting an error names in `relaxable_by` has a setter. `list_archive*` takes `options=ListOptions().with_stored_targets("read")` (`"skip"` or `"read"`; the argument is required) to read the 7z link targets that a listing leaves unread by default.
 
 **Newer core values.** Output tokens (`kind`, `code`, `sub_code`, `io_kind`, entry and disposition kinds, ...) are the strings `exarch-core` emits, so a value added to the core after your stubs were written still arrives as a plain `str`; an unknown report class falls back to its base class (`ArchiveEntry`, `LinkTarget` whose `state` is the core token, `EntryDisposition`, `MemoryEntry`, `ExtractionWarning`, `CreationWarning`) instead of raising.
 

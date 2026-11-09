@@ -104,6 +104,7 @@ pub use error::IoKind;
 pub use error::KindSource;
 pub use error::Malformation;
 pub use error::NativeKind;
+pub use error::OccupiedBy;
 pub use error::Partial;
 pub use error::PartialOutcome;
 pub use error::PartialWrites;

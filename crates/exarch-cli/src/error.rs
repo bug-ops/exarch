@@ -23,16 +23,15 @@ use crate::output::terminal::TerminalText;
 use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveType;
-use exarch_core::CompressionLevel;
 use exarch_core::CompressionRatio;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::ExtractionReport;
+use exarch_core::OccupiedBy;
 use exarch_core::PartialWrites;
 use exarch_core::PolicySetting;
 use exarch_core::QuotaKind;
 use exarch_core::ReplaceFailure;
-use exarch_core::RequestedLevel;
 use exarch_core::Restore;
 use exarch_core::TarTrailerRefusal;
 use exarch_core::Violation;
@@ -366,6 +365,31 @@ impl std::error::Error for CliContext {
     }
 }
 
+/// What a rolled-back extraction says about its staging directory and the
+/// destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagingFate {
+    /// The staging directory was removed and the destination was not touched.
+    Removed,
+    /// The staging directory could not be removed and remains at this path;
+    /// the destination was not touched.
+    Left(PathBuf),
+    /// The run failed while swapping over the destination: the cause names
+    /// what became of the destination and of the staging directory.
+    Swap,
+}
+
+impl StagingFate {
+    /// The staging fate a core partial extraction reports.
+    fn of(partial: &exarch_core::Partial) -> Self {
+        match (partial.cause(), partial.leftover()) {
+            (ArchiveError::ReplaceFailed(_), _) => Self::Swap,
+            (_, Some(leftover)) => Self::Left(leftover.path.clone()),
+            (_, None) => Self::Removed,
+        }
+    }
+}
+
 /// Carrier for partial-extraction progress embedded in the anyhow error chain.
 ///
 /// `ArchiveError::PartialExtraction` uses `#[error("{source}")]` with
@@ -378,7 +402,7 @@ impl std::error::Error for CliContext {
 pub struct PartialExtractionContext {
     pub(crate) report: ExtractionReport,
     pub(crate) writes: PartialWrites,
-    leftover: Option<PathBuf>,
+    staging: StagingFate,
     inner: anyhow::Error,
     message: OnceLock<Message>,
 }
@@ -388,13 +412,13 @@ impl PartialExtractionContext {
     pub fn new(
         report: ExtractionReport,
         writes: PartialWrites,
-        leftover: Option<PathBuf>,
+        staging: StagingFate,
         inner: anyhow::Error,
     ) -> Self {
         Self {
             report,
             writes,
-            leftover,
+            staging,
             inner,
             message: OnceLock::new(),
         }
@@ -433,25 +457,24 @@ impl PartialExtractionContext {
             }
             // The counts and warnings describe the discarded run, not the
             // destination.
-            PartialWrites::RolledBack => self.leftover.as_deref().map_or_else(
-                || {
-                    Message::default().lit(
-                        "WARNING: Extraction was stopped. The partial extraction was discarded; \
-                         the destination was left unchanged.",
+            PartialWrites::RolledBack => match &self.staging {
+                StagingFate::Removed => Message::default().lit(
+                    "WARNING: Extraction was stopped. The partial extraction was discarded; the \
+                     destination was left unchanged.",
+                ),
+                StagingFate::Left(leftover) => Message::default()
+                    .lit(
+                        "WARNING: Extraction was stopped. Nothing was published and the \
+                         destination was left unchanged, but the staging directory remains at ",
                     )
-                },
-                |leftover| {
-                    Message::default()
-                        .lit(
-                            "WARNING: Extraction was stopped. Nothing was published and the \
-                             destination was left unchanged, but the staging directory remains \
-                             at ",
-                        )
-                        .path(leftover)
-                        .lit(".")
-                        .hint_lit("Remove the staging directory when you no longer need it.")
-                },
-            ),
+                    .path(leftover)
+                    .lit(".")
+                    .hint_lit("Remove the staging directory when you no longer need it."),
+                StagingFate::Swap => Message::default().lit(
+                    "WARNING: Extraction was stopped. The extracted content was discarded and \
+                     was not published; the error below says what became of the destination.",
+                ),
+            },
             PartialWrites::Discarded => {
                 Message::default().lit("WARNING: Extraction was stopped. Nothing was written.")
             }
@@ -529,6 +552,9 @@ pub enum ConflictAdvice {
     UseForce,
     /// `--force` is already on, and a file cannot be replaced by a directory.
     ForceCannotReplace,
+    /// The archive itself needs a directory where it also writes a file or
+    /// link; no flag changes that.
+    ArchiveConflict,
 }
 
 impl ConflictAdvice {
@@ -540,6 +566,9 @@ impl ConflictAdvice {
                 "{force} cannot replace a file with a directory; remove the listed files or \
                  choose another destination."
             ),
+            Self::ArchiveConflict => "The archive writes a file or link at a path where it also \
+                                     makes a directory; no flag allows that."
+                .to_owned(),
         }
     }
 }
@@ -754,17 +783,36 @@ fn quota_exceeded_context(op: Operation, kind: QuotaKind, archive: &Path) -> Mes
     })
 }
 
-/// The sentence that names the flag raising a 7z header `what` (`budget` or
-/// `limit`), or nothing when `op` has no such flag.
-fn raise_hint(op: Operation, what: &str) -> String {
-    accepted(op, &[Flag::MaxFiles])
-        .first()
-        .map_or_default(|flag| {
-            format!(
-                " {flag} raises that {what}, and with it the memory a header's entry table may \
-                 need."
-            )
-        })
+/// Which 7z header bound a [`raise_hint`] sentence is about.
+#[derive(Clone, Copy)]
+enum HeaderBound {
+    /// The byte budget derived from the permitted file count.
+    Budget,
+    /// The entry count allowed by the permitted file count.
+    Limit,
+}
+
+impl HeaderBound {
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::Budget => "budget",
+            Self::Limit => "limit",
+        }
+    }
+}
+
+/// The sentence that names the flag raising a 7z header `bound`, or nothing
+/// when `op` has no such flag.
+fn raise_hint(op: Operation, bound: HeaderBound) -> String {
+    if op.accepts(Flag::MaxFiles) {
+        format!(
+            " {} raises that {}, and with it the memory a header's entry table may need.",
+            Flag::MaxFiles.long(),
+            bound.noun()
+        )
+    } else {
+        String::new()
+    }
 }
 
 /// The context for each quota dimension: a one-line message naming the
@@ -826,7 +874,7 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
             .lit("'")
             .hint_lit("No CLI flag relaxes this. Rust API only: the sink's capacity limit."),
         QuotaKind::HeaderSize => {
-            let raise = raise_hint(op, "budget");
+            let raise = raise_hint(op, HeaderBound::Budget);
             message
                 .lit("Archive header too large for '")
                 .path(archive)
@@ -837,7 +885,7 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
                 )))
         }
         QuotaKind::HeaderEntryCount => {
-            let raise = raise_hint(op, "limit");
+            let raise = raise_hint(op, HeaderBound::Limit);
             message
                 .lit("Archive header entry count too large for '")
                 .path(archive)
@@ -892,12 +940,12 @@ pub fn convert_error_with_advice(
     // wrapped error's own Display already carries.
     let err = match err {
         ArchiveError::PartialExtraction(partial) => {
-            let leftover = partial.leftover().map(|leftover| leftover.path.clone());
+            let staging = StagingFate::of(&partial);
             let (cause, report, writes) = partial.into_parts();
             return anyhow::Error::new(PartialExtractionContext::new(
                 report,
                 writes,
-                leftover,
+                staging,
                 convert_error_with_advice(op, cause, archive, advice),
             ));
         }
@@ -1087,22 +1135,20 @@ fn dedicated_context(
         ArchiveError::DestinationOccupied {
             destination,
             conflicts,
-        } => occupied_message(destination, conflicts, advice),
+            by,
+        } => match by {
+            OccupiedBy::Archive => {
+                occupied_message(Path::new(""), conflicts, ConflictAdvice::ArchiveConflict)
+            }
+            _ => occupied_message(destination, conflicts, advice),
+        },
         ArchiveError::InvalidPermissions { mode, .. } => message.text(format!(
             "Invalid permissions {:#o}: blocked by security policy.",
             mode.get()
         )),
-        ArchiveError::InvalidCompressionLevel { level } => {
-            let level = match level {
-                RequestedLevel::Integer(_) | RequestedLevel::Fractional(_) => level.to_string(),
-                other => format!("({other})"),
-            };
-            message.restating_source().text(format!(
-                "Invalid compression level {level}: must be between {} and {}.",
-                CompressionLevel::MIN.get(),
-                CompressionLevel::MAX.get()
-            ))
-        }
+        ArchiveError::InvalidCompressionLevel { .. } => message
+            .restating_source()
+            .text(capitalized(&err.to_string())),
 
         ArchiveError::Cancelled => message.restating_source().lit(CANCELLED_TEXT),
         ArchiveError::OutputReservationLeft { .. } => {
@@ -1125,7 +1171,11 @@ fn dedicated_context(
 /// `error` names, as the CLI reports paths: unredacted.
 pub fn leftover_path(error: &anyhow::Error) -> Option<&Path> {
     if let Some(context) = error.downcast_ref::<PartialExtractionContext>() {
-        return context.leftover.as_deref();
+        match &context.staging {
+            StagingFate::Removed => return None,
+            StagingFate::Left(leftover) => return Some(leftover),
+            StagingFate::Swap => {}
+        }
     }
     error
         .chain()
@@ -1162,7 +1212,9 @@ pub fn add_archive_context<T>(
 mod tests {
     use super::*;
     use exarch_core::Compressed;
+    use exarch_core::CompressionLevel;
     use exarch_core::LinkKind;
+    use exarch_core::RequestedLevel;
     use exarch_core::SecurityConfig;
     use exarch_core::Uncompressed;
     use exarch_core::Violation;
@@ -1462,7 +1514,7 @@ mod tests {
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = full_text(&converted);
         assert!(msg.contains('0'), "level missing: {msg}");
-        assert!(msg.contains("between 1 and 9"), "range hint missing: {msg}");
+        assert!(msg.contains("must be 1-9"), "range missing: {msg}");
     }
 
     #[test]
@@ -1686,23 +1738,23 @@ mod tests {
         };
         assert_eq!(
             text(RequestedLevel::OutOfRange),
-            "Invalid compression level (an out-of-range integer): must be between 1 and 9."
+            "Invalid compression level: must be 1-9, got an out-of-range integer"
         );
         assert_eq!(
             text(RequestedLevel::NonFinite),
-            "Invalid compression level (a non-finite number): must be between 1 and 9."
+            "Invalid compression level: must be 1-9, got a non-finite number"
         );
         assert_eq!(
             text(RequestedLevel::Integer(-3)),
-            "Invalid compression level -3: must be between 1 and 9."
+            "Invalid compression level: must be 1-9, got -3"
         );
     }
 
     #[test]
     fn the_raise_hint_names_the_flag_only_where_the_operation_has_it() {
-        let hint = raise_hint(Operation::Extract, "budget");
+        let hint = raise_hint(Operation::Extract, HeaderBound::Budget);
         assert!(hint.contains("--max-files raises that budget"), "{hint}");
-        assert_eq!(raise_hint(Operation::Create, "budget"), "");
+        assert_eq!(raise_hint(Operation::Create, HeaderBound::Budget), "");
     }
 
     #[test]
@@ -1712,7 +1764,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "Invalid compression level 10: must be between {} and {}.",
+                "Invalid compression level: must be {}-{}, got 10",
                 CompressionLevel::MIN.get(),
                 CompressionLevel::MAX.get()
             )
@@ -1983,7 +2035,12 @@ mod tests {
     fn forged_warning_context() -> PartialExtractionContext {
         let mut report = exarch_core::ExtractionReport::new();
         report.warnings = vec![crate::test_support::extraction_warning("w\x1b[31m\nforged")];
-        PartialExtractionContext::new(report, PartialWrites::Kept, None, anyhow::anyhow!("inner"))
+        PartialExtractionContext::new(
+            report,
+            PartialWrites::Kept,
+            StagingFate::Removed,
+            anyhow::anyhow!("inner"),
+        )
     }
 
     #[test]
@@ -2022,7 +2079,7 @@ mod tests {
             let context = PartialExtractionContext::new(
                 ExtractionReport::default(),
                 writes,
-                None,
+                StagingFate::Removed,
                 anyhow::anyhow!("inner"),
             );
             assert!(
@@ -2039,7 +2096,7 @@ mod tests {
         let context = PartialExtractionContext::new(
             report,
             PartialWrites::Kept,
-            None,
+            StagingFate::Removed,
             anyhow::anyhow!("inner"),
         );
         let text = context.to_string();
@@ -2054,7 +2111,7 @@ mod tests {
         let context = PartialExtractionContext::new(
             ExtractionReport::default(),
             PartialWrites::Discarded,
-            None,
+            StagingFate::Removed,
             anyhow::anyhow!("inner"),
         );
         assert_eq!(
@@ -2150,6 +2207,7 @@ mod tests {
             ArchiveError::DestinationOccupied {
                 destination: path(),
                 conflicts: Box::new([path()]),
+                by: exarch_core::OccupiedBy::Existing,
             },
             ArchiveError::OutputReservationLeft {
                 path: path(),
@@ -2235,7 +2293,11 @@ mod tests {
     fn occupied_advice_is_the_hint_and_follows_the_write_mode() {
         let context =
             |advice| occupied_message(Path::new(""), &[PathBuf::from("a")], advice).into_context();
-        for advice in [ConflictAdvice::UseForce, ConflictAdvice::ForceCannotReplace] {
+        for advice in [
+            ConflictAdvice::UseForce,
+            ConflictAdvice::ForceCannotReplace,
+            ConflictAdvice::ArchiveConflict,
+        ] {
             let context = context(advice);
             assert!(
                 !terminal(&context.parts()).contains("--force"),
@@ -2250,6 +2312,38 @@ mod tests {
         let cannot = ConflictAdvice::ForceCannotReplace.hint();
         assert!(cannot.contains("cannot replace"), "{cannot}");
         assert!(!cannot.contains("Use --force"), "{cannot}");
+    }
+
+    #[test]
+    fn a_conflict_with_an_entry_the_archive_made_names_the_entry_and_hints_no_flag() {
+        let occupied = |by| ArchiveError::DestinationOccupied {
+            destination: PathBuf::from("/tmp/.exarch-mine"),
+            conflicts: Box::new([PathBuf::from("x")]),
+            by,
+        };
+
+        let archive = convert_error(
+            Operation::Extract,
+            occupied(OccupiedBy::Archive),
+            Path::new("a.tar"),
+        );
+        let text = chain_text(&archive);
+        assert!(!text.contains(".exarch-mine"), "{text}");
+        assert!(text.ends_with("  x"), "{text}");
+        let hints = chain_hints(&archive, raw);
+        assert_eq!(hints, [ConflictAdvice::ArchiveConflict.hint()]);
+        assert!(!hints[0].contains("--force"), "{hints:?}");
+
+        let existing = convert_error(
+            Operation::Extract,
+            occupied(OccupiedBy::Existing),
+            Path::new("a.tar"),
+        );
+        assert!(chain_text(&existing).contains(".exarch-mine"));
+        assert_eq!(
+            chain_hints(&existing, raw),
+            [ConflictAdvice::UseForce.hint()]
+        );
     }
 
     #[test]
@@ -2323,7 +2417,7 @@ mod tests {
         let partial = anyhow::Error::new(PartialExtractionContext::new(
             ExtractionReport::default(),
             PartialWrites::RolledBack,
-            None,
+            StagingFate::Removed,
             cause,
         ));
         let text = chain_text(&partial);
@@ -2364,6 +2458,39 @@ mod tests {
             ["Remove the staging directory when you no longer need it."]
         );
         assert_eq!(leftover_path(&error), Some(Path::new("out/.exarch-AbC123")));
+    }
+
+    #[test]
+    fn a_failed_swap_keeps_the_counts_and_names_what_became_of_the_destination() {
+        let mut report = ExtractionReport::default();
+        report.files_extracted = 3;
+        let swap = ArchiveError::ReplaceFailed(ReplaceFailure::new(
+            io::Error::from(io::ErrorKind::PermissionDenied),
+            Restore::Failed {
+                backup: PathBuf::from("p/.exarch-backup-X"),
+                error: io::Error::from(io::ErrorKind::PermissionDenied),
+            },
+            Some(exarch_core::StagingLeftover::new(PathBuf::from(
+                "p/.exarch-X",
+            ))),
+        ));
+        let error = convert_error(
+            Operation::Extract,
+            ArchiveError::PartialExtraction(exarch_core::Partial::new(
+                swap,
+                report,
+                PartialWrites::RolledBack,
+            )),
+            Path::new("a.tar"),
+        );
+
+        let context = error.downcast_ref::<PartialExtractionContext>().unwrap();
+        assert_eq!(context.report.files_extracted, 3);
+        assert_eq!(context.staging, StagingFate::Swap);
+        assert_eq!(leftover_path(&error), Some(Path::new("p/.exarch-X")));
+        let text = chain_text(&error);
+        assert!(!text.contains("left unchanged"), "{text}");
+        assert!(text.contains("p/.exarch-backup-X"), "{text}");
     }
 
     #[test]

@@ -671,7 +671,9 @@ enum Placement {
     /// Skipped by default, but overwriting replaces a file with a symlink and
     /// changes what the path resolves to.
     ReplacesUnderOverwrite,
-    /// Skipped by default; overwriting fails closed and replaces nothing.
+    /// Skipped by default; overwriting fails closed and replaces nothing. A
+    /// directory occupant also fails an extraction that refuses existing
+    /// entries, which the finding's text says.
     RefusedUnderOverwrite(Occupant),
 }
 
@@ -930,7 +932,7 @@ mod tests {
                 ("d/f", file()),
                 ("d", symlink_to("sub")),
             ],
-            "extraction with overwrite fails at d: an earlier entry is a directory",
+            "every CLI extract mode fails at d, as does any caller that does not skip existing entries: an earlier entry is a directory",
         );
     }
 
@@ -957,7 +959,7 @@ mod tests {
     fn file_over_a_dir_or_symlink_is_an_overwrite_note() {
         assert_overwrite_note(
             vec![("d/f", file()), ("d", file())],
-            "fails at d: an earlier entry is a directory",
+            "fails at d, as does any caller that does not skip existing entries: an earlier entry is a directory",
         );
         assert_overwrite_note(
             vec![("s", symlink_to("t")), ("s", file())],
@@ -973,9 +975,15 @@ mod tests {
             (ManifestEntryKind::Directory, "directory"),
             (symlink_to("t"), "symlink"),
         ] {
+            let expected = if noun == "directory" {
+                "fails at h, as does any caller that does not skip existing entries: an earlier entry is a directory"
+                    .to_owned()
+            } else {
+                format!("fails at h: an earlier entry is a {noun}")
+            };
             assert_overwrite_note(
                 vec![target.clone(), ("h", earlier), ("h", hardlink_to("t"))],
-                &format!("fails at h: an earlier entry is a {noun}"),
+                &expected,
             );
         }
     }

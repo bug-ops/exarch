@@ -158,7 +158,7 @@ def test_solid_ratio_keeps_the_block_memory_limit():
 def test_list_options_defaults_and_builder():
     options = exarch.ListOptions()
     assert options.stored_targets == "skip"
-    assert options.with_stored_targets().stored_targets == "read"
+    assert options.with_stored_targets("read").stored_targets == "read"
     assert options.with_stored_targets("skip").stored_targets == "skip"
     assert exarch.ListOptions.default().stored_targets == "skip"
     assert 'stored_targets="skip"' in repr(exarch.ListOptions())
@@ -172,7 +172,7 @@ def test_list_options_reject_an_unknown_stored_targets_token():
 
 def test_list_functions_take_list_options(tmp_path):
     archive = _tar_with_mtime(tmp_path / "a.tar")
-    options = exarch.ListOptions().with_stored_targets()
+    options = exarch.ListOptions().with_stored_targets("read")
     assert exarch.list_archive(archive, options=options).total_entries == 1
     data = archive.read_bytes()
     assert exarch.list_archive_bytes(data, options=options).total_entries == 1
@@ -183,3 +183,47 @@ def test_manifest_entry_exposes_its_modification_time(tmp_path):
     manifest = exarch.list_archive(_tar_with_mtime(tmp_path / "a.tar"))
     [entry] = manifest.entries
     assert entry.modified == pytest.approx(MTIME)
+
+
+def test_with_stored_targets_requires_its_argument():
+    with pytest.raises(TypeError):
+        exarch.ListOptions().with_stored_targets()
+
+
+def test_report_counts_are_properties(tmp_path):
+    archive = _tar_with_mtime(tmp_path / "a.tar")
+    report = exarch.extract_archive(archive, tmp_path / "out")
+    assert report.total_items == report.files_extracted + report.directories_created
+    assert report.has_warnings is False
+
+
+def test_sink_options_defaults_come_from_core():
+    options = exarch.SinkOptions()
+    assert (options.existing_files, options.decode_reuse, options.decode_reuse_limit) == (
+        "skip",
+        "off",
+        None,
+    )
+    assert exarch.SinkOptions(decode_reuse="memory").decode_reuse_limit == 32 * 1024 * 1024
+
+
+def test_creation_report_counts_are_properties(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.txt").write_text("hello")
+    report = exarch.create_archive(tmp_path / "out.tar", [source])
+    assert report.total_items == (
+        report.files_added + report.directories_added + report.symlinks_added
+    )
+    assert report.total_items >= 1
+    assert report.has_warnings is False
+
+
+def test_sink_options_explicit_values_are_kept():
+    options = exarch.SinkOptions(
+        existing_files="refuse", decode_reuse="temp_file", decode_reuse_limit=1024
+    )
+    assert options.existing_files == "refuse"
+    assert options.decode_reuse == "temp_file"
+    assert options.decode_reuse_limit == 1024
+    assert exarch.SinkOptions(existing_files="overwrite").existing_files == "overwrite"

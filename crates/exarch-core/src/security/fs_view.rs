@@ -1309,14 +1309,32 @@ impl VirtualTree {
         node: Node,
         limits: LandingLimits,
     ) -> Result<SafePath, PlaceError> {
+        self.project_landing_found(rel, node, limits)
+            .map(|(landing, _)| landing)
+    }
+
+    /// [`project_landing`](Self::project_landing) that also says whether a node
+    /// already held the name, which the insert then left as it was.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`project_landing`](Self::project_landing).
+    pub(crate) fn project_landing_found<P: ParentCheck>(
+        &mut self,
+        rel: &SafePath<P>,
+        node: Node,
+        limits: LandingLimits,
+    ) -> Result<(SafePath, bool), PlaceError> {
         self.guard_landing(rel.as_path(), limits)?;
-        let landed = self.place_path(rel.as_path(), node)?;
+        let landed = self.insert_node(rel.as_path(), node)?;
+        let held = landed.as_ref().is_some_and(|l| l.existing.is_some());
+        let landing = self.landing_path(rel.as_path(), landed);
         if limits == LandingLimits::Enforced {
             self.model
-                .check_name_lengths(&landed)
+                .check_name_lengths(&landing)
                 .map_err(|_| PlaceError::LandingTooLong)?;
         }
-        Ok(SafePath::from_normalized(landed)?)
+        Ok((SafePath::from_normalized(landing)?, held))
     }
 
     /// [`project_landing`](Self::project_landing) for a caller that only needs
@@ -1394,6 +1412,7 @@ impl VirtualTree {
         }
     }
 
+    #[cfg(test)]
     fn place_path(&mut self, rel: &Path, node: Node) -> Result<PathBuf, PlaceError> {
         let landed = self.insert_node(rel, node)?;
         Ok(self.landing_path(rel, landed))

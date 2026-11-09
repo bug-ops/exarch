@@ -187,16 +187,20 @@ jobs:
       - name: Build wheels (musl)
         if: matrix.platform.musl-image
         shell: bash
+        working-directory: crates/exarch-python
         env:
           IMAGE: ${{ matrix.platform.musl-image }}
           TARGET: ${{ matrix.platform.target }}
         run: |
           MATURIN_BIN="$(readlink -f "$(command -v maturin)")"
           file "$MATURIN_BIN" | grep -q 'statically linked'
+          MUSL_REQUIREMENTS="$RUNNER_TEMP/python-release-musl-requirements.txt"
+          uv export --locked --no-emit-project --only-group release-musl -o "$MUSL_REQUIREMENTS"
           docker run --rm \
             -e TARGET -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e WORKSPACE="$GITHUB_WORKSPACE" \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -v "$MATURIN_BIN:/usr/local/bin/maturin:ro" \
+            -v "$MUSL_REQUIREMENTS:/tmp/release-musl-requirements.txt:ro" \
             -w "$GITHUB_WORKSPACE/crates/exarch-python" \
             "$IMAGE" bash -euo pipefail -c '
               fix_owner() {
@@ -205,10 +209,10 @@ jobs:
               }
               trap fix_owner EXIT
               rm -rf "$RUSTUP_HOME/toolchains"
-              rustup toolchain install stable --profile minimal
-              rustup override set stable
+              rustup toolchain install 1.99.1 --profile minimal
+              rustup override set 1.99.1
               rustup target add "$TARGET"
-              python3 -m pip install --user patchelf
+              python3 -m pip install --user --require-hashes --only-binary :all: -r /tmp/release-musl-requirements.txt
               export PATH="$PATH:$HOME/.local/bin"
               maturin build --release --strip --out wheels -i python3.11 --target "$TARGET" --compatibility musllinux_1_2
             '

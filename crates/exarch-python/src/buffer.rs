@@ -13,7 +13,6 @@ use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
 use exarch_core::DecodeReuse;
 use exarch_core::DecodeReuseKind;
-use exarch_core::ExistingFiles;
 use exarch_core::ListRequest;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
@@ -298,40 +297,45 @@ fn build_decode_reuse(kind: DecodeReuseKind, limit: Option<PyInteger>) -> PyResu
 #[pyclass(name = "SinkOptions", frozen)]
 #[derive(Clone)]
 pub struct PySinkOptions {
-    existing_files: ExistingFiles,
-    reuse: DecodeReuse,
+    inner: exarch_core::SinkOptions,
 }
 
 #[pymethods]
 impl PySinkOptions {
     #[new]
-    #[pyo3(signature = (existing_files="skip", decode_reuse="off", decode_reuse_limit=None))]
-    #[pyo3(text_signature = "(existing_files='skip', decode_reuse='off', decode_reuse_limit=None)")]
+    #[pyo3(signature = (existing_files=None, decode_reuse=None, decode_reuse_limit=None))]
+    #[pyo3(text_signature = "(existing_files=None, decode_reuse=None, decode_reuse_limit=None)")]
     fn new(
-        existing_files: &str,
-        decode_reuse: &str,
+        existing_files: Option<&str>,
+        decode_reuse: Option<&str>,
         decode_reuse_limit: Option<PyInteger>,
     ) -> PyResult<Self> {
-        let kind = parse_one(ConfigSetting::DecodeReuse, decode_reuse)?;
+        let defaults = exarch_core::SinkOptions::default();
+        let kind = decode_reuse.map_or(Ok(defaults.decode_reuse.kind()), |text| {
+            parse_one(ConfigSetting::DecodeReuse, text)
+        })?;
         Ok(Self {
-            existing_files: parse_existing_files(existing_files)?,
-            reuse: build_decode_reuse(kind, decode_reuse_limit)?,
+            inner: defaults
+                .with_existing_files(
+                    existing_files.map_or(Ok(defaults.existing_files), parse_existing_files)?,
+                )
+                .with_decode_reuse(build_decode_reuse(kind, decode_reuse_limit)?),
         })
     }
 
     #[getter]
     const fn existing_files(&self) -> &'static str {
-        self.existing_files.as_str()
+        self.inner.existing_files.as_str()
     }
 
     #[getter]
     const fn decode_reuse(&self) -> &'static str {
-        self.reuse.kind().as_str()
+        self.inner.decode_reuse.kind().as_str()
     }
 
     #[getter]
     fn decode_reuse_limit(&self) -> Option<u64> {
-        self.reuse.limit().map(ReuseLimit::get)
+        self.inner.decode_reuse.limit().map(ReuseLimit::get)
     }
 
     fn __repr__(&self) -> String {
@@ -345,10 +349,8 @@ impl PySinkOptions {
 }
 
 impl PySinkOptions {
-    fn as_core(&self) -> exarch_core::SinkOptions {
-        exarch_core::SinkOptions::default()
-            .with_existing_files(self.existing_files)
-            .with_decode_reuse(self.reuse)
+    const fn as_core(&self) -> exarch_core::SinkOptions {
+        self.inner
     }
 }
 

@@ -36,10 +36,12 @@ use super::acl;
 use super::dir::OwnContents;
 use super::dir::VerifiedStage;
 use super::dir::list_entries;
-use super::remove::MAX_DEPTH;
 use crate::formats::file_identity::IdentityKey;
 use crate::formats::pinned_dir::open_directory_at;
 use crate::formats::run_record::RunRecord;
+
+/// Directory levels the sweep descends, each holding one descriptor.
+const MAX_DEPTH: usize = 64;
 
 /// The names inside the stage the sweep walked past and could not unlink,
 /// for the entries that have several links.

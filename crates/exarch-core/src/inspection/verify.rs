@@ -120,7 +120,7 @@ fn verify_with_tree(
     make_tree: impl FnOnce(&VirtualRoot) -> VirtualTree,
 ) -> VerificationReport {
     let root = VirtualRoot::new();
-    let mut tree = make_tree(&root);
+    let mut tree = make_tree(&root).keeping_files_under_links();
     let mut quota_tracker = QuotaTracker::new();
     let mut hardlink_tracker = HardlinkTracker::new();
     let include_hits = IncludeHits::of(manifest.selection());
@@ -1354,6 +1354,46 @@ mod tests {
             i.category() == IssueCategory::InvalidArchive
                 && i.message().contains("hardlink target does not exist")
         }));
+    }
+
+    #[test]
+    fn hardlink_to_a_file_shadowed_by_a_duplicate_symlink_is_not_an_escape() {
+        let manifest = manifest_of(vec![
+            ("x", file()),
+            ("x", symlink_to("y")),
+            ("h", hardlink_to("x")),
+        ]);
+        let report = verify_manifest(&manifest, &link_config(), None);
+        let on_hardlink: Vec<_> = report
+            .issues()
+            .iter()
+            .filter(|i| i.entry_path() == Some(Path::new("h")))
+            .collect();
+        assert!(on_hardlink.is_empty(), "{on_hardlink:?}");
+    }
+
+    #[test]
+    fn hardlink_through_a_shadowing_symlink_is_still_judged_on_the_file() {
+        let manifest = manifest_of(vec![
+            ("x", file()),
+            ("x", symlink_to("../outside")),
+            ("h", hardlink_to("x")),
+        ]);
+        let report = verify_manifest(&manifest, &link_config(), None);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .all(|i| i.category() != IssueCategory::HardlinkEscape),
+            "{:?}",
+            report.issues()
+        );
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.entry_path() == Some(Path::new("x")))
+        );
     }
 
     #[test]

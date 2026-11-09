@@ -290,7 +290,10 @@ closed_enum! {
         ///
         /// Writing the destination's list onto the root happens after the
         /// publishing rename, so the run still succeeds and the root is made
-        /// private (`0700`, no list) where the OS allows.
+        /// private (`0700`, no list) where the OS allows. On Windows the same
+        /// holds for resetting the published root to its parent's inherited
+        /// ACL, which also fails when the parent has no inheritable entries:
+        /// the root then stays owner-only.
         ///
         /// Seeding the staging directory with the entries its children
         /// inherit (from the destination, or from the parent of an absent

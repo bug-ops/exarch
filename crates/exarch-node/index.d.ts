@@ -752,8 +752,9 @@ export declare class ExtractionOptions {
    * replaces (or fills), never setuid; with `'atomic_replace'` also its
    * owner as far as the caller may, and with `'atomic'` never the uid and
    * the group only when the caller owns the destination. On Windows the
-   * staging directory inherits the ACL of the destination's parent, and
-   * `'atomic'` onto an existing empty directory fails with `OUTPUT_EXISTS`.
+   * staging directory is owner-only while the run lasts and the published
+   * root inherits the ACL of the destination's parent, and `'atomic'` onto
+   * an existing empty directory fails with `OUTPUT_EXISTS`.
    */
   withStaging(staging: Staging): this
   /** Finalizes the configuration (for API consistency). */

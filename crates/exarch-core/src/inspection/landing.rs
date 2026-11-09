@@ -284,7 +284,8 @@ impl ArchiveManifest {
             PathModel::Host,
             NodeBudget::from_config(config),
             CollisionRecording::Discard,
-        );
+        )
+        .keeping_files_under_links();
         let mut hardlinks = HardlinkTracker::new();
         let claims = LandingClaims::default();
         let is_hardlink =
@@ -862,6 +863,29 @@ mod tests {
             ],
             &strip_one(),
             false,
+        );
+    }
+
+    const SYM: tar::EntryType = tar::EntryType::Symlink;
+
+    #[test]
+    fn hardlink_to_a_file_shadowed_by_a_duplicate_symlink_is_extracted() {
+        assert_hardlink_agrees(
+            &[(b"x", FILE, ""), (b"x", SYM, "y"), (b"hl", HARD, "x")],
+            true,
+        );
+    }
+
+    #[test]
+    fn hardlink_to_a_stripped_file_shadowed_by_a_duplicate_symlink_is_extracted() {
+        assert_hardlink_agrees_under(
+            &[
+                (b"p/x", FILE, ""),
+                (b"q/x", SYM, "y"),
+                (b"p/hl", HARD, "p/x"),
+            ],
+            &strip_one(),
+            true,
         );
     }
 

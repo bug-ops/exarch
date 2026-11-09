@@ -489,7 +489,7 @@ fn publish_adopted(
         report.record_narrowing(destination_vanished(withheld));
         None
     };
-    let published = staging
+    let mut published = staging
         .publish(&destination.name)
         .map_err(|e| match e.kind() {
             io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty => {
@@ -503,6 +503,7 @@ fn publish_adopted(
                 output_dir,
             )),
         })?;
+    report.record_narrowing(published.take_narrowing());
     if let Some(root) = adopted {
         report.record_narrowing(root.finish(published));
     }
@@ -515,3 +516,6 @@ mod parent_tests;
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
+#[cfg(all(test, windows))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod windows_tests;

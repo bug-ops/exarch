@@ -17,6 +17,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use std::ffi::OsStr;
+use std::ffi::c_void;
 use std::fs::File;
 use std::io;
 use std::mem::offset_of;
@@ -30,6 +31,7 @@ use std::os::windows::io::OwnedHandle;
 use std::os::windows::io::RawHandle;
 use std::ptr::null;
 use std::ptr::null_mut;
+use std::slice;
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::FILE_CREATE;
@@ -49,10 +51,34 @@ use windows_sys::Wdk::Storage::FileSystem::NtFsControlFile;
 use windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile;
 use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
 use windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED;
+use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Foundation::OBJ_CASE_INSENSITIVE;
 use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
 use windows_sys::Win32::Foundation::UNICODE_STRING;
+use windows_sys::Win32::Security::ACL;
+use windows_sys::Win32::Security::ACL_REVISION;
+use windows_sys::Win32::Security::ACL_SIZE_INFORMATION;
+use windows_sys::Win32::Security::AclSizeInformation;
+use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
+use windows_sys::Win32::Security::Authorization::SDDL_REVISION_1;
+use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
+use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
+use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+use windows_sys::Win32::Security::GetAclInformation;
+use windows_sys::Win32::Security::GetSecurityDescriptorDacl;
+use windows_sys::Win32::Security::GetTokenInformation;
+use windows_sys::Win32::Security::InitializeAcl;
+use windows_sys::Win32::Security::OBJECT_SECURITY_INFORMATION;
+use windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION;
+use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::TOKEN_QUERY;
+use windows_sys::Win32::Security::TOKEN_USER;
+use windows_sys::Win32::Security::TokenUser;
+use windows_sys::Win32::Security::UNPROTECTED_DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Storage::FileSystem::DELETE;
 use windows_sys::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS;
 use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_FLAG_DELETE;
@@ -71,6 +97,8 @@ use windows_sys::Win32::Storage::FileSystem::MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::OpenProcessToken;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_POSIX_SEMANTICS;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_REPLACE_IF_EXISTS;
 
@@ -144,6 +172,23 @@ pub(super) fn create_at(
     name: Leaf<'_>,
     request: Request,
 ) -> io::Result<OwnedHandle> {
+    // SAFETY: a null descriptor is allowed.
+    unsafe { create_with(dir, name, request, null()) }
+}
+
+/// [`create_at`] with the security descriptor `security` for a created object;
+/// null keeps the inherited one.
+///
+/// # Safety
+///
+/// `security` must be null or point at a valid security descriptor that
+/// outlives the call.
+unsafe fn create_with(
+    dir: BorrowedHandle<'_>,
+    name: Leaf<'_>,
+    request: Request,
+    security: *const c_void,
+) -> io::Result<OwnedHandle> {
     let mut name_units = wide(name.as_os_str());
     let name_bytes = u16::try_from(name_units.len().saturating_mul(size_of::<u16>()))
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidFilename))?;
@@ -157,7 +202,7 @@ pub(super) fn create_at(
         RootDirectory: dir.as_raw_handle(),
         ObjectName: &raw const object_name,
         Attributes: OBJ_CASE_INSENSITIVE,
-        SecurityDescriptor: null(),
+        SecurityDescriptor: security.cast(),
         SecurityQualityOfService: null(),
     };
     let disposition = match request.disposition {
@@ -175,8 +220,9 @@ pub(super) fn create_at(
     // SAFETY: `attributes` points at `object_name`, which points at
     // `name_units`; all three outlive the call. `RootDirectory` is a live
     // handle borrowed from `dir`. `handle` and `status_block` are valid for
-    // writes, and the allocation size, security descriptor and EA buffer are
-    // null with a zero EA length.
+    // writes, the security descriptor is null or valid for the call (the
+    // caller's contract), and the allocation size and EA buffer are null with
+    // a zero EA length.
     let status = unsafe {
         NtCreateFile(
             &raw mut handle,
@@ -198,6 +244,304 @@ pub(super) fn create_at(
     // SAFETY: the call succeeded, so `handle` is a newly opened handle that
     // nothing else owns.
     Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+/// A self-relative security descriptor whose DACL is protected and grants the
+/// current user full control, inherited by every child.
+///
+/// A protected DACL ignores the parent's, so no other principal is named.
+struct OwnerOnlyDescriptor(PSECURITY_DESCRIPTOR);
+
+impl OwnerOnlyDescriptor {
+    /// Builds the descriptor from the SID of the process token's user.
+    ///
+    /// # Errors
+    ///
+    /// The OS error of the failed step; there is no fallback descriptor.
+    fn for_current_user() -> io::Result<Self> {
+        let sddl: Vec<u16> = format!("D:P(A;OICI;FA;;;{})", current_user_sid()?)
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        // SAFETY: `sddl` is a NUL-terminated UTF-16 string that outlives the
+        // call, `descriptor` is valid for writes, and the size out-pointer is
+        // null, which the API allows.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(descriptor))
+    }
+}
+
+impl Drop for OwnerOnlyDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor was allocated by the conversion call with
+        // `LocalAlloc` and is freed exactly once, here.
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+/// The string form of the SID of the user the current process runs as.
+pub(super) fn current_user_sid() -> io::Result<String> {
+    let mut token: HANDLE = null_mut();
+    // SAFETY: `GetCurrentProcess` returns a pseudo handle that needs no
+    // closing, and `token` is valid for writes.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so `token` is a newly opened handle that
+    // nothing else owns.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+
+    let mut needed = 0_u32;
+    // SAFETY: a null buffer of length zero asks only for the required size,
+    // which is written to `needed`; `token` is a live handle.
+    unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            null_mut(),
+            0,
+            &raw mut needed,
+        );
+    }
+    if needed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buffer = vec![0_u64; (needed as usize).div_ceil(size_of::<u64>())];
+    // SAFETY: `buffer` is valid for writes of `needed` bytes (it has at least
+    // that many), `token` is a live handle and `needed` is valid for writes.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &raw mut needed,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so `buffer` starts with an initialized
+    // `TOKEN_USER`, and the 8-aligned storage satisfies its alignment.
+    let sid = unsafe { buffer.as_ptr().cast::<TOKEN_USER>().read() }
+        .User
+        .Sid;
+    // SAFETY: `sid` points into `buffer`, which is alive and holds the SID the
+    // token call just wrote.
+    unsafe { sid_to_string(sid) }
+}
+
+/// The string form of `sid`.
+///
+/// # Safety
+///
+/// `sid` must point at a valid SID.
+pub(super) unsafe fn sid_to_string(sid: *mut c_void) -> io::Result<String> {
+    let mut text: *mut u16 = null_mut();
+    // SAFETY: the caller guarantees `sid` is a valid SID, and `text` is valid
+    // for writes.
+    if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: on success `text` points at a NUL-terminated UTF-16 string
+    // allocated by the API, so every offset up to the NUL is readable.
+    let units = unsafe {
+        let mut len = 0;
+        while *text.add(len) != 0 {
+            len = len.saturating_add(1);
+        }
+        slice::from_raw_parts(text, len)
+    };
+    let parsed = String::from_utf16(units).map_err(|_| io::Error::from(io::ErrorKind::InvalidData));
+    // SAFETY: `text` was allocated by `ConvertSidToStringSidW` with
+    // `LocalAlloc`, `units` is no longer used, and it is freed once.
+    unsafe { LocalFree(text.cast()) };
+    parsed
+}
+
+/// Creates the directory `name` inside `dir` with a protected DACL that grants
+/// only the current user, and that every child inherits.
+///
+/// Fails closed: when the descriptor cannot be built or applied, nothing is
+/// created and the error comes back; the parent's ACL is never used instead.
+pub(super) fn create_private_dir_at(dir: BorrowedHandle<'_>, name: Leaf<'_>) -> io::Result<()> {
+    let descriptor = OwnerOnlyDescriptor::for_current_user()?;
+    let request = Request {
+        access: SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+        disposition: Disposition::Create,
+        kind: Kind::Directory,
+        attributes: 0,
+    };
+    // SAFETY: `descriptor` owns a valid descriptor until it drops after the
+    // call.
+    unsafe { create_with(dir, name, request, descriptor.0.cast_const()) }.map(drop)
+}
+
+/// Replaces the DACL of the directory `dir` with one that inherits from its
+/// parent, and re-derives the inherited entries of everything below it.
+///
+/// `dir` must be open with `READ_CONTROL` and `WRITE_DAC`. The explicit list
+/// passed is empty, not null: a null DACL would grant everyone full access if
+/// the system did not merge the parent's entries, while an empty one leaves the
+/// directory closed.
+///
+/// When the parent has no inheritable entries the merge leaves an empty DACL,
+/// on the directory and on everything below it. That is detected by reading the
+/// DACL back, the owner-only DACL is put back and an error is returned, so a
+/// root is never published unreadable.
+pub(super) fn inherit_dacl(dir: BorrowedHandle<'_>) -> io::Result<()> {
+    const _: () = assert!(size_of::<ACL>() == size_of::<[u32; 2]>());
+    let mut empty = [0_u32; 2];
+    // SAFETY: `empty` is writable, 4-aligned and exactly `size_of::<ACL>()`
+    // bytes, the length passed.
+    let ok = unsafe {
+        InitializeAcl(
+            empty.as_mut_ptr().cast(),
+            length_u32(size_of::<ACL>())?,
+            ACL_REVISION,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `empty` is an initialized empty ACL that outlives the call.
+    unsafe {
+        set_dacl(
+            dir,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            empty.as_ptr().cast(),
+        )
+    }?;
+    match ace_count(dir) {
+        Ok(entries) if entries > 0 => Ok(()),
+        Ok(_) => {
+            restore_owner_only(dir)?;
+            Err(io::Error::other(
+                "the parent has no inheritable entries; the directory stays owner-only",
+            ))
+        }
+        Err(err) => {
+            restore_owner_only(dir)?;
+            Err(err)
+        }
+    }
+}
+
+/// Puts the protected, current-user-only DACL back on `dir`, which must be
+/// open with `WRITE_DAC`, and re-derives what its children inherited.
+fn restore_owner_only(dir: BorrowedHandle<'_>) -> io::Result<()> {
+    let owner_only = OwnerOnlyDescriptor::for_current_user()?;
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut acl: *mut ACL = null_mut();
+    // SAFETY: the descriptor is valid until `owner_only` drops, and the three
+    // out-pointers are valid for writes.
+    let ok = unsafe {
+        GetSecurityDescriptorDacl(
+            owner_only.0,
+            &raw mut present,
+            &raw mut acl,
+            &raw mut defaulted,
+        )
+    };
+    if ok == 0 || present == 0 || acl.is_null() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    // SAFETY: `acl` points into the descriptor, which outlives the call.
+    unsafe {
+        set_dacl(
+            dir,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            acl,
+        )
+    }
+}
+
+/// `SetSecurityInfo` on the DACL of `dir` with `flags`, which must select the
+/// DACL only.
+///
+/// # Safety
+///
+/// `acl` must point at a valid ACL that outlives the call.
+unsafe fn set_dacl(
+    dir: BorrowedHandle<'_>,
+    flags: OBJECT_SECURITY_INFORMATION,
+    acl: *const ACL,
+) -> io::Result<()> {
+    // SAFETY: `dir` is a live handle, `acl` is valid by the caller's contract,
+    // and the owner, group and SACL are null because `flags` selects only the
+    // DACL.
+    let code = unsafe {
+        SetSecurityInfo(
+            dir.as_raw_handle(),
+            SE_FILE_OBJECT,
+            flags,
+            null_mut(),
+            null_mut(),
+            acl,
+            null(),
+        )
+    };
+    if code == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(code.cast_signed()))
+    }
+}
+
+/// The number of entries in the DACL of `dir`, which must be open with
+/// `READ_CONTROL`. A null DACL counts as none.
+fn ace_count(dir: BorrowedHandle<'_>) -> io::Result<u32> {
+    let info_len = length_u32(size_of::<ACL_SIZE_INFORMATION>())?;
+    let mut acl: *mut ACL = null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `dir` is a live handle, the owner, group and SACL out-pointers
+    // are null because only the DACL is requested, and `acl` and `descriptor`
+    // are valid for writes.
+    let code = unsafe {
+        GetSecurityInfo(
+            dir.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &raw mut acl,
+            null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code.cast_signed()));
+    }
+    let mut size = ACL_SIZE_INFORMATION::default();
+    let counted = if acl.is_null() {
+        Ok(0)
+    } else {
+        // SAFETY: `acl` points into `descriptor`, which is alive, and `size`
+        // is writable and of exactly the length passed.
+        let ok =
+            unsafe { GetAclInformation(acl, (&raw mut size).cast(), info_len, AclSizeInformation) };
+        if ok == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(size.AceCount)
+        }
+    };
+    // SAFETY: `descriptor` was allocated by `GetSecurityInfo` with
+    // `LocalAlloc`, and `acl` is no longer used.
+    unsafe { LocalFree(descriptor) };
+    counted
 }
 
 /// The raw reparse data of the reparse point `name` inside `dir`, as

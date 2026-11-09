@@ -22,11 +22,10 @@
 //! (`$?` reads 130 or 143); Windows has no such death and exits 130.
 //!
 //! SIGHUP is deliberately not handled: a `nohup`-ed run ignores it, and
-//! handling it here would override that. A disposition inherited as ignored
-//! cannot be detected without `unsafe`, so SIGINT or SIGTERM that the parent
-//! ignored is still turned into a cancel while the window is armed, and a
-//! signal after the window closes still ends the process (a known limitation,
-//! tracked in #1109).
+//! handling it here would override that. SIGINT or SIGTERM that the parent
+//! ignored (a background job under `trap "" INT`) is left alone on Unix: no
+//! handler is installed for it, so it stays ignored for the whole run, inside
+//! the armed window and after it.
 //!
 //! Core polls at entry boundaries and every few MiB inside one entry's copy,
 //! and the `extract` pre-extraction listing polls per entry, so the first
@@ -312,12 +311,10 @@ impl Drop for InterruptGuard {
 /// What a stop request does outside an armed window: the default action, so
 /// the process ends as it would have without this module.
 ///
-/// A signal that was inherited as ignored is still ended here, because
-/// telling the two apart needs a scoped `sigaction` query.
+/// A signal inherited as ignored never reaches here on Unix, since `register`
+/// does not handle it.
 #[cfg(not(target_os = "wasi"))]
 fn terminate_by_default(stop: Stop) -> ! {
-    // TODO(#1109): leave a signal inherited as ignored alone (needs a scoped
-    // sigaction query)
     #[cfg(unix)]
     {
         // A terminating signal ends the process here, or aborts when the
@@ -451,12 +448,34 @@ fn on_stop(stop: Stop) {
     }
 }
 
+/// Whether the process inherited `signal` as ignored, read with a `sigaction`
+/// query that installs nothing. This is the CLI's only `unsafe`: neither std
+/// nor `signal-hook` can read a disposition.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn ignored_on_entry(signal: std::ffi::c_int) -> bool {
+    // SAFETY: a null new action only queries; an all-zero C `sigaction` is
+    // valid and is read only after success.
+    unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(signal, std::ptr::null(), &raw mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
+    }
+}
+
 #[cfg(unix)]
 fn register(handler: fn(Stop)) -> std::io::Result<()> {
     use signal_hook::consts::SIGINT;
     use signal_hook::consts::SIGTERM;
 
-    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])?;
+    let kept: Vec<_> = [SIGINT, SIGTERM]
+        .into_iter()
+        .filter(|&signal| !ignored_on_entry(signal))
+        .collect();
+    if kept.is_empty() {
+        return Ok(());
+    }
+    let mut signals = signal_hook::iterator::Signals::new(kept)?;
     std::thread::Builder::new()
         .name("exarch-signals".to_owned())
         .spawn(move || {

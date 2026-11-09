@@ -151,11 +151,14 @@ closed_enum! {
         /// owns that destination, so an empty directory someone else made does
         /// not hand them the extracted tree. A destination the caller does not
         /// own also loses its group and world write bits and its setgid bit.
-        /// Windows has no Unix modes; the staging directory inherits the ACL of
-        /// the destination's parent, so staged content is as readable as that
-        /// parent while the run lasts. On Windows an existing empty destination
-        /// is refused with `OutputExists`, because the rename cannot replace
-        /// an existing directory there.
+        /// Windows has no Unix modes; the staging directory has a protected
+        /// DACL that grants only the current user while the run lasts, and the
+        /// published root is then reset to inherit the ACL of the destination's
+        /// parent, as a new directory there would. A parent with no inheritable
+        /// entries leaves the root owner-only and reports `acl_copy_failed`. On
+        /// Windows an existing empty destination is refused with
+        /// `OutputExists`, because the rename cannot replace an existing
+        /// directory there.
         ///
         /// On Linux and Android the destination's POSIX ACL (access and
         /// default) is copied onto the published root; the default ACL applies
@@ -214,8 +217,9 @@ closed_enum! {
         /// and a member can only take one of its own groups; a root that cannot
         /// be put in the destination's group loses its group permission bits
         /// and setgid instead of exposing them to another group. Windows has no
-        /// Unix modes: the staging directory inherits the ACL of the
-        /// destination's parent, not that of the destination.
+        /// Unix modes: the staging directory is owner-only while the run lasts,
+        /// and the published root inherits the ACL of the destination's parent,
+        /// not that of the destination.
         ///
         /// On Linux and Android the destination's POSIX ACL (access and
         /// default) is copied onto the published root; the default ACL applies

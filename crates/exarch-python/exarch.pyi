@@ -804,9 +804,10 @@ class ExtractionOptions:
         destination it replaces (or fills), never setuid; with
         ``"atomic_replace"`` also its owner as far as the caller may, and with
         ``"atomic"`` never the uid and the group only when the caller owns the
-        destination. On Windows the staging directory inherits the ACL of the
-        destination's parent, and ``"atomic"`` onto an existing empty
-        directory raises ``OutputExistsError``.
+        destination. On Windows the staging directory is owner-only while the
+        run lasts and the published root inherits the ACL of the destination's
+        parent, and ``"atomic"`` onto an existing empty directory raises
+        ``OutputExistsError``.
 
         The in-memory functions take no staging.
 

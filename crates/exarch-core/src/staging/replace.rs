@@ -29,9 +29,9 @@ use super::StagedRun;
 use super::acl;
 use super::adopt::Adoption;
 use super::adopt::make_removable;
-use super::cancelled_after;
 use super::dir::Seed;
 use super::dir::StagingDir;
+use super::discarded_after;
 use super::extract_in;
 use super::hold::Destination;
 use super::hold::DestinationHold;
@@ -56,6 +56,8 @@ use crate::Violation;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
 use crate::formats::file_identity::identity_of;
+#[cfg(target_os = "macos")]
+use crate::formats::pinned_dir::DeleteAccess;
 use crate::formats::pinned_dir::EntryStatus;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
@@ -318,6 +320,35 @@ impl Refusal {
     }
 }
 
+/// Refuses, before anything is extracted, a destination the caller may not
+/// move aside, which the swap would otherwise only find out after the whole
+/// archive was extracted. The check is advisory: the rename stays the
+/// authority, and where the platform cannot evaluate it nothing is refused.
+#[cfg(target_os = "macos")]
+fn refuse_undeletable(pin: &VettedDir, name: &LeafBuf, path: &Path) -> Result<()> {
+    match pin.delete_access(name.as_leaf()) {
+        DeleteAccess::Denied => Err(ArchiveError::ReplaceFailed(ReplaceFailure::new(
+            io_context(
+                &io::Error::from(io::ErrorKind::PermissionDenied),
+                "the existing destination cannot be moved aside",
+                path,
+            ),
+            Restore::NotNeeded,
+            None,
+        ))),
+        DeleteAccess::Granted | DeleteAccess::Unknown => Ok(()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps the call site platform-neutral"
+)]
+const fn refuse_undeletable(_pin: &VettedDir, _name: &LeafBuf, _path: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Extracts into a staging directory and swaps it over `target`.
 ///
 /// # Errors
@@ -342,6 +373,7 @@ pub(super) fn run(
         path,
         hold: _hold,
     } = target;
+    refuse_undeletable(&pin, &name, &path)?;
     let inheritance = acl::read_inheritance(&pin, name.as_leaf(), &parent, id).map_err(|e| {
         ArchiveError::Io(io_context(
             &e,
@@ -356,7 +388,11 @@ pub(super) fn run(
         Err(e) => return Err(e.rolled_back_with(staging.discard())),
     };
     if progress.is_cancelled() {
-        return Err(cancelled_after(report, staging.discard()));
+        return Err(discarded_after(
+            report,
+            ArchiveError::Cancelled,
+            staging.discard(),
+        ));
     }
     let dest = Dest {
         name: &name,

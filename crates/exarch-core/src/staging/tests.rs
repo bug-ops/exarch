@@ -21,6 +21,7 @@ use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ExtractionWarning;
 use crate::NarrowingReason;
+use crate::PartialWrites;
 use crate::ProgressCallback;
 use crate::ProtectedPath;
 use crate::Restore;
@@ -254,6 +255,31 @@ fn atomic_cancelled_after_the_last_entry_publishes_nothing() {
     assert!(error.is_cancelled(), "{error}");
     assert!(!dest.exists());
     assert!(fx.leftovers().is_empty());
+}
+
+#[test]
+fn a_failed_publish_of_an_atomic_extraction_keeps_the_counts() {
+    let fx = Fixture::new();
+    let dest = fx.dest();
+    std::fs::create_dir(&dest).unwrap();
+    let filled = dest.clone();
+    let mut hooks = Hooks {
+        at_end: Some(Box::new(move || {
+            std::fs::write(filled.join("late.txt"), b"late").unwrap();
+        })),
+        ..Hooks::default()
+    };
+
+    let error = fx.extract(&dest, Staging::Atomic, &mut hooks).unwrap_err();
+
+    let ArchiveError::PartialExtraction(partial) = &error else {
+        panic!("expected a partial extraction: {error:?}");
+    };
+    assert_matches!(partial.cause(), ArchiveError::OutputExists { .. });
+    assert_eq!(partial.writes(), PartialWrites::RolledBack);
+    assert_eq!(partial.report().files_extracted, 2);
+    assert_eq!(read(&dest.join("late.txt")), "late");
+    assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
 }
 
 fn plant_in_staging(parent: &Path, name: &'static str) -> Action {
@@ -847,7 +873,7 @@ fn a_racing_destination_flip_never_touches_a_planted_symlinks_target() {
 
         if let Err(error) = &outcome {
             assert_matches!(
-                error,
+                cause(error),
                 ArchiveError::SecurityViolation { .. }
                     | ArchiveError::ReplaceFailed(_)
                     | ArchiveError::InvalidConfiguration { .. }
@@ -862,6 +888,52 @@ fn a_racing_destination_flip_never_touches_a_planted_symlinks_target() {
             .collect();
         assert_eq!(names, [OsString::from("sentinel")]);
         assert_eq!(read(&victim.join("sentinel")), "victim");
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod denied_destination {
+    use super::super::test_acl::AclCleanup;
+    use super::super::test_acl::add_ace;
+    use super::*;
+
+    #[test]
+    fn a_destination_the_caller_cannot_delete_is_refused_before_extracting() {
+        let fx = Fixture::new();
+        let dest = fx.with_old_destination();
+        let _cleanup = AclCleanup(&fx.parent);
+        add_ace(&dest, "everyone deny delete");
+        let mut hooks = Hooks::default();
+
+        let error = fx
+            .extract(&dest, Staging::AtomicReplace, &mut hooks)
+            .unwrap_err();
+
+        let ArchiveError::ReplaceFailed(failure) = &error else {
+            panic!("expected ReplaceFailed: {error:?}");
+        };
+        assert_eq!(failure.error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_matches!(failure.restore, Restore::NotNeeded);
+        assert!(failure.leftover.is_none());
+        assert_eq!(hooks.started, 0, "nothing was extracted");
+        assert_eq!(read(&dest.join("old.txt")), "old");
+        assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
+    }
+
+    #[test]
+    fn a_destination_that_denies_reading_its_security_fails_closed_before_extracting() {
+        let fx = Fixture::new();
+        let dest = fx.with_old_destination();
+        let _cleanup = AclCleanup(&fx.parent);
+        add_ace(&dest, "everyone deny readsecurity");
+        let mut hooks = Hooks::default();
+
+        let outcome = fx.extract(&dest, Staging::AtomicReplace, &mut hooks);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(hooks.started, 0, "nothing was extracted");
+        assert_eq!(read(&dest.join("old.txt")), "old");
+        assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
     }
 }
 

@@ -969,11 +969,15 @@ mod macos {
             .extract(&fx.archive, &fx.dest)
             .unwrap_err();
 
+        let exarch_core::ArchiveError::PartialExtraction(partial) = &error else {
+            panic!("expected a partial extraction, got {error}");
+        };
         assert_matches!(
-            error,
+            partial.cause(),
             exarch_core::ArchiveError::OutputExists { .. },
             "{error}"
         );
+        assert!(partial.leftover().is_none(), "{:?}", partial.leftover());
         assert_eq!(
             staging_dirs_in(fx.dest.parent().unwrap()),
             Vec::<PathBuf>::new()

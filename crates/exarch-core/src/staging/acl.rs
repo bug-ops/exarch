@@ -390,6 +390,7 @@ mod imp {
 mod linux {
     use std::fs::File;
     use std::io;
+    use std::os::fd::AsRawFd;
     use std::path::Path;
 
     use rustix::io::Errno;
@@ -398,6 +399,7 @@ mod linux {
     use crate::NarrowingReason;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::le;
+    use crate::formats::pinned_dir::DirHandle;
     use crate::formats::pinned_dir::Leaf;
     use crate::formats::pinned_dir::VettedDir;
     use crate::staging::dir::VerifiedStage;
@@ -617,10 +619,11 @@ mod linux {
     /// Reads the POSIX ACL of the directory `name` of `pin`, which must still
     /// be the directory `expected` names.
     ///
-    /// The directory is opened for reading, never through an `O_PATH` handle.
-    /// A directory its caller cannot open for reading, an ACL that cannot be
-    /// read in full or names an id the namespace cannot map, and a directory
-    /// that is no longer `expected` give [`AclPlan::Private`].
+    /// The directory is opened for reading. One its caller cannot open for
+    /// reading is opened through an `O_PATH` handle, whose ACL is read through
+    /// its `/proc` link. A directory that no handle can be opened on, an ACL
+    /// that cannot be read in full or names an id the namespace cannot map, and
+    /// a directory that is no longer `expected` give [`AclPlan::Private`].
     ///
     /// # Errors
     ///
@@ -632,20 +635,44 @@ mod linux {
         _parent_path: &Path,
         expected: FileIdentity,
     ) -> io::Result<AclPlan> {
-        let dir = match pin.open_dir_file(name) {
-            Ok(dir) => dir,
+        let opened = match pin.open_dir_file(name) {
+            Ok(dir) => Ok(DirHandle::Read(dir)),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                pin.open_dir_for_metadata(name)
+            }
+            Err(e) => Err(e),
+        };
+        let handle = match opened {
+            Ok(handle) => handle,
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
                 return Ok(AclPlan::Private(NarrowingReason::AclUnreadable));
             }
             Err(e) => return Err(e),
         };
-        if !super::imp::is_expected(FileIdentity::of_file(&dir), expected) {
+        if !super::imp::is_expected(FileIdentity::of_file(handle.as_file()), expected) {
             return Ok(AclPlan::Private(NarrowingReason::DestinationChanged));
         }
         let mut buffer = vec![0_u8; XATTR_SIZE_MAX];
-        let access = screen(read_blob(&dir, ACCESS, &mut buffer)?);
-        let default = screen(read_blob(&dir, DEFAULT, &mut buffer)?);
+        let access = screen(read_handle_blob(&handle, ACCESS, &mut buffer)?);
+        let default = screen(read_handle_blob(&handle, DEFAULT, &mut buffer)?);
         Ok(plan_of(access, default))
+    }
+
+    fn read_handle_blob(handle: &DirHandle, name: &str, buffer: &mut [u8]) -> io::Result<Blob> {
+        match handle {
+            DirHandle::Read(dir) => read_blob(dir, name, buffer),
+            DirHandle::Search(dir) => read_blob_by_proc(dir, name, buffer),
+        }
+    }
+
+    /// Reads an ACL attribute of the directory an `O_PATH` descriptor names:
+    /// the descriptor cannot take `fgetxattr`, but its `/proc` link acts on the
+    /// same inode and needs no permission on it. Without `/proc` the lookup
+    /// fails with `ENOENT`, which is an unreadable ACL, never an absent one.
+    fn read_blob_by_proc(dir: &File, name: &str, buffer: &mut [u8]) -> io::Result<Blob> {
+        let link = format!("/proc/self/fd/{}", dir.as_raw_fd());
+        let read = rustix::fs::getxattr(link.as_str(), name, &mut *buffer);
+        classify(read, buffer)
     }
 
     fn plan_of(access: Blob, default: Blob) -> AclPlan {
@@ -848,6 +875,69 @@ mod linux {
                 read_error(Errno::RANGE),
                 Ok(Blob::Unreadable(NarrowingReason::AclUnreadable))
             );
+        }
+
+        /// A destination `parent/dest` with `mode` and, when given, the access
+        /// ACL `entries` of `(tag, permission, id)`, read as a replace reads
+        /// it.
+        ///
+        /// `None` when the temporary directory has no POSIX ACLs.
+        fn read_with_mode(
+            mode: u32,
+            entries: &[(u16, u16, u32)],
+        ) -> Option<(tempfile::TempDir, io::Result<AclPlan>)> {
+            use std::os::unix::fs::PermissionsExt;
+
+            let temp = tempfile::tempdir().unwrap();
+            let parent = temp.path().canonicalize().unwrap();
+            let dest = parent.join("dest");
+            std::fs::create_dir(&dest).unwrap();
+            if !entries.is_empty() {
+                let mut blob = VERSION.to_le_bytes().to_vec();
+                for &(tag, permission, id) in entries {
+                    blob.extend_from_slice(&tag.to_le_bytes());
+                    blob.extend_from_slice(&permission.to_le_bytes());
+                    blob.extend_from_slice(&id.to_le_bytes());
+                }
+                let dir = File::open(&dest).unwrap();
+                match rustix::fs::fsetxattr(&dir, ACCESS, &blob, rustix::fs::XattrFlags::empty()) {
+                    Ok(()) => {}
+                    Err(Errno::NOTSUP) => return None,
+                    Err(e) => panic!("setting the ACL: {e}"),
+                }
+            }
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode)).unwrap();
+            let pin = VettedDir::open_path(&parent).unwrap();
+            let name = crate::formats::pinned_dir::LeafBuf::of(&dest).unwrap();
+            let id = pin.status(name.as_leaf()).unwrap().unwrap().identity;
+            let plan = read_destination(&pin, name.as_leaf(), &parent, id);
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Some((temp, plan))
+        }
+
+        #[test]
+        fn a_destination_without_read_access_and_without_an_acl_has_none() {
+            for mode in [0o311, 0o000] {
+                let (_temp, plan) = read_with_mode(mode, &[]).unwrap();
+                assert_matches!(plan, Ok(AclPlan::None), "{mode:o}");
+            }
+        }
+
+        #[test]
+        fn a_destination_without_read_access_keeps_its_acl() {
+            // The owner entry has no read bit, so the owner cannot list it.
+            let entries = [
+                (USER_OBJ, 3, NO_ID),
+                (TAG_USER, 5, 12_345),
+                (GROUP_OBJ, 1, NO_ID),
+                (0x10, 5, NO_ID),
+                (OTHER, 1, NO_ID),
+            ];
+            let Some((_temp, plan)) = read_with_mode(0o311, &entries) else {
+                eprintln!("skipping: the temporary directory has no POSIX ACLs");
+                return;
+            };
+            assert_matches!(plan, Ok(AclPlan::Copy(_)));
         }
 
         #[test]
@@ -1245,9 +1335,11 @@ mod macos {
     /// The directory is opened relative to the pin without following a
     /// symlink, its identity is compared with `expected`, and the ACL is read
     /// through that same descriptor, so a swap of the entry cannot change
-    /// which object is read. A directory its caller cannot open for reading,
-    /// an ACL that cannot be read in full or parsed, and a directory that is no
-    /// longer `expected` give [`AclPlan::Private`].
+    /// which object is read. The handle is search-only where the directory
+    /// allows it, so a mode such as `0311` does not hide its ACL. A directory
+    /// that no handle can be opened on, an ACL that cannot be read in full or
+    /// parsed, and a directory that is no longer `expected` give
+    /// [`AclPlan::Private`].
     ///
     /// # Errors
     ///
@@ -1259,17 +1351,18 @@ mod macos {
         _parent_path: &Path,
         expected: FileIdentity,
     ) -> io::Result<AclPlan> {
-        let dir = match pin.open_dir_file(name) {
-            Ok(dir) => dir,
+        let handle = match pin.open_dir_for_metadata(name) {
+            Ok(handle) => handle,
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
                 return Ok(AclPlan::Private(NarrowingReason::AclUnreadable));
             }
             Err(e) => return Err(e),
         };
-        if !super::imp::is_expected(FileIdentity::of_file(&dir), expected) {
+        let dir = handle.as_file();
+        if !super::imp::is_expected(FileIdentity::of_file(dir), expected) {
             return Ok(AclPlan::Private(NarrowingReason::DestinationChanged));
         }
-        read_stage(&dir)
+        read_stage(dir)
     }
 
     #[cfg(test)]
@@ -1582,6 +1675,79 @@ mod macos {
             let einval = || io::Error::from_raw_os_error(Errno::INVAL.raw_os_error());
             assert_matches!(plan_of(Err(einval())), Ok(AclPlan::None));
             assert!(!is_unsupported(&einval()));
+        }
+
+        /// A destination `parent/dest` with `mode`, read as a replace reads it.
+        fn read_with_mode(
+            mode: u32,
+            prepare: impl FnOnce(&Path),
+        ) -> (tempfile::TempDir, io::Result<AclPlan>) {
+            use std::os::unix::fs::PermissionsExt;
+
+            let temp = tempfile::tempdir().unwrap();
+            let parent = temp.path().canonicalize().unwrap();
+            let dest = parent.join("dest");
+            std::fs::create_dir(&dest).unwrap();
+            prepare(&dest);
+            let pin = VettedDir::open_path(&parent).unwrap();
+            let name = crate::formats::pinned_dir::LeafBuf::of(&dest).unwrap();
+            let id = pin.status(name.as_leaf()).unwrap().unwrap().identity;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode)).unwrap();
+            let plan = read_destination(&pin, name.as_leaf(), &parent, id);
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+            (temp, plan)
+        }
+
+        #[test]
+        fn a_destination_without_read_access_and_without_an_acl_has_none() {
+            let (_temp, plan) = read_with_mode(0o311, |_| {});
+            assert_matches!(plan, Ok(AclPlan::None));
+        }
+
+        #[test]
+        fn a_destination_without_read_access_keeps_its_acl() {
+            let (temp, plan) = read_with_mode(0o311, |dest| add_ace(dest, "everyone allow search"));
+            let _clear = ClearAcl(temp.path());
+            assert_matches!(plan, Ok(AclPlan::Copy(_)));
+        }
+
+        #[test]
+        fn an_acl_that_denies_listing_to_the_caller_is_still_read() {
+            let user = Command::new("/usr/bin/id").arg("-un").output().unwrap();
+            let user = String::from_utf8(user.stdout).unwrap();
+            let ace = format!("user:{} deny list", user.trim());
+            let (temp, plan) = read_with_mode(0o755, |dest| add_ace(dest, &ace));
+            let _clear = ClearAcl(temp.path());
+            let Ok(AclPlan::Copy(acl)) = plan else {
+                panic!("expected the ACL to be copied: {plan:?}");
+            };
+            assert_eq!(acl.aces().first().unwrap().flags & KIND_MASK, KIND_DENY);
+        }
+
+        #[test]
+        fn a_destination_no_handle_can_be_opened_on_is_unreadable() {
+            if rustix::process::geteuid().is_root() {
+                return;
+            }
+            let (_temp, plan) = read_with_mode(0o000, |_| {});
+            assert_matches!(plan, Ok(AclPlan::Private(NarrowingReason::AclUnreadable)));
+        }
+
+        /// Measured on Darwin 25.6: a `deny readsecurity` entry makes the
+        /// attribute read fail with `EACCES`, so it is never read as "no ACL".
+        #[test]
+        fn a_destination_that_denies_reading_its_security_is_not_read_as_aclless() {
+            let temp = tempfile::tempdir().unwrap();
+            let _clear = ClearAcl(temp.path());
+            add_ace(temp.path(), "everyone deny readsecurity");
+            let denied = File::open(temp.path()).unwrap();
+
+            let fetched = darwin_acl::fetch(&denied);
+
+            assert_matches!(
+                plan_of(fetched),
+                Ok(AclPlan::Private(NarrowingReason::AclUnreadable))
+            );
         }
 
         /// Removes the ACL of a test directory even when an assertion fails, so

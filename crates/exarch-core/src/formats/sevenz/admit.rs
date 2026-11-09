@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn lzma2_dict_size_decodes_every_property_byte() {
+    fn lzma2_dict_size_matches_known_property_bytes() {
         const KNOWN: [(u8, u32); 7] = [
             (0, 4_096),
             (1, 6_144),

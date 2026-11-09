@@ -118,13 +118,13 @@ jobs:
           - name: linux-musl-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            manylinux: musllinux_1_2
+            musl-image: ghcr.io/rust-cross/rust-musl-cross:x86_64-musl@sha256:3f1010eb48311dfde5d51f011163451940af34bd317355c4a8652ce6b4b61051
 
           # Linux aarch64 (musl)
           - name: linux-musl-aarch64
             os: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            manylinux: musllinux_1_2
+            musl-image: ghcr.io/rust-cross/rust-musl-cross:aarch64-musl@sha256:02e790506c5f15a533bc05b3af8719b16a8a2314480f6f0fdc0166432035d9b4
 
           # macOS x86_64
           - name: macos-x86_64
@@ -158,19 +158,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Read locked maturin version
-        id: maturin
-        shell: bash
-        run: echo "version=$(python .github/scripts/check-maturin-pin.py)" >> "$GITHUB_OUTPUT"
-
       - name: Install uv
-        if: ${{ !matrix.platform.manylinux }}
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: 0.13.7
 
       - name: Install maturin
-        if: ${{ !matrix.platform.manylinux }}
         shell: bash
         working-directory: crates/exarch-python
         run: |
@@ -189,20 +182,35 @@ jobs:
         with:
           shared-key: "python-${{ matrix.platform.name }}"
 
+      # The image digest is the multi-arch index digest of the tag, resolved with
+      # `docker buildx imagetools inspect`. Dependabot does not update it; bump by hand.
       - name: Build wheels (musl)
-        if: matrix.platform.manylinux
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
-        with:
-          target: ${{ matrix.platform.target }}
-          manylinux: ${{ matrix.platform.manylinux }}
-          # Pinned by version only: maturin-action fetches the binary without a hash
-          # and offers no checksum input.
-          maturin-version: v${{ steps.maturin.outputs.version }}
-          args: --release --strip --out wheels -i python3.11
-          working-directory: crates/exarch-python
+        if: matrix.platform.musl-image
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.platform.musl-image }}
+          TARGET: ${{ matrix.platform.target }}
+        run: |
+          MATURIN_BIN="$(readlink -f "$(command -v maturin)")"
+          file "$MATURIN_BIN" | grep -q 'statically linked'
+          docker run --rm \
+            -e TARGET -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e WORKSPACE="$GITHUB_WORKSPACE" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -v "$MATURIN_BIN:/usr/local/bin/maturin:ro" \
+            -w "$GITHUB_WORKSPACE/crates/exarch-python" \
+            "$IMAGE" bash -euo pipefail -c '
+              trap "chown -R $HOST_UID:$HOST_GID $WORKSPACE/target $WORKSPACE/crates/exarch-python/wheels 2>/dev/null || true" EXIT
+              rm -rf "$RUSTUP_HOME/toolchains"
+              rustup toolchain install stable --profile minimal
+              rustup override set stable
+              rustup target add "$TARGET"
+              python3 -m pip install --user patchelf
+              export PATH="$PATH:$HOME/.local/bin"
+              maturin build --release --strip --out wheels -i python3.11 --target "$TARGET" --compatibility musllinux_1_2
+            '
 
       - name: Build wheels
-        if: ${{ !matrix.platform.manylinux }}
+        if: ${{ !matrix.platform.musl-image }}
         working-directory: crates/exarch-python
         run: maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.11
 

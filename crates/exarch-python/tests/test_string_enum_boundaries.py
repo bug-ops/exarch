@@ -78,7 +78,22 @@ CALLS: dict[str, Call] = {
     ),
 }
 
+CREATION_FORMAT_CALLS = {
+    "create_archive.format",
+    "create_archive_with_progress.format",
+    "create_archive_to_bytes.format",
+}
+
+
+def _setting(name: str) -> str:
+    parameter = name.rsplit(".", 1)[1]
+    if name in CREATION_FORMAT_CALLS:
+        return "creation_format"
+    return "archive_format" if parameter == "format" else parameter
+
+
 CASES = [pytest.param(call, id=name) for name, call in CALLS.items()]
+SETTING_CASES = [pytest.param(call, _setting(name), id=name) for name, call in CALLS.items()]
 
 
 @pytest.mark.parametrize("call", CASES)
@@ -93,7 +108,9 @@ def test_lone_surrogate_is_a_unicode_encode_error(call, tmp_path):
         call(tmp_path, LONE_SURROGATE)
 
 
-@pytest.mark.parametrize("call", CASES)
-def test_unknown_value_is_an_invalid_configuration_error(call, tmp_path):
-    with pytest.raises(exarch.InvalidConfigurationError):
+@pytest.mark.parametrize(("call", "setting"), SETTING_CASES)
+def test_unknown_value_is_an_invalid_configuration_error(call, setting, tmp_path):
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
         call(tmp_path, UNKNOWN)
+
+    assert info.value.setting == setting

@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-08
+updated: 2026-11-09
 status: implemented
 related:
   - "[[constitution]]"
@@ -205,7 +205,7 @@ THEN extraction respects those settings
 |----|----------|-------------|
 | NFR-001 | Safety | `unsafe impl Send for PyProgressAdapter` is the only justified `unsafe` in the Python crate; must be documented |
 | NFR-002 | Performance | GIL is released during I/O when no progress callback is provided |
-| NFR-003 | Compatibility | Built with `maturin` and `pyo3` abi3 feature for broad Python version support |
+| NFR-003 | Compatibility | Built with `maturin` and the `pyo3` `abi3-py311` feature: one wheel per platform covers Python 3.11 and later; minimum Python 3.11 |
 | NFR-004 | Testability | Python tests run via `pytest` with `maturin develop` — excluded from `cargo nextest` |
 | NFR-005 | Correctness | All security logic stays in `exarch-core`; Python crate contains only type mapping and boundary validation |
 
@@ -385,8 +385,10 @@ class ExtractionOptions:
 - [NEEDS CLARIFICATION: Should an async Python interface (asyncio) be provided via `pyo3-asyncio` in a future version?]
 
 > [!note] Resolved in v0.3.1
-> Python version range: minimum Python 3.10. Python 3.9 support was dropped when it reached
-> EOL in October 2025. The abi3 wheel covers 3.10–3.14+.
+> Python version range: minimum Python 3.11. Python 3.9 support was dropped when it reached
+> EOL in October 2025, and Python 3.10 when it reached EOL in October 2026. The `abi3-py311`
+> wheel covers 3.11–3.15+. The CI matrix runs Python 3.11–3.15, and the release wheel build
+> uses interpreter `python3.11`.
 
 ## 10. See Also
 

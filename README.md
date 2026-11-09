@@ -46,7 +46,7 @@ pip install exarch
 ```
 
 > [!NOTE]
-> Requires Python 3.10 or later.
+> Requires Python 3.11 or later.
 
 ### Node.js
 
@@ -240,7 +240,7 @@ exarch uses optimized I/O with atomic permission setting to outperform native ar
 ### Requirements
 
 - Rust 1.99.1 or later (Edition 2024)
-- Python 3.10+ (for Python bindings)
+- Python 3.11+ (for Python bindings)
 - Node.js 20+ (for Node.js bindings)
 
 ### Build

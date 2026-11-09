@@ -312,20 +312,16 @@ pub struct PySinkOptions {
 #[pymethods]
 impl PySinkOptions {
     #[new]
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "pyo3 cannot extract `&str` under abi3-py39"
-    )]
-    #[pyo3(signature = (existing_files="skip".to_owned(), decode_reuse="off".to_owned(), decode_reuse_limit=None))]
+    #[pyo3(signature = (existing_files="skip", decode_reuse="off", decode_reuse_limit=None))]
     #[pyo3(text_signature = "(existing_files='skip', decode_reuse='off', decode_reuse_limit=None)")]
     fn new(
-        existing_files: String,
-        decode_reuse: String,
+        existing_files: &str,
+        decode_reuse: &str,
         decode_reuse_limit: Option<PyInteger>,
     ) -> PyResult<Self> {
-        let kind = parse_one(ConfigSetting::DecodeReuse, &decode_reuse)?;
+        let kind = parse_one(ConfigSetting::DecodeReuse, decode_reuse)?;
         Ok(Self {
-            existing_files: parse_existing_files(&existing_files)?,
+            existing_files: parse_existing_files(existing_files)?,
             reuse: build_decode_reuse(kind, decode_reuse_limit)?,
         })
     }
@@ -436,10 +432,6 @@ impl PyMemoryExtraction {
 ///     print(entry.path, entry.kind)
 /// ```
 #[pyfunction]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pyo3 cannot extract `&str` under abi3-py39"
-)]
 #[pyo3(signature = (data, config=None, options=None, max_bytes=None, path_model=None, format=None))]
 pub fn extract_archive_to_memory(
     py: Python<'_>,
@@ -447,16 +439,10 @@ pub fn extract_archive_to_memory(
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<&PySinkOptions>,
     max_bytes: Option<PyInteger>,
-    path_model: Option<String>,
-    format: Option<String>,
+    path_model: Option<&str>,
+    format: Option<&str>,
 ) -> PyResult<PyMemoryExtraction> {
-    let request = MemoryRequest::parse(
-        config,
-        options,
-        max_bytes,
-        path_model.as_deref(),
-        format.as_deref(),
-    )?;
+    let request = MemoryRequest::parse(config, options, max_bytes, path_model, format)?;
 
     let slot = data.failure_slot();
     let result = catch_panic_as_py_err("archive extraction", || {
@@ -516,9 +502,8 @@ pub fn extract_archive_to_memory(
 /// ```
 #[pyfunction]
 #[expect(
-    clippy::needless_pass_by_value,
     clippy::too_many_arguments,
-    reason = "pyo3 cannot extract `&str` under abi3-py39; the signature mirrors the sibling function"
+    reason = "the signature mirrors the sibling function"
 )]
 #[pyo3(signature = (data, config=None, progress=None, options=None, max_bytes=None, path_model=None, format=None))]
 pub fn extract_archive_to_memory_with_progress(
@@ -528,16 +513,10 @@ pub fn extract_archive_to_memory_with_progress(
     progress: Option<Py<PyAny>>,
     options: Option<&PySinkOptions>,
     max_bytes: Option<PyInteger>,
-    path_model: Option<String>,
-    format: Option<String>,
+    path_model: Option<&str>,
+    format: Option<&str>,
 ) -> PyResult<PyMemoryExtraction> {
-    let request = MemoryRequest::parse(
-        config,
-        options,
-        max_bytes,
-        path_model.as_deref(),
-        format.as_deref(),
-    )?;
+    let request = MemoryRequest::parse(config, options, max_bytes, path_model, format)?;
 
     let slot = data.failure_slot();
     let result = run_with_optional_progress(
@@ -592,20 +571,16 @@ pub fn extract_archive_to_memory_with_progress(
 ///     manifest = list_archive_bytes_with_progress(f.read(), None, progress)
 /// ```
 #[pyfunction]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pyo3 cannot extract `&str` under abi3-py39"
-)]
 #[pyo3(signature = (data, config=None, progress=None, format=None, options=None))]
 pub fn list_archive_bytes_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
     progress: Option<Py<PyAny>>,
-    format: Option<String>,
+    format: Option<&str>,
     options: Option<PyRef<'_, PyListOptions>>,
 ) -> PyResult<PyArchiveManifest> {
-    let format = parse_format(format.as_deref())?;
+    let format = parse_format(format)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyListOptions::snapshot(options);
 
@@ -666,10 +641,6 @@ pub fn list_archive_bytes_with_progress(
 ///     report = verify_archive_bytes_with_progress(f.read(), None, progress)
 /// ```
 #[pyfunction]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pyo3 cannot extract `&str` under abi3-py39"
-)]
 #[pyo3(signature = (data, config=None, progress=None, options=None, format=None))]
 pub fn verify_archive_bytes_with_progress(
     py: Python<'_>,
@@ -677,9 +648,9 @@ pub fn verify_archive_bytes_with_progress(
     config: Option<PyRef<'_, PySecurityConfig>>,
     progress: Option<Py<PyAny>>,
     options: Option<PyRef<'_, PyVerificationOptions>>,
-    format: Option<String>,
+    format: Option<&str>,
 ) -> PyResult<PyVerificationReport> {
-    let format = parse_format(format.as_deref())?;
+    let format = parse_format(format)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyVerificationOptions::snapshot(options);
 
@@ -769,7 +740,7 @@ pub fn verify_archive_bytes_with_progress(
 #[pyfunction]
 #[expect(
     clippy::needless_pass_by_value,
-    reason = "pyo3 cannot extract `&str` under abi3-py39"
+    reason = "pyo3 extracts on_entry as an owned Py<PyAny>; the Send handle is what the py.detach closure borrows"
 )]
 #[pyo3(signature = (data, on_entry, config=None, options=None, path_model=None, format=None))]
 pub fn extract_archive_to_callback(
@@ -778,19 +749,13 @@ pub fn extract_archive_to_callback(
     on_entry: Py<PyAny>,
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<&PySinkOptions>,
-    path_model: Option<String>,
-    format: Option<String>,
+    path_model: Option<&str>,
+    format: Option<&str>,
 ) -> PyResult<PyExtractionReport> {
     if !on_entry.bind(py).is_callable() {
         return Err(PyTypeError::new_err("on_entry must be callable"));
     }
-    let request = MemoryRequest::parse(
-        config,
-        options,
-        None,
-        path_model.as_deref(),
-        format.as_deref(),
-    )?;
+    let request = MemoryRequest::parse(config, options, None, path_model, format)?;
 
     let slot = data.failure_slot();
     // Outer `Err`: an archive or file-object failure; inner `Err`: the
@@ -936,18 +901,14 @@ impl PyCreatedArchive {
 /// print(len(created.data), created.report.files_added)
 /// ```
 #[pyfunction]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pyo3 cannot extract `&str` under abi3-py39"
-)]
 #[pyo3(signature = (sources, format, config=None))]
 pub fn create_archive_to_bytes(
     py: Python<'_>,
     sources: &Bound<'_, PyAny>,
-    format: String,
+    format: &str,
     config: Option<PyRef<'_, PyCreationConfig>>,
 ) -> PyResult<PyCreatedArchive> {
-    let format = parse_creatable_format(&format)?;
+    let format = parse_creatable_format(format)?;
     let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
     let source_paths: Vec<exarch_core::BoundaryPath> = sources_list
         .iter()
@@ -995,19 +956,15 @@ pub fn create_archive_to_bytes(
 ///     manifest = list_archive_bytes(f.read())
 /// ```
 #[pyfunction]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pyo3 cannot extract `&str` under abi3-py39"
-)]
 #[pyo3(signature = (data, config=None, format=None, options=None))]
 pub fn list_archive_bytes(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
-    format: Option<String>,
+    format: Option<&str>,
     options: Option<PyRef<'_, PyListOptions>>,
 ) -> PyResult<PyArchiveManifest> {
-    let format = parse_format(format.as_deref())?;
+    let format = parse_format(format)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyListOptions::snapshot(options);
 
@@ -1051,19 +1008,15 @@ pub fn list_archive_bytes(
 /// print(report.is_safe())
 /// ```
 #[pyfunction]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pyo3 cannot extract `&str` under abi3-py39"
-)]
 #[pyo3(signature = (data, config=None, options=None, format=None))]
 pub fn verify_archive_bytes(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<PyRef<'_, PyVerificationOptions>>,
-    format: Option<String>,
+    format: Option<&str>,
 ) -> PyResult<PyVerificationReport> {
-    let format = parse_format(format.as_deref())?;
+    let format = parse_format(format)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyVerificationOptions::snapshot(options);
 

@@ -266,29 +266,20 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
 /// report = create_archive("output.tar.gz", ["src/"], config)
 /// ```
 #[pyfunction]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "pyo3 cannot extract `&str` under abi3-py39"
-)]
 #[pyo3(signature = (output_path, sources, config=None, format=None, overwrite=true, durability=None))]
 fn create_archive(
     py: Python<'_>,
     output_path: &Bound<'_, PyAny>,
     sources: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PyCreationConfig>>,
-    format: Option<String>,
+    format: Option<&str>,
     overwrite: bool,
-    durability: Option<String>,
+    durability: Option<&str>,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_boundary(py, output_path)?;
     let source_paths = source_boundary_paths(py, sources)?;
     let config = PyCreationConfig::snapshot(config);
-    let output = output_file(
-        &output_path,
-        overwrite,
-        format.as_deref(),
-        durability.as_deref(),
-    )?;
+    let output = output_file(&output_path, overwrite, format, durability)?;
 
     let report = catch_panic_as_py_err("archive creation", || {
         py.detach(|| CreateRequest::new(&config).create(&output, &source_paths))
@@ -498,9 +489,8 @@ fn verify_archive(
 /// ```
 #[pyfunction]
 #[expect(
-    clippy::needless_pass_by_value,
     clippy::too_many_arguments,
-    reason = "pyo3 cannot extract `&str` under abi3-py39; the keyword arguments are the Python signature"
+    reason = "the keyword arguments are the Python signature"
 )]
 #[pyo3(signature = (output_path, sources, config=None, progress=None, format=None, overwrite=true, durability=None))]
 fn create_archive_with_progress(
@@ -509,19 +499,14 @@ fn create_archive_with_progress(
     sources: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PyCreationConfig>>,
     progress: Option<Py<PyAny>>,
-    format: Option<String>,
+    format: Option<&str>,
     overwrite: bool,
-    durability: Option<String>,
+    durability: Option<&str>,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_boundary(py, output_path)?;
     let source_paths = source_boundary_paths(py, sources)?;
     let config = PyCreationConfig::snapshot(config);
-    let output = output_file(
-        &output_path,
-        overwrite,
-        format.as_deref(),
-        durability.as_deref(),
-    )?;
+    let output = output_file(&output_path, overwrite, format, durability)?;
 
     let report = run_with_optional_progress(
         py,

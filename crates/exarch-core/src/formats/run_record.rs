@@ -19,7 +19,12 @@
 //! host and needs no path folding. Where the volume gives no identity the key
 //! is the landing path as the archive spelled it, so a duplicate that differs
 //! only in case is refused: the record fails closed. A failed identity lookup
-//! records nothing.
+//! records nothing. [`ArchiveManifest::dispositions_on`] can model the path
+//! basis when its caller passes [`VolumeIdentity::LandingPaths`]; no front end
+//! does yet, and `list` assumes file identities.
+//!
+//! [`ArchiveManifest::dispositions_on`]: crate::ArchiveManifest::dispositions_on
+//! [`VolumeIdentity::LandingPaths`]: crate::VolumeIdentity::LandingPaths
 //!
 //! The record is bounded by [`RECORD_CAP`]. Past it nothing more is recorded
 //! and every occupant counts as not created by this run, so the run fails
@@ -62,9 +67,46 @@ enum LandingKey {
 }
 
 fn key_for(identity: FileIdentity, rel: &Path) -> LandingKey {
+    #[cfg(test)]
+    if key_basis::current() == key_basis::KeyBasis::Path {
+        return LandingKey::Path(rel.to_path_buf());
+    }
     identity
         .key()
         .map_or_else(|| LandingKey::Path(rel.to_path_buf()), LandingKey::Identity)
+}
+
+/// A test-only switch that makes this thread key every landing by its spelled
+/// path, as a volume without file identities does.
+#[cfg(test)]
+pub(crate) mod key_basis {
+    use std::cell::Cell;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum KeyBasis {
+        Identity,
+        Path,
+    }
+
+    thread_local! {
+        static BASIS: Cell<KeyBasis> = const { Cell::new(KeyBasis::Identity) };
+    }
+
+    pub(super) fn current() -> KeyBasis {
+        BASIS.with(Cell::get)
+    }
+
+    /// Runs `body` with this thread keying landings by `basis`.
+    pub(crate) fn with<T>(basis: KeyBasis, body: impl FnOnce() -> T) -> T {
+        struct Restore(KeyBasis);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                BASIS.with(|cell| cell.set(self.0));
+            }
+        }
+        let _restore = Restore(BASIS.with(|cell| cell.replace(basis)));
+        body()
+    }
 }
 
 /// The key of the occupant of `leaf`, `None` when it is absent or the lookup

@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Node: `isSafe`, `hasCriticalIssues`, `compressionRatio` and `compressionPercentage` on reports and manifest entries, as in Python (#1136, #1141).
 - Core: NetBSD and illumos open directories search-only for mode changes and fall back to the read handle on any error (#1126, #1141).
 - Tests: `dispositions_match_extraction` compares `dispositions()` with the per-entry outcome of extraction over TAR, ZIP and 7z (#1132, #1141).
+- Core: `VolumeIdentity` and `ArchiveManifest::dispositions_on` model a volume without file IDs, where a differently spelled repeat of a landing is refused (#1140).
 
 ### Changed
 
@@ -159,6 +160,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: a forced exit keeps the interrupt window locked, so `--json` prints exactly one document (#1133, #1141).
 - Core: `list` agrees with extraction for a repeated file name, a hardlink over an earlier symlink and a symlink on a host without symlink creation (#1125, #1127, #1130, #1141).
 - CI: patchelf is installed from a hash-locked requirements export and the musl build toolchain is pinned to Rust 1.99.1 (#1128, #1141).
+- Core: `--force` of a symlink entry over a directory is refused with `refusing to replace the existing directory at <path>` instead of a bare `Operation not permitted` (#1139).
+- CI: the release build and validate jobs run with `contents: read` and without persisted checkout credentials (#1138).
+- Docs: the leftover `0311` backup on OpenBSD and DragonFly and the unverified NetBSD and illumos fallback are documented (#1137).
 
 ## [0.9.0] - 2026-11-05
 

@@ -234,6 +234,7 @@ pub use inspection::UnverifiedReason;
 pub use inspection::VerificationIssue;
 pub use inspection::VerificationReport;
 pub use inspection::VerificationStatus;
+pub use inspection::VolumeIdentity;
 pub use path_text::bytes_text;
 pub use path_text::path_text;
 pub use path_text::utf8_entry_path;

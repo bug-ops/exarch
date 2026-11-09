@@ -6520,6 +6520,39 @@ fn test_extract_force_file_over_symlink_names_the_entry() {
         );
 }
 
+/// Regression test for #1139: a symlink over a directory an earlier entry
+/// created names the entry in `--force` and `--atomic --force`, not a bare
+/// `Operation not permitted`.
+#[cfg(unix)]
+#[test]
+fn test_extract_force_symlink_over_directory_names_the_entry() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("sym_over_dir.tar");
+    tar_entries_archive(
+        &archive,
+        &[
+            ("t", tar::EntryType::Regular, ""),
+            ("d/", tar::EntryType::Directory, ""),
+            ("d", tar::EntryType::Symlink, "t"),
+        ],
+    );
+    for atomic in [false, true] {
+        let mut cmd = exarch_cmd();
+        cmd.arg("extract").arg("--allow-symlinks").arg("--force");
+        if atomic {
+            cmd.arg("--atomic");
+        }
+        cmd.arg(&archive)
+            .arg(temp.path().join(format!("out_{atomic}")))
+            .assert()
+            .code(1)
+            .stderr(
+                predicate::str::contains("refusing to replace the existing directory at d")
+                    .and(predicate::str::contains("os error").not()),
+            );
+    }
+}
+
 /// Builds a TAR holding `ok.txt` followed by a `../evil.txt` entry, which the
 /// tar crate's path setters refuse to write, so the name is set raw.
 fn create_tar_with_trailing_traversal(path: &std::path::Path) {

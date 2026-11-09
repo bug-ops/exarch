@@ -96,8 +96,12 @@ closed_enum! {
         /// directory the run made, explicitly or as a parent, is refused.
         /// The run tracks what it created by file identity, and by landing path
         /// where the host gives no identity (Windows), so there a duplicate that
-        /// differs only in case is refused. The record is bounded at 4 Mi
-        /// landings; past that every occupant counts as not created by the run.
+        /// differs only in case is refused (a caller whose volume has no file
+        /// identities can model this with
+        /// [`VolumeIdentity::LandingPaths`](crate::VolumeIdentity::LandingPaths);
+        /// the CLI `list` does not and assumes identities). The record is
+        /// bounded at 4 Mi landings; past that every occupant counts as not
+        /// created by the run.
         /// Both limits fail closed.
         ///
         /// A foreign file that reuses the freed identity of a file the run

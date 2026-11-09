@@ -160,6 +160,7 @@ jobs:
 
       - name: Read locked maturin version
         id: maturin
+        shell: bash
         working-directory: crates/exarch-python
         run: |
           python - <<'PY'
@@ -180,6 +181,7 @@ jobs:
 
       - name: Install maturin
         if: ${{ !matrix.platform.manylinux }}
+        shell: bash
         working-directory: crates/exarch-python
         run: |
           uv export --locked --no-emit-project --only-group release -o "$RUNNER_TEMP/python-release-requirements.txt"

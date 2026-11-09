@@ -6,7 +6,6 @@ use std::path::Path;
 use crate::ArchiveError;
 use crate::EntrySelection;
 use crate::IntegrityCheck;
-use crate::Malformation;
 use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
@@ -58,7 +57,6 @@ use crate::security::fs_view::VirtualTree;
 use crate::security::fs_view::check_link_target_length;
 use crate::security::fs_view::name_too_long;
 use crate::security::hardlink::HardlinkTracker;
-use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::QuotaTracker;
 use crate::security::validator::Gated;
@@ -627,20 +625,8 @@ fn verify_deferred_hardlink(
         .require_unambiguous(&entry.path, &target)
         .map_err(issue)?;
     hardlink_tracker
-        .validate_hardlink_in(&link_path, &target, dest, config, tree)
-        .map(drop)
+        .check_hardlink_target(&link_path, &target, dest, config, tree)
         .map_err(issue)?;
-    let target_full = dest.as_path().join(&*target);
-    if !tree.exists(&target_full) {
-        return Err(issue(hardlink_target_missing(&target)));
-    }
-    if tree.resolves_to_dir(&target_full) {
-        return Err(issue(ArchiveError::from(
-            Malformation::HardlinkTargetDirectory {
-                target: target.to_path_buf(),
-            },
-        )));
-    }
     // A file over a file is accepted by the tree, but a hardlink cannot
     // replace one: it is created exclusively.
     let occupant = tree.occupant(link_path.as_path());

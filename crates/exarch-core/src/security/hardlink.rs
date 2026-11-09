@@ -14,6 +14,9 @@ use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::LinkBase;
 use crate::security::fs_view::LinkKind;
+use crate::security::fs_view::ModelRoot;
+use crate::security::fs_view::VirtualRoot;
+use crate::security::fs_view::VirtualTree;
 #[cfg(any(test, feature = "testing"))]
 use crate::types::DestDir;
 use crate::types::SafePath;
@@ -283,6 +286,40 @@ impl HardlinkTracker {
             .or_insert_with(|| link_path.as_path().to_path_buf());
 
         Ok(HardlinkTarget(target.to_path_buf()))
+    }
+
+    /// Validates a hardlink target against the final tree: the escape checks
+    /// of [`validate_hardlink_in`](Self::validate_hardlink_in), then that the
+    /// target exists there and is not a directory.
+    ///
+    /// Shared by `verify` and the `list` preview so both apply one rule; the
+    /// known exception, where extraction accepts a link they refuse, is #1112.
+    ///
+    /// # Errors
+    ///
+    /// Returns the validation error, [`Malformation::HardlinkTargetAbsent`]
+    /// when nothing lands at the target, or
+    /// [`Malformation::HardlinkTargetDirectory`] when a directory does.
+    pub(crate) fn check_hardlink_target<P: ParentCheck>(
+        &mut self,
+        link_path: &SafePath<P>,
+        target: &Path,
+        root: &VirtualRoot,
+        config: &SecurityConfig,
+        tree: &VirtualTree,
+    ) -> Result<()> {
+        self.validate_hardlink_in(link_path, target, root, config, tree)?;
+        let target_full = root.as_path().join(target);
+        if !tree.exists(&target_full) {
+            return Err(hardlink_target_missing(target));
+        }
+        if tree.resolves_to_dir(&target_full) {
+            return Err(Malformation::HardlinkTargetDirectory {
+                target: target.to_path_buf(),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// Returns the number of tracked hardlinks.

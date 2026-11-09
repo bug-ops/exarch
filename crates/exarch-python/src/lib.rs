@@ -225,8 +225,6 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
 /// * `sources` - List of source files/directories to include (str or
 ///   pathlib.Path)
 /// * `config` - Optional `CreationConfig` (uses defaults if None)
-/// * `format` - The format to write whatever the extension is (for example
-///   `"Zip"` for a `.whl`); `None` detects it from the extension
 /// * `overwrite` - Replace an existing regular file or symlink, keeping its
 ///   permission bits (default); `False` refuses any existing output
 /// * `durability` - `"synced"` (default) flushes the archive and its directory
@@ -234,6 +232,8 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
 ///   a crash or power loss a replaced output can be empty or truncated and a
 ///   new output can be empty, and write-back errors (network filesystems,
 ///   quotas, delayed allocation) are not reported
+/// * `format` - The format to write whatever the extension is (for example
+///   `"Zip"` for a `.whl`); `None` detects it from the extension
 ///
 /// The archive is written to a temporary file next to `output_path` (whose
 /// directory must be writable) and renamed into place when complete, so a
@@ -266,15 +266,15 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
 /// report = create_archive("output.tar.gz", ["src/"], config)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (output_path, sources, config=None, format=None, overwrite=true, durability=None))]
+#[pyo3(signature = (output_path, sources, config=None, overwrite=true, durability=None, format=None))]
 fn create_archive(
     py: Python<'_>,
     output_path: &Bound<'_, PyAny>,
     sources: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PyCreationConfig>>,
-    format: Option<&str>,
     overwrite: bool,
     durability: Option<&str>,
+    format: Option<&str>,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_boundary(py, output_path)?;
     let source_paths = source_boundary_paths(py, sources)?;
@@ -442,10 +442,10 @@ fn verify_archive(
 /// * `sources` - List of source files/directories to include (str or
 ///   pathlib.Path)
 /// * `config` - Optional `CreationConfig` (uses defaults if None)
-/// * `progress` - Optional progress callback function
-/// * `format` - As in `create_archive`
 /// * `overwrite` - As in `create_archive`
 /// * `durability` - As in `create_archive`
+/// * `format` - As in `create_archive`
+/// * `progress` - Optional progress callback function
 ///
 /// Progress callback signature: `(path: str, total: int | None, current: int,
 /// bytes_written: int) -> None`; `current` counts from 1 and `total` is `None`
@@ -484,7 +484,7 @@ fn verify_archive(
 ///     print(f"{current}/{total}: {path} ({bytes} bytes)")
 ///
 /// report = create_archive_with_progress(
-///     "output.tar.gz", ["src/"], None, progress
+///     "output.tar.gz", ["src/"], progress=progress
 /// )
 /// ```
 #[pyfunction]
@@ -492,16 +492,16 @@ fn verify_archive(
     clippy::too_many_arguments,
     reason = "the keyword arguments are the Python signature"
 )]
-#[pyo3(signature = (output_path, sources, config=None, progress=None, format=None, overwrite=true, durability=None))]
+#[pyo3(signature = (output_path, sources, config=None, overwrite=true, durability=None, format=None, progress=None))]
 fn create_archive_with_progress(
     py: Python<'_>,
     output_path: &Bound<'_, PyAny>,
     sources: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PyCreationConfig>>,
-    progress: Option<Py<PyAny>>,
-    format: Option<&str>,
     overwrite: bool,
     durability: Option<&str>,
+    format: Option<&str>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<PyCreationReport> {
     let output_path = path_to_boundary(py, output_path)?;
     let source_paths = source_boundary_paths(py, sources)?;
@@ -611,6 +611,7 @@ fn merge_progress_result<T>(
 /// * `output_dir` - Directory where files will be extracted (str or
 ///   pathlib.Path)
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+/// * `options` - Optional `ExtractionOptions`, as in `extract_archive`
 /// * `progress` - Optional progress callback function
 ///
 /// Progress callback signature: `(path: str, total: int | None, current: int,
@@ -676,18 +677,18 @@ fn merge_progress_result<T>(
 ///     print(f"{current}/{total}: {path} ({bytes} bytes)")
 ///
 /// report = extract_archive_with_progress(
-///     "archive.tar.gz", "/tmp/output", None, progress
+///     "archive.tar.gz", "/tmp/output", progress=progress
 /// )
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, output_dir, config=None, progress=None, options=None))]
+#[pyo3(signature = (archive_path, output_dir, config=None, options=None, progress=None))]
 fn extract_archive_with_progress(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     output_dir: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PySecurityConfig>>,
-    progress: Option<Py<PyAny>>,
     options: Option<PyRef<'_, PyExtractionOptions>>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<PyExtractionReport> {
     let archive_path = path_to_boundary(py, archive_path)?;
     let output_dir = path_to_boundary(py, output_dir)?;

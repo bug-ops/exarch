@@ -381,7 +381,7 @@ def test_selection_survives_a_config_copy_through_the_progress_variant(project, 
     seen = []
 
     exarch.extract_archive_with_progress(
-        project, out, config, lambda path, total, current, written: seen.append(path)
+        project, out, config, progress=lambda path, total, current, written: seen.append(path)
     )
 
     assert _files(out) == ["README.md"]

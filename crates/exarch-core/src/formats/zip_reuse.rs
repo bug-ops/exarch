@@ -145,10 +145,11 @@ struct SpoolFile {
 
 impl SpoolFile {
     fn new(spool: TempSpool) -> Self {
+        let backing = spool.backing();
         Self {
-            writer: BufWriter::with_capacity(SPOOL_BUFFER, spool.file),
+            writer: BufWriter::with_capacity(SPOOL_BUFFER, spool.into_file()),
             len: 0,
-            backing: spool.backing,
+            backing,
             held_end: 0,
         }
     }

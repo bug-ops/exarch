@@ -4,7 +4,7 @@ Context for explaining refusals. A rejection for any reason here is the pipeline
 
 ## Defaults
 
-50 MB per file, 500 MB total, 100x compression ratio, 10,000 files, path depth 32. Symlinks, hardlinks, absolute paths, and world-writable files are rejected unless allowed. setuid/setgid are always stripped on Unix, regardless of `--preserve-permissions`.
+50 MiB per file, 500 MiB total, 100x compression ratio, 10,000 files, path depth 32. Symlinks, hardlinks, absolute paths, and world-writable files are rejected unless allowed. setuid/setgid are always stripped on Unix, regardless of `--preserve-permissions`.
 
 ## Paths (all formats, ZIP included)
 

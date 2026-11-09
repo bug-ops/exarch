@@ -296,9 +296,9 @@ pub struct AllowedFeatures {
     /// Allow Windows reserved device names (`CON`, `NUL`, `COM1`, ...) as path
     /// components.
     ///
-    /// Only consulted when extracting on Windows; has no effect elsewhere.
-    /// There is no CLI or binding opt-out, and the permissive preset does not
-    /// enable it.
+    /// On-disk extraction checks these names only on Windows; the portable path
+    /// model (in-memory and callback extraction) checks them on every host.
+    /// The CLI has no opt-out, and the permissive preset does not enable it.
     pub windows_reserved_names: Admit,
 }
 
@@ -539,6 +539,43 @@ impl SolidArchives {
         match self {
             Self::Allow(limits) => Ok(Self::Allow(limits.with_max_block_memory(max_block_memory))),
             Self::Refuse => self.with_limits(SolidLimits::DEFAULT),
+        }
+    }
+
+    /// Replaces only the compression ratio limit of an admitted policy,
+    /// keeping its block memory limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::MaxSolidCompressionRatio`] under
+    /// [`Refuse`](Self::Refuse), because the limit would be silently ignored.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SolidArchives;
+    /// use exarch_core::SolidLimits;
+    ///
+    /// let ratio = exarch_core::ratio_limit!(500.0);
+    /// assert!(SolidArchives::Refuse.with_max_ratio(ratio).is_err());
+    ///
+    /// let allowed = SolidArchives::Allow(SolidLimits::PERMISSIVE).with_max_ratio(ratio)?;
+    /// let limits = allowed.limits().expect("an admitted policy has limits");
+    /// assert_eq!(limits.max_ratio, ratio);
+    /// assert_eq!(
+    ///     limits.max_block_memory,
+    ///     SolidLimits::PERMISSIVE.max_block_memory
+    /// );
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn with_max_ratio(self, max_ratio: RatioLimit) -> crate::Result<Self> {
+        match self {
+            Self::Allow(limits) => Ok(Self::Allow(limits.with_max_ratio(max_ratio))),
+            Self::Refuse => Err(crate::ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::MaxSolidCompressionRatio,
+                problem: ConfigProblem::NotSupported,
+            }),
         }
     }
 }
@@ -864,7 +901,7 @@ pub struct SecurityConfig {
     ///   the header's own size and the entry cap.
     ///
     /// Other codecs are bounded by their format (bzip2 blocks of at most
-    /// 900 KB). Not exposed through the CLI or language bindings.
+    /// 900 KB). Exposed by both bindings, not by the CLI.
     ///
     /// Default: 256 MiB (268,435,456 bytes)
     pub max_decoder_memory: NonZeroU64,
@@ -882,7 +919,7 @@ pub struct SecurityConfig {
     /// member. A gzip or bzip2 stream averaging less than that over large
     /// outputs must raise this value. Applies to `extract`, `list` and
     /// `verify` of `.tar.gz` and `.tar.bz2`; xz and zstd are not governed by
-    /// it. Not exposed through the CLI or language bindings.
+    /// it. Exposed by both bindings, not by the CLI.
     ///
     /// Default: 10,000 (100,000 for [`SecurityConfig::permissive`])
     pub compressed_member_allowance: NonZeroU64,
@@ -1161,7 +1198,9 @@ impl SecurityConfig {
     }
 
     /// Enables or disables Windows reserved device names (`CON`, `NUL`,
-    /// `COM1`, ...) as path components. Only consulted on Windows.
+    /// `COM1`, ...) as path components. On-disk extraction checks the names
+    /// only on Windows; the portable path model (in-memory and callback
+    /// extraction) checks them on every host.
     ///
     /// # Examples
     ///
@@ -2088,33 +2127,35 @@ impl VerificationOptions {
     }
 }
 
-/// Whether listing reads the symlink targets a format keeps in compressed
-/// entry data.
-///
-/// 7z keeps link targets in compressed entry data, so reading them decodes
-/// part of the archive, which in a solid block can be most of it. Listing
-/// therefore skips them by default. Other formats always report their targets:
-/// TAR keeps them in headers, and ZIP reads them from a small local entry. This
-/// is a Rust API option only; the Python and Node `list_archive` skip 7z
-/// targets.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::StoredTargets;
-///
-/// assert_eq!(StoredTargets::default(), StoredTargets::Skip);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum StoredTargets {
-    /// Leave 7z link targets unread, so listing decodes no entry data (the
-    /// default).
-    #[default]
-    Skip,
+closed_enum! {
+    /// Whether listing reads the symlink targets a format keeps in compressed
+    /// entry data.
+    ///
+    /// 7z keeps link targets in compressed entry data, so reading them decodes
+    /// part of the archive, which in a solid block can be most of it. Listing
+    /// therefore skips them by default. Other formats always report their
+    /// targets: TAR keeps them in headers, and ZIP reads them from a small
+    /// local entry. The string form is shared by every front end.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::StoredTargets;
+    ///
+    /// assert_eq!(StoredTargets::default(), StoredTargets::Skip);
+    /// assert_eq!(StoredTargets::Read.as_str(), "read");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    #[non_exhaustive]
+    pub enum StoredTargets {
+        /// Leave 7z link targets unread, so listing decodes no entry data (the
+        /// default).
+        #[default]
+        Skip => "skip",
 
-    /// Read the targets, decoding the blocks that hold them.
-    Read,
+        /// Read the targets, decoding the blocks that hold them.
+        Read => "read",
+    }
 }
 
 /// Options controlling `list` behavior.

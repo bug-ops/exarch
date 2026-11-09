@@ -38,6 +38,7 @@ use super::hold::DestinationHold;
 use super::io_context;
 use super::parent_or_cwd;
 use crate::ArchiveError;
+use crate::BACKUP_PREFIX;
 use crate::BackupIdentity;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
@@ -98,7 +99,7 @@ fn is_absent(error: &io::Error) -> bool {
 /// `..` or a root has no such name and goes through `canonicalize`.
 ///
 /// `Ok(None)` means nothing can exist at the destination.
-fn locate(output_dir: &Path) -> Result<Option<(PathBuf, LeafBuf)>> {
+pub(super) fn locate(output_dir: &Path) -> Result<Option<(PathBuf, LeafBuf)>> {
     if let Some(name) = LeafBuf::of(output_dir) {
         return Ok(Some((parent_or_cwd(output_dir).to_path_buf(), name)));
     }
@@ -474,7 +475,7 @@ impl<'a> Displaced<'a> {
 
     fn vacant_name(pin: &VettedDir) -> io::Result<LeafBuf> {
         for _ in 0..BACKUP_ATTEMPTS {
-            let name = LeafBuf::random(".exarch-backup-");
+            let name = LeafBuf::random(BACKUP_PREFIX);
             if pin.status(name.as_leaf())?.is_none() {
                 return Ok(name);
             }

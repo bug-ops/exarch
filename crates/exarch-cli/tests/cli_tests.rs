@@ -7908,6 +7908,31 @@ fn test_create_negative_compression_level_is_exit_1() {
         .stderr(predicates::str::contains("between 1 and 9"));
 }
 
+/// A whole number beyond `i64` is core's out-of-range refusal (exit 1), while
+/// text that is no whole number stays clap's usage error (#1103).
+#[test]
+fn test_create_huge_compression_level_is_exit_1_and_text_is_usage_error() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("create")
+        .arg("-l")
+        .arg("99999999999999999999999")
+        .arg(temp.path().join("t.tar.gz"))
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("between 1 and 9"));
+    for text in ["abc", "", "-", "1.5"] {
+        exarch_cmd()
+            .arg("create")
+            .arg(format!("--compression-level={text}"))
+            .arg(temp.path().join("t.tar.gz"))
+            .arg(fixture_path("sample.txt"))
+            .assert()
+            .code(2);
+    }
+}
+
 /// The help text states the bounds and defaults core enforces, read from core
 /// rather than copied (#1048).
 #[test]
@@ -8493,11 +8518,12 @@ mod interrupt {
     /// reading it: the first SIGINT only requests a graceful stop that cannot
     /// complete, and a repeated one always takes the forced exit. The signal
     /// is resent until the process ends, since standard signals coalesce.
-    /// The forced report is best effort, so the oracle is the exit status
-    /// plus "at most one `Cancelled` document". A status other than 130
-    /// would mean the blocked read was interrupted and failed instead.
+    /// The forced exit dies by SIGINT like the graceful stop, and leaves
+    /// exactly one `Cancelled` document whose hint names the canonical
+    /// directory of the staging entry. A plain failure exit would mean the
+    /// blocked read was interrupted and failed instead.
     #[test]
-    fn repeated_sigint_under_json_forces_the_exit_with_130() {
+    fn repeated_sigint_under_json_forces_the_exit_by_the_signal() {
         use std::io::Read as _;
 
         let temp = TempDir::new().expect("temp dir");
@@ -8544,16 +8570,21 @@ mod interrupt {
         drop(held);
 
         let stdout = String::from_utf8_lossy(&stdout);
-        assert_eq!(status.code(), Some(130), "{status:?}, stdout: {stdout:?}");
+        assert_stopped_by(status, Stop::Int);
         let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&stdout)
             .into_iter()
             .collect::<Result<_, _>>()
             .unwrap_or_else(|error| panic!("{error}; stdout: {stdout:?}"));
-        assert!(documents.len() <= 1, "{documents:?}");
-        for json in &documents {
-            assert_eq!(json["status"], "error", "{json}");
-            assert_eq!(json["error"]["kind"], "Cancelled", "{json}");
-        }
+        assert_eq!(documents.len(), 1, "{stdout:?}");
+        let json = &documents[0];
+        assert_eq!(json["status"], "error", "{json}");
+        assert_eq!(json["error"]["kind"], "Cancelled", "{json}");
+        let canonical = temp.path().canonicalize().expect("canonicalize");
+        let hint = json["error"]["hint"].as_str().expect("hint text");
+        assert!(
+            hint.contains(&format!("in {}:", canonical.display())),
+            "{hint}"
+        );
     }
 
     /// Whichever path ends the run, a stdout pipe that is full and never read
@@ -8563,7 +8594,6 @@ mod interrupt {
     #[test]
     fn repeated_sigint_ends_the_run_despite_a_full_stdout_pipe() {
         use std::io::Write as _;
-        use std::os::unix::process::ExitStatusExt as _;
         use std::sync::Arc;
         use std::sync::atomic::AtomicUsize;
         use std::sync::atomic::Ordering;
@@ -8627,10 +8657,7 @@ mod interrupt {
             );
             sigint(&child);
         };
-        assert!(
-            status.code() == Some(130) || status.signal() == Some(2),
-            "{status:?}"
-        );
+        assert_stopped_by(status, Stop::Int);
         drop(reader);
     }
 }
@@ -8840,4 +8867,260 @@ fn test_list_allow_symlinks_degrades_links_in_a_solid_7z_it_cannot_decode() {
     let decoded = listed_actions(&archive, &["--allow-symlinks", "--allow-solid-archives"]);
     assert_eq!(action_of(&decoded, "sl"), "extract", "{decoded:?}");
     assert_eq!(action_of(&decoded, "escape"), "refuse", "{decoded:?}");
+}
+
+/// One member of a hardlink test archive.
+enum TarMember<'a> {
+    File(&'a str),
+    Dir(&'a str),
+    Hardlink { name: &'a str, target: &'a str },
+}
+
+fn write_tar(path: &std::path::Path, members: &[TarMember<'_>]) {
+    let mut builder = tar::Builder::new(std::fs::File::create(path).expect("create archive"));
+    for member in members {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(0);
+        match *member {
+            TarMember::File(name) => {
+                header.set_size(4);
+                builder
+                    .append_data(&mut header, name, &b"data"[..])
+                    .expect("append file");
+            }
+            TarMember::Dir(name) => {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_mode(0o755);
+                builder
+                    .append_data(&mut header, name, std::io::empty())
+                    .expect("append directory");
+            }
+            TarMember::Hardlink { name, target } => {
+                header.set_entry_type(tar::EntryType::Link);
+                // `set_link_name` rejects an absolute target in some versions.
+                header.set_link_name(target).expect("set link name");
+                builder
+                    .append_data(&mut header, name, std::io::empty())
+                    .expect("append hardlink");
+            }
+        }
+    }
+    builder.finish().expect("finish tar");
+}
+
+/// The `list`, `verify` and `extract` verdicts for `hard.lnk` in an archive
+/// whose hardlink target is broken in the way `members` builds.
+fn assert_broken_hardlink_is_refused_everywhere(members: &[TarMember<'_>]) {
+    assert_hardlink_is_refused_everywhere(members, &[]);
+}
+
+/// [`assert_broken_hardlink_is_refused_everywhere`] with `flags` added to all
+/// three commands.
+fn assert_hardlink_is_refused_everywhere(members: &[TarMember<'_>], flags: &[&str]) {
+    let temp = TempDir::new().expect("create temp dir");
+    let archive = temp.path().join("links.tar");
+    write_tar(&archive, members);
+    let link = members
+        .iter()
+        .find_map(|member| match member {
+            TarMember::Hardlink { name, .. } => Some(*name),
+            _ => None,
+        })
+        .expect("a hardlink member");
+    let flags: Vec<&str> = std::iter::once("--allow-hardlinks")
+        .chain(flags.iter().copied())
+        .collect();
+
+    let actions = listed_actions(&archive, &flags);
+    assert_eq!(action_of(&actions, link), "refuse", "{actions:?}");
+    let text = exarch_cmd()
+        .args(["list", "--include", "*"])
+        .args(&flags)
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text).expect("utf-8 listing");
+    assert!(line_of(&text, link).contains("[refused]"), "{text}");
+
+    exarch_cmd()
+        .arg("verify")
+        .args(&flags)
+        .arg(&archive)
+        .assert()
+        .code(1);
+    let out = temp.path().join("out");
+    exarch_cmd()
+        .arg("extract")
+        .args(&flags)
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn test_list_refuses_a_hardlink_whose_target_is_missing() {
+    assert_broken_hardlink_is_refused_everywhere(&[TarMember::Hardlink {
+        name: "hard.lnk",
+        target: "nothing",
+    }]);
+}
+
+#[test]
+fn test_list_refuses_a_hardlink_whose_target_escapes() {
+    for target in ["../a", "/a"] {
+        assert_broken_hardlink_is_refused_everywhere(&[
+            TarMember::File("a"),
+            TarMember::Hardlink {
+                name: "hard.lnk",
+                target,
+            },
+        ]);
+    }
+}
+
+#[test]
+fn test_list_refuses_a_hardlink_whose_target_is_a_directory() {
+    assert_broken_hardlink_is_refused_everywhere(&[
+        TarMember::Dir("d"),
+        TarMember::Hardlink {
+            name: "hard.lnk",
+            target: "d",
+        },
+    ]);
+}
+
+#[test]
+fn test_list_lands_a_hardlink_whose_target_is_a_file_and_extract_agrees() {
+    let link = TarMember::Hardlink {
+        name: "hard.lnk",
+        target: "t.txt",
+    };
+    // A target that comes later in the archive is accepted by all three.
+    for members in [
+        [TarMember::File("t.txt"), link],
+        [
+            TarMember::Hardlink {
+                name: "hard.lnk",
+                target: "t.txt",
+            },
+            TarMember::File("t.txt"),
+        ],
+    ] {
+        let temp = TempDir::new().expect("create temp dir");
+        let archive = temp.path().join("links.tar");
+        write_tar(&archive, &members);
+        let actions = listed_actions(&archive, &["--allow-hardlinks"]);
+        assert_eq!(action_of(&actions, "hard.lnk"), "extract", "{actions:?}");
+        exarch_cli_verify_and_extract_succeed(&archive, temp.path());
+    }
+}
+
+fn exarch_cli_verify_and_extract_succeed(archive: &std::path::Path, dir: &std::path::Path) {
+    exarch_cmd()
+        .args(["verify", "--allow-hardlinks"])
+        .arg(archive)
+        .assert()
+        .success();
+    exarch_cmd()
+        .args(["extract", "--allow-hardlinks"])
+        .arg(archive)
+        .arg(dir.join("out"))
+        .assert()
+        .success();
+}
+
+/// A 7z whose only coder is Deflate is refused at admission like Deflate64:
+/// `list` still reads the header, everything that would decode fails (#1091).
+#[test]
+fn test_sevenz_deflate_is_listed_but_refused_by_verify_and_extract() {
+    let archive = workspace_fixture("deflate.7z");
+    exarch_cmd()
+        .arg("list")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("deflate-a.txt"));
+
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("FAIL"));
+
+    exarch_cmd()
+        .args(["verify", "--check-integrity"])
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("INCOMPLETE"));
+
+    let output = exarch_cmd()
+        .args(["--json", "verify", "--check-integrity"])
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(json["data"]["status"], "FAIL", "{json}");
+    assert_eq!(json["data"]["integrity_status"], "INCOMPLETE", "{json}");
+}
+
+#[test]
+fn test_sevenz_deflate_extract_fails_before_creating_the_destination() {
+    let archive = workspace_fixture("deflate.7z");
+    for flags in [&[][..], &["--atomic"][..]] {
+        let temp = TempDir::new().expect("create temp dir");
+        let out = temp.path().join("out");
+        exarch_cmd()
+            .arg("extract")
+            .args(flags)
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .code(1)
+            .stderr(predicates::str::contains("unsupported coder"));
+        assert!(!out.exists(), "{flags:?} created the destination");
+    }
+}
+
+/// Two entries that strip to one landing make a hardlink to either ambiguous:
+/// the preview refuses it like `verify` and `extract` (#1090).
+#[test]
+fn test_list_refuses_a_hardlink_whose_landing_is_ambiguous() {
+    assert_hardlink_is_refused_everywhere(
+        &[
+            TarMember::File("p/x"),
+            TarMember::File("q/x"),
+            TarMember::Hardlink {
+                name: "p/hard.lnk",
+                target: "p/x",
+            },
+        ],
+        &["--strip-components", "1"],
+    );
+}
+
+/// A level too negative for 64 bits is core's out-of-range refusal, and its
+/// message reads as a phrase, not as a broken sentence.
+#[test]
+fn test_create_negative_overrange_compression_level_is_exit_1_with_a_readable_message() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("create")
+        .arg("--compression-level=-99999999999999999999")
+        .arg(temp.path().join("t.tar.gz"))
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains(
+            "Invalid compression level (an out-of-range integer): must be between 1 and 9.",
+        ));
 }

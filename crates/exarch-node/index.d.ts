@@ -759,23 +759,15 @@ export declare class ExtractionOptions {
   /** Finalizes the configuration (for API consistency). */
   build(): this
   /**
-   * What happens when a destination path is already occupied.
-   *
-   * # Errors
-   *
-   * Returns error if this binding is older than `exarch-core` and does not
-   * know the policy.
+   * What happens when a destination path is already occupied. A policy
+   * newer than this binding is reported as core's token.
    */
-  get existingFiles(): ExistingFiles
+  get existingFiles(): ExistingFiles | (string & {})
   /**
-   * How extraction stages its output.
-   *
-   * # Errors
-   *
-   * Returns error if this binding is older than `exarch-core` and does not
-   * know the mode.
+   * How extraction stages its output. A mode newer than this binding is
+   * reported as core's token.
    */
-  get staging(): Staging
+  get staging(): Staging | (string & {})
 }
 
 /**
@@ -801,8 +793,11 @@ export declare class ListOptions {
    * read.
    */
   withStoredTargets(targets: StoredTargets): this
-  /** Whether 7z link targets are read. */
-  get storedTargets(): StoredTargets
+  /**
+   * Whether 7z link targets are read. A policy newer than this binding is
+   * reported as core's token.
+   */
+  get storedTargets(): StoredTargets | (string & {})
 }
 
 /**
@@ -868,7 +863,7 @@ export declare class SecurityConfig {
    * Sets the maximum compression ratio.
    *
    * Solid 7z blocks are exempt: each block is checked as a whole against a
-   * fixed 1000x limit that is configurable only from the Rust API.
+   * limit of `withMaxSolidCompressionRatio` (default 1000).
    *
    * # Errors
    *
@@ -917,7 +912,8 @@ export declare class SecurityConfig {
    * Allows or denies Windows reserved device names (`CON`, `NUL`, `COM1`,
    * ...) as path components.
    *
-   * Only consulted when extracting on Windows; it has no effect elsewhere.
+   * On-disk extraction checks these names only on Windows; in-memory and
+   * callback extraction (the portable path model) check them on every host.
    * Denied by default.
    */
   withAllowWindowsReservedNames(allow: boolean): this
@@ -1172,14 +1168,10 @@ export declare class SecurityConfig {
   /** Whether solid 7z archives are allowed. */
   get allowSolidArchives(): boolean
   /**
-   * How ZIP archives with ambiguous structure are handled.
-   *
-   * # Errors
-   *
-   * Returns error if this binding is older than `exarch-core` and does not
-   * know the policy.
+   * How ZIP archives with ambiguous structure are handled. A policy newer
+   * than this binding is reported as core's token.
    */
-  get zipConsistency(): ZipConsistencyPolicy
+  get zipConsistency(): ZipConsistencyPolicy | (string & {})
   /**
    * Memory in bytes for decoding 7z LZMA2 runs ahead on worker threads, or
    * `null` when decoding runs on one thread.
@@ -1270,14 +1262,10 @@ export declare class SinkOptions {
    */
   withExistingFiles(policy: ExistingFiles): this
   /**
-   * What happens when a delivery path is already occupied.
-   *
-   * # Errors
-   *
-   * Returns error if this binding is older than `exarch-core` and does not
-   * know the policy.
+   * What happens when a delivery path is already occupied. A policy newer
+   * than this binding is reported as core's token.
    */
-  get existingFiles(): ExistingFiles
+  get existingFiles(): ExistingFiles | (string & {})
   /**
    * Sets where a ZIP extraction keeps decoded output so a deflate entry is
    * decoded once: `'off'` (default), `'memory'` or `'temp_file'`.
@@ -1409,7 +1397,7 @@ export type BackupIdentity = 'verified' | 'unverified'
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components' | 'stored_targets'
 
 /** Archive format that can be created: `ArchiveType` without `'SevenZ'`. */
 export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip'
@@ -1691,6 +1679,13 @@ export interface CreationReport {
    * `kind`, `message` is the human-readable text.
    */
   warnings: Array<CreationWarning>
+  /**
+   * Files, directories and symlinks added; skipped entries are not
+   * counted.
+   */
+  totalItems: number
+  /** Whether any warning was raised. */
+  hasWarnings: boolean
 }
 
 /** Class of a creation warning. */
@@ -1810,8 +1805,7 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  *   `banned_components`, `max_path_depth`, `windows_reserved_names` or
  *   `max_tar_metadata_bytes`; absent when no setting relaxes the refusal.
  *   Changing the setting removes that refusal only; the entry can still fail a
- *   later check. `windows_reserved_names` and `max_tar_metadata_bytes` have no
- *   setter in this binding (Rust API only).
+ *   later check. Every one of these settings has a `SecurityConfig` setter.
  * - `subCode`: the finer classification of an `INVALID_ARCHIVE` (when it has
  *   one), the family of every `SECURITY_VIOLATION`, the quota of every
  *   `QUOTA_EXCEEDED` and the scope of every `ZIP_BOMB`.
@@ -2262,6 +2256,13 @@ export interface ExtractionReport {
    * `kind`, `message` is the human-readable text.
    */
   warnings: Array<ExtractionWarning>
+  /**
+   * Files, directories and symlinks extracted; skipped entries are not
+   * counted.
+   */
+  totalItems: number
+  /** Whether any warning was raised. */
+  hasWarnings: boolean
 }
 
 /** Class of an extraction warning. */
@@ -2356,6 +2357,7 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  *   the call returns, or an `AsyncIterable<Uint8Array>` (TAR family only) read
  *   from a worker thread and closed (`return()`) however the call ends
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `options` - Optional `ListOptions`, as in `listArchive`
  * * `format` - The archive format; detected from the leading bytes if omitted
  * * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
  *   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
@@ -2380,7 +2382,7 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  * const manifest = await listArchiveBytes(fs.readFileSync('archive.tar.gz'));
  * ```
  */
-export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null, options?: ListOptions | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory, without extracting (sync).
@@ -2391,6 +2393,7 @@ export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8A
  *
  * * `data` - The archive bytes
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `options` - Optional `ListOptions`, as in `listArchive`
  * * `format` - The archive format; detected from the leading bytes if omitted
  *
  * # Returns
@@ -2407,7 +2410,7 @@ export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8A
  * const manifest = listArchiveBytesSync(fs.readFileSync('archive.zip'));
  * ```
  */
-export declare function listArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, options?: ListOptions | undefined | null): ArchiveManifest
+export declare function listArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null): ArchiveManifest
 
 /**
  * List the contents of an archive held in memory with a progress callback
@@ -2443,11 +2446,12 @@ export declare function listArchiveBytesSync(data: Uint8Array, config?: Security
  *   fs.readFileSync('archive.zip'),
  *   null,
  *   null,
+ *   null,
  *   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null, options?: ListOptions | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory with a progress callback
@@ -2479,11 +2483,12 @@ export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIte
  *   fs.readFileSync('archive.zip'),
  *   null,
  *   null,
+ *   null,
  *   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, options?: ListOptions | undefined | null): ArchiveManifest
+export declare function listArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): ArchiveManifest
 
 /**
  * List archive contents without extracting (sync).
@@ -2531,7 +2536,11 @@ export interface ManifestDirectoryEntry {
   sizeClamped: boolean
   /** File permissions (raw Unix mode). */
   mode?: number
-  /** Modification time (milliseconds since Unix epoch). */
+  /**
+   * Modification time in milliseconds since the Unix epoch, negative
+   * before it, clamped to `±(2^53 - 1)`. Absent only when the archive
+   * stores no time.
+   */
   modified?: number
 }
 
@@ -2555,7 +2564,11 @@ export interface ManifestFileEntry {
   sizeClamped: boolean
   /** File permissions (raw Unix mode). */
   mode?: number
-  /** Modification time (milliseconds since Unix epoch). */
+  /**
+   * Modification time in milliseconds since the Unix epoch, negative
+   * before it, clamped to `±(2^53 - 1)`. Absent only when the archive
+   * stores no time.
+   */
   modified?: number
 }
 
@@ -2574,7 +2587,11 @@ export interface ManifestHardlinkEntry {
   sizeClamped: boolean
   /** File permissions (raw Unix mode). */
   mode?: number
-  /** Modification time (milliseconds since Unix epoch). */
+  /**
+   * Modification time in milliseconds since the Unix epoch, negative
+   * before it, clamped to `±(2^53 - 1)`. Absent only when the archive
+   * stores no time.
+   */
   modified?: number
   /** The link target. */
   target: LinkTarget
@@ -2595,11 +2612,15 @@ export interface ManifestSymlinkEntry {
   sizeClamped: boolean
   /** File permissions (raw Unix mode). */
   mode?: number
-  /** Modification time (milliseconds since Unix epoch). */
+  /**
+   * Modification time in milliseconds since the Unix epoch, negative
+   * before it, clamped to `±(2^53 - 1)`. Absent only when the archive
+   * stores no time.
+   */
   modified?: number
   /**
-   * The link target. A 7z target is `'unread'`: listing does not decode 7z
-   * entry data to read it.
+   * The link target. A 7z target is `'unread'` unless the listing was asked
+   * to read stored targets.
    */
   target: LinkTarget
 }
@@ -2872,10 +2893,7 @@ export interface UnknownExtractionWarning {
 
 /** A link target of a state newer than this binding. */
 export interface UnknownLinkTarget {
-  /**
-   * The state's token. Core offers no accessor for the token of a variant
-   * this binding does not know, so it is always `'unknown'`.
-   */
+  /** The state's token, as core spells it. */
   state: string
 }
 

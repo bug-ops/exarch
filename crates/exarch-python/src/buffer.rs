@@ -278,13 +278,6 @@ fn build_decode_reuse(kind: DecodeReuseKind, limit: Option<PyInteger>) -> PyResu
     DecodeReuse::from_parts(kind, limit).map_err(convert_error)
 }
 
-const fn reuse_limit(reuse: DecodeReuse) -> Option<ReuseLimit> {
-    match reuse {
-        DecodeReuse::Memory(limit) | DecodeReuse::TempFile(limit) => Some(limit),
-        _ => None,
-    }
-}
-
 /// What the in-memory and callback extraction functions honour of the options
 /// of path-based extraction.
 ///
@@ -338,7 +331,7 @@ impl PySinkOptions {
 
     #[getter]
     fn decode_reuse_limit(&self) -> Option<u64> {
-        reuse_limit(self.reuse).map(ReuseLimit::get)
+        self.reuse.limit().map(ReuseLimit::get)
     }
 
     fn __repr__(&self) -> String {
@@ -461,11 +454,11 @@ pub fn extract_archive_to_memory(
 ///
 /// * `data` - The archive bytes
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
-/// * `progress` - Optional progress callback function
 /// * `options` - Optional `SinkOptions`
 /// * `max_bytes` - See `extract_archive_to_memory`
 /// * `path_model` - See `extract_archive_to_memory`
 /// * `format` - The archive format; detected from the leading bytes if None
+/// * `progress` - Optional progress callback function
 ///
 /// # Returns
 ///
@@ -498,23 +491,23 @@ pub fn extract_archive_to_memory(
 ///     print(f"{current}/{total}: {path}")
 ///
 /// with open("archive.tar.gz", "rb") as f:
-///     result = extract_archive_to_memory_with_progress(f.read(), None, progress)
+///     result = extract_archive_to_memory_with_progress(f.read(), progress=progress)
 /// ```
 #[pyfunction]
 #[expect(
     clippy::too_many_arguments,
     reason = "the signature mirrors the sibling function"
 )]
-#[pyo3(signature = (data, config=None, progress=None, options=None, max_bytes=None, path_model=None, format=None))]
+#[pyo3(signature = (data, config=None, options=None, max_bytes=None, path_model=None, format=None, progress=None))]
 pub fn extract_archive_to_memory_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
-    progress: Option<Py<PyAny>>,
     options: Option<&PySinkOptions>,
     max_bytes: Option<PyInteger>,
     path_model: Option<&str>,
     format: Option<&str>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<PyMemoryExtraction> {
     let request = MemoryRequest::parse(config, options, max_bytes, path_model, format)?;
 
@@ -543,9 +536,9 @@ pub fn extract_archive_to_memory_with_progress(
 ///
 /// * `data` - The archive bytes
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
-/// * `progress` - Optional progress callback function
-/// * `format` - The archive format; detected from the leading bytes if None
 /// * `options` - Optional `ListOptions`, as in `list_archive`
+/// * `format` - The archive format; detected from the leading bytes if None
+/// * `progress` - Optional progress callback function
 ///
 /// # Returns
 ///
@@ -568,17 +561,17 @@ pub fn extract_archive_to_memory_with_progress(
 ///     print(f"{current}/{total}: {path}")
 ///
 /// with open("archive.zip", "rb") as f:
-///     manifest = list_archive_bytes_with_progress(f.read(), None, progress)
+///     manifest = list_archive_bytes_with_progress(f.read(), progress=progress)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (data, config=None, progress=None, format=None, options=None))]
+#[pyo3(signature = (data, config=None, options=None, format=None, progress=None))]
 pub fn list_archive_bytes_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
-    progress: Option<Py<PyAny>>,
-    format: Option<&str>,
     options: Option<PyRef<'_, PyListOptions>>,
+    format: Option<&str>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<PyArchiveManifest> {
     let format = parse_format(format)?;
     let config = PySecurityConfig::snapshot(config);
@@ -613,9 +606,9 @@ pub fn list_archive_bytes_with_progress(
 ///
 /// * `data` - The archive bytes
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
-/// * `progress` - Optional progress callback function
 /// * `options` - Optional `VerificationOptions`
 /// * `format` - The archive format; detected from the leading bytes if None
+/// * `progress` - Optional progress callback function
 ///
 /// # Returns
 ///
@@ -638,17 +631,17 @@ pub fn list_archive_bytes_with_progress(
 ///     print(f"{current}/{total}: {path}")
 ///
 /// with open("archive.zip", "rb") as f:
-///     report = verify_archive_bytes_with_progress(f.read(), None, progress)
+///     report = verify_archive_bytes_with_progress(f.read(), progress=progress)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (data, config=None, progress=None, options=None, format=None))]
+#[pyo3(signature = (data, config=None, options=None, format=None, progress=None))]
 pub fn verify_archive_bytes_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
-    progress: Option<Py<PyAny>>,
     options: Option<PyRef<'_, PyVerificationOptions>>,
     format: Option<&str>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<PyVerificationReport> {
     let format = parse_format(format)?;
     let config = PySecurityConfig::snapshot(config);
@@ -932,9 +925,9 @@ pub fn create_archive_to_bytes(
 ///
 /// * `data` - The archive bytes (`bytes`, or any object that converts to it)
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+/// * `options` - Optional `ListOptions`, as in `list_archive`
 /// * `format` - The archive format (`"Tar"`, `"TarGz"`, `"TarBz2"`, `"TarXz"`,
 ///   `"TarZst"`, `"Zip"`, `"SevenZ"`); detected from the leading bytes if None
-/// * `options` - Optional `ListOptions`, as in `list_archive`
 ///
 /// # Returns
 ///
@@ -956,13 +949,13 @@ pub fn create_archive_to_bytes(
 ///     manifest = list_archive_bytes(f.read())
 /// ```
 #[pyfunction]
-#[pyo3(signature = (data, config=None, format=None, options=None))]
+#[pyo3(signature = (data, config=None, options=None, format=None))]
 pub fn list_archive_bytes(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
-    format: Option<&str>,
     options: Option<PyRef<'_, PyListOptions>>,
+    format: Option<&str>,
 ) -> PyResult<PyArchiveManifest> {
     let format = parse_format(format)?;
     let config = PySecurityConfig::snapshot(config);

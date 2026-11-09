@@ -8,7 +8,7 @@ tags:
   - progress
   - rust
 created: 2026-05-20
-updated: 2026-11-08
+updated: 2026-11-09
 status: implemented
 related:
   - "[[constitution]]"
@@ -158,7 +158,7 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 | `ProgressCallback` | Trait for receiving archive operation progress events | Methods: `on_entry_start`, `on_bytes_written`, `on_entry_complete`, `on_complete` |
 | `NoopProgress` | Zero-overhead implementation of `ProgressCallback` | All methods are no-ops; intended as the default |
 | `EntryPosition` / `EntryTotal` | Position passed to `on_entry_start` (#904) | `current: NonZeroUsize`; `total: Known(usize) \| Unknown` |
-| `SkipKind` / `Skip` / `Skips` | Typed skip accounting in `ExtractionReport` and `CreationReport` (#906) | counts per kind, bounded sample, `total()`, `count()`, `sample()` |
+| `SkipKind` / `Skip` / `Skips` | Typed skip accounting in `ExtractionReport` and `CreationReport` (#906) | counts per kind, bounded sample, `total()`, `count()`, `counts()` (an iterator of every kind that occurred with its count; Python `Skips.counts` is a dict by kind), `sample()` |
 
 ### Trait Signature
 

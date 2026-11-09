@@ -9,8 +9,11 @@ use exarch_core::ExtractionReport as CoreReport;
 use exarch_core::ExtractionWarning as CoreExtractionWarning;
 use exarch_core::IntegrityGaps as CoreIntegrityGaps;
 use exarch_core::IssueSeverity as CoreIssueSeverity;
+#[cfg(test)]
+use exarch_core::LinkTargetState as CoreLinkTargetState;
 use exarch_core::ManifestEntryType as CoreManifestEntryType;
 use exarch_core::VerificationStatus as CoreVerificationStatus;
+#[cfg(test)]
 use napi::Error;
 use napi_derive::napi;
 
@@ -36,6 +39,13 @@ pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// Whole milliseconds of `duration`, clamped to [`MAX_SAFE_INTEGER`].
 pub fn saturating_millis(duration: std::time::Duration) -> i64 {
     saturating_i64(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Whole milliseconds of `time`, negative before the epoch, clamped to
+/// plus or minus [`MAX_SAFE_INTEGER`].
+pub fn signed_millis(time: exarch_core::UnixTime) -> i64 {
+    let limit = i128::from(MAX_SAFE_INTEGER);
+    i64::try_from(time.as_millis().clamp(-limit, limit)).unwrap_or_default()
 }
 
 /// An entry or item count as an exact JavaScript number.
@@ -86,6 +96,7 @@ impl ByteSize {
     }
 }
 
+#[cfg(test)]
 pub fn unknown_variant(what: &str, wire: &str) -> Error {
     Error::from_reason(format!(
         "exarch-node is older than exarch-core: unknown {what} '{wire}'"
@@ -607,14 +618,11 @@ pub struct SkippedSummary {
 impl From<&exarch_core::Skips> for SkippedSummary {
     fn from(skips: &exarch_core::Skips) -> Self {
         Self {
-            counts: exarch_core::SkipKind::ALL
-                .iter()
-                .filter_map(|kind| {
-                    let count = skips.count(*kind);
-                    (count > 0).then(|| SkipCount {
-                        kind: kind.as_str().to_owned(),
-                        count: saturating_usize(count),
-                    })
+            counts: skips
+                .counts()
+                .map(|(kind, count)| SkipCount {
+                    kind: kind.as_str().to_owned(),
+                    count: saturating_usize(count),
                 })
                 .collect(),
             sample: skips
@@ -942,6 +950,11 @@ pub struct ExtractionReport {
     /// `kind`, `message` is the human-readable text.
     #[napi(ts_type = "Array<ExtractionWarning>")]
     pub warnings: Vec<ExtractionWarning>,
+    /// Files, directories and symlinks extracted; skipped entries are not
+    /// counted.
+    pub total_items: i64,
+    /// Whether any warning was raised.
+    pub has_warnings: bool,
 }
 
 impl From<CoreReport> for ExtractionReport {
@@ -957,6 +970,8 @@ impl From<CoreReport> for ExtractionReport {
             files_skipped: saturating_usize(report.files_skipped()),
             skipped: SkippedSummary::from(&report.skipped),
             warnings: report.warnings.iter().map(extraction_warning).collect(),
+            total_items: saturating_usize(report.total_items()),
+            has_warnings: report.has_warnings(),
         }
     }
 }
@@ -991,6 +1006,11 @@ pub struct CreationReport {
     /// `kind`, `message` is the human-readable text.
     #[napi(ts_type = "Array<CreationWarning>")]
     pub warnings: Vec<CreationWarning>,
+    /// Files, directories and symlinks added; skipped entries are not
+    /// counted.
+    pub total_items: i64,
+    /// Whether any warning was raised.
+    pub has_warnings: bool,
 }
 
 impl From<exarch_core::CreationReport> for CreationReport {
@@ -1008,6 +1028,8 @@ impl From<exarch_core::CreationReport> for CreationReport {
             files_skipped: saturating_usize(report.files_skipped()),
             skipped: SkippedSummary::from(&report.skipped),
             warnings: report.warnings.iter().map(creation_warning).collect(),
+            total_items: saturating_usize(report.total_items()),
+            has_warnings: report.has_warnings(),
         }
     }
 }
@@ -1187,7 +1209,8 @@ pub enum LinkTargetState {
     /// The archive stores no target.
     #[napi(value = "missing")]
     Missing,
-    /// The target was not read: a 7z target kept in compressed entry data.
+    /// The target was not read: a 7z target kept in compressed entry data, left
+    /// alone unless the listing was asked to read stored targets.
     #[napi(value = "unread")]
     Unread,
     /// The target could not be read.
@@ -1197,6 +1220,13 @@ pub enum LinkTargetState {
     #[napi(value = "oversized")]
     Oversized,
 }
+
+mirror_from_core!(
+    LinkTargetState,
+    CoreLinkTargetState,
+    "link target state",
+    [Recorded, Missing, Unread, Unreadable, Oversized]
+);
 
 /// A link target the archive stores.
 #[napi(object)]
@@ -1253,8 +1283,7 @@ pub struct OversizedLinkTarget {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct UnknownLinkTarget {
-    /// The state's token. Core offers no accessor for the token of a variant
-    /// this binding does not know, so it is always `'unknown'`.
+    /// The state's token, as core spells it.
     pub state: String,
 }
 
@@ -1292,8 +1321,8 @@ fn link_target(target: &exarch_core::LinkTarget) -> CoreResult<LinkTarget> {
                 size_clamped: bytes.clamped,
             })
         }
-        _ => Either6::F(UnknownLinkTarget {
-            state: "unknown".to_owned(),
+        other => Either6::F(UnknownLinkTarget {
+            state: other.state().as_str().to_owned(),
         }),
     })
 }
@@ -1316,7 +1345,9 @@ pub struct ManifestFileEntry {
     pub size_clamped: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
-    /// Modification time (milliseconds since Unix epoch).
+    /// Modification time in milliseconds since the Unix epoch, negative
+    /// before it, clamped to `±(2^53 - 1)`. Absent only when the archive
+    /// stores no time.
     pub modified: Option<i64>,
 }
 
@@ -1336,7 +1367,9 @@ pub struct ManifestDirectoryEntry {
     pub size_clamped: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
-    /// Modification time (milliseconds since Unix epoch).
+    /// Modification time in milliseconds since the Unix epoch, negative
+    /// before it, clamped to `±(2^53 - 1)`. Absent only when the archive
+    /// stores no time.
     pub modified: Option<i64>,
 }
 
@@ -1356,10 +1389,12 @@ pub struct ManifestSymlinkEntry {
     pub size_clamped: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
-    /// Modification time (milliseconds since Unix epoch).
+    /// Modification time in milliseconds since the Unix epoch, negative
+    /// before it, clamped to `±(2^53 - 1)`. Absent only when the archive
+    /// stores no time.
     pub modified: Option<i64>,
-    /// The link target. A 7z target is `'unread'`: listing does not decode 7z
-    /// entry data to read it.
+    /// The link target. A 7z target is `'unread'` unless the listing was asked
+    /// to read stored targets.
     #[napi(ts_type = "LinkTarget")]
     pub target: LinkTarget,
 }
@@ -1380,7 +1415,9 @@ pub struct ManifestHardlinkEntry {
     pub size_clamped: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
-    /// Modification time (milliseconds since Unix epoch).
+    /// Modification time in milliseconds since the Unix epoch, negative
+    /// before it, clamped to `±(2^53 - 1)`. Absent only when the archive
+    /// stores no time.
     pub modified: Option<i64>,
     /// The link target.
     #[napi(ts_type = "LinkTarget")]
@@ -1422,11 +1459,9 @@ fn entry_common(entry: &exarch_core::ArchiveEntry) -> CoreResult<EntryCommon> {
             .to_owned(),
         compressed_size: entry.compressed_size().map(ByteSize::new),
         mode: entry.mode.map(exarch_core::RawMode::get),
-        modified: entry.modified.and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(saturating_millis)
-        }),
+        modified: entry
+            .modified
+            .map(|time| signed_millis(exarch_core::UnixTime::from(time))),
     })
 }
 
@@ -2039,6 +2074,48 @@ mod tests {
     }
 
     #[test]
+    fn signed_millis_clamps_to_the_safe_integer_range() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        let far = Duration::from_secs(1 << 44);
+        let after = UNIX_EPOCH.checked_add(far).unwrap();
+        let before = UNIX_EPOCH.checked_sub(far).unwrap();
+        let safe = i64::try_from(MAX_SAFE_INTEGER).unwrap();
+        assert_eq!(signed_millis(exarch_core::UnixTime::from(after)), safe);
+        assert_eq!(signed_millis(exarch_core::UnixTime::from(before)), -safe);
+    }
+
+    #[test]
+    fn a_sub_millisecond_time_rounds_toward_negative_infinity_in_an_entry() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        let millis = |time| {
+            let mut entry = exarch_core::ArchiveEntry::new(
+                "f".into(),
+                exarch_core::ManifestEntryKind::Directory,
+            );
+            entry.modified = Some(time);
+            entry_common(&entry).unwrap().modified
+        };
+        assert_eq!(millis(UNIX_EPOCH - Duration::from_micros(1)), Some(-1));
+        assert_eq!(millis(UNIX_EPOCH + Duration::from_micros(1500)), Some(1));
+        assert_eq!(millis(UNIX_EPOCH - Duration::from_micros(1500)), Some(-2));
+    }
+
+    #[test]
+    fn a_time_before_the_epoch_is_negative_milliseconds() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        let before = exarch_core::UnixTime::from(UNIX_EPOCH - Duration::from_secs(1000));
+        assert_eq!(signed_millis(before), -1_000_000);
+        let after = exarch_core::UnixTime::from(UNIX_EPOCH + Duration::from_secs(1000));
+        assert_eq!(signed_millis(after), 1_000_000);
+    }
+
+    #[test]
     fn test_symlink_entry_carries_a_typed_target() {
         use exarch_core::LinkTarget as Core;
         use exarch_core::ManifestEntryKind;
@@ -2556,6 +2633,13 @@ mod tests {
     }
 
     #[test]
+    fn every_core_link_target_state_has_a_mirror() {
+        for core in CoreLinkTargetState::ALL {
+            assert!(LinkTargetState::try_from(*core).is_ok(), "{core:?}");
+        }
+    }
+
+    #[test]
     fn test_index_d_ts_unions_match_core_enums() {
         let dts = include_str!("../index.d.ts");
         let expected = [
@@ -2586,6 +2670,11 @@ mod tests {
                 "CreationWarningKind",
                 exarch_core::CreationWarningKind::ALL,
                 exarch_core::CreationWarningKind::as_str,
+            ),
+            union_line(
+                "LinkTargetState",
+                CoreLinkTargetState::ALL,
+                CoreLinkTargetState::as_str,
             ),
             union_line(
                 "BackupIdentity",

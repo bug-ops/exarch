@@ -2,7 +2,9 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use crate::ArchiveError;
 use crate::EntrySelection;
@@ -425,6 +427,38 @@ impl EntryCompression {
     }
 }
 
+closed_enum! {
+    /// What a [`LinkTarget`] holds, without the target itself.
+    ///
+    /// The string form is stable and shared by every front end, so a binding
+    /// reports the state of a target it cannot carry without matching the
+    /// variants itself.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::LinkTarget;
+    /// use exarch_core::LinkTargetState;
+    ///
+    /// assert_eq!(LinkTarget::Missing.state(), LinkTargetState::Missing);
+    /// assert_eq!(LinkTargetState::Unreadable.as_str(), "unreadable");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum LinkTargetState {
+        /// [`LinkTarget::Recorded`].
+        Recorded => "recorded",
+        /// [`LinkTarget::Missing`].
+        Missing => "missing",
+        /// [`LinkTarget::Unread`].
+        Unread => "unread",
+        /// [`LinkTarget::Unreadable`].
+        Unreadable => "unreadable",
+        /// [`LinkTarget::Oversized`].
+        Oversized => "oversized",
+    }
+}
+
 /// Link target of a manifest entry, as far as the listing could keep it.
 ///
 /// An over-long target is not retained: only its byte length is kept, so an
@@ -512,12 +546,110 @@ impl LinkTarget {
         }
     }
 
+    /// Returns what this target holds, without the target itself.
+    #[must_use]
+    pub const fn state(&self) -> LinkTargetState {
+        match self {
+            Self::Recorded(_) => LinkTargetState::Recorded,
+            Self::Missing => LinkTargetState::Missing,
+            Self::Unread => LinkTargetState::Unread,
+            Self::Unreadable => LinkTargetState::Unreadable,
+            Self::Oversized { .. } => LinkTargetState::Oversized,
+        }
+    }
+
     /// Returns the recorded target, or `None` when it is missing or oversized.
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::Recorded(path) => Some(path),
             Self::Missing | Self::Unread | Self::Unreadable | Self::Oversized { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum EpochSide {
+    Before,
+    AtOrAfter,
+}
+
+/// A point in time as an offset from the Unix epoch, which may be negative.
+///
+/// [`SystemTime`] cannot be turned into a signed number without choosing a
+/// representation for times before 1970; this type fixes it once so every
+/// front end reports the same value. It is built only from a [`SystemTime`],
+/// so the magnitude and the side of the epoch always agree. It has no
+/// ordering: compare the [`SystemTime`] it came from.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use std::time::UNIX_EPOCH;
+///
+/// use exarch_core::UnixTime;
+///
+/// let before = UnixTime::from(UNIX_EPOCH - Duration::from_millis(1500));
+/// assert_eq!(before.as_millis(), -1500);
+/// assert_eq!(before.as_secs_f64(), -1.5);
+///
+/// let after = UnixTime::from(UNIX_EPOCH + Duration::from_secs(2));
+/// assert_eq!(after.as_millis(), 2000);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnixTime {
+    magnitude: Duration,
+    side: EpochSide,
+}
+
+impl From<SystemTime> for UnixTime {
+    fn from(time: SystemTime) -> Self {
+        match time.duration_since(UNIX_EPOCH) {
+            Ok(magnitude) => Self {
+                magnitude,
+                side: EpochSide::AtOrAfter,
+            },
+            Err(error) => Self {
+                magnitude: error.duration(),
+                side: EpochSide::Before,
+            },
+        }
+    }
+}
+
+impl UnixTime {
+    /// Seconds since the epoch, negative before it.
+    #[must_use]
+    pub fn as_secs_f64(self) -> f64 {
+        match self.side {
+            EpochSide::AtOrAfter => self.magnitude.as_secs_f64(),
+            EpochSide::Before => -self.magnitude.as_secs_f64(),
+        }
+    }
+
+    /// Milliseconds since the epoch, rounded toward negative infinity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use std::time::UNIX_EPOCH;
+    ///
+    /// use exarch_core::UnixTime;
+    ///
+    /// let time = UnixTime::from(UNIX_EPOCH - Duration::from_micros(1));
+    /// assert_eq!(time.as_millis(), -1);
+    /// ```
+    #[must_use]
+    pub fn as_millis(self) -> i128 {
+        let floor = i128::try_from(self.magnitude.as_millis()).unwrap_or(i128::MAX);
+        match self.side {
+            EpochSide::AtOrAfter => floor,
+            EpochSide::Before if self.magnitude.subsec_nanos().is_multiple_of(1_000_000) => {
+                floor.saturating_neg()
+            }
+            EpochSide::Before => floor.saturating_add(1).saturating_neg(),
         }
     }
 }

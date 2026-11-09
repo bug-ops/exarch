@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::SEVENZ_MAGIC;
+use super::admit::ADMITTED;
 use super::admit::RefusalScope;
 use super::admit::SevenZRefusal;
 use super::admit::sevenz_entry_compression;
@@ -2691,4 +2692,128 @@ fn test_block_scan_stops_on_a_disk_error() {
 
     assert!(!keep_going);
     assert_matches!(stop, Some(BlockStop::Fatal(ArchiveError::Io(_))));
+}
+
+/// Methods the in-tree encoder cannot produce, each backed by a fixture that
+/// 7-Zip wrote.
+const NOT_ENCODABLE: &[(&[u8], &str)] = &[(sevenz_rust2::EncoderMethod::ID_BCJ2, "bcj2.7z")];
+
+fn exempt_fixture(id: &[u8]) -> Option<&'static str> {
+    NOT_ENCODABLE
+        .iter()
+        .find_map(|&(exempt, fixture)| (exempt == id).then_some(fixture))
+}
+
+fn admitted_archive_bytes(method: sevenz_rust2::EncoderMethod, payload: &[u8]) -> Vec<u8> {
+    use sevenz_rust2::ArchiveEntry;
+    use sevenz_rust2::ArchiveWriter;
+    use sevenz_rust2::EncoderConfiguration;
+    use sevenz_rust2::SourceReader;
+
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(method)]);
+    let mut entry = ArchiveEntry::new_file("payload.bin");
+    entry.has_stream = true;
+    entry.size = payload.len() as u64;
+    writer
+        .push_archive_entries(vec![entry], vec![SourceReader::from(Cursor::new(payload))])
+        .unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+#[test]
+fn every_admitted_method_decodes() {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let payload: Vec<u8> = (0..4096)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect();
+
+    for &(id, _) in ADMITTED {
+        let fixture = exempt_fixture(id);
+        let bytes = fixture.map_or_else(
+            || {
+                let method = sevenz_rust2::EncoderMethod::by_id(id)
+                    .unwrap_or_else(|| panic!("admitted id {id:02x?} is not a known method"));
+                admitted_archive_bytes(method, &payload)
+            },
+            load_fixture,
+        );
+        let header =
+            read_sevenz_header(&mut Cursor::new(bytes.clone()), HeaderLimit::UNLIMITED).unwrap();
+        assert!(
+            sevenz_refusals(&header, &SecurityConfig::default()).is_empty(),
+            "admission refused {id:02x?}"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let archive = dir.path().join("a.7z");
+        std::fs::write(&archive, &bytes).unwrap();
+        let out = dir.path().join("out");
+        let result = crate::extract_archive(&archive, &out, &SecurityConfig::default());
+        assert!(
+            result.is_ok(),
+            "{id:02x?} admitted but not decodable: {result:?}"
+        );
+        if fixture.is_none() {
+            assert_eq!(std::fs::read(out.join("payload.bin")).unwrap(), payload);
+        }
+    }
+}
+
+#[test]
+fn every_exempt_method_is_admitted() {
+    for &(id, fixture) in NOT_ENCODABLE {
+        assert!(
+            ADMITTED.iter().any(|&(admitted, _)| admitted == id),
+            "exempt {id:02x?} is not admitted"
+        );
+        assert!(!load_fixture(fixture).is_empty());
+    }
+}
+
+/// Issue #1091: a Deflate block is refused at admission, before the
+/// destination is created, like Deflate64.
+#[test]
+fn deflate_block_is_refused_before_any_write() {
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("deflate.7z");
+    std::fs::write(&archive, load_fixture("deflate.7z")).unwrap();
+    let out = dir.path().join("out");
+
+    let error = crate::extract_archive(&archive, &out, &SecurityConfig::default()).unwrap_err();
+
+    assert_eq!(
+        error.malformation(),
+        Some(&crate::Malformation::SevenZUnsupportedCoder)
+    );
+    assert!(!out.exists(), "nothing may be written");
+}
+
+#[test]
+fn deflate_block_is_reported_not_decodable_by_verify() {
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("deflate.7z");
+    std::fs::write(&archive, load_fixture("deflate.7z")).unwrap();
+
+    let report = crate::verify_archive(&archive, &SecurityConfig::default()).unwrap();
+
+    let expected = crate::VerificationIssue::from_error(
+        &ArchiveError::from(crate::Malformation::SevenZUnsupportedCoder),
+        None,
+    );
+    assert_eq!(
+        report.status(),
+        crate::inspection::report::VerificationStatus::Fail
+    );
+    assert_eq!(report.issues().len(), 2, "one refusal per block");
+    for issue in report.issues() {
+        assert_eq!(issue.severity(), expected.severity());
+        assert_eq!(issue.category(), expected.category());
+        assert_eq!(issue.message(), expected.message());
+    }
 }

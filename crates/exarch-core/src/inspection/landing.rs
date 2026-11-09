@@ -28,8 +28,10 @@ use crate::security::fs_view::NodeBudget;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
+use crate::security::hardlink::HardlinkTracker;
 use crate::security::validator::Gated;
 use crate::security::validator::route_validated;
+use crate::selection::LandingClaims;
 use crate::selection::SelectionRun;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -283,17 +285,40 @@ impl ArchiveManifest {
             NodeBudget::from_config(config),
             CollisionRecording::Discard,
         );
-        let judged: Vec<_> = self
-            .entries()
+        let mut hardlinks = HardlinkTracker::new();
+        let claims = LandingClaims::default();
+        let is_hardlink =
+            |entry: &ArchiveEntry| matches!(entry.kind, ManifestEntryKind::Hardlink { .. });
+        let mut land_entry = |entry: &ArchiveEntry| {
+            land(
+                entry,
+                self.selection(),
+                config,
+                &root,
+                &mut tree,
+                &mut hardlinks,
+                &claims,
+            )
+        };
+        let mut judged: Vec<Option<Disposition>> = Vec::with_capacity(self.entries().len());
+        // Extraction creates hardlinks after every other entry, so a target
+        // that appears later in the archive still exists.
+        for entry in self.entries() {
+            judged.push(if is_hardlink(entry) {
+                None
+            } else {
+                Some(land_entry(entry))
+            });
+        }
+        self.entries()
             .iter()
-            .map(|entry| {
-                (
-                    entry,
-                    land(entry, self.selection(), config, &root, &mut tree),
-                )
+            .zip(judged)
+            .map(|(entry, first)| {
+                let disposition = first.unwrap_or_else(|| land_entry(entry));
+                (entry, disposition)
             })
-            .collect();
-        judged.into_iter()
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     /// Everything extraction would create, entries and the directories it
@@ -374,8 +399,10 @@ fn land(
     config: &SecurityConfig,
     root: &VirtualRoot,
     tree: &mut VirtualTree,
+    hardlinks: &mut HardlinkTracker,
+    claims: &LandingClaims,
 ) -> Disposition {
-    judge(entry, selection, config, root, tree).unwrap_or(Disposition::Refuse)
+    judge(entry, selection, config, root, tree, hardlinks, claims).unwrap_or(Disposition::Refuse)
 }
 
 /// The disposition of an entry extraction can act on, or `None` when the
@@ -386,6 +413,8 @@ fn judge(
     config: &SecurityConfig,
     root: &VirtualRoot,
     tree: &mut VirtualTree,
+    hardlinks: &mut HardlinkTracker,
+    claims: &LandingClaims,
 ) -> Option<Disposition> {
     let original = SafePath::validate_in(&entry.path, root, config, tree).ok()?;
     let ctx = ValidationContext::<VirtualTree>::new(config.allowed.symlinks.is_allowed());
@@ -402,17 +431,25 @@ fn judge(
     if is_file && !is_extension_allowed(safe.as_path(), config) {
         return Some(Disposition::Skip(SkipKind::ExtensionNotAllowed));
     }
+    if is_file {
+        claims.claim(selection, safe.as_path());
+    }
     let node = match &entry.kind {
         ManifestEntryKind::File { .. } => Node::File,
         ManifestEntryKind::Hardlink { target } => {
             if !config.allowed.hardlinks.is_allowed() {
                 return None;
             }
-            if let LinkTarget::Recorded(target) = target {
-                selection
-                    .mapped_link_target(&entry.path, target, config.allowed.absolute_paths)
-                    .ok()?;
-            }
+            let LinkTarget::Recorded(target) = target else {
+                return None;
+            };
+            let mapped = selection
+                .mapped_link_target(&entry.path, target, config.allowed.absolute_paths)
+                .ok()?;
+            claims.require_unambiguous(&entry.path, &mapped).ok()?;
+            hardlinks
+                .check_hardlink_target(&safe, &mapped, root, config, tree)
+                .ok()?;
             Node::File
         }
         ManifestEntryKind::Directory => Node::Dir,
@@ -441,6 +478,7 @@ fn judge(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::assert_matches;
     use std::collections::BTreeSet;
     use std::io::Cursor;
     use std::io::Write as _;
@@ -695,6 +733,153 @@ mod tests {
                 (PathBuf::from("a/b/c.txt"), false),
                 (PathBuf::from("a/d.txt"), false),
             ]
+        );
+    }
+
+    /// The preview of the hardlink `hl` and whether extraction accepts the
+    /// archive, both under hardlinks-allowed.
+    fn hardlink_outcome(
+        entries: &[(&[u8], tar::EntryType, &str)],
+        config: &SecurityConfig,
+    ) -> (Disposition, bool) {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, kind, link) in entries {
+            tar_entry(&mut builder, name, *kind, link);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        let dest = dir.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+        let manifest = list_archive(&archive, config).unwrap();
+        let disposition = manifest
+            .dispositions(config)
+            .find(|(entry, _)| matches!(entry.kind, ManifestEntryKind::Hardlink { .. }))
+            .map(|(_, d)| d)
+            .unwrap();
+        (
+            disposition,
+            extract_archive(&archive, &dest, config).is_ok(),
+        )
+    }
+
+    fn assert_hardlink_agrees(entries: &[(&[u8], tar::EntryType, &str)], accepted: bool) {
+        let config = config().with_allow_hardlinks(true);
+        assert_hardlink_agrees_under(entries, &config, accepted);
+    }
+
+    fn assert_hardlink_agrees_under(
+        entries: &[(&[u8], tar::EntryType, &str)],
+        config: &SecurityConfig,
+        accepted: bool,
+    ) {
+        let (disposition, extracted) = hardlink_outcome(entries, config);
+        assert_eq!(extracted, accepted);
+        assert_eq!(
+            matches!(disposition, Disposition::Extract(_)),
+            accepted,
+            "{disposition:?}"
+        );
+        if !accepted {
+            assert_matches!(disposition, Disposition::Refuse);
+        }
+    }
+
+    const FILE: tar::EntryType = tar::EntryType::Regular;
+    const HARD: tar::EntryType = tar::EntryType::Link;
+
+    #[test]
+    fn hardlink_to_a_present_target_is_extracted() {
+        assert_hardlink_agrees(&[(b"a", FILE, ""), (b"hl", HARD, "a")], true);
+    }
+
+    #[test]
+    fn hardlink_to_a_target_missing_from_the_archive_is_refused() {
+        assert_hardlink_agrees(&[(b"a", FILE, ""), (b"hl", HARD, "nope")], false);
+    }
+
+    #[test]
+    fn hardlink_to_a_target_later_in_the_archive_is_extracted() {
+        assert_hardlink_agrees(&[(b"hl", HARD, "a"), (b"a", FILE, "")], true);
+    }
+
+    #[test]
+    fn hardlink_with_an_absolute_target_is_refused() {
+        assert_hardlink_agrees(&[(b"a", FILE, ""), (b"hl", HARD, "/a")], false);
+    }
+
+    #[test]
+    fn hardlink_with_an_escaping_target_is_refused() {
+        assert_hardlink_agrees(&[(b"a", FILE, ""), (b"hl", HARD, "../a")], false);
+    }
+
+    #[test]
+    fn hardlink_to_a_directory_is_refused() {
+        assert_hardlink_agrees(
+            &[(b"d/", tar::EntryType::Directory, ""), (b"hl", HARD, "d")],
+            false,
+        );
+    }
+
+    #[test]
+    fn hardlink_whose_target_is_not_selected_is_refused() {
+        let mut builder = tar::Builder::new(Vec::new());
+        tar_entry(&mut builder, b"a", FILE, "");
+        tar_entry(&mut builder, b"hl", HARD, "a");
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        let selection = EntrySelection::default().with_include("hl".parse().unwrap());
+        let config = config()
+            .with_allow_hardlinks(true)
+            .with_selection(selection);
+        let manifest = list_archive(&archive, &config).unwrap();
+        let (_, disposition) = manifest
+            .dispositions(&config)
+            .find(|(entry, _)| entry.path == Path::new("hl"))
+            .unwrap();
+        assert_matches!(disposition, Disposition::Refuse);
+    }
+
+    fn strip_one() -> SecurityConfig {
+        use crate::PathRewrite;
+        use crate::StripComponents;
+        use crate::non_zero;
+
+        let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
+        config()
+            .with_allow_hardlinks(true)
+            .with_selection(EntrySelection::default().with_rewrite(PathRewrite::Strip(strip)))
+    }
+
+    #[test]
+    fn hardlink_to_an_ambiguous_landing_is_refused() {
+        assert_hardlink_agrees_under(
+            &[
+                (b"p/x", FILE, ""),
+                (b"q/x", FILE, ""),
+                (b"p/h", HARD, "p/x"),
+            ],
+            &strip_one(),
+            false,
+        );
+    }
+
+    #[test]
+    fn hardlink_to_an_unambiguous_stripped_landing_is_extracted() {
+        assert_hardlink_agrees_under(
+            &[(b"p/x", FILE, ""), (b"p/h", HARD, "p/x")],
+            &strip_one(),
+            true,
+        );
+    }
+
+    #[test]
+    fn hardlink_to_a_later_stripped_target_is_extracted() {
+        assert_hardlink_agrees_under(
+            &[(b"p/h", HARD, "p/x"), (b"p/x", FILE, "")],
+            &strip_one(),
+            true,
         );
     }
 }

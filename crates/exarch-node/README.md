@@ -177,9 +177,14 @@ defaults to the config's `maxTotalSize`; exceeding it rejects with
 `QUOTA_EXCEEDED`. `pathModel: 'portable'` validates names against the strictest
 rules of every platform instead of this host's.
 
+Every in-memory function takes its arguments in one order: the data, `config`,
+`options`, the function's own arguments (`maxBytes`, `pathModel`), `format`,
+`progress`, `signal`. `listArchiveBytes(data, config?, options?, format?, signal?)`
+is one example.
+
 `listArchiveBytesWithProgress`, `verifyArchiveBytesWithProgress` and
-`extractArchiveToMemoryWithProgress` (async only) take a `progress` callback as
-their last argument, called with `(err, [path, total, current, bytesWritten])`;
+`extractArchiveToMemoryWithProgress` (async only) take a `progress` callback
+after `format` (and before the optional `signal`), called with `(err, [path, total, current, bytesWritten])`;
 `current` counts from 1 and `total` is `null` while the entry count is unknown (a TAR stream). A throwing callback stops the
 run before the next entry, and the promise rejects with
 `PROGRESS_CALLBACK_ERROR` and the result is discarded.
@@ -518,13 +523,13 @@ const config = new SecurityConfig()
   .withMaxTarMetadataBytes(bytes)             // TAR metadata budget (default 4 MiB)
   .withMaxDecoderMemory(bytes)                // Decoder dictionary/window memory (default 256 MiB)
   .withCompressedMemberAllowance(n)           // Base gzip members / bzip2 streams of a compressed TAR (default 10,000)
-  .withAllowWindowsReservedNames(true);       // Allow CON, NUL, COM1, ... components (Windows only; default: false)
+  .withAllowWindowsReservedNames(true);       // Allow CON, NUL, COM1, ... components (on disk checked on Windows only, in-memory on every host; default: false)
 ```
 
 An error whose `relaxableBy` or `setting` names one of these says which call
 relaxes it.
 
-**List options.** `listArchive*` take a trailing optional `ListOptions`:
+**List options.** `listArchive*` take an optional `ListOptions` (third argument for the path functions, `options` before `format` for the in-memory ones):
 `new ListOptions().withStoredTargets('read')` reads the symlink targets a 7z
 archive keeps in compressed entry data, which decodes part of the archive;
 the default `'skip'` reports them as `'unread'`.

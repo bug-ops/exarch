@@ -63,4 +63,5 @@ Details that matter:
 - A header declaring data streams but no file list (or a stream map not covering its blocks and files) fails with `InvalidArchive` (`failed to open 7z archive: ...`).
 - A FIFO, socket, device node, unknown Unix type bits, or an entry whose recorded kind contradicts its own (directory mode on data, file mode on a directory, Windows directory bit on a file) fails with `operation denied by security policy`. `bsdtar --format 7zip` writes FIFOs as stream-less entries, so a tree holding one is refused.
 - An entry with an empty name is rejected (`empty path not allowed`).
+- A block coded with Deflate, Deflate64, zstd, or lz4 is refused at admission, before any write: `extract` and `extract --atomic` exit `1` and create no destination, `list` still works, `verify` reports `FAIL` (one `HIGH` `7z block uses an unsupported coder or malformed coder properties` issue per block), and `verify --check-integrity` reports `INCOMPLETE` (`not_decodable`) with exit `1`, also under `--json`.
 - Solid archives, decoder memory, and header limits: [security-model.md](security-model.md).

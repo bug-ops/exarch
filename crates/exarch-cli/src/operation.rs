@@ -71,6 +71,7 @@ impl Operation {
             Flag::AllowedExtensions | Flag::Atomic | Flag::BannedComponent | Flag::MaxPathDepth => {
                 matches!(self, Self::Extract)
             }
+            Flag::CheckIntegrity => matches!(self, Self::Verify),
             Flag::Force => matches!(self, Self::Extract | Self::Create),
         }
     }
@@ -86,6 +87,7 @@ closed_list! {
         AllowedExtensions => "--allowed-extensions",
         Atomic => "--atomic",
         BannedComponent => "--banned-component",
+        CheckIntegrity => "--check-integrity",
         Exclude => "--exclude",
         Flatten => "--flatten",
         Force => "--force",

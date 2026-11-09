@@ -111,9 +111,11 @@ fn main() -> ExitCode {
             failure_status(&failure.error)
         }
     };
-    if matches!(status, ExitStatus::Interrupted | ExitStatus::Terminated) {
+    let status = exit::final_status(status, interrupt::requested());
+    if status.is_stop() {
         drop(formatter);
         let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
         interrupt::finish_by_signal();
     }
     status.into()

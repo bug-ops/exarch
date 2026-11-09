@@ -265,6 +265,9 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
+    use crate::formats::pinned_dir::Gid;
+    use crate::formats::pinned_dir::Uid;
+
     use tempfile::TempDir;
 
     use super::super::dir::Seed;
@@ -407,8 +410,6 @@ mod tests {
 
     #[test]
     fn a_rollback_after_adoption_leaves_the_stage_without_a_sweep() {
-        use std::os::unix::fs::MetadataExt;
-
         use super::super::adopt::Adoption;
         use super::super::adopt::Claim;
 
@@ -419,7 +420,12 @@ mod tests {
         std::fs::write(staging.path().join("f"), b"x").unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         let _adopted = staging
-            .adopt(Adoption::for_test(0o755, own.uid(), own.gid(), Claim::Full))
+            .adopt(Adoption::for_test(
+                0o755,
+                Uid::of(&own),
+                Gid::of(&own),
+                Claim::Full,
+            ))
             .unwrap();
 
         assert!(staging.discard().is_some());

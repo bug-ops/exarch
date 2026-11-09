@@ -180,10 +180,10 @@ pub enum PolicySetting {
     /// `SecurityConfig.withMaxPathDepth`.
     #[napi(value = "max_path_depth")]
     MaxPathDepth,
-    /// Rust API only: no setter in this binding.
+    /// `SecurityConfig.withAllowWindowsReservedNames`.
     #[napi(value = "windows_reserved_names")]
     WindowsReservedNames,
-    /// Rust API only: no setter in this binding.
+    /// `SecurityConfig.withMaxTarMetadataBytes`.
     #[napi(value = "max_tar_metadata_bytes")]
     MaxTarMetadataBytes,
 }
@@ -398,6 +398,9 @@ pub enum ConfigSetting {
     /// `strip_components`.
     #[napi(value = "strip_components")]
     StripComponents,
+    /// `stored_targets`.
+    #[napi(value = "stored_targets")]
+    StoredTargets,
 }
 
 /// Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
@@ -718,7 +721,8 @@ mirror_from_core!(
         EntrySelection,
         EntryInclude,
         EntryExclude,
-        StripComponents
+        StripComponents,
+        StoredTargets
     ]
 );
 mirror_from_core!(
@@ -1889,7 +1893,8 @@ mod tests {
             EntrySelection,
             EntryInclude,
             EntryExclude,
-            StripComponents
+            StripComponents,
+            StoredTargets
         ]
     );
 

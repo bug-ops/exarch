@@ -34,13 +34,13 @@ pub(super) enum Inheritance {
     None,
     /// Inheritable entries to write onto the staging directory before
     /// anything is extracted into it.
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     Stage(InheritedAcl),
     /// The destination's ACL cannot be carried faithfully, so its children
     /// inherit nothing from it and the published root stays `0700`.
     #[cfg(unix)]
     #[cfg_attr(
-        not(any(target_os = "linux", target_os = "android", target_os = "macos")),
+        not(acl_copy),
         allow(
             dead_code,
             reason = "only platforms that look for an ACL ever withhold the inheritance"
@@ -83,9 +83,9 @@ pub(super) fn read_inheritance(
 
 #[cfg(unix)]
 mod imp {
-    use std::os::unix::fs::MetadataExt;
-
     use crate::NarrowingReason;
+    use crate::formats::pinned_dir::Gid;
+    use crate::formats::pinned_dir::Uid;
     use crate::staging::dir::VerifiedStage;
 
     // TODO(#1020): copy the Windows DACL instead of falling back to a private
@@ -97,15 +97,15 @@ mod imp {
     /// meaning on a directory that has the same ones.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(in crate::staging) struct Ownership {
-        pub(in crate::staging) uid: u32,
-        pub(in crate::staging) gid: u32,
+        pub(in crate::staging) uid: Uid,
+        pub(in crate::staging) gid: Gid,
     }
 
     impl Ownership {
         pub(in crate::staging) fn of(metadata: &std::fs::Metadata) -> Self {
             Self {
-                uid: metadata.uid(),
-                gid: metadata.gid(),
+                uid: Uid::of(metadata),
+                gid: Gid::of(metadata),
             }
         }
     }
@@ -116,11 +116,11 @@ mod imp {
         /// No ACL was found, or this platform does not look for one.
         None,
         /// Copy the ACL onto the root.
-        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        #[cfg(acl_copy)]
         Copy(super::CopiedAcl),
         /// The ACL cannot be copied faithfully: the root stays `0700`.
         #[cfg_attr(
-            not(any(target_os = "linux", target_os = "android", target_os = "macos")),
+            not(acl_copy),
             allow(
                 dead_code,
                 reason = "only platforms that look for an ACL ever fall back to a private root"
@@ -135,7 +135,7 @@ mod imp {
         /// Nothing to copy; the destination's mode is applied as it is.
         NoAcl,
         /// Write this ACL onto the root.
-        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        #[cfg(acl_copy)]
         Copy(super::CopiedAcl),
         /// Keep the root `0700`, for this reason.
         Private(NarrowingReason),
@@ -147,7 +147,7 @@ mod imp {
     /// An ACL copied onto a root with another owner or group would grant the
     /// destination's owner entry to the wrong user, so it is not copied.
     #[cfg_attr(
-        not(any(target_os = "linux", target_os = "android", target_os = "macos")),
+        not(acl_copy),
         allow(
             unused_variables,
             clippy::needless_pass_by_value,
@@ -162,9 +162,9 @@ mod imp {
         let same_owner = destination == root;
         match plan {
             AclPlan::None => Resolution::NoAcl,
-            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            #[cfg(acl_copy)]
             AclPlan::Copy(acl) if same_owner => Resolution::Copy(acl),
-            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            #[cfg(acl_copy)]
             AclPlan::Copy(_) => Resolution::Private(NarrowingReason::OwnershipDiffers),
             AclPlan::Private(reason) => Resolution::Private(reason),
         }
@@ -218,7 +218,7 @@ mod imp {
         pub(in crate::staging) fn inheritance(&self) -> super::Inheritance {
             match self {
                 Self::None => super::Inheritance::None,
-                #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+                #[cfg(acl_copy)]
                 Self::Copy(acl) => acl
                     .inheritance()
                     .map_or(super::Inheritance::None, super::Inheritance::Stage),
@@ -232,7 +232,7 @@ mod imp {
     /// # Errors
     ///
     /// The I/O error of writing the entries.
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     pub(in crate::staging) fn stage(
         dir: &VerifiedStage,
         inheritance: &super::Inheritance,
@@ -244,7 +244,7 @@ mod imp {
     }
 
     /// Other Unixes carry no ACL handling.
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    #[cfg(not(acl_copy))]
     #[allow(
         clippy::unnecessary_wraps,
         clippy::missing_const_for_fn,
@@ -267,7 +267,7 @@ mod imp {
     pub(in crate::staging) use super::macos::read_destination;
 
     /// Other Unixes carry no ACL handling.
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    #[cfg(not(acl_copy))]
     #[allow(
         clippy::unnecessary_wraps,
         clippy::missing_const_for_fn,
@@ -278,7 +278,7 @@ mod imp {
     }
 
     /// Other Unixes carry no ACL detection.
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    #[cfg(not(acl_copy))]
     #[allow(
         clippy::unnecessary_wraps,
         clippy::missing_const_for_fn,
@@ -294,7 +294,7 @@ mod imp {
     }
 
     /// Whether `observed` is still the entry `expected` names.
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     pub(super) fn is_expected(
         observed: crate::formats::file_identity::FileIdentity,
         expected: crate::formats::file_identity::FileIdentity,
@@ -307,13 +307,16 @@ mod imp {
         use super::*;
 
         const DESTINATION: Ownership = Ownership {
-            uid: 1000,
-            gid: 100,
+            uid: Uid::from_raw(1000),
+            gid: Gid::from_raw(100),
         };
 
         #[test]
         fn a_destination_without_an_acl_resolves_to_no_acl() {
-            let other = Ownership { uid: 0, gid: 0 };
+            let other = Ownership {
+                uid: Uid::from_raw(0),
+                gid: Gid::from_raw(0),
+            };
             assert_eq!(
                 resolve(AclPlan::None, DESTINATION, other),
                 Resolution::NoAcl
@@ -332,7 +335,7 @@ mod imp {
             );
         }
 
-        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        #[cfg(acl_copy)]
         mod copied {
             use std::assert_matches;
 
@@ -362,7 +365,7 @@ mod imp {
             #[test]
             fn an_acl_is_not_copied_onto_a_root_in_another_group() {
                 let root = Ownership {
-                    gid: DESTINATION.gid + 1,
+                    gid: Gid::from_raw(DESTINATION.gid.get() + 1),
                     ..DESTINATION
                 };
                 assert_eq!(
@@ -374,7 +377,7 @@ mod imp {
             #[test]
             fn an_acl_is_not_copied_onto_a_root_of_another_user() {
                 let root = Ownership {
-                    uid: DESTINATION.uid + 1,
+                    uid: Uid::from_raw(DESTINATION.uid.get() + 1),
                     ..DESTINATION
                 };
                 assert_eq!(
@@ -397,6 +400,7 @@ mod linux {
     use super::imp::AclPlan;
     use crate::NarrowingReason;
     use crate::formats::file_identity::FileIdentity;
+    use crate::formats::le;
     use crate::formats::pinned_dir::Leaf;
     use crate::formats::pinned_dir::VettedDir;
     use crate::staging::dir::VerifiedStage;
@@ -427,9 +431,7 @@ mod linux {
         /// [`NarrowingReason::AclUnreadable`] for a value that is too large,
         /// has another version or has a partial entry.
         fn parse(bytes: &[u8]) -> Result<Self, NarrowingReason> {
-            let version = bytes
-                .first_chunk::<HEADER_LEN>()
-                .map(|header| u32::from_le_bytes(*header));
+            let version = le::u32_at(bytes, 0);
             let whole_entries = bytes
                 .len()
                 .checked_sub(HEADER_LEN)
@@ -450,11 +452,8 @@ mod linux {
                 .0
                 .iter()
                 .any(|entry| {
-                    let tag = entry.first_chunk::<2>().map(|tag| u16::from_le_bytes(*tag));
-                    let id = entry
-                        .get(4..)
-                        .and_then(|id| id.first_chunk::<4>())
-                        .map(|id| u32::from_le_bytes(*id));
+                    let tag = le::u16_at(entry, 0);
+                    let id = le::u32_at(entry, 4);
                     matches!(tag, Some(TAG_USER | TAG_GROUP)) && id == Some(UNDEFINED_ID)
                 })
         }
@@ -916,6 +915,7 @@ mod macos {
 
     use super::imp::AclPlan;
     use crate::NarrowingReason;
+    use crate::formats::common::errno_is;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::pinned_dir::Leaf;
     use crate::formats::pinned_dir::VettedDir;
@@ -1173,7 +1173,7 @@ mod macos {
 
     // `fsetattrlist` reports a volume without ACL support as `ENOTSUP`.
     fn is_unsupported(error: &io::Error) -> bool {
-        error.raw_os_error() == Some(Errno::NOTSUP.raw_os_error())
+        errno_is(error, &[Errno::NOTSUP])
     }
 
     /// FAT32 and exFAT answer a read of the (constant) extended security
@@ -1181,7 +1181,7 @@ mod macos {
     /// there. Only the read maps it; a write that fails with `EINVAL` stays an
     /// error so an inherited entry is never left in place.
     fn is_attribute_unavailable(error: &io::Error) -> bool {
-        error.raw_os_error() == Some(Errno::INVAL.raw_os_error())
+        errno_is(error, &[Errno::INVAL])
     }
 
     /// Removes every ACL entry, inherited ones included, from `stage`.
@@ -1226,7 +1226,7 @@ mod macos {
             }),
             Err(e) if is_unsupported(&e) || is_attribute_unavailable(&e) => Ok(AclPlan::None),
             // A bad descriptor is a bug here, not a property of the directory.
-            Err(e) if e.raw_os_error() == Some(Errno::BADF.raw_os_error()) => Err(e),
+            Err(e) if errno_is(&e, &[Errno::BADF]) => Err(e),
             Ok(Fetched::Truncated) | Err(_) => Ok(AclPlan::Private(NarrowingReason::AclUnreadable)),
         }
     }

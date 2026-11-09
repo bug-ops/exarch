@@ -188,6 +188,11 @@ pub use request::VerifyRequest;
 pub use selection::EntrySelection;
 pub use selection::PathRewrite;
 pub use selection::StripComponents;
+pub use staging::BACKUP_PREFIX;
+pub use staging::STAGING_PREFIX;
+pub use staging::StagedOutputKind;
+pub use staging::StagingPlace;
+pub use staging::staging_place;
 
 // Re-export creation types
 pub use creation::CompressionLevel;
@@ -215,12 +220,14 @@ pub use inspection::Landing;
 pub use inspection::LandingKind;
 pub use inspection::LandingPath;
 pub use inspection::LinkTarget;
+pub use inspection::LinkTargetState;
 pub use inspection::ManifestEntryKind;
 pub use inspection::ManifestEntryType;
 pub use inspection::NameCollisionKind;
 pub use inspection::OversizedEntry;
 pub use inspection::PathOccupant;
 pub use inspection::SolidBlock;
+pub use inspection::UnixTime;
 pub use inspection::UnverifiedEntry;
 pub use inspection::UnverifiedReason;
 pub use inspection::VerificationIssue;

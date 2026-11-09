@@ -120,7 +120,7 @@ function fakeSignal() {
 }
 
 const CALLS = [
-  ['listArchiveBytes', (data, signal) => listArchiveBytes(data, null, null, signal)],
+  ['listArchiveBytes', (data, signal) => listArchiveBytes(data, null, null, null, signal)],
   ['verifyArchiveBytes', (data, signal) => verifyArchiveBytes(data, null, null, null, signal)],
   [
     'extractArchiveToMemory',
@@ -132,7 +132,7 @@ const CALLS = [
   ],
   [
     'listArchiveBytesWithProgress',
-    (data, signal) => listArchiveBytesWithProgress(data, null, null, null, signal),
+    (data, signal) => listArchiveBytesWithProgress(data, null, null, null, null, signal),
   ],
   [
     'verifyArchiveBytesWithProgress',
@@ -191,7 +191,7 @@ describe('duck-typed signals', () => {
   it('accepts a plain object, as a signal from another realm would be', async () => {
     const signal = fakeSignal();
     const source = stalledIterable();
-    const pending = listArchiveBytes(source, null, null, signal);
+    const pending = listArchiveBytes(source, null, null, null, signal);
     await eventually(() => source.state.pulled === 1);
     signal.abort(new Error('foreign'));
     await assert.rejects(settles(pending), (err) => assertAborted(err, 'foreign'));
@@ -200,7 +200,7 @@ describe('duck-typed signals', () => {
 
   it('carries a non-Error reason as the cause', async () => {
     const signal = fakeSignal();
-    const pending = listArchiveBytes(stalledIterable(), null, null, signal);
+    const pending = listArchiveBytes(stalledIterable(), null, null, null, signal);
     signal.abort('plain reason');
     await assert.rejects(settles(pending), (err) => {
       assertAborted(err);
@@ -298,7 +298,7 @@ describe('abort while waiting for JavaScript', () => {
       await NEVER();
     }
     const controller = new AbortController();
-    const pending = listArchiveBytes(hung(), null, null, controller.signal);
+    const pending = listArchiveBytes(hung(), null, null, null, controller.signal);
     setTimeout(() => controller.abort(), 50);
     await assert.rejects(settles(pending), (err) => assertAborted(err));
   });
@@ -389,7 +389,7 @@ describe('abort while waiting for JavaScript', () => {
       },
     };
     const controller = new AbortController();
-    const pending = listArchiveBytes(source, null, null, controller.signal);
+    const pending = listArchiveBytes(source, null, null, null, controller.signal);
     await eventually(() => closing.started);
     controller.abort();
     await assert.rejects(settles(pending), (err) => assertAborted(err));
@@ -402,6 +402,7 @@ describe('abort while waiting for JavaScript', () => {
         (async function* () {
           yield new Uint8Array(ARCHIVE);
         })(),
+        null,
         null,
         null,
         controller.signal
@@ -420,7 +421,7 @@ describe('abort while waiting for JavaScript', () => {
 
   it('does not affect an operation that finishes before the abort', async () => {
     const controller = new AbortController();
-    const manifest = await settles(listArchiveBytes(ARCHIVE, null, null, controller.signal));
+    const manifest = await settles(listArchiveBytes(ARCHIVE, null, null, null, controller.signal));
     controller.abort();
     assert.strictEqual(manifest.totalEntries, 2);
   });
@@ -435,7 +436,8 @@ describe('abort of an in-memory Uint8Array call', () => {
   const PROGRESS_CALLS = [
     [
       'listArchiveBytesWithProgress',
-      (progress, signal) => listArchiveBytesWithProgress(manyEntries, null, null, progress, signal),
+      (progress, signal) =>
+        listArchiveBytesWithProgress(manyEntries, null, null, null, progress, signal),
     ],
     [
       'verifyArchiveBytesWithProgress',
@@ -490,7 +492,7 @@ describe('ABORT_ERR in the ErrorCode declarations', () => {
 
   it('is the code an aborted call actually rejects with', async () => {
     await assert.rejects(
-      settles(listArchiveBytes(ARCHIVE, null, null, AbortSignal.abort())),
+      settles(listArchiveBytes(ARCHIVE, null, null, null, AbortSignal.abort())),
       (err) => {
         assert.ok(declared().includes(err.code));
         return true;

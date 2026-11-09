@@ -16,6 +16,8 @@
 
 use std::io;
 
+#[cfg(unix)]
+use crate::formats::common::errno_is;
 use crate::formats::pinned_dir::EntryStatus;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
@@ -104,9 +106,10 @@ impl DestinationHold {
 fn is_not_held(error: &io::Error) -> bool {
     use rustix::io::Errno;
 
-    [Errno::NOENT, Errno::NOTDIR, Errno::LOOP, Errno::ACCESS]
-        .iter()
-        .any(|errno| error.raw_os_error() == Some(errno.raw_os_error()))
+    errno_is(
+        error,
+        &[Errno::NOENT, Errno::NOTDIR, Errno::LOOP, Errno::ACCESS],
+    )
 }
 
 #[cfg(all(test, unix))]

@@ -24,23 +24,23 @@ use exarch_core::RatioLimit;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::Staging as CoreStaging;
+use exarch_core::StoredTargets as CoreStoredTargets;
 use exarch_core::StripComponents;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
 use exarch_core::positive_from_f64;
 use napi::Env;
 use napi::bindgen_prelude::Either;
-use napi::bindgen_prelude::Error;
 use napi::bindgen_prelude::Null;
 use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
 use crate::error::IntoJsError;
 use crate::mirror::mirror_from_closed_core;
+use crate::mirror::mirror_from_core;
 use crate::mirror::mirror_into_core;
 use crate::report::MAX_SAFE_INTEGER;
 use crate::report::saturating_i64;
 use crate::report::saturating_u32;
-use crate::report::unknown_variant;
 
 /// Parses a JavaScript byte count: a negative, fractional, non-finite or
 /// out-of-range value and zero are refusals naming `setting`.
@@ -110,17 +110,12 @@ mirror_into_core!(
     [Enforce, Ignore]
 );
 
-impl TryFrom<CorePolicy> for ZipConsistencyPolicy {
-    type Error = Error;
-
-    fn try_from(policy: CorePolicy) -> Result<Self> {
-        match policy {
-            CorePolicy::Enforce => Ok(Self::Enforce),
-            CorePolicy::Ignore => Ok(Self::Ignore),
-            other => Err(unknown_variant("ZIP consistency policy", other.as_str())),
-        }
-    }
-}
+mirror_from_core!(
+    ZipConsistencyPolicy,
+    CorePolicy,
+    "ZIP consistency policy",
+    [Enforce, Ignore]
+);
 
 /// What extraction does when a destination path is already occupied.
 ///
@@ -147,18 +142,12 @@ mirror_into_core!(
     [Skip, Overwrite, Refuse]
 );
 
-impl TryFrom<CoreExistingFiles> for ExistingFiles {
-    type Error = Error;
-
-    fn try_from(policy: CoreExistingFiles) -> Result<Self> {
-        match policy {
-            CoreExistingFiles::Skip => Ok(Self::Skip),
-            CoreExistingFiles::Overwrite => Ok(Self::Overwrite),
-            CoreExistingFiles::Refuse => Ok(Self::Refuse),
-            other => Err(unknown_variant("existing-files policy", other.as_str())),
-        }
-    }
-}
+mirror_from_core!(
+    ExistingFiles,
+    CoreExistingFiles,
+    "existing-files policy",
+    [Skip, Overwrite, Refuse]
+);
 
 /// Where a ZIP extraction into a sink keeps decoded output between the
 /// structural check and the write, so a deflate entry is decoded once.
@@ -217,18 +206,12 @@ mirror_into_core!(
     [InPlace, Atomic, AtomicReplace]
 );
 
-impl TryFrom<CoreStaging> for Staging {
-    type Error = Error;
-
-    fn try_from(staging: CoreStaging) -> Result<Self> {
-        match staging {
-            CoreStaging::InPlace => Ok(Self::InPlace),
-            CoreStaging::Atomic => Ok(Self::Atomic),
-            CoreStaging::AtomicReplace => Ok(Self::AtomicReplace),
-            other => Err(unknown_variant("staging mode", other.as_str())),
-        }
-    }
-}
+mirror_from_core!(
+    Staging,
+    CoreStaging,
+    "staging mode",
+    [InPlace, Atomic, AtomicReplace]
+);
 
 /// Security configuration for archive extraction.
 ///
@@ -319,7 +302,7 @@ impl SecurityConfig {
     /// Sets the maximum compression ratio.
     ///
     /// Solid 7z blocks are exempt: each block is checked as a whole against a
-    /// fixed 1000x limit that is configurable only from the Rust API.
+    /// limit of `withMaxSolidCompressionRatio` (default 1000).
     ///
     /// # Errors
     ///
@@ -403,7 +386,8 @@ impl SecurityConfig {
     /// Allows or denies Windows reserved device names (`CON`, `NUL`, `COM1`,
     /// ...) as path components.
     ///
-    /// Only consulted when extracting on Windows; it has no effect elsewhere.
+    /// On-disk extraction checks these names only on Windows; in-memory and
+    /// callback extraction (the portable path model) check them on every host.
     /// Denied by default.
     #[napi(js_name = "withAllowWindowsReservedNames")]
     pub fn with_allow_windows_reserved_names(&mut self, allow: bool) -> &Self {
@@ -807,15 +791,11 @@ impl SecurityConfig {
         self.inner.solid_archives.is_allowed()
     }
 
-    /// How ZIP archives with ambiguous structure are handled.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if this binding is older than `exarch-core` and does not
-    /// know the policy.
-    #[napi(getter)]
-    pub fn get_zip_consistency(&self) -> Result<ZipConsistencyPolicy> {
-        self.inner.zip_consistency.try_into()
+    /// How ZIP archives with ambiguous structure are handled. A policy newer
+    /// than this binding is reported as core's token.
+    #[napi(getter, ts_return_type = "ZipConsistencyPolicy | (string & {})")]
+    pub fn get_zip_consistency(&self) -> String {
+        self.inner.zip_consistency.as_str().to_owned()
     }
 
     /// Memory in bytes for decoding 7z LZMA2 runs ahead on worker threads, or
@@ -1070,16 +1050,7 @@ impl SecurityConfig {
         ratio: f64,
     ) -> std::result::Result<(), CoreError> {
         let ratio = RatioLimit::parse(ConfigSetting::MaxSolidCompressionRatio, ratio)?;
-        let Some(limits) = self.inner.solid_archives.limits() else {
-            return Err(CoreError::InvalidConfiguration {
-                setting: ConfigSetting::MaxSolidCompressionRatio,
-                problem: ConfigProblem::NotSupported,
-            });
-        };
-        self.inner.solid_archives = self
-            .inner
-            .solid_archives
-            .with_limits(limits.with_max_ratio(ratio))?;
+        self.inner.solid_archives = self.inner.solid_archives.with_max_ratio(ratio)?;
         Ok(())
     }
 
@@ -1526,26 +1497,18 @@ impl ExtractionOptions {
         self
     }
 
-    /// What happens when a destination path is already occupied.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if this binding is older than `exarch-core` and does not
-    /// know the policy.
-    #[napi(getter)]
-    pub fn get_existing_files(&self) -> Result<ExistingFiles> {
-        self.inner.existing_files.try_into()
+    /// What happens when a destination path is already occupied. A policy
+    /// newer than this binding is reported as core's token.
+    #[napi(getter, ts_return_type = "ExistingFiles | (string & {})")]
+    pub fn get_existing_files(&self) -> String {
+        self.inner.existing_files.as_str().to_owned()
     }
 
-    /// How extraction stages its output.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if this binding is older than `exarch-core` and does not
-    /// know the mode.
-    #[napi(getter)]
-    pub fn get_staging(&self) -> Result<Staging> {
-        self.inner.staging.try_into()
+    /// How extraction stages its output. A mode newer than this binding is
+    /// reported as core's token.
+    #[napi(getter, ts_return_type = "Staging | (string & {})")]
+    pub fn get_staging(&self) -> String {
+        self.inner.staging.as_str().to_owned()
     }
 }
 
@@ -1594,15 +1557,11 @@ impl SinkOptions {
         self
     }
 
-    /// What happens when a delivery path is already occupied.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if this binding is older than `exarch-core` and does not
-    /// know the policy.
-    #[napi(getter)]
-    pub fn get_existing_files(&self) -> Result<ExistingFiles> {
-        self.inner.existing_files.try_into()
+    /// What happens when a delivery path is already occupied. A policy newer
+    /// than this binding is reported as core's token.
+    #[napi(getter, ts_return_type = "ExistingFiles | (string & {})")]
+    pub fn get_existing_files(&self) -> String {
+        self.inner.existing_files.as_str().to_owned()
     }
 
     /// Sets where a ZIP extraction keeps decoded output so a deflate entry is
@@ -1684,14 +1643,14 @@ pub enum StoredTargets {
     Read,
 }
 
-impl From<StoredTargets> for exarch_core::StoredTargets {
-    fn from(targets: StoredTargets) -> Self {
-        match targets {
-            StoredTargets::Skip => Self::Skip,
-            StoredTargets::Read => Self::Read,
-        }
-    }
-}
+mirror_into_core!(StoredTargets => CoreStoredTargets, [Skip, Read]);
+
+mirror_from_core!(
+    StoredTargets,
+    CoreStoredTargets,
+    "stored-targets policy",
+    [Skip, Read]
+);
 
 /// Options controlling listing behavior (non-security).
 ///
@@ -1703,7 +1662,7 @@ impl From<StoredTargets> for exarch_core::StoredTargets {
 #[napi]
 #[derive(Debug, Clone)]
 pub struct ListOptions {
-    stored_targets: StoredTargets,
+    inner: exarch_core::ListOptions,
 }
 
 #[napi]
@@ -1712,7 +1671,7 @@ impl ListOptions {
     #[napi(constructor)]
     pub fn new() -> Self {
         Self {
-            stored_targets: StoredTargets::Skip,
+            inner: exarch_core::ListOptions::default(),
         }
     }
 
@@ -1728,21 +1687,22 @@ impl ListOptions {
     /// read.
     #[napi(js_name = "withStoredTargets")]
     pub fn with_stored_targets(&mut self, targets: StoredTargets) -> &Self {
-        self.stored_targets = targets;
+        self.inner = self.inner.with_stored_targets(targets.into());
         self
     }
 
-    /// Whether 7z link targets are read.
-    #[napi(getter)]
-    pub fn get_stored_targets(&self) -> StoredTargets {
-        self.stored_targets
+    /// Whether 7z link targets are read. A policy newer than this binding is
+    /// reported as core's token.
+    #[napi(getter, ts_return_type = "StoredTargets | (string & {})")]
+    pub fn get_stored_targets(&self) -> String {
+        self.inner.stored_targets.as_str().to_owned()
     }
 }
 
 impl ListOptions {
     /// The inner core options.
-    pub fn to_core(&self) -> exarch_core::ListOptions {
-        exarch_core::ListOptions::default().with_stored_targets(self.stored_targets.into())
+    pub const fn to_core(&self) -> exarch_core::ListOptions {
+        self.inner
     }
 }
 
@@ -1853,6 +1813,26 @@ mod tests {
     /// Largest integer a JavaScript number holds exactly.
     const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
     const MAX_SAFE_INT: i64 = 9_007_199_254_740_991;
+
+    #[test]
+    fn documented_numbers_follow_core_constants() {
+        let defaults = exarch_core::SecurityConfig::default();
+        assert_eq!(
+            defaults.max_tar_metadata_bytes.get(),
+            4 * 1024 * 1024,
+            "docs say 4 MiB"
+        );
+        assert_eq!(
+            defaults.max_decoder_memory.get(),
+            256 * 1024 * 1024,
+            "docs say 256 MiB"
+        );
+        assert_eq!(
+            defaults.compressed_member_allowance.get(),
+            10_000,
+            "docs say 10,000"
+        );
+    }
 
     #[test]
     fn test_default_config() {
@@ -2734,20 +2714,14 @@ mod tests {
     #[test]
     fn test_zip_consistency_defaults_to_enforce_and_round_trips() {
         let mut config = SecurityConfig::new();
+        assert_eq!(config.get_zip_consistency(), "enforce");
         assert_eq!(
-            config.get_zip_consistency().unwrap(),
-            ZipConsistencyPolicy::Enforce
-        );
-        assert_eq!(
-            SecurityConfig::permissive().get_zip_consistency().unwrap(),
-            ZipConsistencyPolicy::Enforce
+            SecurityConfig::permissive().get_zip_consistency(),
+            "enforce"
         );
 
         config.with_zip_consistency(ZipConsistencyPolicy::Ignore);
-        assert_eq!(
-            config.get_zip_consistency().unwrap(),
-            ZipConsistencyPolicy::Ignore
-        );
+        assert_eq!(config.get_zip_consistency(), "ignore");
     }
 
     #[test]
@@ -2875,20 +2849,23 @@ mod tests {
     #[test]
     fn test_existing_files_defaults_to_skip_and_round_trips() {
         let mut options = ExtractionOptions::new();
-        assert_eq!(options.get_existing_files().unwrap(), ExistingFiles::Skip);
+        assert_eq!(options.get_existing_files(), "skip");
         for policy in [
             ExistingFiles::Overwrite,
             ExistingFiles::Refuse,
             ExistingFiles::Skip,
         ] {
             options.with_existing_files(policy);
-            assert_eq!(options.get_existing_files().unwrap(), policy);
+            assert_eq!(
+                options.get_existing_files(),
+                CoreExistingFiles::from(policy).as_str()
+            );
         }
 
         let mut sink = SinkOptions::new();
-        assert_eq!(sink.get_existing_files().unwrap(), ExistingFiles::Skip);
+        assert_eq!(sink.get_existing_files(), "skip");
         sink.with_existing_files(ExistingFiles::Refuse);
-        assert_eq!(sink.get_existing_files().unwrap(), ExistingFiles::Refuse);
+        assert_eq!(sink.get_existing_files(), "refuse");
         assert_eq!(sink.to_core().existing_files, CoreExistingFiles::Refuse);
     }
 
@@ -2992,12 +2969,43 @@ mod tests {
     }
 
     #[test]
+    fn test_stored_targets_covers_every_core_variant() {
+        for core in CoreStoredTargets::ALL {
+            let targets = StoredTargets::try_from(*core).unwrap();
+            assert_eq!(CoreStoredTargets::from(targets), *core);
+        }
+    }
+
+    #[test]
+    fn test_index_d_ts_stored_targets_union_matches_core() {
+        let values: Vec<_> = CoreStoredTargets::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type StoredTargets = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_list_options_default_and_round_trip() {
+        let mut options = ListOptions::new();
+        assert_eq!(options.get_stored_targets(), "skip");
+        options.with_stored_targets(StoredTargets::Read);
+        assert_eq!(options.get_stored_targets(), "read");
+        assert_eq!(options.to_core().stored_targets, CoreStoredTargets::Read);
+    }
+
+    #[test]
     fn test_staging_defaults_to_in_place_and_round_trips() {
         let mut options = ExtractionOptions::new();
-        assert_eq!(options.get_staging().unwrap(), Staging::InPlace);
+        assert_eq!(options.get_staging(), "in_place");
         for staging in [Staging::AtomicReplace, Staging::Atomic, Staging::InPlace] {
             options.with_staging(staging);
-            assert_eq!(options.get_staging().unwrap(), staging);
+            assert_eq!(options.get_staging(), CoreStaging::from(staging).as_str());
         }
         options.with_staging(Staging::AtomicReplace);
         assert_eq!(options.as_core().staging, CoreStaging::AtomicReplace);

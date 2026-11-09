@@ -440,7 +440,8 @@ jobs:
       - name: Install dependencies
         run: |
           cd crates/exarch-python
-          uv pip install --system maturin "ruff==0.16.0" mypy pytest pytest-cov
+          uv export --locked --no-emit-project --only-group dev -o "$RUNNER_TEMP/python-dev-requirements.txt"
+          uv pip install --system --require-hashes --no-build -r "$RUNNER_TEMP/python-dev-requirements.txt"
 
       - name: Run Rust unit tests (exarch-python)
         run: cargo test -p exarch-python --lib --no-default-features

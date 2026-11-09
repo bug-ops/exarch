@@ -58,6 +58,7 @@ use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::le;
 use crate::formats::output_root::OutputRoot;
 use crate::formats::source_fault::SourceRead;
 use crate::formats::source_fault::SourceTap;
@@ -532,7 +533,7 @@ fn gzip_decoded_size(archive: &Path) -> Option<u64> {
     file.seek(SeekFrom::End(-4)).ok()?;
     let mut isize = [0; 4];
     file.read_exact(&mut isize).ok()?;
-    Some(u64::from(u32::from_le_bytes(isize)))
+    Some(u64::from(le::le32::<0, 4>(&isize)))
 }
 
 /// Where the decoder stands, as seen by a [`SpoolTee`].
@@ -568,10 +569,10 @@ impl<R: Read> SpoolTee<R> {
     fn over(inner: R, spool: Option<TempSpool>, limit: u64, ram_limit: u64) -> Self {
         let limit = spool
             .as_ref()
-            .map_or(limit, |spool| spool.backing.capacity(limit, ram_limit));
+            .map_or(limit, |spool| spool.backing().capacity(limit, ram_limit));
         Self {
             inner,
-            spool: spool.map(|spool| BufWriter::with_capacity(SPOOL_BUFFER, spool.file)),
+            spool: spool.map(|spool| BufWriter::with_capacity(SPOOL_BUFFER, spool.into_file())),
             written: 0,
             limit,
             decoding: Decoding::Reading,

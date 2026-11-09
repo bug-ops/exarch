@@ -42,13 +42,16 @@ Documentation = "https://github.com/bug-ops/exarch#readme"
 Issues = "https://github.com/bug-ops/exarch/issues"
 
 [dependency-groups]
+# Single pin of the wheel build tool: uv.lock is the source for the release
+# workflow and for CI. Keep it inside `[build-system].requires` above.
+release = ["maturin==1.16.0"]
 dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.0",
     "Pygments>=2.20.0",
     "mypy>=2.0",
-    "ruff>=0.16",
-    "maturin>=1.14",
+    "ruff==0.16.0",
+    { include-group = "release" },
 ]
 
 [tool.maturin]

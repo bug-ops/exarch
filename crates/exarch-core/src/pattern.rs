@@ -30,13 +30,8 @@ use direct_index::DirectIndex;
 
 const GLOBSTAR: &str = "**";
 
-/// What a pattern selects, independent of how it is matched.
-///
-/// `Eq` and `Hash` live here, so two patterns are equal when they reduce to
-/// the same canonical form (`target/` equals `./target`, but `x` does not
-/// equal `./x`). Equal patterns select the same paths; the converse does not
-/// hold (`x` and `**/x` select the same paths and stay unequal).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// What a parsed pattern selects, before it is given a matcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Shape {
     /// Every path.
     MatchAll,
@@ -48,12 +43,44 @@ enum Shape {
     Anchored(Box<str>),
 }
 
+/// What a glob pattern selects; never every path.
+#[derive(Debug, Clone)]
+enum GlobShape {
+    /// See [`Shape::Floating`].
+    Floating(Box<str>),
+    /// See [`Shape::Anchored`].
+    Anchored(Box<str>),
+}
+
+/// How a pattern is matched. The shape and the engine are one value, so a
+/// plain comparison can never be paired with a pattern that needs a glob.
 #[derive(Clone)]
-enum Engine {
-    /// Plain comparison; exact for [`Shape::MatchAll`] and for shapes without
-    /// `*`, `?` or `[` (a `*name` suffix included).
-    Direct,
-    Glob(GlobSet),
+enum Matcher {
+    /// Every path.
+    All,
+    /// A literal component name, tested against every path component.
+    Name(Box<str>),
+    /// The part after the `*` of a `*suffix` name, tested against the end of
+    /// every path component.
+    Suffix(Box<str>),
+    /// A literal anchored path, tested against the start of the path.
+    Path(Box<str>),
+    /// A pattern with `*`, `?` or `[`, matched by the compiled `set`.
+    Glob { shape: GlobShape, set: GlobSet },
+}
+
+/// What two patterns are compared by: two patterns are equal when they reduce
+/// to the same canonical form (`target/` equals `./target`, but `x` does not
+/// equal `./x`). Equal patterns select the same paths; the converse does not
+/// hold (`x` and `**/x` select the same paths and stay unequal).
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum Key<'a> {
+    All,
+    Name(&'a str),
+    Suffix(&'a str),
+    FloatingGlob(&'a str),
+    Path(&'a str),
+    AnchoredGlob(&'a str),
 }
 
 /// A glob pattern that selects archive entries, built once when the pattern
@@ -138,8 +165,7 @@ enum Engine {
 /// ```
 #[derive(Clone)]
 pub struct EntryPattern {
-    shape: Shape,
-    engine: Engine,
+    matcher: Matcher,
 }
 
 const _: () = {
@@ -152,7 +178,7 @@ const _: () = {
 
 impl PartialEq for EntryPattern {
     fn eq(&self, other: &Self) -> bool {
-        self.shape == other.shape
+        self.matcher.key() == other.matcher.key()
     }
 }
 
@@ -160,7 +186,7 @@ impl Eq for EntryPattern {}
 
 impl std::hash::Hash for EntryPattern {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.shape.hash(state);
+        self.matcher.key().hash(state);
     }
 }
 
@@ -174,8 +200,7 @@ impl EntryPattern {
     /// A pattern naming one literal component, for the built-in defaults.
     pub(crate) fn literal_name(name: &'static str) -> Self {
         Self {
-            shape: Shape::Floating(name.into()),
-            engine: Engine::Direct,
+            matcher: Matcher::Name(name.into()),
         }
     }
 
@@ -183,14 +208,14 @@ impl EntryPattern {
     /// built-in defaults.
     pub(crate) fn suffix_name(suffix: &'static str) -> Self {
         Self {
-            shape: Shape::Floating(format!("*{suffix}").into()),
-            engine: Engine::Direct,
+            matcher: Matcher::Suffix(suffix.into()),
         }
     }
 
     fn from_shape(shape: Shape) -> std::result::Result<Self, PatternRefusal> {
-        let engine = engine_for(&shape)?;
-        Ok(Self { shape, engine })
+        Ok(Self {
+            matcher: Matcher::from_shape(shape)?,
+        })
     }
 
     /// Parses `text`, naming `setting` in the refusal.
@@ -248,22 +273,18 @@ impl EntryPattern {
     /// Matches a path already reduced by [`normalized`], so a caller testing
     /// many patterns against one entry normalizes it once.
     pub(crate) fn matches_normalized(&self, path: &[u8]) -> bool {
-        match &self.engine {
-            Engine::Glob(set) => set.is_match_candidate(&Candidate::from_bytes(path)),
-            Engine::Direct => match &self.shape {
-                Shape::MatchAll => true,
-                Shape::Floating(pattern) => {
-                    let pattern = pattern.as_bytes();
-                    path.split(|b| *b == b'/').any(|component| {
-                        pattern
-                            .strip_prefix(b"*")
-                            .map_or(component == pattern, |suffix| component.ends_with(suffix))
-                    })
-                }
-                Shape::Anchored(pattern) => path
-                    .strip_prefix(pattern.as_bytes())
-                    .is_some_and(|rest| rest.first().is_none_or(|b| *b == b'/')),
-            },
+        match &self.matcher {
+            Matcher::All => true,
+            Matcher::Name(name) => path
+                .split(|b| *b == b'/')
+                .any(|component| component == name.as_bytes()),
+            Matcher::Suffix(suffix) => path
+                .split(|b| *b == b'/')
+                .any(|component| component.ends_with(suffix.as_bytes())),
+            Matcher::Path(anchored) => path
+                .strip_prefix(anchored.as_bytes())
+                .is_some_and(|rest| rest.first().is_none_or(|b| *b == b'/')),
+            Matcher::Glob { set, .. } => set.is_match_candidate(&Candidate::from_bytes(path)),
         }
     }
 }
@@ -293,11 +314,14 @@ impl fmt::Display for EntryPattern {
     /// Writes the normalized pattern text; parsing it again gives an equal
     /// pattern. An anchored name keeps a trailing `/` (`target/`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.shape {
-            Shape::MatchAll => f.write_str(GLOBSTAR),
-            Shape::Floating(pattern) => f.write_str(pattern),
-            Shape::Anchored(pattern) if pattern.contains('/') => f.write_str(pattern),
-            Shape::Anchored(pattern) => write!(f, "{pattern}/"),
+        match self.matcher.key() {
+            Key::All => f.write_str(GLOBSTAR),
+            Key::Name(pattern) | Key::FloatingGlob(pattern) => f.write_str(pattern),
+            Key::Suffix(suffix) => write!(f, "*{suffix}"),
+            Key::Path(pattern) | Key::AnchoredGlob(pattern) if pattern.contains('/') => {
+                f.write_str(pattern)
+            }
+            Key::Path(pattern) | Key::AnchoredGlob(pattern) => write!(f, "{pattern}/"),
         }
     }
 }
@@ -472,29 +496,60 @@ fn is_alnum_range(low: u8, high: u8) -> bool {
             || (low.is_ascii_uppercase() && high.is_ascii_uppercase()))
 }
 
-fn is_direct(shape: &Shape) -> bool {
-    let plain = |text: &str| !text.contains(['*', '?', '[']);
-    match shape {
-        Shape::MatchAll => true,
-        Shape::Floating(pattern) => plain(pattern.strip_prefix('*').unwrap_or(pattern)),
-        Shape::Anchored(pattern) => plain(pattern),
+fn is_plain(text: &str) -> bool {
+    !text.contains(['*', '?', '['])
+}
+
+impl Matcher {
+    fn from_shape(shape: Shape) -> std::result::Result<Self, PatternRefusal> {
+        match shape {
+            Shape::MatchAll => Ok(Self::All),
+            Shape::Floating(name) => match name.strip_prefix('*') {
+                Some(suffix) if is_plain(suffix) => Ok(Self::Suffix(suffix.into())),
+                None if is_plain(&name) => Ok(Self::Name(name)),
+                Some(_) | None => Self::glob(GlobShape::Floating(name)),
+            },
+            Shape::Anchored(path) if is_plain(&path) => Ok(Self::Path(path)),
+            Shape::Anchored(path) => Self::glob(GlobShape::Anchored(path)),
+        }
+    }
+
+    /// The glob matcher for `shape`: the shape's own glob plus its subtree
+    /// twin.
+    fn glob(shape: GlobShape) -> std::result::Result<Self, PatternRefusal> {
+        let mut builder = GlobSetBuilder::new();
+        for text in &glob_texts(&shape) {
+            builder.add(build_glob(text)?);
+        }
+        let set = builder
+            .build()
+            .map_err(|error| glob_refusal(error.kind()))?;
+        Ok(Self::Glob { shape, set })
+    }
+
+    fn key(&self) -> Key<'_> {
+        match self {
+            Self::All => Key::All,
+            Self::Name(name) => Key::Name(name),
+            Self::Suffix(suffix) => Key::Suffix(suffix),
+            Self::Path(path) => Key::Path(path),
+            Self::Glob {
+                shape: GlobShape::Floating(pattern),
+                ..
+            } => Key::FloatingGlob(pattern),
+            Self::Glob {
+                shape: GlobShape::Anchored(pattern),
+                ..
+            } => Key::AnchoredGlob(pattern),
+        }
     }
 }
 
-fn engine_for(shape: &Shape) -> std::result::Result<Engine, PatternRefusal> {
-    if is_direct(shape) {
-        return Ok(Engine::Direct);
-    }
-    glob_engine(shape)
-}
-
-/// The glob texts for `shape`: its own glob plus its subtree twin, or `None`
-/// for a shape that matches every path.
-fn glob_texts(shape: &Shape) -> Option<[String; 2]> {
+/// The glob texts for `shape`: its own glob plus its subtree twin.
+fn glob_texts(shape: &GlobShape) -> [String; 2] {
     match shape {
-        Shape::MatchAll => None,
-        Shape::Floating(pattern) => Some([format!("**/{pattern}"), format!("**/{pattern}/**")]),
-        Shape::Anchored(pattern) => Some([pattern.to_string(), format!("{pattern}/**")]),
+        GlobShape::Floating(pattern) => [format!("**/{pattern}"), format!("**/{pattern}/**")],
+        GlobShape::Anchored(pattern) => [pattern.to_string(), format!("{pattern}/**")],
     }
 }
 
@@ -511,21 +566,6 @@ fn build_glob(text: &str) -> std::result::Result<Glob, PatternRefusal> {
         .map_err(|error| glob_refusal(error.kind()))
 }
 
-/// The glob engine for `shape`: the shape's own glob plus its subtree twin.
-fn glob_engine(shape: &Shape) -> std::result::Result<Engine, PatternRefusal> {
-    let Some(texts) = glob_texts(shape) else {
-        return Ok(Engine::Direct);
-    };
-    let mut builder = GlobSetBuilder::new();
-    for text in &texts {
-        builder.add(build_glob(text)?);
-    }
-    builder
-        .build()
-        .map(Engine::Glob)
-        .map_err(|error| glob_refusal(error.kind()))
-}
-
 fn glob_refusal(kind: &ErrorKind) -> PatternRefusal {
     match kind {
         ErrorKind::InvalidRange(..) => PatternRefusal::InvalidClassRange,
@@ -535,9 +575,9 @@ fn glob_refusal(kind: &ErrorKind) -> PatternRefusal {
 
 impl EntryPattern {
     fn glob_texts(&self) -> Option<[String; 2]> {
-        match self.engine {
-            Engine::Direct => None,
-            Engine::Glob(_) => glob_texts(&self.shape),
+        match &self.matcher {
+            Matcher::Glob { shape, .. } => Some(glob_texts(shape)),
+            Matcher::All | Matcher::Name(_) | Matcher::Suffix(_) | Matcher::Path(_) => None,
         }
     }
 }
@@ -645,7 +685,7 @@ impl PatternList {
         self.patterns
             .iter()
             .enumerate()
-            .filter(|(_, pattern)| matches!(pattern.engine, Engine::Glob(_)))
+            .filter(|(_, pattern)| matches!(pattern.matcher, Matcher::Glob { .. }))
     }
 
     /// Calls `visit` with the index of every pattern that matches `path`, a
@@ -741,9 +781,12 @@ mod tests {
     }
 
     fn glob_only(text: &str) -> EntryPattern {
-        let shape = parse_shape(text).unwrap();
-        let engine = glob_engine(&shape).unwrap();
-        EntryPattern { shape, engine }
+        let matcher = match parse_shape(text).unwrap() {
+            Shape::MatchAll => Matcher::All,
+            Shape::Floating(name) => Matcher::glob(GlobShape::Floating(name)).unwrap(),
+            Shape::Anchored(path) => Matcher::glob(GlobShape::Anchored(path)).unwrap(),
+        };
+        EntryPattern { matcher }
     }
 
     fn refusal(text: &str) -> PatternRefusal {

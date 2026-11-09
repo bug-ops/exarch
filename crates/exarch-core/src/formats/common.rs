@@ -912,6 +912,15 @@ pub(crate) fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> 
     Ok(PathBuf::from(target_str))
 }
 
+/// Whether `error` carries one of the OS error codes in `set`.
+///
+/// The one spelling of an errno comparison, so a failure is classified the same
+/// way wherever it is checked.
+#[cfg(any(unix, target_os = "wasi"))]
+pub(crate) fn errno_is(error: &std::io::Error, set: &[rustix::io::Errno]) -> bool {
+    rustix::io::Errno::from_io_error(error).is_some_and(|errno| set.contains(&errno))
+}
+
 /// Returns `true` if `error` is the "too many levels of symbolic links"
 /// error (`ELOOP` on Unix) that an `O_NOFOLLOW` open produces when its final
 /// path component is a symlink.
@@ -926,7 +935,7 @@ pub(crate) fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> 
 pub(crate) fn is_filesystem_loop_error(error: &std::io::Error) -> bool {
     #[cfg(unix)]
     {
-        error.raw_os_error() == Some(libc::ELOOP)
+        errno_is(error, &[rustix::io::Errno::LOOP])
     }
     #[cfg(not(unix))]
     {
@@ -998,6 +1007,7 @@ pub(crate) fn copy_file_content_with_permit(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
     use crate::ArchiveError;
     use crate::ExtractionReport;
     use crate::Malformation;
@@ -1013,6 +1023,43 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[cfg(any(unix, target_os = "wasi"))]
+    #[test]
+    fn errno_is_matches_only_the_listed_codes() {
+        use rustix::io::Errno;
+
+        let error = |errno: Errno| std::io::Error::from_raw_os_error(errno.raw_os_error());
+        let all = [
+            Errno::NOENT,
+            Errno::NOTDIR,
+            Errno::LOOP,
+            Errno::ACCESS,
+            Errno::NOTSUP,
+            Errno::INVAL,
+            Errno::BADF,
+            Errno::MFILE,
+            Errno::NFILE,
+            Errno::NOMEM,
+        ];
+        for listed in all {
+            for observed in all {
+                assert_eq!(
+                    errno_is(&error(observed), &[listed]),
+                    observed == listed,
+                    "{observed:?} against {listed:?}"
+                );
+            }
+            assert!(errno_is(&error(listed), &all));
+            assert!(!errno_is(&error(listed), &[]));
+        }
+        assert!(!errno_is(&std::io::Error::other("no code"), &all));
+        assert_eq!(
+            errno_is(&error(Errno::OPNOTSUPP), &[Errno::NOTSUP]),
+            Errno::OPNOTSUPP == Errno::NOTSUP,
+            "equal on Linux, distinct on macOS"
+        );
+    }
 
     /// Builds a [`SanitizedMode`] for tests that don't otherwise need a
     /// `SecurityConfig` in scope. None of the modes used across these tests

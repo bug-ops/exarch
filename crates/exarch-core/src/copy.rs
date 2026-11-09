@@ -23,6 +23,7 @@ use std::io::Read;
 use std::io::Write;
 use std::io::{self};
 
+use crate::formats::bounded_read::read_prefix;
 use crate::formats::tar_metadata_limit::budget_violation;
 
 use crate::ArchiveError;
@@ -273,16 +274,16 @@ fn copy_polled<R: Read + ?Sized, W: Write + ?Sized>(
             return Err(CopyError::Cancelled);
         }
 
-        let bytes_read = match reader.read(&mut buffer.buf) {
-            Ok(0) => break,
-            Ok(n) => n,
+        let chunk = match read_prefix(reader, &mut buffer.buf) {
+            Ok([]) => break,
+            Ok(chunk) => &*chunk,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(CopyError::Read(e)),
         };
 
         // SECURITY: Detect overflow to prevent quota bypass
         total = total
-            .checked_add(bytes_read as u64)
+            .checked_add(chunk.len() as u64)
             .ok_or(CopyError::Overflow)?;
 
         // SECURITY: Enforce the declared size as a hard streaming ceiling
@@ -295,10 +296,6 @@ fn copy_polled<R: Read + ?Sized, W: Write + ?Sized>(
             return Err(CopyError::Overrun { declared: expected });
         }
 
-        let chunk = buffer
-            .buf
-            .get(..bytes_read)
-            .ok_or_else(|| CopyError::Read(io::Error::from(io::ErrorKind::InvalidData)))?;
         writer.write_all(chunk).map_err(CopyError::Write)?;
     }
 
@@ -403,6 +400,24 @@ mod tests {
             Err(CopyError::Read(e)) if e.kind() == io::ErrorKind::InvalidData
         );
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn an_over_reporting_reader_fails_as_a_read_error_whatever_the_declared_size() {
+        let mut buffer = CopyBuffer::new();
+        let below = u64::try_from(buffer.size()).unwrap() - 1;
+        let above = u64::try_from(buffer.size()).unwrap() + 1;
+        for expected in [Some(below), Some(above), None] {
+            let mut output = Vec::new();
+
+            let result = copy_bounded(&mut OverReporting, &mut output, &mut buffer, expected);
+
+            assert_matches!(
+                result,
+                Err(CopyError::Read(e)) if e.kind() == io::ErrorKind::InvalidData
+            );
+            assert!(output.is_empty());
+        }
     }
 
     #[test]

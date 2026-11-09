@@ -78,16 +78,16 @@ describe('archive bytes', () => {
   });
 
   it('honours an explicit format', async () => {
-    const manifest = await listArchiveBytes(archives.Tar.bytes, null, 'Tar');
+    const manifest = await listArchiveBytes(archives.Tar.bytes, null, null, 'Tar');
     assert.strictEqual(manifest.format, 'Tar');
   });
 
   it('rejects an explicit format that does not match the bytes', async () => {
-    await assert.rejects(listArchiveBytes(archives.Zip.bytes, null, 'Tar'));
+    await assert.rejects(listArchiveBytes(archives.Zip.bytes, null, null, 'Tar'));
   });
 
   it('rejects an unknown format name at the argument boundary', () => {
-    assert.throws(() => listArchiveBytes(archives.Tar.bytes, null, 'tar.gz'), {
+    assert.throws(() => listArchiveBytes(archives.Tar.bytes, null, null, 'tar.gz'), {
       code: 'InvalidArg',
     });
   });

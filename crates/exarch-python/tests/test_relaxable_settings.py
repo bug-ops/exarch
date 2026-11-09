@@ -157,11 +157,17 @@ def test_solid_ratio_keeps_the_block_memory_limit():
 
 def test_list_options_defaults_and_builder():
     options = exarch.ListOptions()
-    assert options.stored_targets is False
-    assert options.with_stored_targets().stored_targets is True
-    assert options.with_stored_targets(False).stored_targets is False
-    assert exarch.ListOptions.default().stored_targets is False
-    assert "stored_targets=False" in repr(exarch.ListOptions())
+    assert options.stored_targets == "skip"
+    assert options.with_stored_targets().stored_targets == "read"
+    assert options.with_stored_targets("skip").stored_targets == "skip"
+    assert exarch.ListOptions.default().stored_targets == "skip"
+    assert 'stored_targets="skip"' in repr(exarch.ListOptions())
+
+
+def test_list_options_reject_an_unknown_stored_targets_token():
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        exarch.ListOptions().with_stored_targets("maybe")
+    assert info.value.setting == "stored_targets"
 
 
 def test_list_functions_take_list_options(tmp_path):

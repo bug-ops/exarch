@@ -26,6 +26,7 @@ mod sweep;
 #[allow(clippy::unwrap_used)]
 mod test_acl;
 
+use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -54,6 +55,119 @@ use dir::Seed;
 use dir::StagingDir;
 use hold::Destination;
 use hold::DestinationHold;
+
+/// The name prefix of every staging entry (a staging directory, or the
+/// temporary file of a staged archive) created next to a destination.
+///
+/// # Examples
+///
+/// ```
+/// assert!(exarch_core::STAGING_PREFIX.starts_with('.'));
+/// assert!(exarch_core::BACKUP_PREFIX.starts_with(exarch_core::STAGING_PREFIX));
+/// ```
+pub const STAGING_PREFIX: &str = ".exarch-";
+
+/// The name prefix of the backup an atomic replace renames the previous
+/// destination to; it extends [`STAGING_PREFIX`].
+pub const BACKUP_PREFIX: &str = ".exarch-backup-";
+
+/// What a staged output is, which fixes how its destination is resolved.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::StagedOutputKind;
+///
+/// assert_ne!(StagedOutputKind::Directory, StagedOutputKind::File);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StagedOutputKind {
+    /// An extraction destination directory (atomic or replace staging).
+    Directory,
+    /// A created archive file.
+    File,
+}
+
+/// Where the staging entries of one output live, and the path a backup is
+/// renamed back to.
+///
+/// Built only by [`staging_place`], so the parent is always an absolute,
+/// canonical directory.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::StagedOutputKind;
+/// use exarch_core::staging_place;
+///
+/// let dir = tempfile::tempdir()?;
+/// let place = staging_place(&dir.path().join("out"), StagedOutputKind::Directory)?;
+/// assert_eq!(place.target().file_name(), Some("out".as_ref()));
+/// assert_eq!(place.target().parent(), Some(place.parent()));
+/// # Ok::<(), std::io::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagingPlace {
+    parent: PathBuf,
+    name: OsString,
+}
+
+impl StagingPlace {
+    /// The directory that holds the staging and backup entries.
+    #[must_use]
+    pub fn parent(&self) -> &Path {
+        &self.parent
+    }
+
+    /// The path of the output itself inside [`parent`](Self::parent): where a
+    /// backup is renamed back to.
+    #[must_use]
+    pub fn target(&self) -> PathBuf {
+        self.parent.join(&self.name)
+    }
+}
+
+/// Resolves where the staging entries of `output` are created, by the rule the
+/// staging code of `kind` uses.
+///
+/// A [`Directory`](StagedOutputKind::Directory) that exists is canonicalized
+/// and split into parent and name; one that is absent takes its name from
+/// `output` and its parent from the canonical parent. A
+/// [`File`](StagedOutputKind::File) always takes the canonical parent and the
+/// name of `output`. Nothing is created.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::InvalidInput`] when the output has no name (a root, or a
+/// path ending in `..`); otherwise the error of canonicalizing, for example
+/// `NotFound` when the parent does not exist yet.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::StagedOutputKind;
+/// use exarch_core::staging_place;
+///
+/// let dir = tempfile::tempdir()?;
+/// let output = dir.path().join("out");
+/// let place = staging_place(&output, StagedOutputKind::File)?;
+/// assert_eq!(place.target(), dir.path().canonicalize()?.join("out"));
+/// assert!(staging_place(std::path::Path::new("/"), StagedOutputKind::Directory).is_err());
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn staging_place(output: &Path, kind: StagedOutputKind) -> io::Result<StagingPlace> {
+    let no_name = || io::Error::new(io::ErrorKind::InvalidInput, "the output has no name");
+    if kind == StagedOutputKind::Directory && output.exists() {
+        let canonical = output.canonicalize()?;
+        let name = canonical.file_name().ok_or_else(no_name)?.to_os_string();
+        let parent = canonical.parent().ok_or_else(no_name)?.to_path_buf();
+        return Ok(StagingPlace { parent, name });
+    }
+    let name = output.file_name().ok_or_else(no_name)?.to_os_string();
+    let parent = parent_or_cwd(output).canonicalize()?;
+    Ok(StagingPlace { parent, name })
+}
 
 /// The extraction a staging mode wraps: it writes into the directory it is
 /// given, under the options it is given, reporting to the progress it is given.
@@ -395,6 +509,9 @@ fn publish_adopted(
     Ok(())
 }
 
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod parent_tests;
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

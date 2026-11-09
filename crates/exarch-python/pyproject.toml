@@ -50,7 +50,7 @@ dev = [
     "pytest-cov>=7.0",
     "Pygments>=2.20.0",
     "mypy>=2.0",
-    "ruff==0.16.0",
+    "ruff==0.17.4",
     { include-group = "release" },
 ]
 

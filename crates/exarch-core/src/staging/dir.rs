@@ -948,7 +948,7 @@ mod tests {
     /// Makes `name` in `pin`, moves that directory to `moved` and puts a
     /// directory of `mode` at the name.
     fn replaced_at_name(pin: &VettedDir, parent: &Path, mode: u32) -> (LeafBuf, PathBuf) {
-        let name = LeafBuf::random(PREFIX);
+        let name = LeafBuf::random(STAGING_PREFIX);
         pin.make_private_dir(name.as_leaf()).unwrap();
         let at = parent.join(&name);
         let moved = parent.join("moved");
@@ -1012,7 +1012,7 @@ mod tests {
     fn a_refused_claim_removes_the_empty_directory_it_checked() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = pin_of(&temp);
-        let name = LeafBuf::random(PREFIX);
+        let name = LeafBuf::random(STAGING_PREFIX);
         pin.make_private_dir(name.as_leaf()).unwrap();
         let at = parent.join(&name);
         std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1027,7 +1027,7 @@ mod tests {
     fn a_refused_claim_names_a_directory_it_cannot_remove() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = pin_of(&temp);
-        let name = LeafBuf::random(PREFIX);
+        let name = LeafBuf::random(STAGING_PREFIX);
         pin.make_private_dir(name.as_leaf()).unwrap();
         let at = parent.join(&name);
         std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();

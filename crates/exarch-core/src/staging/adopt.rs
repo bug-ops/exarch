@@ -739,7 +739,139 @@ mod removable {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod imp {
+    use std::io;
+
+    use super::Published;
+    use super::StagingDir;
+    use crate::NarrowingReason;
+    use crate::formats::pinned_dir::DaclHandle;
+    use crate::formats::pinned_dir::EntryStatus;
+    use crate::formats::pinned_dir::RootDacl;
+    use crate::report::Narrowed;
+    use crate::staging::acl::AclPlan;
+
+    /// What the published root takes its DACL from.
+    #[derive(Debug)]
+    pub(in crate::staging) enum Adoption {
+        /// A directory made for a destination that was absent: it gets what a
+        /// directory made at the destination's path would, the parent's
+        /// inheritable entries.
+        Fresh,
+        /// An existing destination: its DACL as `AclPlan` says.
+        ///
+        /// A plain atomic run onto an existing directory never reaches the
+        /// publish, as the rename refuses to replace it; only a replace does.
+        Destination(AclPlan),
+    }
+
+    impl Adoption {
+        /// The adoption of an existing destination directory.
+        pub(in crate::staging) const fn of(_status: &EntryStatus, acl: AclPlan) -> Self {
+            Self::Destination(acl)
+        }
+
+        /// Like [`of`](Self::of) for an existing but empty destination.
+        pub(in crate::staging) const fn of_empty_destination(
+            _status: &EntryStatus,
+            acl: AclPlan,
+        ) -> Self {
+            Self::Destination(acl)
+        }
+    }
+
+    /// What [`AdoptedRoot::finish`] does to the published root.
+    #[derive(Debug)]
+    enum RootTarget {
+        /// Rewrite the root and the tree below it.
+        Rewrite(RootDacl),
+        /// Leave the tree owner-only and report why.
+        Private(NarrowingReason),
+    }
+
+    /// A staging root that is ready to be published, holding the handle
+    /// through which its DACL is rewritten after the rename.
+    ///
+    /// [`finish`](Self::finish) does the rewrite, so dropping one leaves the
+    /// root owner-only, as it was before the rename.
+    #[must_use = "the root's DACL is only written by `finish`"]
+    #[derive(Debug)]
+    pub(in crate::staging) struct AdoptedRoot {
+        dacl: DaclHandle,
+        target: RootTarget,
+    }
+
+    impl AdoptedRoot {
+        /// Rewrites the DACL of the published root and of everything below it,
+        /// and returns every way the tree has less access than the
+        /// destination.
+        ///
+        /// The directory is published already, so a failure is not an error:
+        /// [`NarrowingReason::AclCopyFailed`] is recorded and the root stays
+        /// owner-only, which the walk guarantees by rewriting it last.
+        pub(in crate::staging) fn finish(self, _published: Published) -> Narrowed {
+            let mut narrowed = Narrowed::none();
+            match self.target {
+                RootTarget::Private(reason) => narrowed.push(reason),
+                RootTarget::Rewrite(root) => {
+                    if self.dacl.rewrite(&root).is_err() {
+                        narrowed.push(NarrowingReason::AclCopyFailed);
+                    }
+                }
+            }
+            narrowed
+        }
+    }
+
+    #[allow(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        clippy::needless_pass_by_ref_mut,
+        reason = "keeps the call sites platform-neutral"
+    )]
+    impl StagingDir<'_> {
+        /// The adoption of a root made for an absent destination.
+        pub(in crate::staging) fn probe_umask(&self) -> io::Result<Adoption> {
+            Ok(Adoption::Fresh)
+        }
+
+        /// Opens the staged root for its DACL, before the rename, and reads
+        /// what it is to be given.
+        ///
+        /// A fresh root reads its parent's descriptor through the pinned
+        /// parent; one that cannot be read leaves the tree owner-only.
+        ///
+        /// # Errors
+        ///
+        /// The I/O error of opening the root, or `NotFound` when it is no
+        /// longer the directory that was created.
+        pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<AdoptedRoot> {
+            let dacl = self
+                .parent
+                .open_dir_for_dacl(self.name.as_leaf(), self.id)?;
+            let target = match adoption {
+                Adoption::Destination(AclPlan::Copy(security)) => {
+                    RootTarget::Rewrite(RootDacl::Copy(security))
+                }
+                Adoption::Destination(AclPlan::Private(reason)) => RootTarget::Private(reason),
+                Adoption::Fresh => self.parent.read_security().map_or(
+                    RootTarget::Private(NarrowingReason::AclCopyFailed),
+                    |parent| RootTarget::Rewrite(RootDacl::Inherit(parent)),
+                ),
+            };
+            Ok(AdoptedRoot { dacl, target })
+        }
+
+        pub(in crate::staging) fn vanished_reason(&self) -> io::Result<Option<NarrowingReason>> {
+            Ok(None)
+        }
+
+        pub(in crate::staging) fn reset_private(&self) {}
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 mod imp {
     use std::io;
 

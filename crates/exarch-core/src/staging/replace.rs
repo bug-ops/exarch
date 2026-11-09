@@ -597,14 +597,13 @@ fn swap_adopted(
             return Err(roll_back(displaced, staging, &error, context, dest.path));
         }
     };
-    let mut published = match staging.publish(dest.name) {
+    let published = match staging.publish(dest.name) {
         Ok(published) => published,
         Err(error) => {
             let context = "failed to move the extracted content into place";
             return Err(roll_back(displaced, staging, &error, context, dest.path));
         }
     };
-    report.record_narrowing(published.take_narrowing());
     report.record_narrowing(root.finish(published));
     displaced.discard(&mut report);
     Ok(report)

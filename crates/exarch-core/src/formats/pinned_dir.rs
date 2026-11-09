@@ -79,9 +79,15 @@ use crate::types::DestDir;
 
 #[cfg(windows)]
 pub(crate) use imp::DaclHandle;
+#[cfg(windows)]
+pub(crate) use imp::DirRead;
+#[cfg(windows)]
+pub(crate) use imp::RootDacl;
 pub(crate) use imp::VettedDir;
 #[cfg(unix)]
 pub(crate) use imp::open_directory_at;
+#[cfg(windows)]
+pub(crate) use nt::security::DirSecurity;
 
 /// Exactly one normal path component: a name inside a [`VettedDir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -861,6 +867,12 @@ mod imp {
 #[allow(unsafe_code)] // the only unsafe code on Windows: NT directory-relative calls
 pub(in crate::formats) mod nt;
 
+#[cfg(windows)]
+mod dacl_walk;
+
+#[cfg(any(windows, test))]
+mod dir_info;
+
 #[cfg(all(test, windows))]
 #[allow(unsafe_code)] // test-only DACL reader
 pub(crate) mod dacl_probe;
@@ -895,10 +907,20 @@ mod imp {
     use super::EntryStatus;
     use super::Leaf;
     use super::TempLeaf;
+    use super::dacl_walk;
     use super::nt;
     use super::nt::Disposition;
     use super::nt::Kind;
     use super::nt::Request;
+    use super::nt::security;
+    use super::nt::security::DaclState;
+    use super::nt::security::Derived;
+    use super::nt::security::Descriptor;
+    use super::nt::security::DirSecurity;
+    use super::nt::security::EffectiveToken;
+    use super::nt::security::ObjectKind;
+    use super::nt::security::Part;
+    use super::nt::security::SecurityDescriptor;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::file_identity::IdentityCheck;
     use crate::formats::occupant::ReplacePermit;
@@ -909,22 +931,70 @@ mod imp {
 
     const DIR_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
+    /// Where the DACL of a published root comes from.
+    #[derive(Debug)]
+    pub(crate) enum RootDacl {
+        /// What a directory created in the parent that was read gets: the
+        /// parent's inheritable entries.
+        Inherit(DirSecurity),
+        /// The descriptor of the destination the root replaces, copied as it
+        /// is, including a null DACL.
+        Copy(DirSecurity),
+    }
+
+    /// A directory's security as read by name.
+    #[derive(Debug)]
+    pub(crate) enum DirRead {
+        /// The descriptor of the directory that was expected.
+        Read(DirSecurity),
+        /// The name no longer holds the directory that was expected.
+        Replaced,
+    }
+
     /// A directory handle opened with `WRITE_DAC`, which survives a rename of
     /// the directory.
     #[derive(Debug)]
     pub(crate) struct DaclHandle(File);
 
     impl DaclHandle {
-        /// Makes the directory inherit its DACL from its parent again, and
-        /// re-derives what its children inherited.
+        /// Gives the directory the DACL `root` names, then every entry below
+        /// it the DACL it would have had if created in place under that
+        /// directory (see the `dacl_walk` module); the directory itself is
+        /// rewritten last, so until the whole tree is done it stays as private
+        /// as it was.
         ///
         /// # Errors
         ///
-        /// The OS error. When the parent has no inheritable entries the
-        /// directory is put back to its owner-only DACL and an error is
-        /// returned too, so it is never left with an empty DACL.
-        pub(crate) fn inherit_dacl(&self) -> io::Result<()> {
-            nt::inherit_dacl(self.0.as_handle())
+        /// The OS error of the first step that failed. A parent without
+        /// inheritable entries is refused before anything is derived or
+        /// written: the token's default DACL would otherwise stand in for it.
+        pub(crate) fn rewrite(&self, root: &RootDacl) -> io::Result<()> {
+            let token = EffectiveToken::open()?;
+            let handle = self.0.as_handle();
+            let descriptor = match root {
+                RootDacl::Copy(source) => source.descriptor(),
+                RootDacl::Inherit(parent) => {
+                    let parent = parent.descriptor();
+                    if !parent.has_inheritable_entries()? {
+                        return Err(io::Error::other(
+                            "the parent has no inheritable entries; the tree stays owner-only",
+                        ));
+                    }
+                    let creator = SecurityDescriptor::read(handle, Part::OwnerAndGroup)?;
+                    let derived = Derived::new(&parent, &creator, ObjectKind::Container, &token)?;
+                    match derived.dacl_state()? {
+                        DaclState::Present { entries } if entries > 0 => {}
+                        DaclState::Present { .. } | DaclState::Null => {
+                            return Err(io::Error::other(
+                                "the parent has no inheritable entries; the tree stays owner-only",
+                            ));
+                        }
+                    }
+                    Descriptor::Derived(derived)
+                }
+            };
+            dacl_walk::rewrite_children(handle, &descriptor, &token)?;
+            security::apply_dacl(handle, &descriptor)
         }
     }
 
@@ -1084,6 +1154,42 @@ mod imp {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             Ok(DaclHandle(file))
+        }
+
+        /// The owner, group and DACL of this directory, read through a handle
+        /// reopened on it with `READ_CONTROL`.
+        ///
+        /// # Errors
+        ///
+        /// The OS error; `PermissionDenied` when the caller may not read it.
+        pub(crate) fn read_security(&self) -> io::Result<DirSecurity> {
+            let reopened = nt::reopen_dir(self.0.as_handle(), READ_CONTROL | FILE_READ_ATTRIBUTES)?;
+            SecurityDescriptor::read(reopened.as_handle(), Part::OwnerGroupAndDacl)
+                .map(DirSecurity::new)
+        }
+
+        /// The owner, group and DACL of the subdirectory `name`, when it still
+        /// is the directory `expected` names; a link or a file there is an
+        /// error. An identity the volume cannot provide is not a mismatch.
+        ///
+        /// # Errors
+        ///
+        /// The OS error; `PermissionDenied` when the caller may not read it.
+        pub(crate) fn read_dir_security(
+            &self,
+            name: Leaf<'_>,
+            expected: FileIdentity,
+        ) -> io::Result<DirRead> {
+            let request = Request {
+                kind: Kind::Directory,
+                ..Request::open(READ_CONTROL | FILE_READ_ATTRIBUTES)
+            };
+            let file = File::from(nt::create_at(self.0.as_handle(), name, request)?);
+            if FileIdentity::of_file(&file).check(expected) == IdentityCheck::Different {
+                return Ok(DirRead::Replaced);
+            }
+            SecurityDescriptor::read(file.as_handle(), Part::OwnerGroupAndDacl)
+                .map(|descriptor| DirRead::Read(DirSecurity::new(descriptor)))
         }
 
         /// Renames the directory `from` to `to`, both in this directory, and
@@ -1641,7 +1747,7 @@ mod windows_tests {
     }
 
     #[test]
-    fn resetting_the_dacl_inherits_from_the_parent_down_the_tree() {
+    fn rewriting_with_the_parent_dacl_inherits_it_down_the_tree() {
         use super::dacl_probe;
         let temp = TempDir::new().unwrap();
         let dir = pinned(&temp);
@@ -1652,7 +1758,7 @@ mod windows_tests {
 
         dir.open_dir_for_dacl(leaf("stage"), id)
             .unwrap()
-            .inherit_dacl()
+            .rewrite(&RootDacl::Inherit(dir.read_security().unwrap()))
             .unwrap();
 
         let parent = dacl_probe::read(temp.path());
@@ -1676,7 +1782,7 @@ mod windows_tests {
     }
 
     #[test]
-    fn resetting_under_a_parent_without_inheritable_entries_keeps_the_dir_owner_only() {
+    fn rewriting_under_a_parent_without_inheritable_entries_keeps_the_dir_owner_only() {
         use super::dacl_probe;
         let temp = TempDir::new().unwrap();
         let parent = temp.path().join("closed");
@@ -1691,7 +1797,7 @@ mod windows_tests {
         let result = dir
             .open_dir_for_dacl(leaf("stage"), id)
             .unwrap()
-            .inherit_dacl();
+            .rewrite(&RootDacl::Inherit(dir.read_security().unwrap()));
 
         let dacl = dacl_probe::read(&stage);
         assert!(

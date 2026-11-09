@@ -24,7 +24,7 @@ use super::acl::ParentAcl;
 use super::adopt::Adoption;
 use super::io_context;
 use crate::ArchiveError;
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use crate::NarrowingReason;
 use crate::Result;
 use crate::STAGING_PREFIX;
@@ -32,13 +32,10 @@ use crate::StagingLeftover;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
 use crate::formats::output_root::StagedOutput;
-#[cfg(windows)]
-use crate::formats::pinned_dir::DaclHandle;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::run_record::Recording;
 use crate::formats::run_record::RunRecord;
-use crate::report::Narrowed;
 
 const CREATE_ATTEMPTS: usize = 16;
 
@@ -121,22 +118,8 @@ impl Inherited {
 ///
 /// Only [`StagingDir::publish`] makes one, so what must happen to the root
 /// after the rename cannot be done before it.
-///
-/// It also carries what the rename itself left narrower than intended: on
-/// Windows the root is renamed with its owner-only DACL and then reset to
-/// inherit, and a reset that fails leaves the root owner-only.
 #[derive(Debug)]
-pub(super) struct Published {
-    narrowed: Narrowed,
-}
-
-impl Published {
-    /// Takes the narrowing the publication itself caused, to record on the
-    /// report; always empty off Windows.
-    pub(super) fn take_narrowing(&mut self) -> Narrowed {
-        std::mem::replace(&mut self.narrowed, Narrowed::none())
-    }
-}
+pub(super) struct Published(());
 
 /// Whose inheritance a staging directory is seeded with.
 #[cfg(unix)]
@@ -728,33 +711,10 @@ impl<'p> StagingDir<'p> {
     ///
     /// The rename's I/O error.
     pub(super) fn publish(&mut self, destination: &LeafBuf) -> io::Result<Published> {
-        #[cfg(windows)]
-        let dacl = self
-            .parent
-            .open_dir_for_dacl(self.name.as_leaf(), self.id)?;
         self.parent
             .rename_dir_within(self.name.as_leaf(), destination.as_leaf())?;
         self.armed = false;
-        #[cfg(windows)]
-        let narrowed = Self::inherit_after_rename(&dacl);
-        #[cfg(not(windows))]
-        let narrowed = Narrowed::none();
-        Ok(Published { narrowed })
-    }
-
-    /// Makes the renamed root inherit the DACL of its new parent, through the
-    /// handle opened before the rename so no name is resolved again.
-    ///
-    /// The root is already published, so a failure does not fail the run: the
-    /// root stays owner-only, narrower than the destination it replaces, and
-    /// the narrowing is reported.
-    #[cfg(windows)]
-    fn inherit_after_rename(dacl: &DaclHandle) -> Narrowed {
-        let mut narrowed = Narrowed::none();
-        if dacl.inherit_dacl().is_err() {
-            narrowed.push(NarrowingReason::AclCopyFailed);
-        }
-        narrowed
+        Ok(Published(()))
     }
 
     /// Removes the staging directory and says what survived the removal.

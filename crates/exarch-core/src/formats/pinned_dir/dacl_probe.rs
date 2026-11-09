@@ -24,19 +24,28 @@ use windows_sys::Win32::Security::ACL_REVISION;
 use windows_sys::Win32::Security::ACL_SIZE_INFORMATION;
 use windows_sys::Win32::Security::AclSizeInformation;
 use windows_sys::Win32::Security::AddAccessAllowedAceEx;
+use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
 use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
+use windows_sys::Win32::Security::Authorization::SDDL_REVISION_1;
 use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
 use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
 use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::GetAce;
 use windows_sys::Win32::Security::GetAclInformation;
 use windows_sys::Win32::Security::GetSecurityDescriptorControl;
+use windows_sys::Win32::Security::GetSecurityDescriptorDacl;
+use windows_sys::Win32::Security::ImpersonateSelf;
 use windows_sys::Win32::Security::InitializeAcl;
 use windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::RevertToSelf;
+use windows_sys::Win32::Security::SE_DACL_AUTO_INHERITED;
 use windows_sys::Win32::Security::SE_DACL_PROTECTED;
+use windows_sys::Win32::Security::SecurityImpersonation;
+use windows_sys::Win32::Security::UNPROTECTED_DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
 use super::nt::current_user_sid;
 use super::nt::sid_to_string;
@@ -75,7 +84,42 @@ impl Ace {
 pub(crate) struct Dacl {
     /// `SE_DACL_PROTECTED`: the parent's entries are ignored.
     pub(crate) protected: bool,
+    /// `SE_DACL_AUTO_INHERITED`: the entries marked inherited were derived by
+    /// the system.
+    pub(crate) auto_inherited: bool,
+    /// Whether there is no DACL at all, which grants everyone full access.
+    pub(crate) null: bool,
     pub(crate) aces: Vec<Ace>,
+}
+
+impl Dacl {
+    /// Whether `other` has the same bits and entries, in the same order.
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        self.protected == other.protected
+            && self.auto_inherited == other.auto_inherited
+            && self.null == other.null
+            && self.aces == other.aces
+    }
+}
+
+/// A thread that impersonates the process user, reverted on drop.
+pub(crate) struct Impersonation;
+
+impl Impersonation {
+    /// Starts impersonating on the calling thread.
+    pub(crate) fn start() -> Self {
+        // SAFETY: `ImpersonateSelf` takes only an impersonation level.
+        let ok = unsafe { ImpersonateSelf(SecurityImpersonation) };
+        assert_ne!(ok, 0, "ImpersonateSelf failed");
+        Self
+    }
+}
+
+impl Drop for Impersonation {
+    fn drop(&mut self) {
+        // SAFETY: `RevertToSelf` takes no arguments.
+        unsafe { RevertToSelf() };
+    }
 }
 
 /// The string SID of the user running the tests.
@@ -83,11 +127,23 @@ pub(crate) fn current_user() -> String {
     current_user_sid().unwrap()
 }
 
-/// Reads the DACL of the file or directory at `path`.
+/// Reads the DACL of the file or directory at `path`, following a link there.
 pub(crate) fn read(path: &Path) -> Dacl {
+    read_with(path, FILE_FLAG_BACKUP_SEMANTICS)
+}
+
+/// Reads the DACL of the entry at `path` itself, without following a link.
+pub(crate) fn read_itself(path: &Path) -> Dacl {
+    read_with(
+        path,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+}
+
+fn read_with(path: &Path, flags: u32) -> Dacl {
     let file = OpenOptions::new()
         .access_mode(READ_CONTROL)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .custom_flags(flags)
         .open(path)
         .unwrap();
     let mut acl: *mut ACL = null_mut();
@@ -108,8 +164,11 @@ pub(crate) fn read(path: &Path) -> Dacl {
         )
     };
     assert_eq!(code, ERROR_SUCCESS, "GetSecurityInfo failed");
+    let control = control(descriptor);
     let dacl = Dacl {
-        protected: control(descriptor) & SE_DACL_PROTECTED != 0,
+        protected: control & SE_DACL_PROTECTED != 0,
+        auto_inherited: control & SE_DACL_AUTO_INHERITED != 0,
+        null: acl.is_null(),
         aces: entries(acl).unwrap(),
     };
     // SAFETY: `descriptor` was allocated by `GetSecurityInfo` with
@@ -188,6 +247,68 @@ pub(crate) fn restrict_to_current_user_without_inheritance(path: &Path) {
         "the fixture parent still has inheritable entries: {:?}",
         dacl.aces
     );
+}
+
+/// Sets the DACL of the directory `path` from the SDDL string `sddl`, with the
+/// protection its `P` flag says; `D:NO_ACCESS_CONTROL` gives a null DACL.
+pub(crate) fn set_dacl_from_sddl(path: &Path, sddl: &str) {
+    use std::os::windows::ffi::OsStrExt;
+
+    let text: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `text` is NUL-terminated, `descriptor` is valid for writes and
+    // the size out-pointer is null, which the API allows.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text.as_ptr(),
+            SDDL_REVISION_1,
+            &raw mut descriptor,
+            null_mut(),
+        )
+    };
+    assert_ne!(ok, 0, "the SDDL string {sddl} does not parse");
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut acl: *mut ACL = null_mut();
+    // SAFETY: `descriptor` is valid, and the three out-pointers are valid for
+    // writes.
+    let ok = unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &raw mut present,
+            &raw mut acl,
+            &raw mut defaulted,
+        )
+    };
+    assert_ne!(ok, 0, "GetSecurityDescriptorDacl failed");
+    let protection = if control(descriptor) & SE_DACL_PROTECTED == 0 {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    };
+    let name: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `name` is NUL-terminated, the owner, group and SACL are null
+    // because only the DACL is selected, and `acl` is null or points into
+    // `descriptor`, which outlives the call.
+    let code = unsafe {
+        SetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | protection,
+            null_mut(),
+            null_mut(),
+            acl,
+            std::ptr::null(),
+        )
+    };
+    // SAFETY: `descriptor` was allocated by the conversion with `LocalAlloc`
+    // and is no longer used.
+    unsafe { LocalFree(descriptor) };
+    assert_eq!(code, ERROR_SUCCESS, "SetNamedSecurityInfoW failed");
 }
 
 fn control(descriptor: PSECURITY_DESCRIPTOR) -> u16 {

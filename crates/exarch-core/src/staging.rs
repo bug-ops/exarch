@@ -489,7 +489,7 @@ fn publish_adopted(
         report.record_narrowing(destination_vanished(withheld));
         None
     };
-    let mut published = staging
+    let published = staging
         .publish(&destination.name)
         .map_err(|e| match e.kind() {
             io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty => {
@@ -503,7 +503,6 @@ fn publish_adopted(
                 output_dir,
             )),
         })?;
-    report.record_narrowing(published.take_narrowing());
     if let Some(root) = adopted {
         report.record_narrowing(root.finish(published));
     }

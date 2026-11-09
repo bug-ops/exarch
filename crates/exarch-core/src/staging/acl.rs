@@ -88,9 +88,6 @@ mod imp {
     use crate::formats::pinned_dir::Uid;
     use crate::staging::dir::VerifiedStage;
 
-    // TODO(#1117): the root inherits the
-    // parent's ACL instead of the destination's
-
     /// The user and group a directory belongs to.
     ///
     /// An ACL names its owner and owning group by id, so it only keeps its
@@ -1632,7 +1629,57 @@ pub(super) use macos::InheritedAcl;
 #[cfg(all(unix, target_os = "macos"))]
 pub(super) use macos::MacAcl as CopiedAcl;
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod imp {
+    use std::io;
+    use std::path::Path;
+
+    use crate::NarrowingReason;
+    use crate::formats::file_identity::FileIdentity;
+    use crate::formats::pinned_dir::DirRead;
+    use crate::formats::pinned_dir::DirSecurity;
+    use crate::formats::pinned_dir::Leaf;
+    use crate::formats::pinned_dir::VettedDir;
+
+    /// What the published root does about the destination's DACL.
+    #[derive(Debug)]
+    pub(in crate::staging) enum AclPlan {
+        /// Give the root the destination's descriptor, and the tree what it
+        /// would have inherited from it.
+        Copy(DirSecurity),
+        /// The destination's DACL cannot be read or no longer is the one that
+        /// was displaced: the tree stays owner-only.
+        Private(NarrowingReason),
+    }
+
+    /// Reads the DACL of the directory `name` of `pin`, which must still be
+    /// the directory `expected` names.
+    ///
+    /// A directory whose security the caller may not read, or that was
+    /// replaced, is a [`AclPlan::Private`] plan, not an error: the run goes on
+    /// with a root that is narrower than the destination and says so.
+    ///
+    /// # Errors
+    ///
+    /// Any other I/O error of opening or reading it.
+    pub(in crate::staging) fn read_destination(
+        pin: &VettedDir,
+        name: Leaf<'_>,
+        _parent_path: &Path,
+        expected: FileIdentity,
+    ) -> io::Result<AclPlan> {
+        match pin.read_dir_security(name, expected) {
+            Ok(DirRead::Read(security)) => Ok(AclPlan::Copy(security)),
+            Ok(DirRead::Replaced) => Ok(AclPlan::Private(NarrowingReason::DestinationChanged)),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                Ok(AclPlan::Private(NarrowingReason::AclUnreadable))
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 mod imp {
     use std::io;
     use std::path::Path;
@@ -1641,12 +1688,10 @@ mod imp {
     use crate::formats::pinned_dir::Leaf;
     use crate::formats::pinned_dir::VettedDir;
 
-    /// Platforms without Unix ACLs read none.
+    /// Platforms without ACLs read none.
     #[derive(Debug, Clone, Copy)]
     pub(in crate::staging) struct AclPlan;
 
-    // TODO(#1117): the root inherits the
-    // parent's ACL instead of the destination's
     #[allow(
         clippy::unnecessary_wraps,
         clippy::missing_const_for_fn,

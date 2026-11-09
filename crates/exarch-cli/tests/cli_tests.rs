@@ -8868,3 +8868,206 @@ fn test_list_allow_symlinks_degrades_links_in_a_solid_7z_it_cannot_decode() {
     assert_eq!(action_of(&decoded, "sl"), "extract", "{decoded:?}");
     assert_eq!(action_of(&decoded, "escape"), "refuse", "{decoded:?}");
 }
+
+/// One member of a hardlink test archive.
+enum TarMember<'a> {
+    File(&'a str),
+    Dir(&'a str),
+    Hardlink { name: &'a str, target: &'a str },
+}
+
+fn write_tar(path: &std::path::Path, members: &[TarMember<'_>]) {
+    let mut builder = tar::Builder::new(std::fs::File::create(path).expect("create archive"));
+    for member in members {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(0);
+        match *member {
+            TarMember::File(name) => {
+                header.set_size(4);
+                builder
+                    .append_data(&mut header, name, &b"data"[..])
+                    .expect("append file");
+            }
+            TarMember::Dir(name) => {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_mode(0o755);
+                builder
+                    .append_data(&mut header, name, std::io::empty())
+                    .expect("append directory");
+            }
+            TarMember::Hardlink { name, target } => {
+                header.set_entry_type(tar::EntryType::Link);
+                // `set_link_name` rejects an absolute target in some versions.
+                header.set_link_name(target).expect("set link name");
+                builder
+                    .append_data(&mut header, name, std::io::empty())
+                    .expect("append hardlink");
+            }
+        }
+    }
+    builder.finish().expect("finish tar");
+}
+
+/// The `list`, `verify` and `extract` verdicts for `hard.lnk` in an archive
+/// whose hardlink target is broken in the way `members` builds.
+fn assert_broken_hardlink_is_refused_everywhere(members: &[TarMember<'_>]) {
+    let temp = TempDir::new().expect("create temp dir");
+    let archive = temp.path().join("links.tar");
+    write_tar(&archive, members);
+
+    let actions = listed_actions(&archive, &["--allow-hardlinks"]);
+    assert_eq!(action_of(&actions, "hard.lnk"), "refuse", "{actions:?}");
+    let text = exarch_cmd()
+        .args(["list", "--include", "*", "--allow-hardlinks"])
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text).expect("utf-8 listing");
+    assert!(line_of(&text, "hard.lnk").contains("[refused]"), "{text}");
+
+    exarch_cmd()
+        .args(["verify", "--allow-hardlinks"])
+        .arg(&archive)
+        .assert()
+        .code(1);
+    let out = temp.path().join("out");
+    exarch_cmd()
+        .args(["extract", "--allow-hardlinks"])
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn test_list_refuses_a_hardlink_whose_target_is_missing() {
+    assert_broken_hardlink_is_refused_everywhere(&[TarMember::Hardlink {
+        name: "hard.lnk",
+        target: "nothing",
+    }]);
+}
+
+#[test]
+fn test_list_refuses_a_hardlink_whose_target_escapes() {
+    for target in ["../a", "/a"] {
+        assert_broken_hardlink_is_refused_everywhere(&[
+            TarMember::File("a"),
+            TarMember::Hardlink {
+                name: "hard.lnk",
+                target,
+            },
+        ]);
+    }
+}
+
+#[test]
+fn test_list_refuses_a_hardlink_whose_target_is_a_directory() {
+    assert_broken_hardlink_is_refused_everywhere(&[
+        TarMember::Dir("d"),
+        TarMember::Hardlink {
+            name: "hard.lnk",
+            target: "d",
+        },
+    ]);
+}
+
+#[test]
+fn test_list_lands_a_hardlink_whose_target_is_a_file_and_extract_agrees() {
+    let link = TarMember::Hardlink {
+        name: "hard.lnk",
+        target: "t.txt",
+    };
+    // A target that comes later in the archive is accepted by all three.
+    for members in [
+        [TarMember::File("t.txt"), link],
+        [
+            TarMember::Hardlink {
+                name: "hard.lnk",
+                target: "t.txt",
+            },
+            TarMember::File("t.txt"),
+        ],
+    ] {
+        let temp = TempDir::new().expect("create temp dir");
+        let archive = temp.path().join("links.tar");
+        write_tar(&archive, &members);
+        let actions = listed_actions(&archive, &["--allow-hardlinks"]);
+        assert_eq!(action_of(&actions, "hard.lnk"), "extract", "{actions:?}");
+        exarch_cli_verify_and_extract_succeed(&archive, temp.path());
+    }
+}
+
+fn exarch_cli_verify_and_extract_succeed(archive: &std::path::Path, dir: &std::path::Path) {
+    exarch_cmd()
+        .args(["verify", "--allow-hardlinks"])
+        .arg(archive)
+        .assert()
+        .success();
+    exarch_cmd()
+        .args(["extract", "--allow-hardlinks"])
+        .arg(archive)
+        .arg(dir.join("out"))
+        .assert()
+        .success();
+}
+
+/// A 7z whose only coder is Deflate is refused at admission like Deflate64:
+/// `list` still reads the header, everything that would decode fails (#1091).
+#[test]
+fn test_sevenz_deflate_is_listed_but_refused_by_verify_and_extract() {
+    let archive = workspace_fixture("deflate.7z");
+    exarch_cmd()
+        .arg("list")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("deflate-a.txt"));
+
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("FAIL"));
+
+    exarch_cmd()
+        .args(["verify", "--check-integrity"])
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("INCOMPLETE"));
+
+    let output = exarch_cmd()
+        .args(["--json", "verify", "--check-integrity"])
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(json["data"]["status"], "FAIL", "{json}");
+    assert_eq!(json["data"]["integrity_status"], "INCOMPLETE", "{json}");
+}
+
+#[test]
+fn test_sevenz_deflate_extract_fails_before_creating_the_destination() {
+    let archive = workspace_fixture("deflate.7z");
+    for flags in [&[][..], &["--atomic"][..]] {
+        let temp = TempDir::new().expect("create temp dir");
+        let out = temp.path().join("out");
+        exarch_cmd()
+            .arg("extract")
+            .args(flags)
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .code(1)
+            .stderr(predicates::str::contains("unsupported coder"));
+        assert!(!out.exists(), "{flags:?} created the destination");
+    }
+}

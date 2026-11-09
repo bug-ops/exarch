@@ -38,6 +38,9 @@ windows-sys = { workspace = true, features = ["Wdk_Foundation", "Wdk_Storage_Fil
 [target.'cfg(any(unix, target_os = "wasi"))'.dependencies]
 rustix = { workspace = true, features = ["fs", "alloc"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 [dev-dependencies]
 criterion.workspace = true
 exarch-testkit.workspace = true

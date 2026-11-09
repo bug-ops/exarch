@@ -44,6 +44,25 @@ struct Fixture {
     config: SecurityConfig,
 }
 
+/// A tar of the directory `d/` and these files, each with its mode.
+fn archive_of(files: &[(&str, u32)]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut dir = tar::Header::new_gnu();
+    dir.set_entry_type(tar::EntryType::Directory);
+    dir.set_mode(0o755);
+    dir.set_size(0);
+    dir.set_cksum();
+    builder.append_data(&mut dir, "d/", &b""[..]).unwrap();
+    for (name, mode) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(2);
+        header.set_mode(*mode);
+        header.set_cksum();
+        builder.append_data(&mut header, name, &b"ok"[..]).unwrap();
+    }
+    builder.into_inner().unwrap()
+}
+
 /// Runs a closure once the extraction wrote its last entry, before anything
 /// is published, and can cancel the run right after.
 struct AtEnd {
@@ -95,23 +114,13 @@ impl Fixture {
     /// what a staged extraction must be indistinguishable from.
     fn new() -> Self {
         let temp = TempDir::new().unwrap();
-        let mut builder = tar::Builder::new(Vec::new());
-        let mut dir = tar::Header::new_gnu();
-        dir.set_entry_type(tar::EntryType::Directory);
-        dir.set_mode(0o755);
-        dir.set_size(0);
-        dir.set_cksum();
-        builder.append_data(&mut dir, "d/", &b""[..]).unwrap();
-        for name in ["p.txt", "d/q.txt"] {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(2);
-            header.set_mode(0o644);
-            header.set_cksum();
-            builder.append_data(&mut header, name, &b"ok"[..]).unwrap();
-        }
         let root = temp.path().canonicalize().unwrap();
         let archive = root.join("a.tar");
-        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        std::fs::write(
+            &archive,
+            archive_of(&[("p.txt", 0o644), ("d/q.txt", 0o644)]),
+        )
+        .unwrap();
         let dest = root.join("dest");
         let twin = root.join("twin");
         std::fs::create_dir(&dest).unwrap();
@@ -733,7 +742,7 @@ mod macos {
     }
 
     #[test]
-    fn a_failed_run_under_an_inherited_delete_deny_names_its_private_leftover() {
+    fn a_failed_run_under_an_inherited_delete_deny_leaves_nothing_behind() {
         let fx = Fixture::new();
         chmod(&fx.dest, 0o755);
         add_ace(
@@ -746,13 +755,106 @@ mod macos {
         let exarch_core::ArchiveError::PartialExtraction(partial) = &error else {
             panic!("expected a partial extraction, got {error}");
         };
-        let leftover = partial.leftover().unwrap();
-        assert!(leftover.path.starts_with(fx.dest.parent().unwrap()));
-        assert_eq!(mode_of(&leftover.path), 0o700);
-        assert!(
-            leftover.path.join("d").exists(),
-            "the inheriting directory survived"
+        assert!(partial.leftover().is_none(), "{:?}", partial.leftover());
+        assert_eq!(
+            staging_dirs_in(fx.dest.parent().unwrap()),
+            Vec::<PathBuf>::new()
         );
+    }
+
+    /// Cancelled runs under a parent whose children inherit `ace`, with a
+    /// directory, an ordinary file and a write-only file staged.
+    fn assert_rolled_back_cleanly_under(ace: &str) {
+        for staging in MODES {
+            let fx = absent_fixture();
+            std::fs::write(
+                &fx.archive,
+                archive_of(&[("p.txt", 0o644), ("d/q.txt", 0o644), ("w.txt", 0o200)]),
+            )
+            .unwrap();
+            let parent = fx.dest.parent().unwrap().to_path_buf();
+            add_ace(&parent, ace);
+
+            let error = fx.extract_cancelled(staging);
+
+            remove_acl(&parent);
+            let exarch_core::ArchiveError::PartialExtraction(partial) = &error else {
+                panic!("{staging:?}: expected a partial extraction, got {error}");
+            };
+            assert!(partial.leftover().is_none(), "{staging:?}");
+            assert_eq!(
+                staging_dirs_in(&parent),
+                Vec::<PathBuf>::new(),
+                "{staging:?}"
+            );
+        }
+    }
+
+    fn remove_acl(path: &Path) {
+        let status = Command::new("/bin/chmod")
+            .args(["-N"])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "chmod -N");
+    }
+
+    #[test]
+    fn a_rollback_under_an_inheritable_delete_deny_removes_every_staged_entry() {
+        assert_rolled_back_cleanly_under("everyone deny delete,file_inherit,directory_inherit");
+    }
+
+    #[test]
+    fn a_rollback_under_inheritable_list_and_delete_denies_removes_every_staged_entry() {
+        assert_rolled_back_cleanly_under(
+            "everyone deny list,delete,file_inherit,directory_inherit",
+        );
+    }
+
+    #[test]
+    fn a_staged_file_nobody_may_open_is_named_as_the_leftover() {
+        let fx = absent_fixture();
+        std::fs::write(&fx.archive, archive_of(&[("z.txt", 0o000)])).unwrap();
+        let parent = fx.dest.parent().unwrap().to_path_buf();
+        add_ace(
+            &parent,
+            "everyone deny delete,file_inherit,directory_inherit",
+        );
+
+        let error = fx.extract_cancelled(Staging::Atomic);
+
+        let exarch_core::ArchiveError::PartialExtraction(partial) = &error else {
+            panic!("expected a partial extraction, got {error}");
+        };
+        let leftover = partial.leftover().unwrap();
+        assert!(leftover.path.join("z.txt").exists());
+    }
+
+    #[test]
+    fn an_absent_destination_under_an_inheritable_deny_list_extracts_like_in_place() {
+        for staging in MODES {
+            let fx = absent_fixture();
+            let parent = fx.dest.parent().unwrap().to_path_buf();
+            add_ace(&parent, "everyone deny list,directory_inherit");
+
+            fx.extract(staging);
+            fx.extract_twin();
+
+            remove_acl(&parent);
+            assert_eq!(
+                staging_dirs_in(&parent),
+                Vec::<PathBuf>::new(),
+                "{staging:?}"
+            );
+            for path in TREE {
+                assert_eq!(
+                    aces_of(&fx.dest.join(path)),
+                    aces_of(&fx.twin.join(path)),
+                    "{staging:?} {path:?}"
+                );
+            }
+            assert!(!aces_of(&fx.dest).is_empty(), "{staging:?}");
+        }
     }
 
     #[test]

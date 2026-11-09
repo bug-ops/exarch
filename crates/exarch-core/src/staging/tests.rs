@@ -674,6 +674,142 @@ fn a_read_only_destination_is_replaced_and_its_backup_removed() {
     assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
 }
 
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[test]
+fn a_destination_whatever_its_mode_is_replaced_and_its_backup_removed() {
+    for mode in [0o311, 0o600, 0o644] {
+        let fx = Fixture::new();
+        if !removal_is_enforced(&fx.parent) {
+            eprintln!("skipping: directory permissions are not enforced (running as root?)");
+            return;
+        }
+        let dest = fx.with_old_destination();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode)).unwrap();
+
+        let result = fx.extract(&dest, Staging::AtomicReplace, &mut Hooks::default());
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let report = result.unwrap_or_else(|e| panic!("{mode:o}: {e}"));
+
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, ExtractionWarning::BackupCleanupFailed { .. })),
+            "{mode:o}: {:?}",
+            report.warnings
+        );
+        assert_eq!(read(&dest.join("a.txt")), "new a", "{mode:o}");
+        assert!(fx.leftovers().is_empty(), "{mode:o}: {:?}", fx.leftovers());
+    }
+}
+
+/// Empties and recreates the destination, as an attacker with write access to
+/// its parent would: where the filesystem reissues an inode number at once
+/// (ext4, tmpfs) only a held handle on the old directory tells the two apart.
+fn recreate_destination(dest: &Path) -> Action {
+    let dest = dest.to_path_buf();
+    Box::new(move || {
+        std::fs::remove_dir(&dest).unwrap();
+        std::fs::create_dir(&dest).unwrap();
+    })
+}
+
+/// Whether this process holds a descriptor on the directory `target`.
+#[cfg(not(target_os = "macos"))]
+fn holds_descriptor_on(target: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let wanted = std::fs::metadata(target).unwrap();
+    (0..1024).any(|fd| {
+        std::fs::metadata(format!("/proc/self/fd/{fd}"))
+            .is_ok_and(|held| held.dev() == wanted.dev() && held.ino() == wanted.ino())
+    })
+}
+
+/// `/dev/fd` cannot be stat'ed for a directory descriptor on macOS, so the
+/// open files of the process are listed with `lsof`.
+#[cfg(target_os = "macos")]
+fn holds_descriptor_on(target: &Path) -> bool {
+    let output = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-Fn", "-p", &std::process::id().to_string()])
+        .output()
+        .unwrap();
+    let wanted = target.canonicalize().unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .any(|name| Path::new(name) == wanted)
+}
+
+#[test]
+fn the_destination_stays_held_while_the_archive_extracts() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    for staging in [Staging::Atomic, Staging::AtomicReplace] {
+        let fx = Fixture::new();
+        let dest = if staging == Staging::Atomic {
+            std::fs::create_dir(fx.dest()).unwrap();
+            fx.dest()
+        } else {
+            fx.with_old_destination()
+        };
+        let held = Arc::new(AtomicBool::new(false));
+        let (seen, observed) = (held.clone(), dest.clone());
+        let mut hooks = Hooks {
+            at_end: Some(Box::new(move || {
+                seen.store(holds_descriptor_on(&observed), Ordering::Relaxed);
+            })),
+            ..Hooks::default()
+        };
+
+        fx.extract(&dest, staging, &mut hooks).unwrap();
+
+        assert!(held.load(Ordering::Relaxed), "{staging:?}");
+    }
+}
+
+#[test]
+fn an_empty_destination_recreated_during_an_atomic_run_is_reported_as_changed() {
+    let fx = Fixture::new();
+    let dest = fx.dest();
+    std::fs::create_dir(&dest).unwrap();
+    let mut hooks = Hooks {
+        at_end: Some(recreate_destination(&dest)),
+        ..Hooks::default()
+    };
+
+    let report = fx.extract(&dest, Staging::Atomic, &mut hooks).unwrap();
+
+    assert!(narrowing::reasons(&report).contains(&NarrowingReason::DestinationChanged));
+    assert_eq!(read(&dest.join("a.txt")), "new a");
+}
+
+#[test]
+fn a_destination_recreated_before_a_replace_swaps_is_refused() {
+    let fx = Fixture::new();
+    let dest = fx.dest();
+    std::fs::create_dir(&dest).unwrap();
+    let mut hooks = Hooks {
+        at_end: Some(recreate_destination(&dest)),
+        ..Hooks::default()
+    };
+
+    let error = fx
+        .extract(&dest, Staging::AtomicReplace, &mut hooks)
+        .unwrap_err();
+
+    assert_matches!(
+        error,
+        ArchiveError::SecurityViolation {
+            kind: Violation::DestinationChanged
+        }
+    );
+    assert!(std::fs::read_dir(&dest).unwrap().next().is_none());
+    assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
+}
+
 /// Races an attacker that flips the destination between a real directory and a
 /// symlink to a victim directory against `AtomicReplace`. Whatever the outcome
 /// of a run, the victim must keep exactly what it had: nothing is ever written

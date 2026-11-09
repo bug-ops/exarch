@@ -86,6 +86,7 @@ mod imp {
     use std::os::unix::fs::MetadataExt;
 
     use crate::NarrowingReason;
+    use crate::staging::dir::VerifiedStage;
 
     // TODO(#1020): copy the Windows DACL instead of falling back to a private
     // root
@@ -175,29 +176,41 @@ mod imp {
         /// Nothing that is read or cleared: a POSIX default ACL lives in the
         /// mode's group bits, and clearing it would hide it from the umask
         /// probe.
+        #[cfg_attr(
+            target_os = "macos",
+            allow(dead_code, reason = "macOS lists the inherited entries instead")
+        )]
         MaskedByMode,
         /// The list the directory inherited, read before it is cleared.
+        #[cfg_attr(
+            not(target_os = "macos"),
+            allow(dead_code, reason = "only macOS lists the inherited entries")
+        )]
         Captured(AclPlan),
     }
 
-    /// Reads what the directory `name` of `pin`, just created in a parent,
-    /// inherited from that parent. Only macOS lists it: its inherited entries
-    /// are ordinary ACL entries the directory applies to itself.
+    /// Reads what `stage`, just created in a parent, inherited from that
+    /// parent. Only macOS lists it: its inherited entries are ordinary ACL
+    /// entries the directory applies to itself.
     ///
     /// # Errors
     ///
-    /// The I/O error of [`read_destination`].
-    pub(in crate::staging) fn capture_parent(
-        pin: &crate::formats::pinned_dir::VettedDir,
-        name: crate::formats::pinned_dir::Leaf<'_>,
-        parent_path: &std::path::Path,
-        created: crate::formats::file_identity::FileIdentity,
-    ) -> std::io::Result<ParentAcl> {
-        if cfg!(target_os = "macos") {
-            read_destination(pin, name, parent_path, created).map(ParentAcl::Captured)
-        } else {
-            Ok(ParentAcl::MaskedByMode)
-        }
+    /// The I/O error of reading the list through the descriptor, or a bad
+    /// descriptor.
+    #[cfg(target_os = "macos")]
+    pub(in crate::staging) fn capture_parent(stage: &VerifiedStage) -> std::io::Result<ParentAcl> {
+        super::macos::read_stage(stage.as_file()).map(ParentAcl::Captured)
+    }
+
+    /// Only macOS lists what a new directory inherited.
+    #[cfg(not(target_os = "macos"))]
+    #[allow(
+        clippy::unnecessary_wraps,
+        clippy::missing_const_for_fn,
+        reason = "keeps the signature of the platform that captures the parent's list"
+    )]
+    pub(in crate::staging) fn capture_parent(_stage: &VerifiedStage) -> std::io::Result<ParentAcl> {
+        Ok(ParentAcl::MaskedByMode)
     }
 
     impl AclPlan {
@@ -221,11 +234,11 @@ mod imp {
     /// The I/O error of writing the entries.
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     pub(in crate::staging) fn stage(
-        dir: &std::fs::File,
+        dir: &VerifiedStage,
         inheritance: &super::Inheritance,
     ) -> std::io::Result<()> {
         match inheritance {
-            super::Inheritance::Stage(acl) => acl.write_to(dir),
+            super::Inheritance::Stage(acl) => acl.write_to(dir.as_file()),
             super::Inheritance::None | super::Inheritance::Withheld(_) => Ok(()),
         }
     }
@@ -238,7 +251,7 @@ mod imp {
         reason = "keeps the signature of the platforms that stage an ACL"
     )]
     pub(in crate::staging) fn stage(
-        _dir: &std::fs::File,
+        _dir: &VerifiedStage,
         _inheritance: &super::Inheritance,
     ) -> std::io::Result<()> {
         Ok(())
@@ -260,10 +273,7 @@ mod imp {
         clippy::missing_const_for_fn,
         reason = "keeps the signature of the platforms that clear an ACL"
     )]
-    pub(in crate::staging) fn clear_inherited(
-        _pin: &crate::formats::pinned_dir::VettedDir,
-        _name: crate::formats::pinned_dir::Leaf<'_>,
-    ) -> std::io::Result<()> {
+    pub(in crate::staging) fn clear_inherited(_stage: &VerifiedStage) -> std::io::Result<()> {
         Ok(())
     }
 
@@ -389,6 +399,7 @@ mod linux {
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::pinned_dir::Leaf;
     use crate::formats::pinned_dir::VettedDir;
+    use crate::staging::dir::VerifiedStage;
 
     const ACCESS: &str = "system.posix_acl_access";
     const DEFAULT: &str = "system.posix_acl_default";
@@ -557,14 +568,13 @@ mod linux {
         }
     }
 
-    /// Removes the ACLs the directory `name` of `pin` inherited from its
-    /// parent.
+    /// Removes the ACLs `stage` inherited from its parent.
     ///
     /// # Errors
     ///
-    /// The I/O error of opening the directory or of removing an ACL it has.
-    pub(in crate::staging) fn clear_inherited(pin: &VettedDir, name: Leaf<'_>) -> io::Result<()> {
-        PosixAcl::clear(&pin.open_dir_file(name)?)
+    /// The I/O error of removing an ACL it has.
+    pub(in crate::staging) fn clear_inherited(stage: &VerifiedStage) -> io::Result<()> {
+        PosixAcl::clear(stage.as_file())
     }
 
     /// One ACL attribute of a directory.
@@ -911,6 +921,7 @@ mod macos {
     use crate::formats::pinned_dir::VettedDir;
     use crate::formats::pinned_dir::darwin_acl;
     use crate::formats::pinned_dir::darwin_acl::Fetched;
+    use crate::staging::dir::VerifiedStage;
 
     /// `KAUTH_FILESEC_MAGIC`.
     const MAGIC: u32 = 0x012c_c16d;
@@ -934,6 +945,8 @@ mod macos {
     /// `KAUTH_ACE_FILE_INHERIT | DIRECTORY_INHERIT`: the flags that make an
     /// entry reach children. `LIMIT_INHERIT` alone does not.
     const CHILD_INHERIT_FLAGS: u32 = 0x20 | 0x40;
+    /// `KAUTH_ACE_INHERITED`: the entry was inherited from the parent.
+    const INHERITED: u32 = 0x10;
     /// `KAUTH_ACE_ONLY_INHERIT`: the entry is for children only and is not
     /// evaluated for the directory that holds it.
     const ONLY_INHERIT: u32 = 0x100;
@@ -1171,16 +1184,37 @@ mod macos {
         error.raw_os_error() == Some(Errno::INVAL.raw_os_error())
     }
 
-    /// Removes every ACL entry, inherited ones included, from the directory
-    /// `name` of `pin`, addressed through a descriptor on the entry itself.
+    /// Removes every ACL entry, inherited ones included, from `stage`.
     ///
     /// # Errors
     ///
-    /// The I/O error of opening the directory or of clearing its ACL; a volume
-    /// without ACL support (FAT, exFAT) cannot hold an inherited entry, so its
-    /// refusal counts as cleared.
-    pub(in crate::staging) fn clear_inherited(pin: &VettedDir, name: Leaf<'_>) -> io::Result<()> {
-        MacAcl::clear(&pin.open_dir_file(name)?)
+    /// The I/O error of clearing its ACL; a volume without ACL support (FAT,
+    /// exFAT) cannot hold an inherited entry, so its refusal counts as cleared.
+    pub(in crate::staging) fn clear_inherited(stage: &VerifiedStage) -> io::Result<()> {
+        MacAcl::clear(stage.as_file())
+    }
+
+    /// Whether the ACL of `file` can be read and every entry in it was
+    /// inherited, which is all an entry staged by this run can hold.
+    pub(in crate::staging) fn only_inherited_entries(file: &File) -> bool {
+        match darwin_acl::fetch(file) {
+            Ok(Fetched::Complete(attribute)) => match parse(&attribute) {
+                Ok(None) => true,
+                Ok(Some(acl)) => acl.aces().iter().all(|ace| ace.flags & INHERITED != 0),
+                Err(_) => false,
+            },
+            Ok(Fetched::Truncated) | Err(_) => false,
+        }
+    }
+
+    /// Reads the ACL of `stage` through its descriptor, which needs no read
+    /// access to the directory.
+    ///
+    /// # Errors
+    ///
+    /// A bad descriptor.
+    pub(in crate::staging) fn read_stage(stage: &File) -> io::Result<AclPlan> {
+        plan_of(darwin_acl::fetch(stage))
     }
 
     fn plan_of(fetched: io::Result<Fetched>) -> io::Result<AclPlan> {
@@ -1227,7 +1261,7 @@ mod macos {
         if !super::imp::is_expected(FileIdentity::of_file(&dir), expected) {
             return Ok(AclPlan::Private(NarrowingReason::DestinationChanged));
         }
-        plan_of(darwin_acl::fetch(&dir))
+        read_stage(&dir)
     }
 
     #[cfg(test)]
@@ -1237,6 +1271,7 @@ mod macos {
         use std::process::Command;
 
         use super::*;
+        use crate::staging::test_acl::add_ace;
 
         const EVERYONE: [u8; GUID_LEN] = [
             0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0x00, 0x00,
@@ -1263,15 +1298,6 @@ mod macos {
 
         fn entry(flags: u32) -> ([u8; GUID_LEN], u32, u32) {
             (EVERYONE, flags, RIGHT_LIST)
-        }
-
-        fn add_ace(path: &Path, ace: &str) {
-            let status = Command::new("/bin/chmod")
-                .args(["+a", ace])
-                .arg(path)
-                .status()
-                .unwrap();
-            assert!(status.success(), "chmod +a {ace:?}");
         }
 
         fn read_acl(dir: &File) -> Option<MacAcl> {
@@ -1652,3 +1678,5 @@ pub(super) use imp::read_destination;
 pub(super) use imp::resolve;
 #[cfg(unix)]
 pub(super) use imp::stage;
+#[cfg(target_os = "macos")]
+pub(super) use macos::only_inherited_entries;

@@ -1007,6 +1007,43 @@ pub(crate) fn copy_file_content_with_permit(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[cfg(any(unix, target_os = "wasi"))]
+    #[test]
+    fn errno_is_matches_only_the_listed_codes() {
+        use rustix::io::Errno;
+
+        let error = |errno: Errno| std::io::Error::from_raw_os_error(errno.raw_os_error());
+        let all = [
+            Errno::NOENT,
+            Errno::NOTDIR,
+            Errno::LOOP,
+            Errno::ACCESS,
+            Errno::NOTSUP,
+            Errno::INVAL,
+            Errno::BADF,
+            Errno::MFILE,
+            Errno::NFILE,
+            Errno::NOMEM,
+        ];
+        for listed in all {
+            for observed in all {
+                assert_eq!(
+                    errno_is(&error(observed), &[listed]),
+                    observed == listed,
+                    "{observed:?} against {listed:?}"
+                );
+            }
+            assert!(errno_is(&error(listed), &all));
+            assert!(!errno_is(&error(listed), &[]));
+        }
+        assert!(!errno_is(&std::io::Error::other("no code"), &all));
+        assert_eq!(
+            errno_is(&error(Errno::OPNOTSUPP), &[Errno::NOTSUP]),
+            Errno::OPNOTSUPP == Errno::NOTSUP,
+            "equal on Linux, distinct on macOS"
+        );
+    }
     use crate::ArchiveError;
     use crate::ExtractionReport;
     use crate::Malformation;

@@ -1883,3 +1883,15 @@ fn a_ledger_holds_every_entry_a_run_creates_whatever_existing_files_says() {
     assert!(created("a.txt") && created("sub") && created("sub/b.txt"));
     assert!(!created("foreign"));
 }
+
+#[test]
+fn the_acl_copy_cfg_covers_exactly_linux_android_and_macos() {
+    assert_eq!(
+        cfg!(acl_copy),
+        cfg!(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos"
+        ))
+    );
+}

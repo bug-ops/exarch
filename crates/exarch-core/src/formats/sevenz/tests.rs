@@ -2776,12 +2776,6 @@ fn every_exempt_method_is_admitted() {
     }
 }
 
-#[test]
-fn deflate_is_not_admitted() {
-    let id = sevenz_rust2::EncoderMethod::ID_DEFLATE;
-    assert!(ADMITTED.iter().all(|&(admitted, _)| admitted != id));
-}
-
 /// Issue #1091: a Deflate block is refused at admission, before the
 /// destination is created, like Deflate64.
 #[test]
@@ -2808,9 +2802,18 @@ fn deflate_block_is_reported_not_decodable_by_verify() {
 
     let report = crate::verify_archive(&archive, &SecurityConfig::default()).unwrap();
 
-    assert_ne!(
-        report.status(),
-        crate::inspection::report::VerificationStatus::Pass
+    let expected = crate::VerificationIssue::from_error(
+        &ArchiveError::from(crate::Malformation::SevenZUnsupportedCoder),
+        None,
     );
-    assert!(!report.issues().is_empty());
+    assert_eq!(
+        report.status(),
+        crate::inspection::report::VerificationStatus::Fail
+    );
+    assert_eq!(report.issues().len(), 2, "one refusal per block");
+    for issue in report.issues() {
+        assert_eq!(issue.severity(), expected.severity());
+        assert_eq!(issue.category(), expected.category());
+        assert_eq!(issue.message(), expected.message());
+    }
 }

@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING:** Python: drop Python 3.10, support 3.11-3.15; abi3 wheels now target `cp311-abi3` (#PR).
+- **BREAKING:** Python: drop Python 3.10, support 3.11-3.15; abi3 wheels now target `cp311-abi3` (#1095).
 - Core: `indexing_slicing` and `arithmetic_side_effects` are enforced on the format and security modules, with bounded reads and a `PerBlock` table in the 7z reader (#1032, #1074).
 - Core: include and exclude patterns without wildcards match through a hash index, so 2000 literal or suffix `--exclude` patterns cost about as much as one (#1062, #1077).
 - Docs: `DecodeReuse::TempFile` gains Linux VM timings for ext4 and tmpfs spools, and the macOS RAM-disk limit is documented; the spool code moves to its own module (#1021, #1022, #1077).

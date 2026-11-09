@@ -16,6 +16,7 @@ use crate::SecurityConfig;
 use crate::SkipKind;
 use crate::closed_enum::closed_enum;
 use crate::formats::common::is_extension_allowed;
+use crate::formats::common::require_symlink_creation;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::LinkTarget;
@@ -25,7 +26,9 @@ use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::LandingLimits;
 use crate::security::fs_view::Node;
 use crate::security::fs_view::NodeBudget;
+use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
+use crate::security::fs_view::PlaceError;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
 use crate::security::hardlink::HardlinkTracker;
@@ -274,6 +277,13 @@ impl ArchiveManifest {
     /// whole path, and as [`SkipKind::ExtensionNotAllowed`] when it is a
     /// regular file the allowlist excludes, under the first reason that
     /// applies.
+    ///
+    /// The answer models default extraction
+    /// ([`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse)): a symlink
+    /// whose name an earlier file of the archive took is
+    /// [`SkipKind::Duplicate`] where the host creates symlinks. Under
+    /// [`ExistingFiles::Overwrite`](crate::ExistingFiles::Overwrite) extraction
+    /// replaces the file with the symlink instead.
     pub fn dispositions<'a>(
         &'a self,
         config: &SecurityConfig,
@@ -470,10 +480,20 @@ fn judge(
             }
         }
     };
-    let landed = tree
-        .project_landing(&safe, node, LandingLimits::Enforced)
-        .ok()?;
-    Some(Disposition::Extract(LandingPath(landed.into_path_buf())))
+    // Extraction skips a symlink over a file the run created only after its
+    // target validated and only where symlinks can be created, so an opaque
+    // target or a host without symlinks stays refused.
+    let skippable_duplicate =
+        matches!(node, Node::Symlink(_)) && require_symlink_creation().is_ok();
+    match tree.project_landing(&safe, node, LandingLimits::Enforced) {
+        Ok(landed) => Some(Disposition::Extract(LandingPath(landed.into_path_buf()))),
+        Err(PlaceError::Conflict(conflict))
+            if skippable_duplicate && conflict.occupant == Some(Occupant::File) =>
+        {
+            Some(Disposition::Skip(SkipKind::Duplicate))
+        }
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -910,5 +930,99 @@ mod tests {
             &strip_one(),
             true,
         );
+    }
+
+    fn duplicate_symlink_disposition(
+        file_name: &str,
+        bytes: &[u8],
+        config: &SecurityConfig,
+    ) -> (Disposition, LinkTarget, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join(file_name);
+        std::fs::write(&archive, bytes).unwrap();
+        let dest = dir.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+        let manifest = list_archive(&archive, config).unwrap();
+        let (entry, disposition) = manifest
+            .dispositions(config)
+            .find(|(entry, _)| matches!(entry.kind, ManifestEntryKind::Symlink { .. }))
+            .unwrap();
+        let ManifestEntryKind::Symlink { target } = &entry.kind else {
+            unreachable!("filtered to symlinks");
+        };
+        (
+            disposition,
+            target.clone(),
+            extract_archive(&archive, &dest, config).is_ok(),
+        )
+    }
+
+    fn tar_duplicate_symlink() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        tar_entry(&mut builder, b"x", tar::EntryType::Regular, "");
+        tar_entry(&mut builder, b"x", tar::EntryType::Symlink, "y");
+        builder.into_inner().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_duplicate_symlink_is_skipped_as_extraction_skips_it() {
+        let bytes = tar_duplicate_symlink();
+        let (disposition, _, extracted) = duplicate_symlink_disposition("a.tar", &bytes, &config());
+        assert_matches!(disposition, Disposition::Skip(SkipKind::Duplicate));
+        assert!(extracted);
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, &bytes).unwrap();
+        let dest = dir.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+        let report = extract_archive(&archive, &dest, &config()).unwrap();
+        assert_eq!(report.skipped.count(SkipKind::Duplicate), 1);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_duplicate_symlink_stays_refused_where_symlinks_cannot_be_created() {
+        let (disposition, _, extracted) =
+            duplicate_symlink_disposition("a.tar", &tar_duplicate_symlink(), &config());
+        assert_matches!(disposition, Disposition::Refuse);
+        assert!(!extracted);
+    }
+
+    #[test]
+    fn a_duplicate_symlink_with_an_escaping_target_stays_refused() {
+        let escaping = RawEntry {
+            external_attributes: 0o120_777 << 16,
+            ..RawEntry::stored("x", b"../../etc")
+        };
+        let bytes = RawZip::new(vec![RawEntry::stored("x", b"x"), escaping])
+            .build()
+            .bytes;
+        let lenient = config().with_zip_consistency(crate::ZipConsistencyPolicy::Ignore);
+        let (disposition, _, extracted) = duplicate_symlink_disposition("a.zip", &bytes, &lenient);
+        assert_matches!(disposition, Disposition::Refuse);
+        assert!(!extracted);
+    }
+
+    #[test]
+    fn a_duplicate_symlink_with_an_unread_target_stays_refused() {
+        let mut writer = sevenz_rust2::ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("x"),
+                Some(Cursor::new(b"x".to_vec())),
+            )
+            .unwrap();
+        let mut link = sevenz_rust2::ArchiveEntry::new_file("x");
+        link.has_windows_attributes = true;
+        link.windows_attributes = 0x8000 | (0o120_777 << 16);
+        writer
+            .push_archive_entry(link, Some(Cursor::new(b"../../etc".to_vec())))
+            .unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let (disposition, target, _) = duplicate_symlink_disposition("a.7z", &bytes, &config());
+        assert_eq!(target, LinkTarget::Unread);
+        assert_matches!(disposition, Disposition::Refuse);
     }
 }

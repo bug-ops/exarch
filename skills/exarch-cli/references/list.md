@@ -20,8 +20,9 @@
 
 Under any selection flag `list` shows what extraction would do:
 
-- Text: `  [lands at <path>]` (written under another name), `  [skipped: <kind>]` (`not_selected` or `stripped_away`), or `  [refused]`.
+- Text: `  [lands at <path>]` (written under another name), `  [skipped: <kind>]` (`not_selected`, `stripped_away`, `extension_not_allowed`, or `duplicate`), or `  [refused]`.
 - `--json`: each entry gets `disposition`: `{"action": "extract", "landing": "x.txt"}`, `{"action": "skip", "kind": "not_selected"}`, or `{"action": "refuse"}`.
+- `duplicate` marks a symlink whose name an earlier file entry took, on hosts that create symlinks (Unix) and only for a target `list` can validate (TAR, ZIP, 7z with `--read-link-targets`); it models default extraction, which skips it (`--force` replaces the file instead). A 7z symlink with an unread target stays `refuse`.
 - `refuse` marks an entry that validation refuses or extraction cannot place (for example `f/g` below a file entry `f`). `list` reports and does not judge: it still exits `0` while `extract` fails and `verify` reports the issue.
 - A link that escapes the destination is always `refuse`, as is a hardlink whose target is missing, escapes, is a directory, is not extracted (unselected or stripped away), or lands where several entries land (for example after `--strip-components`), as `extract` and `verify` refuse it. A 7z link whose target cannot be decoded (for example a solid archive without `--allow-solid-archives`) does not fail the listing: its `link_target` state is `unreadable` and its disposition `refuse`.
 - With default selection (link flags alone do not count as a selection) neither suffix nor field appears. `total_entries` and `total_size` still count every entry. An include matching nothing fails `list` like `extract`.

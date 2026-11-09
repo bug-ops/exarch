@@ -6,11 +6,13 @@
 
 use std::fs::OpenOptions;
 use std::io;
+use std::mem::MaybeUninit;
 use std::mem::offset_of;
 use std::mem::size_of;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
+use std::ptr::NonNull;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
@@ -135,18 +137,19 @@ fn entries(acl: *const ACL) -> io::Result<Vec<Ace>> {
 }
 
 fn entry(acl: *const ACL, index: u32) -> io::Result<Ace> {
-    let mut ace = null_mut();
-    // SAFETY: `acl` is a valid ACL, `index` is below its entry count, and `ace`
-    // is valid for writes.
-    if unsafe { GetAce(acl, index, &raw mut ace) } == 0 {
+    let mut slot = MaybeUninit::uninit();
+    // SAFETY: `acl` is a valid ACL, `index` is below its entry count, and
+    // `slot` is valid for writes.
+    if unsafe { GetAce(acl, index, slot.as_mut_ptr()) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    if ace.is_null() {
-        return Err(io::Error::from(io::ErrorKind::InvalidData));
-    }
-    // SAFETY: `GetAce` succeeded and `ace` is non-null; every entry starts with
-    // an `ACE_HEADER`.
-    let header = unsafe { ace.cast::<ACE_HEADER>().read_unaligned() };
+    // SAFETY: `GetAce` returned non-zero, so it wrote the entry pointer to
+    // `slot`.
+    let ace = NonNull::new(unsafe { slot.assume_init() })
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    // SAFETY: `ace` points at a live entry; every entry starts with an
+    // `ACE_HEADER`.
+    let header = unsafe { ace.as_ptr().cast::<ACE_HEADER>().read_unaligned() };
     let allows = header.AceType == ACCESS_ALLOWED_ACE_TYPE;
     Ok(Ace {
         allows,
@@ -155,7 +158,8 @@ fn entry(acl: *const ACL, index: u32) -> io::Result<Ace> {
             // SAFETY: the entry is an `ACCESS_ALLOWED_ACE` (checked above), so
             // its SID starts at `SidStart`, inside the entry.
             let sid = unsafe {
-                ace.cast::<u8>()
+                ace.as_ptr()
+                    .cast::<u8>()
                     .add(offset_of!(ACCESS_ALLOWED_ACE, SidStart))
             };
             // SAFETY: `sid` points at the entry's SID, and the ACL outlives the

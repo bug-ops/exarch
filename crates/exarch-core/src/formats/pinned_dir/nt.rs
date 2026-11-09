@@ -20,6 +20,7 @@ use std::ffi::OsStr;
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
+use std::mem::MaybeUninit;
 use std::mem::offset_of;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -29,6 +30,7 @@ use std::os::windows::io::BorrowedHandle;
 use std::os::windows::io::FromRawHandle;
 use std::os::windows::io::OwnedHandle;
 use std::os::windows::io::RawHandle;
+use std::ptr::NonNull;
 use std::ptr::null;
 use std::ptr::null_mut;
 use std::slice;
@@ -348,28 +350,28 @@ pub(super) fn current_user_sid() -> io::Result<String> {
 ///
 /// `sid` must point at a valid SID.
 pub(super) unsafe fn sid_to_string(sid: *mut c_void) -> io::Result<String> {
-    let mut text: *mut u16 = null_mut();
-    // SAFETY: the caller guarantees `sid` is a valid SID, and `text` is valid
+    let mut slot = MaybeUninit::<*mut u16>::uninit();
+    // SAFETY: the caller guarantees `sid` is a valid SID, and `slot` is valid
     // for writes.
-    if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == 0 {
+    if unsafe { ConvertSidToStringSidW(sid, slot.as_mut_ptr()) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    if text.is_null() {
-        return Err(io::Error::from(io::ErrorKind::InvalidData));
-    }
+    // SAFETY: the call succeeded, so it wrote the string pointer to `slot`.
+    let text = NonNull::new(unsafe { slot.assume_init() })
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
     // SAFETY: on success `text` points at a NUL-terminated UTF-16 string
     // allocated by the API, so every offset up to the NUL is readable.
     let units = unsafe {
         let mut len = 0;
-        while *text.add(len) != 0 {
+        while *text.as_ptr().add(len) != 0 {
             len = len.saturating_add(1);
         }
-        slice::from_raw_parts(text, len)
+        slice::from_raw_parts(text.as_ptr(), len)
     };
     let parsed = String::from_utf16(units).map_err(|_| io::Error::from(io::ErrorKind::InvalidData));
     // SAFETY: `text` was allocated by `ConvertSidToStringSidW` with
     // `LocalAlloc`, `units` is no longer used, and it is freed once.
-    unsafe { LocalFree(text.cast()) };
+    unsafe { LocalFree(text.as_ptr().cast()) };
     parsed
 }
 

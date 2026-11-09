@@ -705,6 +705,9 @@ pub(crate) fn check_directory_occupant(
 /// - Removing an existing path fails when the policy is
 ///   `ExistingFiles::Overwrite`
 /// - A symlink with a different target occupies the path
+/// - A directory occupies the path under `ExistingFiles::Overwrite`, which
+///   never replaces a directory; the error names the entry (`Refuse` fails
+///   earlier as a conflict, `Skip` skips the entry)
 #[cfg_attr(
     not(unix),
     expect(
@@ -744,15 +747,21 @@ pub(crate) fn create_symlink<P: ParentCheck>(
             let OccupantAction::Replace(permit) = action else {
                 return record_duplicate_skip(report, link_path);
             };
-            if existing == Occupant::Symlink {
-                // An unchanged link re-points nothing; a different target could
-                // re-point a path that an earlier link's `..` resolved through.
-                if parent.read_link(leaf)? == target_path {
-                    return record_duplicate_skip(report, safe_symlink.link().as_path());
+            match existing {
+                Occupant::Symlink => {
+                    // An unchanged link re-points nothing; a different target
+                    // could re-point a path that an earlier link's `..`
+                    // resolved through.
+                    if parent.read_link(leaf)? == target_path {
+                        return record_duplicate_skip(report, link_path);
+                    }
+                    return Err(symlink_at_dest_error(link_path).into());
                 }
-                return Err(symlink_at_dest_error(safe_symlink.link().as_path()).into());
+                Occupant::Directory => {
+                    return Err(occupant_at_dest_error(link_path, Occupant::Directory).into());
+                }
+                Occupant::File => parent.remove_occupant(leaf, permit)?,
             }
-            parent.remove_occupant(leaf, permit)?;
         }
 
         parent.symlink(target_path, leaf)?;

@@ -232,6 +232,92 @@ impl<'a> Landing<'a> {
     }
 }
 
+/// How the destination volume tells two landings apart, which decides which
+/// repeated names extraction skips as duplicates.
+///
+/// Extraction under [`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse)
+/// skips an entry that names a path an earlier file or symlink of the same run
+/// created. It recognizes that occupant by file identity where the volume has
+/// one, which is exact on a case-insensitive host: `x` then `X` is one
+/// landing. On a volume without file identities (Windows volumes without
+/// `FileIdInfo`) it falls back to the landing path as the archive spelled it,
+/// so a repeat spelled differently (`x` then `X`, `d/x` then `D/x`, or `l/x`
+/// then `d/x` through an archive symlink `l` to `d`) is refused instead of
+/// skipped. A listing has no destination to ask, so
+/// [`ArchiveManifest::dispositions_on`] takes this as input.
+///
+/// No production caller passes [`LandingPaths`](Self::LandingPaths) yet: it
+/// takes a caller that has opened its destination and learned that the volume
+/// gives no file identities, and no front end probes for that today. `list`
+/// cannot detect it by itself, so it keeps the default.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::VolumeIdentity;
+///
+/// assert_eq!(VolumeIdentity::default(), VolumeIdentity::FileIds);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VolumeIdentity {
+    /// The volume gives every entry a file identity, as every Unix file system,
+    /// NTFS and `ReFS` do. A repeated name is a duplicate whatever its
+    /// spelling.
+    #[default]
+    FileIds,
+    /// The volume gives no file identity, so a repeat counts as a duplicate
+    /// only when the archive spells the path exactly as the earlier entry did;
+    /// any other spelling of an occupied landing is refused.
+    LandingPaths,
+}
+
+/// What a listing remembers of the run so far to judge the next entry.
+struct JudgeRun {
+    hardlinks: HardlinkTracker,
+    keys: RunKeys,
+}
+
+/// The paths the run created, in the spelling extraction records them under
+/// when the volume gives no file identities.
+enum RunKeys {
+    Identity,
+    Spelling(HashSet<PathBuf>),
+}
+
+impl RunKeys {
+    fn new(volume: VolumeIdentity) -> Self {
+        match volume {
+            VolumeIdentity::FileIds => Self::Identity,
+            VolumeIdentity::LandingPaths => Self::Spelling(HashSet::new()),
+        }
+    }
+
+    /// Records the entry spelled `rel`; extraction keys only what an entry
+    /// itself creates, never its parent directories.
+    fn note(&mut self, rel: &Path) {
+        if let Self::Spelling(spelled) = self {
+            spelled.insert(rel.to_path_buf());
+        }
+    }
+
+    fn made_here(&self, rel: &Path) -> bool {
+        match self {
+            Self::Identity => true,
+            Self::Spelling(spelled) => spelled.contains(rel),
+        }
+    }
+
+    /// Skips a repeat of an entry the run made, refuses an occupant it did not.
+    fn duplicate_or_refuse(&self, rel: &Path) -> Result<Disposition> {
+        if self.made_here(rel) {
+            Ok(Disposition::Skip(SkipKind::Duplicate))
+        } else {
+            Err(destination_occupied(Path::new(""), rel))
+        }
+    }
+}
+
 impl ArchiveManifest {
     /// The entries extraction would create, each with where it lands.
     ///
@@ -305,15 +391,64 @@ impl ArchiveManifest {
         &'a self,
         config: &SecurityConfig,
     ) -> impl Iterator<Item = (&'a ArchiveEntry, Disposition)> + use<'a> {
-        self.judgements(config)
+        self.dispositions_on(config, VolumeIdentity::default())
+    }
+
+    /// [`dispositions`](Self::dispositions) for a destination volume that
+    /// identifies landings as `volume` says.
+    ///
+    /// Only the repeated-name answers differ: under
+    /// [`VolumeIdentity::LandingPaths`] a repeat the archive spells differently
+    /// from the earlier entry is [`Disposition::Refuse`], as extraction on such
+    /// a volume refuses it. Nothing in the crate chooses `LandingPaths` for a
+    /// caller: it is for a front end that knows its destination volume.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveEntry;
+    /// use exarch_core::ArchiveManifest;
+    /// use exarch_core::ArchiveType;
+    /// use exarch_core::Disposition;
+    /// use exarch_core::ManifestEntryKind;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::SkipKind;
+    /// use exarch_core::Uncompressed;
+    /// use exarch_core::VolumeIdentity;
+    /// use std::assert_matches;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
+    /// for _ in 0..2 {
+    ///     let file = ManifestEntryKind::File {
+    ///         size: Uncompressed(1),
+    ///     };
+    ///     manifest.add_entry(ArchiveEntry::new("x".into(), file))?;
+    /// }
+    /// let config = SecurityConfig::default();
+    /// let judged: Vec<_> = manifest
+    ///     .dispositions_on(&config, VolumeIdentity::LandingPaths)
+    ///     .map(|(_, d)| d)
+    ///     .collect();
+    /// assert_matches!(judged[1], Disposition::Skip(SkipKind::Duplicate));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn dispositions_on<'a>(
+        &'a self,
+        config: &SecurityConfig,
+        volume: VolumeIdentity,
+    ) -> impl Iterator<Item = (&'a ArchiveEntry, Disposition)> + use<'a> {
+        self.judgements(config, volume)
             .map(|(entry, judged)| (entry, judged.unwrap_or(Disposition::Refuse)))
     }
 
-    /// [`dispositions`](Self::dispositions) with the reason an entry is
+    /// [`dispositions_on`](Self::dispositions_on) with the reason an entry is
     /// refused, the error extraction raises for it.
     fn judgements<'a>(
         &'a self,
         config: &SecurityConfig,
+        volume: VolumeIdentity,
     ) -> impl Iterator<Item = (&'a ArchiveEntry, Result<Disposition>)> + use<'a> {
         let root = VirtualRoot::new();
         let mut tree = VirtualTree::new(
@@ -323,7 +458,10 @@ impl ArchiveManifest {
             CollisionRecording::Discard,
         )
         .keeping_files_under_links();
-        let mut hardlinks = HardlinkTracker::new();
+        let mut state = JudgeRun {
+            hardlinks: HardlinkTracker::new(),
+            keys: RunKeys::new(volume),
+        };
         let claims = LandingClaims::default();
         let is_hardlink =
             |entry: &ArchiveEntry| matches!(entry.kind, ManifestEntryKind::Hardlink { .. });
@@ -334,7 +472,7 @@ impl ArchiveManifest {
                 config,
                 &root,
                 &mut tree,
-                &mut hardlinks,
+                &mut state,
                 &claims,
             )
         };
@@ -450,7 +588,7 @@ fn judge(
     config: &SecurityConfig,
     root: &VirtualRoot,
     tree: &mut VirtualTree,
-    hardlinks: &mut HardlinkTracker,
+    state: &mut JudgeRun,
     claims: &LandingClaims,
 ) -> Result<Disposition> {
     let original = SafePath::validate_in(&entry.path, root, config, tree)?;
@@ -481,7 +619,9 @@ fn judge(
             let mapped =
                 selection.mapped_link_target(&entry.path, target, config.allowed.absolute_paths)?;
             claims.require_unambiguous(&entry.path, &mapped)?;
-            hardlinks.check_hardlink_target(&safe, &mapped, root, config, tree)?;
+            state
+                .hardlinks
+                .check_hardlink_target(&safe, &mapped, root, config, tree)?;
             Node::File
         }
         ManifestEntryKind::Directory => Node::Dir,
@@ -502,11 +642,16 @@ fn judge(
     };
     match tree.project_landing_found(&safe, node.clone(), LandingLimits::Enforced) {
         Ok((_, true)) if shape != EntryShape::Directory => {
-            Ok(Disposition::Skip(SkipKind::Duplicate))
+            state.keys.duplicate_or_refuse(safe.as_path())
         }
-        Ok((landed, _)) => Ok(Disposition::Extract(LandingPath(landed.into_path_buf()))),
+        Ok((landed, held)) => {
+            if !held {
+                state.keys.note(safe.as_path());
+            }
+            Ok(Disposition::Extract(LandingPath(landed.into_path_buf())))
+        }
         Err(PlaceError::Conflict(conflict)) => {
-            conflicting_placement(shape, &node, safe.as_path(), conflict)
+            conflicting_placement(shape, &node, safe.as_path(), conflict, &state.keys)
         }
         Err(other) => Err(place_error(other)),
     }
@@ -522,11 +667,12 @@ fn conflicting_placement(
     node: &Node,
     rel: &Path,
     conflict: Conflict,
+    keys: &RunKeys,
 ) -> Result<Disposition> {
     let occupant = conflict.occupant.filter(|_| conflict.blocked.is_none());
     match occupant {
         Some(held) if *node != Node::OpaqueSymlink && is_run_duplicate(shape, held) => {
-            Ok(Disposition::Skip(SkipKind::Duplicate))
+            keys.duplicate_or_refuse(rel)
         }
         Some(Occupant::Directory) if shape != EntryShape::Directory => {
             Err(destination_occupied(Path::new(""), rel).occupied_by(OccupiedBy::Archive))
@@ -1118,7 +1264,7 @@ mod tests {
             let manifest = list_archive(&archive, &config).unwrap();
 
             let refused: Vec<_> = manifest
-                .judgements(&config)
+                .judgements(&config, VolumeIdentity::default())
                 .filter_map(|(_, judged)| judged.err())
                 .collect();
             let extracted = crate::ExtractRequest::new(&config)
@@ -1159,5 +1305,267 @@ mod tests {
         let (_, disposition) = manifest.dispositions(&config).next().unwrap();
         assert_matches!(disposition, Disposition::Refuse);
         assert!(extract_archive(&archive, dir.path().join("out"), &config).is_err());
+    }
+
+    type TarEntries<'a> = &'a [(&'a [u8], tar::EntryType, &'a str)];
+
+    struct VolumeOutcome {
+        file_ids: Vec<Disposition>,
+        landing_paths: Vec<Disposition>,
+        identity_extraction: crate::Result<crate::ExtractionReport>,
+        path_extraction: crate::Result<crate::ExtractionReport>,
+        file_ids_refusal: Option<ArchiveError>,
+        landing_paths_refusal: Option<ArchiveError>,
+    }
+
+    fn volume_outcome(entries: TarEntries<'_>) -> VolumeOutcome {
+        volume_outcome_under(entries, &config())
+    }
+
+    fn volume_outcome_under(entries: TarEntries<'_>, config: &SecurityConfig) -> VolumeOutcome {
+        use crate::formats::run_record::key_basis::KeyBasis;
+        use crate::formats::run_record::key_basis::with;
+
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, kind, link) in entries {
+            tar_entry(&mut builder, name, *kind, link);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        let manifest = list_archive(&archive, config).unwrap();
+        let judged = |volume| -> Vec<Disposition> {
+            manifest
+                .dispositions_on(config, volume)
+                .map(|(_, d)| d)
+                .collect()
+        };
+        let extract = |basis: KeyBasis, name: &str| {
+            let dest = dir.path().join(name);
+            std::fs::create_dir(&dest).unwrap();
+            let options = crate::ExtractionOptions::default()
+                .with_existing_files(crate::ExistingFiles::Refuse);
+            with(basis, || {
+                crate::ExtractRequest::new(config)
+                    .with_options(options)
+                    .extract(&archive, &dest)
+            })
+        };
+        let refusal = |volume| {
+            manifest
+                .judgements(config, volume)
+                .filter_map(|(_, judged)| judged.err())
+                .last()
+        };
+        VolumeOutcome {
+            file_ids_refusal: refusal(VolumeIdentity::FileIds),
+            landing_paths_refusal: refusal(VolumeIdentity::LandingPaths),
+            file_ids: judged(VolumeIdentity::FileIds),
+            landing_paths: judged(VolumeIdentity::LandingPaths),
+            identity_extraction: extract(KeyBasis::Identity, "by-id"),
+            path_extraction: extract(KeyBasis::Path, "by-path"),
+        }
+    }
+
+    fn folds_case() -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), b"").unwrap();
+        cfg!(any(windows, target_os = "macos")) && dir.path().join("A").exists()
+    }
+
+    /// Whether the test must stop: its case aliases need a host and a volume
+    /// that fold case. Says so on stderr instead of passing silently.
+    fn skipped_without_case_folding(test: &str) -> bool {
+        let skipped = !folds_case();
+        if skipped {
+            eprintln!("skipping {test}: the test volume does not fold case");
+        }
+        skipped
+    }
+
+    /// The identity-keyed preview and extraction skip the last entry as a
+    /// duplicate; extraction keyed by spelled path refuses it as occupied by a
+    /// foreign entry, and the `LandingPaths` preview agrees.
+    fn assert_spelling_refused(entries: TarEntries<'_>) {
+        assert_spelling_refused_under(entries, &config());
+    }
+
+    fn assert_spelling_refused_under(entries: TarEntries<'_>, config: &SecurityConfig) {
+        let outcome = volume_outcome_under(entries, config);
+        let last = entries.len() - 1;
+        assert_matches!(
+            outcome.file_ids[last],
+            Disposition::Skip(SkipKind::Duplicate)
+        );
+        assert_eq!(
+            outcome
+                .identity_extraction
+                .unwrap()
+                .skipped
+                .count(SkipKind::Duplicate),
+            1
+        );
+        assert_matches!(outcome.landing_paths[last], Disposition::Refuse);
+        let refused = outcome.path_extraction.unwrap_err();
+        assert_eq!(
+            occupied_by(&refused),
+            Some(OccupiedBy::Existing),
+            "{refused}"
+        );
+        let previewed = outcome.landing_paths_refusal.unwrap();
+        assert_eq!(previewed.error_code(), refused.error_code());
+        assert_eq!(occupied_by(&previewed), occupied_by(&refused));
+    }
+
+    #[test]
+    fn a_case_variant_repeat_is_refused_on_a_path_keyed_volume() {
+        if skipped_without_case_folding("a_case_variant_repeat_is_refused_on_a_path_keyed_volume") {
+            return;
+        }
+        assert_spelling_refused(&[(b"x", FILE, ""), (b"X", FILE, "")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_case_variant_symlink_over_a_file_is_refused_on_a_path_keyed_volume() {
+        if skipped_without_case_folding(
+            "a_case_variant_symlink_over_a_file_is_refused_on_a_path_keyed_volume",
+        ) {
+            return;
+        }
+        assert_spelling_refused(&[(b"x", FILE, ""), (b"X", SYM, "y")]);
+    }
+
+    #[test]
+    fn a_case_variant_under_a_made_directory_is_refused_on_a_path_keyed_volume() {
+        if skipped_without_case_folding(
+            "a_case_variant_under_a_made_directory_is_refused_on_a_path_keyed_volume",
+        ) {
+            return;
+        }
+        assert_spelling_refused(&[
+            (b"d/", tar::EntryType::Directory, ""),
+            (b"d/x", FILE, ""),
+            (b"D/x", FILE, ""),
+        ]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repeat_through_a_symlink_is_refused_on_a_path_keyed_volume() {
+        assert_spelling_refused(&[
+            (b"d/", tar::EntryType::Directory, ""),
+            (b"l", SYM, "d"),
+            (b"d/x", FILE, ""),
+            (b"l/x", FILE, ""),
+        ]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hardlink_over_a_file_through_a_symlink_alias_is_refused_on_a_path_keyed_volume() {
+        let hardlinks = config().with_allow_hardlinks(true);
+        assert_spelling_refused_under(
+            &[
+                (b"d/", tar::EntryType::Directory, ""),
+                (b"l", SYM, "d"),
+                (b"d/x", FILE, ""),
+                (b"l/x", HARD, "d/x"),
+            ],
+            &hardlinks,
+        );
+    }
+
+    #[test]
+    fn an_exact_repeat_is_a_duplicate_on_every_volume() {
+        let outcome = volume_outcome(&[(b"x", FILE, ""), (b"x", FILE, "")]);
+        for judged in [&outcome.file_ids, &outcome.landing_paths] {
+            assert_matches!(judged[1], Disposition::Skip(SkipKind::Duplicate));
+        }
+        for extracted in [outcome.identity_extraction, outcome.path_extraction] {
+            assert_eq!(extracted.unwrap().skipped.count(SkipKind::Duplicate), 1);
+        }
+    }
+
+    #[test]
+    fn a_file_over_a_made_directory_is_refused_on_every_volume() {
+        let outcome = volume_outcome(&[(b"x", tar::EntryType::Directory, ""), (b"x", FILE, "")]);
+        for judged in [&outcome.file_ids, &outcome.landing_paths] {
+            assert_matches!(judged[1], Disposition::Refuse);
+        }
+        let previews = [outcome.file_ids_refusal, outcome.landing_paths_refusal];
+        let extractions = [outcome.identity_extraction, outcome.path_extraction];
+        for (previewed, extracted) in previews.into_iter().zip(extractions) {
+            let refused = extracted.unwrap_err();
+            assert_eq!(occupied_by(&refused), Some(OccupiedBy::Archive));
+            let previewed = previewed.unwrap();
+            assert_eq!(previewed.error_code(), refused.error_code());
+            assert_eq!(occupied_by(&previewed), Some(OccupiedBy::Archive));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_over_a_made_directory_is_refused_as_archive_made_on_every_volume() {
+        let hardlinks = config().with_allow_hardlinks(true);
+        let dir = (&b"d"[..], tar::EntryType::Directory, "");
+        for over in [(&b"d"[..], SYM, "t"), (&b"d"[..], HARD, "t")] {
+            let outcome = volume_outcome_under(&[(&b"t"[..], FILE, ""), dir, over], &hardlinks);
+            for judged in [&outcome.file_ids, &outcome.landing_paths] {
+                assert_matches!(judged[2], Disposition::Refuse);
+            }
+            for (previewed, extracted) in [
+                (outcome.file_ids_refusal, outcome.identity_extraction),
+                (outcome.landing_paths_refusal, outcome.path_extraction),
+            ] {
+                let refused = extracted.unwrap_err();
+                assert_eq!(occupied_by(&refused), Some(OccupiedBy::Archive));
+                assert_eq!(occupied_by(&previewed.unwrap()), Some(OccupiedBy::Archive));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_repeat_after_a_file_through_its_case_alias_is_refused() {
+        if skipped_without_case_folding(
+            "a_symlink_repeat_after_a_file_through_its_case_alias_is_refused",
+        ) {
+            return;
+        }
+        let dir = tar::EntryType::Directory;
+        assert_spelling_refused(&[
+            (b"d/", dir, ""),
+            (b"L", SYM, "d"),
+            (b"l/x", FILE, ""),
+            (b"l", SYM, "d"),
+        ]);
+        assert_spelling_refused(&[
+            (b"d/", dir, ""),
+            (b"A", SYM, "d"),
+            (b"a/x", FILE, ""),
+            (b"a", SYM, "d"),
+        ]);
+    }
+
+    #[test]
+    fn a_case_variant_under_an_implied_parent_is_refused_on_a_path_keyed_volume() {
+        if skipped_without_case_folding(
+            "a_case_variant_under_an_implied_parent_is_refused_on_a_path_keyed_volume",
+        ) {
+            return;
+        }
+        assert_spelling_refused(&[(b"d/x", FILE, ""), (b"D/x", FILE, "")]);
+    }
+
+    #[test]
+    fn a_case_variant_hardlink_over_a_file_is_refused_on_a_path_keyed_volume() {
+        if skipped_without_case_folding(
+            "a_case_variant_hardlink_over_a_file_is_refused_on_a_path_keyed_volume",
+        ) {
+            return;
+        }
+        let hardlinks = config().with_allow_hardlinks(true);
+        assert_spelling_refused_under(&[(b"x", FILE, ""), (b"X", HARD, "x")], &hardlinks);
     }
 }

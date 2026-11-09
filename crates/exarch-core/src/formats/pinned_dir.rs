@@ -29,7 +29,10 @@
 //! the bindings or the CLI release builds. FreeBSD, NetBSD and illumos open
 //! with `O_SEARCH` only where a directory's attributes are read or changed
 //! ([`DirHandle`]); on NetBSD and illumos neither that open nor the `fchmod`
-//! through it is verified, so any failure there falls back to the read handle.
+//! through it is verified (no CI runs there), so any failure there falls back
+//! to the read handle. OpenBSD and `DragonFly` have no search-only open flag,
+//! so the `0311` backup of an atomic `--force` swap is expected to stay behind
+//! there (unobserved, see `open_dir_for_metadata`).
 //!
 //! On Windows a [`VettedDir`] is a directory handle. Below the root, a junction
 //! or symlink is opened as itself and refused. The root is opened the same
@@ -736,6 +739,16 @@ mod imp {
         /// Opens the directory `name` to read or change its attributes, for
         /// reading: the platform has no handle that needs no read access.
         ///
+        /// OpenBSD and `DragonFly` have no search-only open flag (`libc`
+        /// defines `O_SEARCH` for neither), so a directory whose mode denies
+        /// reading, such as a `0311` backup, is expected to fail with `EACCES`.
+        /// A by-name `fchmodat` would drop the binding to the directory's
+        /// identity, so it is not used. The consequence is inferred from the
+        /// code and the missing flag, not observed: no run on these targets
+        /// exists. `make_removable` ignores the failure, so the removal of the
+        /// backup is expected to fail while the swap succeeds with a
+        /// `backup_cleanup_failed` warning naming the leftover backup.
+        ///
         /// # Errors
         ///
         /// The I/O error of the open.
@@ -751,8 +764,6 @@ mod imp {
             ))
         ))]
         pub(crate) fn open_dir_for_metadata(&self, name: Leaf<'_>) -> io::Result<DirHandle> {
-            // TODO(#1137): OpenBSD and DragonFly have no search-only open flag
-            // in libc.
             self.open_dir_file(name).map(DirHandle::Read)
         }
 

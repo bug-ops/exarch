@@ -167,6 +167,118 @@ fn sevenz_file_over_directory_names_the_entry() {
     assert!(out.path().join("target").is_dir());
 }
 
+#[cfg(unix)]
+#[test]
+fn tar_symlink_over_directory_names_the_entry() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_tar(
+        &dir,
+        &[
+            tar_entry("t", tar::EntryType::Regular, b"t", None),
+            tar_entry("d/", tar::EntryType::Directory, b"", None),
+            tar_entry("d", tar::EntryType::Symlink, b"", Some("t")),
+        ],
+    );
+    let out = TempDir::new().unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+
+    let message = extract_forced(&archive, &out, &config);
+
+    assert!(
+        message.contains("refusing to replace the existing directory at d"),
+        "{message}"
+    );
+    assert!(!message.contains("os error"), "{message}");
+    assert!(out.path().join("d").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_symlink_over_nested_directory_names_the_normalized_path() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_tar(
+        &dir,
+        &[
+            tar_entry("t", tar::EntryType::Regular, b"t", None),
+            tar_entry("a/b/", tar::EntryType::Directory, b"", None),
+            tar_entry("./a/b", tar::EntryType::Symlink, b"", Some("../t")),
+        ],
+    );
+    let out = TempDir::new().unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+
+    let message = extract_forced(&archive, &out, &config);
+
+    assert!(
+        message.contains("refusing to replace the existing directory at a/b"),
+        "{message}"
+    );
+    assert!(out.path().join("a/b").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn zip_symlink_over_directory_names_the_entry() {
+    use zip::write::SimpleFileOptions;
+
+    let bytes = zip_bytes(|zip| {
+        zip.add_directory("d/", SimpleFileOptions::default())
+            .unwrap();
+        zip.add_symlink("d", "t", SimpleFileOptions::default())
+            .unwrap();
+    });
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, "occupied.zip", &bytes);
+    let out = TempDir::new().unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+
+    let message = extract_forced(&archive, &out, &config);
+
+    assert!(
+        message.contains("refusing to replace the existing directory at d"),
+        "{message}"
+    );
+    assert!(!message.contains("os error"), "{message}");
+    assert!(out.path().join("d").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn sevenz_symlink_over_directory_names_the_entry() {
+    use sevenz_rust2::ArchiveEntry;
+    use sevenz_rust2::ArchiveWriter;
+
+    const UNIX_EXTENSION: u32 = 0x8000;
+    const S_IFLNK: u32 = 0o12_0000;
+
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer
+        .push_archive_entry::<&[u8]>(ArchiveEntry::new_directory("d"), None)
+        .unwrap();
+    let mut link = ArchiveEntry::new_file("d");
+    link.has_stream = true;
+    link.size = 1;
+    link.has_windows_attributes = true;
+    link.windows_attributes = UNIX_EXTENSION | ((S_IFLNK | 0o777) << 16);
+    writer
+        .push_archive_entry(link, Some(Cursor::new(b"t".to_vec())))
+        .unwrap();
+    let bytes = writer.finish().unwrap().into_inner();
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, "occupied.7z", &bytes);
+    let out = TempDir::new().unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+
+    let message = extract_forced(&archive, &out, &config);
+
+    assert!(
+        message.contains("refusing to replace the existing directory at d"),
+        "{message}"
+    );
+    assert!(!message.contains("os error"), "{message}");
+    assert!(out.path().join("d").is_dir());
+}
+
 fn zip_bytes(build: impl FnOnce(&mut zip::write::ZipWriter<Cursor<Vec<u8>>>)) -> Vec<u8> {
     let mut writer = zip::write::ZipWriter::new(Cursor::new(Vec::new()));
     build(&mut writer);

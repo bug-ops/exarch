@@ -38,6 +38,7 @@ pub use landing::DispositionKind;
 pub use landing::Landing;
 pub use landing::LandingKind;
 pub use landing::LandingPath;
+pub use landing::VolumeIdentity;
 pub(crate) use list::list_archive;
 pub(crate) use list::list_archive_with_progress;
 pub use manifest::ArchiveEntry;

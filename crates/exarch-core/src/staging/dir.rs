@@ -27,6 +27,7 @@ use crate::ArchiveError;
 #[cfg(unix)]
 use crate::NarrowingReason;
 use crate::Result;
+use crate::STAGING_PREFIX;
 use crate::StagingLeftover;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
@@ -36,7 +37,6 @@ use crate::formats::pinned_dir::VettedDir;
 use crate::formats::run_record::Recording;
 use crate::formats::run_record::RunRecord;
 
-const PREFIX: &str = ".exarch-";
 const CREATE_ATTEMPTS: usize = 16;
 
 /// What a new staging directory is made to resemble, which fixes the order of
@@ -319,7 +319,7 @@ impl<'p> StagingDir<'p> {
             ))
         };
         for _ in 0..CREATE_ATTEMPTS {
-            let name = LeafBuf::random(PREFIX);
+            let name = LeafBuf::random(STAGING_PREFIX);
             match parent.make_private_dir(name.as_leaf()) {
                 Ok(()) => {
                     return Self::claim(parent, parent_path, name)
@@ -815,7 +815,7 @@ mod tests {
     /// A staging directory created and claimed, but not yet prepared: the
     /// window in which another user could plant something.
     fn claimed<'p>(pin: &'p VettedDir, parent: &Path) -> StagingDir<'p> {
-        let name = LeafBuf::random(PREFIX);
+        let name = LeafBuf::random(STAGING_PREFIX);
         pin.make_private_dir(name.as_leaf()).unwrap();
         StagingDir::claim(pin, parent, name).unwrap()
     }
@@ -832,7 +832,7 @@ mod tests {
         std::fs::read_dir(parent)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
-            .filter(|name| name.to_string_lossy().starts_with(PREFIX))
+            .filter(|name| name.to_string_lossy().starts_with(STAGING_PREFIX))
             .collect()
     }
 

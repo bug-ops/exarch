@@ -158,6 +158,29 @@ impl Skips {
             .unwrap_or(0)
     }
 
+    /// Returns the non-zero count of each [`SkipKind`], in `SkipKind` order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::Skip;
+    /// use exarch_core::SkipKind;
+    /// use exarch_core::Skips;
+    ///
+    /// let mut skips = Skips::default();
+    /// skips.record(Skip::new(SkipKind::Excluded, "a.tmp"))?;
+    /// skips.record(Skip::new(SkipKind::Duplicate, "b"))?;
+    /// skips.record(Skip::new(SkipKind::Duplicate, "c"))?;
+    /// let counts: Vec<_> = skips.counts().collect();
+    /// assert_eq!(counts, [(SkipKind::Duplicate, 2), (SkipKind::Excluded, 1)]);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn counts(&self) -> impl Iterator<Item = (SkipKind, usize)> + '_ {
+        self.detail
+            .iter()
+            .flat_map(|detail| detail.counts.iter().map(|(kind, count)| (*kind, *count)))
+    }
+
     /// Returns the first [`SAMPLE_CAP`](Self::SAMPLE_CAP) skipped entries, in
     /// the order they were skipped.
     #[must_use]

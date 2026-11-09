@@ -541,6 +541,43 @@ impl SolidArchives {
             Self::Refuse => self.with_limits(SolidLimits::DEFAULT),
         }
     }
+
+    /// Replaces only the compression ratio limit of an admitted policy,
+    /// keeping its block memory limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidConfiguration`] naming
+    /// [`ConfigSetting::MaxSolidCompressionRatio`] under
+    /// [`Refuse`](Self::Refuse), because the limit would be silently ignored.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SolidArchives;
+    /// use exarch_core::SolidLimits;
+    ///
+    /// let ratio = exarch_core::ratio_limit!(500.0);
+    /// assert!(SolidArchives::Refuse.with_max_ratio(ratio).is_err());
+    ///
+    /// let allowed = SolidArchives::Allow(SolidLimits::PERMISSIVE).with_max_ratio(ratio)?;
+    /// let limits = allowed.limits().expect("an admitted policy has limits");
+    /// assert_eq!(limits.max_ratio, ratio);
+    /// assert_eq!(
+    ///     limits.max_block_memory,
+    ///     SolidLimits::PERMISSIVE.max_block_memory
+    /// );
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn with_max_ratio(self, max_ratio: RatioLimit) -> crate::Result<Self> {
+        match self {
+            Self::Allow(limits) => Ok(Self::Allow(limits.with_max_ratio(max_ratio))),
+            Self::Refuse => Err(crate::ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::MaxSolidCompressionRatio,
+                problem: ConfigProblem::NotSupported,
+            }),
+        }
+    }
 }
 
 /// How much extra memory a 7z block may use to decode LZMA2 runs ahead on
@@ -2088,33 +2125,35 @@ impl VerificationOptions {
     }
 }
 
-/// Whether listing reads the symlink targets a format keeps in compressed
-/// entry data.
-///
-/// 7z keeps link targets in compressed entry data, so reading them decodes
-/// part of the archive, which in a solid block can be most of it. Listing
-/// therefore skips them by default. Other formats always report their targets:
-/// TAR keeps them in headers, and ZIP reads them from a small local entry. This
-/// is a Rust API option only; the Python and Node `list_archive` skip 7z
-/// targets.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::StoredTargets;
-///
-/// assert_eq!(StoredTargets::default(), StoredTargets::Skip);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum StoredTargets {
-    /// Leave 7z link targets unread, so listing decodes no entry data (the
-    /// default).
-    #[default]
-    Skip,
+closed_enum! {
+    /// Whether listing reads the symlink targets a format keeps in compressed
+    /// entry data.
+    ///
+    /// 7z keeps link targets in compressed entry data, so reading them decodes
+    /// part of the archive, which in a solid block can be most of it. Listing
+    /// therefore skips them by default. Other formats always report their
+    /// targets: TAR keeps them in headers, and ZIP reads them from a small
+    /// local entry. The string form is shared by every front end.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::StoredTargets;
+    ///
+    /// assert_eq!(StoredTargets::default(), StoredTargets::Skip);
+    /// assert_eq!(StoredTargets::Read.as_str(), "read");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    #[non_exhaustive]
+    pub enum StoredTargets {
+        /// Leave 7z link targets unread, so listing decodes no entry data (the
+        /// default).
+        #[default]
+        Skip => "skip",
 
-    /// Read the targets, decoding the blocks that hold them.
-    Read,
+        /// Read the targets, decoding the blocks that hold them.
+        Read => "read",
+    }
 }
 
 /// Options controlling `list` behavior.

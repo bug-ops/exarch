@@ -21,6 +21,7 @@ use crate::ConfigProblem;
 use crate::ConfigSetting;
 use crate::CreationWarning;
 use crate::Result;
+use crate::STAGING_PREFIX;
 use crate::request::Durability;
 use crate::request::OutputPolicy;
 
@@ -180,7 +181,7 @@ impl StagedOutput {
         }
 
         let mut builder = Builder::new();
-        builder.prefix(".exarch-");
+        builder.prefix(STAGING_PREFIX);
         let permissions = match &occupant {
             Occupant::Regular(permissions) => {
                 private_while_writing(&mut builder);

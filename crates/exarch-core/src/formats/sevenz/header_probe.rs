@@ -25,6 +25,7 @@ use lzma_rust2::lzma2_get_memory_usage;
 
 use super::SIGNATURE_HEADER_LEN;
 use super::SIGNATURE_HEADER_SIZE;
+use super::admit;
 use super::header::SEVENZ_MAGIC;
 use crate::Malformation;
 use crate::SevenZHeaderTable;
@@ -269,17 +270,6 @@ fn fits(needed_kib: u32, memory_kib: usize) -> Result<(), Stop> {
     }
 }
 
-/// The LZMA2 dictionary size a properties byte declares.
-fn lzma2_dictionary(property: u8) -> Option<u32> {
-    match property {
-        0..=39 => {
-            (2 | u32::from(property & 1)).checked_shl(u32::from(property / 2).saturating_add(11))
-        }
-        40 => Some(u32::MAX),
-        _ => None,
-    }
-}
-
 /// The bytes `record` decodes to, with its coder held to the same memory
 /// check sevenz-rust2 applies to it.
 fn decode_header<R: Read + Seek>(
@@ -315,8 +305,7 @@ fn decode_header<R: Read + Seek>(
             read_bounded(reader, decoded).map_err(unmodelled)
         }
         METHOD_LZMA2 => {
-            let property = *properties.first().ok_or(Stop::Unmodelled)?;
-            let dictionary = lzma2_dictionary(property).ok_or(Stop::Unmodelled)?;
+            let dictionary = admit::lzma2_dict_size(properties).ok_or(Stop::Unmodelled)?;
             fits(lzma2_get_memory_usage(dictionary), memory_kib)?;
             read_bounded(Lzma2Reader::new(packed, dictionary, None), decoded).map_err(unmodelled)
         }

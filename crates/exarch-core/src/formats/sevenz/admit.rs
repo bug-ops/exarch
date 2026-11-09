@@ -549,6 +549,17 @@ mod tests {
     }
 
     #[test]
+    fn lzma2_dict_size_decodes_every_property_byte() {
+        for property in 0u8..=39 {
+            let expected = (2 | u32::from(property & 1)) << (u32::from(property / 2) + 11);
+            assert_eq!(lzma2_dict_size(&[property]), Some(expected));
+        }
+        assert_eq!(lzma2_dict_size(&[40]), Some(u32::MAX));
+        assert_eq!(lzma2_dict_size(&[41]), None);
+        assert_eq!(lzma2_dict_size(&[]), None);
+    }
+
+    #[test]
     fn solid_policy_refusal_carries_its_own_reason() {
         let refused =
             check_solid_policy(true, bytes(&[1]), &SecurityConfig::default()).unwrap_err();

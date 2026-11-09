@@ -183,8 +183,8 @@ Every in-memory function takes its arguments in one order: the data, `config`,
 is one example.
 
 `listArchiveBytesWithProgress`, `verifyArchiveBytesWithProgress` and
-`extractArchiveToMemoryWithProgress` (async only) take a `progress` callback as
-their last argument, called with `(err, [path, total, current, bytesWritten])`;
+`extractArchiveToMemoryWithProgress` (async only) take a `progress` callback
+after `format` (and before the optional `signal`), called with `(err, [path, total, current, bytesWritten])`;
 `current` counts from 1 and `total` is `null` while the entry count is unknown (a TAR stream). A throwing callback stops the
 run before the next entry, and the promise rejects with
 `PROGRESS_CALLBACK_ERROR` and the result is discarded.

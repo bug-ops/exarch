@@ -1456,6 +1456,21 @@ mod tests {
     }
 
     #[test]
+    fn test_a_sub_second_time_before_the_epoch_keeps_its_fraction() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        pyo3::Python::initialize();
+        let mut entry = ArchiveEntry::new(PathBuf::from("f"), ManifestEntryKind::Directory);
+        entry.modified = Some(UNIX_EPOCH - Duration::from_millis(1500));
+        Python::attach(|py| {
+            let obj = PyArchiveEntry::into_py(py, entry).unwrap().into_bound(py);
+            let modified: f64 = obj.getattr("modified").unwrap().extract().unwrap();
+            assert_eq!(modified, -1.5);
+        });
+    }
+
+    #[test]
     fn test_a_time_before_the_epoch_is_negative_seconds() {
         use std::time::Duration;
         use std::time::UNIX_EPOCH;

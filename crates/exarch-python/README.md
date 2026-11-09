@@ -221,7 +221,7 @@ except exarch.ArchiveError as e:
 
 ## API Reference
 
-### `extract_archive(archive_path, output_dir, config=None)`
+### `extract_archive(archive_path, output_dir, config=None, options=None)`
 
 Extract an archive to the specified directory with security validation.
 
@@ -344,7 +344,7 @@ config = config.with_max_solid_compression_ratio(
 
 Every setting an error names in `relaxable_by` has a setter. `list_archive*` takes `options=ListOptions().with_stored_targets()` (`"skip"` or `"read"`, default `"read"` when called without an argument) to read the 7z link targets that a listing leaves unread by default.
 
-**Newer core values.** Output tokens (`kind`, `code`, `sub_code`, `io_kind`, entry and disposition kinds, ...) are the strings `exarch-core` emits, so a value added to the core after your stubs were written still arrives as a plain `str`; an unknown report class falls back to its base class (`ArchiveEntry`, `LinkTarget` with `state == "unknown"`, `EntryDisposition`, `MemoryEntry`, `ExtractionWarning`, `CreationWarning`) instead of raising.
+**Newer core values.** Output tokens (`kind`, `code`, `sub_code`, `io_kind`, entry and disposition kinds, ...) are the strings `exarch-core` emits, so a value added to the core after your stubs were written still arrives as a plain `str`; an unknown report class falls back to its base class (`ArchiveEntry`, `LinkTarget` whose `state` is the core token, `EntryDisposition`, `MemoryEntry`, `ExtractionWarning`, `CreationWarning`) instead of raising.
 
 **Patterns.** Include, exclude and `CreationConfig` exclude patterns share one glob grammar (matched case-sensitively on raw bytes, `\` is a separator):
 

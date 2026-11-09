@@ -2644,9 +2644,8 @@ class SecurityViolationError(ArchiveError):
         relaxable_by: The ``SecurityConfig`` setting whose current value refused
             the entry, or ``None`` when no setting relaxes this refusal. Changing
             that setting removes this refusal only; the entry can still fail a
-            later check. ``"windows_reserved_names"`` and
-            ``"max_tar_metadata_bytes"`` have no setter in this binding (Rust
-            API only).
+            later check. Every setting named here has a
+            ``SecurityConfig`` setter.
         sub_code: The family of the refusal, set on every violation raised by the
             core (``"PATH_NAME"``, ``"LINK_TARGET"``, ``"ENCRYPTED"``,
             ``"TAR_TRAILER"``, ...); ``None`` only on the class itself.

@@ -180,10 +180,10 @@ pub enum PolicySetting {
     /// `SecurityConfig.withMaxPathDepth`.
     #[napi(value = "max_path_depth")]
     MaxPathDepth,
-    /// Rust API only: no setter in this binding.
+    /// `SecurityConfig.withAllowWindowsReservedNames`.
     #[napi(value = "windows_reserved_names")]
     WindowsReservedNames,
-    /// Rust API only: no setter in this binding.
+    /// `SecurityConfig.withMaxTarMetadataBytes`.
     #[napi(value = "max_tar_metadata_bytes")]
     MaxTarMetadataBytes,
 }

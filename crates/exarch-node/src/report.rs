@@ -2074,6 +2074,37 @@ mod tests {
     }
 
     #[test]
+    fn signed_millis_clamps_to_the_safe_integer_range() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        let far = Duration::from_secs(1 << 44);
+        let after = UNIX_EPOCH.checked_add(far).unwrap();
+        let before = UNIX_EPOCH.checked_sub(far).unwrap();
+        let safe = i64::try_from(MAX_SAFE_INTEGER).unwrap();
+        assert_eq!(signed_millis(exarch_core::UnixTime::from(after)), safe);
+        assert_eq!(signed_millis(exarch_core::UnixTime::from(before)), -safe);
+    }
+
+    #[test]
+    fn a_sub_millisecond_time_rounds_toward_negative_infinity_in_an_entry() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        let millis = |time| {
+            let mut entry = exarch_core::ArchiveEntry::new(
+                "f".into(),
+                exarch_core::ManifestEntryKind::Directory,
+            );
+            entry.modified = Some(time);
+            entry_common(&entry).unwrap().modified
+        };
+        assert_eq!(millis(UNIX_EPOCH - Duration::from_micros(1)), Some(-1));
+        assert_eq!(millis(UNIX_EPOCH + Duration::from_micros(1500)), Some(1));
+        assert_eq!(millis(UNIX_EPOCH - Duration::from_micros(1500)), Some(-2));
+    }
+
+    #[test]
     fn a_time_before_the_epoch_is_negative_milliseconds() {
         use std::time::Duration;
         use std::time::UNIX_EPOCH;

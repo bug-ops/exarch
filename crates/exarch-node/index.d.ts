@@ -1805,8 +1805,7 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  *   `banned_components`, `max_path_depth`, `windows_reserved_names` or
  *   `max_tar_metadata_bytes`; absent when no setting relaxes the refusal.
  *   Changing the setting removes that refusal only; the entry can still fail a
- *   later check. `windows_reserved_names` and `max_tar_metadata_bytes` have no
- *   setter in this binding (Rust API only).
+ *   later check. Every one of these settings has a `SecurityConfig` setter.
  * - `subCode`: the finer classification of an `INVALID_ARCHIVE` (when it has
  *   one), the family of every `SECURITY_VIOLATION`, the quota of every
  *   `QUOTA_EXCEEDED` and the scope of every `ZIP_BOMB`.

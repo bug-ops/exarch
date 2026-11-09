@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Node: `withCompressedMemberAllowance`, `withAllowWindowsReservedNames`, `withMaxTarMetadataBytes`, `withMaxDecoderMemory` and `withMaxSolidCompressionRatio`, an optional `ListOptions` on `listArchive*`, `IntegrityGaps.total`, `SkippedSummary.total` and `sizeClamped` on byte-size reports (#1052, #1055, #1056, #1065).
 - Tests: regression tests for the zip2 open-time advisories GHSA-m3j8 and GHSA-w2w4 (#1028, #1065).
 - Tests: a WinRAR-produced ZIP with deflate payload joins the ZIP corpus (#855, #1077).
+- Core: `staging_place`, `StagingPlace`, `StagedOutputKind`, `STAGING_PREFIX`, `BACKUP_PREFIX`, `LinkTargetState`, `StoredTargets` tokens, `UnixTime`, `SolidArchives::with_max_ratio` and `Skips::counts` (#1096, #1097, #1098, #1099, #1102, #1114).
 
 ### Changed
 
@@ -88,6 +89,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `indexing_slicing` and `arithmetic_side_effects` are enforced across all of `exarch-core` from `lib.rs` instead of the format and security modules, and the remaining sites use checked or saturating forms that stay restrictive (#1070, #1081).
 - Core: `fs_view` tree nodes are addressed by a `NodeId` minted by a private arena and 7z files by a header-minted `FileIndex` with one `SevenZHeader::file` accessor (#1071, #1072, #1081).
 - Tests: the CLI interrupt tests join their stderr reader, drive the repeated-SIGINT case through a FIFO and run under a `package(exarch-cli)` nextest override with a 2 s leak timeout that reports a leak without failing the run (#1075, #1081).
+- **Breaking**: Python and Node take every function's arguments in one order (required inputs, config, options, specific arguments, format, progress, signal); seven Python signatures and the four Node `listArchiveBytes*` functions moved (#1102, #1114).
+- **Breaking**: Python `ListOptions.with_stored_targets` and `stored_targets` are strings instead of a bool, and an unknown `LinkTarget` state reports the core token (#1097, #1114).
+- **Breaking**: Node `zipConsistency`, `existingFiles`, `staging` and `storedTargets` getters return widened strings and never throw, and `ArchiveEntry.modified` is negative before 1970 instead of `null` (#1097, #1098, #1114).
+- Core: a caller-supplied reader that claims more bytes than it holds always fails as an I/O error with zero bytes written, instead of sometimes `Overrun` (#1101, #1114).
+- Core: `EntryPattern` pairs shape and engine through a `Matcher`, uid and gid are newtypes, `ArchiveError` classifiers are exhaustive and `TempSpool` fields are private (#1100, #1114).
+- Core: the ACL platform predicate, little-endian reads, bounded prefix reads and errno checks have one implementation each (#1101, #1114).
+- Python and Node: the solid 7z ratio rule and the decode-reuse limit come from core (#1096, #1114).
+- CLI: a stop after core's last poll reports the result and ends by the signal (130/143), a forced exit flushes stdout and stderr first, and `--compression-level` beyond `i64` is exit 1 (#1103, #1114).
+- CLI: the forced-exit hint names the staging place resolved by core and no longer spells core's `.exarch-*` names (#1099, #1114).
+- CI: maturin and the Python dev tools install from the hash-locked `uv.lock`, and Dependabot tracks the Python lock (#1093, #1114).
 
 ### Fixed
 
@@ -114,6 +125,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: macOS atomic and default fresh-destination extraction succeeds under a parent with an inheritable `deny list` entry (#1084, #1089).
 - Core: `--atomic --force` removes the backup of a destination with mode 0311, 0600 or 0644 (#1069, #1089).
 - Core: atomic extraction holds a descriptor on the destination until publication, so a replaced destination is reported as `destination_changed` even when the filesystem reuses its inode number (#1080, #1089).
+- Core: the list preview refuses a hardlink whose target is missing, escaping, a directory, unselected or ambiguous, as extract and verify do (#1090, #1114).
+- Core: a 7z Deflate block is refused at admission, before the destination is created, like Deflate64; `verify` of such an archive now fails (#1091, #1114).
 
 ## [0.9.0] - 2026-11-05
 

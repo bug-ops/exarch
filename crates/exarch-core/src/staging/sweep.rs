@@ -19,6 +19,9 @@
 //! not see) keeps the entry and its ACL in place. An entry that belongs to
 //! another user or carries an entry that was not inherited is left in place
 //! too. Every failure skips the entry: the rollback reports what survived.
+//!
+//! The tree is walked by the bounded-descriptor walk the plain removal uses,
+//! so a tree of any depth is swept.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -35,13 +38,13 @@ use rustix::io::Errno;
 use super::acl;
 use super::dir::OwnContents;
 use super::dir::VerifiedStage;
-use super::dir::list_entries;
+use super::remove::Enter;
+use super::remove::Trail;
+use super::remove::Visit;
+use super::remove::walk;
 use crate::formats::file_identity::IdentityKey;
 use crate::formats::pinned_dir::open_directory_at;
 use crate::formats::run_record::RunRecord;
-
-/// Directory levels the sweep descends, each holding one descriptor.
-const MAX_DEPTH: usize = 64;
 
 /// The names inside the stage the sweep walked past and could not unlink,
 /// for the entries that have several links.
@@ -62,7 +65,7 @@ impl Links {
         }
     }
 
-    fn defer(&mut self, key: Option<IdentityKey>, trail: &[OsString], name: &OsStr) {
+    fn defer(&mut self, key: Option<IdentityKey>, trail: &Trail<'_>, name: &OsStr) {
         let Some(key) = key else {
             return;
         };
@@ -140,95 +143,76 @@ fn open_parent<'a>(root: &File, at: &'a [OsString]) -> Option<(File, &'a OsStr)>
 
 /// Unlinks everything it may under `stage`, clearing the inherited ACL
 /// entries that stand in the way of the entries `ledger` says the run made.
-pub(super) fn sweep(stage: &VerifiedStage, _own: OwnContents, ledger: &RunRecord) {
+pub(super) fn sweep(stage: &VerifiedStage, _own: &OwnContents, ledger: &RunRecord) {
     let root = stage.as_file();
     let _ = acl::CopiedAcl::clear(root);
-    let mut links = Links::default();
-    sweep_children(root, &mut Vec::new(), &mut links, ledger);
-    if links.resolve(root, ledger) {
+    let mut sweep = Sweep {
+        links: Links::default(),
+        ledger,
+    };
+    walk(root, &mut sweep);
+    if sweep.links.resolve(root, ledger) {
         // The directories that held those names can go now.
-        sweep_children(root, &mut Vec::new(), &mut Links::default(), ledger);
+        walk(
+            root,
+            &mut Sweep {
+                links: Links::default(),
+                ledger,
+            },
+        );
     }
 }
 
-fn sweep_children(dir: &File, trail: &mut Vec<OsString>, links: &mut Links, ledger: &RunRecord) {
-    let Ok(names) = list_entries(dir) else {
-        return;
-    };
-    for name in &names {
-        sweep_entry(dir, name, trail, links, ledger);
-    }
+/// The walk's visitor: enters only the directories the run made and clears
+/// their ACL, and unlinks the entries whose ACL the run may clear.
+struct Sweep<'a> {
+    links: Links,
+    ledger: &'a RunRecord,
 }
 
-fn sweep_entry(
-    dir: &File,
-    name: &OsStr,
-    trail: &mut Vec<OsString>,
-    links: &mut Links,
-    ledger: &RunRecord,
-) {
-    let Ok(stat) = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) else {
-        return;
-    };
-    match FileType::from_raw_mode(stat.st_mode) {
-        FileType::Directory => sweep_directory(dir, name, trail, links, ledger),
-        FileType::Symlink => {
-            let _ = rustix::fs::unlinkat(dir, name, AtFlags::empty());
+impl Visit for Sweep<'_> {
+    fn enter(&mut self, dir: &File) -> Enter {
+        if cleared_own_entry(dir, self.ledger) {
+            Enter::Descend
+        } else {
+            Enter::Keep
         }
-        _ => sweep_leaf(dir, name, &stat, trail, links, ledger),
     }
-}
 
-fn sweep_directory(
-    parent: &File,
-    name: &OsStr,
-    trail: &mut Vec<OsString>,
-    links: &mut Links,
-    ledger: &RunRecord,
-) {
-    if trail.len() >= MAX_DEPTH {
-        return;
-    }
-    let Ok(child) = open_directory_at(parent, name) else {
-        return;
-    };
-    if !cleared_own_entry(&child, ledger) {
-        return;
-    }
-    trail.push(name.to_os_string());
-    sweep_children(&child, trail, links, ledger);
-    trail.pop();
-    let _ = rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR);
-}
-
-fn sweep_leaf(
-    dir: &File,
-    name: &OsStr,
-    stat: &Stat,
-    trail: &[OsString],
-    links: &mut Links,
-    ledger: &RunRecord,
-) {
-    match rustix::fs::unlinkat(dir, name, AtFlags::empty()) {
-        Err(Errno::ACCESS | Errno::PERM) => {}
-        Ok(()) | Err(_) => return,
-    }
-    let key = IdentityKey::of_stat(stat).ok();
-    let Some((file, opened)) = open_leaf(dir, name)
-        .ok()
-        .and_then(|file| rustix::fs::fstat(&file).ok().map(|opened| (file, opened)))
-    else {
-        links.survives(key);
-        return;
-    };
-    if FileType::from_raw_mode(opened.st_mode) == FileType::Directory {
-        links.survives(key);
-    } else if opened.st_nlink == 1 {
-        if cleared_own_entry(&file, ledger) {
-            let _ = rustix::fs::unlinkat(dir, name, AtFlags::empty());
+    fn leaf(&mut self, dir: &File, name: &OsStr, stat: &Stat, trail: Trail<'_>) -> bool {
+        match FileType::from_raw_mode(stat.st_mode) {
+            FileType::Symlink => rustix::fs::unlinkat(dir, name, AtFlags::empty()).is_ok(),
+            _ => self.sweep_leaf(dir, name, stat, &trail),
         }
-    } else {
-        links.defer(IdentityKey::of_stat(&opened).ok(), trail, name);
+    }
+}
+
+impl Sweep<'_> {
+    fn sweep_leaf(&mut self, dir: &File, name: &OsStr, stat: &Stat, trail: &Trail<'_>) -> bool {
+        match rustix::fs::unlinkat(dir, name, AtFlags::empty()) {
+            Err(Errno::ACCESS | Errno::PERM) => {}
+            Ok(()) => return true,
+            Err(_) => return false,
+        }
+        let key = IdentityKey::of_stat(stat).ok();
+        let Some((file, opened)) = open_leaf(dir, name)
+            .ok()
+            .and_then(|file| rustix::fs::fstat(&file).ok().map(|opened| (file, opened)))
+        else {
+            self.links.survives(key);
+            return false;
+        };
+        if FileType::from_raw_mode(opened.st_mode) == FileType::Directory {
+            self.links.survives(key);
+            false
+        } else if opened.st_nlink == 1 {
+            cleared_own_entry(&file, self.ledger)
+                && rustix::fs::unlinkat(dir, name, AtFlags::empty()).is_ok()
+        } else {
+            self.links
+                .defer(IdentityKey::of_stat(&opened).ok(), trail, name);
+            false
+        }
     }
 }
 
@@ -265,6 +249,7 @@ fn open_leaf(dir: &File, name: &OsStr) -> rustix::io::Result<File> {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
+    use std::path::Path;
     use std::path::PathBuf;
 
     use crate::formats::pinned_dir::Gid;
@@ -272,6 +257,8 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use super::super::adopt::Adoption;
+    use super::super::adopt::Claim;
     use super::super::dir::Seed;
     use super::super::dir::StagingDir;
     use super::super::test_acl::AclCleanup;
@@ -279,7 +266,6 @@ mod tests {
     use super::super::test_acl::add_ace;
     use super::super::test_acl::clear_acl;
     use super::IdentityKey;
-    use super::MAX_DEPTH;
     use super::RunRecord;
     use super::remove_group;
     use crate::formats::file_identity::FileIdentity;
@@ -391,8 +377,8 @@ mod tests {
     }
 
     #[test]
-    fn the_sweep_descends_64_levels_and_names_a_tree_that_is_deeper() {
-        for (levels, swept) in [(MAX_DEPTH, true), (MAX_DEPTH.saturating_add(1), false)] {
+    fn a_tree_of_any_depth_is_swept() {
+        for levels in [65, 200] {
             let temp = TempDir::new().unwrap();
             let _cleanup = AclCleanup(temp.path());
             let (pin, parent) = denying_parent(&temp);
@@ -402,35 +388,132 @@ mod tests {
                 deepest.push("d");
             }
             std::fs::create_dir_all(&deepest).unwrap();
+            std::fs::write(deepest.join("f"), b"x").unwrap();
             record_tree(&staging);
+            assert!(!aces_of(&deepest).is_empty(), "{levels} levels");
+            assert!(!aces_of(&deepest.join("f")).is_empty(), "{levels} levels");
+            let root = std::fs::File::open(staging.path()).unwrap();
+            assert!(
+                !super::super::remove::remove_children(&root),
+                "{levels} levels: the plain removal must fail so only the sweep can succeed"
+            );
+            assert!(deepest.join("f").exists(), "{levels} levels");
 
-            let leftover = staging.discard();
-
-            assert_eq!(leftover.is_none(), swept, "{levels} levels");
+            assert!(staging.discard().is_none(), "{levels} levels");
         }
     }
 
-    #[test]
-    fn a_rollback_after_adoption_leaves_the_stage_without_a_sweep() {
-        use super::super::adopt::Adoption;
-        use super::super::adopt::Claim;
-
-        let temp = TempDir::new().unwrap();
-        let _cleanup = AclCleanup(temp.path());
-        let (pin, parent) = denying_parent(&temp);
-        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
-        std::fs::write(staging.path().join("f"), b"x").unwrap();
-        let own = std::fs::metadata(&parent).unwrap();
+    fn adopt_for_test(staging: &mut StagingDir<'_>, parent: &Path, mode: u32) {
+        let own = std::fs::metadata(parent).unwrap();
         let _adopted = staging
             .adopt(Adoption::for_test(
-                0o755,
+                mode,
                 Uid::of(&own),
                 Gid::of(&own),
                 Claim::Full,
             ))
             .unwrap();
+    }
+
+    /// A stage with one recorded file, adopted with `mode`.
+    fn adopted_stage<'p>(pin: &'p VettedDir, parent: &Path, mode: u32) -> StagingDir<'p> {
+        let mut staging = StagingDir::create(pin, parent, Seed::Absent).unwrap();
+        std::fs::write(staging.path().join("f"), b"x").unwrap();
+        record_tree(&staging);
+        adopt_for_test(&mut staging, parent, mode);
+        staging
+    }
+
+    #[test]
+    fn a_rollback_after_a_closed_adoption_still_sweeps() {
+        let temp = TempDir::new().unwrap();
+        let _cleanup = AclCleanup(temp.path());
+        let (pin, parent) = denying_parent(&temp);
+        let staging = adopted_stage(&pin, &parent, 0o755);
+
+        assert!(staging.own.is_some());
+        assert!(staging.discard().is_none());
+    }
+
+    #[test]
+    fn a_rollback_after_an_adoption_that_opens_the_root_keeps_the_stage() {
+        for mode in [0o775, 0o757] {
+            let temp = TempDir::new().unwrap();
+            let _cleanup = AclCleanup(temp.path());
+            let (pin, parent) = denying_parent(&temp);
+            let staging = adopted_stage(&pin, &parent, mode);
+            let root = staging.path().to_path_buf();
+
+            assert!(staging.own.is_none(), "{mode:o}");
+            assert!(staging.discard().is_some(), "{mode:o}");
+            assert!(root.exists(), "{mode:o}");
+        }
+    }
+
+    #[test]
+    fn an_entry_planted_after_adoption_stays_as_the_leftover() {
+        let temp = TempDir::new().unwrap();
+        let _cleanup = AclCleanup(temp.path());
+        let (pin, parent) = denying_parent(&temp);
+        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
+        let root = staging.path().to_path_buf();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::set_permissions(root.join("sub"), std::fs::Permissions::from_mode(0o777)).unwrap();
+        record_tree(&staging);
+        adopt_for_test(&mut staging, &parent, 0o755);
+        std::fs::write(root.join("sub/planted"), b"x").unwrap();
+        assert!(staging.own.is_some());
+
+        let leftover = staging.discard().unwrap();
+
+        assert_eq!(leftover.path, root);
+        assert!(root.join("sub/planted").exists());
+    }
+
+    #[test]
+    fn a_link_from_outside_keeps_its_acl_after_adoption() {
+        let temp = TempDir::new().unwrap();
+        let _cleanup = AclCleanup(temp.path());
+        let (pin, parent) = denying_parent(&temp);
+        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
+        let root = staging.path().to_path_buf();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/first"), b"x").unwrap();
+        record_tree(&staging);
+        adopt_for_test(&mut staging, &parent, 0o755);
+        let outside = temp.path().canonicalize().unwrap().join("outside");
+        std::fs::hard_link(root.join("sub/first"), &outside).unwrap();
+        let held = aces_of(&outside);
+        assert_eq!(held.len(), 1, "{held:?}");
 
         assert!(staging.discard().is_some());
+
+        assert!(root.join("sub/first").exists());
+        assert_eq!(aces_of(&outside), held);
+    }
+
+    #[test]
+    fn the_proof_is_dropped_unless_the_root_is_closed_to_others() {
+        let temp = TempDir::new().unwrap();
+        let _cleanup = AclCleanup(temp.path());
+        let (pin, parent) = denying_parent(&temp);
+        let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
+        let root = staging.path().to_path_buf();
+        let proof = |staging: &mut StagingDir<'_>| {
+            let own = staging.own.take();
+            staging.keep_own_after_adoption(own);
+            staging.own.is_some()
+        };
+        assert!(proof(&mut staging));
+
+        add_ace(
+            &root,
+            "everyone allow list,file_inherit,directory_inherit,only_inherit",
+        );
+        assert!(proof(&mut staging));
+
+        add_ace(&root, "everyone allow list");
+        assert!(!proof(&mut staging));
     }
 
     #[test]

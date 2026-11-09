@@ -1194,10 +1194,21 @@ mod macos {
     /// Whether the ACL of `file` can be read and every entry in it was
     /// inherited, which is all an entry staged by this run can hold.
     pub(in crate::staging) fn only_inherited_entries(file: &File) -> bool {
+        every_entry_has(file, INHERITED)
+    }
+
+    /// Whether the ACL of `file` can be read and every entry in it is for
+    /// children only, so none applies to `file` itself. A file without an ACL
+    /// qualifies; a value that cannot be read or parsed does not.
+    pub(in crate::staging) fn only_inherit_entries(file: &File) -> bool {
+        every_entry_has(file, ONLY_INHERIT)
+    }
+
+    fn every_entry_has(file: &File, flag: u32) -> bool {
         match darwin_acl::fetch(file) {
             Ok(Fetched::Complete(attribute)) => match parse(&attribute) {
                 Ok(None) => true,
-                Ok(Some(acl)) => acl.aces().iter().all(|ace| ace.flags & INHERITED != 0),
+                Ok(Some(acl)) => acl.aces().iter().all(|ace| ace.flags & flag != 0),
                 Err(_) => false,
             },
             Ok(Fetched::Truncated) | Err(_) => false,
@@ -1723,5 +1734,7 @@ pub(super) use imp::read_destination;
 pub(super) use imp::resolve;
 #[cfg(unix)]
 pub(super) use imp::stage;
+#[cfg(target_os = "macos")]
+pub(super) use macos::only_inherit_entries;
 #[cfg(target_os = "macos")]
 pub(super) use macos::only_inherited_entries;

@@ -369,11 +369,15 @@ mod imp {
         /// changing its mode, or a directory that is no longer the one
         /// created.
         pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<AdoptedRoot> {
-            // TODO(#1088): rollback after adoption skips the macOS sweep
             #[cfg(target_os = "macos")]
-            {
-                self.own = None;
-            }
+            let own = self.own.take();
+            let adopted = self.adopt_root(adoption);
+            #[cfg(target_os = "macos")]
+            self.keep_own_after_adoption(own);
+            adopted
+        }
+
+        fn adopt_root(&mut self, adoption: Adoption) -> io::Result<AdoptedRoot> {
             let stage = self.open_verified()?;
             let dir = stage.as_file();
             let Adoption { mut mode, origin } = adoption;

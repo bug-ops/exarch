@@ -276,10 +276,16 @@ enum OnUnlistable {
 /// descriptor) decide what it may clear, and "inherited" is a heuristic since
 /// the flag can be set by hand.
 ///
-/// Made only by [`StagingDir::emptied`], and lost by `adopt`, whose mode may
-/// open the root to others.
+/// Made only by [`StagingDir::emptied`]. `adopt` takes it, because the
+/// adopted mode may open the root to others, and
+/// [`StagingDir::keep_own_after_adoption`] gives it back only when the root
+/// is still the caller's, grants no group or world write, and carries no ACL
+/// entry that applies to it: then nobody else can add to the root before the
+/// rollback. The root may be searchable by others after adoption, so a staged
+/// subdirectory whose archive mode grants group or world write can receive
+/// entries; the sweep still touches only entries in the run's ledger.
 #[cfg(target_os = "macos")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(super) struct OwnContents(());
 
 /// A staging directory inside the pinned directory `parent`.
@@ -784,9 +790,21 @@ impl<'p> StagingDir<'p> {
     /// stopped at. Best effort, as the removal it follows.
     #[cfg(target_os = "macos")]
     fn sweep_own_contents(&self) {
-        if let Some(own) = self.own {
+        if let Some(own) = &self.own {
             super::sweep::sweep(&self.pin, own, &self.ledger);
         }
+    }
+
+    /// Restores the proof `adopt` took, when the adopted root still rules out
+    /// anyone else writing to it: owned by the caller, no group or world write
+    /// bit, and every ACL entry for children only. Drops it otherwise.
+    #[cfg(target_os = "macos")]
+    pub(super) fn keep_own_after_adoption(&mut self, own: Option<OwnContents>) {
+        let closed = rustix::fs::fstat(self.pin.as_file()).is_ok_and(|stat| {
+            stat.st_uid == rustix::process::geteuid().as_raw()
+                && u32::from(stat.st_mode) & 0o022 == 0
+        }) && super::acl::only_inherit_entries(self.pin.as_file());
+        self.own = own.filter(|_| closed);
     }
 }
 

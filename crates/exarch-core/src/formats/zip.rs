@@ -149,6 +149,7 @@ use crate::types::safe_path::stream_separator_error;
 use super::common;
 use super::common::EntryCompleteGuard;
 use super::io_marker::IoMarker as _;
+use super::output_root::OutputRoot;
 use super::source_fault::DeclaredSizeCeiling;
 use super::source_fault::ReadFamily;
 use super::source_fault::ReadFaults;
@@ -919,15 +920,16 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// The consuming [`ArchiveFormat::extract`] is the production entry point;
     /// extracting twice from one handle is not supported, and this method
     /// exists only so crate tests can look at the handle afterwards.
-    pub(crate) fn extract_in_place(
+    pub(crate) fn extract_in_place<'o>(
         &mut self,
-        output_dir: &Path,
+        output: impl Into<OutputRoot<'o>>,
         config: &SecurityConfig,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
+        let output = output.into();
         self.check_structure(config)?.extract_with(
-            |config| HostTarget::create(output_dir, config),
+            |config| HostTarget::create(output, config),
             SinkOptions::existing_files_of(options),
             progress,
         )
@@ -937,14 +939,14 @@ impl<R: Read + Seek> ZipArchive<R> {
 impl<R: Read + Seek> sealed::Sealed for ZipArchive<R> {}
 
 impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
-    fn extract(
+    fn extract<'o>(
         mut self,
-        output_dir: &Path,
+        output: impl Into<OutputRoot<'o>>,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let config = Arc::clone(&self.config);
-        self.extract_in_place(output_dir, &config, options, progress)
+        self.extract_in_place(output, &config, options, progress)
     }
 
     #[cfg(test)]

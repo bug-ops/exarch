@@ -1,7 +1,6 @@
 //! Common traits for archive format handlers.
 
-use std::path::Path;
-
+use super::output_root::OutputRoot;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
@@ -44,9 +43,9 @@ pub(crate) trait ArchiveFormat: sealed::Sealed {
     /// # Errors
     ///
     /// Returns an error if extraction fails or security checks are violated.
-    fn extract(
+    fn extract<'o>(
         self,
-        output_dir: &Path,
+        output: impl Into<OutputRoot<'o>>,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport>;
@@ -88,9 +87,9 @@ mod tests {
     impl sealed::Sealed for TestFormat {}
 
     impl ArchiveFormat for TestFormat {
-        fn extract(
+        fn extract<'o>(
             self,
-            _output_dir: &Path,
+            _output: impl Into<OutputRoot<'o>>,
             _options: &ExtractionOptions,
             _progress: &mut dyn ProgressCallback,
         ) -> Result<ExtractionReport> {

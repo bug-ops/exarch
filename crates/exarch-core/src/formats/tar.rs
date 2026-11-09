@@ -130,6 +130,7 @@ use super::target::Tally;
 use super::traits::ArchiveFormat;
 use super::traits::sealed;
 use crate::formats::compression::DecoderLimits;
+use crate::formats::output_root::OutputRoot;
 use crate::reader::TarStream;
 use crate::reader::decode_tar_stream;
 
@@ -439,14 +440,14 @@ impl<R: Read> TarArchive<R> {
 impl<R: Read> sealed::Sealed for TarArchive<R> {}
 
 impl<R: Read> ArchiveFormat for TarArchive<R> {
-    fn extract(
+    fn extract<'o>(
         self,
-        output_dir: &Path,
+        output: impl Into<OutputRoot<'o>>,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let config = Arc::clone(&self.config);
-        let mut target = HostTarget::create(output_dir, &config)?;
+        let mut target = HostTarget::create(output.into(), &config)?;
         self.extract_into(
             &mut target,
             &config,

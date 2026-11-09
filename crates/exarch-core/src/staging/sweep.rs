@@ -8,7 +8,9 @@
 //! Nothing here acts on an entry by name except the unlink itself: an entry is
 //! opened without following a symlink, its owner, link count and ACL are read
 //! from the descriptor, and only then is the ACL cleared through that
-//! descriptor. The sweep runs only with the [`OwnContents`] proof.
+//! descriptor. The sweep runs only with the [`OwnContents`] proof, and clears
+//! only an entry whose identity the run's ledger holds: an entry the run did
+//! not create is never cleared, whatever its owner and ACL look like.
 //!
 //! An entry with other links is the run's own only when every one of its
 //! names is inside the staging directory: the sweep counts the names it walks
@@ -34,12 +36,10 @@ use super::acl;
 use super::dir::OwnContents;
 use super::dir::VerifiedStage;
 use super::dir::list_entries;
+use super::remove::MAX_DEPTH;
 use crate::formats::file_identity::IdentityKey;
 use crate::formats::pinned_dir::open_directory_at;
-
-/// Directory levels the sweep descends, each holding one descriptor: the
-/// default soft limit on open files is often 256.
-const MAX_DEPTH: usize = 64;
+use crate::formats::run_record::RunRecord;
 
 /// The names inside the stage the sweep walked past and could not unlink,
 /// for the entries that have several links.
@@ -72,11 +72,11 @@ impl Links {
 
     /// Unlinks the names of every inode whose links are all inside the stage
     /// and whose ACL the sweep may clear. Says whether any name was removed.
-    fn resolve(&self, root: &File) -> bool {
+    fn resolve(&self, root: &File, ledger: &RunRecord) -> bool {
         let mut removed = false;
         for (key, names) in &self.deferred {
             if self.surviving.get(key) == Some(&names.len()) {
-                removed |= remove_group(root, *key, names);
+                removed |= remove_group(root, *key, names, ledger);
             }
         }
         removed
@@ -89,7 +89,12 @@ impl Links {
 /// Every name is opened again first and must still be a non-directory with
 /// that identity and a link count equal to `names.len()`; nothing is cleared
 /// or unlinked unless all of them are.
-fn remove_group(root: &File, key: IdentityKey, names: &[Vec<OsString>]) -> bool {
+fn remove_group(
+    root: &File,
+    key: IdentityKey,
+    names: &[Vec<OsString>],
+    ledger: &RunRecord,
+) -> bool {
     let mut opened = Vec::with_capacity(names.len());
     for at in names {
         let Some((parent, name)) = open_parent(root, at) else {
@@ -111,7 +116,7 @@ fn remove_group(root: &File, key: IdentityKey, names: &[Vec<OsString>]) -> bool 
     let Some((_, _, first)) = opened.first() else {
         return false;
     };
-    if !cleared_own_entry(first) {
+    if !cleared_own_entry(first, ledger) {
         return false;
     }
     for (parent, name, _) in &opened {
@@ -132,57 +137,76 @@ fn open_parent<'a>(root: &File, at: &'a [OsString]) -> Option<(File, &'a OsStr)>
 }
 
 /// Unlinks everything it may under `stage`, clearing the inherited ACL
-/// entries that stand in the way.
-pub(super) fn sweep(stage: &VerifiedStage, _own: OwnContents) {
+/// entries that stand in the way of the entries `ledger` says the run made.
+pub(super) fn sweep(stage: &VerifiedStage, _own: OwnContents, ledger: &RunRecord) {
     let root = stage.as_file();
     let _ = acl::CopiedAcl::clear(root);
     let mut links = Links::default();
-    sweep_children(root, &mut Vec::new(), &mut links);
-    if links.resolve(root) {
+    sweep_children(root, &mut Vec::new(), &mut links, ledger);
+    if links.resolve(root, ledger) {
         // The directories that held those names can go now.
-        sweep_children(root, &mut Vec::new(), &mut Links::default());
+        sweep_children(root, &mut Vec::new(), &mut Links::default(), ledger);
     }
 }
 
-fn sweep_children(dir: &File, trail: &mut Vec<OsString>, links: &mut Links) {
+fn sweep_children(dir: &File, trail: &mut Vec<OsString>, links: &mut Links, ledger: &RunRecord) {
     let Ok(names) = list_entries(dir) else {
         return;
     };
     for name in &names {
-        sweep_entry(dir, name, trail, links);
+        sweep_entry(dir, name, trail, links, ledger);
     }
 }
 
-fn sweep_entry(dir: &File, name: &OsStr, trail: &mut Vec<OsString>, links: &mut Links) {
+fn sweep_entry(
+    dir: &File,
+    name: &OsStr,
+    trail: &mut Vec<OsString>,
+    links: &mut Links,
+    ledger: &RunRecord,
+) {
     let Ok(stat) = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) else {
         return;
     };
     match FileType::from_raw_mode(stat.st_mode) {
-        FileType::Directory => sweep_directory(dir, name, trail, links),
+        FileType::Directory => sweep_directory(dir, name, trail, links, ledger),
         FileType::Symlink => {
             let _ = rustix::fs::unlinkat(dir, name, AtFlags::empty());
         }
-        _ => sweep_leaf(dir, name, &stat, trail, links),
+        _ => sweep_leaf(dir, name, &stat, trail, links, ledger),
     }
 }
 
-fn sweep_directory(parent: &File, name: &OsStr, trail: &mut Vec<OsString>, links: &mut Links) {
+fn sweep_directory(
+    parent: &File,
+    name: &OsStr,
+    trail: &mut Vec<OsString>,
+    links: &mut Links,
+    ledger: &RunRecord,
+) {
     if trail.len() >= MAX_DEPTH {
         return;
     }
     let Ok(child) = open_directory_at(parent, name) else {
         return;
     };
-    if !cleared_own_entry(&child) {
+    if !cleared_own_entry(&child, ledger) {
         return;
     }
     trail.push(name.to_os_string());
-    sweep_children(&child, trail, links);
+    sweep_children(&child, trail, links, ledger);
     trail.pop();
     let _ = rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR);
 }
 
-fn sweep_leaf(dir: &File, name: &OsStr, stat: &Stat, trail: &[OsString], links: &mut Links) {
+fn sweep_leaf(
+    dir: &File,
+    name: &OsStr,
+    stat: &Stat,
+    trail: &[OsString],
+    links: &mut Links,
+    ledger: &RunRecord,
+) {
     match rustix::fs::unlinkat(dir, name, AtFlags::empty()) {
         Err(Errno::ACCESS | Errno::PERM) => {}
         Ok(()) | Err(_) => return,
@@ -198,7 +222,7 @@ fn sweep_leaf(dir: &File, name: &OsStr, stat: &Stat, trail: &[OsString], links: 
     if FileType::from_raw_mode(opened.st_mode) == FileType::Directory {
         links.survives(key);
     } else if opened.st_nlink == 1 {
-        if cleared_own_entry(&file) {
+        if cleared_own_entry(&file, ledger) {
             let _ = rustix::fs::unlinkat(dir, name, AtFlags::empty());
         }
     } else {
@@ -206,11 +230,14 @@ fn sweep_leaf(dir: &File, name: &OsStr, stat: &Stat, trail: &[OsString], links: 
     }
 }
 
-/// Clears the ACL of `file` when the caller owns it and every entry in the
-/// ACL was inherited, so nothing the owner set on purpose is removed.
-fn cleared_own_entry(file: &File) -> bool {
-    rustix::fs::fstat(file).is_ok_and(|stat| is_owned_by_caller(&stat))
-        && acl::only_inherited_entries(file)
+/// Clears the ACL of `file` when the run created it, the caller owns it and
+/// every entry in the ACL was inherited, so nothing the owner set on purpose
+/// and nothing the run did not create is touched.
+fn cleared_own_entry(file: &File, ledger: &RunRecord) -> bool {
+    rustix::fs::fstat(file).is_ok_and(|stat| {
+        is_owned_by_caller(&stat)
+            && IdentityKey::of_stat(&stat).is_ok_and(|key| ledger.created_with(key))
+    }) && acl::only_inherited_entries(file)
         && acl::CopiedAcl::clear(file).is_ok()
 }
 
@@ -245,10 +272,14 @@ mod tests {
     use super::super::test_acl::AclCleanup;
     use super::super::test_acl::aces_of;
     use super::super::test_acl::add_ace;
+    use super::super::test_acl::clear_acl;
     use super::IdentityKey;
     use super::MAX_DEPTH;
+    use super::RunRecord;
     use super::remove_group;
+    use crate::formats::file_identity::FileIdentity;
     use crate::formats::pinned_dir::VettedDir;
+    use crate::formats::run_record::Recording;
 
     const DENY_DELETE: &str = "everyone deny delete,file_inherit,directory_inherit";
 
@@ -258,6 +289,24 @@ mod tests {
         std::fs::create_dir(&parent).unwrap();
         add_ace(&parent, DENY_DELETE);
         (VettedDir::open_path(&parent).unwrap(), parent)
+    }
+
+    /// Records everything now in the stage as made by the run, as the
+    /// extraction would have.
+    fn record_tree(staging: &StagingDir<'_>) {
+        fn walk(ledger: &RunRecord, dir: &std::path::Path) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let stat = rustix::fs::lstat(&path).unwrap();
+                ledger.insert_identity_for_test(FileIdentity::Known(
+                    IdentityKey::of_stat(&stat).unwrap(),
+                ));
+                if path.is_dir() && !path.is_symlink() {
+                    walk(ledger, &path);
+                }
+            }
+        }
+        walk(staging.ledger(), staging.path());
     }
 
     fn is_root() -> bool {
@@ -277,6 +326,7 @@ mod tests {
         std::fs::set_permissions(root.join("w"), std::fs::Permissions::from_mode(0o200)).unwrap();
         symlink("w", root.join("l")).unwrap();
         assert!(!aces_of(&root.join("d/e/f")).is_empty());
+        record_tree(&staging);
 
         assert!(staging.discard().is_none());
 
@@ -292,6 +342,12 @@ mod tests {
         IdentityKey::of_stat(&stat).unwrap()
     }
 
+    fn ledger_of(path: &std::path::Path) -> RunRecord {
+        let ledger = RunRecord::new(Recording::Ledger);
+        ledger.insert_identity_for_test(FileIdentity::Known(key_of(path)));
+        ledger
+    }
+
     #[test]
     fn a_group_whose_names_all_match_is_unlinked() {
         let temp = TempDir::new().unwrap();
@@ -299,7 +355,12 @@ mod tests {
         std::fs::hard_link(temp.path().join("a"), temp.path().join("b")).unwrap();
         let root = std::fs::File::open(temp.path()).unwrap();
 
-        let removed = remove_group(&root, key_of(&temp.path().join("a")), &names(&["a", "b"]));
+        let removed = remove_group(
+            &root,
+            key_of(&temp.path().join("a")),
+            &names(&["a", "b"]),
+            &ledger_of(&temp.path().join("a")),
+        );
 
         assert!(removed);
         assert!(!temp.path().join("a").exists() && !temp.path().join("b").exists());
@@ -318,7 +379,7 @@ mod tests {
         std::fs::hard_link(dir.join("a"), dir.join("a_extra")).unwrap();
         let root = std::fs::File::open(dir).unwrap();
 
-        let removed = remove_group(&root, key, &names(&["a", "b"]));
+        let removed = remove_group(&root, key, &names(&["a", "b"]), &ledger_of(&dir.join("a")));
 
         assert!(!removed);
         assert!(dir.join("a").exists() && dir.join("b").exists());
@@ -336,6 +397,7 @@ mod tests {
                 deepest.push("d");
             }
             std::fs::create_dir_all(&deepest).unwrap();
+            record_tree(&staging);
 
             let leftover = staging.discard();
 
@@ -393,6 +455,7 @@ mod tests {
         std::fs::write(root.join("first"), b"x").unwrap();
         std::fs::hard_link(root.join("first"), root.join("a/second")).unwrap();
         std::fs::hard_link(root.join("first"), root.join("a/b/third")).unwrap();
+        record_tree(&staging);
 
         assert!(staging.discard().is_none());
 
@@ -458,5 +521,51 @@ mod tests {
 
         assert!(root.join("sub/link").exists());
         assert_eq!(aces_of(&victim), held);
+    }
+
+    #[test]
+    fn an_entry_the_run_did_not_create_keeps_its_acl_and_is_reported() {
+        let temp = TempDir::new().unwrap();
+        let _cleanup = AclCleanup(temp.path());
+        let (pin, parent) = denying_parent(&temp);
+        let outside = temp.path().canonicalize().unwrap().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let moved = outside.join("moved");
+        std::fs::create_dir(&moved).unwrap();
+        add_ace(&moved, "everyone deny delete,file_inherit");
+        let kept = moved.join("kept");
+        std::fs::write(&kept, b"x").unwrap();
+        clear_acl(&moved);
+        let held = aces_of(&kept);
+        assert_eq!(held.len(), 1, "{held:?}");
+        let staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
+        let root = staging.path().to_path_buf();
+        std::fs::write(root.join("own"), b"x").unwrap();
+        record_tree(&staging);
+        std::fs::rename(&moved, root.join("moved")).unwrap();
+
+        let leftover = staging.discard().unwrap();
+
+        assert_eq!(leftover.path, root);
+        assert!(!root.join("own").exists());
+        assert!(root.join("moved/kept").exists());
+        assert_eq!(aces_of(&root.join("moved/kept")), held);
+    }
+
+    #[test]
+    fn a_saturated_ledger_sweeps_nothing() {
+        let temp = TempDir::new().unwrap();
+        let _cleanup = AclCleanup(temp.path());
+        let (pin, parent) = denying_parent(&temp);
+        let staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
+        let root = staging.path().to_path_buf();
+        std::fs::create_dir(root.join("d")).unwrap();
+        std::fs::write(root.join("d/f"), b"x").unwrap();
+        record_tree(&staging);
+        staging.ledger().saturate();
+
+        assert!(staging.discard().is_some());
+
+        assert!(root.join("d/f").exists());
     }
 }

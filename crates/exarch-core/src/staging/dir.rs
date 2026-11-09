@@ -12,6 +12,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 #[cfg(unix)]
 use super::acl;
@@ -29,8 +30,11 @@ use crate::Result;
 use crate::StagingLeftover;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
+use crate::formats::output_root::StagedOutput;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::run_record::Recording;
+use crate::formats::run_record::RunRecord;
 
 const PREFIX: &str = ".exarch-";
 const CREATE_ATTEMPTS: usize = 16;
@@ -131,14 +135,45 @@ enum SeedSource {
 /// the run created.
 ///
 /// Every read or change of the stage's ACL and every check of its contents goes
-/// through one, so none of them can reach a directory another user swapped in
-/// under the name. Only [`StagingDir::open_verified`] makes one.
+/// through one, so none of them acts on a directory found by name that is not
+/// the one the run created. Only [`StagingDir::claim`] (from the descriptor
+/// opened after the `mkdir`) and [`StagingDir::open_verified`] make one.
 #[cfg(unix)]
 #[derive(Debug)]
 pub(super) struct VerifiedStage(std::fs::File);
 
 #[cfg(unix)]
 impl VerifiedStage {
+    /// Fails unless `dir`, opened on a directory just made, has the owner, the
+    /// privacy and the ACL a fresh `0700` directory of this process has. A
+    /// filesystem that reports a synthetic owner or mode fails it.
+    ///
+    /// A directory that fails the check is not known to be what the `mkdir`
+    /// made, so nothing derived from it, its identity above all, is trusted.
+    fn verify_created(dir: &std::fs::File) -> io::Result<()> {
+        let stat = rustix::fs::fstat(dir)?;
+        let refuse = |what: &str| Err(io::Error::other(format!("the staging directory {what}")));
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
+            return refuse("is not a directory");
+        }
+        if stat.st_uid != rustix::process::geteuid().as_raw() {
+            return refuse("is owned by another user");
+        }
+        if stat.st_mode & 0o077 != 0 {
+            return refuse("is accessible to other users");
+        }
+        #[cfg(target_os = "macos")]
+        if !acl::only_inherited_entries(dir) {
+            return refuse("carries an access control entry it did not inherit");
+        }
+        Ok(())
+    }
+
+    /// Another descriptor on the same directory.
+    pub(super) fn try_clone(&self) -> io::Result<std::fs::File> {
+        self.0.try_clone()
+    }
+
     /// The descriptor, for the calls that act on the stage itself.
     pub(super) const fn as_file(&self) -> &std::fs::File {
         &self.0
@@ -204,6 +239,23 @@ pub(super) fn list_entries(dir: &impl std::os::fd::AsFd) -> io::Result<Vec<std::
     Ok(names)
 }
 
+/// Why a created directory could not be claimed as the run's staging
+/// directory, and what of it is left on disk.
+#[derive(Debug)]
+pub(super) struct ClaimRefused {
+    error: io::Error,
+    leftover: Option<StagingLeftover>,
+}
+
+impl From<io::Error> for ClaimRefused {
+    fn from(error: io::Error) -> Self {
+        Self {
+            error,
+            leftover: None,
+        }
+    }
+}
+
 /// What a failure to list the staging directory means for the run.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +291,9 @@ pub(super) struct StagingDir<'p> {
     pub(super) id: FileIdentity,
     armed: bool,
     fresh: Option<Adoption>,
+    ledger: Rc<RunRecord>,
+    #[cfg(unix)]
+    pin: VerifiedStage,
     #[cfg(unix)]
     pub(super) inherited: Inherited,
     #[cfg(unix)]
@@ -268,7 +323,9 @@ impl<'p> StagingDir<'p> {
             match parent.make_private_dir(name.as_leaf()) {
                 Ok(()) => {
                     return Self::claim(parent, parent_path, name)
-                        .map_err(|e| failure(&e))?
+                        .map_err(|refused| {
+                            failure(&refused.error).rolled_back_with(refused.leftover)
+                        })?
                         .prepared(seed, parent_path);
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -278,29 +335,139 @@ impl<'p> StagingDir<'p> {
         Err(failure(&io::Error::from(io::ErrorKind::AlreadyExists)))
     }
 
-    /// Records the identity of the directory just created as `name`; a
-    /// failure removes it through the armed guard.
-    fn claim(parent: &'p VettedDir, parent_path: &Path, name: LeafBuf) -> io::Result<Self> {
-        let path = parent_path.join(&name);
-        let mut staging = Self {
+    /// The ledger of a new staging directory. Only a rollback that sweeps
+    /// reads it, so only macOS pays for recording every entry.
+    fn new_ledger() -> Rc<RunRecord> {
+        Rc::new(RunRecord::new(if cfg!(target_os = "macos") {
+            Recording::Ledger
+        } else {
+            Recording::Duplicates
+        }))
+    }
+
+    /// Takes the identity of the directory just made as `name` from one
+    /// descriptor opened on it, which must be a private directory of this
+    /// process, and keeps that descriptor.
+    ///
+    /// `mkdir` returns no descriptor, so the name is opened and checked. On a
+    /// refusal the name is removed only when it is
+    /// empty and still has the identity of the descriptor that was checked;
+    /// anything else at the name is left alone, and a directory that cannot be
+    /// removed is named in the refusal.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of the open or the check that failed.
+    #[cfg(unix)]
+    fn claim(
+        parent: &'p VettedDir,
+        parent_path: &Path,
+        name: LeafBuf,
+    ) -> std::result::Result<Self, ClaimRefused> {
+        let dir = match parent.open_dir_for_attributes(name.as_leaf()) {
+            Ok(dir) => dir,
+            Err(e) => {
+                let _ = parent.remove_dir(name.as_leaf());
+                return Err(e.into());
+            }
+        };
+        if let Err(error) = VerifiedStage::verify_created(&dir) {
+            let leftover = Self::remove_refused(parent, &parent_path.join(&name), &name, &dir);
+            return Err(ClaimRefused { error, leftover });
+        }
+        let pin = VerifiedStage(dir);
+        Ok(Self {
             parent,
+            path: parent_path.join(&name),
             name,
-            path,
-            id: FileIdentity::Unknown,
+            id: FileIdentity::of_file(pin.as_file()),
             armed: true,
             fresh: None,
-            #[cfg(unix)]
+            ledger: Self::new_ledger(),
+            pin,
             inherited: Inherited::Parent,
-            #[cfg(unix)]
             adopted: None,
             #[cfg(target_os = "macos")]
             own: None,
-        };
-        staging.id = parent
-            .status(staging.name.as_leaf())?
+        })
+    }
+
+    /// Unlinks `name` when it still is the empty directory `dir` was opened
+    /// on, and says what remains when that is not possible.
+    #[cfg(unix)]
+    fn remove_refused(
+        parent: &VettedDir,
+        path: &Path,
+        name: &LeafBuf,
+        dir: &std::fs::File,
+    ) -> Option<StagingLeftover> {
+        let same = matches!(
+            parent.status(name.as_leaf()),
+            Ok(Some(observed)) if observed.identity.check(FileIdentity::of_file(dir)) == IdentityCheck::Same
+        );
+        (same && parent.remove_dir(name.as_leaf()).is_err())
+            .then(|| StagingLeftover::new(path.to_path_buf()))
+    }
+
+    /// Records the identity of the directory just created as `name`; a
+    /// failure removes it through the armed guard.
+    #[cfg(not(unix))]
+    fn claim(
+        parent: &'p VettedDir,
+        parent_path: &Path,
+        name: LeafBuf,
+    ) -> std::result::Result<Self, ClaimRefused> {
+        let id = parent
+            .status(name.as_leaf())?
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
             .identity;
-        Ok(staging)
+        Ok(Self {
+            parent,
+            path: parent_path.join(&name),
+            name,
+            id,
+            armed: true,
+            fresh: None,
+            ledger: Self::new_ledger(),
+        })
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn ledger(&self) -> &RunRecord {
+        &self.ledger
+    }
+
+    /// The directory an extraction writes into: the descriptor the stage was
+    /// claimed through, so the extraction never resolves the name, and the
+    /// ledger of what it creates.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of duplicating the descriptor.
+    #[cfg(unix)]
+    pub(super) fn output(&self) -> io::Result<StagedOutput> {
+        Ok(StagedOutput::new(
+            self.path.clone(),
+            self.pin.try_clone()?,
+            Rc::clone(&self.ledger),
+        ))
+    }
+
+    /// The directory an extraction writes into.
+    ///
+    /// # Errors
+    ///
+    /// Never fails: there is no descriptor to duplicate.
+    #[cfg(not(unix))]
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "keeps the call site platform-neutral"
+    )]
+    pub(super) fn output(&self) -> io::Result<StagedOutput> {
+        Ok(StagedOutput::new(
+            self.path.clone(),
+            Rc::clone(&self.ledger),
+        ))
     }
 
     /// Takes the permissions a directory gets under the umask, probed at
@@ -324,7 +491,7 @@ impl<'p> StagingDir<'p> {
                 )?;
                 // Without a probe result the fallback for a vanished
                 // destination is a private root.
-                if let Ok(fresh) = self.probe_umask(AclPlan::None) {
+                if let Ok(fresh) = Self::probe_umask(&stage, AclPlan::None) {
                     self.fresh = Some(fresh);
                 }
                 self = self.seeded(SeedSource::Destination(id), &inheritance, parent_path)?;
@@ -371,7 +538,7 @@ impl<'p> StagingDir<'p> {
         };
         self = self.emptied(&stage, on_unlistable, parent_path)?;
         let inheritance = plan.as_ref().map(AclPlan::inheritance);
-        match self.probe_umask(plan.unwrap_or(AclPlan::None)) {
+        match Self::probe_umask(&stage, plan.unwrap_or(AclPlan::None)) {
             Ok(fresh) => self.fresh = Some(fresh),
             Err(e) => return Err(self.fail(&e, "failed to probe the umask", parent_path)),
         }
@@ -552,10 +719,11 @@ impl<'p> StagingDir<'p> {
 
     /// Removes the staging directory and says what survived the removal.
     ///
-    /// The removal goes by the logical path, which a redirect of the parent
-    /// could point at a decoy; the survival check is relative to the pinned
-    /// parent and so still sees the real directory, and names it from a
-    /// descriptor on the entry itself.
+    /// On Unix the contents go through the descriptor the stage was claimed
+    /// through, and the name is unlinked only while it still has the stage's
+    /// identity, so nothing found at the name by then is removed. The survival
+    /// check is relative to the pinned parent and names
+    /// the entry from a descriptor on the entry itself.
     pub(super) fn discard(mut self) -> Option<StagingLeftover> {
         self.armed = false;
         self.remove_tree();
@@ -572,6 +740,23 @@ impl<'p> StagingDir<'p> {
         }
     }
 
+    #[cfg(unix)]
+    fn remove_tree(&self) {
+        self.reset_private();
+        // The survival check in `discard` reports a removal that failed.
+        #[cfg_attr(
+            not(target_os = "macos"),
+            allow(unused_variables, reason = "only macOS sweeps what is left")
+        )]
+        let emptied = super::remove::remove_children(self.pin.as_file());
+        #[cfg(target_os = "macos")]
+        if !emptied {
+            self.sweep_own_contents();
+        }
+        self.remove_while_created();
+    }
+
+    #[cfg(not(unix))]
     #[expect(
         clippy::disallowed_methods,
         reason = "removes the private staging directory; std's removal does not follow symlinks"
@@ -579,27 +764,28 @@ impl<'p> StagingDir<'p> {
     fn remove_tree(&self) {
         self.reset_private();
         // The survival check in `discard` reports a removal that failed.
-        if std::fs::remove_dir_all(&self.path).is_err() {
-            #[cfg(target_os = "macos")]
-            self.sweep_own_contents();
-        }
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 
-    /// Unlinks the run's own entries that inherited a deny entry the removal
-    /// stopped at, then the directory itself while it is still the one
-    /// created. Best effort, as the removal it follows.
-    #[cfg(target_os = "macos")]
-    fn sweep_own_contents(&self) {
-        let (Some(own), Ok(stage)) = (self.own, self.open_verified()) else {
-            return;
-        };
-        super::sweep::sweep(&stage, own);
+    /// Unlinks the directory's name while it still has the identity the
+    /// directory was claimed with. Best effort, as the removal it follows.
+    #[cfg(unix)]
+    fn remove_while_created(&self) {
         let still_created = matches!(
             self.parent.status(self.name.as_leaf()),
             Ok(Some(observed)) if observed.identity.check(self.id) == IdentityCheck::Same
         );
         if still_created {
             let _ = self.parent.remove_dir(self.name.as_leaf());
+        }
+    }
+
+    /// Unlinks the entries of the run that inherited a deny entry the removal
+    /// stopped at. Best effort, as the removal it follows.
+    #[cfg(target_os = "macos")]
+    fn sweep_own_contents(&self) {
+        if let Some(own) = self.own {
+            super::sweep::sweep(&self.pin, own, &self.ledger);
         }
     }
 }
@@ -615,6 +801,8 @@ impl Drop for StagingDir<'_> {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -755,5 +943,100 @@ mod tests {
         };
         assert!(partial.leftover().is_some(), "the link cannot be unlinked");
         assert_eq!(aces_of(&victim), ["group:everyone deny delete"]);
+    }
+
+    /// Makes `name` in `pin`, moves that directory to `moved` and puts a
+    /// directory of `mode` at the name.
+    fn replaced_at_name(pin: &VettedDir, parent: &Path, mode: u32) -> (LeafBuf, PathBuf) {
+        let name = LeafBuf::random(PREFIX);
+        pin.make_private_dir(name.as_leaf()).unwrap();
+        let at = parent.join(&name);
+        let moved = parent.join("moved");
+        std::fs::rename(&at, &moved).unwrap();
+        std::fs::create_dir(&at).unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode)).unwrap();
+        (name, moved)
+    }
+
+    #[test]
+    fn a_directory_open_to_others_is_not_claimed() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = pin_of(&temp);
+        let (name, moved) = replaced_at_name(&pin, &parent, 0o755);
+        let at = parent.join(&name);
+
+        assert!(StagingDir::claim(&pin, &parent, name).is_err());
+
+        assert!(
+            !at.exists(),
+            "the empty directory that was checked is removed"
+        );
+        assert!(moved.is_dir(), "a directory that was not checked is kept");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_directory_with_an_explicit_entry_is_not_claimed() {
+        use super::super::test_acl::AclCleanup;
+        use super::super::test_acl::add_ace;
+
+        let temp = TempDir::new().unwrap();
+        let _cleanup = AclCleanup(temp.path());
+        let (pin, parent) = pin_of(&temp);
+        let (name, _moved) = replaced_at_name(&pin, &parent, 0o700);
+        add_ace(&parent.join(&name), "everyone allow list");
+
+        assert!(StagingDir::claim(&pin, &parent, name).is_err());
+    }
+
+    #[test]
+    fn the_umask_probe_runs_in_the_verified_directory() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = pin_of(&temp);
+        let stage = claimed(&pin, &parent);
+        let opened = stage.open_verified().unwrap();
+        let moved = parent.join("moved");
+        std::fs::rename(stage.path(), &moved).unwrap();
+        std::fs::create_dir(stage.path()).unwrap();
+        std::fs::set_permissions(stage.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let probed = StagingDir::probe_umask(&opened, AclPlan::None);
+
+        std::fs::set_permissions(stage.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(probed.is_ok());
+        assert!(std::fs::read_dir(stage.path()).unwrap().next().is_none());
+        assert!(std::fs::read_dir(&moved).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_refused_claim_removes_the_empty_directory_it_checked() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = pin_of(&temp);
+        let name = LeafBuf::random(PREFIX);
+        pin.make_private_dir(name.as_leaf()).unwrap();
+        let at = parent.join(&name);
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let refused = StagingDir::claim(&pin, &parent, name).err().unwrap();
+
+        assert!(refused.leftover.is_none());
+        assert!(!at.exists());
+    }
+
+    #[test]
+    fn a_refused_claim_names_a_directory_it_cannot_remove() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = pin_of(&temp);
+        let name = LeafBuf::random(PREFIX);
+        pin.make_private_dir(name.as_leaf()).unwrap();
+        let at = parent.join(&name);
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = std::fs::File::open(&at).unwrap();
+        std::fs::write(at.join("kept"), b"x").unwrap();
+
+        let leftover = StagingDir::remove_refused(&pin, &at, &name, &file);
+
+        assert_eq!(leftover.unwrap().path, at);
+        assert!(at.join("kept").exists());
     }
 }

@@ -1761,3 +1761,109 @@ fn a_bare_destination_name_has_the_working_directory_as_its_parent() {
     assert_eq!(super::parent_or_cwd(Path::new("a/out")), Path::new("a"));
     assert_eq!(super::parent_or_cwd(Path::new("/out")), Path::new("/"));
 }
+
+fn pinned_run(
+    fx: &Fixture,
+    swap: impl FnOnce(&Path),
+) -> (Result<ExtractionReport, ArchiveError>, PathBuf) {
+    let config = SecurityConfig::default();
+    let archive = fx.archive.clone();
+    let parent = fx.parent.clone();
+    let result = super::extract_staged(
+        &fx.dest(),
+        &ExtractionOptions::default().with_staging(Staging::Atomic),
+        &crate::EntrySelection::default(),
+        Some(&fx.archive),
+        &mut crate::NoopProgress,
+        |output, options, progress| {
+            swap(&staging_dirs(&parent)[0]);
+            crate::api::extract_validated(&archive, output, &config, options, progress)
+        },
+    );
+    (result, fx.parent.join("aside"))
+}
+
+#[test]
+fn an_extraction_writes_through_the_stage_descriptor_not_its_name() {
+    let fx = Fixture::new();
+    let parent = fx.parent.clone();
+
+    let (result, aside) = pinned_run(&fx, |stage| {
+        std::fs::rename(stage, parent.join("aside")).unwrap();
+        std::fs::create_dir(stage).unwrap();
+        std::fs::write(stage.join("marker"), b"m").unwrap();
+    });
+
+    assert!(result.is_err());
+    let decoy = &staging_dirs(&fx.parent)[0];
+    assert_eq!(read(&decoy.join("marker")), "m");
+    assert!(!decoy.join("a.txt").exists());
+    assert!(std::fs::read_dir(&aside).unwrap().next().is_none());
+}
+
+#[test]
+fn a_rollback_removes_only_the_tree_of_the_stage_it_holds() {
+    let fx = Fixture::new();
+    let parent = fx.parent.clone();
+    let mut hooks = Hooks {
+        cancel_at_end: true,
+        at_end: Some(Box::new(move || {
+            let stage = staging_dirs(&parent).remove(0);
+            std::fs::rename(&stage, parent.join("aside")).unwrap();
+            std::fs::create_dir(&stage).unwrap();
+            std::fs::write(stage.join("precious"), b"p").unwrap();
+        })),
+        ..Hooks::default()
+    };
+
+    let error = fx
+        .extract(&fx.dest(), Staging::Atomic, &mut hooks)
+        .unwrap_err();
+
+    assert_matches!(cause(&error), ArchiveError::Cancelled);
+    let decoy = &staging_dirs(&fx.parent)[0];
+    assert_eq!(read(&decoy.join("precious")), "p");
+    assert!(
+        std::fs::read_dir(fx.parent.join("aside"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_ledger_holds_every_entry_a_run_creates_whatever_existing_files_says() {
+    use std::rc::Rc;
+
+    use crate::formats::output_root::StagedOutput;
+    use crate::formats::run_record::Recording;
+    use crate::formats::run_record::RunRecord;
+
+    let fx = Fixture::new();
+    let stage = fx.parent.join("stage");
+    std::fs::create_dir(&stage).unwrap();
+    let ledger = Rc::new(RunRecord::new(Recording::Ledger));
+    let output = StagedOutput::new(
+        stage.clone(),
+        std::fs::File::open(&stage).unwrap(),
+        Rc::clone(&ledger),
+    );
+    let options = ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite);
+
+    crate::api::extract_validated(
+        &fx.archive,
+        (&output).into(),
+        &SecurityConfig::default(),
+        &options,
+        &mut crate::NoopProgress,
+    )
+    .unwrap();
+
+    std::fs::write(stage.join("foreign"), b"x").unwrap();
+    let created = |name: &str| {
+        let stat = rustix::fs::lstat(stage.join(name)).unwrap();
+        ledger.created_with(IdentityKey::of_stat(&stat).unwrap())
+    };
+    assert!(created("a.txt") && created("sub") && created("sub/b.txt"));
+    assert!(!created("foreign"));
+}

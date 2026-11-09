@@ -20,6 +20,7 @@ pub use config_error::ProtectedPath;
 pub use io_context::IoContext;
 pub use io_kind::IoKind;
 pub use malformation::Malformation;
+pub use malformation::SevenZHeaderTable;
 pub use malformation::Unclassified;
 pub use messages::ErrorCode;
 pub use messages::FfiDetail;

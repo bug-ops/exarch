@@ -27,6 +27,29 @@ impl Unclassified {
     }
 }
 
+/// A table of a 7z header whose declared length is bounded before the header
+/// is parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SevenZHeaderTable {
+    /// The blocks (folders) of the streams info.
+    Blocks,
+    /// The sub-streams that split the blocks into files.
+    SubStreams,
+    /// The pack streams the blocks read their input from.
+    PackStreams,
+}
+
+impl fmt::Display for SevenZHeaderTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Blocks => "blocks",
+            Self::SubStreams => "sub-streams",
+            Self::PackStreams => "pack streams",
+        })
+    }
+}
+
 /// Why an archive, or one of its entries, is malformed.
 ///
 /// # Examples
@@ -221,6 +244,16 @@ pub enum Malformation {
         /// Number of pack streams.
         pack_streams: usize,
     },
+    /// The 7z header declares a table longer than the archive's entries and
+    /// streams account for, and is refused before it is parsed.
+    SevenZHeaderTableTooLarge {
+        /// The table.
+        table: SevenZHeaderTable,
+        /// The length the header declares.
+        declared: u64,
+        /// The longest the table may be for this header.
+        max: u64,
+    },
     /// `sevenz-rust2` cannot parse the 7z header.
     SevenZHeaderUnreadable {
         /// The reader's description of the failure.
@@ -284,6 +317,7 @@ impl Malformation {
             Self::SevenZUnsupportedCoder
             | Self::SevenZEntryDataUnreadable { .. }
             | Self::SevenZPackStreamOffsetMismatch { .. }
+            | Self::SevenZHeaderTableTooLarge { .. }
             | Self::SevenZHeaderUnreadable { .. }
             | Self::SevenZLinkEntriesOutOfOrder
             | Self::SevenZLibraryError { .. } => Some(C::SevenZReader),
@@ -415,6 +449,15 @@ impl fmt::Display for Malformation {
                 f,
                 "failed to open 7z archive: the pack stream offsets have {offsets} entries for \
                  {pack_streams} pack streams"
+            ),
+            Self::SevenZHeaderTableTooLarge {
+                table,
+                declared,
+                max,
+            } => write!(
+                f,
+                "failed to open 7z archive: the header declares {declared} {table}, more than \
+                 the {max} its contents allow"
             ),
             Self::SevenZHeaderUnreadable { detail } => {
                 write!(f, "failed to open 7z archive: {detail}")
@@ -681,6 +724,16 @@ mod tests {
                 },
                 "failed to open 7z archive: the pack stream offsets have 1 entries for 2 pack \
                  streams",
+                Some(C::SevenZReader),
+            ),
+            (
+                Malformation::SevenZHeaderTableTooLarge {
+                    table: SevenZHeaderTable::SubStreams,
+                    declared: 9,
+                    max: 4,
+                },
+                "failed to open 7z archive: the header declares 9 sub-streams, more than the 4 \
+                 its contents allow",
                 Some(C::SevenZReader),
             ),
             (

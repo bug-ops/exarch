@@ -17,8 +17,10 @@ use common::number;
 use common::solid_copy_7z;
 
 use exarch_core::ArchiveError;
+use exarch_core::Malformation;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
+use exarch_core::SevenZHeaderTable;
 use exarch_core::VerifyRequest;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
@@ -485,20 +487,119 @@ fn refused_as_unsupported_by_every_operation(path: &Path) {
 }
 
 #[test]
-fn header_entry_count_over_limit_is_refused_for_a_long_encoded_record() {
-    let dir = TempDir::new().unwrap();
+fn encoded_records_with_more_than_one_block_or_pack_stream_are_refused_as_unsupported() {
     let header = entry_count_only_header(OVER_LIMIT, 8);
-    let layout = Layout {
-        extra_pack_streams: 5000,
-        extra_folders: 2,
-        ..Layout::default()
-    };
-    let bytes = layered_header_archive(&header, layout);
-    let record_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap());
-    assert!(record_len > 4096, "{record_len}");
-    let path = write(&dir, &bytes);
+    for layout in [
+        Layout {
+            extra_pack_streams: 5000,
+            extra_folders: 2,
+            ..Layout::default()
+        },
+        Layout {
+            extra_pack_streams: 1,
+            ..Layout::default()
+        },
+        Layout {
+            extra_folders: 1,
+            ..Layout::default()
+        },
+    ] {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, &layered_header_archive(&header, layout));
+        refused_as_unsupported_by_every_operation(&path);
+    }
+}
 
-    refused_entry_count_by_every_operation(&path, &SecurityConfig::default(), OVER_LIMIT as u64);
+/// A plain header whose streams info declares `packs` pack streams, `blocks`
+/// one-coder blocks with `sub_streams` in the first, and `entries` entries.
+fn table_header(
+    packs: usize,
+    blocks: usize,
+    sub_streams: Option<usize>,
+    entries: usize,
+) -> Vec<u8> {
+    let mut header = vec![0x01, 0x04];
+    if packs > 0 {
+        header.extend([0x06]);
+        header.extend(number(0));
+        header.extend(number(packs));
+        header.push(0x00);
+    }
+    if blocks > 0 {
+        header.extend([0x07, 0x0B]);
+        header.extend(number(blocks));
+        header.push(0x00);
+        header.extend((0..blocks).flat_map(|_| [0x01, 0x01, 0x00]));
+        header.push(0x0C);
+        header.extend((0..blocks).flat_map(|_| number(1)));
+        header.push(0x00);
+    }
+    if let Some(count) = sub_streams {
+        header.extend([0x08, 0x0D]);
+        header.extend(number(count));
+        header.extend((1..blocks).flat_map(|_| number(1)));
+        header.push(0x00);
+    }
+    header.extend([0x00, 0x05]);
+    header.extend(number(entries));
+    header.extend([0x00, 0x00]);
+    header
+}
+
+fn assert_table_refused(err: &ArchiveError, expected: SevenZHeaderTable) {
+    match err {
+        ArchiveError::InvalidArchive(Malformation::SevenZHeaderTableTooLarge {
+            table,
+            declared,
+            max,
+        }) if *table == expected && declared > max => {}
+        other => panic!("expected a refusal of the {expected} table: {other:?}"),
+    }
+}
+
+fn refused_table_by_every_operation(header: &[u8], expected: SevenZHeaderTable) {
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, &with_next_header(&[], header));
+    let config = SecurityConfig::default();
+    assert_table_refused(&list_archive(&path, &config).unwrap_err(), expected);
+    let verify = VerifyRequest::new(&config).verify(&path).unwrap_err();
+    assert_table_refused(&verify, expected);
+    let out = TempDir::new().unwrap();
+    let extract = extract_archive(&path, out.path(), &config).unwrap_err();
+    assert_table_refused(&extract, expected);
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn more_blocks_than_entries_are_refused_before_the_parse() {
+    refused_table_by_every_operation(&table_header(0, 1200, None, 1), SevenZHeaderTable::Blocks);
+}
+
+#[test]
+fn more_sub_streams_than_entries_are_refused_before_the_parse() {
+    refused_table_by_every_operation(
+        &table_header(0, 1, Some(1200), 1),
+        SevenZHeaderTable::SubStreams,
+    );
+}
+
+#[test]
+fn more_pack_streams_than_the_blocks_use_are_refused_before_the_parse() {
+    refused_table_by_every_operation(
+        &table_header(3000, 0, None, 1),
+        SevenZHeaderTable::PackStreams,
+    );
+}
+
+#[test]
+fn an_archive_with_spare_pack_streams_still_opens() {
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, &fixture_bytes("bcj2-spare-pack.7z"));
+    let config = SecurityConfig::default();
+
+    assert!(list_archive(&path, &config).unwrap().total_entries() > 0);
+    let out = TempDir::new().unwrap();
+    extract_archive(&path, out.path(), &config).unwrap();
 }
 
 #[test]

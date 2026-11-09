@@ -65,10 +65,12 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::Component;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use super::file_identity::FileIdentity;
+use super::output_root::OutputRoot;
 use super::run_record::RunRecord;
 use crate::ArchiveError;
 use crate::Result;
@@ -76,7 +78,7 @@ use crate::security::fs_view::Occupant;
 use crate::types::DestDir;
 
 pub(crate) use imp::VettedDir;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub(crate) use imp::open_directory_at;
 
 /// Exactly one normal path component: a name inside a [`VettedDir`].
@@ -283,7 +285,7 @@ impl From<rustix::fs::FileType> for Occupant {
 pub(crate) struct PinnedRoot {
     dest: DestDir,
     dir: VettedDir,
-    created: RunRecord,
+    created: Rc<RunRecord>,
 }
 
 impl PinnedRoot {
@@ -297,12 +299,38 @@ impl PinnedRoot {
         Ok(Self {
             dest,
             dir,
-            created: RunRecord::default(),
+            created: Rc::default(),
         })
     }
 
+    /// Opens the directory `output` names: a path is created if absent and
+    /// opened; a staging directory is entered through the descriptor the
+    /// staging layer verified, never through its name, and records into the
+    /// ledger the rollback reads.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the directory cannot be created or opened.
+    pub(crate) fn open_output(output: OutputRoot<'_>) -> Result<Self> {
+        match output {
+            OutputRoot::Path(path) => Self::open(DestDir::new_or_create(path.to_path_buf())?),
+            OutputRoot::Staged(staged) => {
+                let dest = DestDir::new(staged.path().to_path_buf())?;
+                #[cfg(unix)]
+                let dir = VettedDir::reopen_at(staged.root()).map_err(ArchiveError::Io)?;
+                #[cfg(not(unix))]
+                let dir = VettedDir::open_path(dest.as_path())?;
+                Ok(Self {
+                    dest,
+                    dir,
+                    created: staged.ledger(),
+                })
+            }
+        }
+    }
+
     /// What this run created in the destination, for `ExistingFiles::Refuse`.
-    pub(crate) const fn created(&self) -> &RunRecord {
+    pub(crate) fn created(&self) -> &RunRecord {
         &self.created
     }
 
@@ -441,6 +469,13 @@ mod imp {
         /// `dup` is unsupported on WASI.
         pub(crate) fn reopen(&self) -> io::Result<Self> {
             open_directory(|flags| rustix::fs::openat(&self.0, ".", flags, Mode::empty())).map(Self)
+        }
+
+        /// Another handle to the directory `dir` is open on, opened through
+        /// `.` so the name it was reached by is never resolved again.
+        #[cfg(unix)]
+        pub(crate) fn reopen_at(dir: &impl AsFd) -> io::Result<Self> {
+            open_directory(|flags| rustix::fs::openat(dir, ".", flags, Mode::empty())).map(Self)
         }
 
         /// Opens the subdirectory `name`; a symlink or a file there is an

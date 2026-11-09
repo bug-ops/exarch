@@ -167,6 +167,12 @@ closed_enum! {
         /// and gives a `0700` root; it is not copied. Other Unixes and `NFSv4`
         /// ACLs are not detected.
         ///
+        /// On Unix the staging directory must report the owner and the mode
+        /// bits it was created with: a filesystem that reports a synthetic
+        /// owner or mode (some network and Windows-backed mounts) makes the
+        /// run fail before extracting, naming the staging directory if it
+        /// could not be removed.
+        ///
         /// Cleanup is best-effort if the process is terminated via SIGKILL.
         Atomic => "atomic",
 

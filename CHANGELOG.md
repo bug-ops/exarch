@@ -99,6 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: a stop after core's last poll reports the result and ends by the signal (130/143), a forced exit flushes stdout and stderr first, and `--compression-level` beyond `i64` is exit 1 (#1103, #1114).
 - CLI: the forced-exit hint names the staging place resolved by core and no longer spells core's `.exarch-*` names (#1099, #1114).
 - CI: maturin and the Python dev tools install from the hash-locked `uv.lock`, and Dependabot tracks the Python lock (#1093, #1114).
+- **Breaking**: a failed publish of a plain `--atomic` extraction returns `PartialExtraction` with the extraction counts and cause `OutputExists` instead of the bare error (#1083, #1129).
+- Core: the LZMA2 dictionary-size formula exists once for 7z admission and the header probe (#1073, #1129).
+- Python: tests pin the errors for non-str and lone-surrogate string-enum values (#1094, #1129).
 
 ### Fixed
 
@@ -133,6 +136,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: a SIGINT or SIGTERM inherited as ignored stays ignored on Unix and never cancels a run (#1109, #1123).
 - CI: `uv` and the sdist `maturin` are pinned to the locked versions and a check keeps the maturin pin in step with `uv.lock` (#1113, #1123).
 - Docs: `CONTRIBUTING.md` lists Node.js 20+ (#1092, #1123).
+- Core: on Windows the published atomic root receives the replaced destination's DACL through a handle-relative walk that never follows reparse points, and the owner-only ACE uses the thread token SID (#1117, #1122, #1121, #1129).
+- Core: atomic extraction onto a destination its owner cannot read keeps the destination's mode and ACL instead of narrowing the root to 0700 (#1068, #1129).
+- Core: the macOS staging sweep has no 64-level cap and a rollback after the root was adopted still sweeps (#1119, #1088, #1129).
+- Core: `--atomic --force` onto a destination the caller cannot delete is refused before the extraction, and the 0311 backup is removed on FreeBSD (#1085, #1087, #1129).
+- Core: `list` skips a duplicate symlink as `extract` does on hosts that can create symlinks (#1120, #1129).
+- CI: the musl wheel is built with the hash-locked maturin in a digest-pinned container, and a FreeBSD job runs the backup-removal test as an unprivileged user (#1118, #1087, #1129).
 
 ## [0.9.0] - 2026-11-05
 

@@ -24,7 +24,7 @@ use super::acl::ParentAcl;
 use super::adopt::Adoption;
 use super::io_context;
 use crate::ArchiveError;
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use crate::NarrowingReason;
 use crate::Result;
 use crate::STAGING_PREFIX;
@@ -32,13 +32,10 @@ use crate::StagingLeftover;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
 use crate::formats::output_root::StagedOutput;
-#[cfg(windows)]
-use crate::formats::pinned_dir::DaclHandle;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::run_record::Recording;
 use crate::formats::run_record::RunRecord;
-use crate::report::Narrowed;
 
 const CREATE_ATTEMPTS: usize = 16;
 
@@ -121,22 +118,8 @@ impl Inherited {
 ///
 /// Only [`StagingDir::publish`] makes one, so what must happen to the root
 /// after the rename cannot be done before it.
-///
-/// It also carries what the rename itself left narrower than intended: on
-/// Windows the root is renamed with its owner-only DACL and then reset to
-/// inherit, and a reset that fails leaves the root owner-only.
 #[derive(Debug)]
-pub(super) struct Published {
-    narrowed: Narrowed,
-}
-
-impl Published {
-    /// Takes the narrowing the publication itself caused, to record on the
-    /// report; always empty off Windows.
-    pub(super) fn take_narrowing(&mut self) -> Narrowed {
-        std::mem::replace(&mut self.narrowed, Narrowed::none())
-    }
-}
+pub(super) struct Published(());
 
 /// Whose inheritance a staging directory is seeded with.
 #[cfg(unix)]
@@ -293,10 +276,16 @@ enum OnUnlistable {
 /// descriptor) decide what it may clear, and "inherited" is a heuristic since
 /// the flag can be set by hand.
 ///
-/// Made only by [`StagingDir::emptied`], and lost by `adopt`, whose mode may
-/// open the root to others.
+/// Made only by [`StagingDir::emptied`]. `adopt` takes it, because the
+/// adopted mode may open the root to others, and
+/// [`StagingDir::keep_own_after_adoption`] gives it back only when the root
+/// is still the caller's, grants no group or world write, and carries no ACL
+/// entry that applies to it: then nobody else can add to the root before the
+/// rollback. The root may be searchable by others after adoption, so a staged
+/// subdirectory whose archive mode grants group or world write can receive
+/// entries; the sweep still touches only entries in the run's ledger.
 #[cfg(target_os = "macos")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(super) struct OwnContents(());
 
 /// A staging directory inside the pinned directory `parent`.
@@ -728,33 +717,10 @@ impl<'p> StagingDir<'p> {
     ///
     /// The rename's I/O error.
     pub(super) fn publish(&mut self, destination: &LeafBuf) -> io::Result<Published> {
-        #[cfg(windows)]
-        let dacl = self
-            .parent
-            .open_dir_for_dacl(self.name.as_leaf(), self.id)?;
         self.parent
             .rename_dir_within(self.name.as_leaf(), destination.as_leaf())?;
         self.armed = false;
-        #[cfg(windows)]
-        let narrowed = Self::inherit_after_rename(&dacl);
-        #[cfg(not(windows))]
-        let narrowed = Narrowed::none();
-        Ok(Published { narrowed })
-    }
-
-    /// Makes the renamed root inherit the DACL of its new parent, through the
-    /// handle opened before the rename so no name is resolved again.
-    ///
-    /// The root is already published, so a failure does not fail the run: the
-    /// root stays owner-only, narrower than the destination it replaces, and
-    /// the narrowing is reported.
-    #[cfg(windows)]
-    fn inherit_after_rename(dacl: &DaclHandle) -> Narrowed {
-        let mut narrowed = Narrowed::none();
-        if dacl.inherit_dacl().is_err() {
-            narrowed.push(NarrowingReason::AclCopyFailed);
-        }
-        narrowed
+        Ok(Published(()))
     }
 
     /// Removes the staging directory and says what survived the removal.
@@ -824,9 +790,21 @@ impl<'p> StagingDir<'p> {
     /// stopped at. Best effort, as the removal it follows.
     #[cfg(target_os = "macos")]
     fn sweep_own_contents(&self) {
-        if let Some(own) = self.own {
+        if let Some(own) = &self.own {
             super::sweep::sweep(&self.pin, own, &self.ledger);
         }
+    }
+
+    /// Restores the proof `adopt` took, when the adopted root still rules out
+    /// anyone else writing to it: owned by the caller, no group or world write
+    /// bit, and every ACL entry for children only. Drops it otherwise.
+    #[cfg(target_os = "macos")]
+    pub(super) fn keep_own_after_adoption(&mut self, own: Option<OwnContents>) {
+        let closed = rustix::fs::fstat(self.pin.as_file()).is_ok_and(|stat| {
+            stat.st_uid == rustix::process::geteuid().as_raw()
+                && u32::from(stat.st_mode) & 0o022 == 0
+        }) && super::acl::only_inherit_entries(self.pin.as_file());
+        self.own = own.filter(|_| closed);
     }
 }
 

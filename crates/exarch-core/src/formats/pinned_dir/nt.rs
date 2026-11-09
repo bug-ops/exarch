@@ -12,7 +12,7 @@
 //! This is the only module in the crate that uses `unsafe` on Windows. Every
 //! export is a safe function taking a [`Leaf`], so the "one non-empty normal
 //! component" invariant is carried by the type: an empty `ObjectName` would
-//! reopen the root itself.
+//! reopen the root itself, which only [`reopen_dir`] does, on purpose.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -38,6 +38,7 @@ use std::slice;
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::FILE_CREATE;
 use windows_sys::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE;
+use windows_sys::Wdk::Storage::FileSystem::FILE_FULL_DIR_INFORMATION;
 use windows_sys::Wdk::Storage::FileSystem::FILE_INFORMATION_CLASS;
 use windows_sys::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE;
 use windows_sys::Wdk::Storage::FileSystem::FILE_OPEN;
@@ -46,41 +47,25 @@ use windows_sys::Wdk::Storage::FileSystem::FILE_RENAME_INFORMATION;
 use windows_sys::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT;
 use windows_sys::Wdk::Storage::FileSystem::FileDispositionInformation;
 use windows_sys::Wdk::Storage::FileSystem::FileDispositionInformationEx;
+use windows_sys::Wdk::Storage::FileSystem::FileFullDirectoryInformation;
 use windows_sys::Wdk::Storage::FileSystem::FileRenameInformation;
 use windows_sys::Wdk::Storage::FileSystem::FileRenameInformationEx;
 use windows_sys::Wdk::Storage::FileSystem::NtCreateFile;
 use windows_sys::Wdk::Storage::FileSystem::NtFsControlFile;
+use windows_sys::Wdk::Storage::FileSystem::NtQueryDirectoryFile;
 use windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile;
 use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
 use windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED;
-use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Foundation::OBJ_CASE_INSENSITIVE;
 use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+use windows_sys::Win32::Foundation::STATUS_NO_MORE_FILES;
 use windows_sys::Win32::Foundation::UNICODE_STRING;
-use windows_sys::Win32::Security::ACL;
-use windows_sys::Win32::Security::ACL_REVISION;
-use windows_sys::Win32::Security::ACL_SIZE_INFORMATION;
-use windows_sys::Win32::Security::AclSizeInformation;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
 use windows_sys::Win32::Security::Authorization::SDDL_REVISION_1;
-use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
-use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
-use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-use windows_sys::Win32::Security::GetAclInformation;
-use windows_sys::Win32::Security::GetSecurityDescriptorDacl;
-use windows_sys::Win32::Security::GetTokenInformation;
-use windows_sys::Win32::Security::InitializeAcl;
-use windows_sys::Win32::Security::OBJECT_SECURITY_INFORMATION;
-use windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
-use windows_sys::Win32::Security::TOKEN_QUERY;
-use windows_sys::Win32::Security::TOKEN_USER;
-use windows_sys::Win32::Security::TokenUser;
-use windows_sys::Win32::Security::UNPROTECTED_DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Storage::FileSystem::DELETE;
 use windows_sys::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS;
 use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_FLAG_DELETE;
@@ -99,12 +84,13 @@ use windows_sys::Win32::Storage::FileSystem::MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
-use windows_sys::Win32::System::Threading::OpenProcessToken;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_POSIX_SEMANTICS;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_REPLACE_IF_EXISTS;
 
 use super::Leaf;
+use super::dir_info;
+
+pub(in crate::formats) mod security;
 
 /// What `NtCreateFile` does when the name does and does not exist.
 #[derive(Debug, Clone, Copy)]
@@ -175,7 +161,33 @@ pub(super) fn create_at(
     request: Request,
 ) -> io::Result<OwnedHandle> {
     // SAFETY: a null descriptor is allowed.
-    unsafe { create_with(dir, name, request, null()) }
+    unsafe { create_with(dir, Target::Name(name), request, null()) }
+}
+
+/// What a relative open names.
+#[derive(Debug, Clone, Copy)]
+enum Target<'a> {
+    /// A name inside the directory.
+    Name(Leaf<'a>),
+    /// The directory itself, which a zero-length name reopens.
+    Itself,
+}
+
+/// Opens the directory `dir` again, with `access`, relative to itself.
+///
+/// This is how a handle opened for security access gets one for listing
+/// without naming the directory again, so nothing is resolved by path. A
+/// reparse point is opened itself.
+pub(super) fn reopen_dir(
+    dir: BorrowedHandle<'_>,
+    access: FILE_ACCESS_RIGHTS,
+) -> io::Result<OwnedHandle> {
+    let request = Request {
+        kind: Kind::Directory,
+        ..Request::open(access)
+    };
+    // SAFETY: a null descriptor is allowed.
+    unsafe { create_with(dir, Target::Itself, request, null()) }
 }
 
 /// [`create_at`] with the security descriptor `security` for a created object;
@@ -187,11 +199,14 @@ pub(super) fn create_at(
 /// outlives the call.
 unsafe fn create_with(
     dir: BorrowedHandle<'_>,
-    name: Leaf<'_>,
+    name: Target<'_>,
     request: Request,
     security: *const c_void,
 ) -> io::Result<OwnedHandle> {
-    let mut name_units = wide(name.as_os_str());
+    let mut name_units = match name {
+        Target::Name(leaf) => wide(leaf.as_os_str()),
+        Target::Itself => Vec::new(),
+    };
     let name_bytes = u16::try_from(name_units.len().saturating_mul(size_of::<u16>()))
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidFilename))?;
     let object_name = UNICODE_STRING {
@@ -255,7 +270,7 @@ unsafe fn create_with(
 struct OwnerOnlyDescriptor(PSECURITY_DESCRIPTOR);
 
 impl OwnerOnlyDescriptor {
-    /// Builds the descriptor from the SID of the process token's user.
+    /// Builds the descriptor from the SID of the effective token's user.
     ///
     /// # Errors
     ///
@@ -292,56 +307,10 @@ impl Drop for OwnerOnlyDescriptor {
     }
 }
 
-/// The string form of the SID of the user the current process runs as.
+/// The string form of the SID of the effective user: the thread's when it
+/// impersonates, else the process's.
 pub(super) fn current_user_sid() -> io::Result<String> {
-    let mut token: HANDLE = null_mut();
-    // SAFETY: `GetCurrentProcess` returns a pseudo handle that needs no
-    // closing, and `token` is valid for writes.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the call succeeded, so `token` is a newly opened handle that
-    // nothing else owns.
-    let token = unsafe { OwnedHandle::from_raw_handle(token) };
-
-    let mut needed = 0_u32;
-    // SAFETY: a null buffer of length zero asks only for the required size,
-    // which is written to `needed`; `token` is a live handle.
-    unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenUser,
-            null_mut(),
-            0,
-            &raw mut needed,
-        );
-    }
-    if needed == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut buffer = vec![0_u64; (needed as usize).div_ceil(size_of::<u64>())];
-    // SAFETY: `buffer` is valid for writes of `needed` bytes (it has at least
-    // that many), `token` is a live handle and `needed` is valid for writes.
-    let ok = unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenUser,
-            buffer.as_mut_ptr().cast(),
-            needed,
-            &raw mut needed,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the call succeeded, so `buffer` starts with an initialized
-    // `TOKEN_USER`, and the 8-aligned storage satisfies its alignment.
-    let sid = unsafe { buffer.as_ptr().cast::<TOKEN_USER>().read() }
-        .User
-        .Sid;
-    // SAFETY: `sid` points into `buffer`, which is alive and holds the SID the
-    // token call just wrote.
-    unsafe { sid_to_string(sid) }
+    security::EffectiveToken::open()?.user_sid()
 }
 
 /// The string form of `sid`.
@@ -390,163 +359,65 @@ pub(super) fn create_private_dir_at(dir: BorrowedHandle<'_>, name: Leaf<'_>) -> 
     };
     // SAFETY: `descriptor` owns a valid descriptor until it drops after the
     // call.
-    unsafe { create_with(dir, name, request, descriptor.0.cast_const()) }.map(drop)
+    unsafe { create_with(dir, Target::Name(name), request, descriptor.0.cast_const()) }.map(drop)
 }
 
-/// Replaces the DACL of the directory `dir` with one that inherits from its
-/// parent, and re-derives the inherited entries of everything below it.
+const _: () = {
+    assert!(offset_of!(FILE_FULL_DIR_INFORMATION, NextEntryOffset) == dir_info::NEXT_ENTRY_OFFSET);
+    assert!(offset_of!(FILE_FULL_DIR_INFORMATION, FileNameLength) == dir_info::FILE_NAME_LENGTH);
+    assert!(offset_of!(FILE_FULL_DIR_INFORMATION, FileName) == dir_info::FILE_NAME);
+};
+
+/// The names of the entries of the directory `dir`, without `.` and `..`, each
+/// as UTF-16 code units. `dir` must be open with `FILE_LIST_DIRECTORY`.
 ///
-/// `dir` must be open with `READ_CONTROL` and `WRITE_DAC`. The explicit list
-/// passed is empty, not null: a null DACL would grant everyone full access if
-/// the system did not merge the parent's entries, while an empty one leaves the
-/// directory closed.
+/// # Errors
 ///
-/// When the parent has no inheritable entries the merge leaves an empty DACL,
-/// on the directory and on everything below it. That is detected by reading the
-/// DACL back, the owner-only DACL is put back and an error is returned, so a
-/// root is never published unreadable.
-pub(super) fn inherit_dacl(dir: BorrowedHandle<'_>) -> io::Result<()> {
-    const _: () = assert!(size_of::<ACL>() == size_of::<[u32; 2]>());
-    let mut empty = [0_u32; 2];
-    // SAFETY: `empty` is writable, 4-aligned and exactly `size_of::<ACL>()`
-    // bytes, the length passed.
-    let ok = unsafe {
-        InitializeAcl(
-            empty.as_mut_ptr().cast(),
-            length_u32(size_of::<ACL>())?,
-            ACL_REVISION,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `empty` is an initialized empty ACL that outlives the call.
-    unsafe {
-        set_dacl(
-            dir,
-            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-            empty.as_ptr().cast(),
-        )
-    }?;
-    match ace_count(dir) {
-        Ok(entries) if entries > 0 => Ok(()),
-        Ok(_) => {
-            restore_owner_only(dir)?;
-            Err(io::Error::other(
-                "the parent has no inheritable entries; the directory stays owner-only",
-            ))
+/// The OS error, or `InvalidData` when the records the kernel returned do not
+/// parse: the caller must treat the directory as unlistable, not as partial.
+pub(super) fn list_names(dir: BorrowedHandle<'_>) -> io::Result<Vec<Vec<u16>>> {
+    const BUFFER_BYTES: usize = 64 * 1024;
+    let mut buffer = vec![0_u64; BUFFER_BYTES.div_ceil(size_of::<u64>())];
+    let mut names = Vec::new();
+    let mut restart = true;
+    loop {
+        let mut status_block = IO_STATUS_BLOCK::default();
+        // SAFETY: `dir` is a live handle opened with
+        // `FILE_SYNCHRONOUS_IO_NONALERT`, so the call completes before
+        // returning and keeps no pointer. The event, APC routine, APC context
+        // and file name filter are null. `buffer` is valid for writes of
+        // `BUFFER_BYTES` bytes and `status_block` is valid for writes.
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                dir.as_raw_handle(),
+                null_mut(),
+                None,
+                null(),
+                &raw mut status_block,
+                buffer.as_mut_ptr().cast(),
+                length_u32(BUFFER_BYTES)?,
+                FileFullDirectoryInformation,
+                false,
+                null(),
+                restart,
+            )
+        };
+        if status == STATUS_NO_MORE_FILES {
+            return Ok(names);
         }
-        Err(err) => {
-            restore_owner_only(dir)?;
-            Err(err)
+        if status < 0 {
+            return Err(nt_error(status));
         }
+        restart = false;
+        let written = status_block.Information.min(BUFFER_BYTES);
+        // SAFETY: `buffer` is `BUFFER_BYTES` initialized bytes (zeroed, then
+        // written by the call) and `written` does not exceed that; the borrow
+        // ends before the next call writes to the buffer.
+        let bytes = unsafe { slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), written) };
+        let batch =
+            dir_info::names(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        names.extend(batch);
     }
-}
-
-/// Puts the protected, current-user-only DACL back on `dir`, which must be
-/// open with `WRITE_DAC`, and re-derives what its children inherited.
-fn restore_owner_only(dir: BorrowedHandle<'_>) -> io::Result<()> {
-    let owner_only = OwnerOnlyDescriptor::for_current_user()?;
-    let mut present = 0;
-    let mut defaulted = 0;
-    let mut acl: *mut ACL = null_mut();
-    // SAFETY: the descriptor is valid until `owner_only` drops, and the three
-    // out-pointers are valid for writes.
-    let ok = unsafe {
-        GetSecurityDescriptorDacl(
-            owner_only.0,
-            &raw mut present,
-            &raw mut acl,
-            &raw mut defaulted,
-        )
-    };
-    if ok == 0 || present == 0 || acl.is_null() {
-        return Err(io::Error::from(io::ErrorKind::InvalidData));
-    }
-    // SAFETY: `acl` points into the descriptor, which outlives the call.
-    unsafe {
-        set_dacl(
-            dir,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            acl,
-        )
-    }
-}
-
-/// `SetSecurityInfo` on the DACL of `dir` with `flags`, which must select the
-/// DACL only.
-///
-/// # Safety
-///
-/// `acl` must point at a valid ACL that outlives the call.
-unsafe fn set_dacl(
-    dir: BorrowedHandle<'_>,
-    flags: OBJECT_SECURITY_INFORMATION,
-    acl: *const ACL,
-) -> io::Result<()> {
-    // SAFETY: `dir` is a live handle, `acl` is valid by the caller's contract,
-    // and the owner, group and SACL are null because `flags` selects only the
-    // DACL.
-    let code = unsafe {
-        SetSecurityInfo(
-            dir.as_raw_handle(),
-            SE_FILE_OBJECT,
-            flags,
-            null_mut(),
-            null_mut(),
-            acl,
-            null(),
-        )
-    };
-    if code == ERROR_SUCCESS {
-        Ok(())
-    } else {
-        Err(io::Error::from_raw_os_error(code.cast_signed()))
-    }
-}
-
-/// The number of entries in the DACL of `dir`, which must be open with
-/// `READ_CONTROL`. A null DACL counts as none.
-fn ace_count(dir: BorrowedHandle<'_>) -> io::Result<u32> {
-    let info_len = length_u32(size_of::<ACL_SIZE_INFORMATION>())?;
-    let mut acl: *mut ACL = null_mut();
-    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
-    // SAFETY: `dir` is a live handle, the owner, group and SACL out-pointers
-    // are null because only the DACL is requested, and `acl` and `descriptor`
-    // are valid for writes.
-    let code = unsafe {
-        GetSecurityInfo(
-            dir.as_raw_handle(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            null_mut(),
-            null_mut(),
-            &raw mut acl,
-            null_mut(),
-            &raw mut descriptor,
-        )
-    };
-    if code != ERROR_SUCCESS {
-        return Err(io::Error::from_raw_os_error(code.cast_signed()));
-    }
-    let mut size = ACL_SIZE_INFORMATION::default();
-    let counted = if acl.is_null() {
-        Ok(0)
-    } else {
-        // SAFETY: `acl` points into `descriptor`, which is alive, and `size`
-        // is writable and of exactly the length passed.
-        let ok =
-            unsafe { GetAclInformation(acl, (&raw mut size).cast(), info_len, AclSizeInformation) };
-        if ok == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(size.AceCount)
-        }
-    };
-    // SAFETY: `descriptor` was allocated by `GetSecurityInfo` with
-    // `LocalAlloc`, and `acl` is no longer used.
-    unsafe { LocalFree(descriptor) };
-    counted
 }
 
 /// The raw reparse data of the reparse point `name` inside `dir`, as

@@ -518,21 +518,15 @@ mod linux {
     /// `Staging::Atomic` refuses such a destination earlier, when it checks
     /// that the directory is empty.
     #[test]
-    fn a_replaced_destination_its_owner_cannot_read_publishes_a_private_root() {
+    fn a_replaced_destination_its_owner_cannot_read_keeps_its_mode() {
         let fx = Fixture::new();
         chmod(&fx.dest, 0o300);
-        let root = is_root(&fx.dest);
-        let expected = if root { 0o300 } else { 0o700 };
 
         let report = fx.extract(Staging::AtomicReplace);
 
-        assert_eq!(mode_of(&fx.dest), expected);
+        assert_eq!(mode_of(&fx.dest), 0o300);
         let reasons = narrowing_of(&report);
-        if root {
-            assert!(reasons.is_empty(), "{reasons:?}");
-        } else {
-            assert_eq!(reasons, [NarrowingReason::AclUnreadable]);
-        }
+        assert!(reasons.is_empty(), "{reasons:?}");
     }
 
     /// Needs root to give the destination away, so it only runs there; on an
@@ -969,11 +963,15 @@ mod macos {
             .extract(&fx.archive, &fx.dest)
             .unwrap_err();
 
+        let exarch_core::ArchiveError::PartialExtraction(partial) = &error else {
+            panic!("expected a partial extraction, got {error}");
+        };
         assert_matches!(
-            error,
+            partial.cause(),
             exarch_core::ArchiveError::OutputExists { .. },
             "{error}"
         );
+        assert!(partial.leftover().is_none(), "{:?}", partial.leftover());
         assert_eq!(
             staging_dirs_in(fx.dest.parent().unwrap()),
             Vec::<PathBuf>::new()

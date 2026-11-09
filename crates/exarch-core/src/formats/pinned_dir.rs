@@ -26,7 +26,8 @@
 //! Other Unix targets and WASI have no such mode and open directories
 //! read-only, so there a directory without read permission fails with
 //! `EACCES` where path-based code worked. None of them is a shipped target for
-//! the bindings or the CLI release builds.
+//! the bindings or the CLI release builds. FreeBSD opens with `O_SEARCH` only
+//! where a directory's attributes are read or changed ([`DirHandle`]).
 //!
 //! On Windows a [`VettedDir`] is a directory handle. Below the root, a junction
 //! or symlink is opened as itself and refused. The root is opened the same
@@ -79,9 +80,15 @@ use crate::types::DestDir;
 
 #[cfg(windows)]
 pub(crate) use imp::DaclHandle;
+#[cfg(windows)]
+pub(crate) use imp::DirRead;
+#[cfg(windows)]
+pub(crate) use imp::RootDacl;
 pub(crate) use imp::VettedDir;
 #[cfg(unix)]
 pub(crate) use imp::open_directory_at;
+#[cfg(windows)]
+pub(crate) use nt::security::DirSecurity;
 
 /// Exactly one normal path component: a name inside a [`VettedDir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,6 +300,46 @@ pub(crate) struct EntryStatus {
     pub(crate) mode: EntryMode,
 }
 
+/// A directory opened to read or change its attributes (ACL, mode), by the
+/// access the platform lets the caller have.
+///
+/// A [`Search`](Self::Search) handle needs no read permission on the
+/// directory, so a mode such as `0311` does not hide the directory's own
+/// attributes; a [`Read`](Self::Read) handle is the fallback where search-only
+/// access is unavailable or refused.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) enum DirHandle {
+    /// `O_PATH` on Linux and Android, `O_SEARCH` on Apple platforms and
+    /// FreeBSD.
+    Search(std::fs::File),
+    /// Opened for reading.
+    Read(std::fs::File),
+}
+
+#[cfg(unix)]
+impl DirHandle {
+    /// The descriptor, whichever way it was opened.
+    pub(crate) const fn as_file(&self) -> &std::fs::File {
+        match self {
+            Self::Search(file) | Self::Read(file) => file,
+        }
+    }
+}
+
+/// Whether the caller may delete a directory entry, as the filesystem's ACL
+/// evaluation sees it.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeleteAccess {
+    /// Deleting is allowed.
+    Granted,
+    /// The ACL or the mode refuses it.
+    Denied,
+    /// The check itself failed, so nothing is known.
+    Unknown,
+}
+
 /// The one rule that maps a file type onto an [`Occupant`].
 const fn occupant(is_dir: bool, is_symlink: bool) -> Occupant {
     if is_dir {
@@ -433,12 +480,18 @@ mod imp {
     use std::os::fd::OwnedFd;
     use std::path::Path;
 
+    #[cfg(target_os = "macos")]
+    use rustix::fs::Access;
     use rustix::fs::AtFlags;
     use rustix::fs::FileType;
     use rustix::fs::Mode;
     use rustix::fs::OFlags;
     use rustix::io::Errno;
 
+    #[cfg(target_os = "macos")]
+    use super::DeleteAccess;
+    #[cfg(unix)]
+    use super::DirHandle;
     use super::EntryStatus;
     use super::Leaf;
     use super::TempLeaf;
@@ -457,11 +510,27 @@ mod imp {
     #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
     const DIR_ACCESS: OFlags = OFlags::RDONLY;
 
+    /// The access with which a directory's attributes are read or changed: it
+    /// needs no read permission on the directory. Every other Unix would only
+    /// open it for reading, so it has no such handle.
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    const MODE_ACCESS: OFlags = DIR_ACCESS;
+    #[cfg(target_os = "freebsd")]
+    const MODE_ACCESS: OFlags = OFlags::from_bits_retain(libc::O_SEARCH.cast_unsigned());
+
     /// Opens a directory without following a symlink, with the platform's
     /// permission-light access mode.
     fn open_directory(open: impl Fn(OFlags) -> rustix::io::Result<OwnedFd>) -> io::Result<OwnedFd> {
+        open_directory_with(DIR_ACCESS, open)
+    }
+
+    /// Opens a directory without following a symlink, with `access`.
+    fn open_directory_with(
+        access: OFlags,
+        open: impl Fn(OFlags) -> rustix::io::Result<OwnedFd>,
+    ) -> io::Result<OwnedFd> {
         let base = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let opened = open(base | DIR_ACCESS);
+        let opened = open(base | access);
         // Older macOS kernels may reject `O_SEARCH` with `EINVAL`.
         #[cfg(target_vendor = "apple")]
         let opened = match opened {
@@ -611,16 +680,66 @@ mod imp {
             self.open_dir_file(name)
         }
 
+        /// Opens the directory `name` to read or change its attributes (ACL,
+        /// mode), refusing a symlink, through a handle that needs no read
+        /// access to it where the platform has one.
+        ///
+        /// Apple platforms and FreeBSD open it search-only (`O_SEARCH`) and,
+        /// for a directory that is readable but not searchable, for reading;
+        /// Linux and Android use an `O_PATH` handle. Other Unix open it for
+        /// reading, so a mode that denies that read still fails there.
+        ///
+        /// # Errors
+        ///
+        /// The I/O error of the open that was tried last.
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            target_os = "freebsd"
+        ))]
+        pub(crate) fn open_dir_for_metadata(&self, name: Leaf<'_>) -> io::Result<DirHandle> {
+            let searched = open_directory_with(MODE_ACCESS, |flags| {
+                rustix::fs::openat(&self.0, name.as_os_str(), flags, Mode::empty())
+            });
+            match searched {
+                Ok(fd) => Ok(DirHandle::Search(File::from(fd))),
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                    self.open_dir_file(name).map(DirHandle::Read)
+                }
+                Err(e) => Err(e),
+            }
+        }
+
+        /// Opens the directory `name` to read or change its attributes, for
+        /// reading: the platform has no handle that needs no read access.
+        ///
+        /// # Errors
+        ///
+        /// The I/O error of the open.
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "linux",
+                target_os = "android",
+                target_vendor = "apple",
+                target_os = "freebsd"
+            ))
+        ))]
+        pub(crate) fn open_dir_for_metadata(&self, name: Leaf<'_>) -> io::Result<DirHandle> {
+            // TODO(#1126): NetBSD, illumos, OpenBSD and DragonFly have no
+            // verified handle that accepts `fchmod` without read access.
+            self.open_dir_file(name).map(DirHandle::Read)
+        }
+
         /// Sets the permission bits of the directory `name` through a handle
         /// that needs no read access to it, when it still is the directory
         /// `expected` names.
         ///
-        /// An identity the volume cannot provide is not a mismatch. Apple
-        /// platforms open it search-only and, for a directory that is
-        /// readable but not searchable, for reading; Linux and Android use an
-        /// `O_PATH` handle, falling back to a read handle where `/proc` is not
-        /// mounted. Other Unix open it for reading, so a mode that denies that
-        /// read still fails there.
+        /// An identity the volume cannot provide is not a mismatch. Linux and
+        /// Android fall back to a read handle where `/proc` is not mounted. See
+        /// [`open_dir_for_metadata`](Self::open_dir_for_metadata) for the
+        /// handles.
         ///
         /// # Errors
         ///
@@ -633,9 +752,9 @@ mod imp {
             expected: FileIdentity,
             mode: &std::fs::Permissions,
         ) -> io::Result<()> {
-            let dir = self.open_for_mode(name)?;
-            ensure_unreplaced(&dir, expected)?;
-            match chmod_handle(&dir, mode) {
+            let dir = self.open_dir_for_metadata(name)?;
+            ensure_unreplaced(dir.as_file(), expected)?;
+            match dir.chmod(mode) {
                 #[cfg(any(target_os = "linux", target_os = "android"))]
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     self.set_dir_mode_through_read_handle(name, expected, mode)
@@ -644,17 +763,26 @@ mod imp {
             }
         }
 
-        /// Opens the directory `name` with the handle `set_dir_mode` prefers
-        /// on this platform.
-        #[cfg(unix)]
-        fn open_for_mode(&self, name: Leaf<'_>) -> io::Result<File> {
-            let opened = open_directory_at(&self.0, name.as_os_str());
-            #[cfg(target_vendor = "apple")]
-            let opened = match opened {
-                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => self.open_dir_file(name),
-                other => other,
-            };
-            opened
+        /// Whether the caller may delete the entry `name`, evaluated by the
+        /// kernel with the entry's ACL and mode before anything is moved.
+        ///
+        /// The answer is advisory: the rename that follows stays the
+        /// authority, so [`DeleteAccess::Unknown`] never blocks anything.
+        #[cfg(target_os = "macos")]
+        pub(crate) fn delete_access(&self, name: Leaf<'_>) -> DeleteAccess {
+            // `_DELETE_OK` of <sys/unistd.h>; the libc crate does not define
+            // it.
+            const DELETE_OK: i32 = 1 << 12;
+            match rustix::fs::accessat(
+                &self.0,
+                name.as_os_str(),
+                Access::from_bits_retain(DELETE_OK),
+                AtFlags::EACCESS,
+            ) {
+                Ok(()) => DeleteAccess::Granted,
+                Err(Errno::ACCESS | Errno::PERM) => DeleteAccess::Denied,
+                Err(_) => DeleteAccess::Unknown,
+            }
         }
 
         /// `set_dir_mode` for a Linux without `/proc`, where an `O_PATH`
@@ -804,6 +932,17 @@ mod imp {
         }
     }
 
+    #[cfg(unix)]
+    impl DirHandle {
+        /// Sets the permission bits through the descriptor.
+        pub(crate) fn chmod(&self, mode: &std::fs::Permissions) -> io::Result<()> {
+            match self {
+                Self::Search(dir) => chmod_handle(dir, mode),
+                Self::Read(dir) => dir.set_permissions(mode.clone()),
+            }
+        }
+    }
+
     /// Fails when `dir` is known to be another directory than `expected`.
     #[cfg(unix)]
     fn ensure_unreplaced(dir: &File, expected: FileIdentity) -> io::Result<()> {
@@ -827,8 +966,6 @@ mod imp {
         )?)
     }
 
-    // TODO(#1087): 0311 backup stays unremovable on other Unix (O_RDONLY
-    // fchmod)
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
     fn chmod_handle(dir: &File, mode: &std::fs::Permissions) -> io::Result<()> {
         dir.set_permissions(mode.clone())
@@ -860,6 +997,12 @@ mod imp {
 #[cfg(windows)]
 #[allow(unsafe_code)] // the only unsafe code on Windows: NT directory-relative calls
 pub(in crate::formats) mod nt;
+
+#[cfg(windows)]
+mod dacl_walk;
+
+#[cfg(any(windows, test))]
+mod dir_info;
 
 #[cfg(all(test, windows))]
 #[allow(unsafe_code)] // test-only DACL reader
@@ -895,10 +1038,20 @@ mod imp {
     use super::EntryStatus;
     use super::Leaf;
     use super::TempLeaf;
+    use super::dacl_walk;
     use super::nt;
     use super::nt::Disposition;
     use super::nt::Kind;
     use super::nt::Request;
+    use super::nt::security;
+    use super::nt::security::DaclState;
+    use super::nt::security::Derived;
+    use super::nt::security::Descriptor;
+    use super::nt::security::DirSecurity;
+    use super::nt::security::EffectiveToken;
+    use super::nt::security::ObjectKind;
+    use super::nt::security::Part;
+    use super::nt::security::SecurityDescriptor;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::file_identity::IdentityCheck;
     use crate::formats::occupant::ReplacePermit;
@@ -909,22 +1062,69 @@ mod imp {
 
     const DIR_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
+    const NO_INHERITABLE_ENTRIES: &str =
+        "the parent has no inheritable entries; the root stays owner-only";
+
+    /// Where the DACL of a published root comes from.
+    #[derive(Debug)]
+    pub(crate) enum RootDacl {
+        /// What a directory created in the parent that was read gets: the
+        /// parent's inheritable entries.
+        Inherit(DirSecurity),
+        /// The descriptor of the destination the root replaces, copied as it
+        /// is, including a null DACL.
+        Copy(DirSecurity),
+    }
+
+    /// A directory's security as read by name.
+    #[derive(Debug)]
+    pub(crate) enum DirRead {
+        /// The descriptor of the directory that was expected.
+        Read(DirSecurity),
+        /// The name no longer holds the directory that was expected.
+        Replaced,
+    }
+
     /// A directory handle opened with `WRITE_DAC`, which survives a rename of
     /// the directory.
     #[derive(Debug)]
     pub(crate) struct DaclHandle(File);
 
     impl DaclHandle {
-        /// Makes the directory inherit its DACL from its parent again, and
-        /// re-derives what its children inherited.
+        /// Gives the directory the DACL `root` names, then every entry below
+        /// it the DACL it would have had if created in place under that
+        /// directory (see the `dacl_walk` module); the directory itself is
+        /// rewritten last, so until the whole tree is done it stays as private
+        /// as it was.
         ///
         /// # Errors
         ///
-        /// The OS error. When the parent has no inheritable entries the
-        /// directory is put back to its owner-only DACL and an error is
-        /// returned too, so it is never left with an empty DACL.
-        pub(crate) fn inherit_dacl(&self) -> io::Result<()> {
-            nt::inherit_dacl(self.0.as_handle())
+        /// The OS error of the first step that failed. A parent without
+        /// inheritable entries is refused before anything is derived or
+        /// written: the token's default DACL would otherwise stand in for it.
+        pub(crate) fn rewrite(&self, root: &RootDacl) -> io::Result<()> {
+            let token = EffectiveToken::open()?;
+            let handle = self.0.as_handle();
+            let descriptor = match root {
+                RootDacl::Copy(source) => source.descriptor(),
+                RootDacl::Inherit(parent) => {
+                    let parent = parent.descriptor();
+                    if !parent.has_inheritable_entries()? {
+                        return Err(io::Error::other(NO_INHERITABLE_ENTRIES));
+                    }
+                    let creator = SecurityDescriptor::read(handle, Part::OwnerAndGroup)?;
+                    let derived = Derived::new(&parent, &creator, ObjectKind::Container, &token)?;
+                    match derived.dacl_state()? {
+                        DaclState::Present { entries } if entries > 0 => {}
+                        DaclState::Present { .. } | DaclState::Null => {
+                            return Err(io::Error::other(NO_INHERITABLE_ENTRIES));
+                        }
+                    }
+                    Descriptor::Derived(derived)
+                }
+            };
+            dacl_walk::rewrite_children(handle, &descriptor, &token)?;
+            security::apply_dacl(handle, &descriptor)
         }
     }
 
@@ -1084,6 +1284,42 @@ mod imp {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             Ok(DaclHandle(file))
+        }
+
+        /// The owner, group and DACL of this directory, read through a handle
+        /// reopened on it with `READ_CONTROL`.
+        ///
+        /// # Errors
+        ///
+        /// The OS error; `PermissionDenied` when the caller may not read it.
+        pub(crate) fn read_security(&self) -> io::Result<DirSecurity> {
+            let reopened = nt::reopen_dir(self.0.as_handle(), READ_CONTROL | FILE_READ_ATTRIBUTES)?;
+            SecurityDescriptor::read(reopened.as_handle(), Part::OwnerGroupAndDacl)
+                .map(DirSecurity::new)
+        }
+
+        /// The owner, group and DACL of the subdirectory `name`, when it still
+        /// is the directory `expected` names; a link or a file there is an
+        /// error. An identity the volume cannot provide is not a mismatch.
+        ///
+        /// # Errors
+        ///
+        /// The OS error; `PermissionDenied` when the caller may not read it.
+        pub(crate) fn read_dir_security(
+            &self,
+            name: Leaf<'_>,
+            expected: FileIdentity,
+        ) -> io::Result<DirRead> {
+            let request = Request {
+                kind: Kind::Directory,
+                ..Request::open(READ_CONTROL | FILE_READ_ATTRIBUTES)
+            };
+            let file = File::from(nt::create_at(self.0.as_handle(), name, request)?);
+            if FileIdentity::of_file(&file).check(expected) == IdentityCheck::Different {
+                return Ok(DirRead::Replaced);
+            }
+            SecurityDescriptor::read(file.as_handle(), Part::OwnerGroupAndDacl)
+                .map(|descriptor| DirRead::Read(DirSecurity::new(descriptor)))
         }
 
         /// Renames the directory `from` to `to`, both in this directory, and
@@ -1445,7 +1681,32 @@ mod tests {
         dir.status(leaf(name)).unwrap().unwrap().identity
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd"
+    ))]
+    #[test]
+    fn a_directory_without_read_access_is_opened_search_only() {
+        let temp = TempDir::new().unwrap();
+        let locked = temp.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o311)).unwrap();
+        let dir = pinned(&temp);
+
+        let handle = dir.open_dir_for_metadata(leaf("locked"));
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_matches!(handle, Ok(DirHandle::Search(_)));
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd"
+    ))]
     #[test]
     fn set_dir_mode_reaches_a_directory_whatever_access_its_mode_grants() {
         for mode in [0o311, 0o600, 0o644, 0o400, 0o000] {
@@ -1459,7 +1720,7 @@ mod tests {
             let result = dir.set_dir_mode(leaf("locked"), id, &fs::Permissions::from_mode(0o700));
 
             if mode == 0o000
-                && cfg!(target_vendor = "apple")
+                && cfg!(any(target_vendor = "apple", target_os = "freebsd"))
                 && fs::metadata(temp.path()).unwrap().uid() != 0
             {
                 // Neither search nor read is allowed, so no handle exists.
@@ -1641,7 +1902,7 @@ mod windows_tests {
     }
 
     #[test]
-    fn resetting_the_dacl_inherits_from_the_parent_down_the_tree() {
+    fn rewriting_with_the_parent_dacl_inherits_it_down_the_tree() {
         use super::dacl_probe;
         let temp = TempDir::new().unwrap();
         let dir = pinned(&temp);
@@ -1652,7 +1913,7 @@ mod windows_tests {
 
         dir.open_dir_for_dacl(leaf("stage"), id)
             .unwrap()
-            .inherit_dacl()
+            .rewrite(&RootDacl::Inherit(dir.read_security().unwrap()))
             .unwrap();
 
         let parent = dacl_probe::read(temp.path());
@@ -1676,7 +1937,7 @@ mod windows_tests {
     }
 
     #[test]
-    fn resetting_under_a_parent_without_inheritable_entries_keeps_the_dir_owner_only() {
+    fn rewriting_under_a_parent_without_inheritable_entries_keeps_the_dir_owner_only() {
         use super::dacl_probe;
         let temp = TempDir::new().unwrap();
         let parent = temp.path().join("closed");
@@ -1691,7 +1952,7 @@ mod windows_tests {
         let result = dir
             .open_dir_for_dacl(leaf("stage"), id)
             .unwrap()
-            .inherit_dacl();
+            .rewrite(&RootDacl::Inherit(dir.read_security().unwrap()));
 
         let dacl = dacl_probe::read(&stage);
         assert!(

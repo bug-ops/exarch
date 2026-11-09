@@ -335,11 +335,15 @@ fn io_context(error: &io::Error, context: &'static str, path: &Path) -> io::Erro
     )
 }
 
-/// The error of an extraction that was cancelled after it finished, once
-/// nothing was published; `leftover` is the staging directory that survived
-/// its removal.
-fn cancelled_after(report: ExtractionReport, leftover: Option<StagingLeftover>) -> ArchiveError {
-    ArchiveError::partial_or(report, ArchiveError::Cancelled).rolled_back_with(leftover)
+/// The error of an extraction that finished into a staging directory and was
+/// then discarded without publishing, keeping what it extracted; `leftover` is
+/// the staging directory that survived its removal.
+fn discarded_after(
+    report: ExtractionReport,
+    error: ArchiveError,
+    leftover: Option<StagingLeftover>,
+) -> ArchiveError {
+    ArchiveError::partial_or(report, error).rolled_back_with(leftover)
 }
 
 /// The narrowing of a root whose destination vanished before its mode could
@@ -403,7 +407,11 @@ fn extract_atomic(
         Err(e) => return Err(e.rolled_back_with(staging.discard())),
     };
     if progress.is_cancelled() {
-        return Err(cancelled_after(report, staging.discard()));
+        return Err(discarded_after(
+            report,
+            ArchiveError::Cancelled,
+            staging.discard(),
+        ));
     }
     let fresh = staging.take_fresh();
     let published = adoption_for(&destination, fresh, output_dir).and_then(|adoption| {
@@ -417,7 +425,7 @@ fn extract_atomic(
     });
     match published {
         Ok(()) => Ok(report),
-        Err(error) => Err(error.rolled_back_with(staging.discard())),
+        Err(error) => Err(discarded_after(report, error, staging.discard())),
     }
 }
 
@@ -469,7 +477,7 @@ fn publish_adopted(
     output_dir: &Path,
     report: &mut ExtractionReport,
 ) -> Result<()> {
-    let adopted = if let Some(adoption) = adoption {
+    let (adopted, vanished) = if let Some(adoption) = adoption {
         let root = staging.adopt(adoption).map_err(|e| {
             ArchiveError::Io(io_context(
                 &e,
@@ -477,7 +485,7 @@ fn publish_adopted(
                 output_dir,
             ))
         })?;
-        Some(root)
+        (Some(root), None)
     } else {
         let withheld = staging.vanished_reason().map_err(|e| {
             ArchiveError::Io(io_context(
@@ -486,10 +494,9 @@ fn publish_adopted(
                 output_dir,
             ))
         })?;
-        report.record_narrowing(destination_vanished(withheld));
-        None
+        (None, Some(destination_vanished(withheld)))
     };
-    let mut published = staging
+    let published = staging
         .publish(&destination.name)
         .map_err(|e| match e.kind() {
             io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty => {
@@ -503,7 +510,9 @@ fn publish_adopted(
                 output_dir,
             )),
         })?;
-    report.record_narrowing(published.take_narrowing());
+    if let Some(vanished) = vanished {
+        report.record_narrowing(vanished);
+    }
     if let Some(root) = adopted {
         report.record_narrowing(root.finish(published));
     }

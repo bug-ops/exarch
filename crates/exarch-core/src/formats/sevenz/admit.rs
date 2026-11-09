@@ -549,6 +549,25 @@ mod tests {
     }
 
     #[test]
+    fn lzma2_dict_size_matches_known_property_bytes() {
+        const KNOWN: [(u8, u32); 7] = [
+            (0, 4_096),
+            (1, 6_144),
+            (2, 8_192),
+            (18, 2_097_152),
+            (19, 3_145_728),
+            (38, 2_147_483_648),
+            (39, 3_221_225_472),
+        ];
+        for (property, expected) in KNOWN {
+            assert_eq!(lzma2_dict_size(&[property]), Some(expected));
+        }
+        assert_eq!(lzma2_dict_size(&[40]), Some(u32::MAX));
+        assert_eq!(lzma2_dict_size(&[41]), None);
+        assert_eq!(lzma2_dict_size(&[]), None);
+    }
+
+    #[test]
     fn solid_policy_refusal_carries_its_own_reason() {
         let refused =
             check_solid_policy(true, bytes(&[1]), &SecurityConfig::default()).unwrap_err();

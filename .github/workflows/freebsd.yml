@@ -11,6 +11,7 @@ on:
   pull_request:
     paths:
       - crates/exarch-core/src/formats/spool.rs
+      - crates/exarch-core/src/formats/pinned_dir.rs
       - .github/workflows/freebsd.yml
 
 permissions:
@@ -48,3 +49,43 @@ jobs:
             mount | grep -E ' on (/tmp|/mnt/spool-tmpfs) ' || df /tmp /mnt/spool-tmpfs
             export EXARCH_TEST_TMPFS_DIR=/mnt/spool-tmpfs
             cargo test -p exarch-core --lib --all-features spool_tests -- --include-ignored
+
+  directory-mode-tests:
+    name: Directory mode tests (FreeBSD, unprivileged)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Root ignores a directory's mode, so the test binary is built as root and
+      # run as `nobody`; the run fails unless both tests really executed.
+      - name: Run directory mode tests as an unprivileged user in a FreeBSD VM
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: '15.0'
+          usesh: true
+          prepare: |
+            pkg install -y curl ca_root_nss
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          run: |
+            set -eu
+            . "$HOME/.cargo/env"
+            built=$(cargo test -p exarch-core --lib --all-features --no-run 2>&1 | tee /dev/stderr)
+            bin=$(printf '%s\n' "$built" | sed -n 's/.*Executable unittests src\/lib.rs (\(.*\))/\1/p')
+            test -n "$bin"
+            bin=$(realpath "$bin")
+            path=$bin
+            while [ "$path" != / ]; do
+              chmod a+rx "$path"
+              path=$(dirname "$path")
+            done
+            scratch=/mnt/nobody-tmp
+            mkdir -p "$scratch"
+            chmod 1777 "$scratch"
+            su -m nobody -c "TMPDIR=$scratch $bin --exact formats::pinned_dir::tests::a_directory_without_read_access_is_opened_search_only formats::pinned_dir::tests::set_dir_mode_reaches_a_directory_whatever_access_its_mode_grants > $scratch/output 2>&1" || { cat "$scratch/output"; exit 1; }
+            cat "$scratch/output"
+            grep -q '2 passed' "$scratch/output"

@@ -199,7 +199,11 @@ jobs:
             -v "$MATURIN_BIN:/usr/local/bin/maturin:ro" \
             -w "$GITHUB_WORKSPACE/crates/exarch-python" \
             "$IMAGE" bash -euo pipefail -c '
-              trap "chown -R $HOST_UID:$HOST_GID $WORKSPACE/target $WORKSPACE/crates/exarch-python/wheels 2>/dev/null || true" EXIT
+              fix_owner() {
+                chown -R "$HOST_UID:$HOST_GID" "$WORKSPACE/target" "$WORKSPACE/crates/exarch-python/wheels" \
+                  || echo "warning: chown of build outputs failed" >&2
+              }
+              trap fix_owner EXIT
               rm -rf "$RUSTUP_HOME/toolchains"
               rustup toolchain install stable --profile minimal
               rustup override set stable

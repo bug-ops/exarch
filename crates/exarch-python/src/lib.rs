@@ -331,8 +331,9 @@ fn output_file(
 ///
 /// * `archive_path` - Path to archive file (str or pathlib.Path)
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
-/// * `options` - Optional `ListOptions`; `ListOptions().with_stored_targets()`
-///   reads the 7z link targets that listing leaves unread by default
+/// * `options` - Optional `ListOptions`;
+///   `ListOptions().with_stored_targets("read")` reads the 7z link targets that
+///   listing leaves unread by default
 ///
 /// # Returns
 ///

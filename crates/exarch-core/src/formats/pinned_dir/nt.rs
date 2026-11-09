@@ -9,10 +9,13 @@
 //! path. This is the scheme the standard library's `remove_dir_all` fix for
 //! CVE-2022-21658 uses.
 //!
-//! This is the only module in the crate that uses `unsafe` on Windows. Every
-//! export is a safe function taking a [`Leaf`], so the "one non-empty normal
-//! component" invariant is carried by the type: an empty `ObjectName` would
-//! reopen the root itself, which only [`reopen_dir`] does, on purpose.
+//! This module and its child [`security`] are the non-test `unsafe` surface of
+//! the crate on Windows; `dacl_probe` is a test-only third. Every name-taking
+//! export here is a safe function taking a [`Leaf`], so the "one non-empty
+//! normal component" invariant is carried by the type: an empty `ObjectName`
+//! would reopen the root itself, which only [`reopen_dir`] does, on purpose.
+//! [`security`] exports tokens and descriptors instead, each owning the memory
+//! its Win32 call hands out.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -20,7 +23,6 @@ use std::ffi::OsStr;
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
-use std::mem::MaybeUninit;
 use std::mem::offset_of;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -30,7 +32,6 @@ use std::os::windows::io::BorrowedHandle;
 use std::os::windows::io::FromRawHandle;
 use std::os::windows::io::OwnedHandle;
 use std::os::windows::io::RawHandle;
-use std::ptr::NonNull;
 use std::ptr::null;
 use std::ptr::null_mut;
 use std::slice;
@@ -57,17 +58,27 @@ use windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile;
 use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
 use windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED;
 use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Foundation::OBJ_CASE_INSENSITIVE;
 use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
 use windows_sys::Win32::Foundation::STATUS_NO_MORE_FILES;
 use windows_sys::Win32::Foundation::UNICODE_STRING;
-use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-use windows_sys::Win32::Security::Authorization::SDDL_REVISION_1;
+use windows_sys::Win32::Security::ACCESS_ALLOWED_ACE;
+use windows_sys::Win32::Security::ACL;
+use windows_sys::Win32::Security::ACL_REVISION;
+use windows_sys::Win32::Security::AddAccessAllowedAceEx;
+use windows_sys::Win32::Security::CONTAINER_INHERIT_ACE;
+use windows_sys::Win32::Security::GetLengthSid;
+use windows_sys::Win32::Security::InitializeAcl;
+use windows_sys::Win32::Security::InitializeSecurityDescriptor;
+use windows_sys::Win32::Security::OBJECT_INHERIT_ACE;
 use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::SE_DACL_PROTECTED;
+use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::SetSecurityDescriptorControl;
+use windows_sys::Win32::Security::SetSecurityDescriptorDacl;
 use windows_sys::Win32::Storage::FileSystem::DELETE;
 use windows_sys::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS;
+use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_FLAG_DELETE;
 use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
 use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_INFO;
@@ -84,8 +95,10 @@ use windows_sys::Win32::Storage::FileSystem::MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_POSIX_SEMANTICS;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_REPLACE_IF_EXISTS;
+use windows_sys::core::BOOL;
 
 use super::Leaf;
 use super::dir_info;
@@ -263,85 +276,70 @@ unsafe fn create_with(
     Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
 }
 
-/// A self-relative security descriptor whose DACL is protected and grants the
+/// The turn of a Win32 `BOOL` into the OS error of the call that returned it.
+pub(super) fn win32(ok: BOOL) -> io::Result<()> {
+    (ok != 0).ok_or_else(io::Error::last_os_error)
+}
+
+/// An absolute security descriptor whose DACL is protected and grants the
 /// current user full control, inherited by every child.
 ///
 /// A protected DACL ignores the parent's, so no other principal is named.
-struct OwnerOnlyDescriptor(PSECURITY_DESCRIPTOR);
+struct OwnerOnlyDescriptor {
+    descriptor: SECURITY_DESCRIPTOR,
+    /// The DACL `descriptor` points at; 4-aligned as an ACL requires.
+    _acl: Vec<u32>,
+}
 
 impl OwnerOnlyDescriptor {
+    /// The ACL header and one allow entry, without the SID that follows it.
+    const ACL_WITHOUT_SID: usize =
+        size_of::<ACL>() + size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>();
+
     /// Builds the descriptor from the SID of the effective token's user.
     ///
     /// # Errors
     ///
     /// The OS error of the failed step; there is no fallback descriptor.
     fn for_current_user() -> io::Result<Self> {
-        let sddl: Vec<u16> = format!("D:P(A;OICI;FA;;;{})", current_user_sid()?)
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
-        // SAFETY: `sddl` is a NUL-terminated UTF-16 string that outlives the
-        // call, `descriptor` is valid for writes, and the size out-pointer is
-        // null, which the API allows.
-        let ok = unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl.as_ptr(),
-                SDDL_REVISION_1,
-                &raw mut descriptor,
-                null_mut(),
+        let user = security::EffectiveToken::open()?.user()?;
+        let sid = user.sid();
+        // SAFETY: `user` owns a valid SID that outlives the call.
+        let sid_length = unsafe { GetLengthSid(sid) } as usize;
+        let acl_length = Self::ACL_WITHOUT_SID.saturating_add(sid_length);
+        let mut acl = vec![0_u32; acl_length.div_ceil(size_of::<u32>())];
+        let capacity = length_u32(acl.len().saturating_mul(size_of::<u32>()))?;
+        // SAFETY: `acl` is writable, 4-aligned and `capacity` bytes long.
+        win32(unsafe { InitializeAcl(acl.as_mut_ptr().cast(), capacity, ACL_REVISION) })?;
+        // SAFETY: `acl` was initialized above with room for one entry holding
+        // `sid`, which is valid.
+        win32(unsafe {
+            AddAccessAllowedAceEx(
+                acl.as_mut_ptr().cast(),
+                ACL_REVISION,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                FILE_ALL_ACCESS,
+                sid,
             )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self(descriptor))
+        })?;
+        let mut descriptor = SECURITY_DESCRIPTOR::default();
+        let ptr: PSECURITY_DESCRIPTOR = (&raw mut descriptor).cast();
+        // SAFETY: `ptr` points at a writable `SECURITY_DESCRIPTOR`.
+        win32(unsafe { InitializeSecurityDescriptor(ptr, SECURITY_DESCRIPTOR_REVISION) })?;
+        // SAFETY: `ptr` was initialized above, and `acl` is a valid ACL whose
+        // heap buffer stays where it is when the vector moves into `Self`.
+        win32(unsafe { SetSecurityDescriptorDacl(ptr, 1, acl.as_ptr().cast(), 0) })?;
+        // SAFETY: `ptr` is a valid descriptor.
+        win32(unsafe { SetSecurityDescriptorControl(ptr, SE_DACL_PROTECTED, SE_DACL_PROTECTED) })?;
+        Ok(Self {
+            descriptor,
+            _acl: acl,
+        })
     }
-}
 
-impl Drop for OwnerOnlyDescriptor {
-    fn drop(&mut self) {
-        // SAFETY: the descriptor was allocated by the conversion call with
-        // `LocalAlloc` and is freed exactly once, here.
-        unsafe { LocalFree(self.0) };
+    fn as_ptr(&self) -> *const c_void {
+        (&raw const self.descriptor).cast()
     }
-}
-
-/// The string form of the SID of the effective user: the thread's when it
-/// impersonates, else the process's.
-pub(super) fn current_user_sid() -> io::Result<String> {
-    security::EffectiveToken::open()?.user_sid()
-}
-
-/// The string form of `sid`.
-///
-/// # Safety
-///
-/// `sid` must point at a valid SID.
-pub(super) unsafe fn sid_to_string(sid: *mut c_void) -> io::Result<String> {
-    let mut slot = MaybeUninit::<*mut u16>::uninit();
-    // SAFETY: the caller guarantees `sid` is a valid SID, and `slot` is valid
-    // for writes.
-    if unsafe { ConvertSidToStringSidW(sid, slot.as_mut_ptr()) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the call succeeded, so it wrote the string pointer to `slot`.
-    let text = NonNull::new(unsafe { slot.assume_init() })
-        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
-    // SAFETY: on success `text` points at a NUL-terminated UTF-16 string
-    // allocated by the API, so every offset up to the NUL is readable.
-    let units = unsafe {
-        let mut len = 0;
-        while *text.as_ptr().add(len) != 0 {
-            len = len.saturating_add(1);
-        }
-        slice::from_raw_parts(text.as_ptr(), len)
-    };
-    let parsed = String::from_utf16(units).map_err(|_| io::Error::from(io::ErrorKind::InvalidData));
-    // SAFETY: `text` was allocated by `ConvertSidToStringSidW` with
-    // `LocalAlloc`, `units` is no longer used, and it is freed once.
-    unsafe { LocalFree(text.as_ptr().cast()) };
-    parsed
 }
 
 /// Creates the directory `name` inside `dir` with a protected DACL that grants
@@ -359,7 +357,7 @@ pub(super) fn create_private_dir_at(dir: BorrowedHandle<'_>, name: Leaf<'_>) -> 
     };
     // SAFETY: `descriptor` owns a valid descriptor until it drops after the
     // call.
-    unsafe { create_with(dir, Target::Name(name), request, descriptor.0.cast_const()) }.map(drop)
+    unsafe { create_with(dir, Target::Name(name), request, descriptor.as_ptr()) }.map(drop)
 }
 
 const _: () = {
@@ -661,9 +659,7 @@ pub(in crate::formats) fn file_id(handle: BorrowedHandle<'_>) -> Option<(u64, u1
             length_u32(size_of::<FILE_ID_INFO>()).ok()?,
         )
     };
-    if ok == 0 {
-        return None;
-    }
+    win32(ok).ok()?;
     nonzero_file_id(info.FileId.Identifier).map(|id| (info.VolumeSerialNumber, id))
 }
 
@@ -683,5 +679,23 @@ mod file_id_tests {
         let mut id = [0; 16];
         id[0] = 7;
         assert_eq!(nonzero_file_id(id), Some(7));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod owner_only_tests {
+    use super::OwnerOnlyDescriptor;
+    use crate::formats::pinned_dir::dacl_probe;
+
+    #[test]
+    fn the_owner_only_descriptor_is_a_protected_inheritable_full_control_grant() {
+        let descriptor = OwnerOnlyDescriptor::for_current_user().unwrap();
+
+        let expected = dacl_probe::normalized_sddl(&format!(
+            "D:P(A;OICI;FA;;;{})",
+            dacl_probe::current_user()
+        ));
+        assert_eq!(dacl_probe::dacl_sddl_of(descriptor.as_ptr()), expected);
     }
 }

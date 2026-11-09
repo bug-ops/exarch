@@ -28,8 +28,6 @@ use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsHandle;
 use std::os::windows::io::BorrowedHandle;
 use std::os::windows::io::OwnedHandle;
-use std::path::Component;
-use std::path::Path;
 
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
@@ -119,14 +117,7 @@ struct Level<'d> {
 
 /// One normal path component, or an `InvalidData` error.
 fn leaf_of(name: &OsStr) -> io::Result<Leaf<'_>> {
-    let mut components = Path::new(name).components();
-    match (components.next(), components.next()) {
-        (Some(component @ Component::Normal(only)), None) if only == name => {
-            Leaf::from_component(component)
-        }
-        _ => None,
-    }
-    .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+    Leaf::of_name(name).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
 }
 
 fn list(listing: BorrowedHandle<'_>) -> io::Result<Vec<OsString>> {

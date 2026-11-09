@@ -54,12 +54,15 @@ use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
 use crate::security::fs_view::HostFs;
+#[cfg(unix)]
+use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
 use crate::security::fs_view::normalized_display;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
+use crate::selection::EntryShape;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -493,8 +496,8 @@ struct OutputSlot {
 /// exists, overwrite mode writes a fresh sibling temp file that the caller
 /// renames over the entry, so other hardlinks to the old inode keep their
 /// content. Returns `None` when the entry exists and `duplicates` is `Skip`.
-/// Under `Refuse` an entry this run created is a duplicate and gives `None`
-/// as well; any other occupant fails with `DestinationOccupied`.
+/// Under `Refuse` a file or symlink this run created is a duplicate and gives
+/// `None` as well; any other occupant fails with `DestinationOccupied`.
 fn open_output_slot(
     dir: &VettedDir,
     leaf: Leaf<'_>,
@@ -513,6 +516,8 @@ fn open_output_slot(
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let action = duplicates.on_occupant(
+                EntryShape::File,
+                || dir.probe(leaf),
                 || root.created().created_here(dir, leaf, rel),
                 || destination_occupied(root.dest().as_path(), rel),
             )?;
@@ -540,6 +545,7 @@ pub(crate) fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveErr
     ArchiveError::DestinationOccupied {
         destination: destination.to_path_buf(),
         conflicts: Box::new([rel.to_path_buf()]),
+        by: crate::OccupiedBy::Existing,
     }
 }
 
@@ -730,6 +736,8 @@ pub(crate) fn create_symlink<P: ParentCheck>(
         if let Some(existing) = parent.probe(leaf)? {
             let link_path = safe_symlink.link().as_path();
             let action = duplicates.on_occupant(
+                EntryShape::Link(LinkKind::Symlink),
+                || Ok(Some(existing)),
                 || root.created().created_here(&parent, leaf, link_path),
                 || destination_occupied(root.dest().as_path(), link_path),
             )?;

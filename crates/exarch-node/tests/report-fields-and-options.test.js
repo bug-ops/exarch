@@ -69,6 +69,8 @@ describe('report fields', () => {
     assert.deepStrictEqual(keys(report), [
       'bytesCompressed',
       'bytesWritten',
+      'compressionPercentage',
+      'compressionRatio',
       'directoriesAdded',
       'durationMs',
       'filesAdded',
@@ -81,6 +83,12 @@ describe('report fields', () => {
       'warnings',
     ]);
     assert.strictEqual(report.sizeClamped, false);
+    assert.strictEqual(report.compressionRatio, report.bytesWritten / report.bytesCompressed);
+    const saved = Math.max(report.bytesWritten - report.bytesCompressed, 0);
+    assert.ok(
+      Math.abs(report.compressionPercentage - (saved / report.bytesWritten) * 100) < 1e-9,
+      String(report.compressionPercentage)
+    );
   });
 
   it('manifest and entry fields', () => {
@@ -96,13 +104,16 @@ describe('report fields', () => {
     const file = manifest.entries.find((entry) => entry.entryType === 'File');
     assert.strictEqual(file.sizeClamped, false);
     assert.strictEqual(file.size, 5);
+    assert.strictEqual(file.compressionRatio, undefined);
   });
 
   it('verification report fields', () => {
     const report = verifyArchiveSync(archive);
     assert.deepStrictEqual(keys(report), [
       'format',
+      'hasCriticalIssues',
       'integrityStatus',
+      'isSafe',
       'issues',
       'securityStatus',
       'sizeClamped',
@@ -113,6 +124,8 @@ describe('report fields', () => {
     ]);
     assert.strictEqual(report.sizeClamped, false);
     assert.strictEqual(report.format, 'TarGz');
+    assert.strictEqual(report.isSafe, report.status === 'PASS');
+    assert.strictEqual(report.hasCriticalIssues, false);
   });
 
   it('integrity gaps carry the total over all reasons', () => {

@@ -84,6 +84,38 @@ impl TryFrom<u32> for CompressionLevel {
     }
 }
 
+impl TryFrom<RequestedLevel> for CompressionLevel {
+    type Error = ArchiveError;
+
+    /// Accepts what a caller asked for, as a binding or the CLI reports it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidCompressionLevel`] carrying `requested`
+    /// unless it is an integer in 1-9.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::CompressionLevel;
+    /// use exarch_core::RequestedLevel;
+    ///
+    /// assert_eq!(
+    ///     CompressionLevel::try_from(RequestedLevel::Integer(9))?.get(),
+    ///     9
+    /// );
+    /// assert!(CompressionLevel::try_from(RequestedLevel::OutOfRange).is_err());
+    /// assert!(CompressionLevel::try_from(RequestedLevel::Fractional(1.5)).is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    fn try_from(requested: RequestedLevel) -> Result<Self> {
+        match requested {
+            RequestedLevel::Integer(level) => Self::from_i128(i128::from(level)),
+            other => Err(ArchiveError::InvalidCompressionLevel { level: other }),
+        }
+    }
+}
+
 impl CompressionLevel {
     /// Parses an integer of any width, as a binding receives it.
     ///

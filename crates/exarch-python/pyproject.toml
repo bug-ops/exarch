@@ -46,6 +46,8 @@ Issues = "https://github.com/bug-ops/exarch/issues"
 # `[build-system].requires` above must carry the same exact version; the
 # `check-maturin-pin` CI step fails when they drift.
 release = ["maturin==1.16.0"]
+# Bundled into musllinux wheels inside the build container only (release.yml).
+release-musl = ["patchelf==0.19.1.0"]
 dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.0",

@@ -8,7 +8,11 @@ the field names of the report and error types. Core's structs are
 table below stays a hand-kept list; add a row when a type gains a field.
 
 Language conventions are not drift: a Node field is the camelCase of the Python
-one. `RENAMED` lists the deliberate differences.
+one. `RENAMED` lists the deliberate differences. The one difference of value
+rather than name is the unit of `modified`: float seconds in Python, integer
+milliseconds in Node; each stub documents its own, and `ArchiveEntry` below
+shares the name only. A Node report is a plain object, so a Python helper method
+(`is_safe()`, `compression_ratio()`) is the Node property of the same name.
 """
 
 import re
@@ -42,6 +46,8 @@ SHARED = [
             "integrity_status",
             "integrity_gaps",
             "security_status",
+            "is_safe",
+            "has_critical_issues",
         ],
     ),
     (
@@ -124,12 +130,14 @@ SHARED = [
             "warnings",
             "total_items",
             "has_warnings",
+            "compression_ratio",
+            "compression_percentage",
         ],
     ),
     (
         "ArchiveEntry",
         ["ManifestFileEntry"],
-        ["path", "entry_type", "compressed_size", "mode", "modified"],
+        ["path", "entry_type", "compressed_size", "mode", "modified", "compression_ratio"],
     ),
     ("ListOptions", ["ListOptions"], ["stored_targets"]),
     ("ArchiveFile", ["ManifestFileEntry"], ["size"]),

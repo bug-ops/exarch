@@ -302,20 +302,30 @@ impl Refusal {
         }
     }
 
-    /// The error, saying which staging directory survived its removal.
-    fn into_error(self, leftover: Option<StagingLeftover>) -> ArchiveError {
+    /// The error of a swap refused after the extraction: a rolled-back partial
+    /// extraction that keeps `report` and names the staging directory that
+    /// survived its removal, once.
+    fn into_error(
+        self,
+        report: ExtractionReport,
+        leftover: Option<StagingLeftover>,
+    ) -> ArchiveError {
         match self {
             Self::Failed {
                 error,
                 context,
                 path,
                 restore,
-            } => ArchiveError::ReplaceFailed(ReplaceFailure::new(
-                io_context(&error, context, &path),
-                restore,
-                leftover,
-            )),
-            Self::Error(error) => error.rolled_back_with(leftover),
+            } => discarded_after(
+                report,
+                ArchiveError::ReplaceFailed(ReplaceFailure::new(
+                    io_context(&error, context, &path),
+                    restore,
+                    leftover,
+                )),
+                None,
+            ),
+            Self::Error(error) => discarded_after(report, error, leftover),
         }
     }
 }
@@ -357,8 +367,9 @@ const fn refuse_undeletable(_pin: &VettedDir, _name: &LeafBuf, _path: &Path) -> 
 /// to stop once extraction finished; `SecurityViolation(DestinationChanged)`
 /// when the destination is no longer the directory that was pinned;
 /// `ReplaceFailed` when a rename failed, saying whether the original
-/// destination was restored. An error names the staging directory that could
-/// not be removed.
+/// destination was restored; when the extraction produced a report, a swap
+/// failure carries it as a rolled-back `PartialExtraction`. An error names the
+/// staging directory that could not be removed.
 pub(super) fn run(
     target: ReplaceTarget,
     options: &ExtractionOptions,
@@ -599,6 +610,9 @@ fn verify_unchanged(pin: &VettedDir, name: &LeafBuf, expected: FileIdentity) -> 
 
 /// Swaps the staged tree over the destination and removes the backup.
 ///
+/// A failure keeps the extraction's counts as a rolled-back partial extraction
+/// around the swap failure, which alone says what became of the destination.
+///
 /// The staged root takes the original's permissions only now, right before it
 /// is published, so a failure anywhere earlier leaves it private. A failure to
 /// do that or to rename puts the original back.
@@ -609,7 +623,7 @@ fn swap(
 ) -> Result<ExtractionReport> {
     let displaced = match Displaced::displace(staging.parent, dest) {
         Ok(displaced) => displaced,
-        Err(refusal) => return Err(refusal.into_error(staging.discard())),
+        Err(refusal) => return Err(refusal.into_error(report, staging.discard())),
     };
     let adoption = displaced.original_permissions(dest.parent);
     swap_adopted(staging, dest, displaced, adoption, report)
@@ -630,14 +644,16 @@ fn swap_adopted(
         Ok(root) => root,
         Err(error) => {
             let context = "failed to give the extracted content the destination's permissions";
-            return Err(roll_back(displaced, staging, &error, context, dest.path));
+            let error = roll_back(displaced, staging, &error, context, dest.path);
+            return Err(discarded_after(report, error, None));
         }
     };
     let published = match staging.publish(dest.name) {
         Ok(published) => published,
         Err(error) => {
             let context = "failed to move the extracted content into place";
-            return Err(roll_back(displaced, staging, &error, context, dest.path));
+            let error = roll_back(displaced, staging, &error, context, dest.path);
+            return Err(discarded_after(report, error, None));
         }
     };
     report.record_narrowing(root.finish(published));
@@ -691,6 +707,20 @@ pub(super) fn swap_adopted_in(
     adoption: Adoption,
     seed: impl FnOnce(FileIdentity) -> Seed,
 ) -> ExtractionReport {
+    swap_adoption_in(parent, Ok(adoption), seed, ExtractionReport::new()).unwrap()
+}
+
+/// Like [`swap_adopted_in`] with the outcome of reading the destination's
+/// permissions and the report of the extraction given, returning what the swap
+/// returned.
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+pub(super) fn swap_adoption_in(
+    parent: &Path,
+    adoption: io::Result<Adoption>,
+    seed: impl FnOnce(FileIdentity) -> Seed,
+    report: ExtractionReport,
+) -> Result<ExtractionReport> {
     use crate::formats::file_identity::identity_of;
 
     let parent = parent.to_path_buf();
@@ -708,14 +738,75 @@ pub(super) fn swap_adopted_in(
     let Ok(displaced) = Displaced::displace(&pin, &dest) else {
         panic!("the destination should be displaced");
     };
-    swap_adopted(
-        staging,
-        &dest,
-        displaced,
-        Ok(adoption),
-        ExtractionReport::new(),
-    )
-    .unwrap()
+    swap_adopted(staging, &dest, displaced, adoption, report)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod refusal_tests {
+    use std::assert_matches;
+    use std::io;
+    use std::path::PathBuf;
+
+    use super::Refusal;
+    use crate::ArchiveError;
+    use crate::ExtractionReport;
+    use crate::PartialWrites;
+    use crate::StagingLeftover;
+    use crate::Violation;
+
+    fn extracted() -> ExtractionReport {
+        let mut report = ExtractionReport::new();
+        report.files_extracted = 3;
+        report
+    }
+
+    fn partial(error: &ArchiveError) -> &crate::Partial {
+        let ArchiveError::PartialExtraction(partial) = error else {
+            panic!("expected a partial extraction: {error:?}");
+        };
+        assert_eq!(partial.writes(), PartialWrites::RolledBack);
+        assert_eq!(partial.report().files_extracted, 3);
+        partial
+    }
+
+    #[test]
+    fn a_refusal_with_a_leftover_is_one_partial_that_names_the_leftover() {
+        let leftover = StagingLeftover::new(PathBuf::from("p/.exarch-X"));
+        let refusal = Refusal::Error(Violation::DestinationChanged.into());
+
+        let error = refusal.into_error(extracted(), Some(leftover));
+
+        let partial = partial(&error);
+        assert_matches!(
+            partial.cause(),
+            ArchiveError::SecurityViolation {
+                kind: Violation::DestinationChanged
+            }
+        );
+        assert_eq!(
+            partial.leftover().map(|leftover| leftover.path.as_path()),
+            Some(std::path::Path::new("p/.exarch-X"))
+        );
+    }
+
+    #[test]
+    fn a_failed_move_keeps_its_leftover_inside_the_replace_failure() {
+        let leftover = StagingLeftover::new(PathBuf::from("p/.exarch-X"));
+        let refusal = Refusal::failed(
+            io::Error::from(io::ErrorKind::PermissionDenied),
+            "failed to move the existing destination aside",
+            std::path::Path::new("p/dest"),
+        );
+
+        let error = refusal.into_error(extracted(), Some(leftover));
+
+        let ArchiveError::ReplaceFailed(failure) = partial(&error).cause() else {
+            panic!("expected ReplaceFailed: {error:?}");
+        };
+        assert!(failure.leftover.is_some());
+        assert!(partial(&error).leftover().is_none());
+    }
 }
 
 #[cfg(all(test, unix))]

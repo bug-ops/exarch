@@ -65,6 +65,10 @@ pub enum Stop {
 }
 
 impl Stop {
+    /// Every stop, in the order of the signals that cause them.
+    #[cfg(unix)]
+    const ALL: [Self; 2] = [Self::Interrupt, Self::Terminate];
+
     #[cfg(not(target_os = "wasi"))]
     const fn encode(self) -> u8 {
         match self {
@@ -87,6 +91,13 @@ impl Stop {
             Self::Interrupt => signal_hook::consts::SIGINT,
             Self::Terminate => signal_hook::consts::SIGTERM,
         }
+    }
+
+    #[cfg(unix)]
+    fn from_raw_signal(signal: std::ffi::c_int) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|stop| stop.raw_signal() == signal)
     }
 }
 
@@ -161,6 +172,16 @@ impl Run {
         }
     }
 
+    /// Whether the run moves the existing destination aside, so that the
+    /// forced exit must say where the original is.
+    #[cfg(not(target_os = "wasi"))]
+    const fn makes_backup(self) -> bool {
+        match self {
+            Self::ExtractReplace => true,
+            Self::Create | Self::ExtractInPlace | Self::ExtractAtomic => false,
+        }
+    }
+
     /// What core stages for this run, which decides how its place resolves.
     #[cfg(not(target_os = "wasi"))]
     const fn staged_kind(self) -> StagedOutputKind {
@@ -218,7 +239,7 @@ fn forced_exit_hint(output: &Path, place: Option<&StagingPlace>, run: Run) -> Ve
         ]),
     }
     parts.extend(location);
-    if run == Run::ExtractReplace {
+    if run.makes_backup() {
         let target = place.map_or_else(|| output.to_path_buf(), StagingPlace::target);
         parts.extend([
             Part::Lit(": remove them, but if "),
@@ -241,7 +262,7 @@ fn forced_exit_hint(output: &Path, place: Option<&StagingPlace>, run: Run) -> Ve
 /// destination spelled `a/b/..` stops resolving once a replace moves `a`
 /// aside.
 #[cfg(not(target_os = "wasi"))]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Armed {
     output: PathBuf,
     run: Run,
@@ -429,22 +450,58 @@ fn decided(interrupt: &Interrupt, latest: Stop) -> Stop {
     interrupt.requested().unwrap_or(latest)
 }
 
+/// What a stop request found when it looked at the window.
+#[cfg(not(target_os = "wasi"))]
+#[derive(Debug)]
+enum Claim<'w> {
+    /// No window is open: the default action applies.
+    Disarmed,
+    /// The first request: the run stops at its next poll.
+    First,
+    /// A later request: the forced exit reports `report` while `held` keeps the
+    /// window locked, so the guard of the interrupted command cannot drop and
+    /// let its thread write a second result.
+    Forced {
+        report: Armed,
+        held: std::sync::MutexGuard<'w, Option<Armed>>,
+    },
+}
+
+/// Records the request `stop` against `interrupt` while `window` is open, and
+/// says what the handler must do about it.
+#[cfg(not(target_os = "wasi"))]
+fn claim<'w>(window: &'w Window, interrupt: &Interrupt, stop: Stop) -> Claim<'w> {
+    let held = window.lock();
+    let Some(armed) = held.as_ref() else {
+        return Claim::Disarmed;
+    };
+    match interrupt.request(stop) {
+        Signal::First => Claim::First,
+        Signal::Repeated => Claim::Forced {
+            report: armed.clone(),
+            held,
+        },
+    }
+}
+
 #[cfg(not(target_os = "wasi"))]
 fn on_stop(stop: Stop) {
-    let window = WINDOW.lock();
-    let Some(armed) = window.as_ref() else {
-        drop(window);
-        terminate_by_default(stop);
-    };
-    if INTERRUPT.request(stop) == Signal::Repeated {
-        let armed = Armed {
-            output: armed.output.clone(),
-            run: armed.run,
-            mode: armed.mode,
-            place: armed.place.clone(),
-        };
-        drop(window);
-        forced_exit(armed, decided(&INTERRUPT, stop));
+    handle_stop(&WINDOW, &INTERRUPT, stop, |report, stop| {
+        forced_exit(report, stop)
+    });
+}
+
+/// Acts on a stop request found by [`claim`]: the forced exit runs with the
+/// window still locked, which `exit` is given no way to release.
+#[cfg(not(target_os = "wasi"))]
+fn handle_stop(window: &Window, interrupt: &Interrupt, stop: Stop, exit: impl FnOnce(Armed, Stop)) {
+    match claim(window, interrupt, stop) {
+        Claim::Disarmed => terminate_by_default(stop),
+        Claim::First => {}
+        Claim::Forced { report, held } => {
+            exit(report, decided(interrupt, stop));
+            drop(held);
+        }
     }
 }
 
@@ -465,11 +522,9 @@ fn ignored_on_entry(signal: std::ffi::c_int) -> bool {
 
 #[cfg(unix)]
 fn register(handler: fn(Stop)) -> std::io::Result<()> {
-    use signal_hook::consts::SIGINT;
-    use signal_hook::consts::SIGTERM;
-
-    let kept: Vec<_> = [SIGINT, SIGTERM]
+    let kept: Vec<_> = Stop::ALL
         .into_iter()
+        .map(Stop::raw_signal)
         .filter(|&signal| !ignored_on_entry(signal))
         .collect();
     if kept.is_empty() {
@@ -479,12 +534,8 @@ fn register(handler: fn(Stop)) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("exarch-signals".to_owned())
         .spawn(move || {
-            for signal in signals.forever() {
-                handler(if signal == SIGTERM {
-                    Stop::Terminate
-                } else {
-                    Stop::Interrupt
-                });
+            for stop in signals.forever().filter_map(Stop::from_raw_signal) {
+                handler(stop);
             }
         })
         .map(drop)
@@ -578,6 +629,8 @@ mod tests {
     use super::*;
     #[cfg(not(target_os = "wasi"))]
     use crate::output::Verbosity;
+    #[cfg(not(target_os = "wasi"))]
+    use std::assert_matches;
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
@@ -842,6 +895,91 @@ mod tests {
             unresolved.contains(&format!("next to {}:", missing_parent.display())),
             "{unresolved}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_stop_round_trips_through_its_signal() {
+        for stop in Stop::ALL {
+            assert_eq!(Stop::from_raw_signal(stop.raw_signal()), Some(stop));
+        }
+        assert_eq!(Stop::from_raw_signal(signal_hook::consts::SIGHUP), None);
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn a_stop_without_a_window_leaves_the_request_unrecorded() {
+        static CLOSED: Window = Window::new();
+        static STOPS: Interrupt = Interrupt::new();
+        assert_matches!(claim(&CLOSED, &STOPS, Stop::Interrupt), Claim::Disarmed);
+        assert_eq!(STOPS.requested(), None);
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_repeated_stop_keeps_the_guard_from_dropping_until_the_exit_ends() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        static HELD: Window = Window::new();
+        static STOPS: Interrupt = Interrupt::new();
+        let guard = arm(
+            &HELD,
+            Path::new("out"),
+            Run::ExtractAtomic,
+            OutputMode::Human(Verbosity::Normal),
+        );
+        assert_matches!(claim(&HELD, &STOPS, Stop::Interrupt), Claim::First);
+        let Claim::Forced { report, held } = claim(&HELD, &STOPS, Stop::Interrupt) else {
+            panic!("a repeated stop must force the exit");
+        };
+        assert_eq!(report.output, Path::new("out"));
+
+        let (started_tx, started) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            started_tx.send(()).expect("report the start");
+            drop(guard);
+            done_tx.send(()).expect("report the drop");
+        });
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the dropping thread starts");
+        assert!(
+            done.recv_timeout(Duration::from_millis(100)).is_err(),
+            "the guard dropped while the forced exit held the window"
+        );
+
+        drop(held);
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("the guard drops once the window is free");
+        dropper.join().expect("the dropping thread ends");
+        assert!(HELD.lock().is_none());
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn the_window_stays_locked_while_the_forced_exit_runs() {
+        static LOCKED: Window = Window::new();
+        static STOPS: Interrupt = Interrupt::new();
+        let _guard = arm(
+            &LOCKED,
+            Path::new("out"),
+            Run::ExtractAtomic,
+            OutputMode::Human(Verbosity::Normal),
+        );
+        handle_stop(&LOCKED, &STOPS, Stop::Interrupt, |_, _| {
+            panic!("a first stop must not force the exit")
+        });
+
+        let mut was_locked = false;
+        handle_stop(&LOCKED, &STOPS, Stop::Interrupt, |_, _| {
+            was_locked = LOCKED.0.try_lock().is_err();
+        });
+
+        assert!(was_locked, "the window was free while the exit ran");
+        assert!(LOCKED.0.try_lock().is_ok());
     }
 
     #[cfg(not(target_os = "wasi"))]

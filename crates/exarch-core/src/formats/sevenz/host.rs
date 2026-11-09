@@ -79,6 +79,15 @@ impl DestOccupancy {
         ))
     }
 
+    const fn occupant(self) -> Option<Occupant> {
+        match self {
+            Self::Vacant => None,
+            Self::RegularFile => Some(Occupant::File),
+            Self::Symlink => Some(Occupant::Symlink),
+            Self::Directory => Some(Occupant::Directory),
+        }
+    }
+
     const fn is_occupied(self) -> bool {
         !matches!(self, Self::Vacant)
     }
@@ -165,6 +174,8 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let write_mode = if occupancy.is_occupied() {
             let root = self.inner.root();
             let action = tally.options.existing_files.on_occupant(
+                EntryShape::File,
+                || Ok(occupancy.occupant()),
                 || {
                     root.created()
                         .created_here(&parent, leaf, safe_path.as_path())
@@ -325,6 +336,8 @@ impl PrePass for HostPrePass<'_> {
         let occupancy = DestOccupancy::probe_path(&dest_path)?;
         if occupancy.is_occupied() {
             let action = self.options.existing_files.on_occupant(
+                EntryShape::File,
+                || Ok(occupancy.occupant()),
                 || false,
                 || common::destination_occupied(self.dest.as_path(), safe_path.as_path()),
             )?;

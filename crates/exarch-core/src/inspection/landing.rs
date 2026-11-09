@@ -11,19 +11,28 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::ArchiveError;
 use crate::EntrySelection;
+use crate::OccupiedBy;
+use crate::Result;
 use crate::SecurityConfig;
 use crate::SkipKind;
 use crate::closed_enum::closed_enum;
+use crate::error::Violation;
+use crate::formats::common::destination_occupied;
 use crate::formats::common::is_extension_allowed;
 use crate::formats::common::require_symlink_creation;
+use crate::formats::common::symlink_target_too_large;
+use crate::formats::occupant::is_run_duplicate;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::CollisionRecording;
+use crate::security::fs_view::Conflict;
 use crate::security::fs_view::LandingLimits;
+use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Node;
 use crate::security::fs_view::NodeBudget;
 use crate::security::fs_view::Occupant;
@@ -31,13 +40,18 @@ use crate::security::fs_view::PathModel;
 use crate::security::fs_view::PlaceError;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
+use crate::security::fs_view::normalized_display;
 use crate::security::hardlink::HardlinkTracker;
+use crate::security::hardlink::require_hardlinks_allowed;
 use crate::security::validator::Gated;
 use crate::security::validator::route_validated;
+use crate::selection::EntryShape;
 use crate::selection::LandingClaims;
 use crate::selection::SelectionRun;
+use crate::sink::place_error;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+use crate::types::safe_symlink::require_symlinks_allowed;
 
 /// The destination-relative path an entry lands at, derived lexically.
 ///
@@ -279,15 +293,28 @@ impl ArchiveManifest {
     /// applies.
     ///
     /// The answer models default extraction
-    /// ([`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse)): a symlink
-    /// whose name an earlier file of the archive took is
-    /// [`SkipKind::Duplicate`] where the host creates symlinks. Under
+    /// ([`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse)) with the rule
+    /// extraction itself applies: an entry that names a path an earlier file or
+    /// symlink of the archive took is [`SkipKind::Duplicate`] (a symlink only
+    /// where the host creates symlinks), and a file or link over a directory
+    /// the archive made is refused. A symlink entry is refused where the host
+    /// cannot create symlinks. Under
     /// [`ExistingFiles::Overwrite`](crate::ExistingFiles::Overwrite) extraction
-    /// replaces the file with the symlink instead.
+    /// replaces the earlier file instead.
     pub fn dispositions<'a>(
         &'a self,
         config: &SecurityConfig,
     ) -> impl Iterator<Item = (&'a ArchiveEntry, Disposition)> + use<'a> {
+        self.judgements(config)
+            .map(|(entry, judged)| (entry, judged.unwrap_or(Disposition::Refuse)))
+    }
+
+    /// [`dispositions`](Self::dispositions) with the reason an entry is
+    /// refused, the error extraction raises for it.
+    fn judgements<'a>(
+        &'a self,
+        config: &SecurityConfig,
+    ) -> impl Iterator<Item = (&'a ArchiveEntry, Result<Disposition>)> + use<'a> {
         let root = VirtualRoot::new();
         let mut tree = VirtualTree::new(
             &root,
@@ -301,7 +328,7 @@ impl ArchiveManifest {
         let is_hardlink =
             |entry: &ArchiveEntry| matches!(entry.kind, ManifestEntryKind::Hardlink { .. });
         let mut land_entry = |entry: &ArchiveEntry| {
-            land(
+            judge(
                 entry,
                 self.selection(),
                 config,
@@ -311,7 +338,7 @@ impl ArchiveManifest {
                 &claims,
             )
         };
-        let mut judged: Vec<Option<Disposition>> = Vec::with_capacity(self.entries().len());
+        let mut judged: Vec<Option<Result<Disposition>>> = Vec::with_capacity(self.entries().len());
         // Extraction creates hardlinks after every other entry, so a target
         // that appears later in the archive still exists.
         for entry in self.entries() {
@@ -325,8 +352,8 @@ impl ArchiveManifest {
             .iter()
             .zip(judged)
             .map(|(entry, first)| {
-                let disposition = first.unwrap_or_else(|| land_entry(entry));
-                (entry, disposition)
+                let judgement = first.unwrap_or_else(|| land_entry(entry));
+                (entry, judgement)
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -404,20 +431,19 @@ impl ArchiveManifest {
     }
 }
 
-fn land(
-    entry: &ArchiveEntry,
-    selection: &EntrySelection,
-    config: &SecurityConfig,
-    root: &VirtualRoot,
-    tree: &mut VirtualTree,
-    hardlinks: &mut HardlinkTracker,
-    claims: &LandingClaims,
-) -> Disposition {
-    judge(entry, selection, config, root, tree, hardlinks, claims).unwrap_or(Disposition::Refuse)
+/// The error for a link entry whose target the listing could not keep; callers
+/// pass a recorded target never, so it reads as missing.
+fn unusable_target(kind: LinkKind, target: &LinkTarget) -> ArchiveError {
+    match target {
+        LinkTarget::Recorded(_) | LinkTarget::Missing => Violation::LinkTargetMissing(kind).into(),
+        LinkTarget::Unread => Violation::LinkTargetUnread(kind).into(),
+        LinkTarget::Unreadable => Violation::LinkTargetUnreadable(kind).into(),
+        LinkTarget::Oversized { bytes } => symlink_target_too_large(*bytes as u64),
+    }
 }
 
-/// The disposition of an entry extraction can act on, or `None` when the
-/// validation refuses it or it cannot be placed.
+/// What extraction does with an entry it can act on, or the error it raises
+/// when validation refuses the entry or it cannot be placed.
 fn judge(
     entry: &ArchiveEntry,
     selection: &EntrySelection,
@@ -426,21 +452,21 @@ fn judge(
     tree: &mut VirtualTree,
     hardlinks: &mut HardlinkTracker,
     claims: &LandingClaims,
-) -> Option<Disposition> {
-    let original = SafePath::validate_in(&entry.path, root, config, tree).ok()?;
+) -> Result<Disposition> {
+    let original = SafePath::validate_in(&entry.path, root, config, tree)?;
     let ctx = ValidationContext::<VirtualTree>::new(config.allowed.symlinks.is_allowed());
     let run = SelectionRun {
         selection,
         hits: None,
     };
-    let safe =
-        match route_validated(run, original, entry.kind.shape(), root, config, &ctx, tree).ok()? {
-            Gated::Admit(safe) => safe,
-            Gated::Skip(kind) => return Some(Disposition::Skip(kind)),
-        };
+    let shape = entry.kind.shape();
+    let safe = match route_validated(run, original, shape, root, config, &ctx, tree)? {
+        Gated::Admit(safe) => safe,
+        Gated::Skip(kind) => return Ok(Disposition::Skip(kind)),
+    };
     let is_file = matches!(entry.kind, ManifestEntryKind::File { .. });
     if is_file && !is_extension_allowed(safe.as_path(), config) {
-        return Some(Disposition::Skip(SkipKind::ExtensionNotAllowed));
+        return Ok(Disposition::Skip(SkipKind::ExtensionNotAllowed));
     }
     if is_file {
         claims.claim(selection, safe.as_path());
@@ -448,50 +474,70 @@ fn judge(
     let node = match &entry.kind {
         ManifestEntryKind::File { .. } => Node::File,
         ManifestEntryKind::Hardlink { target } => {
-            if !config.allowed.hardlinks.is_allowed() {
-                return None;
-            }
+            require_hardlinks_allowed(config)?;
             let LinkTarget::Recorded(target) = target else {
-                return None;
+                return Err(unusable_target(LinkKind::Hardlink, target));
             };
-            let mapped = selection
-                .mapped_link_target(&entry.path, target, config.allowed.absolute_paths)
-                .ok()?;
-            claims.require_unambiguous(&entry.path, &mapped).ok()?;
-            hardlinks
-                .check_hardlink_target(&safe, &mapped, root, config, tree)
-                .ok()?;
+            let mapped =
+                selection.mapped_link_target(&entry.path, target, config.allowed.absolute_paths)?;
+            claims.require_unambiguous(&entry.path, &mapped)?;
+            hardlinks.check_hardlink_target(&safe, &mapped, root, config, tree)?;
             Node::File
         }
         ManifestEntryKind::Directory => Node::Dir,
         ManifestEntryKind::Symlink { target } => {
-            if !config.allowed.symlinks.is_allowed() {
-                return None;
-            }
+            require_symlinks_allowed(config)?;
+            require_symlink_creation()?;
             match target {
                 LinkTarget::Recorded(t) => {
-                    SafeSymlink::validate_in(&safe, t, root, config, tree).ok()?;
+                    SafeSymlink::validate_in(&safe, t, root, config, tree)?;
                     Node::Symlink(t.clone())
                 }
                 LinkTarget::Unread => Node::OpaqueSymlink,
                 LinkTarget::Missing | LinkTarget::Unreadable | LinkTarget::Oversized { .. } => {
-                    return None;
+                    return Err(unusable_target(LinkKind::Symlink, target));
                 }
             }
         }
     };
-    // Extraction skips a duplicate symlink only after validating its target on
-    // a symlink-capable host.
-    let skippable_duplicate =
-        matches!(node, Node::Symlink(_)) && require_symlink_creation().is_ok();
-    match tree.project_landing(&safe, node, LandingLimits::Enforced) {
-        Ok(landed) => Some(Disposition::Extract(LandingPath(landed.into_path_buf()))),
-        Err(PlaceError::Conflict(conflict))
-            if skippable_duplicate && conflict.occupant == Some(Occupant::File) =>
-        {
-            Some(Disposition::Skip(SkipKind::Duplicate))
+    match tree.project_landing_found(&safe, node.clone(), LandingLimits::Enforced) {
+        Ok((_, true)) if shape != EntryShape::Directory => {
+            Ok(Disposition::Skip(SkipKind::Duplicate))
         }
-        Err(_) => None,
+        Ok((landed, _)) => Ok(Disposition::Extract(LandingPath(landed.into_path_buf()))),
+        Err(PlaceError::Conflict(conflict)) => {
+            conflicting_placement(shape, &node, safe.as_path(), conflict)
+        }
+        Err(other) => Err(place_error(other)),
+    }
+}
+
+/// What extraction does at a path an earlier entry holds that the node cannot
+/// share: skip a duplicate, or fail with the error it raises.
+///
+/// An unread symlink target cannot be validated, so extraction never skips
+/// such a link as a duplicate.
+fn conflicting_placement(
+    shape: EntryShape,
+    node: &Node,
+    rel: &Path,
+    conflict: Conflict,
+) -> Result<Disposition> {
+    let occupant = conflict.occupant.filter(|_| conflict.blocked.is_none());
+    match occupant {
+        Some(held) if *node != Node::OpaqueSymlink && is_run_duplicate(shape, held) => {
+            Ok(Disposition::Skip(SkipKind::Duplicate))
+        }
+        Some(Occupant::Directory) if shape != EntryShape::Directory => {
+            Err(destination_occupied(Path::new(""), rel).occupied_by(OccupiedBy::Archive))
+        }
+        Some(Occupant::Symlink) if shape == EntryShape::Directory => {
+            Err(Violation::ReplacesSymlink {
+                rel: normalized_display(rel).into(),
+            }
+            .into())
+        }
+        _ => Err(place_error(PlaceError::Conflict(conflict))),
     }
 }
 
@@ -1019,5 +1065,98 @@ mod tests {
         let (disposition, target, _) = duplicate_symlink_disposition("a.7z", &bytes, &config());
         assert_eq!(target, LinkTarget::Unread);
         assert_matches!(disposition, Disposition::Refuse);
+    }
+
+    /// Every archive here makes extraction under `Refuse` fail at its last
+    /// entry: a file or link over a directory, a directory over a file or link,
+    /// and a file over a directory only implied by an earlier entry.
+    fn refused_shapes() -> Vec<Vec<(&'static [u8], tar::EntryType, &'static str)>> {
+        const DIR: tar::EntryType = tar::EntryType::Directory;
+        let target = (&b"t"[..], tar::EntryType::Regular, "");
+        let non_directories = [
+            (&b"x"[..], tar::EntryType::Regular, ""),
+            (&b"x"[..], tar::EntryType::Symlink, "t"),
+            (&b"x"[..], tar::EntryType::Link, "t"),
+        ];
+        let directory = (&b"x"[..], DIR, "");
+        let mut shapes = Vec::new();
+        for other in non_directories {
+            shapes.push(vec![target, other, directory]);
+            shapes.push(vec![target, directory, other]);
+        }
+        shapes.push(vec![
+            target,
+            (&b"x/a"[..], tar::EntryType::Regular, ""),
+            (&b"x"[..], tar::EntryType::Regular, ""),
+        ]);
+        shapes
+    }
+
+    fn occupied_by(error: &ArchiveError) -> Option<OccupiedBy> {
+        match error {
+            ArchiveError::DestinationOccupied { by, .. } => Some(*by),
+            ArchiveError::PartialExtraction(partial) => occupied_by(partial.cause()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_refused_entry_fails_extraction_with_the_same_code() {
+        let config = config().with_allow_hardlinks(true);
+        let options =
+            crate::ExtractionOptions::default().with_existing_files(crate::ExistingFiles::Refuse);
+        for shape in refused_shapes() {
+            let mut builder = tar::Builder::new(Vec::new());
+            for (name, kind, link) in &shape {
+                tar_entry(&mut builder, name, *kind, link);
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let archive = dir.path().join("a.tar");
+            std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+            let dest = dir.path().join("out");
+            let manifest = list_archive(&archive, &config).unwrap();
+
+            let refused: Vec<_> = manifest
+                .judgements(&config)
+                .filter_map(|(_, judged)| judged.err())
+                .collect();
+            let extracted = crate::ExtractRequest::new(&config)
+                .with_options(options.clone())
+                .extract(&archive, &dest)
+                .unwrap_err();
+
+            assert_eq!(refused.len(), 1, "{shape:?}");
+            // Elsewhere the capability check refuses a symlink first.
+            if cfg!(unix) {
+                assert_eq!(
+                    refused[0].error_code(),
+                    extracted.error_code(),
+                    "{shape:?}: {} vs {extracted}",
+                    refused[0]
+                );
+                assert_eq!(
+                    occupied_by(&refused[0]),
+                    occupied_by(&extracted),
+                    "{shape:?}: {} vs {extracted}",
+                    refused[0]
+                );
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_symlink_is_refused_where_symlinks_cannot_be_created() {
+        let mut builder = tar::Builder::new(Vec::new());
+        tar_entry(&mut builder, b"s", tar::EntryType::Symlink, "ok.txt");
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        let config = config();
+
+        let manifest = list_archive(&archive, &config).unwrap();
+        let (_, disposition) = manifest.dispositions(&config).next().unwrap();
+        assert_matches!(disposition, Disposition::Refuse);
+        assert!(extract_archive(&archive, dir.path().join("out"), &config).is_err());
     }
 }

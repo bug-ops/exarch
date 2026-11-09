@@ -1398,6 +1398,7 @@ mod tests {
         let err = CoreError::DestinationOccupied {
             destination: PathBuf::from("/srv/out"),
             conflicts: vec![PathBuf::from("a/b.txt")].into_boxed_slice(),
+            by: exarch_core::OccupiedBy::Existing,
         };
         let py_err = convert_error(err);
         Python::attach(|py| {

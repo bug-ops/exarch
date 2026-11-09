@@ -106,6 +106,16 @@ def test_compression_level_out_of_range_is_its_own_class(bad):
     assert isinstance(info.value, ValueError)
 
 
+def test_compression_level_beyond_i64_but_within_i128_reads_as_a_phrase():
+    with pytest.raises(exarch.InvalidCompressionLevelError, match="got an out-of-range integer"):
+        exarch.CreationConfig().with_compression_level(2**70)
+
+
+def test_compression_level_beyond_64_bits_reads_as_a_phrase():
+    with pytest.raises(exarch.InvalidCompressionLevelError, match="got an out-of-range integer"):
+        exarch.CreationConfig().with_compression_level(BEYOND_I128)
+
+
 def test_max_bytes_uses_the_same_parser():
     for bad in (0, -1, BEYOND_I128):
         err = _refused(lambda: exarch.extract_archive_to_memory(b"", max_bytes=bad))

@@ -264,6 +264,7 @@ mod tests {
         let occupied = ArchiveError::DestinationOccupied {
             destination: PathBuf::from("/srv/internal/dest"),
             conflicts: Box::new([PathBuf::from("a/b")]),
+            by: crate::OccupiedBy::Existing,
         };
         assert_eq!(occupied.redacted_path().as_deref(), Some("dest"));
         assert!(!occupied.into_ffi_message().description.contains("internal"));

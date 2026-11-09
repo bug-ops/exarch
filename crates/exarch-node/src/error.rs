@@ -2384,6 +2384,7 @@ mod tests {
         let d = described(CoreError::DestinationOccupied {
             destination: PathBuf::from("/srv/internal/app/out"),
             conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
+            by: exarch_core::OccupiedBy::Existing,
         });
         assert_eq!(d.props.code.as_str(), "OUTPUT_EXISTS");
         assert!(d.description.contains("out"), "{}", d.description);
@@ -2460,6 +2461,7 @@ mod tests {
         let d = described(CoreError::DestinationOccupied {
             destination: PathBuf::from("/srv/internal/app/out"),
             conflicts: vec![PathBuf::from("a.txt"), PathBuf::from("d/b.txt")].into_boxed_slice(),
+            by: exarch_core::OccupiedBy::Existing,
         });
         assert_eq!(
             d.props.detail,
@@ -2525,6 +2527,7 @@ mod tests {
         let source = CoreError::DestinationOccupied {
             destination: PathBuf::from("out"),
             conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
+            by: exarch_core::OccupiedBy::Existing,
         };
         let partial =
             exarch_core::Partial::new(source, CoreExtractionReport::new(), CorePartialWrites::Kept);

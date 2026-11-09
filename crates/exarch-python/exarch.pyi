@@ -498,7 +498,8 @@ class SecurityConfig:
     def max_compression_ratio(self) -> float:
         """Maximum compression ratio allowed (default: 100.0).
 
-        Not applied to solid 7z blocks, which use a fixed 1000x limit.
+        Not applied to solid 7z blocks, which use the limit of
+        ``max_solid_compression_ratio`` (default 1000).
         """
         ...
 
@@ -692,7 +693,7 @@ class ListOptions:
         """Creates a ListOptions with defaults."""
         ...
 
-    def with_stored_targets(self, targets: _StoredTargets = "read") -> ListOptions:
+    def with_stored_targets(self, targets: _StoredTargets) -> ListOptions:
         """Sets whether link targets kept in entry data are read (decodes their blocks)."""
         ...
 
@@ -1191,12 +1192,14 @@ class ExtractionReport:
         """The typed warnings of the extraction."""
         ...
 
+    @property
     def total_items(self) -> int:
-        """Returns total number of items processed."""
+        """Total number of items processed."""
         ...
 
+    @property
     def has_warnings(self) -> bool:
-        """Returns whether any warnings were generated."""
+        """Whether any warnings were generated."""
         ...
 
 @final
@@ -1252,12 +1255,14 @@ class CreationReport:
         """The typed warnings of the creation."""
         ...
 
+    @property
     def total_items(self) -> int:
-        """Returns total number of items added."""
+        """Total number of items added."""
         ...
 
+    @property
     def has_warnings(self) -> bool:
-        """Returns whether any warnings were generated."""
+        """Whether any warnings were generated."""
         ...
 
     def compression_ratio(self) -> float:
@@ -1930,7 +1935,7 @@ def list_archive(
     Args:
         archive_path: Path to archive file (str or pathlib.Path)
         config: Optional SecurityConfig (uses secure defaults if None)
-        options: Optional ListOptions; ``ListOptions().with_stored_targets()``
+        options: Optional ListOptions; ``ListOptions().with_stored_targets("read")``
             reads the 7z link targets that listing leaves unread by default
 
     Returns:
@@ -2119,8 +2124,8 @@ class SinkOptions:
 
     def __new__(
         cls,
-        existing_files: _ExistingFiles = "skip",
-        decode_reuse: _DecodeReuse = "off",
+        existing_files: _ExistingFiles | None = None,
+        decode_reuse: _DecodeReuse | None = None,
         decode_reuse_limit: int | None = None,
     ) -> SinkOptions: ...
     @property

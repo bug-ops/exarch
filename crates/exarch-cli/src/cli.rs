@@ -24,6 +24,7 @@ use exarch_core::StripComponents;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::non_zero_u64;
 use exarch_core::positive_from_i128;
+use std::num::IntErrorKind;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -833,8 +834,13 @@ fn parse_requested_level(s: &str) -> Result<RequestedLevel, String> {
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(format!("`{s}` is not a whole number"));
     }
-    Ok(s.parse()
-        .map_or(RequestedLevel::OutOfRange, RequestedLevel::Integer))
+    match s.parse() {
+        Ok(level) => Ok(RequestedLevel::Integer(level)),
+        Err(error) => match error.kind() {
+            IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => Ok(RequestedLevel::OutOfRange),
+            _ => Err(format!("`{s}` is not a whole number")),
+        },
+    }
 }
 
 fn parse_ratio(s: &str) -> Result<f64, String> {

@@ -89,9 +89,11 @@ closed_enum! {
         /// Fail with [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
         /// for an occupant the current run did not create.
         ///
-        /// An occupant the run created itself (a second archive entry for the
-        /// same path) is skipped and counted, as under [`Skip`](Self::Skip),
-        /// and a directory already present at a directory landing is accepted.
+        /// A file or symlink the run created itself (a later file, symlink or
+        /// hardlink entry for the same path) is skipped and counted, as under
+        /// [`Skip`](Self::Skip), and a directory already present at a directory
+        /// landing is accepted. A file, symlink or hardlink entry over a
+        /// directory the run made, explicitly or as a parent, is refused.
         /// The run tracks what it created by file identity, and by landing path
         /// where the host gives no identity (Windows), so there a duplicate that
         /// differs only in case is refused. The record is bounded at 4 Mi
@@ -141,7 +143,9 @@ closed_enum! {
         /// Cancellation is polled once more before the rename. The staging
         /// directory is extracted under [`ExistingFiles::Refuse`] in place of
         /// [`ExistingFiles::Skip`], so a file planted in it is refused and never
-        /// published; a duplicate entry of the archive is still skipped.
+        /// published; a file or link entry that repeats the name of an earlier
+        /// file or symlink is still skipped, but one over a directory the
+        /// archive made is refused.
         ///
         /// The staging directory is private (`0700`) for the whole run. On Unix
         /// the published root then takes the mode of the empty destination it

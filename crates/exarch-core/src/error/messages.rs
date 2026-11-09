@@ -1026,7 +1026,8 @@ impl ArchiveError {
             | Self::TarAmbiguity(_)
             | Self::TarTrailer(_)
             | Self::UnmatchedInclude { .. }
-            | Self::SecurityViolation { .. } => self.to_string(),
+            | Self::SecurityViolation { .. }
+            | Self::InvalidCompressionLevel { .. } => self.to_string(),
             Self::QuotaExceeded { resource } => resource.to_string(),
             Self::InvalidArchive(reason) => format!("invalid archive: {reason}"),
             Self::Io(io_err) => sanitize_io_error_for_error(io_err),
@@ -1051,9 +1052,6 @@ impl ArchiveError {
                 )
             }
             Self::OutputExists { .. } => format!("output file already exists: {path}"),
-            Self::InvalidCompressionLevel { level } => {
-                format!("invalid compression level {level}, must be 1-9")
-            }
             Self::UnknownFormat { .. } => {
                 format!("cannot determine archive format from: {path}")
             }
@@ -1142,10 +1140,27 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    use crate::RequestedLevel;
     use crate::security::Compressed;
     use crate::security::Uncompressed;
     use std::assert_matches;
     use std::path::PathBuf;
+
+    #[test]
+    fn the_level_refusal_reads_as_one_sentence_for_every_request() {
+        for (requested, got) in [
+            (RequestedLevel::Integer(10), "10"),
+            (RequestedLevel::Integer(-3), "-3"),
+            (RequestedLevel::Fractional(1.5), "1.5"),
+            (RequestedLevel::NonFinite, "a non-finite number"),
+            (RequestedLevel::OutOfRange, "an out-of-range integer"),
+        ] {
+            let error = ArchiveError::InvalidCompressionLevel { level: requested };
+            let text = format!("invalid compression level: must be 1-9, got {got}");
+            assert_eq!(error.to_string(), text);
+            assert_eq!(error.ffi_description(), text);
+        }
+    }
 
     #[test]
     fn test_ffi_kind_accessors_expose_payload() {
@@ -1299,6 +1314,7 @@ mod tests {
             ArchiveError::DestinationOccupied {
                 destination: PathBuf::from("dest"),
                 conflicts: Box::new([PathBuf::from("a")]),
+                by: crate::OccupiedBy::Existing,
             },
             ArchiveError::OutputReservationLeft {
                 path: PathBuf::from("out.tar"),
@@ -1459,6 +1475,7 @@ mod tests {
             path(ArchiveError::DestinationOccupied {
                 destination: "out".into(),
                 conflicts: Box::new([]),
+                by: crate::OccupiedBy::Existing,
             })
             .is_some()
         );
@@ -1506,6 +1523,7 @@ mod tests {
         let occupied = ArchiveError::DestinationOccupied {
             destination: PathBuf::from("dest"),
             conflicts: Box::new([PathBuf::from("b"), PathBuf::from("a")]),
+            by: crate::OccupiedBy::Existing,
         }
         .rolled_back();
         assert_eq!(

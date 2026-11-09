@@ -1687,6 +1687,10 @@ export interface CreationReport {
   totalItems: number
   /** Whether any warning was raised. */
   hasWarnings: boolean
+  /** Uncompressed bytes divided by archive bytes; `0` when either is zero. */
+  compressionRatio: number
+  /** Space saved, as a percentage of the uncompressed bytes. */
+  compressionPercentage: number
 }
 
 /** Class of a creation warning. */
@@ -2571,6 +2575,11 @@ export interface ManifestFileEntry {
    * stores no time.
    */
   modified?: number
+  /**
+   * Uncompressed size divided by the compressed size the entry owns; absent
+   * when none can be attributed to it (TAR, solid members, empty entries).
+   */
+  compressionRatio?: number
 }
 
 /** A hard link in a listing. */
@@ -3022,6 +3031,10 @@ export interface VerificationReport {
   sizeClamped: boolean
   /** Archive format: an `ArchiveType`, or a token newer than this binding. */
   format: ArchiveType | (string & {})
+  /** Whether the archive is safe: `status` is `'PASS'`. */
+  isSafe: boolean
+  /** Whether any issue is `'CRITICAL'`. */
+  hasCriticalIssues: boolean
 }
 
 /** Overall verification status. */

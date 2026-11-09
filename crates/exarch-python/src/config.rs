@@ -52,6 +52,15 @@ pub enum PyInteger {
     },
 }
 
+impl From<PyInteger> for RequestedLevel {
+    fn from(value: PyInteger) -> Self {
+        match value {
+            PyInteger::Fits(level) => i64::try_from(level).map_or(Self::OutOfRange, Self::Integer),
+            PyInteger::Beyond { .. } => Self::OutOfRange,
+        }
+    }
+}
+
 impl From<i64> for PyInteger {
     fn from(value: i64) -> Self {
         Self::Fits(i128::from(value))
@@ -204,13 +213,7 @@ pub fn parse_staging(value: &str) -> PyResult<Staging> {
 /// out-of-range value is an `InvalidCompressionLevelError` rather than an
 /// `OverflowError`.
 fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
-    match level {
-        PyInteger::Fits(level) => CompressionLevel::from_i128(level),
-        PyInteger::Beyond { .. } => Err(ArchiveError::InvalidCompressionLevel {
-            level: RequestedLevel::OutOfRange,
-        }),
-    }
-    .map_err(convert_error)
+    CompressionLevel::try_from(RequestedLevel::from(level)).map_err(convert_error)
 }
 
 /// Security configuration for archive extraction.
@@ -1601,7 +1604,7 @@ impl PyVerificationOptions {
 /// ```python
 /// from exarch import ListOptions, list_archive
 ///
-/// manifest = list_archive("archive.7z", options=ListOptions().with_stored_targets())
+/// manifest = list_archive("archive.7z", options=ListOptions().with_stored_targets("read"))
 /// ```
 #[pyclass(name = "ListOptions")]
 #[derive(Clone)]
@@ -1627,7 +1630,6 @@ impl PyListOptions {
 
     /// Sets whether link targets kept in entry data are read, which decodes the
     /// blocks that hold them: `"skip"` or `"read"`.
-    #[pyo3(signature = (targets="read"))]
     fn with_stored_targets<'a>(
         mut slf: PyRefMut<'a, Self>,
         targets: &str,
@@ -1712,6 +1714,16 @@ mod tests {
             defaults.compressed_member_allowance.get(),
             10_000,
             "docs say 10,000"
+        );
+        assert_eq!(
+            exarch_core::ReuseLimit::MAX.get(),
+            256 * 1024 * 1024,
+            "docs of SinkOptions say at most 256 MiB"
+        );
+        assert_eq!(
+            exarch_core::ReuseLimit::DEFAULT.get(),
+            32 * 1024 * 1024,
+            "docs of SinkOptions say default 32 MiB"
         );
     }
 

@@ -229,9 +229,15 @@ describe('CreationConfig', () => {
     it('names a whole refused level in the message', () => {
       for (const bad of [0, 10, -3]) {
         assert.throws(() => new CreationConfig().withCompressionLevel(bad), {
-          message: new RegExp(`level ${bad}\\b`),
+          message: new RegExp(`got ${bad}\\b`),
         });
       }
+    });
+
+    it('names a non-numeric refused level as a phrase in the message', () => {
+      assert.throws(() => new CreationConfig().withCompressionLevel(NaN), {
+        message: /got a non-finite number/,
+      });
     });
   });
 });

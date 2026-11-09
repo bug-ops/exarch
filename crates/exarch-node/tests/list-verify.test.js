@@ -171,7 +171,7 @@ describe('verifyArchiveSync', () => {
   });
 });
 
-function tarWithInternalSymlink() {
+function tarWithInternalSymlink(target = 'target.txt') {
   const header = Buffer.alloc(512);
   header.write('link.txt', 0, 'utf8');
   header.write('0000755\0', 100);
@@ -181,7 +181,7 @@ function tarWithInternalSymlink() {
   header.write('00000000000\0', 136);
   header.write('        ', 148);
   header.write('2', 156);
-  header.write('target.txt', 157, 'utf8');
+  header.write(target, 157, 'utf8');
   header.write('ustar\0', 257);
   header.write('00', 263);
   const checksum = header.reduce((sum, byte) => sum + byte, 0);
@@ -236,6 +236,31 @@ describe('typed report enums wire values', () => {
     assert.strictEqual(report.integrityStatus, 'SKIPPED');
     assert.strictEqual(report.securityStatus, 'OK');
     assert.strictEqual(report.format, 'TarGz');
+  });
+
+  it('derives isSafe and hasCriticalIssues from the report', () => {
+    const archivePath = path.join(tempDir, 'escape.tar');
+    fs.writeFileSync(archivePath, tarWithInternalSymlink('../../outside'));
+
+    const report = verifyArchiveSync(archivePath, new SecurityConfig().withAllowSymlinks(true));
+
+    assert.strictEqual(report.status, 'FAIL');
+    assert.strictEqual(report.isSafe, false);
+    assert.ok(report.issues.some((issue) => issue.severity === 'CRITICAL'));
+    assert.strictEqual(report.hasCriticalIssues, true);
+  });
+
+  it('reports a compression ratio for an entry that owns its compressed data', () => {
+    const source = path.join(tempDir, 'source');
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, 'zeros.txt'), 'a'.repeat(100_000));
+    const zip = path.join(tempDir, 'zeros.zip');
+    createArchiveSync(zip, [source]);
+
+    const file = listArchiveSync(zip).entries.find((entry) => entry.entryType === 'File');
+
+    assert.strictEqual(file.compressionRatio, file.size / file.compressedSize);
+    assert.ok(file.compressionRatio > 1, String(file.compressionRatio));
   });
 
   it('reports severity and category with exact spellings', () => {

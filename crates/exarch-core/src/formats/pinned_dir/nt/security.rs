@@ -39,6 +39,7 @@ use windows_sys::Win32::Security::OBJECT_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::PSID;
 use windows_sys::Win32::Security::SE_DACL_AUTO_INHERIT_REQ;
 use windows_sys::Win32::Security::SE_DACL_AUTO_INHERITED;
 use windows_sys::Win32::Security::SE_DACL_PROTECTED;
@@ -49,7 +50,7 @@ use windows_sys::Win32::Security::SetKernelObjectSecurity;
 use windows_sys::Win32::Security::SetSecurityDescriptorControl;
 use windows_sys::Win32::Security::TOKEN_QUERY;
 use windows_sys::Win32::Security::TOKEN_USER;
-use windows_sys::Win32::Security::TokenUser;
+use windows_sys::Win32::Security::TokenUser as TokenUserClass;
 use windows_sys::Win32::Security::UNPROTECTED_DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_EXECUTE;
@@ -62,7 +63,7 @@ use windows_sys::Win32::System::Threading::OpenThreadToken;
 
 use super::has_code;
 use super::length_u32;
-use super::sid_to_string;
+use super::win32;
 
 /// Where an [`EffectiveToken`] came from.
 #[cfg(test)]
@@ -117,9 +118,7 @@ impl EffectiveToken {
         }
         // SAFETY: `GetCurrentProcess` returns a pseudo handle that needs no
         // closing, and `token` is valid for writes.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        win32(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) })?;
         // SAFETY: the call succeeded, so `token` is a newly opened handle that
         // nothing else owns.
         let handle = unsafe { OwnedHandle::from_raw_handle(token) };
@@ -136,19 +135,19 @@ impl EffectiveToken {
         self.source
     }
 
-    /// The string form of the SID of the token's user.
+    /// The user of the token, with the memory its SID lives in.
     ///
     /// # Errors
     ///
     /// The OS error of the failed query.
-    pub(in crate::formats) fn user_sid(&self) -> io::Result<String> {
+    pub(in crate::formats) fn user(&self) -> io::Result<TokenUser> {
         let mut needed = 0_u32;
         // SAFETY: a null buffer of length zero asks only for the required
         // size, which is written to `needed`; the token is a live handle.
         unsafe {
             GetTokenInformation(
                 self.handle.as_raw_handle(),
-                TokenUser,
+                TokenUserClass,
                 null_mut(),
                 0,
                 &raw mut needed,
@@ -164,27 +163,37 @@ impl EffectiveToken {
         let ok = unsafe {
             GetTokenInformation(
                 self.handle.as_raw_handle(),
-                TokenUser,
+                TokenUserClass,
                 buffer.as_mut_ptr().cast(),
                 needed,
                 &raw mut needed,
             )
         };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: the call succeeded, so `buffer` starts with an initialized
-        // `TOKEN_USER`, and the 8-aligned storage satisfies its alignment.
-        let sid = unsafe { buffer.as_ptr().cast::<TOKEN_USER>().read() }
-            .User
-            .Sid;
-        // SAFETY: `sid` points into `buffer`, which is alive and holds the SID
-        // the token call just wrote.
-        unsafe { sid_to_string(sid) }
+        win32(ok)?;
+        Ok(TokenUser { buffer })
     }
 
     fn raw(&self) -> HANDLE {
         self.handle.as_raw_handle()
+    }
+}
+
+/// The user of a token, as the `TOKEN_USER` record the query wrote.
+#[derive(Debug)]
+pub(in crate::formats) struct TokenUser {
+    /// Starts with an initialized `TOKEN_USER` whose SID points into the same
+    /// allocation, so the SID lives as long as this value.
+    buffer: Vec<u64>,
+}
+
+impl TokenUser {
+    /// The user's SID, valid while `self` is alive.
+    pub(in crate::formats) fn sid(&self) -> PSID {
+        // SAFETY: `buffer` starts with the `TOKEN_USER` the query wrote, and
+        // its 8-aligned storage satisfies the alignment.
+        unsafe { self.buffer.as_ptr().cast::<TOKEN_USER>().read() }
+            .User
+            .Sid
     }
 }
 
@@ -264,9 +273,7 @@ fn control_of(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<u16> {
     // valid for writes.
     let ok =
         unsafe { GetSecurityDescriptorControl(descriptor, &raw mut control, &raw mut revision) };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(ok)?;
     Ok(control)
 }
 
@@ -286,10 +293,7 @@ fn request_auto_inherited(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<()> {
             SE_DACL_AUTO_INHERIT_REQ,
         )
     };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    win32(ok)
 }
 
 /// A self-relative security descriptor read from an object.
@@ -362,9 +366,7 @@ fn dacl_of(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<Option<(*mut ACL, u32
             &raw mut defaulted,
         )
     };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(ok)?;
     if present == 0 || acl.is_null() {
         return Ok(None);
     }
@@ -379,9 +381,7 @@ fn dacl_of(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<Option<(*mut ACL, u32
             AclSizeInformation,
         )
     };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(ok)?;
     Ok(Some((acl, size.AceCount)))
 }
 
@@ -433,9 +433,7 @@ impl Derived {
                 &raw const mapping,
             )
         };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        win32(ok)?;
         let derived = Self(derived);
         request_auto_inherited(derived.0)?;
         Ok(derived)
@@ -489,9 +487,7 @@ impl Descriptor<'_> {
             let mut ace: *mut c_void = null_mut();
             // SAFETY: `acl` points into the descriptor, which is alive, `index`
             // is below its entry count and `ace` is valid for writes.
-            if unsafe { GetAce(acl, index, &raw mut ace) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
+            win32(unsafe { GetAce(acl, index, &raw mut ace) })?;
             // SAFETY: on success `ace` points at a live entry in the ACL, and
             // every entry starts with an `ACE_HEADER`.
             let header = unsafe { ace.cast::<ACE_HEADER>().read_unaligned() };
@@ -534,10 +530,7 @@ pub(in crate::formats) fn apply_dacl(
             ptr,
         )
     };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    win32(ok)
 }
 
 /// The owner, group and DACL of a directory, as read from it.
@@ -569,7 +562,10 @@ mod tests {
         let token = EffectiveToken::open().unwrap();
 
         assert_eq!(token.source(), TokenSource::Process);
-        assert_eq!(token.user_sid().unwrap(), dacl_probe::current_user());
+        assert_eq!(
+            dacl_probe::sid_string_of(&token.user().unwrap()),
+            dacl_probe::current_user()
+        );
     }
 
     #[test]
@@ -579,6 +575,9 @@ mod tests {
         let token = EffectiveToken::open().unwrap();
 
         assert_eq!(token.source(), TokenSource::Thread);
-        assert_eq!(token.user_sid().unwrap(), dacl_probe::current_user());
+        assert_eq!(
+            dacl_probe::sid_string_of(&token.user().unwrap()),
+            dacl_probe::current_user()
+        );
     }
 }

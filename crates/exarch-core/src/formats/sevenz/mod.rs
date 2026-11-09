@@ -18,7 +18,6 @@
 //! - LZMA / LZMA2
 //! - BZIP2
 //! - `PPMd`
-//! - DEFLATE
 //! - Copy (stored)
 //!
 //! # Symlinks, Hardlinks and Special Entries
@@ -177,7 +176,7 @@ const SIGNATURE_HEADER_SIZE: u64 = SIGNATURE_HEADER_LEN as u64;
 ///
 /// Supports:
 /// - 7z format (LZMA SDK)
-/// - Compression methods: LZMA, LZMA2, BZIP2, `PPMd`, DEFLATE, Copy
+/// - Compression methods: LZMA, LZMA2, BZIP2, `PPMd`, Copy
 /// - Multi-volume archives (read-only)
 /// - Encrypted archive detection (rejected)
 /// - Solid archive detection (rejected by default)

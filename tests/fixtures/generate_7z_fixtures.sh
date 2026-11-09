@@ -197,6 +197,19 @@ else
     echo "⚠ Skipping symlink-snl.7z (7zz not installed)"
 fi
 
+# 12b. deflate.7z - a Deflate block (method 04 01 08). Pins #1091: exarch
+# refuses Deflate at admission, like Deflate64, before anything is written.
+python3 - <<'PY2'
+import random
+random.seed(1091)
+words = [bytes(random.randrange(97, 123) for _ in range(random.randrange(3, 9))) for _ in range(300)]
+for name in ("deflate-a.txt", "deflate-b.txt"):
+    with open(name, "wb") as f:
+        f.write(b" ".join(random.choice(words) for _ in range(20000)))
+PY2
+7z a -t7z -m0=deflate -ms=off "$FIXTURES_DIR/deflate.7z" deflate-a.txt deflate-b.txt > /dev/null
+echo "✓ Created deflate.7z (Deflate coder)"
+
 # 13. streams-without-files-info.7z - NOT generated: a 66-byte fuzzer vector, a
 # header with main streams info and no FilesInfo, fetched byte for byte from
 # hasenbanck/sevenz-rust2 (tests/resources/streams_without_files_info.bin, git

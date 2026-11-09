@@ -28,6 +28,7 @@ use super::SIGNATURE_HEADER_SIZE;
 use super::header::SEVENZ_MAGIC;
 use crate::Malformation;
 use crate::SevenZHeaderTable;
+use crate::formats::le;
 use crate::formats::le::le64;
 
 const K_END: u8 = 0x00;
@@ -305,12 +306,8 @@ fn decode_header<R: Read + Seek>(
     match coder.id {
         METHOD_COPY => read_bounded(packed, decoded).map_err(unmodelled),
         METHOD_LZMA => {
-            let (&byte, rest) = properties.split_first().ok_or(Stop::Unmodelled)?;
-            let dictionary = rest
-                .get(..4)
-                .and_then(|d| d.try_into().ok())
-                .map(u32::from_le_bytes)
-                .ok_or(Stop::Unmodelled)?;
+            let &byte = properties.first().ok_or(Stop::Unmodelled)?;
+            let dictionary = le::u32_at(properties, 1).ok_or(Stop::Unmodelled)?;
             let needed = lzma_get_memory_usage_by_props(dictionary, byte).map_err(unmodelled)?;
             fits(needed, memory_kib)?;
             let reader = LzmaReader::new_with_props(packed, decoded, byte, dictionary, None)

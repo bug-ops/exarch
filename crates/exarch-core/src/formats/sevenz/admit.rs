@@ -17,6 +17,7 @@ use crate::SolidMemoryScope;
 use crate::Violation;
 use crate::error::QuotaResource;
 use crate::formats::common;
+use crate::formats::le;
 use crate::inspection::report::Finding;
 use crate::inspection::report::Heuristic;
 use crate::inspection::report::IssueSeverity;
@@ -282,43 +283,65 @@ pub(super) fn lzma2_dict_size(props: &[u8]) -> Option<u32> {
     }
 }
 
+/// How the decoder memory of an admitted method follows from its properties.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum CoderCost {
+    /// A constant, in bytes.
+    Fixed(u64),
+    /// `min(dict, 2 * unpack)` with the LZMA dictionary at property offset 1.
+    LzmaDict,
+    /// `min(dict, 2 * unpack)` with the dictionary of the LZMA2 property byte.
+    Lzma2Dict,
+    /// The `PPMd` memory size at property offset 1.
+    PpmdMem,
+}
+
+/// Every method a 7z block may use, with its decoder cost.
+///
+/// This is the single admission table: a method absent here is refused before
+/// any write. A method belongs here only when the build can decode it, which
+/// `every_admitted_method_decodes` pins; sevenz-rust2 features that are off
+/// (`deflate`, `deflate64`, `zstd`, `lz4`) must stay out.
+pub(super) const ADMITTED: &[(&[u8], CoderCost)] = {
+    use sevenz_rust2::EncoderMethod as M;
+    &[
+        (M::ID_COPY, CoderCost::Fixed(0)),
+        (M::ID_DELTA, CoderCost::Fixed(0)),
+        (M::ID_BCJ_X86, CoderCost::Fixed(0)),
+        (M::ID_BCJ_PPC, CoderCost::Fixed(0)),
+        (M::ID_BCJ_IA64, CoderCost::Fixed(0)),
+        (M::ID_BCJ_ARM, CoderCost::Fixed(0)),
+        (M::ID_BCJ_ARM64, CoderCost::Fixed(0)),
+        (M::ID_BCJ_ARM_THUMB, CoderCost::Fixed(0)),
+        (M::ID_BCJ_SPARC, CoderCost::Fixed(0)),
+        (M::ID_BCJ_RISCV, CoderCost::Fixed(0)),
+        (M::ID_BCJ2, CoderCost::Fixed(0)),
+        (M::ID_LZMA, CoderCost::LzmaDict),
+        (M::ID_LZMA2, CoderCost::Lzma2Dict),
+        (M::ID_PPMD, CoderCost::PpmdMem),
+        (M::ID_BZIP2, CoderCost::Fixed(BZIP2_DECODER_MEMORY)),
+    ]
+};
+
 /// Decoder memory a coder needs, estimated from its properties.
 ///
 /// Blocks are decoded without a sevenz-rust2 memory limit, which would check
 /// the declared dictionary and refuse an admitted block (a small file under a
 /// large dictionary), so the limit is enforced here from the coder properties.
 /// LZMA and LZMA2 grow their window geometrically up to the dictionary size,
-/// so the estimate is `min(dict, 2 * unpack)`. `None` means the method is
-/// unknown or its properties cannot be parsed, and the caller must fail closed.
+/// so the estimate is `min(dict, 2 * unpack)`. `None` means the method is not
+/// in [`ADMITTED`] or its properties cannot be parsed, and the caller must fail
+/// closed.
 pub(super) fn coder_memory(coder: &sevenz_rust2::Coder, unpack_size: u64) -> Option<u64> {
-    use sevenz_rust2::EncoderMethod;
-
     let props = coder.properties();
     let window = |dict: u64| dict.min(unpack_size.saturating_mul(2));
-    match coder.encoder_method_id() {
-        EncoderMethod::ID_COPY
-        | EncoderMethod::ID_DELTA
-        | EncoderMethod::ID_BCJ_X86
-        | EncoderMethod::ID_BCJ_PPC
-        | EncoderMethod::ID_BCJ_IA64
-        | EncoderMethod::ID_BCJ_ARM
-        | EncoderMethod::ID_BCJ_ARM64
-        | EncoderMethod::ID_BCJ_ARM_THUMB
-        | EncoderMethod::ID_BCJ_SPARC
-        | EncoderMethod::ID_BCJ_RISCV
-        | EncoderMethod::ID_BCJ2
-        | EncoderMethod::ID_DEFLATE => Some(0),
-        EncoderMethod::ID_LZMA => {
-            let dict = props.get(1..)?.first_chunk::<4>()?;
-            Some(window(u64::from(u32::from_le_bytes(*dict))))
-        }
-        EncoderMethod::ID_LZMA2 => Some(window(u64::from(lzma2_dict_size(props)?))),
-        EncoderMethod::ID_PPMD => {
-            let mem = props.get(1..)?.first_chunk::<4>()?;
-            Some(u64::from(u32::from_le_bytes(*mem)))
-        }
-        EncoderMethod::ID_BZIP2 => Some(BZIP2_DECODER_MEMORY),
-        _ => None,
+    let id = coder.encoder_method_id();
+    let (_, cost) = ADMITTED.iter().find(|(method, _)| *method == id)?;
+    match cost {
+        CoderCost::Fixed(bytes) => Some(*bytes),
+        CoderCost::LzmaDict => Some(window(u64::from(le::u32_at(props, 1)?))),
+        CoderCost::Lzma2Dict => Some(window(u64::from(lzma2_dict_size(props)?))),
+        CoderCost::PpmdMem => Some(u64::from(le::u32_at(props, 1)?)),
     }
 }
 

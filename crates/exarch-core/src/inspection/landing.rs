@@ -31,6 +31,7 @@ use crate::security::fs_view::VirtualTree;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::validator::Gated;
 use crate::security::validator::route_validated;
+use crate::selection::LandingClaims;
 use crate::selection::SelectionRun;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -285,6 +286,7 @@ impl ArchiveManifest {
             CollisionRecording::Discard,
         );
         let mut hardlinks = HardlinkTracker::new();
+        let claims = LandingClaims::default();
         let is_hardlink =
             |entry: &ArchiveEntry| matches!(entry.kind, ManifestEntryKind::Hardlink { .. });
         let mut judged: Vec<Option<Disposition>> = Vec::with_capacity(self.entries().len());
@@ -301,6 +303,7 @@ impl ArchiveManifest {
                     &root,
                     &mut tree,
                     &mut hardlinks,
+                    &claims,
                 ))
             });
         }
@@ -316,6 +319,7 @@ impl ArchiveManifest {
                         &root,
                         &mut tree,
                         &mut hardlinks,
+                        &claims,
                     )
                 });
                 (entry, disposition)
@@ -403,8 +407,9 @@ fn land(
     root: &VirtualRoot,
     tree: &mut VirtualTree,
     hardlinks: &mut HardlinkTracker,
+    claims: &LandingClaims,
 ) -> Disposition {
-    judge(entry, selection, config, root, tree, hardlinks).unwrap_or(Disposition::Refuse)
+    judge(entry, selection, config, root, tree, hardlinks, claims).unwrap_or(Disposition::Refuse)
 }
 
 /// The disposition of an entry extraction can act on, or `None` when the
@@ -416,6 +421,7 @@ fn judge(
     root: &VirtualRoot,
     tree: &mut VirtualTree,
     hardlinks: &mut HardlinkTracker,
+    claims: &LandingClaims,
 ) -> Option<Disposition> {
     let original = SafePath::validate_in(&entry.path, root, config, tree).ok()?;
     let ctx = ValidationContext::<VirtualTree>::new(config.allowed.symlinks.is_allowed());
@@ -432,6 +438,9 @@ fn judge(
     if is_file && !is_extension_allowed(safe.as_path(), config) {
         return Some(Disposition::Skip(SkipKind::ExtensionNotAllowed));
     }
+    if is_file {
+        claims.claim(selection, safe.as_path());
+    }
     let node = match &entry.kind {
         ManifestEntryKind::File { .. } => Node::File,
         ManifestEntryKind::Hardlink { target } => {
@@ -444,6 +453,7 @@ fn judge(
             let mapped = selection
                 .mapped_link_target(&entry.path, target, config.allowed.absolute_paths)
                 .ok()?;
+            claims.require_unambiguous(&entry.path, &mapped).ok()?;
             hardlinks
                 .check_hardlink_target(&safe, &mapped, root, config, tree)
                 .ok()?;
@@ -735,7 +745,10 @@ mod tests {
 
     /// The preview of the hardlink `hl` and whether extraction accepts the
     /// archive, both under hardlinks-allowed.
-    fn hardlink_outcome(entries: &[(&[u8], tar::EntryType, &str)]) -> (Disposition, bool) {
+    fn hardlink_outcome(
+        entries: &[(&[u8], tar::EntryType, &str)],
+        config: &SecurityConfig,
+    ) -> (Disposition, bool) {
         let mut builder = tar::Builder::new(Vec::new());
         for (name, kind, link) in entries {
             tar_entry(&mut builder, name, *kind, link);
@@ -745,21 +758,29 @@ mod tests {
         std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
         let dest = dir.path().join("out");
         std::fs::create_dir(&dest).unwrap();
-        let config = config().with_allow_hardlinks(true);
-        let manifest = list_archive(&archive, &config).unwrap();
+        let manifest = list_archive(&archive, config).unwrap();
         let disposition = manifest
-            .dispositions(&config)
-            .find(|(entry, _)| entry.path == Path::new("hl"))
+            .dispositions(config)
+            .find(|(entry, _)| matches!(entry.kind, ManifestEntryKind::Hardlink { .. }))
             .map(|(_, d)| d)
             .unwrap();
         (
             disposition,
-            extract_archive(&archive, &dest, &config).is_ok(),
+            extract_archive(&archive, &dest, config).is_ok(),
         )
     }
 
     fn assert_hardlink_agrees(entries: &[(&[u8], tar::EntryType, &str)], accepted: bool) {
-        let (disposition, extracted) = hardlink_outcome(entries);
+        let config = config().with_allow_hardlinks(true);
+        assert_hardlink_agrees_under(entries, &config, accepted);
+    }
+
+    fn assert_hardlink_agrees_under(
+        entries: &[(&[u8], tar::EntryType, &str)],
+        config: &SecurityConfig,
+        accepted: bool,
+    ) {
+        let (disposition, extracted) = hardlink_outcome(entries, config);
         assert_eq!(extracted, accepted);
         assert_eq!(
             matches!(disposition, Disposition::Extract(_)),
@@ -825,5 +846,47 @@ mod tests {
             .find(|(entry, _)| entry.path == Path::new("hl"))
             .unwrap();
         assert_matches!(disposition, Disposition::Refuse);
+    }
+
+    fn strip_one() -> SecurityConfig {
+        use crate::PathRewrite;
+        use crate::StripComponents;
+        use crate::non_zero;
+
+        let strip = StripComponents::new(non_zero!(1), non_zero!(32)).unwrap();
+        config()
+            .with_allow_hardlinks(true)
+            .with_selection(EntrySelection::default().with_rewrite(PathRewrite::Strip(strip)))
+    }
+
+    #[test]
+    fn hardlink_to_an_ambiguous_landing_is_refused() {
+        assert_hardlink_agrees_under(
+            &[
+                (b"p/x", FILE, ""),
+                (b"q/x", FILE, ""),
+                (b"p/h", HARD, "p/x"),
+            ],
+            &strip_one(),
+            false,
+        );
+    }
+
+    #[test]
+    fn hardlink_to_an_unambiguous_stripped_landing_is_extracted() {
+        assert_hardlink_agrees_under(
+            &[(b"p/x", FILE, ""), (b"p/h", HARD, "p/x")],
+            &strip_one(),
+            true,
+        );
+    }
+
+    #[test]
+    fn hardlink_to_a_later_stripped_target_is_extracted() {
+        assert_hardlink_agrees_under(
+            &[(b"p/h", HARD, "p/x"), (b"p/x", FILE, "")],
+            &strip_one(),
+            true,
+        );
     }
 }

@@ -127,12 +127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: atomic extraction holds a descriptor on the destination until publication, so a replaced destination is reported as `destination_changed` even when the filesystem reuses its inode number (#1080, #1089).
 - Core: the list preview refuses a hardlink whose target is missing, escaping, a directory, unselected or ambiguous, as extract and verify do (#1090, #1114).
 - Core: a 7z Deflate block is refused at admission, before the destination is created, like Deflate64; `verify` of such an archive now fails (#1091, #1114).
-- Core: `verify` and the list preview no longer judge a hardlink against a duplicate symlink that extraction skips (#1112, #TBD).
-- Core: the atomic rollback removes a staged tree of any depth with a bounded descriptor budget instead of stopping at 64 levels on Unix (#1110, #TBD).
-- Core: on Windows atomic and replace staging directories are created with a protected owner-only DACL, and the published root inherits its parent's DACL (#1020, #TBD).
-- CLI: a SIGINT or SIGTERM inherited as ignored stays ignored on Unix and never cancels a run (#1109, #TBD).
-- CI: `uv` and the sdist `maturin` are pinned to the locked versions and a check keeps the maturin pin in step with `uv.lock` (#1113, #TBD).
-- Docs: `CONTRIBUTING.md` lists Node.js 20+ (#1092, #TBD).
+- Core: `verify` and the list preview no longer judge a hardlink against a duplicate symlink that extraction skips (#1112, #1123).
+- Core: the atomic rollback removes a staged tree of any depth with a bounded descriptor budget instead of stopping at 64 levels on Unix (#1110, #1123).
+- Core: on Windows atomic and replace staging directories are created with a protected owner-only DACL, and the published root inherits its parent's DACL (#1020, #1123).
+- CLI: a SIGINT or SIGTERM inherited as ignored stays ignored on Unix and never cancels a run (#1109, #1123).
+- CI: `uv` and the sdist `maturin` are pinned to the locked versions and a check keeps the maturin pin in step with `uv.lock` (#1113, #1123).
+- Docs: `CONTRIBUTING.md` lists Node.js 20+ (#1092, #1123).
 
 ## [0.9.0] - 2026-11-05
 

@@ -1681,19 +1681,7 @@ mod windows_tests {
         let temp = TempDir::new().unwrap();
         let parent = temp.path().join("closed");
         fs::create_dir(&parent).unwrap();
-        let grant = format!("*{}:F", dacl_probe::current_user());
-        if !run(
-            "icacls",
-            &[
-                parent.as_os_str(),
-                "/inheritance:r".as_ref(),
-                "/grant:r".as_ref(),
-                grant.as_ref(),
-            ],
-        ) {
-            eprintln!("skipping: icacls could not restrict the parent");
-            return;
-        }
+        dacl_probe::restrict_to_current_user_without_inheritance(&parent);
         let dir = pinned_at(&parent);
         dir.make_private_dir(leaf("stage")).unwrap();
         let stage = parent.join("stage");
@@ -1705,9 +1693,14 @@ mod windows_tests {
             .unwrap()
             .inherit_dacl();
 
-        assert!(result.is_err());
         let dacl = dacl_probe::read(&stage);
-        assert!(dacl.protected);
+        assert!(
+            result.is_err(),
+            "the reset succeeded; stage is protected: {}, entries: {:?}",
+            dacl.protected,
+            dacl.aces
+        );
+        assert!(dacl.protected, "entries: {:?}", dacl.aces);
         let [ace] = dacl.aces.as_slice() else {
             panic!("expected exactly one entry, got {:?}", dacl.aces);
         };

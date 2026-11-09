@@ -866,8 +866,12 @@ mod tests {
         );
     }
 
+    // Windows extraction refuses symlinks, so the duplicate symlink is
+    // Unix-only.
+    #[cfg(unix)]
     const SYM: tar::EntryType = tar::EntryType::Symlink;
 
+    #[cfg(unix)]
     #[test]
     fn hardlink_to_a_file_shadowed_by_a_duplicate_symlink_is_extracted() {
         assert_hardlink_agrees(
@@ -876,6 +880,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn hardlink_to_a_stripped_file_shadowed_by_a_duplicate_symlink_is_extracted() {
         assert_hardlink_agrees_under(

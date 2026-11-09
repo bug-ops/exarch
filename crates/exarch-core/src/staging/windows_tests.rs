@@ -35,7 +35,11 @@ fn assert_inherits(path: &Path) {
 fn assert_owner_only(path: &Path) {
     let dacl = dacl_probe::read(path);
     let shown = path.display();
-    assert!(dacl.protected, "{shown} does not ignore its parent's DACL");
+    assert!(
+        dacl.protected,
+        "{shown} does not ignore its parent's DACL: {:?}",
+        dacl.aces
+    );
     let [ace] = dacl.aces.as_slice() else {
         panic!("{shown}: expected exactly one entry, got {:?}", dacl.aces);
     };
@@ -79,16 +83,7 @@ fn a_parent_without_inheritable_entries_leaves_the_root_owner_only_and_readable(
     let archive = archive_in(&temp);
     let parent = temp.path().join("closed");
     fs::create_dir(&parent).unwrap();
-    let grant = format!("*{}:F", dacl_probe::current_user());
-    let restricted = std::process::Command::new("icacls")
-        .arg(&parent)
-        .args(["/inheritance:r", "/grant:r", &grant])
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if !restricted {
-        eprintln!("skipping: icacls could not restrict the parent");
-        return;
-    }
+    dacl_probe::restrict_to_current_user_without_inheritance(&parent);
     let dest = parent.join("out");
 
     extract(&dest, &archive, Staging::Atomic);

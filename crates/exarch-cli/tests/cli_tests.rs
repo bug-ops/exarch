@@ -9265,6 +9265,7 @@ fn tar_of(entries: &[(&str, tar::EntryType, &str)]) -> Vec<u8> {
 
 const LINK_FLAGS: [&str; 2] = ["--allow-hardlinks", "--allow-symlinks"];
 
+#[cfg(unix)]
 /// `verify`, the `list` selection preview and `extract` agree on a hardlink to
 /// the first file of a name whose duplicate symlink extraction skips.
 fn assert_hardlink_agrees_across_commands(
@@ -9325,6 +9326,8 @@ fn assert_hardlink_agrees_across_commands(
     assert_eq!(std::fs::read(dest.join(landing)).unwrap(), b"x");
 }
 
+// Windows extraction refuses symlinks, so the duplicate symlink is Unix-only.
+#[cfg(unix)]
 #[test]
 fn test_hardlink_to_file_shadowed_by_duplicate_symlink_agrees_across_commands() {
     assert_hardlink_agrees_across_commands(
@@ -9339,6 +9342,8 @@ fn test_hardlink_to_file_shadowed_by_duplicate_symlink_agrees_across_commands() 
     );
 }
 
+// Windows extraction refuses symlinks, so the duplicate symlink is Unix-only.
+#[cfg(unix)]
 #[test]
 fn test_stripped_hardlink_to_file_shadowed_by_duplicate_symlink_agrees_across_commands() {
     assert_hardlink_agrees_across_commands(

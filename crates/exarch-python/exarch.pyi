@@ -119,6 +119,7 @@ _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
 _DecodeReuse = Literal["off", "memory", "temp_file"]
+_StoredTargets = Literal["skip", "read"]
 _LinkState = Literal["recorded", "missing", "unread", "unreadable", "oversized"]
 _DispositionKind = Literal["extract", "skip", "refuse"]
 _SkipKind = Literal[
@@ -187,6 +188,7 @@ _ConfigSetting = Literal[
     "entry_include",
     "entry_exclude",
     "strip_components",
+    "stored_targets",
 ]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 
@@ -346,8 +348,9 @@ class SecurityConfig:
         """
         Allows or denies names Windows reserves (``CON``, ``NUL``, ...).
 
-        Refused by default on every platform, because an archive extracted here
-        may be unpacked on Windows later.
+        Refused by default. On-disk extraction checks these names only on
+        Windows; in-memory and callback extraction (the portable path model)
+        check them on every host.
         """
         ...
 
@@ -689,13 +692,13 @@ class ListOptions:
         """Creates a ListOptions with defaults."""
         ...
 
-    def with_stored_targets(self, read: bool = True) -> ListOptions:
+    def with_stored_targets(self, targets: _StoredTargets = "read") -> ListOptions:
         """Sets whether link targets kept in entry data are read (decodes their blocks)."""
         ...
 
     @property
-    def stored_targets(self) -> bool:
-        """Whether link targets kept in entry data are read (default: False)."""
+    def stored_targets(self) -> _StoredTargets:
+        """Whether link targets kept in entry data are read (default: "skip")."""
         ...
 
 @final
@@ -1267,9 +1270,9 @@ class CreationReport:
 class LinkTarget:
     """
     What listing learned of a link's target; narrow with ``isinstance`` or on
-    ``state``. A 7z symlink is an ``UnreadLinkTarget``: listing does not decode
-    7z entry data. A state this binding has no class for is a bare
-    ``LinkTarget`` whose ``state`` is ``"unknown"``.
+    ``state``. A 7z symlink is an ``UnreadLinkTarget`` unless the listing was
+    asked to read stored targets. A state this binding has no class for is a
+    bare ``LinkTarget`` whose ``state`` is that state's core token.
     """
 
     @property
@@ -1365,7 +1368,11 @@ class ArchiveEntry:
 
     @property
     def modified(self) -> float | None:
-        """Modification time in seconds since the Unix epoch, if the archive records one."""
+        """
+        Modification time in seconds since the Unix epoch, negative before it.
+
+        None only when the archive records no time.
+        """
         ...
 
     def compression_ratio(self) -> float | None:
@@ -1749,8 +1756,8 @@ def extract_archive_with_progress(
     archive_path: str | Path,
     output_dir: str | Path,
     config: SecurityConfig | None = None,
-    progress: ProgressCallbackFn | None = None,
     options: ExtractionOptions | None = None,
+    progress: ProgressCallbackFn | None = None,
 ) -> ExtractionReport:
     """
     Extract an archive to the specified directory with progress reporting.
@@ -1759,6 +1766,7 @@ def extract_archive_with_progress(
         archive_path: Path to the archive file (str or pathlib.Path)
         output_dir: Directory where files will be extracted (str or pathlib.Path)
         config: Optional SecurityConfig (uses secure defaults if None)
+        options: Optional ExtractionOptions, as in extract_archive
         progress: Optional callback function for progress updates
 
     Returns:
@@ -1818,7 +1826,7 @@ def extract_archive_with_progress(
     Example:
         >>> def progress(path: str, total: int, current: int, bytes: int):
         ...     print(f"{current}/{total}: {path} ({bytes} bytes)")
-        >>> report = extract_archive_with_progress("archive.tar.gz", "/tmp/out", None, progress)
+        >>> report = extract_archive_with_progress("archive.tar.gz", "/tmp/out", progress=progress)
     """
     ...
 
@@ -1826,9 +1834,9 @@ def create_archive(
     output_path: str | Path,
     sources: list[str | Path],
     config: CreationConfig | None = None,
-    format: _CreatableFormat | None = None,
     overwrite: bool = True,
     durability: _Durability | None = None,
+    format: _CreatableFormat | None = None,
 ) -> CreationReport:
     """
     Create an archive from source files and directories.
@@ -1842,8 +1850,6 @@ def create_archive(
         output_path: Path to output archive file (str or pathlib.Path)
         sources: List of source files/directories to include (str or pathlib.Path)
         config: Optional CreationConfig (uses defaults if None)
-        format: The format to write whatever the extension is (for example
-            "Zip" for a ``.whl``); None detects it from the extension
         overwrite: Replace an existing regular file or symlink, keeping its
             permission bits (default); False refuses any existing output
         durability: "synced" (the default, also for ``None``) flushes the archive and its directory
@@ -1851,6 +1857,8 @@ def create_archive(
             crash or power loss a replaced output can be empty or truncated and
             a new output can be empty, and write-back errors (network
             filesystems, quotas, delayed allocation) are not reported
+        format: The format to write whatever the extension is (for example
+            "Zip" for a ``.whl``); None detects it from the extension
 
     Returns:
         CreationReport with creation statistics
@@ -1868,10 +1876,10 @@ def create_archive_with_progress(
     output_path: str | Path,
     sources: list[str | Path],
     config: CreationConfig | None = None,
-    progress: ProgressCallbackFn | None = None,
-    format: _CreatableFormat | None = None,
     overwrite: bool = True,
     durability: _Durability | None = None,
+    format: _CreatableFormat | None = None,
+    progress: ProgressCallbackFn | None = None,
 ) -> CreationReport:
     """
     Create an archive with progress reporting.
@@ -1906,7 +1914,7 @@ def create_archive_with_progress(
     Example:
         >>> def progress(path: str, total: int, current: int, bytes: int):
         ...     print(f"{current}/{total}: {path} ({bytes} bytes)")
-        >>> report = create_archive_with_progress("output.tar.gz", ["src/"], None, progress)
+        >>> report = create_archive_with_progress("output.tar.gz", ["src/"], progress=progress)
     """
     ...
 
@@ -1965,8 +1973,8 @@ def verify_archive(
 def list_archive_bytes(
     data: _ArchiveData,
     config: SecurityConfig | None = None,
-    format: _ArchiveType | None = None,
     options: ListOptions | None = None,
+    format: _ArchiveType | None = None,
 ) -> ArchiveManifest:
     """
     List the contents of an archive held in memory, without extracting.
@@ -2226,11 +2234,11 @@ def extract_archive_to_callback(
 def extract_archive_to_memory_with_progress(
     data: _ArchiveData,
     config: SecurityConfig | None = None,
-    progress: ProgressCallbackFn | None = None,
     options: SinkOptions | None = None,
     max_bytes: int | None = None,
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
+    progress: ProgressCallbackFn | None = None,
 ) -> MemoryExtraction:
     """
     Extract an archive held in memory into memory, reporting progress.
@@ -2252,9 +2260,9 @@ def extract_archive_to_memory_with_progress(
 def list_archive_bytes_with_progress(
     data: _ArchiveData,
     config: SecurityConfig | None = None,
-    progress: ProgressCallbackFn | None = None,
-    format: _ArchiveType | None = None,
     options: ListOptions | None = None,
+    format: _ArchiveType | None = None,
+    progress: ProgressCallbackFn | None = None,
 ) -> ArchiveManifest:
     """
     List the contents of an archive held in memory, reporting progress.
@@ -2274,9 +2282,9 @@ def list_archive_bytes_with_progress(
 def verify_archive_bytes_with_progress(
     data: _ArchiveData,
     config: SecurityConfig | None = None,
-    progress: ProgressCallbackFn | None = None,
     options: VerificationOptions | None = None,
     format: _ArchiveType | None = None,
+    progress: ProgressCallbackFn | None = None,
 ) -> VerificationReport:
     """
     Verify the security of an archive held in memory, reporting progress.

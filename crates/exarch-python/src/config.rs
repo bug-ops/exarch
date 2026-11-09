@@ -22,9 +22,7 @@ use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
 use exarch_core::RequestedLevel;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
-use exarch_core::SolidLimits;
 use exarch_core::Staging;
-use exarch_core::StoredTargets;
 use exarch_core::StripComponents;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
@@ -238,7 +236,9 @@ fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
 ///   `None` is the only way to clear the list
 /// * `banned_path_components` - List of banned path components
 /// * `allow_windows_reserved_names` - Whether names Windows reserves (`CON`,
-///   `NUL`, ...) are extracted (default: False)
+///   `NUL`, ...) are extracted (default: False). On-disk extraction checks them
+///   only on Windows; in-memory and callback extraction check them on every
+///   host
 /// * `max_tar_metadata_bytes` - Most bytes of TAR header and metadata records
 ///   between two entries (default: 4 MiB)
 /// * `max_decoder_memory` - Most memory in bytes a compressed-TAR or 7z decoder
@@ -1077,15 +1077,10 @@ impl PySecurityConfig {
     /// `max_solid_compression_ratio`.
     fn try_set_max_solid_compression_ratio(&mut self, ratio: PyRatio) -> PyResult<()> {
         let ratio = ratio.limit_of(ConfigSetting::MaxSolidCompressionRatio)?;
-        let solid = self.inner.solid_archives;
-        let limits = solid.limits().ok_or_else(|| {
-            PyInteger::refuse(
-                ConfigSetting::MaxSolidCompressionRatio,
-                ConfigProblem::NotSupported,
-            )
-        })?;
-        self.inner.solid_archives = solid
-            .with_limits(SolidLimits::with_max_ratio(limits, ratio))
+        self.inner.solid_archives = self
+            .inner
+            .solid_archives
+            .with_max_ratio(ratio)
             .map_err(convert_error)?;
         Ok(())
     }
@@ -1598,8 +1593,8 @@ impl PyVerificationOptions {
 ///
 /// # Attributes
 ///
-/// * `stored_targets` - Whether link targets kept in entry data are read
-///   (default: `False`)
+/// * `stored_targets` - Whether link targets kept in entry data are read:
+///   `"skip"` (default) or `"read"`
 ///
 /// # Examples
 ///
@@ -1631,32 +1626,27 @@ impl PyListOptions {
     }
 
     /// Sets whether link targets kept in entry data are read, which decodes the
-    /// blocks that hold them.
-    #[pyo3(signature = (read=true))]
-    fn with_stored_targets(mut slf: PyRefMut<'_, Self>, read: bool) -> PyRefMut<'_, Self> {
-        slf.inner.stored_targets = if read {
-            StoredTargets::Read
-        } else {
-            StoredTargets::Skip
-        };
-        slf
+    /// blocks that hold them: `"skip"` or `"read"`.
+    #[pyo3(signature = (targets="read"))]
+    fn with_stored_targets<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        targets: &str,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.stored_targets = parse_one(ConfigSetting::StoredTargets, targets)?;
+        Ok(slf)
     }
 
-    /// Whether link targets kept in entry data are read.
+    /// Whether link targets kept in entry data are read: `"skip"` or `"read"`.
     #[getter]
-    fn get_stored_targets(&self) -> bool {
-        self.inner.stored_targets == StoredTargets::Read
+    fn get_stored_targets(&self) -> &'static str {
+        self.inner.stored_targets.as_str()
     }
 
     /// Returns a debug string representation.
     fn __repr__(&self) -> String {
         format!(
-            "ListOptions(stored_targets={})",
-            if self.get_stored_targets() {
-                "True"
-            } else {
-                "False"
-            }
+            "ListOptions(stored_targets={:?})",
+            self.get_stored_targets()
         )
     }
 }
@@ -1686,6 +1676,7 @@ impl PyVerificationOptions {
 )]
 mod tests {
     use exarch_core::MAX_CONFIG_ENTRY_LENGTH;
+    use exarch_core::SolidLimits;
 
     use super::*;
 
@@ -1705,6 +1696,22 @@ mod tests {
             SolidLimits::DEFAULT.max_ratio.get(),
             1000.0,
             "docs and exarch.pyi say 1000"
+        );
+        let defaults = exarch_core::SecurityConfig::default();
+        assert_eq!(
+            defaults.max_tar_metadata_bytes.get(),
+            4 * 1024 * 1024,
+            "docs say 4 MiB"
+        );
+        assert_eq!(
+            defaults.max_decoder_memory.get(),
+            256 * 1024 * 1024,
+            "docs say 256 MiB"
+        );
+        assert_eq!(
+            defaults.compressed_member_allowance.get(),
+            10_000,
+            "docs say 10,000"
         );
     }
 

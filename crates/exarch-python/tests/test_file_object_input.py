@@ -88,7 +88,7 @@ def test_extract_and_verify_accept_a_file():
 def test_progress_variants_accept_a_file():
     seen = []
     exarch.list_archive_bytes_with_progress(
-        io.BytesIO(_tar()), None, lambda path, total, current, written: seen.append(path)
+        io.BytesIO(_tar()), progress=lambda path, total, current, written: seen.append(path)
     )
     assert seen == ["a.txt"]
     result = exarch.extract_archive_to_memory_with_progress(io.BytesIO(_tar()))
@@ -182,7 +182,7 @@ def test_reader_error_wins_over_progress_error():
         raise ValueError("progress")
 
     with pytest.raises(OSError, match="reader"):
-        exarch.list_archive_bytes_with_progress(reader, None, progress)
+        exarch.list_archive_bytes_with_progress(reader, progress=progress)
 
 
 def test_seekable_raising_propagates():

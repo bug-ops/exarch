@@ -121,6 +121,7 @@ fn verify_with_progress_core(
 ///   the call returns, or an `AsyncIterable<Uint8Array>` (TAR family only) read
 ///   from a worker thread and closed (`return()`) however the call ends
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+/// * `options` - Optional `ListOptions`, as in `listArchive`
 /// * `format` - The archive format; detected from the leading bytes if omitted
 /// * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
 ///   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
@@ -149,9 +150,9 @@ pub fn list_archive_bytes<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
+    options: Option<&ListOptions>,
     format: Option<ArchiveType>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
-    options: Option<&ListOptions>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options = options.map_or_default(ListOptions::to_core);
@@ -174,6 +175,7 @@ pub fn list_archive_bytes<'env>(
 ///
 /// * `data` - The archive bytes
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+/// * `options` - Optional `ListOptions`, as in `listArchive`
 /// * `format` - The archive format; detected from the leading bytes if omitted
 ///
 /// # Returns
@@ -194,8 +196,8 @@ pub fn list_archive_bytes_sync(
     env: Env,
     data: Uint8Array,
     config: Option<&SecurityConfig>,
-    format: Option<ArchiveType>,
     options: Option<&ListOptions>,
+    format: Option<ArchiveType>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
@@ -327,6 +329,7 @@ pub fn verify_archive_bytes_sync(
 ///   fs.readFileSync('archive.zip'),
 ///   null,
 ///   null,
+///   null,
 ///   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
 /// );
 /// ```
@@ -335,11 +338,11 @@ pub fn list_archive_bytes_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
+    options: Option<&ListOptions>,
     format: Option<ArchiveType>,
     #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
-    options: Option<&ListOptions>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options = options.map_or_default(ListOptions::to_core);
@@ -464,6 +467,7 @@ pub fn verify_archive_bytes_with_progress<'env>(
 ///   fs.readFileSync('archive.zip'),
 ///   null,
 ///   null,
+///   null,
 ///   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
 /// );
 /// ```
@@ -472,9 +476,9 @@ pub fn list_archive_bytes_with_progress_sync(
     env: Env,
     data: Uint8Array,
     config: Option<&SecurityConfig>,
+    options: Option<&ListOptions>,
     format: Option<ArchiveType>,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
-    options: Option<&ListOptions>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());

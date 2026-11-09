@@ -150,8 +150,8 @@ strictest rules of every platform instead of this host's.
 
 `list_archive_bytes_with_progress`, `verify_archive_bytes_with_progress` and
 `extract_archive_to_memory_with_progress` take a `progress` callback
-`(path, total, current, bytes_written)` after `config`; `current` counts from 1
-and `total` is `None` for TAR. A raising callback cancels the run before the next
+`(path, total, current, bytes_written)` as their last argument, after `format`;
+`current` counts from 1 and `total` is `None` for TAR. A raising callback cancels the run before the next
 entry and its exception is raised (with `progress_callback_error = True`); the
 result is discarded. The GIL is released while the archive is processed.
 
@@ -261,7 +261,7 @@ Extract an archive to the specified directory with security validation.
 | `InvalidArchiveError` | Archive is corrupted |
 | `IOError` | I/O operation failed |
 
-### `create_archive(output_path, sources, config=None, format=None, overwrite=True, durability="synced")`
+### `create_archive(output_path, sources, config=None, overwrite=True, durability="synced", format=None)`
 
 Create an archive from files and directories. The archive is staged in a temporary file next to `output_path` (its directory must be writable) and renamed into place when complete, so a failed creation leaves the output as it was. `format` states the format when the extension does not (for example `"Zip"` for a `.whl`); `overwrite=False` refuses any existing output.
 
@@ -276,7 +276,7 @@ delayed allocation) are not reported, so success does not prove the bytes
 reached the disk. Any other value raises `InvalidConfigurationError` with
 `setting == "durability"`.
 
-### `extract_archive_with_progress(archive_path, output_dir, config, progress)`
+### `extract_archive_with_progress(archive_path, output_dir, config=None, options=None, progress=None)`
 
 Extract an archive with a progress callback. The GIL is released during extraction, with or without a callback; the callback takes it back for each call.
 
@@ -287,6 +287,7 @@ Extract an archive with a progress callback. The GIL is released during extracti
 | `archive_path` | `str \| Path` | Path to the archive file |
 | `output_dir` | `str \| Path` | Directory where files will be extracted |
 | `config` | `SecurityConfig \| None` | Optional security configuration |
+| `options` | `ExtractionOptions \| None` | Optional extraction options |
 | `progress` | `Callable[[str, int, int, int], None] \| None` | Optional progress callback: `(path, total_files, current_file, bytes_written)` |
 
 ```python
@@ -297,9 +298,7 @@ def on_progress(path: str, total: int, current: int, bytes_written: int) -> None
     print(f"[{current}/{total}] {path} ({bytes_written} bytes)")
 
 
-result = exarch.extract_archive_with_progress(
-    "archive.tar.gz", "/output", config=None, progress=on_progress
-)
+result = exarch.extract_archive_with_progress("archive.tar.gz", "/output", progress=on_progress)
 ```
 
 **If `progress` raises** (`KeyboardInterrupt` included), extraction is cancelled: it stops before the next entry and `progress` is not called again. What was written stays on disk, or is rolled back under an atomic `staging`. `progress`'s own exception propagates unchanged, with a `progress_callback_error = True` marker attribute and `writes` plus, while the files remain on disk, `files_extracted`/`bytes_written`/`files_skipped`/`skipped`/`warnings` describing what was written (check the marker before treating the presence of `files_extracted` as a partial-extraction signal, since a genuine partial-extraction failure carries the same attribute names). If extraction failed for its own reason first, the extraction error takes priority — a raising `progress` can never mask a security error such as `SymlinkEscapeError` — and `progress`'s exception is attached as `__cause__` instead of being dropped. `create_archive_with_progress` behaves the same way, discarding the staged archive and attaching no counters.
@@ -343,7 +342,7 @@ config = config.with_max_solid_compression_ratio(
 )  # Solid 7z block ratio; needs with_allow_solid_archives first
 ```
 
-Every setting an error names in `relaxable_by` has a setter. `list_archive*` takes `options=ListOptions().with_stored_targets()` to read the 7z link targets that a listing leaves unread by default.
+Every setting an error names in `relaxable_by` has a setter. `list_archive*` takes `options=ListOptions().with_stored_targets()` (`"skip"` or `"read"`, default `"read"` when called without an argument) to read the 7z link targets that a listing leaves unread by default.
 
 **Newer core values.** Output tokens (`kind`, `code`, `sub_code`, `io_kind`, entry and disposition kinds, ...) are the strings `exarch-core` emits, so a value added to the core after your stubs were written still arrives as a plain `str`; an unknown report class falls back to its base class (`ArchiveEntry`, `LinkTarget` with `state == "unknown"`, `EntryDisposition`, `MemoryEntry`, `ExtractionWarning`, `CreationWarning`) instead of raising.
 

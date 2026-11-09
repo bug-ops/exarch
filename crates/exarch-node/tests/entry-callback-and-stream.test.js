@@ -585,7 +585,7 @@ describe('sync WithProgress variants', () => {
     for (const run of [
       (progress) =>
         extractArchiveToMemoryWithProgressSync(archive, null, null, null, null, null, progress),
-      (progress) => listArchiveBytesWithProgressSync(archive, null, null, progress),
+      (progress) => listArchiveBytesWithProgressSync(archive, null, null, null, progress),
       (progress) => verifyArchiveBytesWithProgressSync(archive, null, null, null, progress),
     ]) {
       const events = [];

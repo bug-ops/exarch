@@ -48,12 +48,16 @@ describe('report fields', () => {
       'durationMs',
       'filesExtracted',
       'filesSkipped',
+      'hasWarnings',
       'sizeClamped',
       'skipped',
       'symlinksCreated',
+      'totalItems',
       'warnings',
     ]);
     assert.strictEqual(report.sizeClamped, false);
+    assert.strictEqual(report.hasWarnings, false);
+    assert.strictEqual(report.totalItems, report.filesExtracted + report.directoriesCreated);
     assert.deepStrictEqual(keys(report.skipped), ['counts', 'sample', 'total']);
     assert.strictEqual(report.skipped.total, 0);
   });
@@ -69,9 +73,11 @@ describe('report fields', () => {
       'durationMs',
       'filesAdded',
       'filesSkipped',
+      'hasWarnings',
       'sizeClamped',
       'skipped',
       'symlinksAdded',
+      'totalItems',
       'warnings',
     ]);
     assert.strictEqual(report.sizeClamped, false);

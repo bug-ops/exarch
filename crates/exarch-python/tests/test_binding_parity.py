@@ -105,6 +105,8 @@ SHARED = [
             "files_skipped",
             "skipped",
             "warnings",
+            "total_items",
+            "has_warnings",
         ],
     ),
     (
@@ -120,6 +122,8 @@ SHARED = [
             "files_skipped",
             "skipped",
             "warnings",
+            "total_items",
+            "has_warnings",
         ],
     ),
     (
@@ -127,6 +131,7 @@ SHARED = [
         ["ManifestFileEntry"],
         ["path", "entry_type", "compressed_size", "mode", "modified"],
     ),
+    ("ListOptions", ["ListOptions"], ["stored_targets"]),
     ("ArchiveFile", ["ManifestFileEntry"], ["size"]),
     ("ArchiveSymlink", ["ManifestSymlinkEntry"], ["target"]),
     ("ArchiveHardlink", ["ManifestHardlinkEntry"], ["target"]),
@@ -171,6 +176,7 @@ def _python_members(cls: str) -> set[str]:
     body = body[: end.start()] if end else body
     members = set(re.findall(r"^    (\w+)\s*:", body, re.MULTILINE))
     members |= set(re.findall(r"@property\n    def (\w+)\(", body))
+    members |= set(re.findall(r"^    def (\w+)\(self", body, re.MULTILINE))
     for parent in (header.group(1) or "").split(","):
         parent = parent.strip().split("[")[0]
         if parent and parent not in {"Exception", "OSError", "ValueError", "Protocol"}:
@@ -180,11 +186,15 @@ def _python_members(cls: str) -> set[str]:
 
 
 def _node_members(interface: str) -> set[str]:
-    header = re.search(rf"^export interface {interface}\b[^{{]*{{", DTS, re.MULTILINE)
+    header = re.search(
+        rf"^export (?:interface|declare class) {interface}\b[^{{]*{{", DTS, re.MULTILINE
+    )
     assert header, f"index.d.ts has no interface {interface}"
     body = DTS[header.end() :]
     body = body[: body.index("\n}")]
-    return set(re.findall(r"^  (\w+)\??:", body, re.MULTILINE))
+    return set(re.findall(r"^  (\w+)\??:", body, re.MULTILINE)) | set(
+        re.findall(r"^  get (\w+)\(", body, re.MULTILINE)
+    )
 
 
 @pytest.mark.parametrize(("python_class", "node_interfaces", "fields"), SHARED)

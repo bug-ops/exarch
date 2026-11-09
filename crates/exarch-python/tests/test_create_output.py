@@ -99,7 +99,7 @@ def test_raising_progress_callback_does_not_commit(tmp_path, source, error):
         raise error
 
     with pytest.raises(type(error)) as info:
-        exarch.create_archive_with_progress(out, [source], None, progress)
+        exarch.create_archive_with_progress(out, [source], progress=progress)
 
     assert info.value is error
     assert info.value.progress_callback_error is True
@@ -111,7 +111,7 @@ def test_working_progress_callback_still_commits(tmp_path, source):
     out = tmp_path / "out.tar"
     seen = []
 
-    exarch.create_archive_with_progress(out, [source], None, lambda *args: seen.append(args))
+    exarch.create_archive_with_progress(out, [source], progress=lambda *args: seen.append(args))
 
     assert seen
     assert tarfile.is_tarfile(out)

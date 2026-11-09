@@ -204,7 +204,7 @@ export function progressTotals(data: Uint8Array): Promise<unknown>[] {
       // @ts-expect-error total is number | null
       total.toFixed(0)
     }),
-    listArchiveBytesWithProgress(data, null, null, (_err, [, total]) => {
+    listArchiveBytesWithProgress(data, null, null, null, (_err, [, total]) => {
       // @ts-expect-error total is number | null
       total.toFixed(0)
     }),
@@ -231,9 +231,9 @@ export function abortableCalls(data: Uint8Array): Promise<unknown>[] {
     removeEventListener: () => {},
   }
   return [
-    listArchiveBytes(data, null, null, controller.signal),
-    listArchiveBytes(data, null, null, structural),
-    listArchiveBytes(data, null, null, undefined),
+    listArchiveBytes(data, null, null, null, controller.signal),
+    listArchiveBytes(data, null, null, null, structural),
+    listArchiveBytes(data, null, null, null, undefined),
   ]
 }
 

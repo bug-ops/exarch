@@ -9,10 +9,12 @@ use exarch_core::DispositionKind;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::IntegrityGaps;
 use exarch_core::LinkTarget;
+use exarch_core::LinkTargetState;
 use exarch_core::ManifestEntryKind;
 use exarch_core::Skip as CoreSkip;
 use exarch_core::SkipKind;
 use exarch_core::Skips as CoreSkips;
+use exarch_core::UnixTime;
 use exarch_core::VerificationIssue;
 use exarch_core::VerificationReport;
 use pyo3::prelude::*;
@@ -21,7 +23,6 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::UNIX_EPOCH;
 
 use crate::buffer::parse_one;
 use crate::warning::creation_warnings;
@@ -108,10 +109,9 @@ impl PySkips {
 
     #[getter]
     fn counts(&self) -> BTreeMap<&'static str, usize> {
-        SkipKind::ALL
-            .iter()
-            .map(|kind| (kind.as_str(), self.inner.count(*kind)))
-            .filter(|(_, count)| *count > 0)
+        self.inner
+            .counts()
+            .map(|(kind, count)| (kind.as_str(), count))
             .collect()
     }
 
@@ -408,12 +408,9 @@ impl PyArchiveEntry {
 
     #[getter]
     fn modified(&self) -> Option<f64> {
-        self.inner.modified.map(|time| {
-            time.duration_since(UNIX_EPOCH).map_or_else(
-                |before| -before.duration().as_secs_f64(),
-                |after| after.as_secs_f64(),
-            )
-        })
+        self.inner
+            .modified
+            .map(|time| UnixTime::from(time).as_secs_f64())
     }
 
     fn compression_ratio(&self) -> Option<f64> {
@@ -519,52 +516,23 @@ impl PyArchiveEntry {
     }
 }
 
-/// The string form of a link target state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkState {
-    Recorded,
-    Missing,
-    Unread,
-    Unreadable,
-    Oversized,
-}
-
-impl LinkState {
-    #[cfg(test)]
-    pub const ALL: &'static [Self] = &[
-        Self::Recorded,
-        Self::Missing,
-        Self::Unread,
-        Self::Unreadable,
-        Self::Oversized,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Recorded => "recorded",
-            Self::Missing => "missing",
-            Self::Unread => "unread",
-            Self::Unreadable => "unreadable",
-            Self::Oversized => "oversized",
-        }
-    }
-}
-
 /// What listing learned of a link's target; the class tells the `state`.
 ///
 /// `RecordedLinkTarget` has the `path`, `OversizedLinkTarget` the `bytes` of
-/// the target that was too long to keep. A 7z symlink is `UnreadLinkTarget`:
-/// listing does not decode 7z entry data.
+/// the target that was too long to keep. A 7z symlink is `UnreadLinkTarget`
+/// unless the listing was asked to read stored targets.
 #[pyclass(name = "LinkTarget", subclass, frozen)]
-pub struct PyLinkTarget;
+pub struct PyLinkTarget {
+    state: &'static str,
+}
 
 #[pymethods]
 impl PyLinkTarget {
     /// The state of a target this binding has no class for; every known class
     /// overrides it.
-    #[classattr]
-    fn state() -> &'static str {
-        "unknown"
+    #[getter]
+    const fn state(&self) -> &'static str {
+        self.state
     }
 }
 
@@ -578,7 +546,7 @@ pub struct PyRecordedLinkTarget {
 impl PyRecordedLinkTarget {
     #[classattr]
     fn state() -> &'static str {
-        LinkState::Recorded.as_str()
+        LinkTargetState::Recorded.as_str()
     }
 
     #[getter]
@@ -595,7 +563,7 @@ pub struct PyMissingLinkTarget;
 impl PyMissingLinkTarget {
     #[classattr]
     fn state() -> &'static str {
-        LinkState::Missing.as_str()
+        LinkTargetState::Missing.as_str()
     }
 }
 
@@ -607,7 +575,7 @@ pub struct PyUnreadLinkTarget;
 impl PyUnreadLinkTarget {
     #[classattr]
     fn state() -> &'static str {
-        LinkState::Unread.as_str()
+        LinkTargetState::Unread.as_str()
     }
 }
 
@@ -619,7 +587,7 @@ pub struct PyUnreadableLinkTarget;
 impl PyUnreadableLinkTarget {
     #[classattr]
     fn state() -> &'static str {
-        LinkState::Unreadable.as_str()
+        LinkTargetState::Unreadable.as_str()
     }
 }
 
@@ -633,7 +601,7 @@ pub struct PyOversizedLinkTarget {
 impl PyOversizedLinkTarget {
     #[classattr]
     fn state() -> &'static str {
-        LinkState::Oversized.as_str()
+        LinkTargetState::Oversized.as_str()
     }
 
     #[getter]
@@ -644,7 +612,9 @@ impl PyOversizedLinkTarget {
 
 impl PyLinkTarget {
     fn into_py(py: Python<'_>, target: LinkTarget) -> PyResult<Py<Self>> {
-        let init = PyClassInitializer::from(Self);
+        let init = PyClassInitializer::from(Self {
+            state: target.state().as_str(),
+        });
         match target {
             LinkTarget::Recorded(path) => {
                 Bound::new(py, init.add_subclass(PyRecordedLinkTarget { path }))
@@ -1486,6 +1456,21 @@ mod tests {
     }
 
     #[test]
+    fn test_a_time_before_the_epoch_is_negative_seconds() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        pyo3::Python::initialize();
+        let mut entry = ArchiveEntry::new(PathBuf::from("f"), ManifestEntryKind::Directory);
+        entry.modified = Some(UNIX_EPOCH - Duration::from_secs(1000));
+        Python::attach(|py| {
+            let obj = PyArchiveEntry::into_py(py, entry).unwrap().into_bound(py);
+            let modified: f64 = obj.getattr("modified").unwrap().extract().unwrap();
+            assert_eq!(modified, -1000.0);
+        });
+    }
+
+    #[test]
     fn test_every_link_state_gets_its_own_class() {
         use exarch_core::LinkTarget;
 
@@ -1497,9 +1482,9 @@ mod tests {
             LinkTarget::Unreadable,
             LinkTarget::Oversized { bytes: 9 },
         ];
-        assert_eq!(targets.len(), LinkState::ALL.len());
+        assert_eq!(targets.len(), LinkTargetState::ALL.len());
         Python::attach(|py| {
-            for (target, state) in targets.into_iter().zip(LinkState::ALL) {
+            for (target, state) in targets.into_iter().zip(LinkTargetState::ALL) {
                 let obj = PyLinkTarget::into_py(py, target).unwrap();
                 let raised: String = obj.bind(py).getattr("state").unwrap().extract().unwrap();
                 assert_eq!(raised, state.as_str());
@@ -1711,7 +1696,7 @@ mod tests {
                 CreatableFormat::as_str,
             ),
             literal_line("_SkipKind", SkipKind::ALL, SkipKind::as_str),
-            literal_line("_LinkState", LinkState::ALL, LinkState::as_str),
+            literal_line("_LinkState", LinkTargetState::ALL, LinkTargetState::as_str),
             literal_line("_ErrorCode", ErrorCode::ALL, ErrorCode::as_str),
             literal_line("_QuotaSubCode", SubCode::QUOTA_ALL, SubCode::as_str),
             literal_line("_ZipBombSubCode", SubCode::ZIP_BOMB_ALL, SubCode::as_str),
@@ -1725,6 +1710,11 @@ mod tests {
                 "_DecodeReuse",
                 exarch_core::DecodeReuseKind::ALL,
                 exarch_core::DecodeReuseKind::as_str,
+            ),
+            literal_line(
+                "_StoredTargets",
+                exarch_core::StoredTargets::ALL,
+                exarch_core::StoredTargets::as_str,
             ),
         ];
         let flat = flatten_literals(pyi);
@@ -1804,7 +1794,7 @@ mod tests {
             let narrowed = format!("def entry_type(self) -> Literal[\"{}\"]", kind.as_str());
             assert_eq!(pyi.matches(&narrowed).count(), 1, "{kind:?}");
         }
-        for state in LinkState::ALL {
+        for state in LinkTargetState::ALL {
             let narrowed = format!("def state(self) -> Literal[\"{}\"]", state.as_str());
             assert_eq!(pyi.matches(&narrowed).count(), 1, "{state:?}");
         }

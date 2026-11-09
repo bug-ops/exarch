@@ -36,7 +36,7 @@ def test_extract_archive_with_progress_invokes_callback(sample_tar_gz, temp_dir)
     def callback(path: str, total: int, current: int, bytes_written: int) -> None:
         calls.append((path, total, current, bytes_written))
 
-    report = exarch.extract_archive_with_progress(sample_tar_gz, output, None, callback)
+    report = exarch.extract_archive_with_progress(sample_tar_gz, output, progress=callback)
 
     assert report.files_extracted >= 1
     assert calls, "progress callback was never invoked"
@@ -47,7 +47,7 @@ def test_extract_archive_with_progress_without_callback(sample_tar_gz, temp_dir)
     output = temp_dir / "output"
     output.mkdir()
 
-    report = exarch.extract_archive_with_progress(sample_tar_gz, output, None, None)
+    report = exarch.extract_archive_with_progress(sample_tar_gz, output, progress=None)
 
     assert report.files_extracted >= 1
 
@@ -60,7 +60,7 @@ def test_create_archive_with_progress_without_callback(temp_dir):
 
     archive = temp_dir / "output.tar.gz"
 
-    report = exarch.create_archive_with_progress(archive, [src_dir], None, None)
+    report = exarch.create_archive_with_progress(archive, [src_dir], progress=None)
 
     assert report.files_added >= 1
     assert archive.exists()
@@ -84,7 +84,7 @@ def test_extract_archive_with_progress_callback_error_propagates(sample_tar_gz, 
         raise RuntimeError("callback aborted")
 
     with pytest.raises(RuntimeError, match="callback aborted") as exc_info:
-        exarch.extract_archive_with_progress(sample_tar_gz, output, None, callback)
+        exarch.extract_archive_with_progress(sample_tar_gz, output, progress=callback)
 
     assert len(calls) == 1, "progress must not be invoked again after it raised"
 
@@ -110,7 +110,7 @@ def test_create_archive_with_progress_callback_error_propagates(temp_dir):
         raise ValueError("callback aborted")
 
     with pytest.raises(ValueError, match="callback aborted") as exc_info:
-        exarch.create_archive_with_progress(archive, [src_dir], None, callback)
+        exarch.create_archive_with_progress(archive, [src_dir], progress=callback)
 
     assert len(calls) == 1, "progress must not be invoked again after it raised"
 
@@ -145,7 +145,7 @@ def test_raising_callback_stops_extraction_before_the_next_entry(temp_dir):
             raise RuntimeError("stop")
 
     with pytest.raises(RuntimeError, match="stop") as info:
-        exarch.extract_archive_with_progress(archive, output, None, callback)
+        exarch.extract_archive_with_progress(archive, output, progress=callback)
 
     assert seen == ["a.txt", "b.txt"]
     assert info.value.progress_callback_error is True
@@ -165,7 +165,7 @@ def test_raising_callback_under_atomic_rolls_the_output_back(temp_dir):
             raise RuntimeError("stop")
 
     with pytest.raises(RuntimeError, match="stop") as info:
-        exarch.extract_archive_with_progress(archive, output, None, callback, options)
+        exarch.extract_archive_with_progress(archive, output, options=options, progress=callback)
 
     assert info.value.progress_callback_error is True
     assert info.value.writes == "rolled_back"
@@ -185,7 +185,7 @@ def test_raising_callback_under_atomic_replace_keeps_the_original_destination(te
             raise RuntimeError("stop")
 
     with pytest.raises(RuntimeError, match="stop") as info:
-        exarch.extract_archive_with_progress(archive, output, None, callback, options)
+        exarch.extract_archive_with_progress(archive, output, options=options, progress=callback)
 
     assert info.value.progress_callback_error is True
     assert info.value.writes == "rolled_back"
@@ -213,13 +213,13 @@ def test_progress_variants_do_not_hold_a_borrow_of_the_config(temp_dir):
 
     output = temp_dir / "output"
     output.mkdir()
-    exarch.extract_archive_with_progress(archive, output, config, callback)
+    exarch.extract_archive_with_progress(archive, output, config, progress=callback)
     assert errors == []
     assert config.max_file_size == 1024
 
     errors.clear()
     with open(archive, "rb") as handle:
-        exarch.extract_archive_to_memory_with_progress(handle.read(), config, callback)
+        exarch.extract_archive_to_memory_with_progress(handle.read(), config, progress=callback)
     assert errors == []
 
     errors.clear()
@@ -240,7 +240,7 @@ def test_progress_variants_do_not_hold_a_borrow_of_the_config(temp_dir):
         worker.start()
         worker.join()
 
-    exarch.create_archive_with_progress(created, [source], creation, creation_callback)
+    exarch.create_archive_with_progress(created, [source], creation, progress=creation_callback)
     assert errors == []
     assert creation.compression_level == 3
 
@@ -277,7 +277,7 @@ def test_other_threads_run_while_a_progress_extraction_decodes(temp_dir):
     interval = sys.getswitchinterval()
     sys.setswitchinterval(1000)
     try:
-        exarch.extract_archive_with_progress(archive, output, config, callback)
+        exarch.extract_archive_with_progress(archive, output, config, progress=callback)
     finally:
         sys.setswitchinterval(interval)
         gate.set()
@@ -302,7 +302,7 @@ def test_a_callback_raising_after_a_finished_extraction_carries_the_whole_report
             raise RuntimeError("late")
 
     with pytest.raises(RuntimeError, match="late") as info:
-        exarch.extract_archive_with_progress(archive, output, None, callback)
+        exarch.extract_archive_with_progress(archive, output, progress=callback)
 
     err = info.value
     assert err.progress_callback_error is True

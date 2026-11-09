@@ -79,7 +79,7 @@ def test_memory_progress_reports_every_entry(source_tree, format):
     calls = []
 
     result = exarch.extract_archive_to_memory_with_progress(
-        data, None, lambda *args: calls.append(args)
+        data, progress=lambda *args: calls.append(args)
     )
 
     plain = exarch.extract_archive_to_memory(data)
@@ -111,7 +111,7 @@ def test_raising_callback_surfaces_and_discards_entries(tar_gz_bytes):
         raise RuntimeError("callback failed")
 
     with pytest.raises(RuntimeError, match="callback failed") as info:
-        exarch.extract_archive_to_memory_with_progress(tar_gz_bytes, None, boom)
+        exarch.extract_archive_to_memory_with_progress(tar_gz_bytes, progress=boom)
 
     assert len(calls) == 1
     assert info.value.progress_callback_error is True
@@ -124,7 +124,7 @@ def test_raising_callback_does_not_mask_core_error(tar_gz_bytes):
         raise RuntimeError("callback failed")
 
     with pytest.raises(exarch.QuotaExceededError) as info:
-        exarch.extract_archive_to_memory_with_progress(tar_gz_bytes, None, boom, max_bytes=10)
+        exarch.extract_archive_to_memory_with_progress(tar_gz_bytes, progress=boom, max_bytes=10)
 
     assert isinstance(info.value.__cause__, RuntimeError)
 
@@ -132,8 +132,8 @@ def test_raising_callback_does_not_mask_core_error(tar_gz_bytes):
 @pytest.mark.parametrize(
     "call",
     [
-        lambda data, progress: exarch.list_archive_bytes_with_progress(data, None, progress),
-        lambda data, progress: exarch.verify_archive_bytes_with_progress(data, None, progress),
+        lambda data, progress: exarch.list_archive_bytes_with_progress(data, progress=progress),
+        lambda data, progress: exarch.verify_archive_bytes_with_progress(data, progress=progress),
     ],
     ids=["list", "verify"],
 )

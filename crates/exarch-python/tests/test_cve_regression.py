@@ -387,7 +387,7 @@ def test_progress_bytes_written_not_stale(temp_dir):
         if name not in entry_start_bytes:
             entry_start_bytes[name] = bytes_written
 
-    exarch.create_archive_with_progress(archive, [src_dir], None, callback)
+    exarch.create_archive_with_progress(archive, [src_dir], progress=callback)
 
     assert "small.txt" in entry_start_bytes, "callback never fired for small.txt"
     assert "large.txt" in entry_start_bytes, "callback never fired for large.txt"

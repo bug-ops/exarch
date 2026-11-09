@@ -176,7 +176,7 @@ describe('extractArchiveToMemoryWithProgress', () => {
   for (const [name, call, errorMessage] of [
     [
       'listArchiveBytesWithProgress',
-      (progress, data = archive) => listArchiveBytesWithProgress(data, null, null, progress),
+      (progress, data = archive) => listArchiveBytesWithProgress(data, null, null, null, progress),
       'listing',
     ],
     [
@@ -245,7 +245,7 @@ describe('extractArchiveToMemoryWithProgress', () => {
     const boom = new Error('boom from progress callback');
 
     await assert.rejects(
-      listArchiveBytesWithProgress(Buffer.from('not an archive'), null, null, () => {
+      listArchiveBytesWithProgress(Buffer.from('not an archive'), null, null, null, () => {
         throw boom;
       }),
       (err) => {

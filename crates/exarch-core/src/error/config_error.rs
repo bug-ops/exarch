@@ -101,6 +101,8 @@ closed_enum! {
         EntryExclude => "entry_exclude",
         /// The number of leading path components stripped from entries.
         StripComponents => "strip_components",
+        /// `ListOptions::stored_targets`.
+        StoredTargets => "stored_targets",
     }
 }
 
@@ -152,6 +154,7 @@ impl ConfigSetting {
             Self::EntryInclude => "entry include pattern",
             Self::EntryExclude => "entry exclude pattern",
             Self::StripComponents => "strip components",
+            Self::StoredTargets => "stored targets",
             Self::MaxFileSize
             | Self::MaxTotalSize
             | Self::MaxFileCount

@@ -64,7 +64,7 @@ def test_tar_progress_total_is_none_and_zip_total_is_known(tmp_path, source):
         calls = []
 
         exarch.extract_archive_with_progress(
-            out, tmp_path / f"x-{format}", None, lambda *args: calls.append(args)
+            out, tmp_path / f"x-{format}", progress=lambda *args: calls.append(args)
         )
 
         assert calls

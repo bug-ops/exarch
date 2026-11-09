@@ -296,9 +296,9 @@ pub struct AllowedFeatures {
     /// Allow Windows reserved device names (`CON`, `NUL`, `COM1`, ...) as path
     /// components.
     ///
-    /// Only consulted when extracting on Windows; has no effect elsewhere.
-    /// There is no CLI or binding opt-out, and the permissive preset does not
-    /// enable it.
+    /// On-disk extraction checks these names only on Windows; the portable path
+    /// model (in-memory and callback extraction) checks them on every host.
+    /// The CLI has no opt-out, and the permissive preset does not enable it.
     pub windows_reserved_names: Admit,
 }
 
@@ -901,7 +901,7 @@ pub struct SecurityConfig {
     ///   the header's own size and the entry cap.
     ///
     /// Other codecs are bounded by their format (bzip2 blocks of at most
-    /// 900 KB). Not exposed through the CLI or language bindings.
+    /// 900 KB). Exposed by both bindings, not by the CLI.
     ///
     /// Default: 256 MiB (268,435,456 bytes)
     pub max_decoder_memory: NonZeroU64,
@@ -919,7 +919,7 @@ pub struct SecurityConfig {
     /// member. A gzip or bzip2 stream averaging less than that over large
     /// outputs must raise this value. Applies to `extract`, `list` and
     /// `verify` of `.tar.gz` and `.tar.bz2`; xz and zstd are not governed by
-    /// it. Not exposed through the CLI or language bindings.
+    /// it. Exposed by both bindings, not by the CLI.
     ///
     /// Default: 10,000 (100,000 for [`SecurityConfig::permissive`])
     pub compressed_member_allowance: NonZeroU64,
@@ -1198,7 +1198,9 @@ impl SecurityConfig {
     }
 
     /// Enables or disables Windows reserved device names (`CON`, `NUL`,
-    /// `COM1`, ...) as path components. Only consulted on Windows.
+    /// `COM1`, ...) as path components. On-disk extraction checks the names
+    /// only on Windows; the portable path model (in-memory and callback
+    /// extraction) checks them on every host.
     ///
     /// # Examples
     ///

@@ -1507,6 +1507,25 @@ mod narrowing {
     }
 
     #[test]
+    fn a_vanished_destination_with_a_failed_publish_reports_no_narrowing() {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let output = parent.join("dest");
+        let destination = AtomicDestination::resolve(&output).unwrap();
+        let mut staging =
+            StagingDir::create(&destination.pin, &destination.parent, Seed::Absent).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join("late"), b"x").unwrap();
+        let mut report = ExtractionReport::new();
+
+        let error =
+            publish_adopted(&mut staging, &destination, None, &output, &mut report).unwrap_err();
+
+        assert_matches!(error, ArchiveError::OutputExists { .. });
+        assert!(reasons(&report).is_empty(), "{:?}", reasons(&report));
+    }
+
+    #[test]
     fn an_unnarrowed_publication_records_nothing() {
         let me = own();
         let adoption = Adoption::for_test(0o755, me.uid, me.gid, Claim::Full);

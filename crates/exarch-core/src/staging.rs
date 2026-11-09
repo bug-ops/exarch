@@ -477,7 +477,7 @@ fn publish_adopted(
     output_dir: &Path,
     report: &mut ExtractionReport,
 ) -> Result<()> {
-    let adopted = if let Some(adoption) = adoption {
+    let (adopted, vanished) = if let Some(adoption) = adoption {
         let root = staging.adopt(adoption).map_err(|e| {
             ArchiveError::Io(io_context(
                 &e,
@@ -485,7 +485,7 @@ fn publish_adopted(
                 output_dir,
             ))
         })?;
-        Some(root)
+        (Some(root), None)
     } else {
         let withheld = staging.vanished_reason().map_err(|e| {
             ArchiveError::Io(io_context(
@@ -494,8 +494,7 @@ fn publish_adopted(
                 output_dir,
             ))
         })?;
-        report.record_narrowing(destination_vanished(withheld));
-        None
+        (None, Some(destination_vanished(withheld)))
     };
     let published = staging
         .publish(&destination.name)
@@ -511,6 +510,9 @@ fn publish_adopted(
                 output_dir,
             )),
         })?;
+    if let Some(vanished) = vanished {
+        report.record_narrowing(vanished);
+    }
     if let Some(root) = adopted {
         report.record_narrowing(root.finish(published));
     }

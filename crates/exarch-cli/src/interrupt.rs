@@ -13,15 +13,20 @@
 //!
 //! A first signal while armed stops the run at the next poll and the process
 //! exits with [`ExitStatus::Interrupted`] (SIGINT) or
-//! [`ExitStatus::Terminated`] (SIGTERM). A second signal gives up waiting and
-//! exits at once with the same status; under `--json` it writes a minimal
-//! `Cancelled` error document to stdout first, so the one-document contract
-//! holds, and otherwise a hint on stderr naming what the run left behind.
+//! [`ExitStatus::Terminated`] (SIGTERM); a stop that lands after the last poll
+//! lets the run finish, report its result, and then end the same way. A second
+//! signal gives up waiting; under `--json` it writes a minimal `Cancelled`
+//! error document to stdout first, so the one-document contract holds, and
+//! otherwise a hint on stderr naming what the run left behind. Both stops end
+//! the process by the signal itself on Unix, so a parent sees a signal death
+//! (`$?` reads 130 or 143); Windows has no such death and exits 130.
 //!
 //! SIGHUP is deliberately not handled: a `nohup`-ed run ignores it, and
 //! handling it here would override that. A disposition inherited as ignored
 //! cannot be detected without `unsafe`, so SIGINT or SIGTERM that the parent
-//! ignored is still turned into a cancel.
+//! ignored is still turned into a cancel while the window is armed, and a
+//! signal after the window closes still ends the process (a known limitation,
+//! tracked in #1109).
 //!
 //! Core polls at entry boundaries and every few MiB inside one entry's copy,
 //! and the `extract` pre-extraction listing polls per entry, so the first
@@ -32,15 +37,19 @@
 //! signals, so nothing is installed there.
 
 #[cfg(not(target_os = "wasi"))]
+use crate::error::Part;
+#[cfg(not(target_os = "wasi"))]
 use crate::exit::ExitStatus;
 #[cfg(not(target_os = "wasi"))]
 use crate::operation::Operation;
 use crate::output::OutputMode;
-#[cfg(not(target_os = "wasi"))]
-use crate::output::terminal::host_path_text;
 use exarch_core::EntryPosition;
 use exarch_core::NoopProgress;
 use exarch_core::ProgressCallback;
+#[cfg(not(target_os = "wasi"))]
+use exarch_core::StagedOutputKind;
+#[cfg(not(target_os = "wasi"))]
+use exarch_core::StagingPlace;
 use std::path::Path;
 #[cfg(not(target_os = "wasi"))]
 use std::path::PathBuf;
@@ -152,70 +161,116 @@ impl Run {
             Self::ExtractInPlace | Self::ExtractAtomic | Self::ExtractReplace => Operation::Extract,
         }
     }
+
+    /// What core stages for this run, which decides how its place resolves.
+    #[cfg(not(target_os = "wasi"))]
+    const fn staged_kind(self) -> StagedOutputKind {
+        match self {
+            Self::Create => StagedOutputKind::File,
+            Self::ExtractInPlace | Self::ExtractAtomic | Self::ExtractReplace => {
+                StagedOutputKind::Directory
+            }
+        }
+    }
 }
 
 /// What the forced exit tells the user to look for.
 ///
-/// `.exarch-backup-*` holds the only copy of the original destination between
+/// The backup entry holds the only copy of the original destination between
 /// the moment an atomic replace moves it aside and the moment the new content
 /// takes its place, so it is named apart from the staging entries that are safe
-/// to delete, and only for the run that makes one. `place` is the directory
-/// the staging entries are created in.
+/// to delete, and only for the run that makes one. `place` is where core
+/// created the entries, when it could be resolved: the hint then names that
+/// directory and the path the backup is renamed back to; otherwise it names
+/// only `output`.
 #[cfg(not(target_os = "wasi"))]
-fn forced_exit_hint(output: &Path, place: &Path, run: Run) -> String {
-    let place = host_path_text(place);
-    let output = host_path_text(output);
+fn forced_exit_hint(output: &Path, place: Option<&StagingPlace>, run: Run) -> Vec<Part> {
+    let staged = Part::Text(format!("{}*", exarch_core::STAGING_PREFIX));
+    let location = place.map_or_else(
+        || [Part::Lit(" next to "), Part::Path(output.to_path_buf())],
+        |place| [Part::Lit(" in "), Part::Path(place.parent().to_path_buf())],
+    );
+    let mut parts = vec![Part::Lit("interrupted again, stopping at once; ")];
     match run {
-        Run::Create => format!(
-            "interrupted again, stopping at once; an unfinished temporary file named .exarch-* \
-             may remain in {place}: remove it"
-        ),
-        Run::ExtractInPlace => format!(
-            "interrupted again, stopping at once; entries already extracted into {output} \
-             remain, or, for a destination that did not exist, an unfinished staging directory \
-             named .exarch-* may remain in {place}: remove it"
-        ),
-        Run::ExtractAtomic => format!(
-            "interrupted again, stopping at once; an unfinished staging directory named \
-             .exarch-* may remain in {place}: remove it"
-        ),
-        Run::ExtractReplace => format!(
-            "interrupted again, stopping at once; unfinished staging entries named .exarch-* may \
-             remain in {place}: remove them, but if {output} is missing, rename the \
-             .exarch-backup-* entry there back to {output} first, since it holds the original"
-        ),
+        Run::Create => parts.extend([
+            Part::Lit("an unfinished temporary file named "),
+            staged,
+            Part::Lit(" may remain"),
+        ]),
+        Run::ExtractInPlace => parts.extend([
+            Part::Lit("entries already extracted into "),
+            Part::Path(output.to_path_buf()),
+            Part::Lit(
+                " remain, or, for a destination that did not exist, an unfinished staging \
+                 directory named ",
+            ),
+            staged,
+            Part::Lit(" may remain"),
+        ]),
+        Run::ExtractAtomic => parts.extend([
+            Part::Lit("an unfinished staging directory named "),
+            staged,
+            Part::Lit(" may remain"),
+        ]),
+        Run::ExtractReplace => parts.extend([
+            Part::Lit("unfinished staging entries named "),
+            staged,
+            Part::Lit(" may remain"),
+        ]),
     }
-}
-
-/// The directory core stages `output`'s run in: the parent of the absolute
-/// path, so a destination spelled `.` names the directory above the working
-/// directory, where its staging entry really is.
-#[cfg(not(target_os = "wasi"))]
-fn staging_place(output: &Path) -> PathBuf {
-    let absolute = std::path::absolute(output).unwrap_or_else(|_| output.to_path_buf());
-    absolute
-        .parent()
-        .map_or_else(|| absolute.clone(), Path::to_path_buf)
+    parts.extend(location);
+    if run == Run::ExtractReplace {
+        let target = place.map_or_else(|| output.to_path_buf(), StagingPlace::target);
+        parts.extend([
+            Part::Lit(": remove them, but if "),
+            Part::Path(target.clone()),
+            Part::Lit(" is missing, rename the "),
+            Part::Text(format!("{}*", exarch_core::BACKUP_PREFIX)),
+            Part::Lit(" entry there back to "),
+            Part::Path(target),
+            Part::Lit(" first, since it holds the original"),
+        ]);
+    } else {
+        parts.push(Part::Lit(": remove it"));
+    }
+    parts
 }
 
 /// What a forced exit does once the armed window has seen a second request.
+///
+/// `place` is resolved when the window opens, before core renames anything: a
+/// destination spelled `a/b/..` stops resolving once a replace moves `a`
+/// aside.
 #[cfg(not(target_os = "wasi"))]
 #[derive(Debug)]
 struct Armed {
-    hint: String,
-    operation: Operation,
+    output: PathBuf,
+    run: Run,
     mode: OutputMode,
+    place: Option<StagingPlace>,
+}
+
+/// The armed state of one window, shared between the guard that opens it and
+/// the signal thread that reads it.
+#[cfg(not(target_os = "wasi"))]
+#[derive(Debug)]
+struct Window(std::sync::Mutex<Option<Armed>>);
+
+#[cfg(not(target_os = "wasi"))]
+impl Window {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Armed>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 #[cfg(not(target_os = "wasi"))]
-static ARMED: std::sync::Mutex<Option<Armed>> = std::sync::Mutex::new(None);
-
-#[cfg(not(target_os = "wasi"))]
-fn armed() -> std::sync::MutexGuard<'static, Option<Armed>> {
-    ARMED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+static WINDOW: Window = Window::new();
 
 /// The armed window of a staged run: while it lives, a stop request cancels
 /// the run; once it is dropped, the default action applies again.
@@ -228,15 +283,11 @@ fn armed() -> std::sync::MutexGuard<'static, Option<Armed>> {
 #[derive(Debug)]
 pub struct InterruptGuard {
     interrupt: &'static Interrupt,
+    #[cfg(not(target_os = "wasi"))]
+    window: &'static Window,
 }
 
 impl InterruptGuard {
-    const fn armed() -> Self {
-        Self {
-            interrupt: &INTERRUPT,
-        }
-    }
-
     /// Wraps `inner` so that a requested stop cancels the run it reports on.
     pub fn watch(&self, inner: Box<dyn ProgressCallback>) -> Interruptible {
         Interruptible::watching(inner, self.interrupt)
@@ -253,15 +304,20 @@ impl Drop for InterruptGuard {
     fn drop(&mut self) {
         #[cfg(not(target_os = "wasi"))]
         {
-            *armed() = None;
+            *self.window.lock() = None;
         }
     }
 }
 
 /// What a stop request does outside an armed window: the default action, so
 /// the process ends as it would have without this module.
+///
+/// A signal that was inherited as ignored is still ended here, because
+/// telling the two apart needs a scoped `sigaction` query.
 #[cfg(not(target_os = "wasi"))]
 fn terminate_by_default(stop: Stop) -> ! {
+    // TODO(#1109): leave a signal inherited as ignored alone (needs a scoped
+    // sigaction query)
     #[cfg(unix)]
     {
         // A terminating signal ends the process here, or aborts when the
@@ -270,7 +326,7 @@ fn terminate_by_default(stop: Stop) -> ! {
         // not terminate.
         let _ = signal_hook::low_level::emulate_default_handler(stop.raw_signal());
     }
-    std::process::exit(i32::from(ExitStatus::from(stop) as u8))
+    std::process::exit(ExitStatus::from(stop).code())
 }
 
 /// Ends the process of a run that stopped on a request the way the request
@@ -291,24 +347,12 @@ pub fn finish_by_signal() {
 #[cfg(not(target_os = "wasi"))]
 const FORCED_EXIT_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Whether the report of a forced exit reached the stream.
-#[cfg(not(target_os = "wasi"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Delivery {
-    /// The write returned within the budget, successfully or not.
-    Written,
-    /// The write did not return within the budget, or no thread could be
-    /// started to attempt it.
-    Abandoned,
-}
-
 /// Runs `write` on a detached thread and waits at most `budget` for it to
 /// return, so a write blocked on a full pipe cannot keep the process alive.
-/// The thread is left behind when the budget runs out; the caller exits the
-/// process next, which ends it. Production ignores the returned [`Delivery`];
-/// it exists so tests can observe the outcome.
+/// The thread is left behind when the budget runs out; the caller ends the
+/// process next, which ends it.
 #[cfg(not(target_os = "wasi"))]
-fn deliver_within(budget: std::time::Duration, write: impl FnOnce() + Send + 'static) -> Delivery {
+fn deliver_within(budget: std::time::Duration, write: impl FnOnce() + Send + 'static) {
     let (done, finished) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("exarch-forced-exit".to_owned())
@@ -316,14 +360,45 @@ fn deliver_within(budget: std::time::Duration, write: impl FnOnce() + Send + 'st
             write();
             let _ = done.send(());
         });
-    match spawned {
-        Ok(_) if finished.recv_timeout(budget).is_ok() => Delivery::Written,
-        _ => Delivery::Abandoned,
+    if spawned.is_ok() {
+        let _ = finished.recv_timeout(budget);
     }
 }
 
-/// Gives up waiting for the run: reports what it leaves and exits with the
-/// status of the stop.
+/// Writes the report of a forced exit and flushes both streams: the one
+/// `--json` document on stdout, or the hint on stderr.
+///
+/// A place that could not be resolved when the window opened, because core had
+/// not created the parent yet, is resolved again here.
+#[cfg(not(target_os = "wasi"))]
+fn write_forced_report(armed: &Armed) {
+    use crate::output::emit_line;
+    use std::io::Write as _;
+
+    let place = armed
+        .place
+        .clone()
+        .or_else(|| exarch_core::staging_place(&armed.output, armed.run.staged_kind()).ok());
+    let hint = forced_exit_hint(&armed.output, place.as_ref(), armed.run);
+    // A closed stdout or stderr must not stop the exit.
+    match armed.mode {
+        OutputMode::Json => {
+            let hint = crate::error::raw(&hint);
+            if let Ok(document) = crate::output::forced_exit_envelope(armed.run.operation(), &hint)
+            {
+                let _ = emit_line(&mut std::io::stdout(), format_args!("{document}"));
+            }
+        }
+        OutputMode::Human(_) => {
+            let _ = writeln!(std::io::stderr(), "{}", crate::error::terminal(&hint));
+        }
+    }
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+}
+
+/// Gives up waiting for the run: reports what it leaves and ends the process
+/// by the signal, like the graceful stop.
 ///
 /// The report is written on a detached thread and abandoned after
 /// [`FORCED_EXIT_WRITE_BUDGET`], so a full stdout or stderr pipe cannot hang
@@ -332,35 +407,14 @@ fn deliver_within(budget: std::time::Duration, write: impl FnOnce() + Send + 'st
 /// `PIPE_BUF` (512 bytes on macOS, 4096 on Linux) can leave a partial line.
 /// The exit status is the contract; the report is best effort.
 ///
-/// `process::exit` still runs std's stdout cleanup, which flushes a line the
-/// interrupted thread left buffered when the stdout lock is free, and that
-/// flush can block on a full pipe. The path is narrow, since the CLI writes
-/// whole lines, and a lock held by an abandoned writer makes the cleanup skip
-/// the flush. A `_exit`-style exit would avoid it, but it would need a scoped
-/// `unsafe` module; it is not worth that surface for a path this narrow.
+/// Both streams are flushed before the process ends, since a signal death
+/// skips std's exit cleanup.
 #[cfg(not(target_os = "wasi"))]
-fn forced_exit(armed: &Armed, stop: Stop) -> ! {
-    use crate::output::emit_line;
-    use std::io::Write as _;
-
-    // A closed stdout or stderr must not stop the exit below.
-    match armed.mode {
-        OutputMode::Json => {
-            if let Ok(document) = crate::output::forced_exit_envelope(armed.operation, &armed.hint)
-            {
-                deliver_within(FORCED_EXIT_WRITE_BUDGET, move || {
-                    let _ = emit_line(&mut std::io::stdout(), format_args!("{document}"));
-                });
-            }
-        }
-        OutputMode::Human(_) => {
-            let hint = armed.hint.clone();
-            deliver_within(FORCED_EXIT_WRITE_BUDGET, move || {
-                let _ = writeln!(std::io::stderr(), "{hint}");
-            });
-        }
-    }
-    std::process::exit(i32::from(ExitStatus::from(stop) as u8))
+fn forced_exit(armed: Armed, stop: Stop) -> ! {
+    deliver_within(FORCED_EXIT_WRITE_BUDGET, move || {
+        write_forced_report(&armed);
+    });
+    terminate_by_default(stop)
 }
 
 /// The stop that decides the exit status: the first request, not the latest.
@@ -371,12 +425,19 @@ fn decided(interrupt: &Interrupt, latest: Stop) -> Stop {
 
 #[cfg(not(target_os = "wasi"))]
 fn on_stop(stop: Stop) {
-    let window = armed();
+    let window = WINDOW.lock();
     let Some(armed) = window.as_ref() else {
         drop(window);
         terminate_by_default(stop);
     };
     if INTERRUPT.request(stop) == Signal::Repeated {
+        let armed = Armed {
+            output: armed.output.clone(),
+            run: armed.run,
+            mode: armed.mode,
+            place: armed.place.clone(),
+        };
+        drop(window);
         forced_exit(armed, decided(&INTERRUPT, stop));
     }
 }
@@ -411,32 +472,43 @@ fn register(handler: fn(Stop)) -> std::io::Result<()> {
 /// and the default signal action stays.
 #[cfg(not(target_os = "wasi"))]
 pub fn install(output: &Path, run: Run, mode: OutputMode) -> InterruptGuard {
+    use std::io::Write as _;
+
     static REGISTERED: std::sync::Once = std::sync::Once::new();
 
-    let guard = arm(output, run, mode);
+    let guard = arm(&WINDOW, output, run, mode);
     REGISTERED.call_once(|| {
         if let Err(error) = register(on_stop) {
-            eprintln!("warning: cannot install the interrupt handler: {error}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: cannot install the interrupt handler: {error}"
+            );
         }
     });
     guard
 }
 
-/// Opens the armed window without touching the process's signal handlers.
+/// Opens `window` without touching the process's signal handlers.
 #[cfg(not(target_os = "wasi"))]
-fn arm(output: &Path, run: Run, mode: OutputMode) -> InterruptGuard {
-    *armed() = Some(Armed {
-        hint: forced_exit_hint(output, &staging_place(output), run),
-        operation: run.operation(),
+fn arm(window: &'static Window, output: &Path, run: Run, mode: OutputMode) -> InterruptGuard {
+    *window.lock() = Some(Armed {
+        output: output.to_path_buf(),
+        run,
         mode,
+        place: exarch_core::staging_place(output, run.staged_kind()).ok(),
     });
-    InterruptGuard::armed()
+    InterruptGuard {
+        interrupt: &INTERRUPT,
+        window,
+    }
 }
 
 /// WASI has no signals; there is nothing to arm.
 #[cfg(target_os = "wasi")]
 pub const fn install(_output: &Path, _run: Run, _mode: OutputMode) -> InterruptGuard {
-    InterruptGuard::armed()
+    InterruptGuard {
+        interrupt: &INTERRUPT,
+    }
 }
 
 /// Wraps a reporter so that a requested stop cancels the run.
@@ -500,33 +572,44 @@ mod tests {
     }
 
     #[cfg(not(target_os = "wasi"))]
+    fn flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    #[cfg(not(target_os = "wasi"))]
     #[test]
-    fn a_write_that_returns_is_delivered() {
-        let budget = std::time::Duration::from_secs(5);
-        assert_eq!(deliver_within(budget, || {}), Delivery::Written);
+    fn a_write_that_returns_has_happened_when_delivery_returns() {
+        let written = flag();
+        let seen = std::sync::Arc::clone(&written);
+        deliver_within(std::time::Duration::from_secs(5), move || {
+            seen.store(true, Ordering::SeqCst);
+        });
+        assert!(written.load(Ordering::SeqCst));
     }
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
     fn a_write_that_never_returns_is_abandoned_after_the_budget() {
-        let budget = std::time::Duration::from_millis(50);
+        let written = flag();
+        let seen = std::sync::Arc::clone(&written);
         let started = std::time::Instant::now();
-        let delivery = deliver_within(budget, || {
+        deliver_within(std::time::Duration::from_millis(50), move || {
             let (_keep, never) = std::sync::mpsc::channel::<()>();
             let _ = never.recv();
+            seen.store(true, Ordering::SeqCst);
         });
-        assert_eq!(delivery, Delivery::Abandoned);
+        assert!(!written.load(Ordering::SeqCst));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
-    fn a_writer_that_panics_is_abandoned() {
-        let budget = std::time::Duration::from_secs(5);
-        assert_eq!(
-            deliver_within(budget, || panic!("write failed")),
-            Delivery::Abandoned
-        );
+    fn a_writer_that_panics_does_not_hold_up_delivery() {
+        let started = std::time::Instant::now();
+        deliver_within(std::time::Duration::from_secs(30), || {
+            panic!("write failed")
+        });
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[cfg(unix)]
@@ -562,11 +645,14 @@ mod tests {
             );
         }
 
+        let finished = flag();
+        let seen = Arc::clone(&finished);
         let started = std::time::Instant::now();
-        let delivery = deliver_within(std::time::Duration::from_millis(100), move || {
+        deliver_within(std::time::Duration::from_millis(100), move || {
             let _ = blocked.write_all(&[0; 4096]);
+            seen.store(true, Ordering::SeqCst);
         });
-        assert_eq!(delivery, Delivery::Abandoned);
+        assert!(!finished.load(Ordering::SeqCst));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         drop(reader);
     }
@@ -591,40 +677,74 @@ mod tests {
     }
 
     #[cfg(not(target_os = "wasi"))]
+    fn hint_text(output: &str, place: Option<&StagingPlace>, run: Run) -> String {
+        crate::error::raw(&forced_exit_hint(Path::new(output), place, run))
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[allow(clippy::expect_used)]
+    fn place_of(output: &Path, run: Run) -> StagingPlace {
+        exarch_core::staging_place(output, run.staged_kind()).expect("resolve the place")
+    }
+
+    #[cfg(not(target_os = "wasi"))]
     #[test]
+    #[allow(clippy::expect_used)]
     fn only_a_replace_names_the_backup() {
-        let place = Path::new("/work");
-        let replace = forced_exit_hint(Path::new("/work/out"), place, Run::ExtractReplace);
-        assert!(replace.contains("in /work:"), "{replace}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out");
+        let place = place_of(&output, Run::ExtractReplace);
+        let backup = format!("{}*", exarch_core::BACKUP_PREFIX);
+        let target = place.target().display().to_string();
+        let replace = crate::error::raw(&forced_exit_hint(
+            &output,
+            Some(&place),
+            Run::ExtractReplace,
+        ));
         assert!(
-            replace.contains("rename the .exarch-backup-* entry"),
+            replace.contains(&format!("rename the {backup} entry")),
+            "{replace}"
+        );
+        assert!(
+            replace.contains(&format!("back to {target} first")),
+            "{replace}"
+        );
+        assert!(
+            replace.contains(&format!("in {}:", place.parent().display())),
             "{replace}"
         );
         for run in [Run::Create, Run::ExtractInPlace, Run::ExtractAtomic] {
-            let hint = forced_exit_hint(Path::new("/work/out"), place, run);
+            let hint = crate::error::raw(&forced_exit_hint(&output, Some(&place), run));
             assert!(!hint.contains("backup"), "{run:?}: {hint}");
         }
     }
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
+    #[allow(clippy::expect_used)]
     fn each_run_names_what_it_leaves() {
-        let place = Path::new("/work");
-        let create = forced_exit_hint(Path::new("/work/o.tar"), place, Run::Create);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out");
+        let staged = format!("{}*", exarch_core::STAGING_PREFIX);
+        let place = place_of(&output, Run::ExtractAtomic);
+        let parent = place.parent().display().to_string();
+        let output = output.display().to_string();
+
+        let create = hint_text(&output, Some(&place), Run::Create);
         assert!(
-            create.contains("temporary file named .exarch-*"),
+            create.contains(&format!("temporary file named {staged}")),
             "{create}"
         );
-        assert!(create.contains("in /work:"), "{create}");
-        let atomic = forced_exit_hint(Path::new("/work/out"), place, Run::ExtractAtomic);
+        assert!(create.contains(&format!("in {parent}:")), "{create}");
+        let atomic = hint_text(&output, Some(&place), Run::ExtractAtomic);
         assert!(
-            atomic.contains("staging directory named .exarch-*"),
+            atomic.contains(&format!("staging directory named {staged}")),
             "{atomic}"
         );
-        let in_place = forced_exit_hint(Path::new("/work/out"), place, Run::ExtractInPlace);
-        assert!(in_place.contains("/work/out"), "{in_place}");
+        let in_place = hint_text(&output, Some(&place), Run::ExtractInPlace);
+        assert!(in_place.contains(&output), "{in_place}");
         assert!(
-            in_place.contains("staging directory named .exarch-*"),
+            in_place.contains(&format!("staging directory named {staged}")),
             "{in_place}"
         );
         assert!(!in_place.contains("backup"), "{in_place}");
@@ -632,25 +752,55 @@ mod tests {
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
+    fn an_unresolved_place_names_only_the_output() {
+        let hint = hint_text("out", None, Run::ExtractReplace);
+        assert!(hint.contains("next to out"), "{hint}");
+        assert!(hint.contains("back to out first"), "{hint}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_hint_spells_a_host_path_exactly_in_json() {
+        let place = hint_text("a\\b", None, Run::Create);
+        assert!(place.contains("next to a\\b:"), "{place}");
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
     #[allow(clippy::expect_used)]
-    fn a_destination_spelled_dot_stages_above_the_working_directory() {
-        let cwd = std::env::current_dir().expect("working directory");
-        let above = cwd.parent().map_or_else(|| cwd.clone(), Path::to_path_buf);
-        assert_eq!(staging_place(Path::new(".")), above);
-        assert_eq!(staging_place(Path::new("out")), cwd);
-        assert_eq!(staging_place(&cwd.join("work/out")), cwd.join("work"));
+    fn the_place_is_resolved_when_the_window_opens() {
+        static OPENING: Window = Window::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().canonicalize().expect("canonicalize");
+        std::fs::create_dir_all(dir.path().join("a/b")).expect("create");
+        let output = dir.path().join("a/b/..");
+        let guard = arm(
+            &OPENING,
+            &output,
+            Run::ExtractReplace,
+            OutputMode::Human(Verbosity::Normal),
+        );
+        let target = OPENING
+            .lock()
+            .as_ref()
+            .and_then(|armed| armed.place.as_ref().map(StagingPlace::target))
+            .expect("a resolved place");
+        assert_eq!(target, canonical.join("a"));
+        drop(guard);
     }
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
     fn the_window_is_armed_only_while_the_guard_lives() {
+        static ARMED_WINDOW: Window = Window::new();
         let guard = arm(
+            &ARMED_WINDOW,
             Path::new("out"),
             Run::ExtractAtomic,
             OutputMode::Human(Verbosity::Normal),
         );
-        assert!(armed().is_some());
+        assert!(ARMED_WINDOW.lock().is_some());
         drop(guard);
-        assert!(armed().is_none());
+        assert!(ARMED_WINDOW.lock().is_none());
     }
 }

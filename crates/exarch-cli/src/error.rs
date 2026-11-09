@@ -15,6 +15,7 @@ use crate::operation::ATOMIC_FORCE_REFUSED;
 use crate::operation::Flag;
 use crate::operation::Operation;
 use crate::operation::join_words;
+use crate::output::HostPath;
 use crate::output::skip_breakdown_lines;
 use crate::output::terminal::TerminalEntry;
 use crate::output::terminal::TerminalPath;
@@ -44,14 +45,18 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// What a cancelled run says, in the error chain and in the forced-exit
+/// document alike.
+pub const CANCELLED_TEXT: &str = "Operation cancelled";
+
 /// One piece of a CLI-authored message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Part {
     /// Text written in the source: trusted, may span lines.
     Lit(&'static str),
-    /// A path of the host (an archive, a destination, an output): rendered
-    /// with `path_text` and escaped for the terminal, like core's own host
-    /// paths; exact in `--json`.
+    /// A path of the host (an archive, a destination, an output): escaped
+    /// for the terminal, and in `--json` spelled as the [`HostPath`] fields
+    /// are: the exact string when it is UTF-8.
     Path(PathBuf),
     /// The name of an archive entry: rendered injectively with `path_text`
     /// and escaped for the terminal.
@@ -65,7 +70,7 @@ impl Part {
     fn write_raw(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lit(text) => f.write_str(text),
-            Self::Path(path) => write!(f, "{}", path.display()),
+            Self::Path(path) => write!(f, "{}", HostPath::from(path.as_path())),
             Self::Entry(path) => f.write_str(&path_text(path)),
             Self::Text(text) => f.write_str(text),
         }
@@ -748,6 +753,19 @@ fn quota_exceeded_context(op: Operation, kind: QuotaKind, archive: &Path) -> Mes
     })
 }
 
+/// The sentence that names the flag raising a 7z header `what` (`budget` or
+/// `limit`), or nothing when `op` has no such flag.
+fn raise_hint(op: Operation, what: &str) -> String {
+    accepted(op, &[Flag::MaxFiles])
+        .first()
+        .map_or_default(|flag| {
+            format!(
+                " {flag} raises that {what}, and with it the memory a header's entry table may \
+                 need."
+            )
+        })
+}
+
 /// The context for each quota dimension: a one-line message naming the
 /// archive, and the advice as the hint; `None` only for a dimension added to
 /// the `#[non_exhaustive]` [`QuotaKind`] after this match was written, which
@@ -807,37 +825,25 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
             .lit("'")
             .hint_lit("No CLI flag relaxes this. Rust API only: the sink's capacity limit."),
         QuotaKind::HeaderSize => {
-            let raise = accepted(op, &[Flag::MaxFiles]).first().map(|flag| {
-                format!(
-                    " {flag} raises that budget, and with it the memory a header's entry table \
-                     may need."
-                )
-            });
+            let raise = raise_hint(op, "budget");
             message
                 .lit("Archive header too large for '")
                 .path(archive)
                 .lit("'")
                 .hint(Some(format!(
                     "The header of this 7z archive is larger than the budget derived from the \
-                     permitted file count.{}",
-                    raise.unwrap_or_default()
+                     permitted file count.{raise}"
                 )))
         }
         QuotaKind::HeaderEntryCount => {
-            let raise = accepted(op, &[Flag::MaxFiles]).first().map(|flag| {
-                format!(
-                    " {flag} raises that limit, and with it the memory a header's entry table \
-                     may need."
-                )
-            });
+            let raise = raise_hint(op, "limit");
             message
                 .lit("Archive header entry count too large for '")
                 .path(archive)
                 .lit("'")
                 .hint(Some(format!(
                     "The header of this 7z archive declares more entries than the permitted file \
-                     count plus a small allowance; directories and links count too.{}",
-                    raise.unwrap_or_default()
+                     count plus a small allowance; directories and links count too.{raise}"
                 )))
         }
         QuotaKind::SolidBlockMemory => message
@@ -1093,7 +1099,7 @@ fn dedicated_context(
             ))
         }
 
-        ArchiveError::Cancelled => message.restating_source().lit("Operation cancelled"),
+        ArchiveError::Cancelled => message.restating_source().lit(CANCELLED_TEXT),
         ArchiveError::OutputReservationLeft { .. } => {
             message.lit("Failed to finish writing the output")
         }
@@ -1657,6 +1663,14 @@ mod tests {
             Path::new("a.tar"),
         );
         assert_eq!(chain_text(&rolled_back).matches("cancelled").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_path_part_is_exact_in_raw_text_and_escaped_on_a_terminal() {
+        let parts = [Part::Path(PathBuf::from("a\\b"))];
+        assert_eq!(raw(&parts), "a\\b");
+        assert_eq!(terminal(&parts), "a\\x5Cb");
     }
 
     #[test]

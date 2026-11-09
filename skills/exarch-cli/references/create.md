@@ -7,7 +7,7 @@
 | Flag | Default | Notes |
 |---|---|---|
 | `-f, --force` | off | Replace `OUTPUT`. The archive is written to a temp file in `OUTPUT`'s directory (must be writable) and renamed when complete, so a failed run leaves the previous archive untouched; a replaced file keeps its permission bits. Without it an existing `OUTPUT` fails `OutputExists` (exit `1`). A directory, FIFO, or device as `OUTPUT` is refused even with `--force` (`InvalidConfiguration`, setting `output_path`). The output is never archived into itself. |
-| `-l, --compression-level <1-9>` | 6 | Outside 1-9 (negative included) is `InvalidCompressionLevel`, exit `1`, message `Invalid compression level -1: must be between 1 and 9.`; a non-integer is a usage error (exit `2`). |
+| `-l, --compression-level <1-9>` | 6 | Outside 1-9 (negative or beyond 64 bits included) is `InvalidCompressionLevel`, exit `1`, message `Invalid compression level -1: must be between 1 and 9.`; text that is not a whole number is a usage error (exit `2`). |
 | `-x, --exclude <PATTERN>` | `.git`, `.DS_Store`, `*.tmp` | Repeatable; grammar below. Counted in `skipped_by_kind.excluded`. |
 | `--strip-prefix <PREFIX>` | none | Strip a path prefix from entry names. |
 | `--include-hidden` | off | Include dotfiles. Otherwise hidden files are skipped and a hidden directory below a source directory is skipped whole (counted once in `skipped_by_kind.hidden`). A hidden directory given as a source, and a source file given directly, are archived regardless. With `--follow-symlinks` a link is judged by its own name. |

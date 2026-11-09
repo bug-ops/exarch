@@ -7908,6 +7908,31 @@ fn test_create_negative_compression_level_is_exit_1() {
         .stderr(predicates::str::contains("between 1 and 9"));
 }
 
+/// A whole number beyond `i64` is core's out-of-range refusal (exit 1), while
+/// text that is no whole number stays clap's usage error (#1103).
+#[test]
+fn test_create_huge_compression_level_is_exit_1_and_text_is_usage_error() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("create")
+        .arg("-l")
+        .arg("99999999999999999999999")
+        .arg(temp.path().join("t.tar.gz"))
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("between 1 and 9"));
+    for text in ["abc", "", "-", "1.5"] {
+        exarch_cmd()
+            .arg("create")
+            .arg(format!("--compression-level={text}"))
+            .arg(temp.path().join("t.tar.gz"))
+            .arg(fixture_path("sample.txt"))
+            .assert()
+            .code(2);
+    }
+}
+
 /// The help text states the bounds and defaults core enforces, read from core
 /// rather than copied (#1048).
 #[test]
@@ -8493,11 +8518,12 @@ mod interrupt {
     /// reading it: the first SIGINT only requests a graceful stop that cannot
     /// complete, and a repeated one always takes the forced exit. The signal
     /// is resent until the process ends, since standard signals coalesce.
-    /// The forced report is best effort, so the oracle is the exit status
-    /// plus "at most one `Cancelled` document". A status other than 130
-    /// would mean the blocked read was interrupted and failed instead.
+    /// The forced exit dies by SIGINT like the graceful stop, and leaves
+    /// exactly one `Cancelled` document whose hint names the canonical
+    /// directory of the staging entry. A plain failure exit would mean the
+    /// blocked read was interrupted and failed instead.
     #[test]
-    fn repeated_sigint_under_json_forces_the_exit_with_130() {
+    fn repeated_sigint_under_json_forces_the_exit_by_the_signal() {
         use std::io::Read as _;
 
         let temp = TempDir::new().expect("temp dir");
@@ -8544,16 +8570,21 @@ mod interrupt {
         drop(held);
 
         let stdout = String::from_utf8_lossy(&stdout);
-        assert_eq!(status.code(), Some(130), "{status:?}, stdout: {stdout:?}");
+        assert_stopped_by(status, Stop::Int);
         let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&stdout)
             .into_iter()
             .collect::<Result<_, _>>()
             .unwrap_or_else(|error| panic!("{error}; stdout: {stdout:?}"));
-        assert!(documents.len() <= 1, "{documents:?}");
-        for json in &documents {
-            assert_eq!(json["status"], "error", "{json}");
-            assert_eq!(json["error"]["kind"], "Cancelled", "{json}");
-        }
+        assert_eq!(documents.len(), 1, "{stdout:?}");
+        let json = &documents[0];
+        assert_eq!(json["status"], "error", "{json}");
+        assert_eq!(json["error"]["kind"], "Cancelled", "{json}");
+        let canonical = temp.path().canonicalize().expect("canonicalize");
+        let hint = json["error"]["hint"].as_str().expect("hint text");
+        assert!(
+            hint.contains(&format!("in {}:", canonical.display())),
+            "{hint}"
+        );
     }
 
     /// Whichever path ends the run, a stdout pipe that is full and never read
@@ -8563,7 +8594,6 @@ mod interrupt {
     #[test]
     fn repeated_sigint_ends_the_run_despite_a_full_stdout_pipe() {
         use std::io::Write as _;
-        use std::os::unix::process::ExitStatusExt as _;
         use std::sync::Arc;
         use std::sync::atomic::AtomicUsize;
         use std::sync::atomic::Ordering;
@@ -8627,10 +8657,7 @@ mod interrupt {
             );
             sigint(&child);
         };
-        assert!(
-            status.code() == Some(130) || status.signal() == Some(2),
-            "{status:?}"
-        );
+        assert_stopped_by(status, Stop::Int);
         drop(reader);
     }
 }

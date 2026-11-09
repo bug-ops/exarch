@@ -24,6 +24,29 @@ pub enum ExitStatus {
     Terminated = 143,
 }
 
+impl ExitStatus {
+    /// The numeric status the process exits with.
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
+
+    /// Whether a stop request caused this status.
+    pub const fn is_stop(self) -> bool {
+        matches!(self, Self::Interrupted | Self::Terminated)
+    }
+}
+
+/// The status the process ends with: a run that completed after a stop was
+/// requested still reports the stop, over a success or a strict warning, so a
+/// stop that landed after core's last poll is not lost. A failure keeps its
+/// own status, and the stop status of a cancelled run is already `result`.
+pub fn final_status(result: ExitStatus, requested: Option<Stop>) -> ExitStatus {
+    match (result, requested) {
+        (ExitStatus::Success | ExitStatus::StrictWarning, Some(stop)) => ExitStatus::from(stop),
+        _ => result,
+    }
+}
+
 impl From<Stop> for ExitStatus {
     fn from(stop: Stop) -> Self {
         match stop {
@@ -66,6 +89,52 @@ mod tests {
             for b in &ALL[i + 1..] {
                 assert_ne!(*a as u8, *b as u8, "{a:?} and {b:?}");
             }
+        }
+    }
+
+    #[test]
+    fn a_stop_after_the_last_poll_still_reports_the_stop() {
+        for (completed, stop, expected) in [
+            (
+                ExitStatus::Success,
+                Stop::Interrupt,
+                ExitStatus::Interrupted,
+            ),
+            (ExitStatus::Success, Stop::Terminate, ExitStatus::Terminated),
+            (
+                ExitStatus::StrictWarning,
+                Stop::Interrupt,
+                ExitStatus::Interrupted,
+            ),
+        ] {
+            assert_eq!(final_status(completed, Some(stop)), expected);
+        }
+    }
+
+    #[test]
+    fn without_a_stop_or_after_a_failure_the_status_is_unchanged() {
+        for status in ALL {
+            assert_eq!(final_status(status, None), status);
+        }
+        assert_eq!(
+            final_status(ExitStatus::Failure, Some(Stop::Interrupt)),
+            ExitStatus::Failure
+        );
+        assert_eq!(
+            final_status(ExitStatus::Terminated, Some(Stop::Interrupt)),
+            ExitStatus::Terminated
+        );
+    }
+
+    #[test]
+    fn the_code_and_the_stop_flag_follow_the_status() {
+        assert_eq!(ExitStatus::Interrupted.code(), 130);
+        assert_eq!(ExitStatus::Terminated.code(), 143);
+        for status in ALL {
+            assert_eq!(
+                status.is_stop(),
+                matches!(status, ExitStatus::Interrupted | ExitStatus::Terminated)
+            );
         }
     }
 

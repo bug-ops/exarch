@@ -16,6 +16,7 @@ use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
 use exarch_core::PathRewrite;
 use exarch_core::RatioLimit;
+use exarch_core::RequestedLevel;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::SolidLimits;
@@ -160,11 +161,15 @@ impl SelectionArgs {
     }
 }
 
-/// Whole MiB of `bytes`, spelled as help and hints give sizes (`256 MiB`).
-///
-/// Every size passed here is a multiple of 1 MiB, so nothing is rounded away.
+/// `bytes` spelled as help and hints give sizes: whole MiB (`256 MiB`), or the
+/// exact byte count when it is not a whole number of MiB.
 fn mib_text(bytes: u64) -> String {
-    format!("{} MiB", bytes / (1024 * 1024))
+    const MIB: u64 = 1024 * 1024;
+    if bytes.is_multiple_of(MIB) {
+        format!("{} MiB", bytes / MIB)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// The ratio an entry is held to by default, spelled as in help and hints
@@ -215,8 +220,9 @@ fn decode_reuse_help() -> String {
 /// Help of `--decompression-budget`, naming the default budget core applies.
 fn decompression_budget_help() -> String {
     format!(
-        "Extra bytes --check-integrity may decode beyond listing (K, M, G, T suffixes; \
-         default {}, independent of {})",
+        "Extra bytes {} may decode beyond listing (K, M, G, T suffixes; default {}, \
+         independent of {})",
+        Flag::CheckIntegrity.long(),
         mib_text(DecompressionBudget::DEFAULT.get()),
         Flag::MaxTotalSize.long()
     )
@@ -252,13 +258,15 @@ pub fn default_banned_components_text() -> String {
 fn atomic_long_help() -> String {
     format!(
         "Extract atomically: stage in a private directory next to the destination, rename on \
-         success, remove it on failure.\n\nWith --force the existing destination directory is \
+         success, remove it on failure.\n\nWith {force} the existing destination directory is \
          replaced as a whole: it is renamed aside, the staged content is renamed into its \
          place, and only then is the old destination removed, so a failure at any point leaves \
-         either the old or the new content under the destination name. --atomic --force \
-         refuses {}. On Unix, --force also needs search (execute) permission on the \
+         either the old or the new content under the destination name. {atomic} {force} \
+         refuses {refused}. On Unix, {force} also needs search (execute) permission on the \
          destination's parent directory; the destination itself need not be readable.",
-        join_words("and", &ATOMIC_FORCE_REFUSED.map(Flag::long))
+        force = Flag::Force.long(),
+        atomic = Flag::Atomic.long(),
+        refused = join_words("and", &ATOMIC_FORCE_REFUSED.map(Flag::long))
     )
 }
 
@@ -614,9 +622,10 @@ pub struct CreateArgs {
         long,
         value_name = "LEVEL",
         allow_negative_numbers = true,
+        value_parser = parse_requested_level,
         help = compression_level_help()
     )]
-    pub compression_level: Option<i64>,
+    pub compression_level: Option<RequestedLevel>,
 
     /// Follow symbolic links
     #[arg(long)]
@@ -817,6 +826,17 @@ impl BannedComponentsArg {
     }
 }
 
+/// Parses `--compression-level` into what the user asked for, so a whole number
+/// of any size reaches core's range check instead of failing as a usage error.
+fn parse_requested_level(s: &str) -> Result<RequestedLevel, String> {
+    let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("`{s}` is not a whole number"));
+    }
+    Ok(s.parse()
+        .map_or(RequestedLevel::OutOfRange, RequestedLevel::Integer))
+}
+
 fn parse_ratio(s: &str) -> Result<f64, String> {
     s.trim()
         .parse()
@@ -867,6 +887,31 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_size_that_is_not_whole_mib_keeps_its_bytes() {
+        assert_eq!(mib_text(256 * 1024 * 1024), "256 MiB");
+        assert_eq!(mib_text(1024 * 1024 + 1), "1048577 bytes");
+        assert_eq!(mib_text(0), "0 MiB");
+    }
+
+    #[test]
+    fn a_compression_level_keeps_what_was_asked_for() {
+        assert_eq!(parse_requested_level("7"), Ok(RequestedLevel::Integer(7)));
+        assert_eq!(parse_requested_level("-3"), Ok(RequestedLevel::Integer(-3)));
+        assert_eq!(parse_requested_level("+5"), Ok(RequestedLevel::Integer(5)));
+        assert_eq!(
+            parse_requested_level("99999999999999999999"),
+            Ok(RequestedLevel::OutOfRange)
+        );
+        assert_eq!(
+            parse_requested_level("-99999999999999999999"),
+            Ok(RequestedLevel::OutOfRange)
+        );
+        for text in ["", "-", "+", "1.5", "abc", " 1"] {
+            assert!(parse_requested_level(text).is_err(), "{text:?}");
+        }
+    }
 
     #[test]
     fn byte_size_suffixes_are_case_insensitive() {

@@ -9,6 +9,7 @@ use crate::output::OutputFormatter;
 use crate::output::OutputMode;
 use crate::progress::BarLength;
 use crate::progress::progress_for;
+use exarch_core::ArchiveError;
 use exarch_core::CompressionLevel;
 use exarch_core::ConfigSetting;
 use exarch_core::CreateRequest;
@@ -16,7 +17,16 @@ use exarch_core::CreationConfig;
 use exarch_core::EntryPattern;
 use exarch_core::Limit;
 use exarch_core::OutputFile;
+use exarch_core::RequestedLevel;
 use std::num::NonZeroU64;
+
+/// The level core accepts for what the user asked for.
+fn compression_level(requested: RequestedLevel) -> Result<CompressionLevel, ArchiveError> {
+    match requested {
+        RequestedLevel::Integer(level) => CompressionLevel::from_i128(i128::from(level)),
+        other => Err(ArchiveError::InvalidCompressionLevel { level: other }),
+    }
+}
 
 /// Runs `create`: builds the archive inside the armed interrupt window and
 /// prints the report once the window is closed.
@@ -43,9 +53,8 @@ pub fn execute(
         .with_strip_prefix(args.strip_prefix.clone())
         .with_max_file_size(max_file_size)
         .with_preserve_permissions(args.preserve_permissions);
-    if let Some(level) = args.compression_level {
-        let level = CompressionLevel::from_i128(i128::from(level))?;
-        config = config.with_compression_level(level);
+    if let Some(requested) = args.compression_level {
+        config = config.with_compression_level(compression_level(requested)?);
     }
 
     // Add user exclude patterns to defaults

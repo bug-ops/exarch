@@ -53,7 +53,7 @@ Common flags (full table, grammar, and edge cases: [references/extract.md](refer
 | `--include` / `--exclude <GLOB>` | all | Select entries (repeatable; exclude wins). Also on `list` and `verify`. |
 | `--strip-components <N>` / `--flatten` | off | Drop leading path components / land files at top level (mutually exclusive). |
 | `--allowed-extensions <EXT>` | all | Extract only matching regular files (`txt,pdf`). |
-| `--max-files` / `--max-total-size` / `--max-file-size` | 10000 / 500 MB / 50 MB | Hard quotas; size values take `K`/`M`/`G`/`T`. `0` is refused. `--max-files` counts every entry (directories, links, skipped entries included). |
+| `--max-files` / `--max-total-size` / `--max-file-size` | 10000 / 500 MiB / 50 MiB | Hard quotas; size values take `K`/`M`/`G`/`T`. `0` is refused. `--max-files` counts every entry (directories, links, skipped entries included). |
 | `--max-compression-ratio` | 100 | Zip-bomb threshold (ZIP and non-solid 7z). |
 | `--max-path-depth` | 32 | Max path components per entry. |
 | `--preserve-permissions` | off | Keep archive modes (setuid/setgid always stripped). |
@@ -80,7 +80,7 @@ Grammar, zip-ratio warning, name collisions, refused outputs (7z and ZIP-family 
 
 ### list `<ARCHIVE>`
 
-Flags: `-l/--long`, `-H/--human-readable` (requires `-l`), `--read-link-targets` (7z), plus the quota, selection, `--zip-consistency` and `--allow-solid-archives` flags of `extract`. Exceeding a quota fails with `QuotaExceeded`; it never truncates. Details and JSON fields: [references/list.md](references/list.md).
+Flags: `-l/--long`, `-H/--human-readable` (requires `-l`), `--read-link-targets` (7z), `--allow-symlinks`, `--allow-hardlinks`, plus the quota, selection, `--zip-consistency` and `--allow-solid-archives` flags of `extract`. Exceeding a quota fails with `QuotaExceeded`; it never truncates. Details and JSON fields: [references/list.md](references/list.md).
 
 ### verify `<ARCHIVE>`
 
@@ -90,12 +90,12 @@ Runs the full security pipeline without writing to disk. Use it before `extract`
 |---|---|---|
 | `--strict` | off | Warning-level findings exit `3` instead of `0`. |
 | `--check-integrity` | off | Decode the payload to EOF so checksums are verified. |
-| `--decompression-budget <SIZE>` | 500M | Extra decode budget for `--check-integrity`. |
+| `--decompression-budget <SIZE>` | 500 MiB | Extra decode budget for `--check-integrity`. |
 | `--allow-symlinks` / `--allow-hardlinks` | off | Same as `extract`; pass the ones you will extract with. |
 
 - A plain `verify` reports `integrity_status` `SKIPPED`: a pass says nothing about corruption.
 - `INCOMPLETE` integrity exits `0` without `--strict`; in automation use `--strict` or read `data.integrity_status`.
-- Archives over 500 MB need `--max-total-size` raised, or `verify` fails with `QuotaExceeded`.
+- Archives over 500 MiB need `--max-total-size` raised, or `verify` fails with `QuotaExceeded`.
 - 7z symlink targets are validated only under `--check-integrity`; gate 7z with `verify --strict` or `--check-integrity`.
 
 Statuses, issue categories, limitations: [references/verify.md](references/verify.md).
@@ -129,11 +129,11 @@ Fields, sub-codes, `error.kind` enum, skip kinds, warnings, examples: [reference
 | `1` | Operation failed; also `verify` with `data.status` `FAIL`. |
 | `2` | Argument-parser usage error (plain text, no JSON). |
 | `3` | `verify --strict` with warning-level findings only. |
-| `130` / `143` | `extract`/`create` stopped by SIGINT / SIGTERM (staging discarded; a second signal exits at once). |
+| `130` / `143` | `extract`/`create` stopped by SIGINT / SIGTERM (staging discarded; a second signal exits at once). Both stops end the process by the signal itself, so a parent that inspects the wait status sees a signal death, not exit code 130 or 143. A stop that lands after the last poll still lets the run finish and report its result, then ends the process the same way. |
 
 ## Defaults at a glance
 
-50 MB per file, 500 MB total, 100x compression ratio, 10,000 files, depth 32. Symlinks, hardlinks, absolute paths, world-writable files, and solid 7z are rejected. setuid/setgid are always stripped on Unix. Decoder-memory and 7z header limits have no CLI flag; see [references/security-model.md](references/security-model.md).
+50 MiB per file, 500 MiB total, 100x compression ratio, 10,000 files, depth 32. Symlinks, hardlinks, absolute paths, world-writable files, and solid 7z are rejected. setuid/setgid are always stripped on Unix. Decoder-memory and 7z header limits have no CLI flag; see [references/security-model.md](references/security-model.md).
 
 ## References
 

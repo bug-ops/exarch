@@ -95,7 +95,7 @@ pub fn forced_exit_envelope(operation: Operation, hint: &str) -> serde_json::Res
         operation,
         error: JsonError::new(
             JsonKind::Code(exarch_core::ErrorCode::Cancelled),
-            "Operation cancelled",
+            crate::error::CANCELLED_TEXT,
         )
         .with_hint(Some(hint.to_owned())),
     })

@@ -286,6 +286,12 @@ impl From<&Path> for HostPath {
     }
 }
 
+impl std::fmt::Display for HostPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One skipped entry in a report's bounded sample.
 #[derive(Debug, Serialize)]
 pub struct JsonSkip {

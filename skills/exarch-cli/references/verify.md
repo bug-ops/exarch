@@ -8,7 +8,7 @@
 |---|---|---|
 | `--strict` | off | Warning-level findings exit `3` (not `0`); `2` stays the usage-error code. |
 | `--check-integrity` | off | Decode payload to the decoder's EOF. |
-| `--decompression-budget <SIZE>` | 500M | Extra bytes `--check-integrity` may decode beyond listing. Requires `--check-integrity`; `0` refused. Does not follow `--max-total-size`; raise both for archives over 500 MB. |
+| `--decompression-budget <SIZE>` | 500 MiB | Extra bytes `--check-integrity` may decode beyond listing. Requires `--check-integrity`; `0` refused. Does not follow `--max-total-size`; raise both for archives over 500 MiB. |
 | `--allow-symlinks` / `--allow-hardlinks` | off | As `extract`; pass the ones you will extract with. |
 | `--include`, `--exclude`, `--strip-components`, `--flatten` | off | As `extract`. An include matching nothing, and a hardlink to an unselected target, are `HIGH` issues. No per-entry rows, so no `disposition`. |
 | `--zip-consistency <enforce\|ignore>` | enforce | Structural findings become issues under `enforce`. |

@@ -38,6 +38,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
+#[cfg(any(unix, target_os = "wasi"))]
+use crate::formats::common::errno_is;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
@@ -110,14 +112,14 @@ impl Refusal {
 
 #[cfg(any(unix, target_os = "wasi"))]
 fn is_resource_exhaustion(error: &io::Error) -> bool {
-    rustix::io::Errno::from_io_error(error).is_some_and(|errno| {
-        [
+    errno_is(
+        error,
+        &[
             rustix::io::Errno::MFILE,
             rustix::io::Errno::NFILE,
             rustix::io::Errno::NOMEM,
-        ]
-        .contains(&errno)
-    }) || error.kind() == io::ErrorKind::OutOfMemory
+        ],
+    ) || error.kind() == io::ErrorKind::OutOfMemory
 }
 
 #[cfg(windows)]

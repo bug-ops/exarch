@@ -1054,6 +1054,8 @@ mod adoption {
     use super::super::dir::Seed;
     use super::super::dir::StagingDir;
     use super::*;
+    use crate::formats::pinned_dir::Gid;
+    use crate::formats::pinned_dir::Uid;
     use crate::formats::pinned_dir::VettedDir;
 
     fn staging_in(parent: &Path) -> (VettedDir, PathBuf) {
@@ -1071,8 +1073,8 @@ mod adoption {
         let narrowed = staging
             .adopt(Adoption::for_test(
                 0o2750,
-                own.uid(),
-                own.gid(),
+                Uid::of(&own),
+                Gid::of(&own),
                 Claim::Full,
             ))
             .unwrap();
@@ -1087,14 +1089,19 @@ mod adoption {
         let (pin, parent) = staging_in(temp.path());
         let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
-        let foreign = std::fs::metadata("/").unwrap().gid();
-        if foreign == own.gid() || own.uid() == 0 {
+        let foreign = Gid::of(&std::fs::metadata("/").unwrap());
+        if foreign == Gid::of(&own) || own.uid() == 0 {
             eprintln!("skipping: no group this caller is outside of");
             return;
         }
 
         let narrowed = staging
-            .adopt(Adoption::for_test(0o2775, own.uid(), foreign, Claim::Full))
+            .adopt(Adoption::for_test(
+                0o2775,
+                Uid::of(&own),
+                foreign,
+                Claim::Full,
+            ))
             .unwrap();
 
         assert_eq!(narrowed.reasons(), [NarrowingReason::GroupNotKept]);
@@ -1107,13 +1114,13 @@ mod adoption {
         let (pin, parent) = staging_in(temp.path());
         let mut staging = StagingDir::create(&pin, &parent, Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
-        let foreign_uid = own.uid().wrapping_add(1);
+        let foreign_uid = Uid::from_raw(own.uid().wrapping_add(1));
 
         let narrowed = staging
             .adopt(Adoption::for_test(
                 0o2777,
                 foreign_uid,
-                own.gid(),
+                Gid::of(&own),
                 Claim::Cautious,
             ))
             .unwrap();
@@ -1134,8 +1141,8 @@ mod adoption {
         let narrowed = staging
             .adopt(Adoption::for_test(
                 0o775,
-                own.uid(),
-                own.gid(),
+                Uid::of(&own),
+                Gid::of(&own),
                 Claim::Cautious,
             ))
             .unwrap();
@@ -1153,7 +1160,12 @@ mod adoption {
         std::fs::write(staging.path().join("f"), b"x").unwrap();
 
         let narrowed = staging
-            .adopt(Adoption::for_test(0o000, own.uid(), own.gid(), Claim::Full))
+            .adopt(Adoption::for_test(
+                0o000,
+                Uid::of(&own),
+                Gid::of(&own),
+                Claim::Full,
+            ))
             .unwrap();
         assert!(narrowed.reasons().is_empty());
         let path = staging.path().to_path_buf();
@@ -1178,7 +1190,6 @@ mod adoption {
 
 /// Every [`NarrowingReason`] is produced through both publish paths.
 mod narrowing {
-    use std::os::unix::fs::MetadataExt;
 
     use super::super::AtomicDestination;
     use super::super::acl::AclPlan;
@@ -1188,14 +1199,16 @@ mod narrowing {
     use super::super::dir::StagingDir;
     use super::super::publish_adopted;
     use super::super::replace::swap_adopted_for_test;
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     use super::super::replace::swap_adopted_in;
     use super::*;
+    use crate::formats::pinned_dir::Gid;
+    use crate::formats::pinned_dir::Uid;
 
     #[derive(Clone, Copy)]
     struct Own {
-        uid: u32,
-        gid: u32,
+        uid: Uid,
+        gid: Gid,
     }
 
     /// The user and group of a directory this process creates.
@@ -1203,13 +1216,13 @@ mod narrowing {
         let temp = TempDir::new().unwrap();
         let metadata = std::fs::metadata(temp.path()).unwrap();
         Own {
-            uid: metadata.uid(),
-            gid: metadata.gid(),
+            uid: Uid::of(&metadata),
+            gid: Gid::of(&metadata),
         }
     }
 
     fn is_root() -> bool {
-        own().uid == 0
+        own().uid.get() == 0
     }
 
     pub(super) fn reasons(report: &ExtractionReport) -> Vec<NarrowingReason> {
@@ -1262,14 +1275,14 @@ mod narrowing {
     /// host cannot (a privileged caller, a platform without a copyable ACL).
     fn adoption_for(reason: NarrowingReason) -> Option<Adoption> {
         let me = own();
-        let foreign_uid = me.uid.wrapping_add(1);
+        let foreign_uid = Uid::from_raw(me.uid.get().wrapping_add(1));
         let plan = |reason| AclPlan::Private(reason);
         let full = |plan| Adoption::for_test_with_acl(0o755, me.uid, me.gid, Claim::Full, plan);
         match reason {
             NarrowingReason::AclUnreadable
             | NarrowingReason::DestinationChanged
             | NarrowingReason::UnmappedId => Some(full(plan(reason))),
-            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            #[cfg(acl_copy)]
             NarrowingReason::OwnershipDiffers => Some(Adoption::for_test_with_acl(
                 0o755,
                 foreign_uid,
@@ -1277,10 +1290,10 @@ mod narrowing {
                 Claim::Cautious,
                 copy_plan(true),
             )),
-            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            #[cfg(acl_copy)]
             NarrowingReason::AclCopyFailed => Some(full(copy_plan(false))),
             NarrowingReason::GroupNotKept => {
-                let foreign = std::fs::metadata("/").unwrap().gid();
+                let foreign = Gid::of(&std::fs::metadata("/").unwrap());
                 (!is_root() && foreign != me.gid)
                     .then(|| Adoption::for_test(0o775, me.uid, foreign, Claim::Full))
             }
@@ -1293,14 +1306,14 @@ mod narrowing {
             NarrowingReason::OwnerNotKept => {
                 (!is_root()).then(|| Adoption::for_test(0o755, foreign_uid, me.gid, Claim::Full))
             }
-            #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+            #[cfg(not(acl_copy))]
             NarrowingReason::OwnershipDiffers | NarrowingReason::AclCopyFailed => None,
             NarrowingReason::DestinationVanished => None,
         }
     }
 
     /// The root published as `parent/dest` is `0700` and carries no ACL.
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     fn assert_private_without_acl(parent: &Path) {
         let pin = crate::formats::pinned_dir::VettedDir::open_path(parent).unwrap();
         let name = crate::formats::pinned_dir::LeafBuf::of(&parent.join("dest")).unwrap();
@@ -1312,7 +1325,7 @@ mod narrowing {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     #[test]
     fn a_root_with_an_acl_to_copy_stays_private_and_aclless_until_the_rename() {
         let me = own();
@@ -1342,7 +1355,7 @@ mod narrowing {
         assert_eq!(plan.unwrap(), AclPlan::None);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     #[test]
     fn a_copy_that_fails_after_the_rename_succeeds_with_a_private_root_and_no_acl() {
         let me = own();
@@ -1412,11 +1425,7 @@ mod narrowing {
     /// path only: the replace path fails and rolls back when the original
     /// permissions cannot be read.
     fn guaranteed_reasons() -> usize {
-        let copyable = cfg!(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos"
-        ));
+        let copyable = cfg!(acl_copy);
         5 + if copyable { 2 } else { 0 } + if is_root() { 0 } else { 2 }
     }
 
@@ -1437,7 +1446,9 @@ mod narrowing {
 /// What a staging directory does with the destination's inheritance, seen
 /// through the publish paths.
 mod seeding {
-    use std::os::unix::fs::MetadataExt;
+
+    use crate::formats::pinned_dir::Gid;
+    use crate::formats::pinned_dir::Uid;
 
     use super::super::AtomicDestination;
     use super::super::acl::Inheritance;
@@ -1460,7 +1471,7 @@ mod seeding {
 
     fn adoption() -> Adoption {
         let owner = std::fs::metadata(TempDir::new().unwrap().path()).unwrap();
-        Adoption::for_test(0o755, owner.uid(), owner.gid(), Claim::Full)
+        Adoption::for_test(0o755, Uid::of(&owner), Gid::of(&owner), Claim::Full)
     }
 
     fn stage(seed: impl FnOnce(&TempDir) -> Seed) -> (TempDir, PathBuf, VettedDir, Seed) {
@@ -1501,9 +1512,9 @@ mod seeding {
         assert_eq!(narrowing::reasons(&report), [reason]);
     }
 
-    fn me() -> (u32, u32) {
+    fn me() -> (Uid, Gid) {
         let metadata = std::fs::metadata(TempDir::new().unwrap().path()).unwrap();
-        (metadata.uid(), metadata.gid())
+        (Uid::of(&metadata), Gid::of(&metadata))
     }
 
     fn withheld_stage(reason: NarrowingReason) -> (TempDir, PathBuf, VettedDir, Seed) {
@@ -1513,8 +1524,8 @@ mod seeding {
     #[test]
     fn a_withheld_root_still_claims_the_destination_group() {
         let (uid, _) = me();
-        let foreign = std::fs::metadata("/").unwrap().gid();
-        if uid == 0 || foreign == me().1 {
+        let foreign = Gid::of(&std::fs::metadata("/").unwrap());
+        if uid.get() == 0 || foreign == me().1 {
             eprintln!("skipping: no group this caller is outside of");
             return;
         }
@@ -1533,7 +1544,7 @@ mod seeding {
     #[test]
     fn a_withheld_root_reports_an_owner_it_could_not_take() {
         let (uid, gid) = me();
-        if uid == 0 {
+        if uid.get() == 0 {
             eprintln!("skipping: root can give a directory away");
             return;
         }
@@ -1544,7 +1555,7 @@ mod seeding {
         let narrowed = staging
             .adopt(Adoption::for_test(
                 0o755,
-                uid.wrapping_add(1),
+                Uid::from_raw(uid.get().wrapping_add(1)),
                 gid,
                 Claim::Full,
             ))
@@ -1556,7 +1567,7 @@ mod seeding {
     #[test]
     fn another_destination_is_not_claimed_from() {
         let (uid, _) = me();
-        let foreign = std::fs::metadata("/").unwrap().gid();
+        let foreign = Gid::of(&std::fs::metadata("/").unwrap());
         let (temp, parent, pin, seed) =
             stage(|temp| Seed::FillEmpty(identity(temp, "seeded-from"), Inheritance::None));
         let adopted_from = identity(&temp, "adopted-from");
@@ -1564,8 +1575,13 @@ mod seeding {
 
         let narrowed = staging
             .adopt(
-                Adoption::for_test(0o775, uid.wrapping_add(1), foreign, Claim::Full)
-                    .of_destination_identity(adopted_from),
+                Adoption::for_test(
+                    0o775,
+                    Uid::from_raw(uid.get().wrapping_add(1)),
+                    foreign,
+                    Claim::Full,
+                )
+                .of_destination_identity(adopted_from),
             )
             .unwrap();
 
@@ -1662,7 +1678,7 @@ mod seeding {
         assert!(staging.take_fresh().is_none());
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     mod stored {
         use super::super::super::acl;
         use super::super::super::acl::AclPlan;

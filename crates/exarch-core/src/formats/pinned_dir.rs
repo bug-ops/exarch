@@ -193,13 +193,53 @@ impl AsRef<Path> for LeafBuf {
     }
 }
 
+/// A user id, so it cannot be passed where a [`Gid`] belongs.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Uid(u32);
+
+#[cfg(unix)]
+impl Uid {
+    pub(crate) fn of(metadata: &std::fs::Metadata) -> Self {
+        Self(std::os::unix::fs::MetadataExt::uid(metadata))
+    }
+
+    pub(crate) const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    pub(crate) const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// A group id, so it cannot be passed where a [`Uid`] belongs.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Gid(u32);
+
+#[cfg(unix)]
+impl Gid {
+    pub(crate) fn of(metadata: &std::fs::Metadata) -> Self {
+        Self(std::os::unix::fs::MetadataExt::gid(metadata))
+    }
+
+    pub(crate) const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    pub(crate) const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// Permission bits and owner of a directory entry, as `stat` reports them.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EntryMode {
     bits: u32,
-    uid: u32,
-    gid: u32,
+    uid: Uid,
+    gid: Gid,
 }
 
 #[cfg(unix)]
@@ -210,17 +250,17 @@ impl EntryMode {
     }
 
     /// The owning user id.
-    pub(crate) const fn uid(self) -> u32 {
+    pub(crate) const fn uid(self) -> Uid {
         self.uid
     }
 
     /// The owning group id.
-    pub(crate) const fn gid(self) -> u32 {
+    pub(crate) const fn gid(self) -> Gid {
         self.gid
     }
 
     #[cfg(test)]
-    pub(crate) const fn for_test(bits: u32, uid: u32, gid: u32) -> Self {
+    pub(crate) const fn for_test(bits: u32, uid: Uid, gid: Gid) -> Self {
         Self { bits, uid, gid }
     }
 
@@ -231,8 +271,8 @@ impl EntryMode {
     fn of_stat(stat: &rustix::fs::Stat) -> Self {
         Self {
             bits: u32::from(stat.st_mode) & 0o7777,
-            uid: stat.st_uid,
-            gid: stat.st_gid,
+            uid: Uid::from_raw(stat.st_uid),
+            gid: Gid::from_raw(stat.st_gid),
         }
     }
 }

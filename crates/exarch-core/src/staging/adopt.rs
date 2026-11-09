@@ -17,6 +17,7 @@ use super::dir::StagingDir;
 #[cfg(unix)]
 mod imp {
     use std::io;
+    #[cfg(any(test, target_os = "linux", target_os = "android"))]
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::fchown;
@@ -27,7 +28,10 @@ mod imp {
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::pinned_dir::EntryMode;
     use crate::formats::pinned_dir::EntryStatus;
+    #[cfg(test)]
+    use crate::formats::pinned_dir::Gid;
     use crate::formats::pinned_dir::LeafBuf;
+    use crate::formats::pinned_dir::Uid;
     use crate::formats::pinned_dir::VettedDir;
     use crate::report::Narrowed;
     use crate::staging::acl;
@@ -200,8 +204,8 @@ mod imp {
         #[cfg(test)]
         pub(in crate::staging) const fn for_test(
             mode: u32,
-            uid: u32,
-            gid: u32,
+            uid: Uid,
+            gid: Gid,
             claim: Claim,
         ) -> Self {
             Self::for_test_with_acl(mode, uid, gid, claim, AclPlan::None)
@@ -210,8 +214,8 @@ mod imp {
         #[cfg(test)]
         pub(in crate::staging) const fn for_test_with_acl(
             mode: u32,
-            uid: u32,
-            gid: u32,
+            uid: Uid,
+            gid: Gid,
             claim: Claim,
             acl: AclPlan,
         ) -> Self {
@@ -241,7 +245,7 @@ mod imp {
 
     /// The ACL and mode a root takes once it has been renamed onto the
     /// destination, with the descriptor that was held across the rename.
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     #[derive(Debug)]
     struct PendingCopy {
         dir: std::fs::File,
@@ -258,7 +262,7 @@ mod imp {
     #[derive(Debug)]
     pub(in crate::staging) struct AdoptedRoot {
         narrowed: Narrowed,
-        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        #[cfg(acl_copy)]
         pending: Option<PendingCopy>,
     }
 
@@ -278,7 +282,7 @@ mod imp {
                 reason = "only platforms that copy an ACL have anything to record"
             )]
             let mut narrowed = self.narrowed;
-            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            #[cfg(acl_copy)]
             if let Some(PendingCopy { dir, acl, mode }) = self.pending {
                 copy_acl(&dir, &acl, mode, &mut narrowed);
             }
@@ -406,7 +410,7 @@ mod imp {
                 (None, Some((destination, root))) => acl::resolve(acl, destination, root),
                 (None, None) => Resolution::NoAcl,
             };
-            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            #[cfg(acl_copy)]
             let mut pending = None;
             let applied = match resolution {
                 Resolution::NoAcl => dir.set_permissions(mode.permissions()),
@@ -414,7 +418,7 @@ mod imp {
                     narrowed.push(reason);
                     dir.set_permissions(DirMode::PRIVATE.permissions())
                 }
-                #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+                #[cfg(acl_copy)]
                 Resolution::Copy(acl) => dir.try_clone().map(|dir| {
                     pending = Some(PendingCopy { dir, acl, mode });
                 }),
@@ -422,7 +426,7 @@ mod imp {
             self.adopted = Some(stage.into_file());
             applied.map(|()| AdoptedRoot {
                 narrowed,
-                #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+                #[cfg(acl_copy)]
                 pending,
             })
         }
@@ -463,14 +467,14 @@ mod imp {
         mode: &mut DirMode,
         narrowed: &mut Narrowed,
     ) -> io::Result<Ownership> {
-        let own_destination = owner.ids.uid == dir.metadata()?.uid();
+        let own_destination = owner.ids.uid == Uid::of(&dir.metadata()?);
         // Best effort: only root may chown to a foreign uid, and a group
         // member to any of its groups. The outcome is read back.
         if owner.claim == Claim::Full || own_destination {
-            let _ = fchown(dir, None, Some(owner.ids.gid));
+            let _ = fchown(dir, None, Some(owner.ids.gid.get()));
         }
         if owner.claim == Claim::Full {
-            let _ = fchown(dir, Some(owner.ids.uid), None);
+            let _ = fchown(dir, Some(owner.ids.uid.get()), None);
         }
         let root = Ownership::of(&dir.metadata()?);
         if owner.claim == Claim::Full && root.uid != owner.ids.uid {
@@ -544,7 +548,7 @@ mod imp {
     /// [`NarrowingReason::AclCopyFailed`] is recorded and the ACL is removed
     /// and the mode set to `0700` where the OS allows. The root is published
     /// already, so nothing here can fail the run.
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(acl_copy)]
     fn write_acl_then(
         dir: &std::fs::File,
         acl: &acl::CopiedAcl,
@@ -559,10 +563,7 @@ mod imp {
         }
     }
 
-    #[cfg(all(
-        test,
-        any(target_os = "linux", target_os = "android", target_os = "macos")
-    ))]
+    #[cfg(all(test, acl_copy))]
     #[allow(clippy::unwrap_used)]
     mod post_rename_tests {
         use super::*;
@@ -633,7 +634,11 @@ mod imp {
             let temp = tempfile::tempdir().unwrap();
             let dir = std::fs::File::open(temp.path()).unwrap();
             let acl = acl::CopiedAcl::for_test(Some(vec![0xff; 7]), Some(default_blob()));
-            let mode = DirMode::of_destination(EntryMode::for_test(0o755, 0, 0));
+            let mode = DirMode::of_destination(EntryMode::for_test(
+                0o755,
+                Uid::from_raw(0),
+                Gid::from_raw(0),
+            ));
             let mut narrowed = Narrowed::none();
 
             copy_acl(&dir, &acl, mode, &mut narrowed);
@@ -669,8 +674,10 @@ mod dir_mode_tests {
     use super::imp::DirBits;
     use super::imp::DirMode;
     use crate::formats::pinned_dir::EntryMode;
+    use crate::formats::pinned_dir::Gid;
+    use crate::formats::pinned_dir::Uid;
 
-    const ALL_BITS: EntryMode = EntryMode::for_test(0o7777, 1, 1);
+    const ALL_BITS: EntryMode = EntryMode::for_test(0o7777, Uid::from_raw(1), Gid::from_raw(1));
 
     #[test]
     fn a_destination_mode_never_carries_setuid() {

@@ -107,6 +107,7 @@ use zip::result::ZipError;
 
 use super::bounded_read::copy_prefix;
 use super::bounded_read::invalid_data;
+use super::bounded_read::read_prefix;
 use super::chunk_search::ChunkEnd;
 use super::chunk_search::ChunkPlan;
 use super::chunk_search::ChunkSource;
@@ -523,9 +524,8 @@ impl<R: Read + Seek> Read for Windowed<R> {
         }
         self.position_inner()?;
         if buf.len() >= WINDOW_BYPASS {
-            let n = self
-                .inner
-                .read(buf)
+            let n = read_prefix(&mut self.inner, buf)
+                .map(|read| read.len())
                 .inspect_err(|_| self.inner_position = None)?;
             self.advance(n);
             return Ok(n);
@@ -533,10 +533,12 @@ impl<R: Read + Seek> Read for Windowed<R> {
         self.window.clear();
         self.window.resize(WINDOW, 0);
         self.window_start = self.cursor;
-        let filled = self.inner.read(&mut self.window).inspect_err(|_| {
-            self.window.clear();
-            self.inner_position = None;
-        })?;
+        let filled = read_prefix(&mut self.inner, &mut self.window)
+            .map(|read| read.len())
+            .inspect_err(|_| {
+                self.window.clear();
+                self.inner_position = None;
+            })?;
         self.window.truncate(filled);
         let n = copy_prefix(buf, &self.window)?;
         self.advance(n);

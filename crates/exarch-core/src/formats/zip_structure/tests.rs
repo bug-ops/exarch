@@ -1682,6 +1682,36 @@ fn failed_refill_leaves_no_stale_window() {
     assert_eq!(tail, data[50_000..50_016]);
 }
 
+struct OverClaimingSource;
+
+impl Read for OverClaimingSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        Ok(buf.len() + 1)
+    }
+}
+
+impl Seek for OverClaimingSource {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match pos {
+            SeekFrom::Start(offset) => Ok(offset),
+            SeekFrom::End(_) | SeekFrom::Current(_) => Err(std::io::ErrorKind::Unsupported.into()),
+        }
+    }
+}
+
+#[test]
+fn an_over_claiming_source_is_invalid_data_through_the_window_and_the_bypass() {
+    for len in [16, WINDOW_BYPASS] {
+        let mut windowed = Windowed::new(OverClaimingSource);
+        let mut buf = vec![0xAA; len];
+
+        let error = windowed.read(&mut buf).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "len {len}");
+        assert_eq!(windowed.stream_position().unwrap(), 0, "len {len}");
+    }
+}
+
 #[test]
 fn header_in_a_skippable_frame_between_zstd_frames_is_found() {
     let (first, second) = (b"hello hello ".as_slice(), b"world world".as_slice());

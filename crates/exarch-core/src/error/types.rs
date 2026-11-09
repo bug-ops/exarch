@@ -892,6 +892,60 @@ impl From<Malformation> for ArchiveError {
     }
 }
 
+/// How an [`ArchiveError`] is classified by the public predicates.
+///
+/// Every variant is listed in [`ArchiveError::class`], so adding one forces a
+/// decision here instead of defaulting to "not a violation".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorClass {
+    /// A refusal of one entry or setting that a caller could skip or relax.
+    EntryViolation,
+    /// A refusal of the archive as a whole that is a security finding.
+    ArchiveViolation,
+    /// Anything that is not a security finding.
+    Failure,
+}
+
+#[deny(clippy::wildcard_enum_match_arm)]
+impl ArchiveError {
+    fn class(&self) -> ErrorClass {
+        match self {
+            Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::InvalidPermissions { .. }
+            | Self::SecurityViolation { .. } => ErrorClass::EntryViolation,
+            Self::ZipBomb(_) | Self::ZipInconsistency(_) | Self::QuotaExceeded { .. } => {
+                ErrorClass::ArchiveViolation
+            }
+            Self::TarTrailer(refusal) => {
+                if refusal.is_policy_refusal() {
+                    ErrorClass::EntryViolation
+                } else {
+                    ErrorClass::Failure
+                }
+            }
+            Self::PartialExtraction(partial) => partial.cause().class(),
+            Self::Io(_)
+            | Self::InvalidArchive(_)
+            | Self::TarAmbiguity(_)
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::OutputExists { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::Cancelled
+            | Self::DestinationOccupied { .. }
+            | Self::UnmatchedInclude { .. }
+            | Self::OutputReservationLeft { .. }
+            | Self::ReplaceFailed(_) => ErrorClass::Failure,
+        }
+    }
+}
+
+#[deny(clippy::wildcard_enum_match_arm)]
 impl ArchiveError {
     /// A malformed-archive refusal that has no family of its own.
     pub(crate) fn unclassified(reason: impl Into<Box<str>>) -> Self {
@@ -915,7 +969,29 @@ impl ArchiveError {
         match self {
             Self::InvalidArchive(malformation) => Some(malformation),
             Self::PartialExtraction(partial) => partial.cause().malformation(),
-            _ => None,
+            Self::Io(_)
+            | Self::TarAmbiguity(_)
+            | Self::TarTrailer(_)
+            | Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::ZipBomb(_)
+            | Self::ZipInconsistency(_)
+            | Self::InvalidPermissions { .. }
+            | Self::QuotaExceeded { .. }
+            | Self::SecurityViolation { .. }
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::OutputExists { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::Cancelled
+            | Self::DestinationOccupied { .. }
+            | Self::UnmatchedInclude { .. }
+            | Self::OutputReservationLeft { .. }
+            | Self::ReplaceFailed(_) => None,
         }
     }
 }
@@ -938,6 +1014,7 @@ impl From<TarAmbiguity> for ArchiveError {
     }
 }
 
+#[deny(clippy::wildcard_enum_match_arm)]
 impl ArchiveError {
     /// Returns the `SecurityConfig` setting whose current value refused the
     /// entry, if this is a [`Self::SecurityViolation`] that a setting relaxes.
@@ -959,7 +1036,28 @@ impl ArchiveError {
             Self::SecurityViolation { kind } => kind.relaxable_by(),
             Self::TarTrailer(refusal) => refusal.relaxable_by(),
             Self::PartialExtraction(partial) => partial.cause().relaxable_by(),
-            _ => None,
+            Self::Io(_)
+            | Self::InvalidArchive(_)
+            | Self::TarAmbiguity(_)
+            | Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::ZipBomb(_)
+            | Self::ZipInconsistency(_)
+            | Self::InvalidPermissions { .. }
+            | Self::QuotaExceeded { .. }
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::OutputExists { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::Cancelled
+            | Self::DestinationOccupied { .. }
+            | Self::UnmatchedInclude { .. }
+            | Self::OutputReservationLeft { .. }
+            | Self::ReplaceFailed(_) => None,
         }
     }
 
@@ -979,7 +1077,29 @@ impl ArchiveError {
         match self {
             Self::Cancelled => true,
             Self::PartialExtraction(partial) => partial.cause().is_cancelled(),
-            _ => false,
+            Self::Io(_)
+            | Self::InvalidArchive(_)
+            | Self::TarAmbiguity(_)
+            | Self::TarTrailer(_)
+            | Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::ZipBomb(_)
+            | Self::ZipInconsistency(_)
+            | Self::InvalidPermissions { .. }
+            | Self::QuotaExceeded { .. }
+            | Self::SecurityViolation { .. }
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::OutputExists { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::DestinationOccupied { .. }
+            | Self::UnmatchedInclude { .. }
+            | Self::OutputReservationLeft { .. }
+            | Self::ReplaceFailed(_) => false,
         }
     }
 
@@ -1000,7 +1120,29 @@ impl ArchiveError {
         match self {
             Self::SecurityViolation { kind } => Some(kind),
             Self::PartialExtraction(partial) => partial.cause().security_violation(),
-            _ => None,
+            Self::Io(_)
+            | Self::InvalidArchive(_)
+            | Self::TarAmbiguity(_)
+            | Self::TarTrailer(_)
+            | Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::ZipBomb(_)
+            | Self::ZipInconsistency(_)
+            | Self::InvalidPermissions { .. }
+            | Self::QuotaExceeded { .. }
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::OutputExists { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::Cancelled
+            | Self::DestinationOccupied { .. }
+            | Self::UnmatchedInclude { .. }
+            | Self::OutputReservationLeft { .. }
+            | Self::ReplaceFailed(_) => None,
         }
     }
 
@@ -1033,21 +1175,7 @@ impl ArchiveError {
     /// ```
     #[must_use]
     pub fn is_security_violation(&self) -> bool {
-        match self {
-            Self::PartialExtraction(partial) => partial.cause().is_security_violation(),
-            Self::TarTrailer(refusal) => refusal.is_policy_refusal(),
-            _ => matches!(
-                self,
-                Self::PathTraversal { .. }
-                    | Self::SymlinkEscape { .. }
-                    | Self::HardlinkEscape { .. }
-                    | Self::ZipBomb(_)
-                    | Self::ZipInconsistency(_)
-                    | Self::InvalidPermissions { .. }
-                    | Self::QuotaExceeded { .. }
-                    | Self::SecurityViolation { .. }
-            ),
-        }
+        !matches!(self.class(), ErrorClass::Failure)
     }
 
     /// Returns `true` if this error is potentially recoverable.
@@ -1073,18 +1201,7 @@ impl ArchiveError {
     /// ```
     #[must_use]
     pub fn is_recoverable(&self) -> bool {
-        match self {
-            Self::PartialExtraction(partial) => partial.cause().is_recoverable(),
-            Self::TarTrailer(refusal) => refusal.is_policy_refusal(),
-            _ => matches!(
-                self,
-                Self::PathTraversal { .. }
-                    | Self::SymlinkEscape { .. }
-                    | Self::HardlinkEscape { .. }
-                    | Self::InvalidPermissions { .. }
-                    | Self::SecurityViolation { .. }
-            ),
-        }
+        matches!(self.class(), ErrorClass::EntryViolation)
     }
 
     /// Returns a context string for this error, if available.
@@ -1116,7 +1233,28 @@ impl ArchiveError {
             Self::InvalidArchive(m) => Some(Cow::Owned(m.to_string())),
             Self::SecurityViolation { kind } => Some(Cow::Owned(kind.to_string())),
             Self::PartialExtraction(partial) => partial.cause().context(),
-            _ => None,
+            Self::Io(_)
+            | Self::TarAmbiguity(_)
+            | Self::TarTrailer(_)
+            | Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::ZipBomb(_)
+            | Self::ZipInconsistency(_)
+            | Self::InvalidPermissions { .. }
+            | Self::QuotaExceeded { .. }
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::OutputExists { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::Cancelled
+            | Self::DestinationOccupied { .. }
+            | Self::UnmatchedInclude { .. }
+            | Self::OutputReservationLeft { .. }
+            | Self::ReplaceFailed(_) => None,
         }
     }
 
@@ -1126,10 +1264,34 @@ impl ArchiveError {
         match self {
             Self::QuotaExceeded { resource } => Some(resource),
             Self::PartialExtraction(partial) => partial.cause().quota_resource(),
-            _ => None,
+            Self::Io(_)
+            | Self::InvalidArchive(_)
+            | Self::TarAmbiguity(_)
+            | Self::TarTrailer(_)
+            | Self::PathTraversal { .. }
+            | Self::SymlinkEscape { .. }
+            | Self::HardlinkEscape { .. }
+            | Self::ZipBomb(_)
+            | Self::ZipInconsistency(_)
+            | Self::InvalidPermissions { .. }
+            | Self::SecurityViolation { .. }
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotAccessible { .. }
+            | Self::OutputExists { .. }
+            | Self::InvalidCompressionLevel { .. }
+            | Self::UnknownFormat { .. }
+            | Self::ReaderFormat(_)
+            | Self::InvalidConfiguration { .. }
+            | Self::Cancelled
+            | Self::DestinationOccupied { .. }
+            | Self::UnmatchedInclude { .. }
+            | Self::OutputReservationLeft { .. }
+            | Self::ReplaceFailed(_) => None,
         }
     }
+}
 
+impl ArchiveError {
     /// Wraps `err` in [`Self::PartialExtraction`] if `report` recorded any
     /// processed items, skipped files, or warnings, otherwise returns `err`
     /// unchanged.
@@ -1882,5 +2044,249 @@ mod tests {
             PartialWrites::Kept,
         ));
         assert_eq!(err.error_code(), crate::ErrorCode::ZipBomb);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Classes {
+        security_violation: bool,
+        recoverable: bool,
+        relaxable_by: Option<PolicySetting>,
+        context: bool,
+        typed_violation: bool,
+        malformation: bool,
+        quota_resource: bool,
+        cancelled: bool,
+    }
+
+    impl Classes {
+        const NONE: Self = Self::of(false, false);
+
+        const fn of(security_violation: bool, recoverable: bool) -> Self {
+            Self {
+                security_violation,
+                recoverable,
+                relaxable_by: None,
+                context: false,
+                typed_violation: false,
+                malformation: false,
+                quota_resource: false,
+                cancelled: false,
+            }
+        }
+
+        const fn relaxable(self, setting: PolicySetting) -> Self {
+            Self {
+                relaxable_by: Some(setting),
+                ..self
+            }
+        }
+
+        const fn with_context(self) -> Self {
+            Self {
+                context: true,
+                ..self
+            }
+        }
+
+        const fn typed_violation(self) -> Self {
+            Self {
+                typed_violation: true,
+                ..self
+            }
+        }
+
+        const fn malformation(self) -> Self {
+            Self {
+                malformation: true,
+                ..self
+            }
+        }
+
+        const fn quota(self) -> Self {
+            Self {
+                quota_resource: true,
+                ..self
+            }
+        }
+
+        const fn cancelled(self) -> Self {
+            Self {
+                cancelled: true,
+                ..self
+            }
+        }
+
+        fn read(error: &ArchiveError) -> Self {
+            Self {
+                security_violation: error.is_security_violation(),
+                recoverable: error.is_recoverable(),
+                relaxable_by: error.relaxable_by(),
+                context: error.context().is_some(),
+                typed_violation: error.security_violation().is_some(),
+                malformation: error.malformation().is_some(),
+                quota_resource: error.quota_resource().is_some(),
+                cancelled: error.is_cancelled(),
+            }
+        }
+    }
+
+    fn io_error() -> std::io::Error {
+        std::io::Error::other("test")
+    }
+
+    fn violation_variants() -> Vec<(ArchiveError, Classes)> {
+        use super::super::tar_trailer::TarTrailerRefusal as Trailer;
+        let path = || PathBuf::from("p");
+        vec![
+            (ArchiveError::Io(io_error()), Classes::NONE),
+            (
+                ArchiveError::unclassified("x"),
+                Classes::NONE.with_context().malformation(),
+            ),
+            (
+                ArchiveError::TarAmbiguity(TarAmbiguity::MalformedRecord),
+                Classes::NONE,
+            ),
+            (
+                ArchiveError::TarTrailer(Trailer::OverCap { cap: 1 }),
+                Classes::of(true, true).relaxable(PolicySetting::MaxTarMetadataBytes),
+            ),
+            (ArchiveError::TarTrailer(Trailer::Truncated), Classes::NONE),
+            (
+                ArchiveError::PathTraversal { path: path() },
+                Classes::of(true, true),
+            ),
+            (
+                ArchiveError::SymlinkEscape { path: path() },
+                Classes::of(true, true),
+            ),
+            (
+                ArchiveError::HardlinkEscape { path: path() },
+                Classes::of(true, true),
+            ),
+            (
+                ArchiveError::ZipBomb(ZipBombDetails::new(
+                    ZipBombScope::Entry,
+                    Compressed(1),
+                    Uncompressed(2),
+                )),
+                Classes::of(true, false),
+            ),
+            (
+                ArchiveError::ZipInconsistency(ZipInconsistency::OverlappingEntries),
+                Classes::of(true, false),
+            ),
+            (
+                ArchiveError::InvalidPermissions {
+                    path: path(),
+                    mode: crate::RawMode::new(0o777),
+                },
+                Classes::of(true, true),
+            ),
+            (
+                ArchiveError::QuotaExceeded {
+                    resource: QuotaResource::IntegerOverflow,
+                },
+                Classes::of(true, false).quota(),
+            ),
+            (
+                ArchiveError::from(Violation::EncryptedArchive),
+                Classes::of(true, true).with_context().typed_violation(),
+            ),
+            (
+                ArchiveError::from(Violation::SolidArchive),
+                Classes::of(true, true)
+                    .with_context()
+                    .typed_violation()
+                    .relaxable(PolicySetting::SolidArchives),
+            ),
+        ]
+    }
+
+    fn unclassified_variants() -> Vec<(ArchiveError, Classes)> {
+        let path = || PathBuf::from("p");
+        vec![
+            (ArchiveError::SourceNotFound { path: path() }, Classes::NONE),
+            (
+                ArchiveError::SourceNotAccessible {
+                    path: path(),
+                    error: io_error(),
+                },
+                Classes::NONE,
+            ),
+            (ArchiveError::OutputExists { path: path() }, Classes::NONE),
+            (
+                ArchiveError::InvalidCompressionLevel {
+                    level: RequestedLevel::OutOfRange,
+                },
+                Classes::NONE,
+            ),
+            (ArchiveError::UnknownFormat { path: path() }, Classes::NONE),
+            (
+                ArchiveError::ReaderFormat(ReaderFormatError::Unrecognized),
+                Classes::NONE,
+            ),
+            (
+                ArchiveError::InvalidConfiguration {
+                    setting: ConfigSetting::OutputPath,
+                    problem: ConfigProblem::NotSet,
+                },
+                Classes::NONE,
+            ),
+            (ArchiveError::Cancelled, Classes::NONE.cancelled()),
+            (
+                ArchiveError::DestinationOccupied {
+                    destination: path(),
+                    conflicts: Box::new([path()]),
+                },
+                Classes::NONE,
+            ),
+            (
+                ArchiveError::UnmatchedInclude {
+                    patterns: Box::new([]),
+                },
+                Classes::NONE,
+            ),
+            (
+                ArchiveError::OutputReservationLeft {
+                    path: path(),
+                    error: io_error(),
+                },
+                Classes::NONE,
+            ),
+            (
+                ArchiveError::ReplaceFailed(ReplaceFailure::new(
+                    io_error(),
+                    crate::Restore::Restored,
+                    None,
+                )),
+                Classes::NONE,
+            ),
+        ]
+    }
+
+    fn classified_variants() -> Vec<(ArchiveError, Classes)> {
+        let mut all = violation_variants();
+        all.extend(unclassified_variants());
+        all
+    }
+
+    #[test]
+    fn test_every_variant_keeps_its_class() {
+        for (error, expected) in classified_variants() {
+            assert_eq!(Classes::read(&error), expected, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn test_partial_extraction_has_the_class_of_its_cause() {
+        for (error, expected) in classified_variants() {
+            let wrapped = ArchiveError::PartialExtraction(crate::Partial::new(
+                error,
+                crate::ExtractionReport::default(),
+                PartialWrites::Kept,
+            ));
+            assert_eq!(Classes::read(&wrapped), expected, "{wrapped:?}");
+        }
     }
 }

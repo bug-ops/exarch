@@ -129,13 +129,21 @@ fn c_chars_until_nul(field: &[std::ffi::c_char]) -> impl Iterator<Item = u8> {
 /// An anonymous spool file and where its bytes live.
 #[derive(Debug)]
 pub(crate) struct TempSpool {
-    /// The unnamed temporary file.
-    pub file: File,
-    /// Whether writing to it consumes memory.
-    pub backing: SpoolBacking,
+    file: File,
+    backing: SpoolBacking,
 }
 
 impl TempSpool {
+    /// Whether writing to the file consumes memory.
+    pub(crate) const fn backing(&self) -> SpoolBacking {
+        self.backing
+    }
+
+    /// The unnamed temporary file.
+    pub(crate) fn into_file(self) -> File {
+        self.file
+    }
+
     /// A spool over `file`, classified by the filesystem it lives on.
     #[cfg(not(target_os = "wasi"))]
     fn new(file: File) -> Self {

@@ -26,7 +26,7 @@ const MODES: [Staging; 2] = [Staging::Atomic, Staging::AtomicReplace];
 
 /// The paths of the archive's tree, relative to the destination, which the
 /// root's own ACL is compared at as well as its children's.
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[cfg(acl_copy)]
 const TREE: [&str; 4] = ["", "p.txt", "d", "d/q.txt"];
 
 struct Fixture {

@@ -912,6 +912,15 @@ pub(crate) fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> 
     Ok(PathBuf::from(target_str))
 }
 
+/// Whether `error` carries one of the OS error codes in `set`.
+///
+/// The one spelling of an errno comparison, so a failure is classified the same
+/// way wherever it is checked.
+#[cfg(any(unix, target_os = "wasi"))]
+pub(crate) fn errno_is(error: &std::io::Error, set: &[rustix::io::Errno]) -> bool {
+    rustix::io::Errno::from_io_error(error).is_some_and(|errno| set.contains(&errno))
+}
+
 /// Returns `true` if `error` is the "too many levels of symbolic links"
 /// error (`ELOOP` on Unix) that an `O_NOFOLLOW` open produces when its final
 /// path component is a symlink.
@@ -926,7 +935,7 @@ pub(crate) fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> 
 pub(crate) fn is_filesystem_loop_error(error: &std::io::Error) -> bool {
     #[cfg(unix)]
     {
-        error.raw_os_error() == Some(libc::ELOOP)
+        errno_is(error, &[rustix::io::Errno::LOOP])
     }
     #[cfg(not(unix))]
     {

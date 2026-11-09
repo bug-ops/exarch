@@ -7,9 +7,8 @@
 //! (at most 255), not on the number of patterns. Memory stays proportional to
 //! the pattern bytes.
 
-use super::Engine;
 use super::EntryPattern;
-use super::Shape;
+use super::Matcher;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -64,16 +63,14 @@ impl DirectIndex {
     pub(super) fn new<'a>(patterns: impl IntoIterator<Item = (usize, &'a EntryPattern)>) -> Self {
         let mut index = Self::default();
         for (position, pattern) in patterns {
-            if !matches!(pattern.engine, Engine::Direct) {
-                continue;
-            }
-            match &pattern.shape {
-                Shape::MatchAll => index.match_all.push(position),
-                Shape::Floating(name) => match name.as_bytes().strip_prefix(b"*") {
-                    Some(suffix) => add_owner(&mut index.suffixes, suffix, position),
-                    None => add_owner(&mut index.floating, name.as_bytes(), position),
-                },
-                Shape::Anchored(path) => add_owner(&mut index.anchored, path.as_bytes(), position),
+            match &pattern.matcher {
+                Matcher::All => index.match_all.push(position),
+                Matcher::Name(name) => add_owner(&mut index.floating, name.as_bytes(), position),
+                Matcher::Suffix(suffix) => {
+                    add_owner(&mut index.suffixes, suffix.as_bytes(), position);
+                }
+                Matcher::Path(path) => add_owner(&mut index.anchored, path.as_bytes(), position),
+                Matcher::Glob { .. } => {}
             }
         }
         index.suffix_lengths = key_lengths(&index.suffixes);

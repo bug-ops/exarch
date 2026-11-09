@@ -1008,6 +1008,22 @@ pub(crate) fn copy_file_content_with_permit(
 mod tests {
     use super::*;
 
+    use crate::ArchiveError;
+    use crate::ExtractionReport;
+    use crate::Malformation;
+    use crate::NoopProgress;
+    use crate::SecurityConfig;
+    use crate::copy::CopyBuffer;
+    use crate::formats::source_fault::ReadFamily;
+    use crate::formats::source_fault::SourceTap;
+    use crate::security::RawMode;
+    use crate::security::permissions::sanitize_permissions;
+    use crate::security::quota::QuotaTracker;
+    use std::assert_matches;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
     #[cfg(any(unix, target_os = "wasi"))]
     #[test]
     fn errno_is_matches_only_the_listed_codes() {
@@ -1044,21 +1060,6 @@ mod tests {
             "equal on Linux, distinct on macOS"
         );
     }
-    use crate::ArchiveError;
-    use crate::ExtractionReport;
-    use crate::Malformation;
-    use crate::NoopProgress;
-    use crate::SecurityConfig;
-    use crate::copy::CopyBuffer;
-    use crate::formats::source_fault::ReadFamily;
-    use crate::formats::source_fault::SourceTap;
-    use crate::security::RawMode;
-    use crate::security::permissions::sanitize_permissions;
-    use crate::security::quota::QuotaTracker;
-    use std::assert_matches;
-    use std::io::Cursor;
-    use std::path::PathBuf;
-    use tempfile::TempDir;
 
     /// Builds a [`SanitizedMode`] for tests that don't otherwise need a
     /// `SecurityConfig` in scope. None of the modes used across these tests

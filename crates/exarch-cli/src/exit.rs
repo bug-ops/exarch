@@ -126,12 +126,8 @@ mod tests {
     fn the_code_and_the_stop_flag_follow_the_status() {
         assert_eq!(ExitStatus::Interrupted.code(), 130);
         assert_eq!(ExitStatus::Terminated.code(), 143);
-        for status in ALL {
-            assert_eq!(
-                status.is_stop(),
-                matches!(status, ExitStatus::Interrupted | ExitStatus::Terminated)
-            );
-        }
+        assert!(ExitStatus::Interrupted.is_stop() && ExitStatus::Terminated.is_stop());
+        assert!(!ExitStatus::Success.is_stop() && !ExitStatus::Failure.is_stop());
     }
 
     #[test]

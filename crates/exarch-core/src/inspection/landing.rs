@@ -289,6 +289,17 @@ impl ArchiveManifest {
         let claims = LandingClaims::default();
         let is_hardlink =
             |entry: &ArchiveEntry| matches!(entry.kind, ManifestEntryKind::Hardlink { .. });
+        let mut land_entry = |entry: &ArchiveEntry| {
+            land(
+                entry,
+                self.selection(),
+                config,
+                &root,
+                &mut tree,
+                &mut hardlinks,
+                &claims,
+            )
+        };
         let mut judged: Vec<Option<Disposition>> = Vec::with_capacity(self.entries().len());
         // Extraction creates hardlinks after every other entry, so a target
         // that appears later in the archive still exists.
@@ -296,32 +307,14 @@ impl ArchiveManifest {
             judged.push(if is_hardlink(entry) {
                 None
             } else {
-                Some(land(
-                    entry,
-                    self.selection(),
-                    config,
-                    &root,
-                    &mut tree,
-                    &mut hardlinks,
-                    &claims,
-                ))
+                Some(land_entry(entry))
             });
         }
         self.entries()
             .iter()
             .zip(judged)
             .map(|(entry, first)| {
-                let disposition = first.unwrap_or_else(|| {
-                    land(
-                        entry,
-                        self.selection(),
-                        config,
-                        &root,
-                        &mut tree,
-                        &mut hardlinks,
-                        &claims,
-                    )
-                });
+                let disposition = first.unwrap_or_else(|| land_entry(entry));
                 (entry, disposition)
             })
             .collect::<Vec<_>>()

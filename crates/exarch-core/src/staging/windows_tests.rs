@@ -195,6 +195,8 @@ fn the_walk_rewrites_a_junction_itself_and_never_follows_it() {
     let outside = parent.join("outside");
     fs::create_dir(&outside).unwrap();
     fs::write(outside.join("secret.txt"), b"x").unwrap();
+    let me = dacl_probe::current_user();
+    dacl_probe::set_dacl_from_sddl(&outside.join("secret.txt"), &format!("D:P(A;;FA;;;{me})"));
     dacl_probe::restrict_to_current_user_without_inheritance(&outside);
     let outside_dir = dacl_probe::read(&outside);
     let outside_file = dacl_probe::read(&outside.join("secret.txt"));
@@ -208,7 +210,6 @@ fn the_walk_rewrites_a_junction_itself_and_never_follows_it() {
         .status()
         .unwrap();
     assert!(status.success(), "mklink /J failed");
-    let me = dacl_probe::current_user();
     dacl_probe::set_dacl_from_sddl(&root, &format!("D:P(A;OICI;FA;;;{me})(A;OICI;FR;;;BU)"));
     let pin = VettedDir::open_path(&parent).unwrap();
     let name = LeafBuf::of(&root).unwrap();

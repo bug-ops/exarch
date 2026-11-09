@@ -518,21 +518,15 @@ mod linux {
     /// `Staging::Atomic` refuses such a destination earlier, when it checks
     /// that the directory is empty.
     #[test]
-    fn a_replaced_destination_its_owner_cannot_read_publishes_a_private_root() {
+    fn a_replaced_destination_its_owner_cannot_read_keeps_its_mode() {
         let fx = Fixture::new();
         chmod(&fx.dest, 0o300);
-        let root = is_root(&fx.dest);
-        let expected = if root { 0o300 } else { 0o700 };
 
         let report = fx.extract(Staging::AtomicReplace);
 
-        assert_eq!(mode_of(&fx.dest), expected);
+        assert_eq!(mode_of(&fx.dest), 0o300);
         let reasons = narrowing_of(&report);
-        if root {
-            assert!(reasons.is_empty(), "{reasons:?}");
-        } else {
-            assert_eq!(reasons, [NarrowingReason::AclUnreadable]);
-        }
+        assert!(reasons.is_empty(), "{reasons:?}");
     }
 
     /// Needs root to give the destination away, so it only runs there; on an

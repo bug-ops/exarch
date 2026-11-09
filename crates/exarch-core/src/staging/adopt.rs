@@ -357,7 +357,13 @@ mod imp {
         /// changing its mode, or a directory that is no longer the one
         /// created.
         pub(in crate::staging) fn adopt(&mut self, adoption: Adoption) -> io::Result<AdoptedRoot> {
-            let dir = self.open_verified()?;
+            // TODO(#1088): rollback after adoption skips the macOS sweep
+            #[cfg(target_os = "macos")]
+            {
+                self.own = None;
+            }
+            let stage = self.open_verified()?;
+            let dir = stage.as_file();
             let Adoption { mut mode, origin } = adoption;
             let (acl, destination, owner) = match origin {
                 RootOrigin::Fresh { captured } => (captured, None, None),
@@ -372,14 +378,14 @@ mod imp {
             // A fresh root with nothing captured keeps what it has: on Linux
             // that is the parent's default ACL, which a clear would strip.
             if withheld.is_some() || owner.is_some() || !matches!(acl, AclPlan::None) {
-                acl::clear_inherited(self.parent, self.name.as_leaf())?;
+                acl::clear_inherited(&stage)?;
             }
             // Another directory than the one that was seeded from has other
             // owners: its uid and gid are not this destination's to claim.
             let claimed = match owner {
                 Some(owner) if withheld != Some(NarrowingReason::DestinationChanged) => Some((
                     owner.ids,
-                    claim_owner(&dir, owner, &mut mode, &mut narrowed)?,
+                    claim_owner(dir, owner, &mut mode, &mut narrowed)?,
                 )),
                 Some(_) => None,
                 None => {
@@ -405,7 +411,7 @@ mod imp {
                     pending = Some(PendingCopy { dir, acl, mode });
                 }),
             };
-            self.adopted = Some(dir);
+            self.adopted = Some(stage.into_file());
             applied.map(|()| AdoptedRoot {
                 narrowed,
                 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
@@ -424,7 +430,7 @@ mod imp {
         pub(in crate::staging) fn vanished_reason(&self) -> io::Result<Option<NarrowingReason>> {
             let reason = self.inherited.withholds(None);
             if reason.is_some() {
-                acl::clear_inherited(self.parent, self.name.as_leaf())?;
+                acl::clear_inherited(&self.open_verified()?)?;
             }
             Ok(reason)
         }
@@ -687,7 +693,6 @@ mod dir_mode_tests {
 #[cfg(unix)]
 mod removable {
     use crate::formats::file_identity::FileIdentity;
-    use crate::formats::file_identity::IdentityCheck;
     use crate::formats::pinned_dir::Leaf;
     use crate::formats::pinned_dir::VettedDir;
 
@@ -700,12 +705,7 @@ mod removable {
         name: Leaf<'_>,
         expected: FileIdentity,
     ) {
-        let Ok(dir) = pin.open_dir_file(name) else {
-            return;
-        };
-        if FileIdentity::of_file(&dir).check(expected) != IdentityCheck::Different {
-            let _ = dir.set_permissions(super::imp::DirMode::PRIVATE.permissions());
-        }
+        let _ = pin.set_dir_mode(name, expected, &super::imp::DirMode::PRIVATE.permissions());
     }
 }
 

@@ -32,6 +32,8 @@ use super::adopt::make_removable;
 use super::cancelled_after;
 use super::dir::Seed;
 use super::dir::StagingDir;
+use super::hold::Destination;
+use super::hold::DestinationHold;
 use super::io_context;
 use super::parent_or_cwd;
 use super::staged_options;
@@ -69,6 +71,8 @@ pub(super) struct ReplaceTarget {
     id: FileIdentity,
     parent: PathBuf,
     path: PathBuf,
+    /// Keeps the destination's inode from being reissued while the run lasts.
+    hold: Option<DestinationHold>,
 }
 
 fn refuse(problem: ConfigProblem) -> ArchiveError {
@@ -162,16 +166,13 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
         ))
     })?;
     let path = parent.join(&name);
-    let status = match pin.status(name.as_leaf()) {
-        Ok(Some(status)) => status,
-        Ok(None) => return Ok(None),
-        Err(e) => {
-            return Err(ArchiveError::Io(io_context(
-                &e,
-                "failed to inspect the destination",
-                &path,
-            )));
-        }
+    let found = Destination::open(&pin, name.as_leaf()).map_err(|e| {
+        ArchiveError::Io(io_context(&e, "failed to inspect the destination", &path))
+    })?;
+    let (status, hold) = match found {
+        Destination::Absent => return Ok(None),
+        Destination::Other(status) => (status, None),
+        Destination::Directory { status, hold } => (status, hold),
     };
     refuse_unreplaceable(&status)?;
     if let Some(guard) = protected_path(&path, status.identity, archive) {
@@ -183,6 +184,7 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
         id: status.identity,
         parent,
         path,
+        hold,
     }))
 }
 
@@ -337,6 +339,7 @@ pub(super) fn run(
         id,
         parent,
         path,
+        hold: _hold,
     } = target;
     let inheritance = acl::read_inheritance(&pin, name.as_leaf(), &parent, id).map_err(|e| {
         ArchiveError::Io(io_context(

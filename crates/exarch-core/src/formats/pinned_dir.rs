@@ -76,6 +76,8 @@ use crate::security::fs_view::Occupant;
 use crate::types::DestDir;
 
 pub(crate) use imp::VettedDir;
+#[cfg(target_os = "macos")]
+pub(crate) use imp::open_directory_at;
 
 /// Exactly one normal path component: a name inside a [`VettedDir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,8 +354,12 @@ pub(crate) mod darwin_acl;
 
 #[cfg(any(unix, target_os = "wasi"))]
 mod imp {
+    #[cfg(unix)]
+    use std::ffi::OsStr;
     use std::fs::File;
     use std::io;
+    #[cfg(unix)]
+    use std::os::fd::AsFd;
     use std::os::fd::OwnedFd;
     use std::path::Path;
 
@@ -367,6 +373,8 @@ mod imp {
     use super::Leaf;
     use super::TempLeaf;
     use crate::formats::file_identity::FileIdentity;
+    #[cfg(unix)]
+    use crate::formats::file_identity::IdentityCheck;
     use crate::formats::file_identity::IdentityKey;
     use crate::formats::occupant::ReplacePermit;
     use crate::security::fs_view::Occupant;
@@ -391,6 +399,24 @@ mod imp {
             other => other,
         };
         Ok(opened?)
+    }
+
+    /// Opens the directory `name` of `dir` without following a symlink, with
+    /// the platform's permission-light access mode (`O_PATH`, `O_SEARCH`).
+    #[cfg(unix)]
+    pub(crate) fn open_directory_at(dir: &impl AsFd, name: &OsStr) -> io::Result<File> {
+        open_directory(|flags| rustix::fs::openat(dir, name, flags, Mode::empty())).map(File::from)
+    }
+
+    /// The status a `stat` result describes.
+    fn entry_status(stat: &rustix::fs::Stat) -> EntryStatus {
+        EntryStatus {
+            occupant: FileType::from_raw_mode(stat.st_mode).into(),
+            reparse: false,
+            identity: IdentityKey::of_stat(stat).map_or(FileIdentity::Unknown, FileIdentity::Known),
+            #[cfg(unix)]
+            mode: super::EntryMode::of_stat(stat),
+        }
     }
 
     /// An open directory below the destination.
@@ -442,17 +468,29 @@ mod imp {
         /// it.
         pub(crate) fn status(&self, name: Leaf<'_>) -> io::Result<Option<EntryStatus>> {
             match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => Ok(Some(EntryStatus {
-                    occupant: FileType::from_raw_mode(stat.st_mode).into(),
-                    reparse: false,
-                    identity: IdentityKey::of_stat(&stat)
-                        .map_or(FileIdentity::Unknown, FileIdentity::Known),
-                    #[cfg(unix)]
-                    mode: super::EntryMode::of_stat(&stat),
-                })),
+                Ok(stat) => Ok(Some(entry_status(&stat))),
                 Err(e) if e == Errno::NOENT => Ok(None),
                 Err(e) => Err(e.into()),
             }
+        }
+
+        /// What this directory itself is, read from the handle and so
+        /// unaffected by any rename of its name.
+        ///
+        /// Linux and Android read it with `AT_EMPTY_PATH`, which works on an
+        /// `O_PATH` handle on every kernel that has it (`fstat` on one needs
+        /// Linux 3.6).
+        ///
+        /// # Errors
+        ///
+        /// The I/O error of the lookup.
+        #[cfg(unix)]
+        pub(crate) fn own_status(&self) -> io::Result<EntryStatus> {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let stat = rustix::fs::statat(&self.0, "", AtFlags::EMPTY_PATH)?;
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let stat = rustix::fs::fstat(&self.0)?;
+            Ok(entry_status(&stat))
         }
 
         /// What `name` is, without following a symlink; `None` if it is absent.
@@ -476,6 +514,84 @@ mod imp {
                 Mode::empty(),
             )?;
             Ok(File::from(fd))
+        }
+
+        /// Opens the directory `name` for reading or changing its attributes
+        /// (ACL, mode, owner), refusing a symlink.
+        ///
+        /// On Apple platforms the handle is search-only, so a directory whose
+        /// ACL denies listing it is still reachable; elsewhere it is the
+        /// [`open_dir_file`](Self::open_dir_file) handle.
+        #[cfg(target_vendor = "apple")]
+        pub(crate) fn open_dir_for_attributes(&self, name: Leaf<'_>) -> io::Result<File> {
+            open_directory_at(&self.0, name.as_os_str())
+        }
+
+        /// Opens the directory `name` for reading or changing its attributes
+        /// (ACL, mode, owner), refusing a symlink.
+        #[cfg(all(unix, not(target_vendor = "apple")))]
+        pub(crate) fn open_dir_for_attributes(&self, name: Leaf<'_>) -> io::Result<File> {
+            self.open_dir_file(name)
+        }
+
+        /// Sets the permission bits of the directory `name` through a handle
+        /// that needs no read access to it, when it still is the directory
+        /// `expected` names.
+        ///
+        /// An identity the volume cannot provide is not a mismatch. Apple
+        /// platforms open it search-only and, for a directory that is
+        /// readable but not searchable, for reading; Linux and Android use an
+        /// `O_PATH` handle, falling back to a read handle where `/proc` is not
+        /// mounted. Other Unix open it for reading, so a mode that denies that
+        /// read still fails there.
+        ///
+        /// # Errors
+        ///
+        /// The I/O error of opening the directory or of changing its mode, or
+        /// an error when it was replaced.
+        #[cfg(unix)]
+        pub(crate) fn set_dir_mode(
+            &self,
+            name: Leaf<'_>,
+            expected: FileIdentity,
+            mode: &std::fs::Permissions,
+        ) -> io::Result<()> {
+            let dir = self.open_for_mode(name)?;
+            ensure_unreplaced(&dir, expected)?;
+            match chmod_handle(&dir, mode) {
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    self.set_dir_mode_through_read_handle(name, expected, mode)
+                }
+                other => other,
+            }
+        }
+
+        /// Opens the directory `name` with the handle `set_dir_mode` prefers
+        /// on this platform.
+        #[cfg(unix)]
+        fn open_for_mode(&self, name: Leaf<'_>) -> io::Result<File> {
+            let opened = open_directory_at(&self.0, name.as_os_str());
+            #[cfg(target_vendor = "apple")]
+            let opened = match opened {
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => self.open_dir_file(name),
+                other => other,
+            };
+            opened
+        }
+
+        /// `set_dir_mode` for a Linux without `/proc`, where an `O_PATH`
+        /// handle cannot be chmod'ed: the directory is opened for reading.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        pub(crate) fn set_dir_mode_through_read_handle(
+            &self,
+            name: Leaf<'_>,
+            expected: FileIdentity,
+            mode: &std::fs::Permissions,
+        ) -> io::Result<()> {
+            let dir = self.open_dir_file(name)?;
+            ensure_unreplaced(&dir, expected)?;
+            dir.set_permissions(mode.clone())
         }
 
         /// Best effort: where the directory `name` is now, resolved from a
@@ -609,6 +725,36 @@ mod imp {
         pub(crate) fn symlink(&self, target: &Path, name: Leaf<'_>) -> io::Result<()> {
             Ok(rustix::fs::symlinkat(target, &self.0, name.as_os_str())?)
         }
+    }
+
+    /// Fails when `dir` is known to be another directory than `expected`.
+    #[cfg(unix)]
+    fn ensure_unreplaced(dir: &File, expected: FileIdentity) -> io::Result<()> {
+        if FileIdentity::of_file(dir).check(expected) == IdentityCheck::Different {
+            return Err(io::Error::other("the directory was replaced"));
+        }
+        Ok(())
+    }
+
+    /// Linux and Android: `fchmod` gives `EBADF` on an `O_PATH` descriptor, so
+    /// the mode is set through the `/proc` link of the descriptor, which acts
+    /// on the same inode.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn chmod_handle(dir: &File, mode: &std::fs::Permissions) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+
+        Ok(rustix::fs::chmod(
+            format!("/proc/self/fd/{}", dir.as_raw_fd()),
+            Mode::from_bits_truncate(mode.mode()),
+        )?)
+    }
+
+    // TODO(#1087): 0311 backup stays unremovable on other Unix (O_RDONLY
+    // fchmod)
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    fn chmod_handle(dir: &File, mode: &std::fs::Permissions) -> io::Result<()> {
+        dir.set_permissions(mode.clone())
     }
 
     /// Linux: the target of `/proc/self/fd/<fd>`.
@@ -975,12 +1121,14 @@ mod tests {
     use super::support::pinned;
     use super::support::pinned_at;
     use super::*;
+    use crate::formats::file_identity::IdentityCheck;
     use crate::formats::occupant::ReplacePermit;
     use crate::security::RawMode;
     use std::assert_matches;
     use std::fs;
     use std::io;
     use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
@@ -1165,6 +1313,103 @@ mod tests {
             result.unwrap();
             assert!(dest.join("d").is_dir() && dest.join("f").is_file());
         }
+    }
+
+    fn identity_of_name(dir: &VettedDir, name: &str) -> FileIdentity {
+        dir.status(leaf(name)).unwrap().unwrap().identity
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn set_dir_mode_reaches_a_directory_whatever_access_its_mode_grants() {
+        for mode in [0o311, 0o600, 0o644, 0o400, 0o000] {
+            let temp = TempDir::new().unwrap();
+            let locked = temp.path().join("locked");
+            fs::create_dir(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
+            let dir = pinned(&temp);
+            let id = identity_of_name(&dir, "locked");
+
+            let result = dir.set_dir_mode(leaf("locked"), id, &fs::Permissions::from_mode(0o700));
+
+            if mode == 0o000
+                && cfg!(target_vendor = "apple")
+                && fs::metadata(temp.path()).unwrap().uid() != 0
+            {
+                // Neither search nor read is allowed, so no handle exists.
+                assert!(result.is_err(), "{mode:o}");
+                fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+                continue;
+            }
+            result.unwrap_or_else(|e| panic!("{mode:o}: {e}"));
+            assert_eq!(
+                fs::metadata(&locked).unwrap().permissions().mode() & 0o7777,
+                0o700,
+                "{mode:o}"
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn set_dir_mode_without_proc_falls_back_to_a_read_handle() {
+        let temp = TempDir::new().unwrap();
+        let readable = temp.path().join("readable");
+        fs::create_dir(&readable).unwrap();
+        fs::set_permissions(&readable, fs::Permissions::from_mode(0o555)).unwrap();
+        let dir = pinned(&temp);
+        let id = identity_of_name(&dir, "readable");
+
+        dir.set_dir_mode_through_read_handle(
+            leaf("readable"),
+            id,
+            &fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::metadata(&readable).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn set_dir_mode_leaves_a_replaced_directory_unchanged() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("d")).unwrap();
+        let dir = pinned(&temp);
+        let original = identity_of_name(&dir, "d");
+        fs::rename(temp.path().join("d"), temp.path().join("moved")).unwrap();
+        fs::create_dir(temp.path().join("d")).unwrap();
+        fs::set_permissions(temp.path().join("d"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = dir.set_dir_mode(leaf("d"), original, &fs::Permissions::from_mode(0o700));
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::metadata(temp.path().join("d"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn own_status_describes_the_handle_whatever_its_name_became() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("d")).unwrap();
+        let dir = pinned(&temp);
+        let held = dir.open_dir(leaf("d")).unwrap();
+        let by_name = dir.status(leaf("d")).unwrap().unwrap();
+        fs::rename(temp.path().join("d"), temp.path().join("moved")).unwrap();
+
+        let own = held.own_status().unwrap();
+
+        assert_eq!(own.occupant, Occupant::Directory);
+        assert_eq!(own.identity.check(by_name.identity), IdentityCheck::Same);
+        assert_eq!(own.mode.bits(), by_name.mode.bits());
     }
 }
 

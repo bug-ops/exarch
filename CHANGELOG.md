@@ -107,6 +107,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python and Node: `leftover_path` survives a cancelled progress callback (#995, #1019).
 - Core: a 7z archive whose stream map would shift file contents is refused when it is opened by list, verify and extract (#769, #1024).
 - Core: atomic extraction seeds the destination's default ACL (Linux) and inheritable entries (macOS) onto the staging root before any child exists, so extracted files and directories inherit what an in-place extraction would give; the stage stays 0700, the umask probe runs before the seed, and a destination that is replaced or vanishes before publish leaves a 0700 root with no ACL (#1067, #1081).
+- Core: on macOS a rolled-back atomic extraction removes staged children that inherited `deny delete`, and the stage ACL is cleared and checked through one verified descriptor (#1082).
+- Core: macOS atomic and default fresh-destination extraction succeeds under a parent with an inheritable `deny list` entry (#1084).
+- Core: `--atomic --force` removes the backup of a destination with mode 0311, 0600 or 0644 (#1069).
+- Core: atomic extraction holds a descriptor on the destination until publication, so a replaced destination is reported as `destination_changed` even when the filesystem reuses its inode number (#1080).
 
 ## [0.9.0] - 2026-11-05
 

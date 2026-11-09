@@ -16,7 +16,13 @@
 mod acl;
 mod adopt;
 mod dir;
+mod hold;
 mod replace;
+#[cfg(target_os = "macos")]
+mod sweep;
+#[cfg(all(test, target_os = "macos"))]
+#[allow(clippy::unwrap_used)]
+mod test_acl;
 
 use std::io;
 use std::path::Path;
@@ -43,6 +49,8 @@ use crate::security::fs_view::Occupant;
 use adopt::Adoption;
 use dir::Seed;
 use dir::StagingDir;
+use hold::Destination;
+use hold::DestinationHold;
 
 /// The extraction a staging mode wraps: it writes into the directory it is
 /// given, under the options it is given, reporting to the progress it is given.
@@ -208,14 +216,17 @@ fn destination_vanished(withheld: Option<NarrowingReason>) -> Narrowed {
 /// under the umask is read at creation, before any archive content is
 /// written. It is also read for an existing one, as the fallback should that
 /// destination vanish before the publish.
-fn atomic_seed(destination: &AtomicDestination, output_dir: &Path) -> Result<Seed> {
-    let existing = destination
-        .pin
-        .status(destination.name.as_leaf())
-        .map_err(ArchiveError::Io)?
-        .filter(|status| status.occupant == Occupant::Directory);
-    let Some(status) = existing else {
-        return Ok(Seed::Absent);
+///
+/// An existing directory is also returned as the hold that keeps its inode
+/// from being reissued; the caller keeps it until the run is over.
+fn atomic_seed(
+    destination: &AtomicDestination,
+    output_dir: &Path,
+) -> Result<(Seed, Option<DestinationHold>)> {
+    let found = Destination::open(&destination.pin, destination.name.as_leaf())
+        .map_err(ArchiveError::Io)?;
+    let Destination::Directory { status, hold } = found else {
+        return Ok((Seed::Absent, None));
     };
     let inheritance = acl::read_inheritance(
         &destination.pin,
@@ -230,7 +241,7 @@ fn atomic_seed(destination: &AtomicDestination, output_dir: &Path) -> Result<See
             output_dir,
         ))
     })?;
-    Ok(Seed::FillEmpty(status.identity, inheritance))
+    Ok((Seed::FillEmpty(status.identity, inheritance), hold))
 }
 
 fn extract_atomic(
@@ -240,7 +251,7 @@ fn extract_atomic(
     extract: impl StagedRun,
 ) -> Result<ExtractionReport> {
     let destination = AtomicDestination::resolve(output_dir)?;
-    let seed = atomic_seed(&destination, output_dir)?;
+    let (seed, _hold) = atomic_seed(&destination, output_dir)?;
     let mut staging = StagingDir::create(&destination.pin, &destination.parent, seed)?;
 
     let mut report = match extract(staging.path(), &staged_options(options), progress) {

@@ -936,7 +936,11 @@ mod tests {
         file_name: &str,
         bytes: &[u8],
         config: &SecurityConfig,
-    ) -> (Disposition, LinkTarget, bool) {
+    ) -> (
+        Disposition,
+        LinkTarget,
+        crate::Result<crate::ExtractionReport>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join(file_name);
         std::fs::write(&archive, bytes).unwrap();
@@ -953,7 +957,7 @@ mod tests {
         (
             disposition,
             target.clone(),
-            extract_archive(&archive, &dest, config).is_ok(),
+            extract_archive(&archive, &dest, config),
         )
     }
 
@@ -967,18 +971,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_duplicate_symlink_is_skipped_as_extraction_skips_it() {
-        let bytes = tar_duplicate_symlink();
-        let (disposition, _, extracted) = duplicate_symlink_disposition("a.tar", &bytes, &config());
+        let (disposition, _, extracted) =
+            duplicate_symlink_disposition("a.tar", &tar_duplicate_symlink(), &config());
         assert_matches!(disposition, Disposition::Skip(SkipKind::Duplicate));
-        assert!(extracted);
-
-        let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("a.tar");
-        std::fs::write(&archive, &bytes).unwrap();
-        let dest = dir.path().join("out");
-        std::fs::create_dir(&dest).unwrap();
-        let report = extract_archive(&archive, &dest, &config()).unwrap();
-        assert_eq!(report.skipped.count(SkipKind::Duplicate), 1);
+        assert_eq!(extracted.unwrap().skipped.count(SkipKind::Duplicate), 1);
     }
 
     #[cfg(not(unix))]
@@ -987,7 +983,7 @@ mod tests {
         let (disposition, _, extracted) =
             duplicate_symlink_disposition("a.tar", &tar_duplicate_symlink(), &config());
         assert_matches!(disposition, Disposition::Refuse);
-        assert!(!extracted);
+        assert!(extracted.is_err());
     }
 
     #[test]
@@ -1002,7 +998,7 @@ mod tests {
         let lenient = config().with_zip_consistency(crate::ZipConsistencyPolicy::Ignore);
         let (disposition, _, extracted) = duplicate_symlink_disposition("a.zip", &bytes, &lenient);
         assert_matches!(disposition, Disposition::Refuse);
-        assert!(!extracted);
+        assert!(extracted.is_err());
     }
 
     #[test]

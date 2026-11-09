@@ -57,13 +57,19 @@ pub(super) enum Enter {
 
 /// The names of the directories between the root and a visited entry, the
 /// root itself excluded.
-pub(super) struct Trail<'a>(&'a [Level]);
+pub(super) struct Trail<'a> {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "only the macOS sweep reads the trail")
+    )]
+    levels: &'a [Level],
+}
 
 impl Trail<'_> {
     /// The names, outermost first.
     #[cfg(target_os = "macos")]
     pub(super) fn to_vec(&self) -> Vec<OsString> {
-        self.0.iter().map(|level| level.name.clone()).collect()
+        self.levels.iter().map(|level| level.name.clone()).collect()
     }
 }
 
@@ -261,7 +267,9 @@ fn visit_entry(walk: &mut Walk, top: usize, name: &OsStr, visit: &mut impl Visit
         Err(_) => return false,
     };
     if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
-        let trail = Trail(walk.levels.get(1..=top).unwrap_or_default());
+        let trail = Trail {
+            levels: walk.levels.get(1..=top).unwrap_or_default(),
+        };
         return visit.leaf(dir, name, &stat, trail);
     }
     let Ok(parent) = dir.try_clone() else {

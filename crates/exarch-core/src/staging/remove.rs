@@ -79,9 +79,22 @@ pub(super) trait Visit {
     /// Called with a directory opened below the root, before it is listed.
     fn enter(&mut self, dir: &File) -> Enter;
 
-    /// Called for an entry of `dir` that is not a directory. Says whether the
-    /// entry is gone.
-    fn leaf(&mut self, dir: &File, name: &OsStr, stat: &Stat, trail: Trail<'_>) -> bool;
+    /// Called for an entry of `dir` that is not a directory.
+    fn leaf(&mut self, dir: &File, name: &OsStr, stat: &Stat, trail: Trail<'_>) -> Outcome;
+}
+
+/// Whether an entry handed to [`Visit::leaf`] is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Outcome {
+    Removed,
+    Kept,
+}
+
+impl Outcome {
+    /// `Removed` when `removed` holds.
+    pub(super) const fn of(removed: bool) -> Self {
+        if removed { Self::Removed } else { Self::Kept }
+    }
 }
 
 /// Unlinks every entry that is not a directory.
@@ -92,8 +105,8 @@ impl Visit for Plain {
         Enter::Descend
     }
 
-    fn leaf(&mut self, dir: &File, name: &OsStr, _stat: &Stat, _trail: Trail<'_>) -> bool {
-        rustix::fs::unlinkat(dir, name, AtFlags::empty()).is_ok()
+    fn leaf(&mut self, dir: &File, name: &OsStr, _stat: &Stat, _trail: Trail<'_>) -> Outcome {
+        Outcome::of(rustix::fs::unlinkat(dir, name, AtFlags::empty()).is_ok())
     }
 }
 
@@ -191,6 +204,19 @@ impl Walk {
         self.level_mut(index)?.dir.as_ref().ok_or_else(not_found)
     }
 
+    /// The descriptor of the level at `index` together with the names of the
+    /// levels from the root down to it.
+    fn view(&mut self, index: usize) -> io::Result<(&File, Trail<'_>)> {
+        self.dir_at(index)?;
+        let dir = self
+            .levels
+            .get(index)
+            .and_then(|level| level.dir.as_ref())
+            .ok_or_else(not_found)?;
+        let levels = self.levels.get(1..=index).unwrap_or_default();
+        Ok((dir, Trail { levels }))
+    }
+
     fn reopen(&mut self, index: usize) -> io::Result<()> {
         let base = (0..index)
             .rev()
@@ -252,13 +278,10 @@ pub(super) fn walk(dir: &File, visit: &mut impl Visit) -> bool {
 /// when it is a directory. Says whether the entry is gone or will be once the
 /// level it opens is closed.
 fn visit_entry(walk: &mut Walk, top: usize, name: &OsStr, visit: &mut impl Visit) -> bool {
-    if walk.dir_at(top).is_err() {
+    let Ok((dir, trail)) = walk.view(top) else {
         if let Some(level) = walk.levels.last_mut() {
             level.pending.clear();
         }
-        return false;
-    }
-    let Some(dir) = walk.levels.get(top).and_then(|level| level.dir.as_ref()) else {
         return false;
     };
     let stat = match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
@@ -267,10 +290,7 @@ fn visit_entry(walk: &mut Walk, top: usize, name: &OsStr, visit: &mut impl Visit
         Err(_) => return false,
     };
     if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
-        let trail = Trail {
-            levels: walk.levels.get(1..=top).unwrap_or_default(),
-        };
-        return visit.leaf(dir, name, &stat, trail);
+        return visit.leaf(dir, name, &stat, trail) == Outcome::Removed;
     }
     let Ok(parent) = dir.try_clone() else {
         return false;

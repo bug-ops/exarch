@@ -727,7 +727,7 @@ mod imp {
             ))
         ))]
         pub(crate) fn open_dir_for_metadata(&self, name: Leaf<'_>) -> io::Result<DirHandle> {
-            // TODO(review): NetBSD, illumos, OpenBSD and DragonFly have no
+            // TODO(#1126): NetBSD, illumos, OpenBSD and DragonFly have no
             // verified handle that accepts `fchmod` without read access.
             self.open_dir_file(name).map(DirHandle::Read)
         }
@@ -1062,6 +1062,9 @@ mod imp {
 
     const DIR_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
+    const NO_INHERITABLE_ENTRIES: &str =
+        "the parent has no inheritable entries; the root stays owner-only";
+
     /// Where the DACL of a published root comes from.
     #[derive(Debug)]
     pub(crate) enum RootDacl {
@@ -1107,18 +1110,14 @@ mod imp {
                 RootDacl::Inherit(parent) => {
                     let parent = parent.descriptor();
                     if !parent.has_inheritable_entries()? {
-                        return Err(io::Error::other(
-                            "the parent has no inheritable entries; the root stays owner-only",
-                        ));
+                        return Err(io::Error::other(NO_INHERITABLE_ENTRIES));
                     }
                     let creator = SecurityDescriptor::read(handle, Part::OwnerAndGroup)?;
                     let derived = Derived::new(&parent, &creator, ObjectKind::Container, &token)?;
                     match derived.dacl_state()? {
                         DaclState::Present { entries } if entries > 0 => {}
                         DaclState::Present { .. } | DaclState::Null => {
-                            return Err(io::Error::other(
-                                "the parent has no inheritable entries; the root stays owner-only",
-                            ));
+                            return Err(io::Error::other(NO_INHERITABLE_ENTRIES));
                         }
                     }
                     Descriptor::Derived(derived)

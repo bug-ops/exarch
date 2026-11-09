@@ -4,8 +4,6 @@
 //! owns the memory the API hands out, so the walk that rewrites a published
 //! tree ([`super::super::dacl_walk`]) is safe code.
 
-#![deny(clippy::undocumented_unsafe_blocks)]
-
 use std::ffi::c_void;
 use std::io;
 use std::mem::size_of;
@@ -19,6 +17,7 @@ use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use windows_sys::Win32::Foundation::ERROR_NO_TOKEN;
 use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::TRUE;
 use windows_sys::Win32::Security::ACE_HEADER;
 use windows_sys::Win32::Security::ACL;
 use windows_sys::Win32::Security::ACL_SIZE_INFORMATION;
@@ -100,7 +99,8 @@ impl EffectiveToken {
         let mut token: HANDLE = null_mut();
         // SAFETY: `GetCurrentThread` returns a pseudo handle that needs no
         // closing, and `token` is valid for writes.
-        let thread = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &raw mut token) };
+        let thread =
+            unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &raw mut token) };
         if thread != 0 {
             // SAFETY: the call succeeded, so `token` is a newly opened handle
             // that nothing else owns.
@@ -345,6 +345,46 @@ impl SecurityDescriptor {
     }
 }
 
+/// The DACL of a valid descriptor and its entry count, or `None` when the
+/// descriptor has no DACL (or a null one). The pointer points into the
+/// descriptor and is valid as long as it is.
+fn dacl_of(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<Option<(*mut ACL, u32)>> {
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut acl: *mut ACL = null_mut();
+    // SAFETY: the callers pass a valid descriptor, and the three out-pointers
+    // are valid for writes.
+    let ok = unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &raw mut present,
+            &raw mut acl,
+            &raw mut defaulted,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if present == 0 || acl.is_null() {
+        return Ok(None);
+    }
+    let mut size = ACL_SIZE_INFORMATION::default();
+    // SAFETY: `acl` points into the descriptor, which is alive, and `size` is
+    // writable and of exactly the length passed.
+    let ok = unsafe {
+        GetAclInformation(
+            acl,
+            (&raw mut size).cast(),
+            length_u32(size_of::<ACL_SIZE_INFORMATION>())?,
+            AclSizeInformation,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Some((acl, size.AceCount)))
+}
+
 /// A descriptor made by `CreatePrivateObjectSecurityEx`.
 #[derive(Debug)]
 pub(in crate::formats) struct Derived(PSECURITY_DESCRIPTOR);
@@ -407,36 +447,9 @@ impl Derived {
     ///
     /// The OS error of reading the descriptor.
     pub(in crate::formats) fn dacl_state(&self) -> io::Result<DaclState> {
-        let mut present = 0;
-        let mut defaulted = 0;
-        let mut acl: *mut ACL = null_mut();
-        // SAFETY: the descriptor is valid until `self` drops, and the three
-        // out-pointers are valid for writes.
-        let ok = unsafe {
-            GetSecurityDescriptorDacl(self.0, &raw mut present, &raw mut acl, &raw mut defaulted)
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if present == 0 || acl.is_null() {
-            return Ok(DaclState::Null);
-        }
-        let mut size = ACL_SIZE_INFORMATION::default();
-        // SAFETY: `acl` points into the descriptor, which is alive, and `size`
-        // is writable and of exactly the length passed.
-        let ok = unsafe {
-            GetAclInformation(
-                acl,
-                (&raw mut size).cast(),
-                length_u32(size_of::<ACL_SIZE_INFORMATION>())?,
-                AclSizeInformation,
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(DaclState::Present {
-            entries: size.AceCount,
+        Ok(match dacl_of(self.0)? {
+            None => DaclState::Null,
+            Some((_, entries)) => DaclState::Present { entries },
         })
     }
 }
@@ -469,43 +482,13 @@ impl Descriptor<'_> {
     ///
     /// The OS error of reading the descriptor.
     pub(in crate::formats) fn has_inheritable_entries(&self) -> io::Result<bool> {
-        let mut present = 0;
-        let mut defaulted = 0;
-        let mut acl: *mut ACL = null_mut();
-        // SAFETY: the descriptor is valid while `self` is borrowed, and the
-        // three out-pointers are valid for writes.
-        let ok = unsafe {
-            GetSecurityDescriptorDacl(
-                self.as_ptr(),
-                &raw mut present,
-                &raw mut acl,
-                &raw mut defaulted,
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if present == 0 || acl.is_null() {
+        let Some((acl, entries)) = dacl_of(self.as_ptr())? else {
             return Ok(false);
-        }
-        let mut size = ACL_SIZE_INFORMATION::default();
-        // SAFETY: `acl` points into the descriptor, which is alive, and `size`
-        // is writable and of exactly the length passed.
-        let ok = unsafe {
-            GetAclInformation(
-                acl,
-                (&raw mut size).cast(),
-                length_u32(size_of::<ACL_SIZE_INFORMATION>())?,
-                AclSizeInformation,
-            )
         };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        for index in 0..size.AceCount {
+        for index in 0..entries {
             let mut ace: *mut c_void = null_mut();
-            // SAFETY: `acl` is a valid ACL, `index` is below its entry count
-            // and `ace` is valid for writes.
+            // SAFETY: `acl` points into the descriptor, which is alive, `index`
+            // is below its entry count and `ace` is valid for writes.
             if unsafe { GetAce(acl, index, &raw mut ace) } == 0 {
                 return Err(io::Error::last_os_error());
             }

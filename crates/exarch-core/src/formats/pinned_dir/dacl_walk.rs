@@ -53,11 +53,41 @@ use super::nt::security::SecurityDescriptor;
 const ENTRY_ACCESS: u32 = READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES;
 const LISTING_ACCESS: u32 = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES;
 
+/// What the walk does with an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryClass {
+    /// A real directory: rewritten after everything below it.
+    Tree,
+    /// A junction or symlink to a directory: rewritten itself, never
+    /// descended.
+    Link,
+    /// Anything else.
+    Leaf,
+}
+
+impl EntryClass {
+    const fn of(attributes: u32) -> Self {
+        if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            Self::Leaf
+        } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            Self::Tree
+        } else {
+            Self::Link
+        }
+    }
+
+    const fn kind(self) -> ObjectKind {
+        match self {
+            Self::Tree | Self::Link => ObjectKind::Container,
+            Self::Leaf => ObjectKind::Leaf,
+        }
+    }
+}
+
 /// An entry opened for its security, with what the walk needs to know of it.
 struct Entry {
     handle: OwnedHandle,
-    kind: ObjectKind,
-    reparse: bool,
+    class: EntryClass,
 }
 
 /// The DACL a directory ends up with: the root's is the caller's, every other
@@ -112,12 +142,7 @@ fn open_entry(parent: BorrowedHandle<'_>, name: &OsStr) -> io::Result<Entry> {
     let attributes = file.metadata()?.file_attributes();
     Ok(Entry {
         handle: OwnedHandle::from(file),
-        kind: if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-            ObjectKind::Container
-        } else {
-            ObjectKind::Leaf
-        },
-        reparse: attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+        class: EntryClass::of(attributes),
     })
 }
 
@@ -156,9 +181,9 @@ pub(super) fn rewrite_children(
         };
         let entry = open_entry(level.listing.as_handle(), &name)?;
         let creator = SecurityDescriptor::read(entry.handle.as_handle(), Part::OwnerAndGroup)?;
-        let derived = Derived::new(level.computed.get(), &creator, entry.kind, token)?;
+        let derived = Derived::new(level.computed.get(), &creator, entry.class.kind(), token)?;
         let computed = Computed::Derived(Descriptor::Derived(derived));
-        if entry.kind == ObjectKind::Container && !entry.reparse {
+        if entry.class == EntryClass::Tree {
             let listing = nt::reopen_dir(entry.handle.as_handle(), LISTING_ACCESS)?;
             let names = list(listing.as_handle())?;
             stack.push(Level {

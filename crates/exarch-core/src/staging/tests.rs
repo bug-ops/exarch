@@ -930,7 +930,17 @@ mod denied_destination {
 
         let outcome = fx.extract(&dest, Staging::AtomicReplace, &mut hooks);
 
-        assert!(outcome.is_err(), "{outcome:?}");
+        let error = outcome.unwrap_err();
+        let ArchiveError::Io(io_error) = &error else {
+            panic!("expected an I/O error: {error:?}");
+        };
+        assert_eq!(io_error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            io_error
+                .to_string()
+                .contains("failed to inspect the destination"),
+            "{io_error}"
+        );
         assert_eq!(hooks.started, 0, "nothing was extracted");
         assert_eq!(read(&dest.join("old.txt")), "old");
         assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());

@@ -39,6 +39,7 @@ use super::acl;
 use super::dir::OwnContents;
 use super::dir::VerifiedStage;
 use super::remove::Enter;
+use super::remove::Outcome;
 use super::remove::Trail;
 use super::remove::Visit;
 use super::remove::walk;
@@ -146,20 +147,11 @@ fn open_parent<'a>(root: &File, at: &'a [OsString]) -> Option<(File, &'a OsStr)>
 pub(super) fn sweep(stage: &VerifiedStage, _own: &OwnContents, ledger: &RunRecord) {
     let root = stage.as_file();
     let _ = acl::CopiedAcl::clear(root);
-    let mut sweep = Sweep {
-        links: Links::default(),
-        ledger,
-    };
+    let mut sweep = Sweep::new(ledger);
     walk(root, &mut sweep);
     if sweep.links.resolve(root, ledger) {
         // The directories that held those names can go now.
-        walk(
-            root,
-            &mut Sweep {
-                links: Links::default(),
-                ledger,
-            },
-        );
+        walk(root, &mut Sweep::new(ledger));
     }
 }
 
@@ -179,20 +171,29 @@ impl Visit for Sweep<'_> {
         }
     }
 
-    fn leaf(&mut self, dir: &File, name: &OsStr, stat: &Stat, trail: Trail<'_>) -> bool {
+    fn leaf(&mut self, dir: &File, name: &OsStr, stat: &Stat, trail: Trail<'_>) -> Outcome {
         match FileType::from_raw_mode(stat.st_mode) {
-            FileType::Symlink => rustix::fs::unlinkat(dir, name, AtFlags::empty()).is_ok(),
+            FileType::Symlink => {
+                Outcome::of(rustix::fs::unlinkat(dir, name, AtFlags::empty()).is_ok())
+            }
             _ => self.sweep_leaf(dir, name, stat, &trail),
         }
     }
 }
 
-impl Sweep<'_> {
-    fn sweep_leaf(&mut self, dir: &File, name: &OsStr, stat: &Stat, trail: &Trail<'_>) -> bool {
+impl<'a> Sweep<'a> {
+    fn new(ledger: &'a RunRecord) -> Self {
+        Self {
+            links: Links::default(),
+            ledger,
+        }
+    }
+
+    fn sweep_leaf(&mut self, dir: &File, name: &OsStr, stat: &Stat, trail: &Trail<'_>) -> Outcome {
         match rustix::fs::unlinkat(dir, name, AtFlags::empty()) {
             Err(Errno::ACCESS | Errno::PERM) => {}
-            Ok(()) => return true,
-            Err(_) => return false,
+            Ok(()) => return Outcome::Removed,
+            Err(_) => return Outcome::Kept,
         }
         let key = IdentityKey::of_stat(stat).ok();
         let Some((file, opened)) = open_leaf(dir, name)
@@ -200,18 +201,20 @@ impl Sweep<'_> {
             .and_then(|file| rustix::fs::fstat(&file).ok().map(|opened| (file, opened)))
         else {
             self.links.survives(key);
-            return false;
+            return Outcome::Kept;
         };
         if FileType::from_raw_mode(opened.st_mode) == FileType::Directory {
             self.links.survives(key);
-            false
+            Outcome::Kept
         } else if opened.st_nlink == 1 {
-            cleared_own_entry(&file, self.ledger)
-                && rustix::fs::unlinkat(dir, name, AtFlags::empty()).is_ok()
+            Outcome::of(
+                cleared_own_entry(&file, self.ledger)
+                    && rustix::fs::unlinkat(dir, name, AtFlags::empty()).is_ok(),
+            )
         } else {
             self.links
                 .defer(IdentityKey::of_stat(&opened).ok(), trail, name);
-            false
+            Outcome::Kept
         }
     }
 }

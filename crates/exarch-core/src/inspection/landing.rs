@@ -480,9 +480,8 @@ fn judge(
             }
         }
     };
-    // Extraction skips a symlink over a file the run created only after its
-    // target validated and only where symlinks can be created, so an opaque
-    // target or a host without symlinks stays refused.
+    // Extraction skips a duplicate symlink only after validating its target on
+    // a symlink-capable host.
     let skippable_duplicate =
         matches!(node, Node::Symlink(_)) && require_symlink_creation().is_ok();
     match tree.project_landing(&safe, node, LandingLimits::Enforced) {

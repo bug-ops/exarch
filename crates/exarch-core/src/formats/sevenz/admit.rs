@@ -550,8 +550,16 @@ mod tests {
 
     #[test]
     fn lzma2_dict_size_decodes_every_property_byte() {
-        for property in 0u8..=39 {
-            let expected = (2 | u32::from(property & 1)) << (u32::from(property / 2) + 11);
+        const KNOWN: [(u8, u32); 7] = [
+            (0, 4_096),
+            (1, 6_144),
+            (2, 8_192),
+            (18, 2_097_152),
+            (19, 3_145_728),
+            (38, 2_147_483_648),
+            (39, 3_221_225_472),
+        ];
+        for (property, expected) in KNOWN {
             assert_eq!(lzma2_dict_size(&[property]), Some(expected));
         }
         assert_eq!(lzma2_dict_size(&[40]), Some(u32::MAX));

@@ -292,8 +292,7 @@ impl HardlinkTracker {
     /// of [`validate_hardlink_in`](Self::validate_hardlink_in), then that the
     /// target exists there and is not a directory.
     ///
-    /// Shared by `verify` and the `list` preview so both apply one rule; the
-    /// known exception, where extraction accepts a link they refuse, is #1112.
+    /// Shared by `verify` and the `list` preview so both apply one rule.
     ///
     /// # Errors
     ///

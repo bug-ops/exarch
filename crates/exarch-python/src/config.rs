@@ -1418,9 +1418,9 @@ impl PyExtractionOptions {
     /// replaces (or fills), never setuid; with `"atomic_replace"` also its
     /// owner as far as the caller may, and with `"atomic"` never the uid and
     /// the group only when the caller owns the destination. On Windows the
-    /// staging directory inherits the ACL of the destination's parent, and
-    /// `"atomic"` onto an existing empty directory raises
-    /// `OutputExistsError`.
+    /// staging directory is owner-only while the run lasts and the published
+    /// root inherits the ACL of the destination's parent, and `"atomic"` onto
+    /// an existing empty directory raises `OutputExistsError`.
     ///
     /// `extract_archive_to_memory` and `extract_archive_to_callback` take no
     /// staging.

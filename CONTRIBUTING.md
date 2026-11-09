@@ -12,7 +12,7 @@ Please be respectful and constructive in all interactions. We welcome contributo
 
 - **Rust** 1.99.1 or later (Edition 2024)
 - **Python** 3.11+ (for Python bindings development)
-- **Node.js** 18+ (for Node.js bindings development)
+- **Node.js** 20+ (for Node.js bindings development)
 - **cargo-nextest** for running tests
 - **maturin** for Python bindings
 - **napi-rs** for Node.js bindings
@@ -207,7 +207,7 @@ fn test_cve_xxxx_description() {
 
 ### Security
 
-- **Zero unsafe code** in `exarch-core`
+- **Minimal unsafe code**: `unsafe` is denied by lint workspace-wide and confined to documented FFI sites (the destination access check on Unix, NT calls and token, SID and DACL calls on Windows in `exarch-core`; one `sigaction` query in `exarch-cli` on Unix)
 - Default-deny security model
 - Validate all external input
 - Document security implications in comments

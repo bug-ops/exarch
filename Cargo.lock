@@ -643,6 +643,7 @@ dependencies = [
  "exarch-testkit",
  "flate2",
  "indicatif",
+ "libc",
  "predicates",
  "serde",
  "serde_json",

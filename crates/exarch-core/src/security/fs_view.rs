@@ -1169,6 +1169,18 @@ pub(crate) struct VirtualTree {
     links_seen: bool,
     /// Whether any name was ever found under another spelling.
     aliases_seen: bool,
+    /// Whether a symlink landing on a file replaces it (overwrite) or leaves
+    /// it (default extraction), so a later hardlink sees what extraction does.
+    link_over_file: LinkOverFile,
+}
+
+/// What a symlink does to the file already at its path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkOverFile {
+    /// The file becomes the symlink, as `ExistingFiles::Overwrite` does.
+    Replace,
+    /// The file stays, as default extraction (`ExistingFiles::Skip`) leaves it.
+    Keep,
 }
 
 impl VirtualTree {
@@ -1184,6 +1196,17 @@ impl VirtualTree {
             PathModel::Portable => portable_fold,
         };
         Self::build(root, model, fold, budget, recording)
+    }
+
+    /// Makes a symlink that lands on a file leave the file in the tree (the
+    /// insert still reports the conflict), for a caller that does not know the
+    /// overwrite policy and models default extraction, which skips the
+    /// symlink. A later hardlink to the file is then judged as extraction
+    /// judges it.
+    #[must_use]
+    pub(crate) fn keeping_files_under_links(mut self) -> Self {
+        self.link_over_file = LinkOverFile::Keep;
+        self
     }
 
     #[cfg(test)]
@@ -1219,6 +1242,7 @@ impl VirtualTree {
             collisions: Vec::new(),
             empty_merge_nodes: Vec::new(),
             links_seen: false,
+            link_over_file: LinkOverFile::Replace,
             aliases_seen: false,
         }
     }
@@ -1425,8 +1449,10 @@ impl VirtualTree {
             (Some(id), node @ (Node::Symlink(_) | Node::OpaqueSymlink)) => {
                 match self.nodes.node(id).kind {
                     Node::File => {
-                        self.nodes.node_mut(id).kind = node;
-                        self.links_seen = true;
+                        if self.link_over_file == LinkOverFile::Replace {
+                            self.nodes.node_mut(id).kind = node;
+                            self.links_seen = true;
+                        }
                         Err(Conflict::already_exists(Occupant::File))
                     }
                     Node::Dir => Err(Conflict::already_exists(Occupant::Directory)),

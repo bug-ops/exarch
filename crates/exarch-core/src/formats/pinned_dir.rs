@@ -77,6 +77,8 @@ use crate::Result;
 use crate::security::fs_view::Occupant;
 use crate::types::DestDir;
 
+#[cfg(windows)]
+pub(crate) use imp::DaclHandle;
 pub(crate) use imp::VettedDir;
 #[cfg(unix)]
 pub(crate) use imp::open_directory_at;
@@ -859,6 +861,10 @@ mod imp {
 #[allow(unsafe_code)] // the only unsafe code on Windows: NT directory-relative calls
 pub(in crate::formats) mod nt;
 
+#[cfg(all(test, windows))]
+#[allow(unsafe_code)] // test-only DACL reader
+pub(crate) mod dacl_probe;
+
 #[cfg(windows)]
 mod imp {
     use std::ffi::OsString;
@@ -882,7 +888,9 @@ mod imp {
     use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
     use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
     use windows_sys::Win32::Storage::FileSystem::FILE_TRAVERSE;
+    use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
     use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+    use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
 
     use super::EntryStatus;
     use super::Leaf;
@@ -892,6 +900,7 @@ mod imp {
     use super::nt::Kind;
     use super::nt::Request;
     use crate::formats::file_identity::FileIdentity;
+    use crate::formats::file_identity::IdentityCheck;
     use crate::formats::occupant::ReplacePermit;
     use crate::formats::reparse;
     use crate::formats::reparse::ReparseTarget;
@@ -899,6 +908,25 @@ mod imp {
     use crate::security::permissions::SanitizedMode;
 
     const DIR_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+
+    /// A directory handle opened with `WRITE_DAC`, which survives a rename of
+    /// the directory.
+    #[derive(Debug)]
+    pub(crate) struct DaclHandle(File);
+
+    impl DaclHandle {
+        /// Makes the directory inherit its DACL from its parent again, and
+        /// re-derives what its children inherited.
+        ///
+        /// # Errors
+        ///
+        /// The OS error. When the parent has no inheritable entries the
+        /// directory is put back to its owner-only DACL and an error is
+        /// returned too, so it is never left with an empty DACL.
+        pub(crate) fn inherit_dacl(&self) -> io::Result<()> {
+            nt::inherit_dacl(self.0.as_handle())
+        }
+    }
 
     /// An open directory below the destination.
     ///
@@ -1027,12 +1055,35 @@ mod imp {
             None
         }
 
-        /// Creates the subdirectory `name`.
+        /// Creates the subdirectory `name` with a protected DACL that grants
+        /// only the current user and is inherited by everything created in it.
         ///
-        /// It inherits the parent's ACL, so it is not owner-only here.
-        // TODO(#1020): an explicit owner-only DACL for staging directories.
+        /// The parent's ACL is never used as a fallback: when the descriptor
+        /// cannot be built, nothing is created.
         pub(crate) fn make_private_dir(&self, name: Leaf<'_>) -> io::Result<()> {
-            self.make_dir(name)
+            nt::create_private_dir_at(self.0.as_handle(), name)
+                .map_err(|err| self.occupied_as_exists(name, err))
+        }
+
+        /// Opens the subdirectory `name` so its DACL can be rewritten, when it
+        /// still is the directory `expected` names; a link or a file there is
+        /// an error.
+        ///
+        /// An identity the volume cannot provide is not a mismatch.
+        pub(crate) fn open_dir_for_dacl(
+            &self,
+            name: Leaf<'_>,
+            expected: FileIdentity,
+        ) -> io::Result<DaclHandle> {
+            let request = Request {
+                kind: Kind::Directory,
+                ..Request::open(READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES)
+            };
+            let file = File::from(nt::create_at(self.0.as_handle(), name, request)?);
+            if FileIdentity::of_file(&file).check(expected) == IdentityCheck::Different {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            Ok(DaclHandle(file))
         }
 
         /// Renames the directory `from` to `to`, both in this directory, and
@@ -1537,6 +1588,141 @@ mod windows_tests {
         assert_eq!(sub.identity.check(by_path), IdentityCheck::Same);
         assert_eq!(sub.identity.check(other.identity), IdentityCheck::Different);
         assert!(!sub.reparse);
+    }
+
+    #[test]
+    fn a_private_dir_grants_only_the_current_user_and_ignores_the_parent() {
+        use super::dacl_probe;
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+
+        dir.make_private_dir(leaf("stage")).unwrap();
+
+        let dacl = dacl_probe::read(&temp.path().join("stage"));
+        assert!(dacl.protected, "the DACL must not inherit from the parent");
+        let [ace] = dacl.aces.as_slice() else {
+            panic!("expected exactly one entry, got {:?}", dacl.aces);
+        };
+        assert!(ace.allows);
+        assert!(!ace.inherited());
+        assert_eq!(ace.sid, dacl_probe::current_user());
+    }
+
+    #[test]
+    fn what_is_created_in_a_private_dir_is_owner_only_too() {
+        use super::dacl_probe;
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        dir.make_private_dir(leaf("stage")).unwrap();
+        let file = temp.path().join("stage").join("child.txt");
+        fs::write(&file, b"x").unwrap();
+        fs::create_dir(temp.path().join("stage").join("sub")).unwrap();
+
+        for path in [file, temp.path().join("stage").join("sub")] {
+            let dacl = dacl_probe::read(&path);
+            assert!(!dacl.protected);
+            let [ace] = dacl.aces.as_slice() else {
+                panic!("expected exactly one entry, got {:?}", dacl.aces);
+            };
+            assert!(ace.allows && ace.inherited());
+            assert_eq!(ace.sid, dacl_probe::current_user());
+        }
+    }
+
+    #[test]
+    fn a_private_dir_refuses_a_taken_name() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        dir.make_private_dir(leaf("stage")).unwrap();
+
+        let err = dir.make_private_dir(leaf("stage")).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn resetting_the_dacl_inherits_from_the_parent_down_the_tree() {
+        use super::dacl_probe;
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        dir.make_private_dir(leaf("stage")).unwrap();
+        let stage = temp.path().join("stage");
+        fs::write(stage.join("child.txt"), b"x").unwrap();
+        let id = dir.identity(leaf("stage")).unwrap().unwrap();
+
+        dir.open_dir_for_dacl(leaf("stage"), id)
+            .unwrap()
+            .inherit_dacl()
+            .unwrap();
+
+        let parent = dacl_probe::read(temp.path());
+        for path in [stage.clone(), stage.join("child.txt")] {
+            let dacl = dacl_probe::read(&path);
+            assert!(!dacl.protected, "{path:?} still ignores the parent");
+            assert!(
+                !dacl.aces.is_empty(),
+                "{path:?} was left with an empty DACL"
+            );
+            assert!(dacl.aces.iter().all(dacl_probe::Ace::inherited));
+        }
+        let inherited_sids = |aces: &[dacl_probe::Ace]| {
+            aces.iter()
+                .filter(|ace| ace.allows)
+                .map(|ace| ace.sid.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let reset = dacl_probe::read(&stage);
+        assert!(inherited_sids(&reset.aces).is_subset(&inherited_sids(&parent.aces)));
+    }
+
+    #[test]
+    fn resetting_under_a_parent_without_inheritable_entries_keeps_the_dir_owner_only() {
+        use super::dacl_probe;
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().join("closed");
+        fs::create_dir(&parent).unwrap();
+        dacl_probe::restrict_to_current_user_without_inheritance(&parent);
+        let dir = pinned_at(&parent);
+        dir.make_private_dir(leaf("stage")).unwrap();
+        let stage = parent.join("stage");
+        fs::write(stage.join("child.txt"), b"x").unwrap();
+        let id = dir.identity(leaf("stage")).unwrap().unwrap();
+
+        let result = dir
+            .open_dir_for_dacl(leaf("stage"), id)
+            .unwrap()
+            .inherit_dacl();
+
+        let dacl = dacl_probe::read(&stage);
+        assert!(
+            result.is_err(),
+            "the reset succeeded; stage is protected: {}, entries: {:?}",
+            dacl.protected,
+            dacl.aces
+        );
+        assert!(dacl.protected, "entries: {:?}", dacl.aces);
+        let [ace] = dacl.aces.as_slice() else {
+            panic!("expected exactly one entry, got {:?}", dacl.aces);
+        };
+        assert_eq!(ace.sid, dacl_probe::current_user());
+        assert!(fs::read(stage.join("child.txt")).is_ok());
+    }
+
+    #[test]
+    fn a_dacl_handle_is_refused_for_another_directory() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+        dir.make_private_dir(leaf("stage")).unwrap();
+        dir.make_dir(leaf("other")).unwrap();
+        let other = dir.identity(leaf("other")).unwrap().unwrap();
+        if matches!(other, crate::formats::file_identity::FileIdentity::Unknown) {
+            eprintln!("skipping: the volume reports no file id");
+            return;
+        }
+
+        let err = dir.open_dir_for_dacl(leaf("stage"), other).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

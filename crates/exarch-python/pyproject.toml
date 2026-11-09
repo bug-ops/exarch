@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.14,<2.0"]
+requires = ["maturin==1.16.0"]
 build-backend = "maturin"
 
 [project]
@@ -42,8 +42,9 @@ Documentation = "https://github.com/bug-ops/exarch#readme"
 Issues = "https://github.com/bug-ops/exarch/issues"
 
 [dependency-groups]
-# Single pin of the wheel build tool: uv.lock is the source for the release
-# workflow and for CI. Keep it inside `[build-system].requires` above.
+# Wheel build tool: uv.lock is the source for the release workflow and CI.
+# `[build-system].requires` above must carry the same exact version; the
+# `check-maturin-pin` CI step fails when they drift.
 release = ["maturin==1.16.0"]
 dev = [
     "pytest>=9.0.3",

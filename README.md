@@ -24,7 +24,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 - **Fluent configuration** — 15 `with_*` builder methods on `SecurityConfig` and 3 on `ExtractionOptions` for ergonomic setup
 - **In-memory processing** — `ArchiveReader`, `SinkExtractRequest` with `MemorySink`, and `CreateRequest::write` validate and build archives without a filesystem path, with in-memory functions in Python and Node.js
 - **Multi-language support** — Native bindings for Python (PyO3) and Node.js (napi-rs)
-- **Minimal unsafe code** — `unsafe` in the core library is denied by lint and confined to documented FFI sites (destination access check on Unix, NT directory-handle calls on Windows)
+- **Minimal unsafe code** — `unsafe` is denied by lint workspace-wide and confined to documented FFI sites (the destination access check on Unix, NT calls and token, SID and DACL calls on Windows in `exarch-core`; one `sigaction` query in `exarch-cli` on Unix)
 - **High performance** — Optimized I/O with reusable buffers and streaming operations
 
 ## Installation

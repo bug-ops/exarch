@@ -8418,6 +8418,124 @@ mod interrupt {
         assert_eq!(leftovers(temp.path()), Vec::<String>::new());
     }
 
+    /// `exarch` as a background job whose parent ignores SIGINT (`trap ""
+    /// INT`), which `exec` hands on as inherited-ignored.
+    fn exarch_ignoring_sigint() -> Command {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "trap '' INT; exec \"$0\" \"$@\""])
+            .arg(exarch_cmd().get_program());
+        command
+    }
+
+    #[test]
+    fn an_inherited_ignored_sigint_does_not_cancel_the_run() {
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+
+        let mut command = exarch_ignoring_sigint();
+        command
+            .args(["--verbose", "extract", "--max-files", "100000"])
+            .arg(&tar)
+            .arg(&out);
+        let mut child = running(command);
+        sigint(&child);
+        sigint(&child);
+        let status = child.wait().expect("wait");
+
+        assert!(status.success(), "{status:?}");
+        assert!(out.exists(), "the run must have published the destination");
+    }
+
+    /// The result report blocks on a full stdout pipe after the armed window
+    /// has closed, which holds the process in that state while SIGINT arrives.
+    #[test]
+    fn an_inherited_ignored_sigint_stays_ignored_after_the_window_closes() {
+        use std::io::Write as _;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("small.tar");
+        write_many_entries_tar(&tar, 3);
+        let out = temp.path().join("out");
+
+        let (mut reader, mut filler) = std::io::pipe().expect("create pipe");
+        let stdout = filler.try_clone().expect("clone writer");
+        let written = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let (progress, stop) = (Arc::clone(&written), Arc::clone(&done));
+        let filler_thread = std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) && filler.write_all(&[0; 512]).is_ok() {
+                progress.fetch_add(512, Ordering::SeqCst);
+            }
+        });
+        // The pipe is full once the filler's byte count stops moving.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let before = written.load(Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if before > 0 && before == written.load(Ordering::SeqCst) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pipe never filled"
+            );
+        }
+
+        let mut child = exarch_ignoring_sigint()
+            .args(["--json", "extract"])
+            .arg(&tar)
+            .arg(&out)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::null())
+            .spawn_reaped();
+        // The three-entry run ends well within this wait, so the signals
+        // below find the process past its armed window, blocked on the report.
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        for _ in 0..3 {
+            sigint(&child);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            child.try_wait().expect("poll").is_none(),
+            "SIGINT ended a process that inherited it as ignored"
+        );
+
+        done.store(true, Ordering::SeqCst);
+        std::io::copy(&mut reader, &mut std::io::sink()).expect("drain stdout");
+        let status = child.wait().expect("wait");
+        filler_thread.join().expect("join filler");
+        assert!(status.success(), "{status:?}");
+        assert!(out.exists(), "the run must have published the destination");
+    }
+
+    #[test]
+    fn an_ignored_sigint_leaves_sigterm_handled() {
+        let temp = TempDir::new().expect("temp dir");
+        let tar = temp.path().join("many.tar");
+        write_many_entries_tar(&tar, 40_000);
+        let out = temp.path().join("out");
+
+        let mut command = exarch_ignoring_sigint();
+        command
+            .args(["--verbose", "extract", "--max-files", "100000"])
+            .arg(&tar)
+            .arg(&out);
+        let mut child = running(command);
+        sigterm(&child);
+        let status = child.wait().expect("wait");
+
+        assert_stopped_by(status, Stop::Term);
+        assert!(!out.exists(), "the destination must not be published");
+        assert_eq!(leftovers(temp.path()), Vec::<String>::new());
+    }
+
     /// `list` never arms the handler, so SIGTERM keeps its default action:
     /// the process dies of the signal instead of exiting with a status.
     #[test]
@@ -9123,4 +9241,149 @@ fn test_create_negative_overrange_compression_level_is_exit_1_with_a_readable_me
         .stderr(predicates::str::contains(
             "Invalid compression level (an out-of-range integer): must be between 1 and 9.",
         ));
+}
+
+/// A TAR of `(path, kind, link target)` entries; a regular file holds one byte.
+fn tar_of(entries: &[(&str, tar::EntryType, &str)]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, kind, link) in entries {
+        let regular = *kind == tar::EntryType::Regular;
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).unwrap();
+        header.set_entry_type(*kind);
+        header.set_mode(0o644);
+        header.set_size(u64::from(regular));
+        if !link.is_empty() {
+            header.set_link_name(link).unwrap();
+        }
+        header.set_cksum();
+        let data: &[u8] = if regular { b"x" } else { &[] };
+        builder.append(&header, data).unwrap();
+    }
+    builder.into_inner().unwrap()
+}
+
+const LINK_FLAGS: [&str; 2] = ["--allow-hardlinks", "--allow-symlinks"];
+
+#[cfg(unix)]
+/// `verify`, the `list` selection preview and `extract` agree on a hardlink to
+/// the first file of a name whose duplicate symlink extraction skips.
+fn assert_hardlink_agrees_across_commands(
+    entries: &[(&str, tar::EntryType, &str)],
+    selection: &[&str],
+    hardlink: &str,
+    landing: &str,
+) {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("a.tar");
+    std::fs::write(&archive, tar_of(entries)).unwrap();
+
+    let verified = exarch_cmd()
+        .arg("verify")
+        .arg(&archive)
+        .args(LINK_FLAGS)
+        .args(selection)
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    let verified = String::from_utf8(verified).unwrap();
+    assert!(
+        !verified.contains(&format!("{hardlink}: ")),
+        "verify reports the hardlink: {verified}"
+    );
+
+    let listed = exarch_cmd()
+        .arg("list")
+        .arg(&archive)
+        .args(LINK_FLAGS)
+        .args(selection)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&listed).expect("one JSON document");
+    let entry = json["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["path"] == hardlink)
+        .unwrap_or_else(|| panic!("no hardlink entry: {json}"));
+    assert_eq!(entry["disposition"]["action"], "extract", "{json}");
+
+    let dest = temp.path().join("out");
+    std::fs::create_dir(&dest).unwrap();
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&dest)
+        .args(LINK_FLAGS)
+        .args(selection)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(dest.join(landing)).unwrap(), b"x");
+}
+
+// Windows extraction refuses symlinks, so the duplicate symlink is Unix-only.
+#[cfg(unix)]
+#[test]
+fn test_hardlink_to_file_shadowed_by_duplicate_symlink_agrees_across_commands() {
+    assert_hardlink_agrees_across_commands(
+        &[
+            ("x", tar::EntryType::Regular, ""),
+            ("x", tar::EntryType::Symlink, "y"),
+            ("h", tar::EntryType::Link, "x"),
+        ],
+        &["--include", "x", "--include", "h"],
+        "h",
+        "h",
+    );
+}
+
+// Windows extraction refuses symlinks, so the duplicate symlink is Unix-only.
+#[cfg(unix)]
+#[test]
+fn test_stripped_hardlink_to_file_shadowed_by_duplicate_symlink_agrees_across_commands() {
+    assert_hardlink_agrees_across_commands(
+        &[
+            ("p/x", tar::EntryType::Regular, ""),
+            ("q/x", tar::EntryType::Symlink, "y"),
+            ("p/h", tar::EntryType::Link, "p/x"),
+        ],
+        &["--strip-components", "1"],
+        "p/h",
+        "h",
+    );
+}
+
+/// A genuine hardlink escape next to a duplicate symlink is still reported by
+/// `verify` and refused by `extract`.
+#[test]
+fn test_genuine_hardlink_escape_still_fails_verify_and_extract() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("a.tar");
+    let entries = [
+        ("x", tar::EntryType::Regular, ""),
+        ("x", tar::EntryType::Symlink, "y"),
+        ("h", tar::EntryType::Link, "../outside"),
+    ];
+    std::fs::write(&archive, tar_of(&entries)).unwrap();
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive)
+        .args(LINK_FLAGS)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("h: Hardlink escape"));
+    let dest = temp.path().join("out");
+    std::fs::create_dir(&dest).unwrap();
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&dest)
+        .args(LINK_FLAGS)
+        .assert()
+        .failure();
 }

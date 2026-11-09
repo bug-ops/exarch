@@ -88,8 +88,8 @@ mod imp {
     use crate::formats::pinned_dir::Uid;
     use crate::staging::dir::VerifiedStage;
 
-    // TODO(#1020): copy the Windows DACL instead of falling back to a private
-    // root
+    // TODO(#1117): the root inherits the
+    // parent's ACL instead of the destination's
 
     /// The user and group a directory belongs to.
     ///
@@ -1645,8 +1645,8 @@ mod imp {
     #[derive(Debug, Clone, Copy)]
     pub(in crate::staging) struct AclPlan;
 
-    // TODO(#1020): copy the Windows DACL instead of falling back to a private
-    // root
+    // TODO(#1117): the root inherits the
+    // parent's ACL instead of the destination's
     #[allow(
         clippy::unnecessary_wraps,
         clippy::missing_const_for_fn,

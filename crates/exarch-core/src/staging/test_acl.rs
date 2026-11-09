@@ -15,6 +15,16 @@ pub(super) fn add_ace(path: &Path, ace: &str) {
     assert!(status.success(), "chmod +a {ace:?}");
 }
 
+/// Removes every entry from the ACL of `path`.
+pub(super) fn clear_acl(path: &Path) {
+    let status = Command::new("/bin/chmod")
+        .arg("-N")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "chmod -N");
+}
+
 /// The entries `ls -led` prints for `path`, without their index.
 pub(super) fn aces_of(path: &Path) -> Vec<String> {
     let output = Command::new("/bin/ls")

@@ -58,6 +58,7 @@ use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::output_root::OutputRoot;
 use crate::formats::source_fault::SourceRead;
 use crate::formats::source_fault::SourceTap;
 use crate::formats::source_fault::TapSource;
@@ -406,7 +407,7 @@ fn extract_kept(
 /// the I/O error it raised rather than as a corrupt archive.
 fn replay_spool<R: Read>(
     spool: R,
-    dir: &Path,
+    dir: OutputRoot<'_>,
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
@@ -1006,7 +1007,7 @@ mod tests {
         let config = SecurityConfig::default();
         replay_spool(
             spool,
-            dir.path(),
+            dir.path().into(),
             &config,
             &ExtractionOptions::default(),
             &mut NoopProgress,

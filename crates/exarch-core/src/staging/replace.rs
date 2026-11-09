@@ -32,11 +32,11 @@ use super::adopt::make_removable;
 use super::cancelled_after;
 use super::dir::Seed;
 use super::dir::StagingDir;
+use super::extract_in;
 use super::hold::Destination;
 use super::hold::DestinationHold;
 use super::io_context;
 use super::parent_or_cwd;
-use super::staged_options;
 use crate::ArchiveError;
 use crate::BackupIdentity;
 use crate::ConfigProblem;
@@ -350,7 +350,7 @@ pub(super) fn run(
     })?;
     let staging = StagingDir::create(&pin, &parent, Seed::Replace(id, inheritance))?;
 
-    let report = match extract(staging.path(), &staged_options(options), progress) {
+    let report = match extract_in(&staging, options, progress, extract) {
         Ok(report) => report,
         Err(e) => return Err(e.rolled_back_with(staging.discard())),
     };

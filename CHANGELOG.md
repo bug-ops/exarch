@@ -91,6 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Core: atomic staging verifies and pins the staging directory by descriptor and rolls back through it, and the macOS rollback sweep touches only entries the run created; staging needs a filesystem that reports owner and mode (#1111).
+- Core: a 7z header whose block, sub-stream or pack-stream tables exceed what its declared entries need is refused before parsing with `Malformation::SevenZHeaderTableTooLarge` (#1111).
 - Core: macOS atomic extraction onto a destination whose ACL denies delete publishes, because the destination ACL is applied after the publishing rename (#1079, #1086).
 - Core: on macOS the staging directory of an absent destination no longer keeps the parent's inherited ACL (#1078, #1086).
 - Core: a destination that is a symlink to an empty directory works with `--atomic`, and a failed parent directory sync is reported (#976, #977, #999).

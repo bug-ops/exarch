@@ -382,7 +382,12 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     .map_err(|error| faults.classify(error))?;
     buffered_writer.flush()?;
     drop(buffered_writer);
+    let replaced = matches!(written_at, WrittenAt::Temp(..));
     commit_output(&parent, written_at, leaf, safe_path.as_path())?;
+    if replaced {
+        root.created()
+            .note(duplicates, &parent, leaf, safe_path.as_path());
+    }
     guard.persist();
 
     record_file_written(report, progress, bytes_written)

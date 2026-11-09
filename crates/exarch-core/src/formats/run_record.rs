@@ -6,6 +6,11 @@
 //! the two apart. It is kept per run, by the pinned destination, and is filled
 //! only under `Refuse`.
 //!
+//! A staged run keeps a [`Recording::Ledger`] instead: every entry the run
+//! creates is recorded whatever `ExistingFiles` says, and the ledger outlives
+//! the extraction, so a rollback can tell what the run made from what it did
+//! not make.
+//!
 //! A landing is keyed by file identity (device and file index of the entry
 //! itself, never of a symlink's target), which is exact on a case-insensitive
 //! host and needs no path folding. Where the volume gives no identity the key
@@ -72,11 +77,42 @@ struct Created {
     saturated: bool,
 }
 
+/// What a [`RunRecord`] keeps.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Recording {
+    /// Only what the duplicate check needs: landings created under
+    /// `ExistingFiles::Refuse`.
+    #[default]
+    Duplicates,
+    /// Every entry the run creates, under any `ExistingFiles`.
+    Ledger,
+}
+
+impl Recording {
+    const fn records(self, existing_files: ExistingFiles) -> bool {
+        match self {
+            Self::Ledger => true,
+            Self::Duplicates => matches!(existing_files, ExistingFiles::Refuse),
+        }
+    }
+}
+
 /// The landings a run created, consulted when one is found occupied.
 #[derive(Debug, Default)]
-pub(crate) struct RunRecord(RefCell<Created>);
+pub(crate) struct RunRecord {
+    recording: Recording,
+    created: RefCell<Created>,
+}
 
 impl RunRecord {
+    /// An empty record that keeps what `recording` says.
+    pub(crate) fn new(recording: Recording) -> Self {
+        Self {
+            recording,
+            created: RefCell::default(),
+        }
+    }
+
     /// Records that the run just created `leaf` in `dir`, if `existing_files`
     /// needs the record.
     ///
@@ -89,7 +125,17 @@ impl RunRecord {
         leaf: Leaf<'_>,
         rel: &Path,
     ) {
-        if matches!(existing_files, ExistingFiles::Refuse) {
+        if self.recording.records(existing_files) {
+            self.insert(key_of(dir, leaf, rel));
+        }
+    }
+
+    /// Records that the run just created the directory `leaf` in `dir`.
+    ///
+    /// Directories only matter to a [`Recording::Ledger`]: a duplicate check
+    /// never asks about one.
+    pub(crate) fn note_directory(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
+        if self.recording == Recording::Ledger {
             self.insert(key_of(dir, leaf, rel));
         }
     }
@@ -105,7 +151,7 @@ impl RunRecord {
         leaf: Leaf<'_>,
         rel: &Path,
     ) {
-        if !matches!(existing_files, ExistingFiles::Refuse) {
+        if !self.recording.records(existing_files) {
             return;
         }
         match FileIdentity::of_file(file) {
@@ -118,7 +164,7 @@ impl RunRecord {
         let Some(key) = key else {
             return;
         };
-        let mut created = self.0.borrow_mut();
+        let mut created = self.created.borrow_mut();
         if created.keys.len() >= RECORD_CAP {
             created.saturated = true;
         } else {
@@ -130,20 +176,33 @@ impl RunRecord {
     ///
     /// `false` when the key cannot be read or the record is saturated.
     pub(crate) fn created_here(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> bool {
-        let created = self.0.borrow();
+        let created = self.created.borrow();
         !created.saturated && key_of(dir, leaf, rel).is_some_and(|key| created.keys.contains(&key))
+    }
+
+    /// Whether the run created an entry with this identity.
+    ///
+    /// `false` for a saturated record, and for an entry recorded by path
+    /// because its volume gave no identity: neither can vouch for an entry.
+    #[cfg(any(target_os = "macos", all(unix, test)))]
+    pub(crate) fn created_with(&self, key: IdentityKey) -> bool {
+        let created = self.created.borrow();
+        !created.saturated && created.keys.contains(&LandingKey::Identity(key))
     }
 
     #[cfg(all(test, unix))]
     pub(crate) fn insert_identity_for_test(&self, identity: super::file_identity::FileIdentity) {
         if let Some(key) = identity.key() {
-            self.0.borrow_mut().keys.insert(LandingKey::Identity(key));
+            self.created
+                .borrow_mut()
+                .keys
+                .insert(LandingKey::Identity(key));
         }
     }
 
     #[cfg(all(test, unix))]
     pub(crate) fn saturate(&self) {
-        self.0.borrow_mut().saturated = true;
+        self.created.borrow_mut().saturated = true;
     }
 }
 
@@ -163,7 +222,7 @@ mod key_tests {
 
         let created = |rel: &str| {
             record
-                .0
+                .created
                 .borrow()
                 .keys
                 .contains(&key_for(FileIdentity::Unknown, rel.as_ref()))
@@ -256,5 +315,50 @@ mod tests {
 
         assert!(record.created_here(&dir, leaf("link"), "link".as_ref()));
         assert!(!record.created_here(&dir, leaf("target"), "target".as_ref()));
+    }
+
+    #[test]
+    fn a_ledger_records_whatever_existing_files_says_and_a_duplicate_record_only_refuse() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = pinned_at(temp.path());
+        std::fs::write(temp.path().join("made"), b"x").unwrap();
+        std::fs::create_dir(temp.path().join("sub")).unwrap();
+        let key = |name: &str| {
+            let stat = rustix::fs::stat(temp.path().join(name)).unwrap();
+            crate::formats::file_identity::IdentityKey::of_stat(&stat).unwrap()
+        };
+        let duplicates = RunRecord::default();
+        let ledger = RunRecord::new(super::Recording::Ledger);
+
+        for record in [&duplicates, &ledger] {
+            record.note(
+                ExistingFiles::Overwrite,
+                &dir,
+                leaf("made"),
+                "made".as_ref(),
+            );
+            record.note_directory(&dir, leaf("sub"), "sub".as_ref());
+        }
+
+        assert!(!duplicates.created_with(key("made")));
+        assert!(!duplicates.created_with(key("sub")));
+        assert!(ledger.created_with(key("made")));
+        assert!(ledger.created_with(key("sub")));
+    }
+
+    #[test]
+    fn a_saturated_ledger_vouches_for_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = pinned_at(temp.path());
+        std::fs::write(temp.path().join("made"), b"x").unwrap();
+        let stat = rustix::fs::stat(temp.path().join("made")).unwrap();
+        let key = crate::formats::file_identity::IdentityKey::of_stat(&stat).unwrap();
+        let ledger = RunRecord::new(super::Recording::Ledger);
+        ledger.note(ExistingFiles::Skip, &dir, leaf("made"), "made".as_ref());
+        assert!(ledger.created_with(key));
+
+        ledger.saturate();
+
+        assert!(!ledger.created_with(key));
     }
 }

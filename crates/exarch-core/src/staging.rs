@@ -17,6 +17,8 @@ mod acl;
 mod adopt;
 mod dir;
 mod hold;
+#[cfg(unix)]
+mod remove;
 mod replace;
 #[cfg(target_os = "macos")]
 mod sweep;
@@ -42,6 +44,7 @@ use crate::Result;
 use crate::Staging;
 use crate::StagingLeftover;
 use crate::destination_state::parent_or_cwd;
+use crate::formats::output_root::OutputRoot;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::report::Narrowed;
@@ -55,13 +58,40 @@ use hold::DestinationHold;
 /// The extraction a staging mode wraps: it writes into the directory it is
 /// given, under the options it is given, reporting to the progress it is given.
 pub(crate) trait StagedRun:
-    FnOnce(&Path, &ExtractionOptions, &mut dyn ProgressCallback) -> Result<ExtractionReport>
+    FnOnce(OutputRoot<'_>, &ExtractionOptions, &mut dyn ProgressCallback) -> Result<ExtractionReport>
 {
 }
 
 impl<F> StagedRun for F where
-    F: FnOnce(&Path, &ExtractionOptions, &mut dyn ProgressCallback) -> Result<ExtractionReport>
+    F: FnOnce(
+        OutputRoot<'_>,
+        &ExtractionOptions,
+        &mut dyn ProgressCallback,
+    ) -> Result<ExtractionReport>
 {
+}
+
+/// Runs `extract` into the directory `staging` pinned, under the options a
+/// staging directory is extracted under.
+///
+/// # Errors
+///
+/// The extraction's own error, or the I/O error of pinning the directory. The
+/// staging directory is left for the caller to discard.
+fn extract_in(
+    staging: &StagingDir<'_>,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+    extract: impl StagedRun,
+) -> Result<ExtractionReport> {
+    let output = staging.output().map_err(|e| {
+        ArchiveError::Io(io_context(
+            &e,
+            "failed to pin the staging directory",
+            staging.path(),
+        ))
+    })?;
+    extract((&output).into(), &staged_options(options), progress)
 }
 
 /// Runs `extract` into `output_dir`, or into a staging directory that replaces
@@ -91,7 +121,7 @@ pub(crate) fn extract_staged(
         });
     }
     match options.staging {
-        Staging::InPlace => extract(output_dir, options, progress),
+        Staging::InPlace => extract(output_dir.into(), options, progress),
         Staging::Atomic => extract_atomic(output_dir, options, progress, extract),
         Staging::AtomicReplace => match replace::resolve(output_dir, archive)? {
             Some(target) => replace::run(target, options, progress, extract),
@@ -254,7 +284,7 @@ fn extract_atomic(
     let (seed, _hold) = atomic_seed(&destination, output_dir)?;
     let mut staging = StagingDir::create(&destination.pin, &destination.parent, seed)?;
 
-    let mut report = match extract(staging.path(), &staged_options(options), progress) {
+    let mut report = match extract_in(&staging, options, progress, extract) {
         Ok(report) => report,
         Err(e) => return Err(e.rolled_back_with(staging.discard())),
     };

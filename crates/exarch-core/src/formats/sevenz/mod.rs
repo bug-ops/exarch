@@ -135,6 +135,7 @@
 //! ```
 
 use super::common;
+use super::output_root::OutputRoot;
 use super::traits::ArchiveFormat;
 use super::traits::sealed;
 use crate::ArchiveError;
@@ -155,7 +156,6 @@ use crate::inspection::report::VerificationIssue;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
-use std::path::Path;
 use std::sync::Arc;
 
 /// Cached entry metadata from initial archive read.
@@ -281,15 +281,16 @@ fn anti_item_issue(count: u64) -> Option<VerificationIssue> {
 impl<R: Read + Seek> sealed::Sealed for SevenZArchive<R> {}
 
 impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
-    fn extract(
+    fn extract<'o>(
         mut self,
-        output_dir: &Path,
+        output: impl Into<OutputRoot<'o>>,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let config = Arc::clone(&self.config);
+        let output = output.into();
         self.admit(&config)?.extract_with(
-            |config| SevenZHostTarget::create(output_dir, config),
+            |config| SevenZHostTarget::create(output, config),
             SinkOptions::existing_files_of(options),
             progress,
         )

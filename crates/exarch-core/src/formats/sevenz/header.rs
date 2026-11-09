@@ -312,7 +312,11 @@ const HEADER_BYTES_BASE: u64 = 64 * 1024;
 
 /// Header entries allowed on top of `max_file_count`: entries extraction does
 /// not count against it (anti items) and small archives.
-const HEADER_ENTRIES_BASE: u64 = 1024;
+///
+/// The table bounds are relative to the declared entry count, which an
+/// unbounded `max_file_count` leaves free; only the header length and the
+/// decoder memory limit bound the tables then.
+pub(super) const HEADER_ENTRIES_BASE: u64 = 1024;
 
 /// What the parse of a 7z header may use.
 ///
@@ -431,7 +435,9 @@ fn kib(limit: NonZeroU64) -> usize {
 /// [`QuotaResource::HeaderEntryCount`] when it declares more entries than
 /// `max_file_count` plus a small allowance and
 /// [`QuotaResource::DecoderMemory`] when it needs more than
-/// `max_decoder_memory`.
+/// `max_decoder_memory`. A header whose block, sub-stream or pack-stream
+/// table is longer than its entries and blocks account for is refused as
+/// [`Malformation::SevenZHeaderTableTooLarge`] before the parse.
 pub(crate) fn read_sevenz_header<R: Read + Seek>(
     source: &mut R,
     limit: HeaderLimit,
@@ -447,13 +453,18 @@ pub(crate) fn read_sevenz_header<R: Read + Seek>(
         DeclaredHeader::Unrecognized => cap,
     };
     match header_entries(source, cap.bytes().get(), kib(limit.memory)) {
-        HeaderEntries::Declared(declared) if declared.get() > limit.entries => {
+        HeaderEntries::Declared(tables) if tables.entries() > limit.entries => {
             return Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::HeaderEntryCount {
-                    declared: declared.get(),
+                    declared: tables.entries(),
                     max: limit.entries,
                 },
             });
+        }
+        HeaderEntries::Declared(tables) => {
+            tables
+                .within_bounds(HEADER_ENTRIES_BASE)
+                .map_err(ArchiveError::from)?;
         }
         HeaderEntries::Unmodelled => {
             return Err(ArchiveError::from(Malformation::SevenZHeaderUnreadable {
@@ -464,7 +475,7 @@ pub(crate) fn read_sevenz_header<R: Read + Seek>(
         HeaderEntries::Refused(Refusal::Memory) => {
             return Err(HeaderCap::Memory(limit.memory).refusal());
         }
-        HeaderEntries::Declared(_) | HeaderEntries::NotApplicable => {}
+        HeaderEntries::NotApplicable => {}
     }
     source.seek(SeekFrom::Start(0)).map_err(ArchiveError::Io)?;
     let tap = SourceTap::default();

@@ -26,6 +26,7 @@ use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::detect::detect_format_from_extension;
 use crate::formats::detect::is_zip_family_alias;
+use crate::formats::output_root::OutputRoot;
 use crate::formats::source_fault::TapSource;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
@@ -78,15 +79,14 @@ pub fn extract_archive<P: AsRef<Path>, Q: AsRef<Path>>(
 }
 
 /// Extracts `archive_path` under a config that is already validated.
-pub(crate) fn extract_validated<P: AsRef<Path>, Q: AsRef<Path>>(
+pub(crate) fn extract_validated<P: AsRef<Path>>(
     archive_path: P,
-    output_dir: Q,
+    output_dir: OutputRoot<'_>,
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     let archive_path = archive_path.as_ref();
-    let output_dir = output_dir.as_ref();
 
     // Detect archive format from file extension
     let format = detect_format(archive_path)?;
@@ -109,7 +109,7 @@ pub(crate) fn extract_validated<P: AsRef<Path>, Q: AsRef<Path>>(
 /// and extracts it.
 fn extract_tar(
     archive_path: &Path,
-    output_dir: &Path,
+    output_dir: OutputRoot<'_>,
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
@@ -138,7 +138,7 @@ pub(crate) fn extract_tar_stream<R: std::io::Read>(
     stream: R,
     source: TapSource,
     trailer: TarTrailer,
-    output_dir: &Path,
+    output_dir: OutputRoot<'_>,
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
@@ -151,7 +151,7 @@ pub(crate) fn extract_tar_stream<R: std::io::Read>(
 
 fn extract_zip(
     archive_path: &Path,
-    output_dir: &Path,
+    output_dir: OutputRoot<'_>,
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
@@ -165,7 +165,7 @@ fn extract_zip(
 
 fn extract_7z(
     archive_path: &Path,
-    output_dir: &Path,
+    output_dir: OutputRoot<'_>,
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,

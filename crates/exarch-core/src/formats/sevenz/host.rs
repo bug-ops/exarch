@@ -20,6 +20,7 @@ use crate::SinkOptions;
 use crate::formats::common;
 use crate::formats::occupant::OccupantAction;
 use crate::formats::occupant::ReplacePermit;
+use crate::formats::output_root::OutputRoot;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
@@ -128,10 +129,13 @@ pub(super) struct SevenZHostTarget<'a> {
 }
 
 impl<'a> SevenZHostTarget<'a> {
-    /// Creates `output_dir` if needed and a target writing into it.
-    pub(super) fn create(output_dir: &Path, config: &'a SecurityConfig) -> Result<Self> {
+    /// Creates the output directory if needed and a target writing into it.
+    pub(super) fn create<'o>(
+        output: impl Into<OutputRoot<'o>>,
+        config: &'a SecurityConfig,
+    ) -> Result<Self> {
         Ok(Self {
-            inner: HostTarget::create(output_dir, config)?,
+            inner: HostTarget::create(output, config)?,
         })
     }
 }

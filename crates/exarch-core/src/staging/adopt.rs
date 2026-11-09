@@ -28,11 +28,13 @@ mod imp {
     use crate::formats::pinned_dir::EntryMode;
     use crate::formats::pinned_dir::EntryStatus;
     use crate::formats::pinned_dir::LeafBuf;
+    use crate::formats::pinned_dir::VettedDir;
     use crate::report::Narrowed;
     use crate::staging::acl;
     use crate::staging::acl::AclPlan;
     use crate::staging::acl::Ownership;
     use crate::staging::acl::Resolution;
+    use crate::staging::dir::VerifiedStage;
 
     const PROBE_ATTEMPTS: usize = 16;
 
@@ -297,11 +299,17 @@ mod imp {
         /// is never read through the racy `umask()` call), and `captured`, the
         /// ACL such a directory was given.
         ///
+        /// The probe is made through `stage`, never through the staging
+        /// directory's name, so it runs in the verified directory.
+        ///
         /// # Errors
         ///
         /// The I/O error of creating, inspecting or removing the probe.
-        pub(in crate::staging) fn probe_umask(&self, captured: AclPlan) -> io::Result<Adoption> {
-            let staging = self.parent.open_dir(self.name.as_leaf())?;
+        pub(in crate::staging) fn probe_umask(
+            stage: &VerifiedStage,
+            captured: AclPlan,
+        ) -> io::Result<Adoption> {
+            let staging = VettedDir::reopen_at(stage.as_file())?;
             for _ in 0..PROBE_ATTEMPTS {
                 let probe = LeafBuf::random(".exarch-probe-");
                 match staging.make_dir(probe.as_leaf()) {

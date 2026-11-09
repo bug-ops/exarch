@@ -344,7 +344,7 @@ impl DirWalker {
         };
         if err.kind() == std::io::ErrorKind::NotFound && missing == Missing::Create {
             match parent.make_dir(leaf) {
-                Ok(()) => {}
+                Ok(()) => root.created().note_directory(parent, leaf, walked),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e.into()),
             }

@@ -26,6 +26,8 @@ use lzma_rust2::lzma2_get_memory_usage;
 use super::SIGNATURE_HEADER_LEN;
 use super::SIGNATURE_HEADER_SIZE;
 use super::header::SEVENZ_MAGIC;
+use crate::Malformation;
+use crate::SevenZHeaderTable;
 use crate::formats::le::le64;
 
 const K_END: u8 = 0x00;
@@ -66,15 +68,44 @@ pub(super) enum DeclaredHeader {
     Unrecognized,
 }
 
-/// The number of entries a 7z header declares in its files info.
+/// The sizes of the tables a 7z header declares: its entries and the block,
+/// sub-stream and pack-stream tables sevenz-rust2 sizes from its streams info.
 ///
 /// Only [`header_entries`] mints one, from the header's own bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct DeclaredEntries(u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct DeclaredTables {
+    entries: u64,
+    blocks: u64,
+    sub_streams: u64,
+    pack_streams: u64,
+    packed_by_blocks: u64,
+}
 
-impl DeclaredEntries {
-    pub(super) const fn get(self) -> u64 {
-        self.0
+impl DeclaredTables {
+    pub(super) const fn entries(self) -> u64 {
+        self.entries
+    }
+
+    /// Refuses a header whose block or sub-stream table is longer than its
+    /// entry table, or whose pack-stream table is longer than the blocks use,
+    /// each by more than `allowance`.
+    pub(super) fn within_bounds(self, allowance: u64) -> Result<(), Malformation> {
+        let entries_max = self.entries.saturating_add(allowance);
+        let pack_max = self.packed_by_blocks.saturating_add(allowance);
+        [
+            (SevenZHeaderTable::Blocks, self.blocks, entries_max),
+            (SevenZHeaderTable::SubStreams, self.sub_streams, entries_max),
+            (SevenZHeaderTable::PackStreams, self.pack_streams, pack_max),
+        ]
+        .into_iter()
+        .find(|&(_, declared, max)| declared > max)
+        .map_or(Ok(()), |(table, declared, max)| {
+            Err(Malformation::SevenZHeaderTableTooLarge {
+                table,
+                declared,
+                max,
+            })
+        })
     }
 }
 
@@ -90,8 +121,8 @@ pub(super) enum Refusal {
 /// What reading the entry count of a header came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HeaderEntries {
-    /// The header declares this many entries.
-    Declared(DeclaredEntries),
+    /// The header declares these tables.
+    Declared(DeclaredTables),
     /// The header is refused for a reason other than its entry count; the
     /// caller returns that refusal without parsing the header.
     Refused(Refusal),
@@ -304,8 +335,9 @@ struct Coder<'a> {
     properties: &'a [u8],
 }
 
-/// An encoded-header record: where its first pack stream is and which coders
-/// its first folder holds.
+/// An encoded-header record: where its pack stream is and which coders its
+/// folder holds. sevenz-rust2 decodes only the first block and the first pack
+/// stream, so a record with more of either is not modelled.
 #[derive(Debug, Clone)]
 struct EncodedRecord<'a> {
     pack_pos: u64,
@@ -321,6 +353,7 @@ impl<'a> EncodedRecord<'a> {
         let mut bytes = Bytes(bytes);
         bytes.expect(K_ENCODED_HEADER)?;
         let streams = bytes.streams_info()?;
+        (streams.packs == 1 && streams.folders.count == 1).then_some(())?;
         Some(Self {
             pack_pos: streams.pack_pos,
             pack_size: streams.first_pack_size?,
@@ -336,15 +369,31 @@ impl<'a> EncodedRecord<'a> {
 }
 
 /// What the streams info of a header declares that the probe uses.
+#[derive(Default)]
 struct Streams<'a> {
     pack_pos: u64,
+    packs: u64,
     first_pack_size: Option<u64>,
     folders: Folders<'a>,
+    substreams: Option<u64>,
+}
+
+impl Streams<'_> {
+    fn tables(&self, entries: u64) -> DeclaredTables {
+        DeclaredTables {
+            entries,
+            blocks: self.folders.count,
+            sub_streams: self.substreams.unwrap_or(self.folders.count),
+            pack_streams: self.packs,
+            packed_by_blocks: self.folders.packed,
+        }
+    }
 }
 
 #[derive(Default)]
 struct Folders<'a> {
     count: u64,
+    packed: u64,
     crcs: Digests<'a>,
     first_coders: Option<Vec<Coder<'a>>>,
     first_unpack_size: Option<u64>,
@@ -426,8 +475,8 @@ impl<'a> Bytes<'a> {
         Some(value)
     }
 
-    /// The entry count of a plain header, read up to its files info.
-    fn header_entries(&mut self) -> Option<DeclaredEntries> {
+    /// The tables of a plain header, read up to its files info.
+    fn header_entries(&mut self) -> Option<DeclaredTables> {
         self.expect(K_HEADER)?;
         let mut next = self.byte()?;
         if next == K_ARCHIVE_PROPERTIES {
@@ -440,24 +489,22 @@ impl<'a> Bytes<'a> {
         if next == K_ADDITIONAL_STREAMS_INFO {
             return None;
         }
+        let mut streams = Streams::default();
         if next == K_MAIN_STREAMS_INFO {
-            self.streams_info()?;
+            streams = self.streams_info()?;
             next = self.byte()?;
         }
-        match next {
-            K_FILES_INFO => self.number().map(DeclaredEntries),
-            K_END => Some(DeclaredEntries(0)),
-            _ => None,
-        }
+        let entries = match next {
+            K_FILES_INFO => self.number()?,
+            K_END => 0,
+            _ => return None,
+        };
+        Some(streams.tables(entries))
     }
 
     /// A streams info, after its introducing id and through its end mark.
     fn streams_info(&mut self) -> Option<Streams<'a>> {
-        let mut streams = Streams {
-            pack_pos: 0,
-            first_pack_size: None,
-            folders: Folders::default(),
-        };
+        let mut streams = Streams::default();
         let mut next = self.byte()?;
         if next == K_PACK_INFO {
             self.pack_info(&mut streams)?;
@@ -468,7 +515,7 @@ impl<'a> Bytes<'a> {
             next = self.byte()?;
         }
         if next == K_SUBSTREAMS_INFO {
-            self.substreams_info(&streams.folders)?;
+            streams.substreams = Some(self.substreams_info(&streams.folders)?);
             next = self.byte()?;
         }
         (next == K_END).then_some(streams)
@@ -477,6 +524,7 @@ impl<'a> Bytes<'a> {
     fn pack_info(&mut self, streams: &mut Streams<'a>) -> Option<()> {
         streams.pack_pos = self.number()?;
         let packs = self.number()?;
+        streams.packs = packs;
         loop {
             match self.byte()? {
                 K_END => return Some(()),
@@ -503,8 +551,9 @@ impl<'a> Bytes<'a> {
         self.expect(0)?;
         let mut out_streams = 0u64;
         for index in 0..folders.count {
-            let coders = self.folder()?;
+            let (coders, packed) = self.folder()?;
             out_streams = out_streams.checked_add(coders.len() as u64)?;
+            folders.packed = folders.packed.checked_add(packed)?;
             if index == 0 {
                 folders.first_coders = Some(coders);
             }
@@ -525,8 +574,9 @@ impl<'a> Bytes<'a> {
     }
 
     /// One folder, as sevenz-rust2 reads it: coders with one output stream
-    /// each, bind pairs, and the packed streams. Returns the coders.
-    fn folder(&mut self) -> Option<Vec<Coder<'a>>> {
+    /// each, bind pairs, and the packed streams. Returns the coders and the
+    /// number of packed streams.
+    fn folder(&mut self) -> Option<(Vec<Coder<'a>>, u64)> {
         let count = self.number()?;
         (count <= MAX_CODERS).then_some(())?;
         let mut coders = Vec::new();
@@ -558,19 +608,22 @@ impl<'a> Bytes<'a> {
         if packed > 1 {
             self.skip_numbers(packed)?;
         }
-        Some(coders)
+        Some((coders, packed))
     }
 
-    fn substreams_info(&mut self, folders: &Folders<'_>) -> Option<()> {
+    /// A substreams info, returning how many sub-streams it declares.
+    fn substreams_info(&mut self, folders: &Folders<'_>) -> Option<u64> {
+        let mut total = folders.count;
         let mut sizes = 0u64;
         let mut digests = (0..folders.count)
             .filter(|&index| !folders.crcs.defined(index))
             .count() as u64;
         let mut next = self.byte()?;
         if next == K_NUM_UNPACK_STREAM {
-            (sizes, digests) = (0, 0);
+            (total, sizes, digests) = (0, 0, 0);
             for index in 0..folders.count {
                 let streams = self.number()?;
+                total = total.checked_add(streams)?;
                 sizes = sizes.checked_add(streams.saturating_sub(1))?;
                 if streams != 1 || !folders.crcs.defined(index) {
                     digests = digests.checked_add(streams)?;
@@ -587,7 +640,7 @@ impl<'a> Bytes<'a> {
             self.digests(digests)?;
             next = self.byte()?;
         }
-        Some(())
+        Some(total)
     }
 }
 
@@ -622,8 +675,18 @@ mod tests {
         read(bytes, ROOMY, MEMORY_KIB)
     }
 
-    fn declared(count: u64) -> HeaderEntries {
-        HeaderEntries::Declared(DeclaredEntries(count))
+    fn declared_entries(header: HeaderEntries) -> Option<u64> {
+        match header {
+            HeaderEntries::Declared(tables) => Some(tables.entries()),
+            _ => None,
+        }
+    }
+
+    fn tables_of(bytes: &[u8]) -> DeclaredTables {
+        match entries(bytes) {
+            HeaderEntries::Declared(tables) => tables,
+            other => panic!("not declared: {other:?}"),
+        }
     }
 
     fn parsed_entries(bytes: &[u8]) -> u64 {
@@ -688,12 +751,18 @@ mod tests {
 
     #[test]
     fn an_encoded_header_declares_the_entries_of_its_decoded_bytes() {
-        assert_eq!(entries(SIMPLE), declared(parsed_entries(SIMPLE)));
+        assert_eq!(
+            declared_entries(entries(SIMPLE)),
+            Some(parsed_entries(SIMPLE))
+        );
     }
 
     #[test]
     fn a_plain_header_declares_its_entries() {
-        assert_eq!(entries(LARGE_FILE), declared(parsed_entries(LARGE_FILE)));
+        assert_eq!(
+            declared_entries(entries(LARGE_FILE)),
+            Some(parsed_entries(LARGE_FILE))
+        );
     }
 
     #[test]
@@ -713,8 +782,8 @@ mod tests {
                 continue;
             }
             assert_eq!(
-                entries(&bytes),
-                declared(archive.files.len() as u64),
+                declared_entries(entries(&bytes)),
+                Some(archive.files.len() as u64),
                 "{path:?}"
             );
             walked += 1;
@@ -761,7 +830,7 @@ mod tests {
         let mut header = vec![K_HEADER, K_FILES_INFO, 0xFF];
         header.extend(u64::MAX.to_le_bytes());
         assert_eq!(
-            Bytes(&header).header_entries().map(DeclaredEntries::get),
+            Bytes(&header).header_entries().map(DeclaredTables::entries),
             Some(u64::MAX)
         );
     }
@@ -770,7 +839,7 @@ mod tests {
     fn a_header_without_files_info_declares_no_entries() {
         let header = [K_HEADER, K_END];
         assert_eq!(
-            Bytes(&header).header_entries().map(DeclaredEntries::get),
+            Bytes(&header).header_entries().map(DeclaredTables::entries),
             Some(0)
         );
     }
@@ -783,6 +852,104 @@ mod tests {
         assert!(Bytes(&truncated).header_entries().is_none());
         let junk = [K_HEADER, 0x7E];
         assert!(Bytes(&junk).header_entries().is_none());
+    }
+
+    /// A plain header with `folders` one-coder folders and `entries` entries,
+    /// whose streams info holds `extra` after the folders' unpack info.
+    fn plain_header(pack_info: &[u8], folders: u8, extra: &[u8], entries: u8) -> Vec<u8> {
+        let mut header = vec![K_HEADER, K_MAIN_STREAMS_INFO];
+        header.extend(pack_info);
+        header.extend([K_UNPACK_INFO, K_FOLDER, folders, 0]);
+        header.extend((0..folders).flat_map(|_| [1, 0x01, 0x00]));
+        header.push(K_CODERS_UNPACK_SIZE);
+        header.extend(vec![1u8; usize::from(folders)]);
+        header.extend([K_END]);
+        header.extend(extra);
+        header.extend([K_END, K_FILES_INFO, entries, K_END]);
+        header
+    }
+
+    fn walked(header: &[u8]) -> DeclaredTables {
+        Bytes(header).header_entries().unwrap()
+    }
+
+    fn too_large(tables: DeclaredTables) -> (SevenZHeaderTable, u64, u64) {
+        match tables.within_bounds(0) {
+            Err(Malformation::SevenZHeaderTableTooLarge {
+                table,
+                declared,
+                max,
+            }) => (table, declared, max),
+            other => panic!("expected a table refusal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn more_blocks_than_entries_exceed_the_block_bound() {
+        let tables = walked(&plain_header(&[], 3, &[], 1));
+        assert_eq!(too_large(tables), (SevenZHeaderTable::Blocks, 3, 1));
+    }
+
+    #[test]
+    fn sub_streams_default_to_one_per_block() {
+        let tables = walked(&plain_header(&[], 2, &[], 2));
+        assert_eq!((tables.blocks, tables.sub_streams), (2, 2));
+        assert!(tables.within_bounds(0).is_ok());
+    }
+
+    #[test]
+    fn more_sub_streams_than_entries_exceed_the_sub_stream_bound() {
+        let extra = [K_SUBSTREAMS_INFO, K_NUM_UNPACK_STREAM, 5, K_END];
+        let tables = walked(&plain_header(&[], 1, &extra, 1));
+        assert_eq!(tables.sub_streams, 5);
+        assert_eq!(too_large(tables), (SevenZHeaderTable::SubStreams, 5, 1));
+    }
+
+    #[test]
+    fn pack_streams_beyond_what_the_blocks_use_exceed_the_pack_bound() {
+        let pack_info = [K_PACK_INFO, 0, 0x87, 0xD0, K_END];
+        let tables = walked(&plain_header(&pack_info, 1, &[], 1));
+        assert_eq!((tables.pack_streams, tables.packed_by_blocks), (2000, 1));
+        assert_eq!(too_large(tables), (SevenZHeaderTable::PackStreams, 2000, 1));
+        assert!(tables.within_bounds(2000).is_ok());
+    }
+
+    #[test]
+    fn a_header_without_streams_declares_empty_tables() {
+        let header = [K_HEADER, K_FILES_INFO, 4, K_END];
+        let tables = walked(&header);
+        assert_eq!(tables.entries(), 4);
+        assert!(tables.within_bounds(0).is_ok());
+        assert_eq!((tables.blocks, tables.pack_streams), (0, 0));
+    }
+
+    #[test]
+    fn every_fixture_declares_the_tables_sevenz_rust2_builds() {
+        for bytes in FIXTURE_SEEDS.iter() {
+            let archive = Archive::read(&mut Cursor::new(bytes), &Password::empty()).unwrap();
+            let tables = tables_of(bytes);
+            let streamed = archive.files.iter().filter(|file| file.has_stream).count();
+            assert_eq!(tables.blocks, archive.blocks.len() as u64);
+            assert_eq!(tables.pack_streams, archive.pack_sizes().len() as u64);
+            assert_eq!(tables.sub_streams, streamed as u64);
+            assert!(
+                tables
+                    .within_bounds(super::super::header::HEADER_ENTRIES_BASE)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn an_encoded_record_with_two_blocks_or_two_pack_streams_is_not_modelled() {
+        let mut two_packs = record_of(&[(METHOD_LZMA2, &[1])], 7, 5);
+        two_packs[3] = 2;
+        two_packs.splice(6..6, [0]);
+        assert!(EncodedRecord::parse(&two_packs).is_none());
+        let mut two_blocks = record_of(&[(METHOD_LZMA2, &[1])], 7, 5);
+        let at = two_blocks.iter().position(|&b| b == K_FOLDER).unwrap();
+        two_blocks[at + 1] = 2;
+        assert!(EncodedRecord::parse(&two_blocks).is_none());
     }
 
     fn byte(value: usize) -> u8 {
@@ -985,7 +1152,7 @@ mod tests {
                 let built = archive.files.len() as u64;
                 match entries(&bytes) {
                     HeaderEntries::Declared(count) => {
-                        proptest::prop_assert!(count.get() >= built, "{} < {built}", count.get());
+                        proptest::prop_assert!(count.entries() >= built, "{} < {built}", count.entries());
                     }
                     HeaderEntries::NotApplicable => proptest::prop_assert_eq!(built, 0),
                     HeaderEntries::Refused(_) | HeaderEntries::Unmodelled => {}
@@ -1005,7 +1172,7 @@ mod tests {
                 let built = archive.files.len() as u64;
                 match entries(&bytes) {
                     HeaderEntries::Declared(count) => {
-                        proptest::prop_assert!(count.get() >= built);
+                        proptest::prop_assert!(count.entries() >= built);
                     }
                     HeaderEntries::NotApplicable => proptest::prop_assert_eq!(built, 0),
                     HeaderEntries::Refused(_) | HeaderEntries::Unmodelled => {}
@@ -1020,7 +1187,7 @@ mod tests {
             solid in proptest::prelude::any::<bool>(),
         ) {
             let bytes = written_archive(files, dirs, solid);
-            proptest::prop_assert_eq!(entries(&bytes), declared(parsed_entries(&bytes)));
+            proptest::prop_assert_eq!(declared_entries(entries(&bytes)), Some(parsed_entries(&bytes)));
         }
     }
 
@@ -1043,7 +1210,10 @@ mod tests {
 
     #[test]
     fn archive_properties_are_skipped_on_the_way_to_the_files_info() {
-        assert_eq!(entries(&padded_plain_archive(10, 3)), declared(3));
+        assert_eq!(
+            declared_entries(entries(&padded_plain_archive(10, 3))),
+            Some(3)
+        );
     }
 
     #[test]
@@ -1054,6 +1224,6 @@ mod tests {
             read(&bytes, size - 1, MEMORY_KIB),
             HeaderEntries::NotApplicable
         );
-        assert_eq!(read(&bytes, size, MEMORY_KIB), declared(3));
+        assert_eq!(declared_entries(read(&bytes, size, MEMORY_KIB)), Some(3));
     }
 }

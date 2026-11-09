@@ -49,6 +49,7 @@ use crate::types::safe_path::Walked;
 
 use super::common;
 use super::dir_walker::DirWalker;
+use super::output_root::OutputRoot;
 use super::pinned_dir::PinnedRoot;
 use super::pinned_dir::TempFileGuard;
 use super::source_fault::ReadFaults;
@@ -297,10 +298,13 @@ pub(crate) struct HostTarget<'a> {
 }
 
 impl<'a> HostTarget<'a> {
-    /// Creates `output_dir` if needed and a target writing into it.
-    pub(crate) fn create(output_dir: &Path, config: &'a SecurityConfig) -> Result<Self> {
+    /// Creates the output directory if needed and a target writing into it.
+    pub(crate) fn create<'o>(
+        output: impl Into<OutputRoot<'o>>,
+        config: &'a SecurityConfig,
+    ) -> Result<Self> {
         Ok(Self {
-            root: PinnedRoot::open(DestDir::new_or_create(output_dir.to_path_buf())?)?,
+            root: PinnedRoot::open_output(output.into())?,
             dirs: DirWalker::new(config),
             copy_buffer: CopyBuffer::new(),
             core: ValidatorCore::new(config),

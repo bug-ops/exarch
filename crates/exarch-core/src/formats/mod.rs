@@ -11,6 +11,7 @@ pub(crate) mod handle_resolution;
 pub(crate) mod io_marker;
 pub(crate) mod le;
 pub(crate) mod occupant;
+pub(crate) mod output_root;
 pub(crate) mod pinned_dir;
 #[cfg(any(windows, test))]
 pub(crate) mod reparse;

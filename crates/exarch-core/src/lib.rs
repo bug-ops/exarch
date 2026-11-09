@@ -120,6 +120,7 @@ pub use error::Restore;
 pub use error::RestoreKind;
 pub use error::Result;
 pub use error::SecurityViolationSubCode;
+pub use error::SevenZHeaderTable;
 pub use error::SolidMemoryScope;
 pub use error::SpecialFile;
 pub use error::StagingLeftover;

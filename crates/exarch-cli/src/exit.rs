@@ -37,12 +37,13 @@ impl ExitStatus {
 }
 
 /// The status the process ends with: a run that completed after a stop was
-/// requested still reports the stop, over a success or a strict warning, so a
-/// stop that landed after core's last poll is not lost. A failure keeps its
-/// own status, and the stop status of a cancelled run is already `result`.
+/// requested still reports the stop, so a stop that landed after core's last
+/// poll is not lost. A failure keeps its own status, and the stop status of a
+/// cancelled run is already `result`. `StrictWarning` comes only from `verify`,
+/// which never arms the handler, so no stop can accompany it.
 pub fn final_status(result: ExitStatus, requested: Option<Stop>) -> ExitStatus {
     match (result, requested) {
-        (ExitStatus::Success | ExitStatus::StrictWarning, Some(stop)) => ExitStatus::from(stop),
+        (ExitStatus::Success, Some(stop)) => ExitStatus::from(stop),
         _ => result,
     }
 }
@@ -101,11 +102,6 @@ mod tests {
                 ExitStatus::Interrupted,
             ),
             (ExitStatus::Success, Stop::Terminate, ExitStatus::Terminated),
-            (
-                ExitStatus::StrictWarning,
-                Stop::Interrupt,
-                ExitStatus::Interrupted,
-            ),
         ] {
             assert_eq!(final_status(completed, Some(stop)), expected);
         }

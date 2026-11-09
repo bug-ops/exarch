@@ -32,6 +32,7 @@ use exarch_core::PartialWrites;
 use exarch_core::PolicySetting;
 use exarch_core::QuotaKind;
 use exarch_core::ReplaceFailure;
+use exarch_core::RequestedLevel;
 use exarch_core::Restore;
 use exarch_core::TarTrailerRefusal;
 use exarch_core::Violation;
@@ -1092,6 +1093,10 @@ fn dedicated_context(
             mode.get()
         )),
         ArchiveError::InvalidCompressionLevel { level } => {
+            let level = match level {
+                RequestedLevel::Integer(_) | RequestedLevel::Fractional(_) => level.to_string(),
+                other => format!("({other})"),
+            };
             message.restating_source().text(format!(
                 "Invalid compression level {level}: must be between {} and {}.",
                 CompressionLevel::MIN.get(),
@@ -1671,6 +1676,33 @@ mod tests {
         let parts = [Part::Path(PathBuf::from("a\\b"))];
         assert_eq!(raw(&parts), "a\\b");
         assert_eq!(terminal(&parts), "a\\x5Cb");
+    }
+
+    #[test]
+    fn a_level_that_is_no_number_reads_as_a_phrase_in_the_message() {
+        let text = |level| {
+            let error = ArchiveError::InvalidCompressionLevel { level };
+            chain_text(&convert_error(Operation::Create, error, Path::new("o.tar")))
+        };
+        assert_eq!(
+            text(RequestedLevel::OutOfRange),
+            "Invalid compression level (an out-of-range integer): must be between 1 and 9."
+        );
+        assert_eq!(
+            text(RequestedLevel::NonFinite),
+            "Invalid compression level (a non-finite number): must be between 1 and 9."
+        );
+        assert_eq!(
+            text(RequestedLevel::Integer(-3)),
+            "Invalid compression level -3: must be between 1 and 9."
+        );
+    }
+
+    #[test]
+    fn the_raise_hint_names_the_flag_only_where_the_operation_has_it() {
+        let hint = raise_hint(Operation::Extract, "budget");
+        assert!(hint.contains("--max-files raises that budget"), "{hint}");
+        assert_eq!(raise_hint(Operation::Create, "budget"), "");
     }
 
     #[test]

@@ -129,7 +129,7 @@ Fields, sub-codes, `error.kind` enum, skip kinds, warnings, examples: [reference
 | `1` | Operation failed; also `verify` with `data.status` `FAIL`. |
 | `2` | Argument-parser usage error (plain text, no JSON). |
 | `3` | `verify --strict` with warning-level findings only. |
-| `130` / `143` | `extract`/`create` stopped by SIGINT / SIGTERM (staging discarded; a second signal exits at once). Both stops end the process by the signal itself, so a parent that inspects the wait status sees a signal death, not exit code 130 or 143. A stop that lands after the last poll still lets the run finish and report its result, then ends the process the same way. |
+| `130` / `143` | `extract`/`create` stopped by SIGINT / SIGTERM (staging discarded; a second signal exits at once). Both stops end the process by the signal itself, so a parent that inspects the wait status sees a signal death, not exit code 130 or 143. A stop that lands after the last poll still lets the run finish and report its result, then ends the process the same way. On Windows there is no signal death: both stops exit `130`. |
 
 ## Defaults at a glance
 

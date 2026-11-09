@@ -487,6 +487,14 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn the_forced_exit_message_is_the_cancelled_text() {
+        let document = forced_exit_envelope(Operation::Extract, "hint").unwrap();
+        let json: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert_eq!(json["error"]["message"], crate::error::CANCELLED_TEXT);
+        assert_eq!(json["error"]["kind"], "Cancelled");
+    }
+
+    #[test]
     fn a_closed_stdout_is_not_a_failure() {
         let mut f = JsonFormatter::with_writer(FailingWriter(io::ErrorKind::BrokenPipe));
         assert!(

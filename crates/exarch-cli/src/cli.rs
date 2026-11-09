@@ -889,6 +889,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_budget_help_spells_the_flag_it_belongs_to() {
+        assert!(decompression_budget_help().contains(Flag::CheckIntegrity.long()));
+        assert!(atomic_long_help().contains(Flag::Force.long()));
+    }
+
+    #[test]
     fn a_size_that_is_not_whole_mib_keeps_its_bytes() {
         assert_eq!(mib_text(256 * 1024 * 1024), "256 MiB");
         assert_eq!(mib_text(1024 * 1024 + 1), "1048577 bytes");

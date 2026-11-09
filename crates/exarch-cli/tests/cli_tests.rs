@@ -8912,14 +8912,31 @@ fn write_tar(path: &std::path::Path, members: &[TarMember<'_>]) {
 /// The `list`, `verify` and `extract` verdicts for `hard.lnk` in an archive
 /// whose hardlink target is broken in the way `members` builds.
 fn assert_broken_hardlink_is_refused_everywhere(members: &[TarMember<'_>]) {
+    assert_hardlink_is_refused_everywhere(members, &[]);
+}
+
+/// [`assert_broken_hardlink_is_refused_everywhere`] with `flags` added to all
+/// three commands.
+fn assert_hardlink_is_refused_everywhere(members: &[TarMember<'_>], flags: &[&str]) {
     let temp = TempDir::new().expect("create temp dir");
     let archive = temp.path().join("links.tar");
     write_tar(&archive, members);
+    let link = members
+        .iter()
+        .find_map(|member| match member {
+            TarMember::Hardlink { name, .. } => Some(*name),
+            _ => None,
+        })
+        .expect("a hardlink member");
+    let flags: Vec<&str> = std::iter::once("--allow-hardlinks")
+        .chain(flags.iter().copied())
+        .collect();
 
-    let actions = listed_actions(&archive, &["--allow-hardlinks"]);
-    assert_eq!(action_of(&actions, "hard.lnk"), "refuse", "{actions:?}");
+    let actions = listed_actions(&archive, &flags);
+    assert_eq!(action_of(&actions, link), "refuse", "{actions:?}");
     let text = exarch_cmd()
-        .args(["list", "--include", "*", "--allow-hardlinks"])
+        .args(["list", "--include", "*"])
+        .args(&flags)
         .arg(&archive)
         .assert()
         .success()
@@ -8927,16 +8944,18 @@ fn assert_broken_hardlink_is_refused_everywhere(members: &[TarMember<'_>]) {
         .stdout
         .clone();
     let text = String::from_utf8(text).expect("utf-8 listing");
-    assert!(line_of(&text, "hard.lnk").contains("[refused]"), "{text}");
+    assert!(line_of(&text, link).contains("[refused]"), "{text}");
 
     exarch_cmd()
-        .args(["verify", "--allow-hardlinks"])
+        .arg("verify")
+        .args(&flags)
         .arg(&archive)
         .assert()
         .code(1);
     let out = temp.path().join("out");
     exarch_cmd()
-        .args(["extract", "--allow-hardlinks"])
+        .arg("extract")
+        .args(&flags)
         .arg(&archive)
         .arg(&out)
         .assert()
@@ -9070,4 +9089,38 @@ fn test_sevenz_deflate_extract_fails_before_creating_the_destination() {
             .stderr(predicates::str::contains("unsupported coder"));
         assert!(!out.exists(), "{flags:?} created the destination");
     }
+}
+
+/// Two entries that strip to one landing make a hardlink to either ambiguous:
+/// the preview refuses it like `verify` and `extract` (#1090).
+#[test]
+fn test_list_refuses_a_hardlink_whose_landing_is_ambiguous() {
+    assert_hardlink_is_refused_everywhere(
+        &[
+            TarMember::File("p/x"),
+            TarMember::File("q/x"),
+            TarMember::Hardlink {
+                name: "p/hard.lnk",
+                target: "p/x",
+            },
+        ],
+        &["--strip-components", "1"],
+    );
+}
+
+/// A level too negative for 64 bits is core's out-of-range refusal, and its
+/// message reads as a phrase, not as a broken sentence.
+#[test]
+fn test_create_negative_overrange_compression_level_is_exit_1_with_a_readable_message() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("create")
+        .arg("--compression-level=-99999999999999999999")
+        .arg(temp.path().join("t.tar.gz"))
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains(
+            "Invalid compression level (an out-of-range integer): must be between 1 and 9.",
+        ));
 }

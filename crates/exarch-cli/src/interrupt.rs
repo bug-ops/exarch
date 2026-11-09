@@ -365,21 +365,26 @@ fn deliver_within(budget: std::time::Duration, write: impl FnOnce() + Send + 'st
     }
 }
 
+/// The hint of a forced exit. A place that could not be resolved when the
+/// window opened, because core had not created the parent yet, is resolved
+/// again here.
+#[cfg(not(target_os = "wasi"))]
+fn resolved_hint(armed: &Armed) -> Vec<Part> {
+    let place = armed
+        .place
+        .clone()
+        .or_else(|| exarch_core::staging_place(&armed.output, armed.run.staged_kind()).ok());
+    forced_exit_hint(&armed.output, place.as_ref(), armed.run)
+}
+
 /// Writes the report of a forced exit and flushes both streams: the one
 /// `--json` document on stdout, or the hint on stderr.
-///
-/// A place that could not be resolved when the window opened, because core had
-/// not created the parent yet, is resolved again here.
 #[cfg(not(target_os = "wasi"))]
 fn write_forced_report(armed: &Armed) {
     use crate::output::emit_line;
     use std::io::Write as _;
 
-    let place = armed
-        .place
-        .clone()
-        .or_else(|| exarch_core::staging_place(&armed.output, armed.run.staged_kind()).ok());
-    let hint = forced_exit_hint(&armed.output, place.as_ref(), armed.run);
+    let hint = resolved_hint(armed);
     // A closed stdout or stderr must not stop the exit.
     match armed.mode {
         OutputMode::Json => {
@@ -408,7 +413,11 @@ fn write_forced_report(armed: &Armed) {
 /// The exit status is the contract; the report is best effort.
 ///
 /// Both streams are flushed before the process ends, since a signal death
-/// skips std's exit cleanup.
+/// skips std's exit cleanup. Where there is no signal death (Windows), the exit
+/// goes through `process::exit`, whose stdout cleanup flushes a line the
+/// interrupted thread left buffered and can block on a full pipe; the path is
+/// narrow because the CLI writes whole lines, and a lock held by an abandoned
+/// writer makes the cleanup skip the flush.
 #[cfg(not(target_os = "wasi"))]
 fn forced_exit(armed: Armed, stop: Stop) -> ! {
     deliver_within(FORCED_EXIT_WRITE_BUDGET, move || {
@@ -787,6 +796,33 @@ mod tests {
             .expect("a resolved place");
         assert_eq!(target, canonical.join("a"));
         drop(guard);
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_place_unresolved_at_arm_time_is_resolved_when_the_exit_is_forced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().canonicalize().expect("canonicalize");
+        let armed = |output: PathBuf| Armed {
+            output,
+            run: Run::ExtractAtomic,
+            mode: OutputMode::Human(Verbosity::Normal),
+            place: None,
+        };
+
+        let resolved = crate::error::raw(&resolved_hint(&armed(dir.path().join("out"))));
+        assert!(
+            resolved.contains(&format!("in {}:", canonical.display())),
+            "{resolved}"
+        );
+
+        let missing_parent = dir.path().join("absent/out");
+        let unresolved = crate::error::raw(&resolved_hint(&armed(missing_parent.clone())));
+        assert!(
+            unresolved.contains(&format!("next to {}:", missing_parent.display())),
+            "{unresolved}"
+        );
     }
 
     #[cfg(not(target_os = "wasi"))]

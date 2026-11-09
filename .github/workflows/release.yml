@@ -158,8 +158,32 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Read locked maturin version
+        id: maturin
+        working-directory: crates/exarch-python
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+
+          with open("uv.lock", "rb") as lock:
+              versions = [p["version"] for p in tomllib.load(lock)["package"] if p["name"] == "maturin"]
+          if len(versions) != 1:
+              raise SystemExit(f"expected exactly one maturin entry in uv.lock, found {versions}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={versions[0]}\n")
+          PY
+
+      - name: Install uv
+        if: ${{ !matrix.platform.manylinux }}
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
       - name: Install maturin
-        run: pip install maturin
+        if: ${{ !matrix.platform.manylinux }}
+        working-directory: crates/exarch-python
+        run: |
+          uv export --locked --no-emit-project --only-group release -o "$RUNNER_TEMP/python-release-requirements.txt"
+          uv pip install --system --require-hashes --no-build -r "$RUNNER_TEMP/python-release-requirements.txt"
 
       - name: Setup cross-compilation (Linux aarch64)
         if: matrix.platform.name == 'linux-aarch64'
@@ -179,6 +203,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
+          maturin-version: v${{ steps.maturin.outputs.version }}
           args: --release --strip --out wheels -i python3.11
           working-directory: crates/exarch-python
 

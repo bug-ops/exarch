@@ -74,3 +74,17 @@ updates:
       - "ci"
     commit-message:
       prefix: "chore"
+
+  # Python tooling pinned in uv.lock (maturin wheel builder, dev tools); the
+  # release and CI workflows install from this lock with --require-hashes.
+  - package-ecosystem: "uv"
+    directory: "/crates/exarch-python"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore"

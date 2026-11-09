@@ -506,7 +506,13 @@ fn sevenz_dispositions_match_extraction() {
     let tally = run_corpus(Format::SevenZ);
     assert_eq!(tally.list_refused, 0);
     assert_eq!(tally.ran, 14, "every archive without a hardlink runs");
-    assert!(tally.duplicates >= 8, "duplicates: {}", tally.duplicates);
+    // `X` repeats `x` only on a case-insensitive volume.
+    let duplicates = if cfg!(target_os = "macos") { 8 } else { 7 };
+    assert!(
+        tally.duplicates >= duplicates,
+        "duplicates: {}",
+        tally.duplicates
+    );
     assert!(tally.refused >= 5, "refused: {}", tally.refused);
     assert_eq!(tally.without_extract, 0, "every archive extracts something");
 }

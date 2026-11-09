@@ -354,6 +354,9 @@ pub(super) unsafe fn sid_to_string(sid: *mut c_void) -> io::Result<String> {
     if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == 0 {
         return Err(io::Error::last_os_error());
     }
+    if text.is_null() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
     // SAFETY: on success `text` points at a NUL-terminated UTF-16 string
     // allocated by the API, so every offset up to the NUL is readable.
     let units = unsafe {

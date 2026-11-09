@@ -141,22 +141,25 @@ fn entry(acl: *const ACL, index: u32) -> io::Result<Ace> {
     if unsafe { GetAce(acl, index, &raw mut ace) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: every entry starts with an `ACE_HEADER`.
+    if ace.is_null() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    // SAFETY: `GetAce` succeeded and `ace` is non-null; every entry starts with
+    // an `ACE_HEADER`.
     let header = unsafe { ace.cast::<ACE_HEADER>().read_unaligned() };
-    // SAFETY: the SID of an `ACCESS_ALLOWED_ACE` starts at `SidStart`, inside
-    // the entry. The test DACLs hold only entries of that layout, and the type
-    // is checked below before the string is trusted.
-    let sid = unsafe {
-        ace.cast::<u8>()
-            .add(offset_of!(ACCESS_ALLOWED_ACE, SidStart))
-    };
     let allows = header.AceType == ACCESS_ALLOWED_ACE_TYPE;
     Ok(Ace {
         allows,
         flags: header.AceFlags,
         sid: if allows {
             // SAFETY: the entry is an `ACCESS_ALLOWED_ACE` (checked above), so
-            // `sid` points at its SID, and the ACL outlives the call.
+            // its SID starts at `SidStart`, inside the entry.
+            let sid = unsafe {
+                ace.cast::<u8>()
+                    .add(offset_of!(ACCESS_ALLOWED_ACE, SidStart))
+            };
+            // SAFETY: `sid` points at the entry's SID, and the ACL outlives the
+            // call.
             unsafe { sid_to_string(sid.cast())? }
         } else {
             String::new()

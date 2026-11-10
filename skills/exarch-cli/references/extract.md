@@ -44,6 +44,10 @@ All four also exist on `list` and `verify`.
 - `--strip-components <N>`: drop N leading components; an entry with N or fewer components is skipped (`stripped_away`). `0` and negatives are `InvalidConfiguration`; N above `--max-path-depth` is refused. A hardlink whose target is stripped or unselected is refused as `SecurityViolation` (`sub_code` `LINK_TARGET`); a symlink keeps its target text; a hardlink target containing `..` under any selection is `PathTraversal`.
 - `--flatten`: every file lands at the destination top level under its final component; directories are skipped (`stripped_away`); a selected link entry is refused (`SecurityViolation`, `LINK_POLICY`). Same-name files follow the duplicate rule. Conflicts with `--strip-components` (exit `2`).
 
+## Unreachable destination
+
+An `OUTPUT_DIR` that cannot be created, opened or searched (a file where a parent directory should be, no search permission) fails before any entry is written with `IoError`, message `Destination is not accessible: <path>: <step>: <cause>` and the matching `io_kind` (`NotADirectory`, `PermissionDenied`, ...), exit `1`. The path is the one you passed. Fix the path or its permissions; no flag relaxes it.
+
 ## `--force`
 
 A regular file is replaced by writing a sibling temp file and renaming over it (like `mv -f`): other hardlinks to the old file keep their content. The destination parent must be writable; a read-only existing file is replaced; owner, ACLs, and xattrs of the old file are not preserved. The new file gets the entry's mode (a ZIP entry without Unix attributes gets `0664`; with no mode at all, `0666 & ~umask`).

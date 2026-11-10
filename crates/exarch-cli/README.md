@@ -382,6 +382,10 @@ A failed operation prints an error envelope. For a `SecurityViolation` that a `S
 > [!TIP]
 > Use JSON output with `jq` for scripting: `exarch extract --json archive.tar.gz | jq '.data.files_extracted'`
 
+## Interrupting
+
+`extract` and `create` treat SIGINT and SIGTERM as a cancelled run: they stop at the next entry, discard their staging entry and exit with status 130 (SIGINT) or 143 (SIGTERM), ending by the signal itself. A second signal exits at once with a hint naming anything left behind; under `--json` one `Cancelled` error document is written.
+
 ## Security
 
 exarch is designed with security as a primary concern, protecting against common archive vulnerabilities:

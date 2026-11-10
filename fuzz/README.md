@@ -15,7 +15,7 @@ already exhaustively covered by existing unit tests; the escape-detection
 logic behind it (the subsystem behind this repo's two closed P0 advisories,
 GHSA-x8wr and GHSA-j9wj) is what fuzzing should spend its cycles on, and it
 is unreachable otherwise. The `extract_archive` target also enables atomic
-extraction (`ExtractionOptions::with_atomic`), the path GHSA-x8wr originally
+extraction (`ExtractionOptions::with_staging(Staging::Atomic)`), the path GHSA-x8wr originally
 lived in.
 
 `fuzz/` is deliberately excluded from the root Cargo workspace: it requires

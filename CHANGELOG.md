@@ -7,191 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-10
+
+### Breaking
+
+- Core API: `with_staging` and `with_existing_files` replace `with_atomic` and `with_skip_duplicates`, an empty extension allowlist refuses (`ExtensionFilter`), every `exarch_core` module is private with items re-exported from the crate root, and format handlers and creation filter functions are no longer public (#999, #1019).
+- Core API: `ExcludePattern`, `ExcludeRefusal` and `ConfigProblem::ExcludePatternRefused` become `EntryPattern`, `PatternRefusal` and `ConfigProblem::PatternRefused`, and `NarrowingReason::AclHasInheritableEntries` is removed (#1024, #1065, #1081).
+- Core API: `ArchiveError::rolled_back_with` wraps `Cancelled`, `OutputExists` and `DestinationChanged` in `PartialExtraction` when a staging directory is left behind, and a failed publish of plain `--atomic` returns `PartialExtraction` with cause `OutputExists` (#1019, #1129).
+- Core API: `DestinationOccupied` gains `by: OccupiedBy` and an optional `destination`, `FfiDetail::Occupied` gains `by`, `DestinationNotAccessible { path, error }` with a `DestinationStep` replaces `Io` for an unreachable destination, and `FfiErrorMessage` gains `raw_os_error` (#1141, #1170, #1174, #1185).
+- Extraction: a corrupt or truncated payload is `InvalidArchive` whatever the destination state, `create` refuses two sources that map to one entry name, and atomic and replace extraction need search permission on the destination's parent instead of read (#999, #1019).
+- Extraction: a file or link over a directory the archive created, a directory occupant under `ExistingFiles::Overwrite` and a symlink occupant are refused with typed errors (`OUTPUT_EXISTS`, `EXISTING_SYMLINK`) instead of skipped or an untyped `IoError`; an archive's own duplicate hardlink fails as `OutputExists` (#1141, #1170, #1185).
+- Entry counting and listing: `max_file_count` counts every entry in every format, `list` fails with `UnmatchedInclude` in strict mode, and `ArchiveManifest::dispositions` reports every entry with `Refuse` where it used to omit one (#1065).
+- 7z: `max_decoder_memory` applies when an archive is opened, the header is capped at `max_file_count` x 256 B + 64 KiB (an archive with many entries may need a higher `--max-files`), headers using a bzip2, PPMd or BCJ coder or several coders and Deflate blocks are refused as `InvalidArchive`, and `verify` of a Deflate archive fails (#1024, #1061, #1114).
+- Patterns: `ExcludePattern::matches` is false for rooted, prefixed and `..` paths, `-x '*'` is accepted, and a drive-prefixed pattern is refused on every host (#1024).
+- Windows: link and hardlink targets resolve handle-relatively, so targets through `SUBST`, mapped drives, 8.3 names, volume GUIDs, `\x`, `C:x` and reparse points other than symlinks and junctions are refused, and Windows `--atomic` onto an existing empty directory fails with `OutputExists` (#1019, #1024).
+- CLI: the default extract mode refuses existing files with `OutputExists` and a sorted `error.conflicts`, `--atomic` refuses a non-empty directory, and `--atomic --force` refuses `.`, `..`, the archive's directory, the working directory and `/` (#999).
+- CLI: `--json` warnings are objects `{kind, message, ...}`, hints move from `error.message` to `error.hint`, host paths are exact UTF-8, `-l` out of range exits 1, and sizes in human output are labelled KiB/MiB (#1019, #1065).
+- CLI: only SIGINT was handled before; extract and create now exit 130 on SIGINT, remove the staging entry and exit at once with a hint on a second signal (#1019).
+- Python: Python 3.10 is dropped, 3.11-3.15 are supported and abi3 wheels target `cp311-abi3` (#1095).
+- Python: `existing_files` and `staging` replace `skip_duplicates` and `atomic`, `allowed_extensions` is `None` for any and refuses `[]`, `warnings` are typed objects, and several attributes become properties or lose their defaults (#999, #1019, #1141, #1170).
+- Python and Node: every function takes its arguments in one order (required inputs, config, options, specific arguments, format, progress, signal), unknown core tokens pass through instead of raising, and stored-target and widened-string getters change type (#1065, #1114).
+- Node: the 23 `set*` methods become `with*`, `withExistingFiles` and `withStaging` replace `skipDuplicates` and `withAtomic`, `allowedExtensions` is `null` for any, report fields are typed string enums, counts are exact numbers, and `OUTPUT_EXISTS` `path` is optional (#999, #1019, #1065, #1170).
+
 ### Added
 
-- Core: entry selection with `EntrySelection`, `PathRewrite`, `StripComponents` and include and exclude patterns on `SecurityConfig`, shared by extract, list, verify and sinks, plus `ArchiveManifest::dispositions`; the CLI gains `--include`, `--exclude`, `--strip-components` and `--flatten`, Python and Node expose the same options (#967, #999).
-- Core: `Staging::{InPlace, Atomic, AtomicReplace}` replaces the CLI-side atomic `--force` swap, with the `ReplacesProtectedPath` guard comparing directory identity, restore on failure and `DestinationChanged`; `ListedArchive::check_destination` replaces the CLI conflict pre-check (#977, #983, #984, #985, #999).
-- Core: `ExistingFiles::{Skip, Overwrite, Refuse}` with a per-run record refuses a file this run did not create and never overwrites under `Refuse` (#975, #982, #999).
-- Core: `ArchiveError::Cancelled` stops extract, list, verify and create at the next entry and before the atomic rename (#973, #990, #999).
-- Core: typed `ZipHeaderField` findings for every zip 9.4 header refusal and a weekly `zip-drift.yml` workflow (#971, #999).
-- Core: `CreationWarning::DirectoryNotSynced`, `Violation::HardlinkTargetAmbiguous` and `ArchiveError::UnmatchedInclude` (#967, #976, #999).
-- CLI: `--json` errors carry `error.hint` and `error.conflicts` (#982, #985, #999).
-- Python: `staging`, `existing_files`, typed warning classes, `io_kind`, errno and filename on source errors, `protected_path` and `collision` on `InvalidConfigurationError` (#962, #988, #989, #992, #999).
-- Node: `withStaging`, `withExistingFiles`, typed warnings, `unmatchedPatterns`, `protectedPath`, `collision`, `withBannedComponents`, `CreationConfig.withExcludePatterns` and `withAllowedExtensions(null)` (#988, #989, #991, #992, #999).
-- Core: `EntrySelection::{with_strip, with_flatten, with_include_list, with_exclude_list}`, `DispositionKind`, `DestinationState` and `ArchiveError::rolled_back_with`, so a failed run reports the staging directory it left (#995, #998, #1013, #1019).
-- CLI: `--json` errors carry `error.io_kind` and `error.leftover_path`, `backup_cleanup_failed` carries `reason`, and extract and create stop on SIGINT with exit 130 and remove their staging entry (#995, #1014, #1016, #1019).
-- Python: `ArchiveError.leftover_path`, `EntryDisposition.action`, `VerificationReport.suspicious_entries` and `format` (#1011, #1019).
-- Core: `*`, `?`, `[...]` and a whole-component `**` in include and exclude patterns and in `create` excludes, matched by `globset` behind the opaque `ExcludePattern`, with a `glob` fuzz target (#1000, #1024).
-- Core: `QuotaResource::HeaderSize` and the `HEADER_SIZE` quota sub-code for a 7z header over the size derived from `max_file_count`, in the CLI, Python and Node (#674, #1024).
-- Core: FreeBSD and macOS tmpfs mounts and FreeBSD `md` disks are charged to the decoder memory limit like Linux tmpfs (#959, #1024).
-- Docs: specifications 023 (glob entry selection) and 024 (encrypted ZIP and 7z, draft) (#1000, #1001, #1024).
-- Core: `QuotaResource::HeaderEntryCount` and the `HEADER_ENTRY_COUNT` quota sub-code for a 7z header that declares more entries than `max_file_count` allows, in the CLI, Python and Node (#1061).
-- Core: `Disposition::Refuse` for an entry that validation refuses or that cannot be placed, shown as `[refused]` and `{"action":"refuse"}` by the CLI and as `RefuseDisposition` in Python and Node (#1036, #1065).
-- Core: `ConfigSetting::CompressedMemberAllowance`, `DecodeReuse::{from_parts, limit}`, `CompressionLevel::{MIN, MAX}`, `FfiKind::io_kind` and `CreationWarning::redacted`, so the bindings stop re-implementing core rules (#1048, #1053, #1056, #1058, #1065).
-- Core: extract and create poll for cancellation about every 8 MiB inside a single entry copy, so the first interrupt stops a large entry (#1045, #1065).
-- CLI: SIGTERM cancels like SIGINT with exit 143, a graceful stop ends by the signal so shell loops stop, and a forced exit writes one `Cancelled` JSON document; `signal-hook` is used on Unix, `ctrlc` on Windows only, and SIGHUP stays at its default so `nohup` keeps working (#1035, #1037, #1050, #1065).
-- Core: `ExtractionWarning::RootAccessNarrowed` with a typed `NarrowingReason` reports every case where the published root ends up narrower than the destination, in the CLI JSON output, Python and Node (#1063, #1077).
-- Core: on macOS atomic extraction copies a destination ACL without inheritable entries onto the published root through the pinned descriptor, replacing the `exacl` dependency with a scoped `darwin_acl` module (#1031, #1060, #1063, #1065, #1077).
-- CLI: `list` accepts `--allow-symlinks` and `--allow-hardlinks` so its link dispositions match `extract` (#1064, #1077).
-- CI: a `freebsd.yml` workflow runs the spool classification tests in a FreeBSD VM (#1022, #1077).
-- Python: `compressed_member_allowance`, `windows_reserved_names`, `max_tar_metadata_bytes`, `max_decoder_memory` and `max_solid_compression_ratio` setters, `ListOptions.stored_targets` and `ArchiveEntry.modified` (#1052, #1056, #1065).
-- Node: `withCompressedMemberAllowance`, `withAllowWindowsReservedNames`, `withMaxTarMetadataBytes`, `withMaxDecoderMemory` and `withMaxSolidCompressionRatio`, an optional `ListOptions` on `listArchive*`, `IntegrityGaps.total`, `SkippedSummary.total` and `sizeClamped` on byte-size reports (#1052, #1055, #1056, #1065).
-- Tests: regression tests for the zip2 open-time advisories GHSA-m3j8 and GHSA-w2w4 (#1028, #1065).
-- Tests: a WinRAR-produced ZIP with deflate payload joins the ZIP corpus (#855, #1077).
-- Core: `staging_place`, `StagingPlace`, `StagedOutputKind`, `STAGING_PREFIX`, `BACKUP_PREFIX`, `LinkTargetState`, `StoredTargets` tokens, `UnixTime`, `SolidArchives::with_max_ratio` and `Skips::counts` (#1096, #1097, #1098, #1099, #1102, #1114).
-- Core: `CompressionLevel: TryFrom<RequestedLevel>` and one core-owned `InvalidCompressionLevel` message used by the CLI, Python and Node (#1134, #1135, #1141).
-- Node: `isSafe`, `hasCriticalIssues`, `compressionRatio` and `compressionPercentage` on reports and manifest entries, as in Python (#1136, #1141).
-- Core: NetBSD and illumos open directories search-only for mode changes and fall back to the read handle on any error (#1126, #1141).
-- Tests: `dispositions_match_extraction` compares `dispositions()` with the per-entry outcome of extraction over TAR, ZIP and 7z (#1132, #1141).
-- Core: `VolumeIdentity` and `ArchiveManifest::dispositions_on` model a volume without file IDs, where a differently spelled repeat of a landing is refused (#1140, #1146).
-- Core: `MarkPropagation::{Never, WhenMarked}` copies the archive's Mark-of-the-Web or quarantine mark onto extracted files and, on macOS, onto directories the run created; the CLI gains `--mark-propagation`, Python and Node expose the option and the report's `mark` (#1026, #1151).
-- CLI, Python, Node: `list --destination` and the `destination` argument of `list_archive` probe the destination volume so `list` agrees with extraction where files have no IDs (#1144, #1151).
-- CI: a `netbsd-illumos.yml` workflow runs the `0311` backup and search-only open tests in NetBSD and illumos VMs, and the observed results replace the "unobserved" wording: NetBSD has no search-only directory open and leaves the `0311` backup behind with a warning (#1145, #1149, #1151).
-- Tests: an opt-in `zip_parallel_prototype` benchmark measures parallel ZIP compression against the sequential writer (#1027, #1151).
-- Docs: specification 026 (Mark-of-the-Web propagation) and the destination probe in specification 019 (#1026, #1144, #1151).
+- Entry selection: `EntrySelection`, `PathRewrite`, `StripComponents` and include and exclude patterns shared by extract, list, verify and sinks, with `ArchiveManifest::dispositions`, `Disposition::Refuse`, glob patterns (`*`, `?`, `[...]`, whole-component `**`) and the CLI flags `--include`, `--exclude`, `--strip-components` and `--flatten` (#999, #1019, #1024, #1065).
+- Staging and existing files: `Staging::{InPlace, Atomic, AtomicReplace}` replaces the CLI atomic `--force` swap with directory-identity guards, `DestinationChanged` and restore on failure, `ExistingFiles::{Skip, Overwrite, Refuse}` tracks files created by the run, and `ListedArchive::check_destination` replaces the CLI conflict pre-check (#999, #1019).
+- Cancellation: `ArchiveError::Cancelled` stops extract, list, verify and create at the next entry and about every 8 MiB inside a copy, and the CLI handles SIGINT (130) and SIGTERM (143) (#999, #1065).
+- ACLs and marks: atomic extraction seeds the destination ACL onto the staging root, a typed `RootAccessNarrowed` warning reports a narrowed root, and `MarkPropagation::{Never, WhenMarked}` with `--mark-propagation` copies the Mark-of-the-Web or quarantine mark (#1065, #1077, #1081, #1151).
+- Volumes: `VolumeIdentity`, `ArchiveManifest::dispositions_on` and `list --destination` model volumes without file IDs; `list` accepts `--allow-symlinks` and `--allow-hardlinks`; FreeBSD and macOS tmpfs and FreeBSD `md` spools are charged to the decoder memory limit (#1024, #1077, #1146, #1151).
+- Quotas and findings: `QuotaResource::{HeaderSize, HeaderEntryCount}` with their sub-codes, typed `ZipHeaderField` findings, `CreationWarning::DirectoryNotSynced`, `Violation::HardlinkTargetAmbiguous` and `ArchiveError::UnmatchedInclude` (#999, #1024, #1061).
+- Core types: `ConfigSetting::CompressedMemberAllowance`, `DecodeReuse::{from_parts, limit}`, `CompressionLevel::{MIN, MAX}` and `TryFrom<RequestedLevel>`, `StagingPlace`, `LinkTargetState`, `StoredTargets`, `UnixTime`, `DispositionKind`, `DestinationState` and `OccupiedBy` so the bindings reuse core rules (#995, #1065, #1114, #1141).
+- CLI: `--json` errors carry `error.hint`, `error.conflicts`, `error.io_kind` and `error.leftover_path`, and a forced exit writes one `Cancelled` document (#999, #1019, #1065).
+- Python: `staging`, `existing_files`, typed warnings, errno and filename on source errors, `leftover_path`, `suspicious_entries`, `stored_targets`, `ArchiveEntry.modified` and setters for compressed-member allowance, reserved names, TAR metadata, decoder memory and solid ratio (#999, #1019, #1065).
+- Node: `withStaging`, `withExistingFiles`, typed warnings, `unmatchedPatterns`, `protectedPath`, `collision`, setters for the same limits, an optional `ListOptions`, `isSafe`, `hasCriticalIssues` and compression ratio fields (#999, #1065, #1141).
+- CI: weekly `zip-drift.yml`, `freebsd.yml` and `netbsd-illumos.yml` workflows, and an opt-in `zip_parallel_prototype` benchmark (#999, #1077, #1151).
+- Docs and tests: specifications 023 to 026 and the new `exarch-cli` skill layout with a `skills` CI job; regression tests for GHSA-m3j8 and GHSA-w2w4, a WinRAR ZIP corpus entry and `dispositions_match_extraction` (#994, #1024, #1065, #1066, #1077, #1141, #1151).
 
 ### Changed
 
-- **BREAKING:** Python: drop Python 3.10, support 3.11-3.15; abi3 wheels now target `cp311-abi3` (#1095).
-- Core: `indexing_slicing` and `arithmetic_side_effects` are enforced on the format and security modules, with bounded reads and a `PerBlock` table in the 7z reader (#1032, #1074).
-- Core: include and exclude patterns without wildcards match through a hash index, so 2000 literal or suffix `--exclude` patterns cost about as much as one (#1062, #1077).
-- Docs: `DecodeReuse::TempFile` gains Linux VM timings for ext4 and tmpfs spools, and the macOS RAM-disk limit is documented; the spool code moves to its own module (#1021, #1022, #1077).
-- Docs: `exarch-cli` skill split into a 151-line `SKILL.md` and eight `references/` files within Agent Skills size limits (#1066).
-- CI: `skills` job validates `skills/` with `skills-ref` 0.1.1 and checks the SKILL.md line limit and reference links, gated by `ci-success` (#1066).
-- **Breaking**: `with_atomic` and `with_skip_duplicates` are replaced by `with_staging` and `with_existing_files`, and the extension allowlist is an `ExtensionFilter` whose empty list refuses instead of allowing all (#972, #975, #999).
-- **Breaking**: every `exarch_core` module is private and its public items are re-exported once from the crate root; the concrete format handlers, `ZIP_FAMILY_ALIASES` and the creation filter functions are no longer public (#978, #999).
-- **Breaking**: a corrupt or truncated payload in ZIP, 7z, tar.xz and TAR is `InvalidArchive` whatever the destination state, while source and destination faults stay `Io` and a forged declared size stays `SecurityViolation` (#964, #965, #999).
-- **Breaking**: `create` refuses two sources that map to one entry name before writing, and ZIP directory entries keep the source mode (#968, #970, #999).
-- **Breaking (CLI)**: the default extract mode refuses existing destination files with `OutputExists` and a sorted `error.conflicts`, `--atomic` refuses a non-empty directory, `--atomic --force` refuses `.`, `..`, the archive's directory, the working directory and `/`, `error.message` no longer embeds the hint, a closed stdout exits 0 and `-v` survives a closed stderr (#977, #981, #982, #984, #985, #999).
-- **Breaking (Python)**: `skip_duplicates` and `atomic` are replaced by `existing_files` and `staging`, `allowed_extensions` is `None` for any and refuses `[]`, and `warnings` are typed objects (#972, #975, #988, #999).
-- **Breaking (Node)**: `skipDuplicates` and `withAtomic` are replaced by `withExistingFiles` and `withStaging`, `allowedExtensions` is `null` for any and refuses `[]`, `warnings` are typed objects, a throwing progress callback stops the operation at the next entry and compression-level errors are `INVALID_COMPRESSION_LEVEL` (#972, #975, #988, #992, #999).
-- The `zip` requirement is `~9.4` instead of the exact `=9.2.2` pin (#971, #999).
-- Docs: specifications and the CLI skill follow the new behavior, and secret file patterns are gitignored with a `files` allowlist for the npm package (#966, #969, #999).
-- **Breaking (CLI)**: `--json` warnings are objects `{kind, message, ...}` instead of display strings, the `--force` advice moves from `message` to `error.hint` and follows the write mode, conflicts are sorted once in core and listed without duplicates, and human-mode output exits 1 when writing to stdout fails except on a closed pipe (#1008, #1013, #1015, #1017, #1019).
-- **Breaking (CLI)**: only SIGINT is handled; extract and create exit 130 and remove the staging entry, and a second signal exits at once with a hint naming any `.exarch-backup-*` entry (#1014, #1019).
-- **Breaking (Node)**: the 23 `set*` methods of `SecurityConfig` and `CreationConfig` are `with*`, disposition `kind` and `reason` are `action` and `kind`, report fields are typed string enums, and sizes clamp at 2^53-1 (#1009, #1011, #1012, #1019).
-- **Breaking (Python)**: `ArchiveManifest.dispositions` is an attribute, `InvalidConfigurationError.patterns` is `unmatched_patterns`, and the `durability` stub is `_Durability | None` (#1011, #1018, #1019).
-- Core: atomic staging is created at 0700 and published with the destination's mode, an existing empty destination keeps its mode but never takes the owner, and an interrupted or failed run reports the leftover directory (#1002, #995, #1019).
-- Core: absolute hardlink targets are stripped like entry names under selection when absolute paths are allowed, and every overwrite needs a `ReplacePermit` from `ExistingFiles` (#997, #1004, #1019).
-- Core: decoder read errors share one typed classifier for extract, list and verify, so verify of a TAR now reports an `Io` error for a source I/O fault instead of `IntegrityCheckFailed` (#1006, #1019).
-- **Breaking**: `ArchiveError::rolled_back_with` wraps non-partial errors (`Cancelled`, `OutputExists`, `DestinationChanged`) in `PartialExtraction` when a staging directory is left behind (#995, #1019).
-- **Breaking**: atomic and replace extraction need search permission on the destination's parent instead of read, and Windows `--atomic` onto an existing empty directory fails with `OutputExists` (#1005, #1019).
-- Core: modules expose only items reachable from the crate root, enforced by `unreachable_pub` (#1007, #1019).
-- Python and Node: the binding error and report fields are derived from core `FfiDetail`, which is exhaustive on purpose so a new detail fails to compile in both bindings (#1010, #1019).
-- **Breaking**: `ExcludePattern` is an opaque struct instead of an enum, and `ExcludeRefusal` drops `WildcardWithSeparator` and `GlobMetacharacter`, so the `wildcard_with_separator` and `glob_metacharacter` codes disappear from `--json` and the bindings (#1000, #1024).
-- **Breaking**: `ExcludePattern::matches` is false for rooted, prefixed and `..` paths, an anchored single segment displays with a trailing `/`, `-x '*'` is accepted, and a drive-prefixed pattern is refused on every host, including a floating `a:b` on Unix (#1000, #1024).
-- **Breaking**: `max_decoder_memory` also applies when a 7z archive is opened, and the header size is capped at `max_file_count` x 256 B + 64 KiB, so an archive with many entries or directories may need a higher `--max-files` (#674, #1024).
-- **Breaking (Windows)**: link and hardlink targets resolve handle-relatively, so targets through `SUBST`, mapped drives, 8.3 names or volume GUIDs, `\x` and `C:x` targets and reparse points other than symlinks and junctions are refused, and the result no longer depends on the destination's absolute length (#958, #1024).
-- Dependencies: `sevenz-rust2` 0.25.0 and `lzma-rust2` 0.25 (#674, #769, #1024).
-- Docs: specifications 001-024 and the constitution synced with the implemented behavior (#1059).
-- **Breaking**: 7z archives whose encoded header uses a bzip2, PPMd or BCJ coder, or more than one coder, are refused as `InvalidArchive` ("unsupported header layout") (#1061).
-- **Breaking**: `max_file_count` counts every entry (directories, links, skipped entries and skipped duplicates) in every format and command; TAR extraction counted only files and links before (#1038, #1065).
-- **Breaking**: `ExcludePattern`, `ExcludeRefusal` and `ConfigProblem::ExcludePatternRefused` become `EntryPattern`, `PatternRefusal` and `ConfigProblem::PatternRefused` in a `pattern` module, since one type serves include and exclude lists (#1041, #1065).
-- **Breaking**: `list` fails with `UnmatchedInclude` in strict mode when an include pattern matches no entry, as `extract` does; `verify` still reports it (#1033, #1065).
-- **Breaking**: `ArchiveManifest::dispositions` reports every entry, with `Refuse` where it used to omit one (#1036, #1065).
-- **Breaking (CLI)**: quota advice moves from `error.message` to `error.hint`, `--json` host paths are exact UTF-8 and human text renders them with `path_text`, `-l` out of range exits 1, `completion` follows the stdout error policy, sizes in human output are labelled KiB/MiB, and help and hint text follow core defaults (#1034, #1047, #1048, #1049, #1051, #1065).
-- **Breaking (Node)**: `createArchiveWithProgress(out, sources, config, options, progress)` takes `progress` last, count fields are exact numbers and no longer saturate at 2^32-1, and unknown core tokens pass through instead of failing the call (#1054, #1055, #1058, #1065).
-- **Breaking (Python)**: an unknown manifest entry, link target, disposition or memory entry kind returns the base class instead of raising `RuntimeError` (#1054, #1065).
-- Core: glob selection compiles one combined set per pattern list, adopted atomic root modes are typed (`DirMode`), the 7z probe and ZIP parsers share bounds-checked little-endian readers, FFI message tables are exhaustive, and `io::Error` sideband markers share one `IoMarker` trait (#1039, #1040, #1042, #1043, #1044, #1046, #1065).
-- Core: Windows reserved names also refuse `CLOCK$`, `CONFIG$` and `COM`/`LPT` followed by superscript digits four to nine, a superset of zip2 9.4.1 (#1030, #1065).
-- CI: the MSRV job checks the whole workspace on Rust 1.99.1, not only `exarch-core` (#1057, #1065).
-- **Breaking**: `NarrowingReason::AclHasInheritableEntries` and `acl_has_inheritable_entries` are removed from core, the CLI `--json` `root_access_narrowed` reasons, Python and Node, because atomic extraction now seeds the destination's inheritable ACL entries onto the staging root instead of narrowing the root (#1067, #1081).
-- Core: `indexing_slicing` and `arithmetic_side_effects` are enforced across all of `exarch-core` from `lib.rs` instead of the format and security modules, and the remaining sites use checked or saturating forms that stay restrictive (#1070, #1081).
-- Core: `fs_view` tree nodes are addressed by a `NodeId` minted by a private arena and 7z files by a header-minted `FileIndex` with one `SevenZHeader::file` accessor (#1071, #1072, #1081).
-- Tests: the CLI interrupt tests join their stderr reader, drive the repeated-SIGINT case through a FIFO and run under a `package(exarch-cli)` nextest override with a 2 s leak timeout that reports a leak without failing the run (#1075, #1081).
-- **Breaking**: Python and Node take every function's arguments in one order (required inputs, config, options, specific arguments, format, progress, signal); seven Python signatures and the four Node `listArchiveBytes*` functions moved (#1102, #1114).
-- **Breaking**: Python `ListOptions.with_stored_targets` and `stored_targets` are strings instead of a bool, and an unknown `LinkTarget` state reports the core token (#1097, #1114).
-- **Breaking**: Node `zipConsistency`, `existingFiles`, `staging` and `storedTargets` getters return widened strings and never throw, and `ArchiveEntry.modified` is negative before 1970 instead of `null` (#1097, #1098, #1114).
-- Core: a caller-supplied reader that claims more bytes than it holds always fails as an I/O error with zero bytes written, instead of sometimes `Overrun` (#1101, #1114).
-- Core: `EntryPattern` pairs shape and engine through a `Matcher`, uid and gid are newtypes, `ArchiveError` classifiers are exhaustive and `TempSpool` fields are private (#1100, #1114).
-- Core: the ACL platform predicate, little-endian reads, bounded prefix reads and errno checks have one implementation each (#1101, #1114).
-- Python and Node: the solid 7z ratio rule and the decode-reuse limit come from core (#1096, #1114).
-- CLI: a stop after core's last poll reports the result and ends by the signal (130/143), a forced exit flushes stdout and stderr first, and `--compression-level` beyond `i64` is exit 1 (#1103, #1114).
-- CLI: the forced-exit hint names the staging place resolved by core and no longer spells core's `.exarch-*` names (#1099, #1114).
-- CI: maturin and the Python dev tools install from the hash-locked `uv.lock`, and Dependabot tracks the Python lock (#1093, #1114).
-- **Breaking**: a failed publish of a plain `--atomic` extraction returns `PartialExtraction` with the extraction counts and cause `OutputExists` instead of the bare error (#1083, #1129).
-- Core: the LZMA2 dictionary-size formula exists once for 7z admission and the header probe (#1073, #1129).
-- Python: tests pin the errors for non-str and lone-surrogate string-enum values (#1094, #1129).
-- **Breaking (core)**: extraction refuses a file or link over a directory the archive created in every CLI extract mode, `--atomic` and `--force` included, and in the sink under `ExistingFiles::Refuse`, instead of skipping it as a duplicate, and `ArchiveError::DestinationOccupied` gains `by: OccupiedBy` so the CLI hint no longer suggests `--force` where it cannot help (#1132, #1141).
-- **Breaking (Python)**: `with_stored_targets` requires its argument, `total_items` and `has_warnings` on the reports are properties, and `SinkOptions` takes its defaults from core (#1136, #1141).
-- **Breaking (CLI, Python, Node)**: the compression-level error reads `invalid compression level: must be 1-9, got N` everywhere (#1134, #1141).
-- Core: `list` and extraction share one run-occupant rule and `list` refusals carry a typed `ArchiveError` (#1125, #1127, #1130, #1132, #1141).
-- Core: plain `--atomic` onto an empty destination that cannot be listed fails with an error naming the destination (#1131, #1141).
-- Core: a failed `--atomic --force` swap keeps the extraction counts in `partial_report`, and the CLI no longer says the destination is unchanged after a failed restore (#1124, #1141).
-- Core: the Win32 result check, the leaf-name constructor and the owner-only descriptor are written once, and the descriptor is built from the SID bytes (#1134, #1141).
-- CLI: `raise_hint`, the forced-exit hint, signal mapping and the interrupt tests are typed and synchronised on events (#1135, #1141).
-- Python, Node: stale solid-ratio, decode-reuse and `modified` unit documentation is corrected and guarded by tests (#1136, #1141).
-- Core: `verify` says extraction fails over a directory occupant unless existing entries are skipped (#1132, #1141).
-- Core: `MarkState` is the token table of `MarkOutcome`, `MarkScope` always stamps the mark outcome, 7z writes reuse `finish_written` behind a `FileWrite` context, and the CLI, Python and Node take mark and occupied-by tokens from core (#1158, #1160, #1170).
-- Breaking: Python `CreationReport.compression_ratio`, `CreationReport.compression_percentage`, `VerificationReport.is_safe` and `VerificationReport.has_critical_issues` are properties (#1160, #1170).
-- Breaking: `ArchiveError::DestinationOccupied::destination` is `Option<PathBuf>`, `FfiDetail::Occupied` gains `by`, `ArchiveError::DestinationNotAccessible` names an unreachable destination, `OutputExistsError.by` and Node `by` report who made the occupant, and Node `path` on `OUTPUT_EXISTS` is optional (#1158, #1159, #1161, #1170).
-- Breaking: under `--force` a file or link over a symlink fails up front as `EXISTING_SYMLINK` instead of `IoError`, and an archive's own duplicate hardlink fails as `OutputExists` with `by: archive` instead of `DUPLICATE_ENTRY` (#1154, #1157, #1170).
-- Breaking: `DestDir::new`, `DestDir::new_or_create` and the atomic, replace and staging paths of extract report an unreachable destination as `ArchiveError::DestinationNotAccessible { path, error }` instead of `ArchiveError::Io`, so release bindings keep the path and the CLI prints `Destination is not accessible: <path>: <cause>` (#1163, #1174).
-- Core: `check_destination(Replaceable)` reuses the opened parent directory across consecutive landings and stops consulting it after four consecutive misses, so its cost no longer grows with path depth (#1169, #1174).
-- Breaking: under `ExistingFiles::Overwrite` a directory occupant is refused as `DestinationOccupied` (`OUTPUT_EXISTS`, entry in `conflicts`) and a symlink occupant as `EXISTING_SYMLINK`, by the write phase, the in-memory sink and `check_destination(Replaceable)` alike, instead of an untyped `IoError` (#1176, #1185).
-- Breaking: `ArchiveError::DestinationNotAccessible` carries a `DestinationStep` and always names the caller's path, and `FfiErrorMessage` gains `raw_os_error` (#1177, #1178, #1185).
-- CLI: `--force` hints distinguish an unknown unreplaced subset from a known one, and the mark propagation JSON counts are one optional pair (#1177, #1185).
+- Core: `indexing_slicing` and `arithmetic_side_effects` are enforced crate-wide, `fs_view` and 7z entries use minted `NodeId` and `FileIndex`, pattern lists compile into one combined set with a hash index for literals, and shared helpers replace duplicated ACL, little-endian read, errno and Win32 checks (#1074, #1077, #1081, #1114, #1129, #1141, #1170).
+- Core: atomic staging is created at 0700 and published with the destination's mode, hardlink targets are stripped like entry names under selection, decoder read errors share one typed classifier, and Windows reserved names also refuse `CLOCK$`, `CONFIG$` and superscript `COM`/`LPT` (#1019, #1065).
+- Core: `list` and extraction share one run-occupant rule, `check_destination(Replaceable)` reuses the opened parent directory, and a caller-supplied reader that claims more bytes than it holds fails as an I/O error (#1114, #1141, #1174).
+- CLI: forced-exit and `--force` hints are resolved through core and name what cannot be replaced, and a stop after the last poll reports the result and ends by the signal (#1114, #1141, #1185).
+- Python and Node: error and report fields derive from core `FfiDetail`, the compression-level message is shared, and solid-ratio and decode-reuse rules come from core (#1019, #1114, #1141).
+- CI: the MSRV job checks the whole workspace on Rust 1.99.1, maturin and Python tools install from the hash-locked `uv.lock`, Node installs use `--frozen-lockfile`, and release jobs have narrowed permissions without persisted credentials (#1065, #1114, #1146, #1151, #1174).
+- Dependencies: `zip` `~9.4`, `sevenz-rust2` 0.25.0, `lzma-rust2` 0.25, `flate2`, ruff 0.17.4 and several GitHub Actions (#999, #1024, #1104, #1105, #1106, #1107, #1108, #1115, #1116).
+- Docs: specifications 001-024 and the constitution are synced with the implemented behavior, and `DecodeReuse::TempFile` timings, the `0311` backup on BSD and illumos and macOS RAM-disk limits are documented (#1059, #1077, #1146, #1151).
 
 ### Fixed
 
-- Core: atomic staging verifies and pins the staging directory by descriptor and rolls back through it, and the macOS rollback sweep touches only entries the run created; staging needs a filesystem that reports owner and mode (#1111).
-- Core: a 7z header whose block, sub-stream or pack-stream tables exceed what its declared entries need is refused before parsing with `Malformation::SevenZHeaderTableTooLarge` (#1111).
-- Core: macOS atomic extraction onto a destination whose ACL denies delete publishes, because the destination ACL is applied after the publishing rename (#1079, #1086).
-- Core: on macOS the staging directory of an absent destination no longer keeps the parent's inherited ACL (#1078, #1086).
-- Core: a destination that is a symlink to an empty directory works with `--atomic`, and a failed parent directory sync is reported (#976, #977, #999).
-- Core: a hardlink to a target that selection collided on is refused instead of copying the winner's bytes (#967, #999).
-- Core: creation benches no longer discard errors and measure a real fsync (#993, #999).
-- Core: a TAR listing spool on tmpfs is charged to the decoder memory limit (#960, #999).
-- CLI: messages state each fact once, a rolled-back report is no longer joined to its cause with `.:` and the `.`, `..` and `./` protected destinations share one test (#982, #985, #986, #999).
-- Core: atomic replace keeps a private destination private, protects the archive path through 8.3 short names on Windows, and unifies its pinned-directory layer with extraction (#1002, #1003, #1005, #1019).
-- Core: a destination swapped during `AtomicReplace` is restored and refused with `DestinationChanged`, a 0555 destination no longer leaves its backup behind, and ZIP message classification applies to ZIP only (#1002, #1005, #1006, #1019).
-- CLI: the forced-exit hint after a second signal names what the interrupted command left behind (#1014, #1019).
-- Core: the run record keys a created file by its descriptor identity (#996, #1019).
-- Core: atomic extraction no longer publishes a root more permissive than the destination: on Linux the destination's POSIX ACL is copied, the ACL the staging root inherits from the destination's parent is cleared, and a root whose ACL cannot be copied is published at 0700 (#1031, #1065).
-- CLI: a forced exit after a second signal no longer waits on a blocked stdout or stderr pipe; the write is abandoned after 500 ms (#1064, #1077).
-- CLI: `completion` no longer panics when stdout fails, and a cancelled run prints `Operation cancelled` once (#1049, #1037, #1065).
-- Python and Node: `leftover_path` survives a cancelled progress callback (#995, #1019).
-- Core: a 7z archive whose stream map would shift file contents is refused when it is opened by list, verify and extract (#769, #1024).
-- Core: atomic extraction seeds the destination's default ACL (Linux) and inheritable entries (macOS) onto the staging root before any child exists, so extracted files and directories inherit what an in-place extraction would give; the stage stays 0700, the umask probe runs before the seed, and a destination that is replaced or vanishes before publish leaves a 0700 root with no ACL (#1067, #1081).
-- Core: on macOS a rolled-back atomic extraction removes staged children that inherited `deny delete`, and the stage ACL is cleared and checked through one verified descriptor (#1082, #1089).
-- Core: macOS atomic and default fresh-destination extraction succeeds under a parent with an inheritable `deny list` entry (#1084, #1089).
-- Core: `--atomic --force` removes the backup of a destination with mode 0311, 0600 or 0644 (#1069, #1089).
-- Core: atomic extraction holds a descriptor on the destination until publication, so a replaced destination is reported as `destination_changed` even when the filesystem reuses its inode number (#1080, #1089).
-- Core: the list preview refuses a hardlink whose target is missing, escaping, a directory, unselected or ambiguous, as extract and verify do (#1090, #1114).
-- Core: a 7z Deflate block is refused at admission, before the destination is created, like Deflate64; `verify` of such an archive now fails (#1091, #1114).
-- Core: `verify` and the list preview no longer judge a hardlink against a duplicate symlink that extraction skips (#1112, #1123).
-- Core: the atomic rollback removes a staged tree of any depth with a bounded descriptor budget instead of stopping at 64 levels on Unix (#1110, #1123).
-- Core: on Windows atomic and replace staging directories are created with a protected owner-only DACL, and the published root inherits its parent's DACL (#1020, #1123).
-- CLI: a SIGINT or SIGTERM inherited as ignored stays ignored on Unix and never cancels a run (#1109, #1123).
-- CI: `uv` and the sdist `maturin` are pinned to the locked versions and a check keeps the maturin pin in step with `uv.lock` (#1113, #1123).
-- Docs: `CONTRIBUTING.md` lists Node.js 20+ (#1092, #1123).
-- Core: on Windows the published atomic root receives the replaced destination's DACL through a handle-relative walk that never follows reparse points, and the owner-only ACE uses the thread token SID (#1117, #1122, #1121, #1129).
-- Core: atomic extraction onto a destination its owner cannot read keeps the destination's mode and ACL instead of narrowing the root to 0700 (#1068, #1129).
-- Core: the macOS staging sweep has no 64-level cap and a rollback after the root was adopted still sweeps (#1119, #1088, #1129).
-- Core: `--atomic --force` onto a destination the caller cannot delete is refused before the extraction, and the 0311 backup is removed on FreeBSD (#1085, #1087, #1129).
-- Core: `list` skips a duplicate symlink as `extract` does on hosts that can create symlinks (#1120, #1129).
-- CI: the musl wheel is built with the hash-locked maturin in a digest-pinned container, and a FreeBSD job runs the backup-removal test as an unprivileged user (#1118, #1087, #1129).
-- CLI: a forced exit keeps the interrupt window locked, so `--json` prints exactly one document (#1133, #1141).
-- Core: `list` agrees with extraction for a repeated file name, a hardlink over an earlier symlink and a symlink on a host without symlink creation (#1125, #1127, #1130, #1141).
-- CI: patchelf is installed from a hash-locked requirements export and the musl build toolchain is pinned to Rust 1.99.1 (#1128, #1141).
-- Core: `--force` of a symlink entry over a directory is refused with `refusing to replace the existing directory at <path>` instead of a bare `Operation not permitted` (#1139, #1146).
-- CI: the release build and validate jobs run with `contents: read` and without persisted checkout credentials (#1138, #1146).
-- Docs: the leftover `0311` backup on OpenBSD and DragonFly and the unverified NetBSD and illumos fallback are documented (#1137, #1146).
-- CI: the release workflow grants `contents: write` to `github-release` only, keeps `id-token: write` on the publishing jobs, drops persisted checkout credentials and passes expressions to `run:` scripts through `env:` (#1142, #1143, #1151).
-- Core: staging on a FAT32 or exFAT volume on macOS no longer fails the inherited access control entry check; a volume that answers `EINVAL` or `ENOTSUP` for the ACL read has no ACL (#1152, #1170).
-- Core: `list` and `verify` model a hardlink after a self-pointing symlink of the same name the way extraction does, and the in-memory sink agrees (#1153, #1170).
-- Core: a TAR hardlink over an existing entry under `--force` is a typed occupant refusal instead of `DUPLICATE_ENTRY`, and `--force` refuses a directory at a file landing, a hardlink over an existing entry and a link over a symlink before it writes (#1154, #1157, #1170).
-- CLI: the `--force` hints name what `--force` cannot replace and no longer promise `--atomic --force`; `list` without a selection flag ignores `--destination` and its error names the destination once (#1157, #1161, #1170).
-- Core: the Windows mark read treats a volume without named streams as unmarked, and a failed volume query stays unreadable (#1150, #1170).
-- CI: `test-release` builds with LTO off, 256 codegen units and opt-level 1 under a 30 minute timeout, and the release workflow no longer restores build caches (#1156, #1147, #1170).
-- Core: `check_destination(Replaceable)` refuses a symlink over an existing symlink when the archive's link target is unread, as the write phase does (#1168, #1174).
-- Core: `list` refuses a hardlink whose target escapes through `..` or a symlink into a later entry, as extraction does (#1167, #1174).
-- CI: the release workflow and the Node jobs of `ci.yml` install Node dependencies with `pnpm install --frozen-lockfile` (#1162, #1174).
-- CI: `windows-volumes.yml` runs the mark propagation tests on FAT32 and exFAT volumes; it is unverified until its first Windows run and does not cover network shares (#1164, #1174).
-- Tests: the racing destination flip test accepts `DestinationNotAccessible`, which turned main red (#1175, #1185).
-- Python: a destination error is raised as the exact builtin `OSError` subclass with errno, cause text and `filename`, so `str(err)` no longer prints `[Errno None] None` and the error pickles; a read-only mount is now a plain `OSError` (`ReadOnlyFilesystem`), not `PermissionError`, and `OutputReservationLeft` prints as `[Errno N] ...` (#1178, #1185).
-- Docs: `ExistingFiles::Refuse` is documented as refusing only a pre-existing occupant or a directory the run made, an in-archive file or symlink repeat is skipped as a duplicate (#1179, #1185).
-- Docs: a manual verification procedure for mark propagation onto an SMB share is recorded in specification 026 as unverified; the real-share run is tracked in #1182 (#1171, #1185).
+- Core: atomic staging is pinned and verified by descriptor, rolled back through it at any depth, and holds the destination until publication so a replaced destination is reported as `destination_changed` (#1089, #1111, #1123).
+- Core: atomic extraction no longer publishes a root more permissive than the destination, keeps the mode and ACL of a destination its owner cannot read, and copies the destination ACL after the publishing rename on macOS and through a handle-relative walk on Windows (#1065, #1086, #1129).
+- Core: macOS atomic extraction works under parents with inheritable `deny` entries, removes staged children that inherited `deny delete`, sweeps without a depth cap and no longer fails on FAT32 or exFAT volumes (#1086, #1089, #1129, #1170).
+- Core: Windows atomic and replace staging use a protected owner-only DACL, and the mark read treats a volume without named streams as unmarked (#1123, #1129, #1170).
+- Core: `--atomic --force` removes the backup of a destination with mode 0311, 0600 or 0644, refuses an undeletable destination before extracting and restores a swapped destination with `DestinationChanged` (#1019, #1089, #1129).
+- Core: `list` and `verify` agree with extraction on duplicate symlinks, hardlinks with missing, escaping or ambiguous targets, repeated names and hosts without symlink creation (#1114, #1123, #1129, #1141, #1170, #1174).
+- Core: a 7z header with oversized block, sub-stream or pack-stream tables and a stream map that would shift file contents are refused before extraction, and a TAR listing spool on tmpfs is charged to the decoder memory limit (#999, #1024, #1111).
+- Core: a symlink over a directory under `--force` is refused with a clear error, a hardlink over a collided selection is refused, and a destination symlink to an empty directory works with `--atomic` (#999, #1146).
+- CLI: a forced exit no longer blocks on a full pipe or breaks `--json` output, an inherited ignored SIGINT stays ignored, `completion` no longer panics on a closed stdout, and messages state each fact once (#999, #1019, #1077, #1123, #1141).
+- Python and Node: `leftover_path` survives a cancelled progress callback (#1019).
+- CI: musl wheels build with the hash-locked maturin in a digest-pinned container, `test-release` builds with LTO off under a 30 minute timeout, and the release workflow no longer restores build caches (#1123, #1129, #1141, #1170).
 
 ## [0.9.0] - 2026-11-05
 
@@ -2455,7 +2331,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/bug-ops/exarch/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/bug-ops/exarch/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/bug-ops/exarch/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bug-ops/exarch/compare/v0.6.1...v0.7.0

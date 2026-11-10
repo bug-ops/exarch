@@ -13,7 +13,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 authors = ["bug-ops"]
 edition = "2024"
 rust-version = "1.99.1"
@@ -24,7 +24,7 @@ keywords = ["archive", "extraction", "security", "tar", "zip"]
 categories = ["compression", "filesystem"]
 
 [workspace.dependencies]
-exarch-core = { path = "crates/exarch-core", version = "0.9.0" }
+exarch-core = { path = "crates/exarch-core", version = "0.10.0" }
 exarch-testkit = { path = "crates/exarch-testkit" }
 anyhow = "1.0"
 assert_cmd = "2.2"

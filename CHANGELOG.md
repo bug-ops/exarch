@@ -126,8 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: Python `CreationReport.compression_ratio`, `CreationReport.compression_percentage`, `VerificationReport.is_safe` and `VerificationReport.has_critical_issues` are properties (#1160, #1170).
 - Breaking: `ArchiveError::DestinationOccupied::destination` is `Option<PathBuf>`, `FfiDetail::Occupied` gains `by`, `ArchiveError::DestinationNotAccessible` names an unreachable destination, `OutputExistsError.by` and Node `by` report who made the occupant, and Node `path` on `OUTPUT_EXISTS` is optional (#1158, #1159, #1161, #1170).
 - Breaking: under `--force` a file or link over a symlink fails up front as `EXISTING_SYMLINK` instead of `IoError`, and an archive's own duplicate hardlink fails as `OutputExists` with `by: archive` instead of `DUPLICATE_ENTRY` (#1154, #1157, #1170).
-- Breaking: `DestDir::new`, `DestDir::new_or_create` and the atomic, replace and staging paths of extract report an unreachable destination as `ArchiveError::DestinationNotAccessible { path, error }` instead of `ArchiveError::Io`, so release bindings keep the path and the CLI prints `Destination is not accessible: <path>: <cause>` (#1163, #PRNUM).
-- Core: `check_destination(Replaceable)` reuses the opened parent directory across consecutive landings and stops consulting it after four consecutive misses, so its cost no longer grows with path depth (#1169, #PRNUM).
+- Breaking: `DestDir::new`, `DestDir::new_or_create` and the atomic, replace and staging paths of extract report an unreachable destination as `ArchiveError::DestinationNotAccessible { path, error }` instead of `ArchiveError::Io`, so release bindings keep the path and the CLI prints `Destination is not accessible: <path>: <cause>` (#1163, #1174).
+- Core: `check_destination(Replaceable)` reuses the opened parent directory across consecutive landings and stops consulting it after four consecutive misses, so its cost no longer grows with path depth (#1169, #1174).
 
 ### Fixed
 
@@ -181,10 +181,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: the `--force` hints name what `--force` cannot replace and no longer promise `--atomic --force`; `list` without a selection flag ignores `--destination` and its error names the destination once (#1157, #1161, #1170).
 - Core: the Windows mark read treats a volume without named streams as unmarked, and a failed volume query stays unreadable (#1150, #1170).
 - CI: `test-release` builds with LTO off, 256 codegen units and opt-level 1 under a 30 minute timeout, and the release workflow no longer restores build caches (#1156, #1147, #1170).
-- Core: `check_destination(Replaceable)` refuses a symlink over an existing symlink when the archive's link target is unread, as the write phase does (#1168, #PRNUM).
-- Core: `list` refuses a hardlink whose target escapes through `..` or a symlink into a later entry, as extraction does (#1167, #PRNUM).
-- CI: the release workflow and the Node jobs of `ci.yml` install Node dependencies with `pnpm install --frozen-lockfile` (#1162, #PRNUM).
-- CI: `windows-volumes.yml` runs the mark propagation tests on FAT32 and exFAT volumes; it is unverified until its first Windows run and does not cover network shares (#1164, #PRNUM).
+- Core: `check_destination(Replaceable)` refuses a symlink over an existing symlink when the archive's link target is unread, as the write phase does (#1168, #1174).
+- Core: `list` refuses a hardlink whose target escapes through `..` or a symlink into a later entry, as extraction does (#1167, #1174).
+- CI: the release workflow and the Node jobs of `ci.yml` install Node dependencies with `pnpm install --frozen-lockfile` (#1162, #1174).
+- CI: `windows-volumes.yml` runs the mark propagation tests on FAT32 and exFAT volumes; it is unverified until its first Windows run and does not cover network shares (#1164, #1174).
 
 ## [0.9.0] - 2026-11-05
 

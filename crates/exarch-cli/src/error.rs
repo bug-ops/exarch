@@ -549,36 +549,38 @@ pub fn chain_text(error: &anyhow::Error) -> String {
     join_chain(&visible_chain(error), ToString::to_string)
 }
 
+/// Which paths of a refused run `--force` does not replace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unreplaced {
+    /// Every path of the error.
+    All,
+    /// Not known: the re-check that would tell failed for another reason.
+    Unknown,
+    /// Exactly these paths, which existed before the run.
+    Only(Box<[PathBuf]>),
+}
+
 /// What a destination conflict tells the user to do, which depends on the
 /// write mode that met it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConflictAdvice {
     /// Existing files are refused: `--force` overwrites them.
     UseForce,
-    /// `--force` does not replace the listed paths, which existed before the
-    /// run; an empty list means every path of the error or that the subset is
-    /// unknown.
-    ForceCannotReplace(Box<[PathBuf]>),
+    /// `--force` does not replace some of the paths.
+    ForceCannotReplace(Unreplaced),
     /// The archive itself writes two entries where only one fits, such as a
     /// file or link where it also makes a directory; no flag changes that.
     ArchiveConflict,
 }
 
-impl ConflictAdvice {
+impl Unreplaced {
     fn hint(&self) -> Vec<Part> {
+        let mut parts = vec![Part::Lit(Flag::Force.long())];
         match self {
-            Self::UseForce => vec![Part::Text(format!(
-                "Use {} to overwrite.",
-                Flag::Force.long()
-            ))],
-            Self::ForceCannotReplace(paths) => {
-                let mut parts = vec![
-                    Part::Lit(Flag::Force.long()),
-                    Part::Lit(" does not replace "),
-                ];
-                if paths.is_empty() {
-                    parts.push(Part::Lit("these paths"));
-                }
+            Self::All => parts.push(Part::Lit(" does not replace these paths")),
+            Self::Unknown => parts.push(Part::Lit(" may not replace every listed path")),
+            Self::Only(paths) => {
+                parts.push(Part::Lit(" does not replace "));
                 for (index, path) in paths.iter().take(MAX_LISTED_CONFLICTS).enumerate() {
                     if index > 0 {
                         parts.push(Part::Lit(", "));
@@ -589,9 +591,21 @@ impl ConflictAdvice {
                 if remaining > 0 {
                     parts.push(Part::Text(format!(" and {remaining} more")));
                 }
-                parts.push(Part::Lit("; remove them or choose another destination."));
-                parts
             }
+        }
+        parts.push(Part::Lit("; remove them or choose another destination."));
+        parts
+    }
+}
+
+impl ConflictAdvice {
+    fn hint(&self) -> Vec<Part> {
+        match self {
+            Self::UseForce => vec![Part::Text(format!(
+                "Use {} to overwrite.",
+                Flag::Force.long()
+            ))],
+            Self::ForceCannotReplace(unreplaced) => unreplaced.hint(),
             Self::ArchiveConflict => vec![Part::Lit(
                 "The archive writes more than one entry at a path where only one fits, such as \
                  a file or link where it also makes a directory; no flag allows that.",
@@ -1164,11 +1178,11 @@ fn dedicated_context(
         ArchiveError::SourceNotAccessible { path, error } => {
             source_not_accessible_context(op, path, error, message)
         }
-        ArchiveError::DestinationNotAccessible { path, error } => message
+        ArchiveError::DestinationNotAccessible { path, step, error } => message
             .restating_source()
             .lit("Destination is not accessible: ")
             .path(path)
-            .text(format!(": {error}")),
+            .text(format!(": {step}: {error}")),
         ArchiveError::OutputExists { path } => message
             .restating_source()
             .lit("Output path already exists: ")
@@ -2224,6 +2238,7 @@ mod tests {
             },
             ArchiveError::DestinationNotAccessible {
                 path: path(),
+                step: exarch_core::DestinationStep::Resolve,
                 error: io::Error::from(io::ErrorKind::NotADirectory),
             },
             ArchiveError::OutputExists { path: path() },
@@ -2336,8 +2351,9 @@ mod tests {
         };
         for advice in [
             ConflictAdvice::UseForce,
-            ConflictAdvice::ForceCannotReplace(Box::default()),
-            ConflictAdvice::ForceCannotReplace(Box::new([PathBuf::from("a")])),
+            ConflictAdvice::ForceCannotReplace(Unreplaced::All),
+            ConflictAdvice::ForceCannotReplace(Unreplaced::Unknown),
+            ConflictAdvice::ForceCannotReplace(Unreplaced::Only(Box::new([PathBuf::from("a")]))),
             ConflictAdvice::ArchiveConflict,
         ] {
             let context = context(&advice);
@@ -2360,14 +2376,18 @@ mod tests {
     #[test]
     fn the_force_hint_is_neutral_and_names_only_the_paths_it_does_not_replace() {
         let hint = |paths: &[&str]| {
-            raw(
-                &ConflictAdvice::ForceCannotReplace(paths.iter().map(PathBuf::from).collect())
-                    .hint(),
-            )
+            raw(&ConflictAdvice::ForceCannotReplace(Unreplaced::Only(
+                paths.iter().map(PathBuf::from).collect(),
+            ))
+            .hint())
         };
         assert_eq!(
-            hint(&[]),
+            raw(&ConflictAdvice::ForceCannotReplace(Unreplaced::All).hint()),
             "--force does not replace these paths; remove them or choose another destination."
+        );
+        assert_eq!(
+            raw(&ConflictAdvice::ForceCannotReplace(Unreplaced::Unknown).hint()),
+            "--force may not replace every listed path; remove them or choose another destination."
         );
         assert_eq!(
             hint(&["x", "d/y"]),

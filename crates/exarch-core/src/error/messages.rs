@@ -566,6 +566,10 @@ pub struct FfiErrorMessage {
     /// expose `errno`, `strerror` and `filename`.
     pub source_fault: Option<FfiSourceFault>,
 
+    /// The OS error number behind an I/O-kind error that names a host path, so
+    /// a binding can expose `errno`.
+    pub raw_os_error: Option<i32>,
+
     /// The host path the error is about, redacted: set for a missing source,
     /// an existing output, an occupied destination and a leftover reservation
     /// file, so a binding can expose it as `filename`.
@@ -715,6 +719,7 @@ impl FfiErrorMessage {
             description,
             partial: None,
             source_fault: None,
+            raw_os_error: None,
             path: None,
             leftover_path: None,
             detail: FfiDetail::None,
@@ -768,6 +773,7 @@ impl ArchiveError {
         msg.path = self.ffi_path();
         msg.leftover_path = self.ffi_leftover_path();
         msg.detail = self.ffi_detail();
+        msg.raw_os_error = self.ffi_raw_os_error();
         if let Self::SourceNotAccessible { error, .. } = &self {
             msg.source_fault = Some(FfiSourceFault {
                 raw_os_error: error.raw_os_error(),
@@ -776,6 +782,17 @@ impl ArchiveError {
             });
         }
         msg
+    }
+
+    /// The OS error number of an I/O failure that names a host path.
+    fn ffi_raw_os_error(&self) -> Option<i32> {
+        if let Self::DestinationNotAccessible { error, .. }
+        | Self::OutputReservationLeft { error, .. } = self
+        {
+            error.raw_os_error()
+        } else {
+            None
+        }
     }
 
     /// The binding-facing class of this error, without consuming it.
@@ -1060,8 +1077,8 @@ impl ArchiveError {
                     conflicts.len()
                 )
             }
-            Self::DestinationNotAccessible { error, .. } => format!(
-                "destination is not accessible: {path}: {}",
+            Self::DestinationNotAccessible { step, error, .. } => format!(
+                "destination is not accessible: {path}: {step}: {}",
                 sanitize_io_error_for_error(error)
             ),
             Self::SourceNotFound { .. } => format!("source path not found: {path}"),
@@ -1264,10 +1281,50 @@ mod tests {
     }
 
     #[test]
+    fn test_destination_not_accessible_message_names_the_step_and_carries_errno() {
+        let error = ArchiveError::DestinationNotAccessible {
+            path: PathBuf::from("ro/sub"),
+            step: crate::DestinationStep::Create,
+            error: std::io::Error::from_raw_os_error(13),
+        };
+        let msg = error.into_ffi_message();
+        assert!(
+            msg.description
+                .starts_with("destination is not accessible: "),
+            "{}",
+            msg.description
+        );
+        assert!(
+            msg.description.contains(": creating the directory: "),
+            "{}",
+            msg.description
+        );
+        assert_eq!(msg.raw_os_error, Some(13));
+    }
+
+    #[test]
+    fn test_raw_os_error_is_set_only_for_path_bearing_io_errors() {
+        let reservation = ArchiveError::OutputReservationLeft {
+            path: PathBuf::from("out.tar"),
+            error: std::io::Error::from_raw_os_error(28),
+        };
+        assert_eq!(reservation.into_ffi_message().raw_os_error, Some(28));
+        let plain = ArchiveError::Io(std::io::Error::from_raw_os_error(13));
+        assert_eq!(plain.into_ffi_message().raw_os_error, None);
+        let synthetic = ArchiveError::DestinationNotAccessible {
+            path: PathBuf::from("d"),
+            step: crate::DestinationStep::Resolve,
+            error: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        assert_eq!(synthetic.into_ffi_message().raw_os_error, None);
+    }
+
+    #[test]
     #[cfg(not(debug_assertions))]
     fn test_destination_not_accessible_names_only_the_file_name_in_release() {
         let error = ArchiveError::DestinationNotAccessible {
             path: PathBuf::from("/srv/secret/app/sub"),
+            step: crate::DestinationStep::Resolve,
             error: std::io::Error::from(std::io::ErrorKind::NotADirectory),
         };
         let msg = error.into_ffi_message();
@@ -1359,6 +1416,7 @@ mod tests {
             },
             ArchiveError::DestinationNotAccessible {
                 path: PathBuf::from("test"),
+                step: crate::DestinationStep::Resolve,
                 error: std::io::Error::other("test"),
             },
             ArchiveError::OutputExists {

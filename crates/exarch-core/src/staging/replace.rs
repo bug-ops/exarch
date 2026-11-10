@@ -31,6 +31,7 @@ use super::adopt::Adoption;
 use super::adopt::make_removable;
 use super::dir::Seed;
 use super::dir::StagingDir;
+use super::dir::StagingSite;
 use super::discarded_after;
 use super::extract_in;
 use super::hold::Destination;
@@ -42,6 +43,7 @@ use crate::BACKUP_PREFIX;
 use crate::BackupIdentity;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::DestinationStep;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ExtractionWarning;
@@ -74,6 +76,8 @@ pub(super) struct ReplaceTarget {
     id: FileIdentity,
     parent: PathBuf,
     path: PathBuf,
+    /// The destination the caller asked to replace, named by a failure.
+    destination: PathBuf,
     /// Keeps the destination's inode from being reissued while the run lasts.
     hold: Option<DestinationHold>,
 }
@@ -114,7 +118,11 @@ pub(super) fn locate(output_dir: &Path) -> Result<Option<(PathBuf, LeafBuf)>> {
             Ok(Some((parent.to_path_buf(), name)))
         }
         Err(e) if is_absent(&e) => Ok(None),
-        Err(e) => Err(ArchiveError::destination_not_accessible(output_dir, e)),
+        Err(e) => Err(ArchiveError::destination_not_accessible(
+            output_dir,
+            DestinationStep::Resolve,
+            e,
+        )),
     }
 }
 
@@ -149,13 +157,21 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
         {
             return Ok(None);
         }
-        Err(e) => return Err(ArchiveError::destination_not_accessible(output_dir, e)),
+        Err(e) => {
+            return Err(ArchiveError::destination_not_accessible(
+                output_dir,
+                DestinationStep::Resolve,
+                e,
+            ));
+        }
     };
-    let pin = VettedDir::open_path(&parent)
-        .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
+    let pin = VettedDir::open_path(&parent).map_err(|e| {
+        ArchiveError::destination_not_accessible(output_dir, DestinationStep::Open, e)
+    })?;
     let path = parent.join(&name);
-    let found = Destination::open(&pin, name.as_leaf())
-        .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
+    let found = Destination::open(&pin, name.as_leaf()).map_err(|e| {
+        ArchiveError::destination_not_accessible(output_dir, DestinationStep::Open, e)
+    })?;
     let (status, hold) = match found {
         Destination::Absent => return Ok(None),
         Destination::Other(status) => (status, None),
@@ -171,6 +187,7 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
         id: status.identity,
         parent,
         path,
+        destination: output_dir.to_path_buf(),
         hold,
     }))
 }
@@ -366,6 +383,7 @@ pub(super) fn run(
         id,
         parent,
         path,
+        destination,
         hold: _hold,
     } = target;
     refuse_undeletable(&pin, &name, &path)?;
@@ -376,7 +394,11 @@ pub(super) fn run(
             &path,
         ))
     })?;
-    let staging = StagingDir::create(&pin, &parent, &path, Seed::Replace(id, inheritance))?;
+    let site = StagingSite {
+        parent: &parent,
+        destination: &destination,
+    };
+    let staging = StagingDir::create(&pin, site, Seed::Replace(id, inheritance))?;
 
     let report = match extract_in(&staging, options, progress, extract) {
         Ok(report) => report,
@@ -718,7 +740,7 @@ pub(super) fn swap_adoption_in(
         parent: &parent,
     };
     let pin = crate::formats::pinned_dir::support::pinned_at(&parent);
-    let staging = StagingDir::create(&pin, &parent, &parent, seed(dest.id)).unwrap();
+    let staging = StagingDir::create(&pin, StagingSite::at(&parent), seed(dest.id)).unwrap();
     let Ok(displaced) = Displaced::displace(&pin, &dest) else {
         panic!("the destination should be displaced");
     };

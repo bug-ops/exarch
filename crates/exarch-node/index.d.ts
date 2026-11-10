@@ -338,7 +338,9 @@ export interface ExarchSourceNotAccessibleDetail {
 
 /**
  * An output that already exists. `conflicts` is set on a `'refuse'` extraction
- * into a destination that holds some of the paths to extract.
+ * into a destination that holds some of the paths to extract, and on an
+ * `'overwrite'` extraction that meets a directory occupant or a hardlink that
+ * would replace a file.
  */
 export interface ExarchOutputExistsDetail {
   code: 'OUTPUT_EXISTS'
@@ -353,9 +355,9 @@ export interface ExarchOutputExistsDetail {
   path?: string
   restore?: undefined
   backupPath?: undefined
-  /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
+  /** The entry names that stopped a `'refuse'` or `'overwrite'` extraction, as the archive spells them. */
   conflicts?: Array<string>
-  /** Who made the occupant of the first conflict: `'existing'` (there before the run, or its maker is unknown: removing it or choosing another destination helps, and overwrite replaces only a file or symlink occupant of a file or symlink entry) or `'archive'` (an earlier entry of the same archive, which no option resolves). */
+  /** Who made the occupant of the first conflict: `'existing'` (there before the run, or its maker is unknown: removing it or choosing another destination helps, and overwrite replaces only a file occupant of a file or symlink entry) or `'archive'` (an earlier entry of the same archive, which no option resolves). */
   by?: 'existing' | 'archive' | (string & {})
   protectedPath?: undefined
   collision?: undefined
@@ -739,7 +741,9 @@ export declare class ExtractionOptions {
    * `'skip'` (default) keeps the occupant and counts a skip, which also
    * covers a duplicate entry inside the archive. `'overwrite'` replaces the
    * occupant where the kinds allow it. `'refuse'` fails with
-   * `OUTPUT_EXISTS` and never overwrites.
+   * `OUTPUT_EXISTS` for an occupant that existed before the run and never
+   * overwrites; an in-archive repeat of a file or symlink is skipped as
+   * under `'skip'`.
    */
   withExistingFiles(policy: ExistingFiles): this
   /**
@@ -1287,7 +1291,9 @@ export declare class SinkOptions {
    * Sets what happens when a delivery path is already occupied.
    *
    * `'skip'` (default) skips and counts a duplicate entry. `'overwrite'`
-   * delivers it again. `'refuse'` fails with `OUTPUT_EXISTS`.
+   * delivers it again. `'refuse'` also skips a repeated file or symlink, but
+   * fails with `OUTPUT_EXISTS` (`by: 'archive'`) for a file over a directory
+   * entry, which `'skip'` skips.
    */
   withExistingFiles(policy: ExistingFiles): this
   /**
@@ -1777,7 +1783,10 @@ export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' 
  *
  * `skip` (the default) keeps the occupant and counts a skip. `overwrite`
  * replaces an occupant where the kinds allow it. `refuse` fails with
- * `OUTPUT_EXISTS` instead of touching anything the run did not create.
+ * `OUTPUT_EXISTS` instead of touching an occupant that existed before the
+ * run; a repeat of a file or symlink inside the archive is skipped as under
+ * `skip`. A file over a directory is skipped under `skip` and refused under
+ * `overwrite` and `refuse`.
  */
 export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
 

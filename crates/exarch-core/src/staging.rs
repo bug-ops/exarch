@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::DestinationStep;
 use crate::EntrySelection;
 use crate::ExistingFiles;
 use crate::ExtractionOptions;
@@ -54,6 +55,7 @@ use crate::security::fs_view::Occupant;
 use adopt::Adoption;
 use dir::Seed;
 use dir::StagingDir;
+use dir::StagingSite;
 use hold::Destination;
 use hold::DestinationHold;
 
@@ -280,9 +282,9 @@ impl AtomicDestination {
             problem,
         };
         let (parent, name) = if output_dir.exists() {
-            let canonical = output_dir
-                .canonicalize()
-                .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
+            let canonical = output_dir.canonicalize().map_err(|e| {
+                ArchiveError::destination_not_accessible(output_dir, DestinationStep::Resolve, e)
+            })?;
             if !canonical.is_dir() {
                 return Err(refuse(ConfigProblem::NotADirectory));
             }
@@ -306,13 +308,17 @@ impl AtomicDestination {
             }
             let name = LeafBuf::of(output_dir).ok_or_else(|| refuse(ConfigProblem::NoParent))?;
             let parent = parent_or_cwd(output_dir);
-            let parent = std::fs::create_dir_all(parent)
-                .and_then(|()| parent.canonicalize())
-                .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ArchiveError::destination_not_accessible(output_dir, DestinationStep::Create, e)
+            })?;
+            let parent = parent.canonicalize().map_err(|e| {
+                ArchiveError::destination_not_accessible(output_dir, DestinationStep::Resolve, e)
+            })?;
             (parent, name)
         };
-        let pin = VettedDir::open_path(&parent)
-            .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
+        let pin = VettedDir::open_path(&parent).map_err(|e| {
+            ArchiveError::destination_not_accessible(output_dir, DestinationStep::Open, e)
+        })?;
         Ok(Self { name, parent, pin })
     }
 }
@@ -321,8 +327,9 @@ impl AtomicDestination {
 /// [`ArchiveError::DestinationNotAccessible`] naming `destination`, since its
 /// emptiness cannot be checked.
 fn is_empty_dir(dir: &Path, destination: &Path) -> Result<bool> {
-    let unlistable =
-        |error: io::Error| ArchiveError::destination_not_accessible(destination, error);
+    let unlistable = |error: io::Error| {
+        ArchiveError::destination_not_accessible(destination, DestinationStep::List, error)
+    };
     let mut entries = std::fs::read_dir(dir).map_err(unlistable)?;
     entries
         .next()
@@ -404,7 +411,11 @@ fn extract_atomic(
 ) -> Result<ExtractionReport> {
     let destination = AtomicDestination::resolve(output_dir)?;
     let (seed, _hold) = atomic_seed(&destination, output_dir)?;
-    let mut staging = StagingDir::create(&destination.pin, &destination.parent, output_dir, seed)?;
+    let site = StagingSite {
+        parent: &destination.parent,
+        destination: output_dir,
+    };
+    let mut staging = StagingDir::create(&destination.pin, site, seed)?;
 
     let mut report = match extract_in(&staging, options, progress, extract) {
         Ok(report) => report,

@@ -45,8 +45,11 @@ use crate::copy::CopyError;
 use crate::copy::copy_cancellable;
 use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
+use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
 use crate::formats::occupant::ReplacePermit;
+use crate::formats::occupant::kept_occupant_refusal;
+use crate::formats::occupant::replaces_symlink;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PendingMode;
 use crate::formats::pinned_dir::PinnedRoot;
@@ -61,7 +64,6 @@ use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
-use crate::security::fs_view::normalized_display;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::selection::EntryShape;
@@ -648,7 +650,7 @@ fn open_output_slot(
             let OccupantAction::Replace(permit) = action else {
                 return Ok(None);
             };
-            refuse_non_file_occupant(dir, leaf, rel)?;
+            refuse_non_file_occupant(dir, leaf, rel, root)?;
             let (temp, file, pending) =
                 create_temp_sibling_with(dir, leaf, mode, timing, &permit, TempLeaf::next)
                     .map_err(|e| replace_error(rel, &e))?;
@@ -658,7 +660,7 @@ fn open_output_slot(
                 written_at: WrittenAt::Temp(temp, permit),
             }))
         }
-        Err(e) => Err(name_occupant_on_open_error(dir, leaf, rel, e).into()),
+        Err(e) => Err(name_occupant_on_open_error(dir, leaf, rel, root, e)),
     }
 }
 
@@ -706,15 +708,35 @@ fn replace_error(rel: &Path, err: &std::io::Error) -> std::io::Error {
     )
 }
 
-/// Fails with an entry-naming error when `leaf` holds a directory or a
-/// symlink, which an overwrite never replaces.
-fn refuse_non_file_occupant(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Result<()> {
-    match dir.probe(leaf) {
-        Ok(Some(occupant @ (Occupant::Directory | Occupant::Symlink))) => {
-            Err(occupant_at_dest_error(rel, occupant).into())
-        }
-        Ok(Some(Occupant::File) | None) | Err(_) => Ok(()),
-    }
+/// Fails with the typed refusal of [`kept_occupant_refusal`] when `leaf`
+/// holds a directory or a symlink, which an overwrite never replaces.
+fn refuse_non_file_occupant(
+    dir: &VettedDir,
+    leaf: Leaf<'_>,
+    rel: &Path,
+    root: &PinnedRoot,
+) -> Result<()> {
+    let kept = dir.probe(leaf).ok().flatten().and_then(KeptOccupant::of);
+    kept.map_or(Ok(()), |kept| {
+        Err(kept_refusal_at(kept, dir, leaf, rel, root))
+    })
+}
+
+/// [`kept_occupant_refusal`] for the occupant at `leaf` of a host run, whose
+/// maker is read from the run record.
+pub(crate) fn kept_refusal_at(
+    kept: KeptOccupant,
+    dir: &VettedDir,
+    leaf: Leaf<'_>,
+    rel: &Path,
+    root: &PinnedRoot,
+) -> ArchiveError {
+    kept_occupant_refusal(
+        kept,
+        rel,
+        || root.created().created_here(dir, leaf, rel),
+        || destination_occupied(root.dest().as_path(), rel),
+    )
 }
 
 /// Creates a directory from a validated entry.
@@ -762,7 +784,7 @@ pub(crate) fn create_directory<P: ParentCheck>(
 }
 
 /// Fails with an entry-naming error when `dir_path` holds something a
-/// directory entry cannot become: a file ([`occupant_at_dest_error`]), or a
+/// directory entry cannot become: a file ([`file_occupant_error`]), or a
 /// symlink that does not resolve to a directory inside `dest` (a security
 /// violation, the category `verify` reports for it).
 ///
@@ -793,14 +815,11 @@ pub(crate) fn check_directory_occupant(
         return Ok(());
     }
     if file_type.is_symlink() {
-        return probe.lands_in_dir(dest).ok_or_else(|| {
-            Violation::ReplacesSymlink {
-                rel: normalized_display(rel).into(),
-            }
-            .into()
-        });
+        return probe
+            .lands_in_dir(dest)
+            .ok_or_else(|| replaces_symlink(rel));
     }
-    Err(occupant_at_dest_error(rel, Occupant::File).into())
+    Err(file_occupant_error(rel).into())
 }
 
 /// Creates a symbolic link from a validated symlink entry.
@@ -891,10 +910,22 @@ pub(crate) fn create_symlink<P: ParentCheck>(
                     if parent.read_link(leaf)? == target_path {
                         return record_duplicate_skip(report, link_path);
                     }
-                    return Err(symlink_at_dest_error(link_path).into());
+                    return Err(kept_refusal_at(
+                        KeptOccupant::Symlink,
+                        &parent,
+                        leaf,
+                        link_path,
+                        root,
+                    ));
                 }
                 Occupant::Directory => {
-                    return Err(occupant_at_dest_error(link_path, Occupant::Directory).into());
+                    return Err(kept_refusal_at(
+                        KeptOccupant::Directory,
+                        &parent,
+                        leaf,
+                        link_path,
+                        root,
+                    ));
                 }
                 Occupant::File => parent.remove_occupant(leaf, permit)?,
             }
@@ -915,37 +946,20 @@ pub(crate) fn create_symlink<P: ParentCheck>(
     }
 }
 
-/// The I/O error for an earlier entry that occupies a path extraction would
-/// overwrite, so the replacement fails closed and names the entry instead of
-/// surfacing a bare errno (issues #477, #735, #765).
-///
-/// A symlink maps to the loop kind on Unix (what `O_NOFOLLOW` reports) and to
-/// `AlreadyExists` elsewhere; the text is identical on every platform.
-pub(crate) fn occupant_at_dest_error(rel: &Path, occupant: Occupant) -> std::io::Error {
-    use std::io::ErrorKind;
-
-    #[cfg(unix)]
-    let symlink_kind = std::io::Error::from_raw_os_error(libc::ELOOP).kind();
-    #[cfg(not(unix))]
-    let symlink_kind = ErrorKind::AlreadyExists;
-
-    let kind = match occupant {
-        Occupant::Directory => ErrorKind::IsADirectory,
-        Occupant::Symlink => symlink_kind,
-        Occupant::File => ErrorKind::AlreadyExists,
-    };
-    std::io::Error::new(kind, occupant.refusal(rel))
-}
-
-/// The error for a symlink that occupies a path extraction would overwrite.
-pub(crate) fn symlink_at_dest_error(rel: &Path) -> std::io::Error {
-    occupant_at_dest_error(rel, Occupant::Symlink)
+/// The I/O error of a file that occupies a path extraction needs as a
+/// directory, naming the entry instead of surfacing a bare errno (issues #477,
+/// #735, #765).
+pub(crate) fn file_occupant_error(rel: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        Occupant::File.refusal(rel),
+    )
 }
 
 /// Replaces `err`, the failure of an overwrite-mode open at `path`, with the
-/// entry-naming [`occupant_at_dest_error`] when the failure is the refusal of
-/// the directory or symlink that holds the path; any other failure (including
-/// a different errno on such a path) is returned unchanged.
+/// typed [`kept_occupant_refusal`] when the failure is the refusal of the
+/// directory or symlink that holds the path; any other failure (including a
+/// different errno on such a path) is returned unchanged.
 ///
 /// Runs only on the error path, via a `probe` of the name, so the success path
 /// costs nothing.
@@ -953,16 +967,19 @@ fn name_occupant_on_open_error(
     dir: &VettedDir,
     leaf: Leaf<'_>,
     rel: &Path,
+    root: &PinnedRoot,
     err: std::io::Error,
-) -> std::io::Error {
-    refused_occupant(dir, leaf, &err).map_or(err, |occupant| occupant_at_dest_error(rel, occupant))
+) -> ArchiveError {
+    refused_occupant(dir, leaf, &err).map_or(ArchiveError::Io(err), |kept| {
+        kept_refusal_at(kept, dir, leaf, rel, root)
+    })
 }
 
 /// The occupant of `leaf` whose presence explains `err`, if any.
 ///
 /// A symlink refusal is identified by `ELOOP` on Unix and by the
 /// `AlreadyExists` that `VettedDir::create_new` returns elsewhere.
-fn refused_occupant(dir: &VettedDir, leaf: Leaf<'_>, err: &std::io::Error) -> Option<Occupant> {
+fn refused_occupant(dir: &VettedDir, leaf: Leaf<'_>, err: &std::io::Error) -> Option<KeptOccupant> {
     use std::io::ErrorKind;
 
     let occupant = dir.probe(leaf).ok()??;
@@ -974,8 +991,8 @@ fn refused_occupant(dir: &VettedDir, leaf: Leaf<'_>, err: &std::io::Error) -> Op
         err.kind() == ErrorKind::AlreadyExists
     };
     match occupant {
-        Occupant::Directory if dir_refusal => Some(Occupant::Directory),
-        Occupant::Symlink if symlink_refusal => Some(Occupant::Symlink),
+        Occupant::Directory if dir_refusal => Some(KeptOccupant::Directory),
+        Occupant::Symlink if symlink_refusal => Some(KeptOccupant::Symlink),
         Occupant::Directory | Occupant::Symlink | Occupant::File => None,
     }
 }
@@ -1170,6 +1187,7 @@ mod tests {
     use crate::formats::source_fault::ReadFamily;
     use crate::formats::source_fault::SourceTap;
     use crate::security::RawMode;
+    use crate::security::fs_view::normalized_display;
     use crate::security::permissions::sanitize_permissions;
     use crate::security::quota::QuotaTracker;
     use std::assert_matches;
@@ -1246,30 +1264,17 @@ mod tests {
     }
 
     #[test]
-    fn occupant_error_names_the_entry_and_the_occupant() {
-        use std::io::ErrorKind;
-
-        #[cfg(unix)]
-        let symlink_kind = std::io::Error::from_raw_os_error(libc::ELOOP).kind();
-        #[cfg(not(unix))]
-        let symlink_kind = ErrorKind::AlreadyExists;
-
-        for (occupant, noun, kind) in [
-            (Occupant::Directory, "directory", ErrorKind::IsADirectory),
-            (Occupant::Symlink, "symlink", symlink_kind),
-            (Occupant::File, "file", ErrorKind::AlreadyExists),
-        ] {
-            let rel = Path::new("a/b");
-            let err = occupant_at_dest_error(rel, occupant);
-            assert_eq!(err.kind(), kind, "{occupant:?}");
-            assert_eq!(
-                err.to_string(),
-                format!(
-                    "refusing to replace the existing {noun} at {}",
-                    normalized_display(rel)
-                )
-            );
-        }
+    fn file_occupant_error_names_the_entry_and_the_occupant() {
+        let rel = Path::new("a/b");
+        let err = file_occupant_error(rel);
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "refusing to replace the existing file at {}",
+                normalized_display(rel)
+            )
+        );
     }
 
     #[cfg(unix)]
@@ -1285,9 +1290,8 @@ mod tests {
         assert_ne!(a, b);
         assert!(!a.contains('\u{FFFD}'), "{a}");
 
-        let occupant = |bytes: &[u8]| {
-            occupant_at_dest_error(Path::new(OsStr::from_bytes(bytes)), Occupant::File).to_string()
-        };
+        let occupant =
+            |bytes: &[u8]| file_occupant_error(Path::new(OsStr::from_bytes(bytes))).to_string();
         assert_ne!(occupant(b"caf\xe9"), occupant(b"caf\xe8"));
     }
 
@@ -1305,7 +1309,7 @@ mod tests {
         let refused = Error::from(ErrorKind::IsADirectory);
         assert_matches!(
             refused_occupant(dir, leaf("d"), &refused),
-            Some(Occupant::Directory)
+            Some(KeptOccupant::Directory)
         );
         let unrelated = Error::from(ErrorKind::Other);
         assert_matches!(refused_occupant(dir, leaf("d"), &unrelated), None);
@@ -1317,7 +1321,7 @@ mod tests {
             let loop_err = Error::from_raw_os_error(libc::ELOOP);
             assert_matches!(
                 refused_occupant(dir, leaf("l"), &loop_err),
-                Some(Occupant::Symlink)
+                Some(KeptOccupant::Symlink)
             );
             assert_matches!(refused_occupant(dir, leaf("l"), &unrelated), None);
             let too_many_files = Error::from_raw_os_error(libc::EMFILE);
@@ -2016,8 +2020,9 @@ mod tests {
         .expect_err("a link with another target must not be replaced");
         assert_matches!(
             &err,
-            ArchiveError::Io(e)
-                if e.kind() == symlink_at_dest_error(Path::new("link.txt")).kind(),
+            ArchiveError::SecurityViolation {
+                kind: Violation::ReplacesSymlink { rel },
+            } if &**rel == "link.txt",
             "{err:?}"
         );
         assert_eq!(report.symlinks_created, 1);

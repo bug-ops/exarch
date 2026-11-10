@@ -2060,7 +2060,7 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
 /// nothing upstream of that rename rejected a symlink destination the
 /// way TAR/ZIP's `O_NOFOLLOW`/`ELOOP` in `VettedDir::create_new` does.
 /// The host target now checks `lstat_dest` before reserving quota
-/// or removing anything, and fails with the same `ELOOP` I/O error
+/// or removing anything, and fails with the same `EXISTING_SYMLINK` refusal
 /// TAR/ZIP produce instead of silently replacing the symlink.
 #[test]
 #[cfg(unix)]
@@ -2228,8 +2228,9 @@ fn test_overwrite_directory_returns_error_without_deleting_it() {
     let err = result.expect_err("extracting a file entry onto a pre-existing directory must fail");
     assert_matches!(
         &err,
-        ArchiveError::Io(io_err) if io_err.kind() == std::io::ErrorKind::IsADirectory,
-        "must fail with ErrorKind::IsADirectory specifically, not a generic or \
+        ArchiveError::DestinationOccupied { conflicts, .. }
+            if conflicts.as_ref() == [std::path::PathBuf::from("target")],
+        "must fail with the typed directory refusal naming the entry, not a generic or \
          misclassified error, got: {err:?}"
     );
     assert!(
@@ -2247,7 +2248,7 @@ fn test_overwrite_directory_returns_error_without_deleting_it() {
 /// itself a directory must not be misidentified as a real directory and
 /// take the `ErrorKind::IsADirectory` branch. It is still rejected — as
 /// of #486/#477, every pre-existing symlink at the destination fails
-/// with `ELOOP` on Unix rather than being replaced — but the failure
+/// with `EXISTING_SYMLINK` on Unix rather than being replaced — but the failure
 /// must come from the symlink check, not the directory check, and the
 /// symlink's target directory itself must survive untouched either way.
 #[test]

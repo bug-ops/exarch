@@ -318,12 +318,13 @@ fn assert_symlink_refused(result: exarch_core::Result<exarch_core::ExtractionRep
     let exarch_core::ArchiveError::PartialExtraction(partial) = &error else {
         panic!("expected PartialExtraction, got {error:?}");
     };
-    let exarch_core::ArchiveError::Io(io) = partial.cause() else {
-        panic!("expected Io, got {:?}", partial.cause());
+    let exarch_core::ArchiveError::SecurityViolation { kind, .. } = partial.cause() else {
+        panic!("expected a security violation, got {:?}", partial.cause());
     };
-    assert_eq!(
-        io.kind(),
-        std::io::Error::from_raw_os_error(libc::ELOOP).kind()
+    assert!(
+        kind.to_string()
+            .contains("refusing to replace the existing symlink"),
+        "{kind}"
     );
 }
 

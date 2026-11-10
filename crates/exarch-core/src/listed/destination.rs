@@ -5,7 +5,11 @@
 //! uses. Every parent is opened handle-relatively with the walker's symlink
 //! policy, so a symlink among the parents is refused with the very error
 //! extraction gives, and a failure to inspect a path is reported as the I/O
-//! error it is, never as a symlink refusal.
+//! error it is, never as a symlink refusal. A landing that holds a symlink is
+//! refused with the error the write phase gives ([`replaces_symlink`]), and one
+//! that holds a directory is a `DestinationOccupied` conflict, the class
+//! [`kept_occupant_refusal`] gives it there. A file at a directory landing is
+//! the one occupant the write phase still reports as an untyped I/O error.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -14,12 +18,12 @@ use crate::ArchiveError;
 use crate::DestinationCheck;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::Violation;
 use crate::formats::common::check_directory_occupant;
 use crate::formats::dir_walker::DirRef;
 use crate::formats::dir_walker::DirWalker;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
+use crate::formats::occupant::replaces_symlink;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::PinnedRoot;
@@ -29,7 +33,6 @@ use crate::inspection::Landing;
 use crate::inspection::LandingKind;
 use crate::inspection::LinkTarget;
 use crate::inspection::ManifestEntryKind;
-use crate::path_text;
 use crate::security::fs_view::Occupant;
 use crate::types::DestDir;
 
@@ -46,7 +49,7 @@ enum Occupancy {
 fn open_destination(dest: &Path) -> Result<Option<PinnedRoot>> {
     match DestDir::new(dest) {
         Ok(dest_dir) => PinnedRoot::open(dest_dir).map(Some),
-        Err(ArchiveError::Io(error) | ArchiveError::DestinationNotAccessible { error, .. })
+        Err(ArchiveError::DestinationNotAccessible { error, .. })
             if error.kind() == std::io::ErrorKind::NotFound =>
         {
             Ok(None)
@@ -183,7 +186,7 @@ impl<'r> ParentCache<'r> {
         rel: &'p Path,
     ) -> Result<(Parent<'c, 'r>, Leaf<'p>)> {
         let (dir_rel, leaf) = Leaf::split(rel)?;
-        if dir_rel.as_os_str().is_empty() {
+        if dir_rel.is_empty() {
             let (dir, leaf) = walker.open_parent(root, rel)?;
             return Ok((Parent::Fresh(dir), leaf));
         }
@@ -349,12 +352,7 @@ fn inspect<'r>(
     let Some(occupant) = parent.probe(leaf)? else {
         return Ok(Occupancy::Free);
     };
-    let replaces_symlink = || {
-        Err(Violation::ReplacesSymlink {
-            rel: path_text(rel).into(),
-        }
-        .into())
-    };
+    let refuse_symlink = || Err(replaces_symlink(rel));
     let replaceable = check == DestinationCheck::Replaceable;
     match (&arrival, occupant) {
         (Arrival::Directory, Occupant::Directory) => Ok(Occupancy::Free),
@@ -365,9 +363,9 @@ fn inspect<'r>(
             LinkTarget::Recorded(recorded) if parent.read_link(leaf)? == *recorded => {
                 Ok(Occupancy::Free)
             }
-            _ => replaces_symlink(),
+            _ => refuse_symlink(),
         },
-        (_, Occupant::Symlink) => replaces_symlink(),
+        (_, Occupant::Symlink) => refuse_symlink(),
     }
 }
 
@@ -394,6 +392,7 @@ mod tests {
     use super::*;
     use crate::ArchiveEntry;
     use crate::ArchiveType;
+    use crate::Violation;
 
     fn replaceable_over_a_symlink(target: LinkTarget) -> Result<()> {
         let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);

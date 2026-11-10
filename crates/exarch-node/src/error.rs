@@ -23,8 +23,9 @@
 //!   message.
 //! - `restore`, `backupPath`, `leftoverPath`: what a failed `'atomic_replace'`
 //!   (or a left-behind output reservation) left on disk, redacted like paths.
-//! - `conflicts`, `by`: the entry names that stopped a `'refuse'` extraction
-//!   and who made the occupant (`'existing'` or `'archive'`).
+//! - `conflicts`, `by`: the entry names that stopped a `'refuse'` extraction,
+//!   or an `'overwrite'` extraction that met a directory occupant or a hardlink
+//!   over a file, and who made the occupant (`'existing'` or `'archive'`).
 //! - `protectedPath`, `collision`, `unmatchedPatterns`: the typed reason of the
 //!   matching `INVALID_CONFIGURATION`.
 //! - `nonUtf8EntryPath`: the injectively escaped path of an `INVALID_ARCHIVE`
@@ -2382,6 +2383,7 @@ mod tests {
     fn test_destination_not_accessible_names_the_destination_in_the_path_field() {
         let d = described(CoreError::DestinationNotAccessible {
             path: PathBuf::from("file.txt/sub"),
+            step: exarch_core::DestinationStep::Resolve,
             error: std::io::Error::from(std::io::ErrorKind::NotADirectory),
         });
         let path = d.props.path.expect("the destination is named");

@@ -424,11 +424,13 @@ fn overwrite_in_memory(entries: &[Vec<u8>]) -> ArchiveError {
 }
 
 fn assert_names_the_directory(error: &ArchiveError) {
-    assert_eq!(cause(error).error_code(), ErrorCode::IoError, "{error}");
-    assert!(
-        cause(error)
-            .to_string()
-            .contains("refusing to replace the existing directory at x"),
+    assert_matches!(
+        cause(error),
+        ArchiveError::DestinationOccupied {
+            conflicts,
+            by: exarch_core::OccupiedBy::Archive,
+            ..
+        } if conflicts.as_ref() == [std::path::PathBuf::from("x")],
         "{error}"
     );
 }
@@ -600,4 +602,127 @@ fn an_in_place_overwrite_names_a_preexisting_file_as_existing() {
         .unwrap_err();
 
     assert_eq!(occupied_by(&error), exarch_core::OccupiedBy::Existing);
+}
+
+/// What a caller sees of a refusal: its code and, for a symlink, the sub-code.
+fn refusal_class(
+    error: &ArchiveError,
+) -> (ErrorCode, Option<exarch_core::SecurityViolationSubCode>) {
+    let kind = error.ffi_kind();
+    let sub_code = match kind {
+        exarch_core::FfiKind::SecurityViolation { sub_code, .. } => Some(sub_code),
+        _ => None,
+    };
+    (kind.code(), sub_code)
+}
+
+/// The refusal of `entries` over `dest`'s planted occupant under overwrite,
+/// from the host write phase and from the destination pre-check.
+fn host_refusals(entries: &[Vec<u8>], dest: &Path, config: &SecurityConfig) -> [ArchiveError; 2] {
+    use exarch_core::DecodeReuse;
+    use exarch_core::DestinationCheck;
+    use exarch_core::ListRequest;
+
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("a.tar");
+    std::fs::write(&archive, tar_archive(entries)).unwrap();
+    let written = ExtractRequest::new(config)
+        .with_options(ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite))
+        .extract(&archive, dest)
+        .unwrap_err();
+    let checked = ListRequest::new(config)
+        .for_extraction(&archive, DecodeReuse::default())
+        .unwrap()
+        .check_destination(dest, DestinationCheck::Replaceable)
+        .unwrap_err();
+    [written, checked]
+}
+
+#[test]
+fn a_file_over_a_directory_is_one_refusal_in_the_write_phase_the_sink_and_the_pre_check() {
+    let dest = TempDir::new().unwrap();
+    std::fs::create_dir(dest.path().join("d")).unwrap();
+    let [written, checked] = host_refusals(
+        &[tar_file("d", b"x")],
+        dest.path(),
+        &SecurityConfig::default(),
+    );
+    let sunk = overwrite_in_memory(&[sink_support::tar_dir("d/"), tar_file("d", b"x")]);
+
+    for error in [cause(&written), cause(&sunk), &checked] {
+        assert_eq!(
+            refusal_class(error),
+            (ErrorCode::OutputExists, None),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_over_a_symlink_is_one_refusal_in_the_write_phase_the_sink_and_the_pre_check() {
+    use exarch_core::SecurityViolationSubCode;
+
+    let dest = TempDir::new().unwrap();
+    std::os::unix::fs::symlink("t", dest.path().join("l")).unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+    let [written, checked] = host_refusals(&[tar_file("l", b"x")], dest.path(), &config);
+    let request = MemoryExtractRequest::default()
+        .with_config(config)
+        .with_options(SinkOptions::default().with_existing_files(ExistingFiles::Overwrite));
+    let sunk = extract_reader_to_memory(
+        ArchiveReader::from_bytes(
+            tar_archive(&[
+                tar_file("t", b"t"),
+                sink_support::tar_symlink("l", "t"),
+                tar_file("l", b"x"),
+            ]),
+            None,
+        )
+        .unwrap(),
+        &request,
+        &mut NoopProgress,
+    )
+    .unwrap_err();
+
+    for error in [cause(&written), cause(&sunk), &checked] {
+        assert_eq!(
+            refusal_class(error),
+            (
+                ErrorCode::SecurityViolation,
+                Some(SecurityViolationSubCode::ExistingSymlink)
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_over_a_symlink_of_the_run_is_refused_as_an_existing_symlink_in_the_sink() {
+    use exarch_core::SecurityViolationSubCode;
+
+    let entries = [
+        tar_file("t", b"t"),
+        sink_support::tar_symlink("l", "t"),
+        sink_support::tar_dir("l/"),
+    ];
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+    let request = MemoryExtractRequest::default().with_config(config);
+
+    let sunk = extract_reader_to_memory(
+        ArchiveReader::from_bytes(tar_archive(&entries), None).unwrap(),
+        &request,
+        &mut NoopProgress,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        refusal_class(cause(&sunk)),
+        (
+            ErrorCode::SecurityViolation,
+            Some(SecurityViolationSubCode::ExistingSymlink)
+        ),
+        "{sunk}"
+    );
 }

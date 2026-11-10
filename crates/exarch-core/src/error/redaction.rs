@@ -280,6 +280,7 @@ mod tests {
 
         let unreachable = ArchiveError::DestinationNotAccessible {
             path: PathBuf::from("/srv/internal/dest"),
+            step: crate::DestinationStep::Resolve,
             error: std::io::Error::other("x"),
         };
         assert_eq!(unreachable.redacted_path().as_deref(), Some("dest"));

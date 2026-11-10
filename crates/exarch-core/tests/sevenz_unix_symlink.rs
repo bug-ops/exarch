@@ -755,17 +755,13 @@ fn assert_symlink_refused(error: ArchiveError) {
         ArchiveError::PartialExtraction(partial) => partial.into_parts().0,
         other => other,
     };
-    let ArchiveError::Io(io) = &error else {
-        panic!("expected Io, got {error:?}");
+    let ArchiveError::SecurityViolation { kind, .. } = &error else {
+        panic!("expected a security violation, got {error:?}");
     };
-    assert_eq!(
-        io.kind(),
-        std::io::Error::from_raw_os_error(libc::ELOOP).kind()
-    );
     assert!(
-        io.to_string()
+        kind.to_string()
             .contains("refusing to replace the existing symlink"),
-        "{io}"
+        "{kind}"
     );
 }
 

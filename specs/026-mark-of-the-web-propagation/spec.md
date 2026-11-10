@@ -23,7 +23,7 @@ related:
 > [!info] Metadata
 > **Issue**: #1026 (promoted from the research draft; numbered 026 so as not to collide with the Landlock draft 025)
 > **Type**: security parity gap, opt-in
-> **Status**: implemented (macOS verified live; Windows compiled and clippy-checked, never run, see Open Items and #1150)
+> **Status**: implemented (macOS verified live; Windows compiled and clippy-checked, never run, see Open Items)
 
 ## 1. Overview
 
@@ -145,7 +145,7 @@ SO THAT scripts can assert protection was preserved
 
 | ID | Metric | Target |
 |----|--------|--------|
-| SC-001 | Extracted files carrying the mark on a marked archive under `when_marked` (TAR, ZIP, 7z, listed route, `--atomic`, `--force`) | 100% on macOS, covered by `tests/mark_propagation.rs`; Windows pending #1150 |
+| SC-001 | Extracted files carrying the mark on a marked archive under `when_marked` (TAR, ZIP, 7z, listed route, `--atomic`, `--force`) | 100% on macOS, covered by `tests/mark_propagation.rs`; Windows pending the Windows runs in Open Items |
 | SC-002 | Marks under `Never` or from an unmarked archive | 0; trees identical under every policy (`tests/mark_never_equivalence.rs`) |
 | SC-003 | Mark writes through path strings | 0 |
 | SC-004 | Attacker-supplied xattr, ACL or stream content reaching an extracted file | 0 |
@@ -166,8 +166,9 @@ SO THAT scripts can assert protection was preserved
 ## 9. Open Items
 
 > [!question] Open
-> - The Windows implementation (`src/mark/windows.rs`, `zone.rs`, the `pinned_dir` stream helpers) runs only on the CI Windows runner (NTFS: stream volume check, `ZoneId=3` fallback for a malformed or oversized source stream, read-only entry keeps its mark); the branch for a volume without named streams, and ReFS, SMB and FAT/exFAT hosts, are not executed anywhere and stay tracked in #1150.
-> - #1164: `.github/workflows/windows-volumes.yml` and `tests/mark_removable_volumes.rs` run the volume-without-named-streams branch on FAT32 and exFAT VHDs; they count as coverage only once that workflow has run green, and until then nothing above is verified. Expected: a marked NTFS archive extracted onto such a volume gives `Propagated { marked: 0, failed: <files> }` (FR-017), also under `--force`; an archive that lives on such a volume gives `Unmarked` (FR-010). SMB and network shares are explicitly NOT covered: the loopback admin share is not proven equivalent to a real redirector, so ReFS and SMB stay open under #1150.
+> - The Windows implementation (`src/mark/windows.rs`, `zone.rs`, the `pinned_dir` stream helpers) runs only on the CI Windows runner (NTFS: stream volume check, `ZoneId=3` fallback for a malformed or oversized source stream, read-only entry keeps its mark); the branch for a volume without named streams, and ReFS, SMB and FAT/exFAT hosts, are not executed anywhere and stay tracked by a follow-up issue (#1182).
+> - #1164: `.github/workflows/windows-volumes.yml` and `tests/mark_removable_volumes.rs` run the volume-without-named-streams branch on FAT32 and exFAT VHDs; they count as coverage only once that workflow has run green, and until then nothing above is verified. Expected: a marked NTFS archive extracted onto such a volume gives `Propagated { marked: 0, failed: <files> }` (FR-017), also under `--force`; an archive that lives on such a volume gives `Unmarked` (FR-010). SMB and network shares are explicitly NOT covered: the loopback admin share is not proven equivalent to a real redirector, so ReFS and SMB stay open under #1182.
+> - #1171 SMB manual verification (unverified: no run on a real SMB share has been performed). Procedure on Windows: (1) take an archive carrying `Zone.Identifier` on NTFS; (2) copy it to a local NTFS volume and run `exarch extract --mark-propagation when-marked --json <archive> <dir>` with `<dir>` on a real SMB share served by another machine (not the loopback admin share); (3) repeat with the archive itself on the share; (4) record the Windows and server versions, the share's filesystem, `report.mark` and its `marked` and `failed` counts for each run, and whether `Zone.Identifier` is present on the extracted files (`Get-Item -Stream *`). Possible `report.mark` outcomes: `not_requested`, `unsupported_platform`, `unmarked`, `unreadable`, `propagated` (with `marked` and `failed`); record the observed one without assuming it.
 > - Office-only selection (7-Zip mode 2) and a strict mode are not planned.
 
 ## 10. See Also

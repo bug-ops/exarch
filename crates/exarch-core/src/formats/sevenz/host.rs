@@ -19,8 +19,10 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::formats::common;
+use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
 use crate::formats::occupant::ReplacePermit;
+use crate::formats::occupant::replaces_symlink;
 use crate::formats::output_root::OutputRoot;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
@@ -93,23 +95,22 @@ impl DestOccupancy {
         !matches!(self, Self::Vacant)
     }
 
-    /// Refuses to unlink a pre-existing symlink and write under its name, as
-    /// TAR and ZIP refuse it through `O_NOFOLLOW`. Elsewhere a symlink is
-    /// replaced like a regular file.
-    fn refuse_symlink(self, rel: &Path) -> Result<()> {
-        if cfg!(unix) && self == Self::Symlink {
-            return Err(common::symlink_at_dest_error(rel).into());
-        }
-        Ok(())
+    /// A pre-existing symlink that is refused rather than unlinked and written
+    /// under its name, as TAR and ZIP refuse it through `O_NOFOLLOW`. Elsewhere
+    /// a symlink is replaced like a regular file.
+    fn kept_symlink(self) -> Option<KeptOccupant> {
+        (cfg!(unix) && self == Self::Symlink).then_some(KeptOccupant::Symlink)
     }
 
     /// How to write over this occupant with the policy's `permit`, or the
-    /// refusal when it cannot be replaced.
-    fn replace_mode(self, rel: &Path, permit: ReplacePermit) -> Result<WriteMode> {
-        self.refuse_symlink(rel)?;
+    /// occupant that cannot be replaced.
+    fn replace_mode(self, permit: ReplacePermit) -> std::result::Result<WriteMode, KeptOccupant> {
+        if let Some(kept) = self.kept_symlink() {
+            return Err(kept);
+        }
         match self {
             Self::Vacant => Ok(WriteMode::CreateNew),
-            Self::Directory => Err(common::occupant_at_dest_error(rel, Occupant::Directory).into()),
+            Self::Directory => Err(KeptOccupant::Directory),
             Self::RegularFile | Self::Symlink => Ok(WriteMode::ReplaceRegular(permit)),
         }
     }
@@ -191,7 +192,9 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                         .map(Admission::Skipped);
                 }
                 OccupantAction::Replace(permit) => {
-                    occupancy.replace_mode(safe_path.as_path(), permit)?
+                    occupancy.replace_mode(permit).map_err(|kept| {
+                        common::kept_refusal_at(kept, &parent, leaf, safe_path.as_path(), root)
+                    })?
                 }
             }
         } else {
@@ -355,7 +358,9 @@ impl PrePass for HostPrePass<'_> {
         }
         // Fail here too, before any entry is written, so the pre-pass keeps
         // its no-partial-extraction guarantee for this refusal.
-        occupancy.refuse_symlink(safe_path.as_path())?;
+        if occupancy.kept_symlink().is_some() {
+            return Err(replaces_symlink(safe_path.as_path()));
+        }
         Ok(FilePlan::Reserve)
     }
 

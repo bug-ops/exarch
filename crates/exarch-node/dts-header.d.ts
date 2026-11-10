@@ -338,7 +338,9 @@ export interface ExarchSourceNotAccessibleDetail {
 
 /**
  * An output that already exists. `conflicts` is set on a `'refuse'` extraction
- * into a destination that holds some of the paths to extract.
+ * into a destination that holds some of the paths to extract, and on an
+ * `'overwrite'` extraction that meets a directory occupant or a hardlink that
+ * would replace a file.
  */
 export interface ExarchOutputExistsDetail {
   code: 'OUTPUT_EXISTS'
@@ -353,9 +355,9 @@ export interface ExarchOutputExistsDetail {
   path?: string
   restore?: undefined
   backupPath?: undefined
-  /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
+  /** The entry names that stopped a `'refuse'` or `'overwrite'` extraction, as the archive spells them. */
   conflicts?: Array<string>
-  /** Who made the occupant of the first conflict: `'existing'` (there before the run, or its maker is unknown: removing it or choosing another destination helps, and overwrite replaces only a file or symlink occupant of a file or symlink entry) or `'archive'` (an earlier entry of the same archive, which no option resolves). */
+  /** Who made the occupant of the first conflict: `'existing'` (there before the run, or its maker is unknown: removing it or choosing another destination helps, and overwrite replaces only a file occupant of a file or symlink entry) or `'archive'` (an earlier entry of the same archive, which no option resolves). */
   by?: 'existing' | 'archive' | (string & {})
   protectedPath?: undefined
   collision?: undefined

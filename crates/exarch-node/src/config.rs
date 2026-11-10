@@ -122,7 +122,10 @@ mirror_from_core!(
 ///
 /// `skip` (the default) keeps the occupant and counts a skip. `overwrite`
 /// replaces an occupant where the kinds allow it. `refuse` fails with
-/// `OUTPUT_EXISTS` instead of touching anything the run did not create.
+/// `OUTPUT_EXISTS` instead of touching an occupant that existed before the
+/// run; a repeat of a file or symlink inside the archive is skipped as under
+/// `skip`. A file over a directory is skipped under `skip` and refused under
+/// `overwrite` and `refuse`.
 // Values must equal `exarch_core::ExistingFiles::as_str`.
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1485,7 +1488,9 @@ impl ExtractionOptions {
     /// `'skip'` (default) keeps the occupant and counts a skip, which also
     /// covers a duplicate entry inside the archive. `'overwrite'` replaces the
     /// occupant where the kinds allow it. `'refuse'` fails with
-    /// `OUTPUT_EXISTS` and never overwrites.
+    /// `OUTPUT_EXISTS` for an occupant that existed before the run and never
+    /// overwrites; an in-archive repeat of a file or symlink is skipped as
+    /// under `'skip'`.
     #[napi(js_name = "withExistingFiles")]
     pub fn with_existing_files(&mut self, policy: ExistingFiles) -> &Self {
         self.inner.existing_files = policy.into();
@@ -1602,7 +1607,9 @@ impl SinkOptions {
     /// Sets what happens when a delivery path is already occupied.
     ///
     /// `'skip'` (default) skips and counts a duplicate entry. `'overwrite'`
-    /// delivers it again. `'refuse'` fails with `OUTPUT_EXISTS`.
+    /// delivers it again. `'refuse'` also skips a repeated file or symlink, but
+    /// fails with `OUTPUT_EXISTS` (`by: 'archive'`) for a file over a directory
+    /// entry, which `'skip'` skips.
     #[napi(js_name = "withExistingFiles")]
     pub fn with_existing_files(&mut self, policy: ExistingFiles) -> &Self {
         self.inner = self.inner.with_existing_files(policy.into());

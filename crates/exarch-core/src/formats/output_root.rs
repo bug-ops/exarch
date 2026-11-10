@@ -20,27 +20,50 @@ use crate::mark::MarkRun;
 #[derive(Debug)]
 pub(crate) struct StagedOutput {
     path: PathBuf,
+    destination: PathBuf,
     #[cfg(unix)]
     root: std::fs::File,
     ledger: Rc<RunRecord>,
 }
 
 impl StagedOutput {
-    /// The staging directory behind `root`, logically at `path`.
+    /// The staging directory behind `root`, logically at `path`, built for the
+    /// extraction to `destination`.
     #[cfg(unix)]
-    pub(crate) const fn new(path: PathBuf, root: std::fs::File, ledger: Rc<RunRecord>) -> Self {
-        Self { path, root, ledger }
+    pub(crate) const fn new(
+        path: PathBuf,
+        destination: PathBuf,
+        root: std::fs::File,
+        ledger: Rc<RunRecord>,
+    ) -> Self {
+        Self {
+            path,
+            destination,
+            root,
+            ledger,
+        }
     }
 
-    /// The staging directory at `path`, which has no descriptor to pin.
+    /// The staging directory at `path`, which has no descriptor to pin, built
+    /// for the extraction to `destination`.
     #[cfg(not(unix))]
-    pub(crate) const fn new(path: PathBuf, ledger: Rc<RunRecord>) -> Self {
-        Self { path, ledger }
+    pub(crate) const fn new(path: PathBuf, destination: PathBuf, ledger: Rc<RunRecord>) -> Self {
+        Self {
+            path,
+            destination,
+            ledger,
+        }
     }
 
     /// The staging directory's logical path.
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The destination the caller asked to extract to, which a failure of the
+    /// run names instead of the internal staging path.
+    pub(crate) fn destination(&self) -> &Path {
+        &self.destination
     }
 
     /// The descriptor of the staging directory itself.

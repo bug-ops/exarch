@@ -442,22 +442,26 @@ impl From<&CreationWarning> for JsonWarning {
 #[derive(Debug, Serialize)]
 pub struct JsonMarkPropagation {
     state: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    marked: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failed: Option<usize>,
+    #[serde(flatten)]
+    counts: Option<MarkCounts>,
+}
+
+/// The counts of a propagated mark, which exist together or not at all.
+#[derive(Debug, Serialize)]
+struct MarkCounts {
+    marked: usize,
+    failed: usize,
 }
 
 impl From<MarkOutcome> for JsonMarkPropagation {
     fn from(outcome: MarkOutcome) -> Self {
         let counts = match outcome {
-            MarkOutcome::Propagated { marked, failed } => Some((marked, failed)),
+            MarkOutcome::Propagated { marked, failed } => Some(MarkCounts { marked, failed }),
             _ => None,
         };
         Self {
             state: outcome.state().as_str(),
-            marked: counts.map(|(marked, _)| marked),
-            failed: counts.map(|(_, failed)| failed),
+            counts,
         }
     }
 }
@@ -635,6 +639,19 @@ mod tests {
             json,
             serde_json::json!({"state": "propagated", "marked": 2, "failed": 1})
         );
+    }
+
+    #[test]
+    fn mark_propagation_json_is_byte_exact() {
+        let text = |outcome| serde_json::to_string(&JsonMarkPropagation::from(outcome)).unwrap();
+        assert_eq!(
+            text(MarkOutcome::Propagated {
+                marked: 2,
+                failed: 1,
+            }),
+            r#"{"state":"propagated","marked":2,"failed":1}"#
+        );
+        assert_eq!(text(MarkOutcome::Unmarked), r#"{"state":"unmarked"}"#);
     }
 
     #[test]

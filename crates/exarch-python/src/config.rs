@@ -1341,9 +1341,13 @@ impl PyCreationConfig {
 /// # Attributes
 ///
 /// * `existing_files` - What to do with a file that already exists at a landing
-///   path, or that an earlier entry created: `"skip"` (default) keeps it and
-///   counts a duplicate, `"overwrite"` replaces it where the entry kinds allow,
-///   `"refuse"` fails with `OutputExistsError` and never overwrites
+///   path: `"skip"` (default) keeps it and counts a duplicate, `"overwrite"`
+///   replaces it where the entry kinds allow, `"refuse"` fails with
+///   `OutputExistsError` and never overwrites. A file or symlink entry that
+///   repeats a path an earlier entry of the same archive wrote is skipped as a
+///   duplicate under `"skip"` and `"refuse"` alike. A file over a directory,
+///   one the run made included, is skipped under `"skip"` and raises
+///   `OutputExistsError` under `"overwrite"` and `"refuse"`
 /// * `staging` - Where files are written first: `"in_place"` (default) writes
 ///   into the destination, `"atomic"` extracts into a temporary sibling
 ///   directory and renames it onto a destination that is absent or empty,
@@ -1394,8 +1398,11 @@ impl PyExtractionOptions {
     ///
     /// `"skip"` (default) keeps the existing file and counts the entry as a
     /// duplicate skip; `"overwrite"` replaces it where the entry kinds allow;
-    /// `"refuse"` raises `OutputExistsError` for any occupant and never
-    /// overwrites. A kind conflict is refused under every value.
+    /// `"refuse"` raises `OutputExistsError` for an occupant that existed
+    /// before the run and never overwrites; a repeat inside the archive is
+    /// skipped as under `"skip"`. A file over a directory is skipped under
+    /// `"skip"` and raises `OutputExistsError` under `"overwrite"` and
+    /// `"refuse"`; a directory over a file is refused under every value.
     ///
     /// # Errors
     ///

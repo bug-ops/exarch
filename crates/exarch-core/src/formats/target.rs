@@ -15,7 +15,6 @@ use super::zip_reuse::Retained;
 use crate::ArchiveError;
 use crate::ExtractionReport;
 use crate::Malformation;
-use crate::OccupiedBy;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -556,21 +555,17 @@ impl ExtractTarget for HostTarget<'_> {
                     }
                     OccupantAction::Replace(permit) => {
                         let found = link_dir.probe(link_leaf)?;
-                        let by = if found.is_some()
-                            && self.root.created().created_here(
-                                &link_dir,
-                                link_leaf,
-                                link.as_path(),
-                            ) {
-                            OccupiedBy::Archive
-                        } else {
-                            OccupiedBy::Existing
-                        };
                         Err(refuse_hardlink_replace(
                             permit,
                             found,
                             link.as_path(),
-                            by,
+                            || {
+                                self.root.created().created_here(
+                                    &link_dir,
+                                    link_leaf,
+                                    link.as_path(),
+                                )
+                            },
                             || {
                                 common::destination_occupied(
                                     self.root.dest().as_path(),

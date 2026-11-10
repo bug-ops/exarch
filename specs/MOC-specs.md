@@ -6,7 +6,7 @@ tags:
   - moc
   - sdd
 created: 2026-05-20
-updated: 2026-11-08
+updated: 2026-11-10
 status: moc
 ---
 
@@ -30,16 +30,17 @@ status: moc
 | 011 | [[011-ffi-panic-boundary-simplification/spec\|FFI Panic Boundary Simplification]] | specify | draft (research, P3) | n/a (specify-only) |
 | 012 | [[012-windows-reserved-device-names/spec\|Windows Reserved Device Name Validation]] | specify | implemented (0.7.0, #652; extended in 0.8.0, #780, #790) | [[012-windows-reserved-device-names/tasks\|not started]] |
 | 013 | [[013-quota-permit-capability-token/spec\|Quota Permit Capability Token]] | tasks | current (synced through #1024) | [[013-quota-permit-capability-token/tasks\|none open]] |
-| 015 | [[015-atomic-force-destination-swap-hardening/spec\|Atomic-Force Destination Swap Hardening]] | tasks | current (synced through #1024; #1067 staged children inherit the destination ACL; #1079, #1078 ACL after the rename and private macOS stage; #1117, #1122, #1121 Windows DACL copy; #1119, #1088, #1085, #1083, #1068, #1087) | [[015-atomic-force-destination-swap-hardening/tasks\|none open]] |
+| 015 | [[015-atomic-force-destination-swap-hardening/spec\|Atomic-Force Destination Swap Hardening]] | tasks | current (synced through #1024; #1067 staged children inherit the destination ACL; #1079, #1078 ACL after the rename and private macOS stage; #1117, #1122, #1121 Windows DACL copy; #1119, #1088, #1085, #1083, #1068, #1087; #1145 observed NetBSD and illumos results) | [[015-atomic-force-destination-swap-hardening/tasks\|none open]] |
 | 016 | [[016-sanitized-mode-and-non-exhaustive-enums/spec\|SanitizedMode Newtype and Non-Exhaustive Enum Hardening]] | specify | implemented (v0.6.1, #554) | n/a (specify-only, retrospective) |
 | 017 | [[017-zip-header-consistency/spec\|ZIP Header Consistency Validation]] | specify | implemented (0.7.0, #671, #684, #688, #689, #690; extended in 0.9.0, #821, #827, #837, #848) | n/a (specify-only) |
 | 018 | [[018-7z-stream-map-panic/spec\|7z Stream Map Validation]] | specify | implemented (0.7.0, #752; narrowed in 0.8.0, #751, #770) | n/a (specify-only) |
-| 019 | [[019-verify-and-list-model/spec\|Verify and List Reporting Model]] | specify | implemented (0.7.0, retrospective; updated for 0.8.0 and 0.9.0) | n/a (specify-only, retrospective) |
+| 019 | [[019-verify-and-list-model/spec\|Verify and List Reporting Model]] | specify | implemented (0.7.0, retrospective; updated for 0.8.0 and 0.9.0; destination volume probe, #1144) | n/a (specify-only, retrospective) |
 | 020 | [[020-reader-sink-and-in-memory-api/spec\|Reader, Sink and In-Memory API]] | specify | implemented (0.8.0, #771, #787, #790, #808; callback and listing for extraction in 0.9.0, #842, #860, #884; request types, admitted sizes and listed config in 0.9.0, #912, #909, #901) | n/a (specify-only, retrospective) |
 | 021 | [[021-create-staging-and-output-policy/spec\|Create Staging and Output Policy]] | specify | implemented (0.9.0, #931, #915, #916; typed source errors and durability, #956, #953, #961) | n/a (specify-only) |
 | 022 | [[022-extract-entry-selection/spec\|Extract Entry Selection and Path Stripping]] | tasks | implemented (#967, #981 batch; grammar replaced by globs in #1024, see 023) | [[022-extract-entry-selection/tasks\|22 done]] |
 | 023 | [[023-entry-selection-glob-patterns/spec\|Glob Patterns for Entry Selection and Create Excludes]] | specify | implemented (#1024, closes #1000; supersedes 021 FR-019 to FR-021) | n/a (specify-only) |
 | 024 | [[024-encrypted-archive-support/spec\|Encrypted Archive Support]] | specify | draft (#1001; encrypted archives are still refused with `SECURITY_VIOLATION` / `ENCRYPTED`; implementation-ready only after the Ask First items in section 9 are resolved) | n/a (specify-only) |
+| 026 | [[026-mark-of-the-web-propagation/spec\|Download-Origin Mark Propagation]] | specify | implemented (#1026; opt-in `MarkPropagation`, macOS verified, Windows compiled only until #1150) | n/a (specify-only) |
 
 ## Completed Specs
 

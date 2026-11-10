@@ -401,6 +401,9 @@ pub enum ConfigSetting {
     /// `stored_targets`.
     #[napi(value = "stored_targets")]
     StoredTargets,
+    /// `mark_propagation`.
+    #[napi(value = "mark_propagation")]
+    MarkPropagation,
 }
 
 /// Value of the `ioKind` property of an `IO_ERROR`: the `std::io::ErrorKind`
@@ -722,7 +725,8 @@ mirror_from_core!(
         EntryInclude,
         EntryExclude,
         StripComponents,
-        StoredTargets
+        StoredTargets,
+        MarkPropagation
     ]
 );
 mirror_from_core!(
@@ -1894,7 +1898,8 @@ mod tests {
             EntryInclude,
             EntryExclude,
             StripComponents,
-            StoredTargets
+            StoredTargets,
+            MarkPropagation
         ]
     );
 

@@ -16,6 +16,7 @@ use exarch_core::ExistingFiles as CoreExistingFiles;
 use exarch_core::Extension;
 use exarch_core::ExtensionFilter;
 use exarch_core::Limit;
+use exarch_core::MarkPropagation as CoreMarkPropagation;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
 use exarch_core::PathRewrite;
@@ -178,6 +179,36 @@ mirror_into_core!(
 mirror_from_closed_core!(
     CoreDecodeReuseKind => DecodeReuseKind,
     [Off, Memory, TempFile]
+);
+
+/// Whether extraction copies the archive file's download-origin mark (Windows
+/// Mark-of-the-Web, macOS quarantine) onto the files it creates.
+///
+/// `never` (the default) reads and copies nothing. `when_marked` copies the
+/// mark when the archive file bears one. Linux has no mark and nothing is
+/// copied there.
+// Values must equal `exarch_core::MarkPropagation::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkPropagation {
+    /// Do not read or copy the archive's mark.
+    #[napi(value = "never")]
+    Never,
+    /// Copy the mark when the archive file bears one.
+    #[napi(value = "when_marked")]
+    WhenMarked,
+}
+
+mirror_into_core!(
+    MarkPropagation => CoreMarkPropagation,
+    [Never, WhenMarked]
+);
+
+mirror_from_core!(
+    MarkPropagation,
+    CoreMarkPropagation,
+    "mark propagation policy",
+    [Never, WhenMarked]
 );
 
 /// How extraction stages its output before it is visible at the destination.
@@ -1492,6 +1523,19 @@ impl ExtractionOptions {
         self
     }
 
+    /// Sets whether the archive file's download-origin mark is copied onto the
+    /// extracted files: `'never'` (default) or `'when_marked'`.
+    ///
+    /// `'when_marked'` copies the Windows `Zone.Identifier` stream or the macOS
+    /// quarantine attribute of the archive file onto every extracted file
+    /// (and, on macOS, every directory the run creates). A failed write is
+    /// counted in the report and extraction continues. Linux has no mark.
+    #[napi(js_name = "withMarkPropagation")]
+    pub fn with_mark_propagation(&mut self, policy: MarkPropagation) -> &Self {
+        self.inner.mark_propagation = policy.into();
+        self
+    }
+
     /// Finalizes the configuration (for API consistency).
     #[napi]
     pub fn build(&self) -> &Self {
@@ -1510,6 +1554,13 @@ impl ExtractionOptions {
     #[napi(getter, ts_return_type = "Staging | (string & {})")]
     pub fn get_staging(&self) -> String {
         self.inner.staging.as_str().to_owned()
+    }
+
+    /// Whether the download-origin mark is copied. A policy newer than this
+    /// binding is reported as core's token.
+    #[napi(getter, ts_return_type = "MarkPropagation | (string & {})")]
+    pub fn get_mark_propagation(&self) -> String {
+        self.inner.mark_propagation.as_str().to_owned()
     }
 }
 

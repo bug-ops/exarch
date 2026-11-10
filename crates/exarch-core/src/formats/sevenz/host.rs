@@ -258,14 +258,16 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         } = admitted;
         let (path, permit, _mode) = file.into_parts();
         let (_, leaf) = Leaf::split(path.as_path())?;
+        let (copy_buffer, marking) = self.inner.copy_buffer_and_marking();
         let written = match write_mode {
             WriteMode::CreateNew => write_file_direct(
                 reader,
                 faults,
                 &parent,
                 leaf,
-                self.inner.copy_buffer_mut(),
+                copy_buffer,
                 permit,
+                marking,
                 &mut *tally.progress,
             )?,
             WriteMode::ReplaceRegular(replace) => write_file_with_permit(
@@ -273,9 +275,10 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 faults,
                 &parent,
                 leaf,
-                self.inner.copy_buffer_mut(),
+                copy_buffer,
                 permit,
                 replace,
+                marking,
                 &mut *tally.progress,
             )?,
         };

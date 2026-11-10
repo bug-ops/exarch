@@ -757,6 +757,16 @@ export declare class ExtractionOptions {
    * an existing empty directory fails with `OUTPUT_EXISTS`.
    */
   withStaging(staging: Staging): this
+  /**
+   * Sets whether the archive file's download-origin mark is copied onto the
+   * extracted files: `'never'` (default) or `'when_marked'`.
+   *
+   * `'when_marked'` copies the Windows `Zone.Identifier` stream or the macOS
+   * quarantine attribute of the archive file onto every extracted file
+   * (and, on macOS, every directory the run creates). A failed write is
+   * counted in the report and extraction continues. Linux has no mark.
+   */
+  withMarkPropagation(policy: MarkPropagation): this
   /** Finalizes the configuration (for API consistency). */
   build(): this
   /**
@@ -769,6 +779,11 @@ export declare class ExtractionOptions {
    * reported as core's token.
    */
   get staging(): Staging | (string & {})
+  /**
+   * Whether the download-origin mark is copied. A policy newer than this
+   * binding is reported as core's token.
+   */
+  get markPropagation(): MarkPropagation | (string & {})
 }
 
 /**
@@ -1398,7 +1413,7 @@ export type BackupIdentity = 'verified' | 'unverified'
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components' | 'stored_targets'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components' | 'stored_targets' | 'mark_propagation'
 
 /** Archive format that can be created: `ArchiveType` without `'SevenZ'`. */
 export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip'
@@ -2256,6 +2271,12 @@ export interface ExtractionReport {
   filesSkipped: number
   /** The skipped entries by reason. */
   skipped: SkippedSummary
+  /** What download-origin mark propagation did. */
+  markPropagation: 'not_requested' | 'unsupported_platform' | 'unmarked' | 'unreadable' | 'propagated'
+  /** Files (and, on macOS, directories) that now carry the mark. */
+  marksWritten: number
+  /** Files (and directories) whose mark could not be written. */
+  marksFailed: number
   /**
    * Conditions worth surfacing that are not skipped entries; branch on
    * `kind`, `message` is the human-readable text.
@@ -2332,6 +2353,9 @@ export type LinkTargetState = 'recorded' | 'missing' | 'unread' | 'unreadable' |
  * * `options` - Optional `ListOptions`; `new
  *   ListOptions().withStoredTargets('read')` reads the link targets a 7z
  *   archive keeps in entry data (default: left `'unread'`)
+ * * `destination` - Optional directory `extractArchive` would write to. Its
+ *   volume decides whether a repeated name is listed as a `duplicate` skip or
+ *   as refused in `dispositions`; nothing is created
  *
  * # Returns
  *
@@ -2351,7 +2375,7 @@ export type LinkTargetState = 'recorded' | 'missing' | 'unread' | 'unreadable' |
  * }
  * ```
  */
-export declare function listArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null): Promise<ArchiveManifest>
+export declare function listArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory, without extracting (async).
@@ -2505,6 +2529,8 @@ export declare function listArchiveBytesWithProgressSync(data: Uint8Array, confi
  *
  * * `archive_path` - Path to archive file
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `options` - Optional `ListOptions`, as in `listArchive`
+ * * `destination` - Optional destination directory, as in `listArchive`
  *
  * # Returns
  *
@@ -2524,7 +2550,7 @@ export declare function listArchiveBytesWithProgressSync(data: Uint8Array, confi
  * }
  * ```
  */
-export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null): ArchiveManifest
+export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null): ArchiveManifest
 
 /** A directory in a listing. */
 export interface ManifestDirectoryEntry {
@@ -2634,6 +2660,16 @@ export interface ManifestSymlinkEntry {
    */
   target: LinkTarget
 }
+
+/**
+ * Whether extraction copies the archive file's download-origin mark (Windows
+ * Mark-of-the-Web, macOS quarantine) onto the files it creates.
+ *
+ * `never` (the default) reads and copies nothing. `when_marked` copies the
+ * mark when the archive file bears one. Linux has no mark and nothing is
+ * copied there.
+ */
+export type MarkPropagation = 'never' | 'when_marked'
 
 /** A directory the archive names explicitly. */
 export interface MemoryDirectoryEntry {

@@ -306,3 +306,105 @@ pub fn sevenz_archive(
 ) -> ArchiveBytes {
     ArchiveBytes::new("archive.7z", reader, config)
 }
+
+use std::collections::BTreeMap;
+use std::io::Cursor;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
+
+/// A TAR header of `kind` with `mode` and `size`.
+pub fn tar_header(kind: tar::EntryType, mode: u32, size: u64) -> tar::Header {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(kind);
+    header.set_mode(mode);
+    header.set_size(size);
+    header
+}
+
+/// A TAR holding a directory, nested files with read-only and executable
+/// modes, and a hardlink: the tree mark propagation tests extract.
+pub fn tar_fixture(dir: &Path) -> PathBuf {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar_header(tar::EntryType::Directory, 0o755, 0);
+    builder
+        .append_data(&mut header, "App.app/", &[][..])
+        .unwrap();
+    for (name, mode) in [
+        ("App.app/Contents/MacOS/run", 0o755),
+        ("ro.txt", 0o444),
+        ("exec", 0o555),
+    ] {
+        let mut header = tar_header(tar::EntryType::Regular, mode, 4);
+        builder
+            .append_data(&mut header, name, &b"data"[..])
+            .unwrap();
+    }
+    let mut link = tar_header(tar::EntryType::Link, 0o644, 0);
+    builder
+        .append_link(&mut link, "link.txt", "ro.txt")
+        .unwrap();
+    let path = dir.join("fixture.tar");
+    std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
+    path
+}
+
+/// A ZIP of two read-only files, one in a directory the entries imply.
+pub fn zip_fixture(dir: &Path) -> PathBuf {
+    let options = zip::write::SimpleFileOptions::default().unix_permissions(0o444);
+    let mut writer = zip::write::ZipWriter::new(Cursor::new(Vec::new()));
+    for name in ["ro.txt", "nested/inner.txt"] {
+        writer.start_file(name, options).unwrap();
+        writer.write_all(b"data").unwrap();
+    }
+    let path = dir.join("fixture.zip");
+    std::fs::write(&path, writer.finish().unwrap().into_inner()).unwrap();
+    path
+}
+
+/// A 7z of the same two files as [`zip_fixture`].
+pub fn sevenz_fixture(dir: &Path) -> PathBuf {
+    use sevenz_rust2::ArchiveEntry;
+    use sevenz_rust2::ArchiveWriter;
+
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    for name in ["ro.txt", "nested/inner.txt"] {
+        let mut entry = ArchiveEntry::new_file(name);
+        entry.has_stream = true;
+        entry.size = 4;
+        writer
+            .push_archive_entry(entry, Some(&b"data"[..]))
+            .unwrap();
+    }
+    let path = dir.join("fixture.7z");
+    std::fs::write(&path, writer.finish().unwrap().into_inner()).unwrap();
+    path
+}
+
+/// Every path below `root` with its content (`None` for a directory) and, on
+/// Unix, its exact permission bits.
+pub fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, (Option<Vec<u8>>, Option<u32>)> {
+    fn visit(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, (Option<Vec<u8>>, Option<u32>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                Some(meta.permissions().mode() & 0o7777)
+            };
+            #[cfg(not(unix))]
+            let mode = None;
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if meta.is_dir() {
+                out.insert(relative, (None, mode));
+                visit(root, &path, out);
+            } else {
+                out.insert(relative, (Some(std::fs::read(&path).unwrap()), mode));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    visit(root, root, &mut out);
+    out
+}

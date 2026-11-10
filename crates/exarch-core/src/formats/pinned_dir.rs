@@ -28,11 +28,15 @@
 //! `EACCES` where path-based code worked. None of them is a shipped target for
 //! the bindings or the CLI release builds. FreeBSD, NetBSD and illumos open
 //! with `O_SEARCH` only where a directory's attributes are read or changed
-//! ([`DirHandle`]); on NetBSD and illumos neither that open nor the `fchmod`
-//! through it is verified (no CI runs there), so any failure there falls back
-//! to the read handle. OpenBSD and `DragonFly` have no search-only open flag,
-//! so the `0311` backup of an atomic `--force` swap is expected to stay behind
-//! there (unobserved, see `open_dir_for_metadata`).
+//! ([`DirHandle`]). On illumos (`OmniOS` VM, CI run of 2026-11-10) an
+//! unprivileged user got that search-only handle for a `0311` directory and
+//! could chmod through it. On NetBSD (10.2 VM, same run) the open failed with
+//! `EACCES` and so did the read fallback, so a `0311` directory has no usable
+//! handle there and the `0311` backup of an atomic `--force` swap stays
+//! behind with a `backup_cleanup_failed` warning. FreeBSD, OpenBSD and
+//! `DragonFly` have not been run; OpenBSD and `DragonFly` have no search-only
+//! open flag, so the same leftover is expected there (see
+//! `open_dir_for_metadata`).
 //!
 //! On Windows a [`VettedDir`] is a directory handle. Below the root, a junction
 //! or symlink is opened as itself and refused. The root is opened the same
@@ -77,9 +81,11 @@ use std::sync::atomic::Ordering;
 
 use super::file_identity::FileIdentity;
 use super::output_root::OutputRoot;
+use super::output_root::Place;
 use super::run_record::RunRecord;
 use crate::ArchiveError;
 use crate::Result;
+use crate::mark::MarkRun;
 use crate::security::fs_view::Occupant;
 use crate::types::DestDir;
 
@@ -93,7 +99,11 @@ pub(crate) use imp::VettedDir;
 #[cfg(unix)]
 pub(crate) use imp::open_directory_at;
 #[cfg(windows)]
+pub(crate) use nt::read_zone_stream;
+#[cfg(windows)]
 pub(crate) use nt::security::DirSecurity;
+#[cfg(windows)]
+pub(crate) use nt::write_zone_stream;
 
 /// Exactly one normal path component: a name inside a [`VettedDir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,6 +393,7 @@ pub(crate) struct PinnedRoot {
     dest: DestDir,
     dir: VettedDir,
     created: Rc<RunRecord>,
+    mark: Option<Rc<MarkRun>>,
 }
 
 impl PinnedRoot {
@@ -397,6 +408,7 @@ impl PinnedRoot {
             dest,
             dir,
             created: Rc::default(),
+            mark: None,
         })
     }
 
@@ -409,27 +421,50 @@ impl PinnedRoot {
     ///
     /// An I/O error if the directory cannot be created or opened.
     pub(crate) fn open_output(output: OutputRoot<'_>) -> Result<Self> {
-        match output {
-            OutputRoot::Path(path) => Self::open(DestDir::new_or_create(path.to_path_buf())?),
-            OutputRoot::Staged(staged) => {
+        let mark = output.mark();
+        let root = match output.place() {
+            Place::Path(path) => Self::open(DestDir::new_or_create(path.to_path_buf())?)?,
+            Place::Staged(staged) => {
                 let dest = DestDir::new(staged.path().to_path_buf())?;
                 #[cfg(unix)]
                 let dir = VettedDir::reopen_at(staged.root()).map_err(ArchiveError::Io)?;
                 #[cfg(not(unix))]
                 let dir = VettedDir::open_path(dest.as_path())?;
-                Ok(Self {
+                Self {
                     dest,
                     dir,
                     created: staged.ledger(),
-                })
+                    mark: None,
+                }
             }
-        }
+        };
+        Ok(Self { mark, ..root })
     }
 
     /// What this run created in the destination, for `ExistingFiles::Refuse`.
     pub(crate) fn created(&self) -> &RunRecord {
         &self.created
     }
+
+    /// The mark this run writes, when the archive file bears one the platform
+    /// defines; `None` means no file is deferred and none is marked.
+    pub(crate) fn marking(&self) -> Option<&MarkRun> {
+        self.mark.as_deref().filter(|run| run.is_marking())
+    }
+
+    /// Marks the directory this run just created, where the platform marks
+    /// directories (macOS: a quarantined `.app` bundle is a directory).
+    #[cfg(target_os = "macos")]
+    pub(super) fn mark_created_dir(&self, dir: &VettedDir) {
+        if let Some(run) = self.marking() {
+            run.mark_dir(dir);
+        }
+    }
+
+    /// Directories carry no mark on this platform.
+    #[cfg(not(target_os = "macos"))]
+    #[expect(clippy::unused_self, reason = "only macOS marks directories")]
+    pub(super) fn mark_created_dir(&self, _dir: &VettedDir) {}
 
     pub(crate) const fn dest(&self) -> &DestDir {
         &self.dest
@@ -502,6 +537,7 @@ mod imp {
     use super::DirHandle;
     use super::EntryStatus;
     use super::Leaf;
+    use super::PendingMode;
     use super::TempLeaf;
     use crate::formats::file_identity::FileIdentity;
     #[cfg(unix)]
@@ -526,9 +562,10 @@ mod imp {
     #[cfg(any(target_os = "freebsd", target_os = "netbsd", target_os = "illumos"))]
     const MODE_ACCESS: OFlags = OFlags::from_bits_retain(libc::O_SEARCH.cast_unsigned());
 
-    /// Whether the search-only open and the `fchmod` through it are unverified
-    /// on this target: any failure then falls back to the read handle, which
-    /// is what the platform did before.
+    /// Whether any failure of the search-only open or of the `fchmod` through
+    /// it falls back to the read handle, as the platform did before. NetBSD
+    /// needs it (the open is refused for a `0311` directory); illumos was
+    /// observed to work and keeps the fallback as a precaution.
     #[cfg(any(
         target_os = "linux",
         target_os = "android",
@@ -582,6 +619,13 @@ mod imp {
     /// An open directory below the destination.
     #[derive(Debug)]
     pub(crate) struct VettedDir(OwnedFd);
+
+    #[cfg(unix)]
+    impl AsFd for VettedDir {
+        fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+            self.0.as_fd()
+        }
+    }
 
     impl VettedDir {
         /// Opens `path`, which the caller has canonicalized.
@@ -708,7 +752,10 @@ mod imp {
         /// Apple platforms, FreeBSD, NetBSD and illumos open it search-only
         /// (`O_SEARCH`) and, for a directory that is readable but not
         /// searchable, for reading; NetBSD and illumos also fall back to
-        /// reading on any other failure of the search-only open. Linux and
+        /// reading on any other failure of the search-only open. Observed in
+        /// CI on 2026-11-10: illumos opens a `0311` directory search-only,
+        /// while NetBSD 10.2 refuses that open with `EACCES` for an
+        /// unprivileged user, so the fallback fails too. Linux and
         /// Android use an `O_PATH` handle. Other Unix open it for reading, so a
         /// mode that denies that read still fails there.
         ///
@@ -743,11 +790,12 @@ mod imp {
         /// defines `O_SEARCH` for neither), so a directory whose mode denies
         /// reading, such as a `0311` backup, is expected to fail with `EACCES`.
         /// A by-name `fchmodat` would drop the binding to the directory's
-        /// identity, so it is not used. The consequence is inferred from the
-        /// code and the missing flag, not observed: no run on these targets
-        /// exists. `make_removable` ignores the failure, so the removal of the
-        /// backup is expected to fail while the swap succeeds with a
-        /// `backup_cleanup_failed` warning naming the leftover backup.
+        /// identity, so it is not used. `make_removable` ignores the failure,
+        /// so the removal of the backup fails while the swap succeeds with a
+        /// `backup_cleanup_failed` warning naming the leftover backup. NetBSD
+        /// 10.2 showed exactly this in CI on 2026-11-10; OpenBSD and
+        /// `DragonFly` have not been run, so there it is inferred from the
+        /// code and the missing flag.
         ///
         /// # Errors
         ///
@@ -894,6 +942,20 @@ mod imp {
             name: Leaf<'_>,
             mode: Option<SanitizedMode>,
         ) -> io::Result<File> {
+            let (file, pending) = self.create_new_deferred(name, mode)?;
+            pending.apply(&file)?;
+            Ok(file)
+        }
+
+        /// Creates `name` like [`create_new`](Self::create_new) but leaves the
+        /// file owner-only when `mode` is given: the caller applies the mode
+        /// through the returned [`PendingMode`] once it has written whatever
+        /// must precede a restrictive mode (the download-origin mark).
+        pub(crate) fn create_new_deferred(
+            &self,
+            name: Leaf<'_>,
+            mode: Option<SanitizedMode>,
+        ) -> io::Result<(File, PendingMode)> {
             let creation =
                 mode.map_or(Mode::from_bits_truncate(0o666), |_| Mode::RUSR | Mode::WUSR);
             let fd = rustix::fs::openat(
@@ -902,13 +964,7 @@ mod imp {
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 creation,
             )?;
-            let file = File::from(fd);
-            #[cfg(unix)]
-            if let Some(m) = mode {
-                use std::os::unix::fs::PermissionsExt;
-                file.set_permissions(std::fs::Permissions::from_mode(m.as_u32()))?;
-            }
-            Ok(file)
+            Ok((File::from(fd), PendingMode(mode)))
         }
 
         /// Opens `name` for reading without following a symlink and without
@@ -1085,6 +1141,7 @@ mod imp {
 
     use super::EntryStatus;
     use super::Leaf;
+    use super::PendingMode;
     use super::TempLeaf;
     use super::dacl_walk;
     use super::nt;
@@ -1380,8 +1437,18 @@ mod imp {
         pub(crate) fn create_new(
             &self,
             name: Leaf<'_>,
-            _mode: Option<SanitizedMode>,
+            mode: Option<SanitizedMode>,
         ) -> io::Result<File> {
+            self.create_new_deferred(name, mode).map(|(file, _)| file)
+        }
+
+        /// Creates the file `name` like [`create_new`](Self::create_new); there
+        /// is no Unix mode to defer, so the [`PendingMode`] does nothing.
+        pub(crate) fn create_new_deferred(
+            &self,
+            name: Leaf<'_>,
+            mode: Option<SanitizedMode>,
+        ) -> io::Result<(File, PendingMode)> {
             let request = Request {
                 access: FILE_GENERIC_WRITE,
                 disposition: Disposition::Create,
@@ -1389,7 +1456,7 @@ mod imp {
                 attributes: FILE_ATTRIBUTE_NORMAL,
             };
             nt::create_at(self.0.as_handle(), name, request)
-                .map(File::from)
+                .map(|handle| (File::from(handle), PendingMode(mode)))
                 .map_err(|err| self.occupied_as_exists(name, err))
         }
 
@@ -1431,6 +1498,51 @@ mod imp {
 
 #[cfg(not(any(unix, target_os = "wasi", windows)))]
 compile_error!("exarch-core has no directory-handle backend for this target");
+
+/// The mode a file created by [`VettedDir::create_new_deferred`] still has to
+/// be given.
+///
+/// The file is owner-only until [`apply`](Self::apply) runs, so whatever must
+/// be written before a restrictive mode (the download-origin mark of a
+/// read-only entry) can still be. It must be applied whether or not that write
+/// succeeded, or the file would keep the owner-only mode.
+#[derive(Debug)]
+#[must_use = "the file stays owner-only until the mode is applied"]
+pub(crate) struct PendingMode(Option<crate::security::permissions::SanitizedMode>);
+
+impl PendingMode {
+    /// A mode that was already set, so applying it does nothing.
+    pub(crate) const fn applied() -> Self {
+        Self(None)
+    }
+
+    /// Sets the mode through the open descriptor (`fchmod`), so the umask
+    /// cannot reduce it and no path is resolved again. Windows has no Unix
+    /// mode and does nothing.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of the `fchmod`.
+    #[cfg(unix)]
+    pub(crate) fn apply(self, file: &std::fs::File) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        self.0.map_or(Ok(()), |mode| {
+            file.set_permissions(std::fs::Permissions::from_mode(mode.as_u32()))
+        })
+    }
+
+    /// There is no mode to set on this platform.
+    ///
+    /// # Errors
+    ///
+    /// Never fails.
+    #[cfg(not(unix))]
+    #[expect(clippy::unnecessary_wraps, reason = "same signature as the Unix apply")]
+    pub(crate) fn apply(self, _file: &std::fs::File) -> std::io::Result<()> {
+        let Self(_mode) = self;
+        Ok(())
+    }
+}
 
 /// RAII guard that removes a file from its directory when dropped, unless
 /// [`persist`](Self::persist) was called first.
@@ -1734,7 +1846,9 @@ mod tests {
         target_os = "linux",
         target_os = "android",
         target_vendor = "apple",
-        target_os = "freebsd"
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos"
     ))]
     #[test]
     fn a_directory_without_read_access_is_opened_search_only() {
@@ -1747,7 +1861,11 @@ mod tests {
         let handle = dir.open_dir_for_metadata(leaf("locked"));
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_matches!(handle, Ok(DirHandle::Search(_)));
+        if cfg!(target_os = "netbsd") && fs::metadata(temp.path()).unwrap().uid() != 0 {
+            assert_matches!(handle, Err(ref e) if e.kind() == io::ErrorKind::PermissionDenied);
+        } else {
+            assert_matches!(handle, Ok(DirHandle::Search(_)));
+        }
     }
 
     #[cfg(any(
@@ -1770,16 +1888,17 @@ mod tests {
 
             let result = dir.set_dir_mode(leaf("locked"), id, &fs::Permissions::from_mode(0o700));
 
-            if mode == 0o000
+            let no_handle = (mode == 0o000
                 && cfg!(any(
                     target_vendor = "apple",
                     target_os = "freebsd",
                     target_os = "netbsd",
                     target_os = "illumos"
-                ))
-                && fs::metadata(temp.path()).unwrap().uid() != 0
-            {
-                // Neither search nor read is allowed, so no handle exists.
+                )))
+                || (mode == 0o311 && cfg!(target_os = "netbsd"));
+            if no_handle && fs::metadata(temp.path()).unwrap().uid() != 0 {
+                // No handle exists: neither search nor read is allowed, or
+                // (NetBSD) the search-only open is refused.
                 assert!(result.is_err(), "{mode:o}");
                 fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
                 continue;

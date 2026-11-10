@@ -368,6 +368,20 @@ describe('entry selection', () => {
       assert.strictEqual(byPath['top/'].action, 'skip');
     });
 
+    it('probes the destination volume of a listing without creating it', () => {
+      const config = new SecurityConfig().addIncludePattern('top/sub').withStripComponents(1);
+      const destination = path.join(tempDir, 'not', 'yet');
+      const probed = listArchiveSync(archive, config, null, destination);
+      assert.deepStrictEqual(probed.dispositions, listArchiveSync(archive, config).dispositions);
+      assert.strictEqual(fs.existsSync(path.join(tempDir, 'not')), false);
+    });
+
+    it('fails a listing whose destination lies below a file', () => {
+      const blocker = path.join(tempDir, 'blocker');
+      fs.writeFileSync(blocker, '');
+      assert.throws(() => listArchiveSync(archive, null, null, path.join(blocker, 'sub')));
+    });
+
     it('reports an entry that cannot be placed as refused', () => {
       const unplaceable = path.join(tempDir, 'unplaceable.tar');
       fs.writeFileSync(unplaceable, tarOf(file('f'), file('f/g')));

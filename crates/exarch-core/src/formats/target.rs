@@ -22,6 +22,7 @@ use crate::SinkOptions;
 use crate::SkipKind;
 use crate::copy::CopyBuffer;
 use crate::formats::occupant::OccupantAction;
+use crate::mark::MarkRun;
 use crate::security::RawMode;
 use crate::security::admitted::EntrySize;
 use crate::security::admitted::PendingFile;
@@ -322,8 +323,10 @@ impl<'a> HostTarget<'a> {
         &self.root
     }
 
-    pub(super) fn copy_buffer_mut(&mut self) -> &mut CopyBuffer {
-        &mut self.copy_buffer
+    /// The copy buffer together with the mark the run writes, borrowed
+    /// together because a write needs both at once.
+    pub(super) fn copy_buffer_and_marking(&mut self) -> (&mut CopyBuffer, Option<&MarkRun>) {
+        (&mut self.copy_buffer, self.root.marking())
     }
 
     pub(super) const fn dirs(&self) -> DirWalker {
@@ -526,8 +529,14 @@ impl ExtractTarget for HostTarget<'_> {
             target_mode.map(|mode| sanitize_permissions(RawMode::new(mode), self.config));
 
         let (link_dir, link_leaf) = self.dirs.ensure_parent(&self.root, link)?;
-        let link_file = match link_dir.create_new(link_leaf, link_mode) {
-            Ok(file) => file,
+        let marking = self.root.marking();
+        let (link_file, pending) = match common::create_file(
+            &link_dir,
+            link_leaf,
+            link_mode,
+            common::ModeTiming::of(marking),
+        ) {
+            Ok(created) => created,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let action = tally.options.existing_files.on_occupant(
                     EntryShape::Link(LinkKind::Hardlink),
@@ -574,13 +583,19 @@ impl ExtractTarget for HostTarget<'_> {
         // Copy content between the two handles opened above. Any subsequent
         // write to the link cannot corrupt the target because they are
         // separate files.
-        let bytes_copied = common::copy_file_content_with_permit(
-            target_file,
-            link_file,
-            &mut self.copy_buffer,
-            permit,
-            &mut *tally.progress,
-        )?;
+        let bytes_copied = {
+            // Closed before `cleanup_guard` can remove the name on an error.
+            let mut link_file = link_file;
+            let copied = common::copy_file_content_with_permit(
+                target_file,
+                &mut link_file,
+                &mut self.copy_buffer,
+                permit,
+                &mut *tally.progress,
+            )?;
+            common::seal_output(&link_file, pending, marking)?;
+            copied
+        };
         cleanup_guard.persist();
 
         tally.record_file(bytes_copied)

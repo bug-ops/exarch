@@ -7867,6 +7867,42 @@ fn test_list_reports_dispositions_only_under_a_selection() {
     assert_eq!(readme["disposition"]["landing"], "README");
 }
 
+/// `list --destination` probes the destination volume without creating it; a
+/// destination that cannot be resolved is a failure (#1144).
+#[test]
+fn test_list_destination_probes_without_creating() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+    let destination = temp.path().join("not").join("yet");
+
+    exarch_cmd()
+        .arg("list")
+        .arg("--strip-components")
+        .arg("1")
+        .arg("--destination")
+        .arg(&destination)
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("proj/README  [lands at README]"));
+    assert!(!temp.path().join("not").exists());
+
+    let file = temp.path().join("file");
+    std::fs::write(&file, b"").expect("failed to write file");
+    exarch_cmd()
+        .arg("list")
+        .arg("--destination")
+        .arg(file.join("sub"))
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(format!(
+            "Failed to process '{}'",
+            file.join("sub").display()
+        )));
+}
+
 /// `verify` applies the same selection and reports an unmatched include as an
 /// archive issue, so it never passes what `extract` would refuse (#967).
 #[test]
@@ -9493,4 +9529,85 @@ fn test_genuine_hardlink_escape_still_fails_verify_and_extract() {
         .args(LINK_FLAGS)
         .assert()
         .failure();
+}
+
+/// The `mark_propagation.state` an unmarked archive reports under
+/// `--mark-propagation when-marked` on this platform.
+const UNMARKED_STATE: &str = if cfg!(any(target_os = "macos", windows)) {
+    "unmarked"
+} else {
+    "unsupported_platform"
+};
+
+fn extract_json_with_flags(extra: &[&str]) -> serde_json::Value {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .args(extra)
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).expect("invalid JSON output")
+}
+
+#[test]
+fn test_extract_json_reports_no_mark_propagation_by_default() {
+    let json = extract_json_with_flags(&[]);
+    assert_eq!(
+        json["data"]["mark_propagation"],
+        serde_json::json!({"state": "not_requested"})
+    );
+    let explicit = extract_json_with_flags(&["--mark-propagation", "never"]);
+    assert_eq!(
+        explicit["data"]["mark_propagation"],
+        json["data"]["mark_propagation"]
+    );
+}
+
+#[test]
+fn test_extract_json_when_marked_reports_the_source_state() {
+    let json = extract_json_with_flags(&["--mark-propagation", "when-marked"]);
+    assert_eq!(json["data"]["mark_propagation"]["state"], UNMARKED_STATE);
+}
+
+#[test]
+fn test_extract_text_prints_a_mark_line_only_when_requested() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Download mark").not());
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("extract")
+        .args(["--mark-propagation", "when-marked"])
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Download mark:"));
+}
+
+#[test]
+fn test_extract_rejects_an_unknown_mark_propagation_mode() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("extract")
+        .args(["--mark-propagation", "always"])
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "possible values: never, when-marked",
+        ));
 }

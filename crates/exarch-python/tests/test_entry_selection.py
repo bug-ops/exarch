@@ -279,6 +279,25 @@ def test_strip_never_reopens_traversal(temp_dir):
     assert not (temp_dir / "x").exists()
 
 
+def test_list_destination_probes_the_volume_without_creating_it(project, temp_dir):
+    config = exarch.SecurityConfig().add_include_pattern("proj/src").with_strip_components(1)
+    destination = temp_dir / "not" / "yet"
+
+    probed = exarch.list_archive(project, config, destination=destination)
+    plain = exarch.list_archive(project, config)
+
+    assert [str(d.path) for d in probed.dispositions] == [str(d.path) for d in plain.dispositions]
+    assert not (temp_dir / "not").exists()
+
+
+def test_list_destination_below_a_file_is_an_io_error(project, temp_dir):
+    blocker = temp_dir / "blocker"
+    blocker.write_bytes(b"")
+
+    with pytest.raises(OSError):
+        exarch.list_archive(project, destination=blocker / "sub")
+
+
 def test_list_reports_the_disposition_of_every_entry(project):
     config = exarch.SecurityConfig().add_include_pattern("proj/src").with_strip_components(1)
 

@@ -17,7 +17,7 @@ use super::dir::StagingDir;
 #[cfg(unix)]
 mod imp {
     use std::io;
-    #[cfg(any(test, target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", all(test, acl_copy)))]
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::fchown;

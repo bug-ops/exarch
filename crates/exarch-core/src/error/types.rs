@@ -777,7 +777,7 @@ pub enum ArchiveError {
 #[derive(Debug)]
 pub struct Partial {
     cause: Box<ArchiveError>,
-    report: crate::ExtractionReport,
+    report: Box<crate::ExtractionReport>,
     writes: PartialWrites,
     leftover: Option<Box<crate::StagingLeftover>>,
 }
@@ -798,7 +798,7 @@ impl Partial {
         match cause {
             ArchiveError::PartialExtraction(inner) => Self {
                 cause: inner.cause,
-                report,
+                report: Box::new(report),
                 writes: if writes == PartialWrites::Kept {
                     inner.writes
                 } else {
@@ -808,7 +808,7 @@ impl Partial {
             },
             other => Self {
                 cause: Box::new(other),
-                report,
+                report: Box::new(report),
                 writes,
                 leftover: None,
             },
@@ -845,7 +845,7 @@ impl Partial {
     /// Splits into the cause, the report and the fate of the writes.
     #[must_use]
     pub fn into_parts(self) -> (ArchiveError, crate::ExtractionReport, PartialWrites) {
-        (*self.cause, self.report, self.writes)
+        (*self.cause, *self.report, self.writes)
     }
 
     fn with_writes(self, writes: PartialWrites) -> Self {

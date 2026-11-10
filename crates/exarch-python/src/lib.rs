@@ -32,6 +32,7 @@ use exarch_core::ExtractRequest;
 use exarch_core::ListRequest;
 use exarch_core::OutputFile;
 use exarch_core::VerifyRequest;
+use exarch_core::VolumeIdentity;
 use report::PyArchiveEntry;
 use report::PyArchiveManifest;
 use report::PyCreationReport;
@@ -334,6 +335,9 @@ fn output_file(
 /// * `options` - Optional `ListOptions`;
 ///   `ListOptions().with_stored_targets("read")` reads the 7z link targets that
 ///   listing leaves unread by default
+/// * `destination` - Optional directory `extract_archive` would write to (str
+///   or pathlib.Path). Its volume decides whether a repeated name is listed as
+///   a `duplicate` skip or as refused in `dispositions`; nothing is created
 ///
 /// # Returns
 ///
@@ -342,7 +346,7 @@ fn output_file(
 /// # Raises
 ///
 /// * `ValueError` - Invalid arguments
-/// * `IOError` - I/O operation failed
+/// * `IOError` - I/O operation failed, or `destination` cannot be resolved
 /// * `UnsupportedFormatError` - Archive format not supported
 ///
 /// # Examples
@@ -355,23 +359,31 @@ fn output_file(
 ///     print(f"{entry.path}: {entry.size} bytes")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, config=None, options=None))]
+#[pyo3(signature = (archive_path, config=None, options=None, destination=None))]
 fn list_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<PyRef<'_, PyListOptions>>,
+    destination: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyArchiveManifest> {
     let archive_path = path_to_boundary(py, archive_path)?;
+    let destination = destination
+        .map(|destination| path_to_boundary(py, destination))
+        .transpose()?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyListOptions::snapshot(options);
 
     catch_panic_as_py_err("archive listing", || {
         py.detach(|| {
+            let volume = destination.as_ref().map_or_else(
+                || Ok(VolumeIdentity::default()),
+                |destination| VolumeIdentity::of_destination(destination.as_ref()),
+            )?;
             ListRequest::new(&config)
                 .with_options(options)
                 .list(&archive_path)
-                .map(|manifest| PyArchiveManifest::new(manifest, &config))
+                .map(|manifest| PyArchiveManifest::new(manifest, &config, volume))
         })
     })
 }

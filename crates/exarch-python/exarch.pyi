@@ -45,6 +45,10 @@ _ZipConsistency = Literal["enforce", "ignore"]
 _Durability = Literal["synced", "unsynced"]
 _ExistingFiles = Literal["skip", "overwrite", "refuse"]
 _Staging = Literal["in_place", "atomic", "atomic_replace"]
+_MarkPropagation = Literal["never", "when_marked"]
+_MarkState = Literal[
+    "not_requested", "unsupported_platform", "unmarked", "unreadable", "propagated"
+]
 _Restore = Literal["not_needed", "restored", "failed"]
 _ProtectedPath = Literal["filesystem_root", "archive_ancestor", "working_directory"]
 _IoKind = Literal[
@@ -189,6 +193,7 @@ _ConfigSetting = Literal[
     "entry_exclude",
     "strip_components",
     "stored_targets",
+    "mark_propagation",
 ]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 
@@ -817,10 +822,34 @@ class ExtractionOptions:
         """
         ...
 
+    def with_mark_propagation(self, value: _MarkPropagation) -> ExtractionOptions:
+        """
+        Sets whether the archive file's download-origin mark is copied onto
+        the extracted files.
+
+        ``"never"`` (default) reads and copies nothing. ``"when_marked"``
+        copies the Windows ``Zone.Identifier`` stream or the macOS quarantine
+        attribute of the archive file onto every extracted file (and, on macOS,
+        every directory the run creates). A failed write is counted in the
+        report and extraction continues. Linux has no mark.
+
+        Raises:
+            InvalidConfigurationError: any other string
+                (``setting == "mark_propagation"``).
+        """
+        ...
+
     def build(self) -> ExtractionOptions:
         """Finalizes the configuration."""
         ...
 
+    @property
+    def mark_propagation(self) -> _MarkPropagation:
+        """Whether the download-origin mark is copied (default: ``"never"``)."""
+        ...
+
+    @mark_propagation.setter
+    def mark_propagation(self, value: _MarkPropagation) -> None: ...
     @property
     def existing_files(self) -> _ExistingFiles:
         """How an existing file is treated (default: ``"skip"``)."""
@@ -1185,6 +1214,21 @@ class ExtractionReport:
     @property
     def skipped(self) -> Skipped:
         """The skipped entries by kind."""
+        ...
+
+    @property
+    def mark_propagation(self) -> _MarkState:
+        """What download-origin mark propagation did."""
+        ...
+
+    @property
+    def marks_written(self) -> int:
+        """Files (and, on macOS, directories) that now carry the mark."""
+        ...
+
+    @property
+    def marks_failed(self) -> int:
+        """Files (and directories) whose mark could not be written."""
         ...
 
     @property
@@ -1928,6 +1972,7 @@ def list_archive(
     archive_path: str | Path,
     config: SecurityConfig | None = None,
     options: ListOptions | None = None,
+    destination: str | Path | None = None,
 ) -> ArchiveManifest:
     """
     List archive contents without extracting.
@@ -1937,13 +1982,16 @@ def list_archive(
         config: Optional SecurityConfig (uses secure defaults if None)
         options: Optional ListOptions; ``ListOptions().with_stored_targets("read")``
             reads the 7z link targets that listing leaves unread by default
+        destination: Optional directory extraction would write to; its volume
+            decides whether a repeated name is listed as a duplicate skip or
+            as refused in ``ArchiveManifest.dispositions``. Nothing is created
 
     Returns:
         ArchiveManifest with entry metadata
 
     Raises:
         ValueError: Invalid arguments
-        IOError: I/O operation failed
+        IOError: I/O operation failed, or destination cannot be resolved
         UnsupportedFormatError: Archive format not supported
     """
     ...

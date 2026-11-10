@@ -49,12 +49,18 @@ describe('report fields', () => {
       'filesExtracted',
       'filesSkipped',
       'hasWarnings',
+      'markPropagation',
+      'marksFailed',
+      'marksWritten',
       'sizeClamped',
       'skipped',
       'symlinksCreated',
       'totalItems',
       'warnings',
     ]);
+    assert.strictEqual(report.markPropagation, 'not_requested');
+    assert.strictEqual(report.marksWritten, 0);
+    assert.strictEqual(report.marksFailed, 0);
     assert.strictEqual(report.sizeClamped, false);
     assert.strictEqual(report.hasWarnings, false);
     assert.strictEqual(report.totalItems, report.filesExtracted + report.directoriesCreated);

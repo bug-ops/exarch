@@ -92,6 +92,49 @@ describe('ExtractionOptions', () => {
     });
   });
 
+  describe('withMarkPropagation()', () => {
+    it("should default to 'never'", () => {
+      assert.strictEqual(new ExtractionOptions().markPropagation, 'never');
+      assert.strictEqual(ExtractionOptions.default().markPropagation, 'never');
+    });
+
+    it('should accept every policy and read it back', () => {
+      const opts = new ExtractionOptions();
+      for (const policy of ['when_marked', 'never']) {
+        assert.strictEqual(opts.withMarkPropagation(policy), opts);
+        assert.strictEqual(opts.markPropagation, policy);
+      }
+    });
+
+    it('should throw on a missing, null or unknown policy and keep the previous one', () => {
+      const opts = new ExtractionOptions().withMarkPropagation('when_marked');
+      assert.throws(() => opts.withMarkPropagation());
+      assert.throws(() => opts.withMarkPropagation(null));
+      assert.throws(() => opts.withMarkPropagation('when-marked'), { code: 'InvalidArg' });
+      assert.throws(() => opts.withMarkPropagation('always'), { code: 'InvalidArg' });
+      assert.strictEqual(opts.markPropagation, 'when_marked');
+    });
+
+    it('should report not_requested by default and a stated source otherwise', () => {
+      const tempDir = createTempDir();
+      try {
+        const archive = path.join(tempDir, 'a.tar.gz');
+        createValidArchive(archive, tempDir);
+
+        const plain = extractArchiveSync(archive, path.join(tempDir, 'plain'));
+        assert.strictEqual(plain.markPropagation, 'not_requested');
+
+        const options = new ExtractionOptions().withMarkPropagation('when_marked');
+        const marked = extractArchiveSync(archive, path.join(tempDir, 'marked'), null, options);
+        assert.ok(['unmarked', 'unsupported_platform'].includes(marked.markPropagation));
+        assert.strictEqual(marked.marksWritten, 0);
+        assert.strictEqual(marked.marksFailed, 0);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('withStaging()', () => {
     it("should default to 'in_place'", () => {
       assert.strictEqual(new ExtractionOptions().staging, 'in_place');

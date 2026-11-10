@@ -24,6 +24,7 @@ use exarch_core::PathModel;
 use exarch_core::ReuseLimit;
 use exarch_core::SanitizedMode;
 use exarch_core::VerifyRequest;
+use exarch_core::VolumeIdentity;
 use exarch_core::extract_reader_to_callback;
 use exarch_core::extract_reader_to_memory;
 use exarch_core::utf8_entry_path;
@@ -590,7 +591,9 @@ pub fn list_archive_bytes_with_progress(
                 .with_options(options)
                 .with_progress(progress)
                 .list_reader(reader)
-                .map(|manifest| PyArchiveManifest::new(manifest, &config))
+                .map(|manifest| {
+                    PyArchiveManifest::new(manifest, &config, VolumeIdentity::default())
+                })
         },
         |_, _| {},
     );
@@ -970,7 +973,9 @@ pub fn list_archive_bytes(
             ListRequest::new(&config)
                 .with_options(options)
                 .list_reader(reader)
-                .map(|manifest| PyArchiveManifest::new(manifest, &config))
+                .map(|manifest| {
+                    PyArchiveManifest::new(manifest, &config, VolumeIdentity::default())
+                })
         })
     });
     slot.surface(result)

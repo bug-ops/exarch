@@ -148,6 +148,9 @@ impl From<CoreSkips> for PySkips {
 /// * `duration_ms` - Extraction duration in milliseconds
 /// * `files_skipped` - Number of entries skipped
 /// * `skipped` - The skipped entries by kind
+/// * `mark_propagation` - What download-origin mark propagation did
+/// * `marks_written` - Objects that now carry the mark
+/// * `marks_failed` - Objects whose mark could not be written
 /// * `warnings` - List of typed warnings
 #[pyclass(name = "ExtractionReport")]
 #[derive(Clone)]
@@ -197,6 +200,26 @@ impl PyExtractionReport {
     #[getter]
     fn skipped(&self) -> PySkips {
         PySkips::from(self.inner.skipped.clone())
+    }
+
+    /// What download-origin mark propagation did: `"not_requested"`,
+    /// `"unsupported_platform"`, `"unmarked"`, `"unreadable"` or
+    /// `"propagated"`.
+    #[getter]
+    fn mark_propagation(&self) -> &'static str {
+        self.inner.mark.as_str()
+    }
+
+    /// Files (and, on macOS, directories) that now carry the mark.
+    #[getter]
+    fn marks_written(&self) -> usize {
+        self.inner.mark.marked()
+    }
+
+    /// Files (and directories) whose mark could not be written.
+    #[getter]
+    fn marks_failed(&self) -> usize {
+        self.inner.mark.failed()
     }
 
     /// Returns the typed warnings (`AntiItemsSkippedWarning`,
@@ -713,10 +736,15 @@ impl PyArchiveManifest {
 
 impl PyArchiveManifest {
     /// Wraps a manifest listed under `config`, recording what extraction under
-    /// that config would do with each entry.
-    pub fn new(inner: ArchiveManifest, config: &exarch_core::SecurityConfig) -> Self {
+    /// that config would do with each entry on a destination volume that
+    /// identifies landings as `volume` says.
+    pub fn new(
+        inner: ArchiveManifest,
+        config: &exarch_core::SecurityConfig,
+        volume: exarch_core::VolumeIdentity,
+    ) -> Self {
         let dispositions = inner
-            .dispositions(config)
+            .dispositions_on(config, volume)
             .map(|(entry, disposition)| (entry.path.clone(), disposition))
             .collect();
         Self {
@@ -1547,7 +1575,11 @@ mod tests {
             manifest.add_entry(entry).unwrap();
         }
 
-        let py_manifest = PyArchiveManifest::new(manifest, &exarch_core::SecurityConfig::default());
+        let py_manifest = PyArchiveManifest::new(
+            manifest,
+            &exarch_core::SecurityConfig::default(),
+            exarch_core::VolumeIdentity::default(),
+        );
 
         assert_eq!(py_manifest.total_entries(), 2, "total_entries should be 2");
         assert_eq!(py_manifest.total_size(), 300, "total_size should be 300");
@@ -1763,6 +1795,11 @@ mod tests {
                 "_Staging",
                 exarch_core::Staging::ALL,
                 exarch_core::Staging::as_str,
+            ),
+            literal_line(
+                "_MarkPropagation",
+                exarch_core::MarkPropagation::ALL,
+                exarch_core::MarkPropagation::as_str,
             ),
             literal_line(
                 "_Restore",

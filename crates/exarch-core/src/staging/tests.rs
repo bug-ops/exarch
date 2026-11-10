@@ -747,7 +747,13 @@ fn an_unlistable_destination_is_refused_by_name_and_left_untouched() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "netbsd",
+    target_os = "illumos"
+))]
 #[test]
 fn a_destination_whatever_its_mode_is_replaced_and_its_backup_removed() {
     for mode in [0o311, 0o600, 0o644] {
@@ -763,15 +769,25 @@ fn a_destination_whatever_its_mode_is_replaced_and_its_backup_removed() {
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
         let report = result.unwrap_or_else(|e| panic!("{mode:o}: {e}"));
 
-        assert!(
-            !report
-                .warnings
-                .iter()
-                .any(|warning| matches!(warning, ExtractionWarning::BackupCleanupFailed { .. })),
-            "{mode:o}: {:?}",
-            report.warnings
-        );
+        let cleanup_failed = report
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, ExtractionWarning::BackupCleanupFailed { .. }));
         assert_eq!(read(&dest.join("a.txt")), "new a", "{mode:o}");
+        if cfg!(target_os = "netbsd") && mode == 0o311 {
+            assert!(cleanup_failed, "{mode:o}: {:?}", report.warnings);
+            let leftovers = fx.leftovers();
+            assert!(!leftovers.is_empty(), "{mode:o}");
+            for name in leftovers {
+                std::fs::set_permissions(
+                    fx.parent.join(name),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+            continue;
+        }
+        assert!(!cleanup_failed, "{mode:o}: {:?}", report.warnings);
         assert!(fx.leftovers().is_empty(), "{mode:o}: {:?}", fx.leftovers());
     }
 }

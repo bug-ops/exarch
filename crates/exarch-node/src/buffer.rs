@@ -39,6 +39,7 @@ fn list_core(
                 .with_options(options)
                 .list_reader(reader)?,
             config,
+            exarch_core::VolumeIdentity::default(),
         )
     })
 }
@@ -79,6 +80,7 @@ fn list_with_progress_core(
                         .with_progress(progress)
                         .list_reader(reader)?,
                     config,
+                    exarch_core::VolumeIdentity::default(),
                 )
             })
         },

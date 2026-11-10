@@ -152,3 +152,59 @@ class TestExtractionOptions:
         opts = ExtractionOptions()
         assert not hasattr(opts, "atomic")
         assert not hasattr(opts, "with_atomic")
+
+
+def _one_file_tar(path):
+    data = b"hello"
+    with tarfile.open(path, "w") as tar:
+        info = tarfile.TarInfo("hello.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return path
+
+
+class TestMarkPropagation:
+    """The download-origin mark policy and what the report says about it."""
+
+    def test_default_is_never(self):
+        assert ExtractionOptions().mark_propagation == "never"
+        assert ExtractionOptions.default().mark_propagation == "never"
+
+    @pytest.mark.parametrize("value", ["never", "when_marked"])
+    def test_with_mark_propagation_sets_the_value_and_returns_self(self, value):
+        opts = ExtractionOptions()
+        assert opts.with_mark_propagation(value) is opts
+        assert opts.mark_propagation == value
+
+    def test_property_setter(self):
+        opts = ExtractionOptions()
+        opts.mark_propagation = "when_marked"
+        assert opts.mark_propagation == "when_marked"
+
+    @pytest.mark.parametrize("value", ["", "When_Marked", "when-marked", "always"])
+    def test_unknown_value_is_refused(self, value):
+        opts = ExtractionOptions()
+        with pytest.raises(InvalidConfigurationError) as info:
+            opts.with_mark_propagation(value)
+        assert info.value.setting == "mark_propagation"
+        with pytest.raises(InvalidConfigurationError):
+            opts.mark_propagation = value
+        assert opts.mark_propagation == "never"
+
+    def test_repr_names_the_policy(self):
+        assert "mark_propagation=" in repr(ExtractionOptions())
+
+    def test_report_says_not_requested_by_default(self, tmp_path):
+        archive = _one_file_tar(tmp_path / "a.tar")
+        report = extract_archive(str(archive), str(tmp_path / "out"))
+        assert report.mark_propagation == "not_requested"
+        assert report.marks_written == 0
+        assert report.marks_failed == 0
+
+    def test_report_states_an_unmarked_archive_or_an_unsupported_platform(self, tmp_path):
+        archive = _one_file_tar(tmp_path / "a.tar")
+        opts = ExtractionOptions().with_mark_propagation("when_marked")
+        report = extract_archive(str(archive), str(tmp_path / "out"), options=opts)
+        assert report.mark_propagation in {"unmarked", "unsupported_platform"}
+        assert report.marks_written == 0
+        assert report.marks_failed == 0

@@ -12,6 +12,10 @@ Context for explaining refusals. A rejection for any reason here is the pipeline
 - An empty entry name or a NUL byte is `SecurityViolation`.
 - Windows only: reserved device-name components (`CON`, `NUL`, `COM1`, ... ASCII case-insensitive, with or without extension), components containing `:` (alternate data streams), ending in dot or space, containing `<>"|?*` or control characters, or not valid Unicode are `SecurityViolation`; the same checks apply to link targets. Only the reserved-device-name check has an opt-out, and only in the Rust API. On other platforms these names are accepted.
 
+## Download mark
+
+Extended attributes, ACLs and alternate data streams stored in an archive are never restored. The only mark an extracted file can get is a copy of the archive file's own download-origin mark, and only with `--mark-propagation when-marked` (default `never`): read through the archive's open handle, written through the handle that created each file, never derived from entry names or content. See `extract.md`.
+
 ## Decoder memory (no CLI flag)
 
 - `max_decoder_memory` defaults to 256 MiB (`SecurityConfig::max_decoder_memory`, Rust API; 1 GiB under `permissive()`). A `.tar.xz` whose LZMA2 dictionary needs more is refused by `extract`, `list`, and `verify` with `QuotaExceeded` (`DECODER_MEMORY`, message `quota exceeded: decoder memory (> 268435456 bytes)`).

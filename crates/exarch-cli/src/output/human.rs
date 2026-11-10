@@ -28,6 +28,7 @@ use exarch_core::ExtractionReport;
 use exarch_core::IssueSeverity;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
+use exarch_core::MarkOutcome;
 use exarch_core::Skips;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
@@ -218,6 +219,30 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
         Ok(())
     }
 
+    /// The one-line summary of mark propagation, nothing when it was not
+    /// requested, and a warning line when some objects could not be marked.
+    fn write_mark_outcome(&mut self, outcome: MarkOutcome) -> io::Result<()> {
+        let summary = match outcome {
+            MarkOutcome::Propagated { marked, failed } => {
+                format!("copied to {marked} items, {failed} failed")
+            }
+            MarkOutcome::Unmarked => "archive is not marked, nothing copied".to_owned(),
+            MarkOutcome::Unreadable => "archive mark unreadable, nothing copied".to_owned(),
+            MarkOutcome::UnsupportedPlatform => {
+                "not supported on this platform, nothing copied".to_owned()
+            }
+            MarkOutcome::NotRequested | _ => return Ok(()),
+        };
+        emit_line(&mut self.out, format_args!("  Download mark: {summary}"))?;
+        if outcome.has_failures() || outcome == MarkOutcome::Unreadable {
+            emit_line(
+                &mut self.out,
+                format_args!("  warning: some extracted items did not receive the download mark"),
+            )?;
+        }
+        Ok(())
+    }
+
     /// The skip total and, under it, one line per reason that occurred.
     /// `label` pads the total's label to the report's column.
     fn write_skips(&mut self, label: &str, skips: &Skips) -> io::Result<()> {
@@ -367,6 +392,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             )?;
 
             f.write_skips("  Files skipped: ", &report.skipped)?;
+            f.write_mark_outcome(report.mark)?;
 
             if f.verbosity == Verbosity::Verbose {
                 emit_line(
@@ -545,6 +571,7 @@ mod tests {
     use crate::test_support::FailingWriter;
     use exarch_core::Compressed;
     use exarch_core::Uncompressed;
+    use exarch_core::VolumeIdentity;
 
     fn formatter(verbosity: Verbosity, use_colors: bool) -> HumanFormatter<Vec<u8>, Vec<u8>> {
         HumanFormatter::with_writers(Vec::new(), Vec::new(), verbosity, use_colors)
@@ -1285,7 +1312,7 @@ mod tests {
     #[test]
     fn every_disposition_has_dedicated_text() {
         let (manifest, config) = crate::test_support::selected_manifest();
-        let dispositions = Dispositions::of(&manifest, &config);
+        let dispositions = Dispositions::of(&manifest, &config, VolumeIdentity::default());
         let mut seen = vec![Disposition::Refuse.kind()];
         for (index, entry) in manifest.entries().iter().enumerate() {
             let disposition = dispositions.get(index).unwrap();

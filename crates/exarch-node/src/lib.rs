@@ -716,6 +716,9 @@ fn create_with_progress_core(
 /// * `options` - Optional `ListOptions`; `new
 ///   ListOptions().withStoredTargets('read')` reads the link targets a 7z
 ///   archive keeps in entry data (default: left `'unread'`)
+/// * `destination` - Optional directory `extractArchive` would write to. Its
+///   volume decides whether a repeated name is listed as a `duplicate` skip or
+///   as refused in `dispositions`; nothing is created
 ///
 /// # Returns
 ///
@@ -740,6 +743,7 @@ pub fn list_archive<'env>(
     archive_path: String,
     config: Option<&SecurityConfig>,
     options: Option<&ListOptions>,
+    destination: Option<String>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options = options.map_or_default(ListOptions::to_core);
@@ -747,7 +751,14 @@ pub fn list_archive<'env>(
     spawn_blocking_promise(
         env,
         "archive listing",
-        move || list_core(&archive_path, &config_owned, options),
+        move || {
+            list_core(
+                &archive_path,
+                &config_owned,
+                options,
+                destination.as_deref(),
+            )
+        },
         Ok,
     )
 }
@@ -756,13 +767,19 @@ fn list_core(
     archive_path: &str,
     config: &exarch_core::SecurityConfig,
     options: exarch_core::ListOptions,
+    destination: Option<&str>,
 ) -> CoreResult<ArchiveManifest> {
     let archive_path = boundary_path(archive_path)?;
+    let volume = destination.map(boundary_path).transpose()?.map_or_else(
+        || Ok(exarch_core::VolumeIdentity::default()),
+        |destination| exarch_core::VolumeIdentity::of_destination(destination.as_ref()),
+    )?;
     ArchiveManifest::from_core(
         exarch_core::ListRequest::new(config)
             .with_options(options)
             .list(&archive_path)?,
         config,
+        volume,
     )
 }
 
@@ -775,6 +792,8 @@ fn list_core(
 ///
 /// * `archive_path` - Path to archive file
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+/// * `options` - Optional `ListOptions`, as in `listArchive`
+/// * `destination` - Optional destination directory, as in `listArchive`
 ///
 /// # Returns
 ///
@@ -799,13 +818,14 @@ pub fn list_archive_sync(
     archive_path: String,
     config: Option<&SecurityConfig>,
     options: Option<&ListOptions>,
+    destination: Option<String>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let options = options.map_or_default(ListOptions::to_core);
 
     run_sync(env, "archive listing", || {
-        list_core(&archive_path, config_ref, options)
+        list_core(&archive_path, config_ref, options, destination.as_deref())
     })
 }
 
@@ -1340,11 +1360,11 @@ mod tests {
     fn test_list_rejects_invalid_archive_path() {
         let options = exarch_core::ListOptions::default();
         assert_boundary_violation(
-            list_core("/tmp/test\0x.tar", &security(), options),
+            list_core("/tmp/test\0x.tar", &security(), options, None),
             "null bytes",
         );
         assert_boundary_violation(
-            list_core(&long_path(), &security(), options),
+            list_core(&long_path(), &security(), options, None),
             "maximum length",
         );
     }

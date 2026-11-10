@@ -15,6 +15,7 @@ use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::Limit;
 use exarch_core::ListOptions as CoreListOptions;
+use exarch_core::MarkPropagation;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
 use exarch_core::PathRewrite;
@@ -202,6 +203,11 @@ fn parse_exclude_patterns(patterns: &[String]) -> PyResult<Vec<exarch_core::Entr
 /// Parses the string form shared with `ExistingFiles::as_str`.
 pub fn parse_existing_files(value: &str) -> PyResult<ExistingFiles> {
     parse_one(ConfigSetting::ExistingFiles, value)
+}
+
+/// Parses the string form shared with `MarkPropagation::as_str`.
+pub fn parse_mark_propagation(value: &str) -> PyResult<MarkPropagation> {
+    parse_one(ConfigSetting::MarkPropagation, value)
 }
 
 /// Parses the string form shared with `Staging::as_str`.
@@ -1343,6 +1349,10 @@ impl PyCreationConfig {
 ///   directory and renames it onto a destination that is absent or empty,
 ///   `"atomic_replace"` also swaps it over an existing directory, replacing it
 ///   as a whole
+/// * `mark_propagation` - Whether the archive file's download-origin mark
+///   (Windows Mark-of-the-Web, macOS quarantine) is copied onto extracted
+///   files: `"never"` (default) copies nothing, `"when_marked"` copies it when
+///   the archive bears one. A no-op on Linux
 ///
 /// # Examples
 ///
@@ -1448,9 +1458,41 @@ impl PyExtractionOptions {
         Ok(slf)
     }
 
+    /// Sets whether the archive file's download-origin mark is copied onto
+    /// the extracted files.
+    ///
+    /// `"never"` (default) reads and copies nothing; `"when_marked"` copies the
+    /// Windows `Zone.Identifier` stream or the macOS quarantine attribute of
+    /// the archive file onto every extracted file (and, on macOS, every
+    /// directory the run creates). A failed write is counted in the report and
+    /// extraction continues. Linux has no mark, so nothing is copied there.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "mark_propagation"`) for any
+    /// other string.
+    fn with_mark_propagation<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner.mark_propagation = parse_mark_propagation(value)?;
+        Ok(slf)
+    }
+
     /// Finalizes the configuration (for API consistency).
     fn build(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf
+    }
+
+    #[getter]
+    fn get_mark_propagation(&self) -> &'static str {
+        self.inner.mark_propagation.as_str()
+    }
+
+    #[setter]
+    fn set_mark_propagation(&mut self, value: &str) -> PyResult<()> {
+        self.inner.mark_propagation = parse_mark_propagation(value)?;
+        Ok(())
     }
 
     #[getter]
@@ -1478,9 +1520,10 @@ impl PyExtractionOptions {
     /// Returns a debug string representation.
     fn __repr__(&self) -> String {
         format!(
-            "ExtractionOptions(existing_files={:?}, staging={:?})",
+            "ExtractionOptions(existing_files={:?}, staging={:?}, mark_propagation={:?})",
             self.inner.existing_files.as_str(),
-            self.inner.staging.as_str()
+            self.inner.staging.as_str(),
+            self.inner.mark_propagation.as_str()
         )
     }
 }

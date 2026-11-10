@@ -48,11 +48,13 @@ use crate::formats::dir_walker::DirWalker;
 use crate::formats::occupant::OccupantAction;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
+use crate::formats::pinned_dir::PendingMode;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
+use crate::mark::MarkRun;
 use crate::security::fs_view::HostFs;
 #[cfg(unix)]
 use crate::security::fs_view::LinkKind;
@@ -363,10 +365,21 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     let expected_size = permit.into_bytes();
     checked_add_bytes(report.bytes_written, expected_size)?;
 
+    let marking = root.marking();
+    let timing = ModeTiming::of(marking);
     let Some(OutputSlot {
         file: output_file,
+        pending,
         written_at,
-    }) = open_output_slot(&parent, leaf, safe_path.as_path(), mode, duplicates, root)?
+    }) = open_output_slot(
+        &parent,
+        leaf,
+        safe_path.as_path(),
+        mode,
+        duplicates,
+        root,
+        timing,
+    )?
     else {
         return record_duplicate_skip(report, safe_path.as_path());
     };
@@ -384,7 +397,11 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     )
     .map_err(|error| faults.classify(error))?;
     buffered_writer.flush()?;
-    drop(buffered_writer);
+    let output_file = buffered_writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
+    seal_output(&output_file, pending, marking)?;
+    drop(output_file);
     let replaced = matches!(written_at, WrittenAt::Temp(..));
     commit_output(&parent, written_at, leaf, safe_path.as_path())?;
     if replaced {
@@ -442,13 +459,50 @@ pub(crate) fn create_temp_sibling(
     dir: &VettedDir,
     entry: Leaf<'_>,
     mode: Option<SanitizedMode>,
+    replace: &ReplacePermit,
+    next_candidate: impl FnMut() -> TempLeaf,
+) -> std::io::Result<(TempLeaf, File)> {
+    create_temp_sibling_with(
+        dir,
+        entry,
+        mode,
+        ModeTiming::AtCreate,
+        replace,
+        next_candidate,
+    )
+    .map(|(temp, file, _)| (temp, file))
+}
+
+/// When a created file is given its mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModeTiming {
+    /// Right after the create, before any byte is written.
+    AtCreate,
+    /// After the caller wrote the download-origin mark, through the returned
+    /// [`PendingMode`].
+    AfterMark,
+}
+
+/// [`create_temp_sibling`] that can leave the mode to the caller.
+///
+/// With [`ModeTiming::AfterMark`] the returned [`PendingMode`] is still to be
+/// applied; with [`ModeTiming::AtCreate`] it is already spent.
+///
+/// # Errors
+///
+/// See [`create_temp_sibling`].
+pub(crate) fn create_temp_sibling_with(
+    dir: &VettedDir,
+    entry: Leaf<'_>,
+    mode: Option<SanitizedMode>,
+    timing: ModeTiming,
     _replace: &ReplacePermit,
     mut next_candidate: impl FnMut() -> TempLeaf,
-) -> std::io::Result<(TempLeaf, File)> {
+) -> std::io::Result<(TempLeaf, File, PendingMode)> {
     for _ in 0..MAX_TEMP_FILE_CREATE_ATTEMPTS {
         let candidate = next_candidate();
-        match dir.create_new(candidate.as_leaf(), mode) {
-            Ok(file) => return Ok((candidate, file)),
+        match create_file(dir, candidate.as_leaf(), mode, timing) {
+            Ok((file, pending)) => return Ok((candidate, file, pending)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
@@ -483,9 +537,59 @@ impl WrittenAt {
     }
 }
 
+impl ModeTiming {
+    /// The timing a run needs: the mode waits for the mark only when one is
+    /// written.
+    pub(crate) const fn of(marking: Option<&MarkRun>) -> Self {
+        if marking.is_some() {
+            Self::AfterMark
+        } else {
+            Self::AtCreate
+        }
+    }
+}
+
+/// Creates `leaf` exclusively and gives it its mode at `timing`.
+pub(crate) fn create_file(
+    dir: &VettedDir,
+    leaf: Leaf<'_>,
+    mode: Option<SanitizedMode>,
+    timing: ModeTiming,
+) -> std::io::Result<(File, PendingMode)> {
+    let (file, pending) = dir.create_new_deferred(leaf, mode)?;
+    match timing {
+        ModeTiming::AfterMark => Ok((file, pending)),
+        ModeTiming::AtCreate => {
+            pending.apply(&file)?;
+            Ok((file, PendingMode::applied()))
+        }
+    }
+}
+
+/// Writes the download-origin mark through `file`, then gives it the mode it
+/// was created without.
+///
+/// The mode is applied whatever the mark's result: a failed best-effort mark is
+/// counted by the run, and the file must not stay owner-only because of it.
+///
+/// # Errors
+///
+/// The I/O error of applying the mode.
+pub(crate) fn seal_output(
+    file: &File,
+    pending: PendingMode,
+    marking: Option<&MarkRun>,
+) -> std::io::Result<()> {
+    if let Some(run) = marking {
+        run.mark_file(file);
+    }
+    pending.apply(file)
+}
+
 /// An open, empty output file and where its content must end up.
 struct OutputSlot {
     file: File,
+    pending: PendingMode,
     written_at: WrittenAt,
 }
 
@@ -505,12 +609,14 @@ fn open_output_slot(
     mode: Option<SanitizedMode>,
     duplicates: ExistingFiles,
     root: &PinnedRoot,
+    timing: ModeTiming,
 ) -> Result<Option<OutputSlot>> {
-    match dir.create_new(leaf, mode) {
-        Ok(file) => {
+    match create_file(dir, leaf, mode, timing) {
+        Ok((file, pending)) => {
             root.created().note_file(duplicates, &file, dir, leaf, rel);
             Ok(Some(OutputSlot {
                 file,
+                pending,
                 written_at: WrittenAt::Final,
             }))
         }
@@ -525,10 +631,12 @@ fn open_output_slot(
                 return Ok(None);
             };
             refuse_non_file_occupant(dir, leaf, rel)?;
-            let (temp, file) = create_temp_sibling(dir, leaf, mode, &permit, TempLeaf::next)
-                .map_err(|e| replace_error(rel, &e))?;
+            let (temp, file, pending) =
+                create_temp_sibling_with(dir, leaf, mode, timing, &permit, TempLeaf::next)
+                    .map_err(|e| replace_error(rel, &e))?;
             Ok(Some(OutputSlot {
                 file,
+                pending,
                 written_at: WrittenAt::Temp(temp, permit),
             }))
         }
@@ -1005,14 +1113,14 @@ fn hardlink_target_changed(error: CopyError) -> ArchiveError {
 /// the permit's byte count, and an I/O error if the copy fails.
 pub(crate) fn copy_file_content_with_permit(
     mut from: File,
-    mut to: File,
+    to: &mut File,
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
     progress: &mut dyn ProgressCallback,
 ) -> Result<u64> {
     copy_cancellable(
         &mut from,
-        &mut to,
+        to,
         copy_buffer,
         Some(permit.into_bytes()),
         progress,
@@ -1576,7 +1684,7 @@ mod tests {
             let to = temp.path().join(format!("copy-{charged}"));
             let result = copy_file_content_with_permit(
                 File::open(&source).expect("open source"),
-                File::create(&to).expect("create copy"),
+                &mut File::create(&to).expect("create copy"),
                 &mut CopyBuffer::new(),
                 permit,
                 &mut NoopProgress,
@@ -2050,6 +2158,7 @@ mod refuse_probe_tests {
             None,
             ExistingFiles::Refuse,
             root,
+            ModeTiming::AtCreate,
         )
         .map(|slot| slot.map(drop))
     }

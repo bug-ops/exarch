@@ -484,6 +484,7 @@ mod tests {
     use exarch_core::QuotaResource;
     use exarch_core::Uncompressed;
     use exarch_core::Violation;
+    use exarch_core::VolumeIdentity;
     use std::path::PathBuf;
 
     #[test]
@@ -1273,7 +1274,7 @@ mod tests {
     #[test]
     fn every_disposition_has_a_dedicated_json_action_and_payload() {
         let (manifest, config) = crate::test_support::selected_manifest();
-        let dispositions = Dispositions::of(&manifest, &config);
+        let dispositions = Dispositions::of(&manifest, &config, VolumeIdentity::default());
         let mut seen = vec![Disposition::Refuse.kind()];
         for index in 0..manifest.entries().len() {
             let disposition = dispositions.get(index).unwrap();

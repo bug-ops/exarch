@@ -259,9 +259,10 @@ closed_enum! {
         /// Only the occupants an in-place overwrite run refuses are reported:
         /// a file at a directory landing, a directory at any other landing, a
         /// file at a hardlink landing, and, as the symlink refusal, a symlink
-        /// at a file or hardlink landing or at a symlink landing with a
-        /// different recorded target. A file at a file or symlink landing is
-        /// replaced, and a symlink with the same recorded target is skipped.
+        /// at a file or hardlink landing or at a symlink landing whose archive
+        /// target is not recorded or differs from the existing one. A file at a
+        /// file or symlink landing is replaced, and a symlink with the same
+        /// recorded target is skipped.
         Replaceable => "replaceable",
     }
 }
@@ -345,11 +346,12 @@ impl ListedArchive {
     ///
     /// [`DestinationCheck::Vacant`] requires every file or link landing to be
     /// empty and every directory landing to be a directory;
-    /// [`DestinationCheck::Replaceable`] checks only the landings that must be
-    /// directories. A refusal is
+    /// [`DestinationCheck::Replaceable`] checks only the landings an
+    /// in-place overwrite refuses. A refusal is
     /// [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
     /// naming the occupied landings, or the typed symlink refusal when an
-    /// existing symlink would be followed out of `dest`.
+    /// existing symlink would be followed out of `dest` or a symlink landing
+    /// over an existing symlink has an unread or different archive target.
     ///
     /// The check is advisory: the write itself decides again, so a path that
     /// appears after the check is still handled by

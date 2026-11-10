@@ -114,11 +114,7 @@ pub(super) fn locate(output_dir: &Path) -> Result<Option<(PathBuf, LeafBuf)>> {
             Ok(Some((parent.to_path_buf(), name)))
         }
         Err(e) if is_absent(&e) => Ok(None),
-        Err(e) => Err(ArchiveError::Io(io_context(
-            &e,
-            "failed to resolve the destination",
-            output_dir,
-        ))),
+        Err(e) => Err(ArchiveError::destination_not_accessible(output_dir, e)),
     }
 }
 
@@ -153,25 +149,13 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
         {
             return Ok(None);
         }
-        Err(e) => {
-            return Err(ArchiveError::Io(io_context(
-                &e,
-                "failed to resolve the destination parent",
-                &parent_path,
-            )));
-        }
+        Err(e) => return Err(ArchiveError::destination_not_accessible(output_dir, e)),
     };
-    let pin = VettedDir::open_path(&parent).map_err(|e| {
-        ArchiveError::Io(io_context(
-            &e,
-            "failed to pin the destination parent",
-            &parent,
-        ))
-    })?;
+    let pin = VettedDir::open_path(&parent)
+        .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
     let path = parent.join(&name);
-    let found = Destination::open(&pin, name.as_leaf()).map_err(|e| {
-        ArchiveError::Io(io_context(&e, "failed to inspect the destination", &path))
-    })?;
+    let found = Destination::open(&pin, name.as_leaf())
+        .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
     let (status, hold) = match found {
         Destination::Absent => return Ok(None),
         Destination::Other(status) => (status, None),
@@ -392,7 +376,7 @@ pub(super) fn run(
             &path,
         ))
     })?;
-    let staging = StagingDir::create(&pin, &parent, Seed::Replace(id, inheritance))?;
+    let staging = StagingDir::create(&pin, &parent, &path, Seed::Replace(id, inheritance))?;
 
     let report = match extract_in(&staging, options, progress, extract) {
         Ok(report) => report,
@@ -734,7 +718,7 @@ pub(super) fn swap_adoption_in(
         parent: &parent,
     };
     let pin = crate::formats::pinned_dir::support::pinned_at(&parent);
-    let staging = StagingDir::create(&pin, &parent, seed(dest.id)).unwrap();
+    let staging = StagingDir::create(&pin, &parent, &parent, seed(dest.id)).unwrap();
     let Ok(displaced) = Displaced::displace(&pin, &dest) else {
         panic!("the destination should be displaced");
     };

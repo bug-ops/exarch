@@ -27,6 +27,8 @@ use criterion::criterion_main;
 use criterion::measurement::WallTime;
 use exarch_core::ArchiveReader;
 use exarch_core::ArchiveType;
+use exarch_core::DecodeReuse;
+use exarch_core::DestinationCheck;
 use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
@@ -303,6 +305,104 @@ fn benchmark_many_small_files(c: &mut Criterion) {
                 });
             },
         );
+    }
+
+    group.finish();
+}
+
+/// How the entries of a nested archive follow one another.
+#[derive(Clone, Copy)]
+enum EntryOrder {
+    /// Every directory's entries together, as an archiver writes them.
+    Grouped,
+    /// Consecutive entries alternate between the directories.
+    Interleaved,
+}
+
+/// Creates a stored ZIP of `file_count` files spread over `fan_out`
+/// directories, each `depth` levels below the root.
+fn create_nested_files_zip(
+    file_count: usize,
+    fan_out: usize,
+    depth: usize,
+    order: EntryOrder,
+) -> Vec<u8> {
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let levels = "level/".repeat(depth.saturating_sub(1));
+    let per_dir = file_count.div_ceil(fan_out);
+
+    for i in 0..file_count {
+        let dir = match order {
+            EntryOrder::Grouped => i / per_dir,
+            EntryOrder::Interleaved => i % fan_out,
+        };
+        let filename = format!("dir{dir:03}/{levels}file{i:05}.txt");
+        zip.start_file(&filename, options).unwrap();
+        zip.write_all(b"x").unwrap();
+    }
+
+    zip.finish().unwrap().into_inner()
+}
+
+/// Cost of `check_destination` over the landings of a 10,000-entry archive
+/// (#1169): flat, shallow and deep layouts, so a cost that grows with path
+/// depth shows; the same layouts with two directories interleaved, which a
+/// one-slot parent cache cannot serve; and a layout whose top directories are
+/// symlinks, which no parent cache can keep. `replaceable_populated` and
+/// `vacant_populated` run over a destination that holds every landing,
+/// `vacant_empty` over one that holds none.
+fn benchmark_check_destination(c: &mut Criterion) {
+    const ENTRIES: usize = 10_000;
+    let mut group = c.benchmark_group("check_destination");
+    group.throughput(Throughput::Elements(ENTRIES as u64));
+    let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(ENTRIES * 2));
+    let aliasing = config.clone().with_allow_symlinks(true);
+    let grouped = |depth| create_nested_files_zip(ENTRIES, 100, depth, EntryOrder::Grouped);
+    let interleaved = |depth| create_nested_files_zip(ENTRIES, 2, depth, EntryOrder::Interleaved);
+
+    for (name, data, config, aliased) in [
+        ("flat", create_many_small_files_zip(ENTRIES), &config, false),
+        ("sorted_depth_2", grouped(2), &config, false),
+        ("sorted_depth_8", grouped(8), &config, false),
+        ("unsorted_depth_2", interleaved(2), &config, false),
+        ("unsorted_depth_8", interleaved(8), &config, false),
+        ("symlinked_depth_8", grouped(8), &aliasing, true),
+    ] {
+        let file = write_archive("archive.zip", &data);
+        let populated = TempDir::new().unwrap();
+        file.extract(config, &ExtractionOptions::default(), populated.path());
+        #[cfg(unix)]
+        if aliased {
+            for i in 0..100 {
+                let link = populated.path().join(format!("dir{i:03}"));
+                let real = populated.path().join(format!("real{i:03}"));
+                std::fs::rename(&link, &real).unwrap();
+                std::os::unix::fs::symlink(&real, &link).unwrap();
+            }
+        }
+        #[cfg(not(unix))]
+        if aliased {
+            continue;
+        }
+        let empty = TempDir::new().unwrap();
+        let listed = ListRequest::new(config)
+            .for_extraction(&file.path, DecodeReuse::default())
+            .unwrap();
+        let mut runs = vec![(
+            "replaceable_populated",
+            DestinationCheck::Replaceable,
+            &populated,
+        )];
+        if !aliased {
+            runs.push(("vacant_populated", DestinationCheck::Vacant, &populated));
+            runs.push(("vacant_empty", DestinationCheck::Vacant, &empty));
+        }
+        for (state, check, dest) in runs {
+            group.bench_function(format!("{name}/{state}"), |b| {
+                b.iter(|| std::hint::black_box(listed.check_destination(dest.path(), check)));
+            });
+        }
     }
 
     group.finish();
@@ -879,6 +979,7 @@ criterion_group!(
     benchmark_security_config,
     benchmark_many_small_files,
     benchmark_skipped_entries,
+    benchmark_check_destination,
     benchmark_zip_inspection,
     benchmark_large_files,
     benchmark_nested_directories,

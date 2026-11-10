@@ -425,7 +425,12 @@ impl PinnedRoot {
         let root = match output.place() {
             Place::Path(path) => Self::open(DestDir::new_or_create(path.to_path_buf())?)?,
             Place::Staged(staged) => {
-                let dest = DestDir::new(staged.path().to_path_buf())?;
+                // The stage path is internal; the user's destination is not
+                // named by it.
+                let dest = DestDir::new(staged.path().to_path_buf()).map_err(|e| match e {
+                    ArchiveError::DestinationNotAccessible { error, .. } => ArchiveError::Io(error),
+                    other => other,
+                })?;
                 #[cfg(unix)]
                 let dir = VettedDir::reopen_at(staged.root()).map_err(ArchiveError::Io)?;
                 #[cfg(not(unix))]

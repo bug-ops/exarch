@@ -2379,6 +2379,16 @@ mod tests {
     }
 
     #[test]
+    fn test_destination_not_accessible_names_the_destination_in_the_path_field() {
+        let d = described(CoreError::DestinationNotAccessible {
+            path: PathBuf::from("file.txt/sub"),
+            error: std::io::Error::from(std::io::ErrorKind::NotADirectory),
+        });
+        let path = d.props.path.expect("the destination is named");
+        assert!(path.ends_with("sub"), "{path}");
+    }
+
+    #[test]
     fn test_other_errors_carry_no_source_fault() {
         let d = described(CoreError::SourceNotFound {
             path: PathBuf::from("a.txt"),

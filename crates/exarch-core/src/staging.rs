@@ -280,11 +280,13 @@ impl AtomicDestination {
             problem,
         };
         let (parent, name) = if output_dir.exists() {
-            let canonical = output_dir.canonicalize().map_err(ArchiveError::Io)?;
+            let canonical = output_dir
+                .canonicalize()
+                .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
             if !canonical.is_dir() {
                 return Err(refuse(ConfigProblem::NotADirectory));
             }
-            if !is_empty_dir(&canonical)? {
+            if !is_empty_dir(&canonical, output_dir)? {
                 return Err(ArchiveError::OutputExists {
                     path: output_dir.to_path_buf(),
                 });
@@ -304,31 +306,23 @@ impl AtomicDestination {
             }
             let name = LeafBuf::of(output_dir).ok_or_else(|| refuse(ConfigProblem::NoParent))?;
             let parent = parent_or_cwd(output_dir);
-            std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;
-            let parent = parent.canonicalize().map_err(ArchiveError::Io)?;
+            let parent = std::fs::create_dir_all(parent)
+                .and_then(|()| parent.canonicalize())
+                .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
             (parent, name)
         };
-        let pin = VettedDir::open_path(&parent).map_err(|e| {
-            ArchiveError::Io(io_context(
-                &e,
-                "failed to pin the destination parent",
-                &parent,
-            ))
-        })?;
+        let pin = VettedDir::open_path(&parent)
+            .map_err(|e| ArchiveError::destination_not_accessible(output_dir, e))?;
         Ok(Self { name, parent, pin })
     }
 }
 
-/// Whether `dir` has no entries; a directory the caller cannot list is an
-/// error naming it, since its emptiness cannot be checked.
-fn is_empty_dir(dir: &Path) -> Result<bool> {
-    let unlistable = |error: io::Error| {
-        ArchiveError::Io(io_context(
-            &error,
-            "cannot list the destination to check that it is empty",
-            dir,
-        ))
-    };
+/// Whether `dir` has no entries; a directory the caller cannot list is a
+/// [`ArchiveError::DestinationNotAccessible`] naming `destination`, since its
+/// emptiness cannot be checked.
+fn is_empty_dir(dir: &Path, destination: &Path) -> Result<bool> {
+    let unlistable =
+        |error: io::Error| ArchiveError::destination_not_accessible(destination, error);
     let mut entries = std::fs::read_dir(dir).map_err(unlistable)?;
     entries
         .next()
@@ -410,7 +404,7 @@ fn extract_atomic(
 ) -> Result<ExtractionReport> {
     let destination = AtomicDestination::resolve(output_dir)?;
     let (seed, _hold) = atomic_seed(&destination, output_dir)?;
-    let mut staging = StagingDir::create(&destination.pin, &destination.parent, seed)?;
+    let mut staging = StagingDir::create(&destination.pin, &destination.parent, output_dir, seed)?;
 
     let mut report = match extract_in(&staging, options, progress, extract) {
         Ok(report) => report,

@@ -655,11 +655,13 @@ pub enum ArchiveError {
         error: std::io::Error,
     },
 
-    /// A `list` destination exists in a form that cannot be resolved.
+    /// A destination cannot be resolved, created or written.
     ///
-    /// Raised before the archive is read, when the destination probe of a
-    /// listing fails (for example a path below a regular file). `error` keeps
-    /// the cause; `path` is a host path and is redacted like any other.
+    /// Raised when the destination probe of a listing fails, and when an
+    /// extraction cannot create or open its destination (for example a path
+    /// below a regular file, a missing directory, or one that is not
+    /// writable). `error` keeps the cause; `path` is a host path and is
+    /// redacted like any other.
     #[error("destination is not accessible: {path}: {error}")]
     DestinationNotAccessible {
         /// The destination path.
@@ -991,6 +993,19 @@ impl ArchiveError {
 
 #[deny(clippy::wildcard_enum_match_arm)]
 impl ArchiveError {
+    /// A [`Self::DestinationNotAccessible`] naming the destination `path` the
+    /// caller asked for; the one constructor every destination-resolving
+    /// step uses.
+    pub(crate) fn destination_not_accessible(
+        path: &std::path::Path,
+        error: std::io::Error,
+    ) -> Self {
+        Self::DestinationNotAccessible {
+            path: path.to_path_buf(),
+            error,
+        }
+    }
+
     /// A malformed-archive refusal that has no family of its own.
     pub(crate) fn unclassified(reason: impl Into<Box<str>>) -> Self {
         Self::InvalidArchive(Malformation::unclassified(reason))

@@ -435,7 +435,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/exarch-node
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build native addon
         working-directory: crates/exarch-node
@@ -505,7 +505,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/exarch-node
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Publish to npm (Trusted Publishing)
         working-directory: crates/exarch-node

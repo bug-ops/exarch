@@ -23,6 +23,8 @@ use crate::formats::common::destination_occupied;
 use crate::formats::common::is_extension_allowed;
 use crate::formats::common::require_symlink_creation;
 use crate::formats::common::symlink_target_too_large;
+use crate::formats::file_identity::FileIdentity;
+use crate::formats::file_identity::identity_of;
 use crate::formats::occupant::is_run_duplicate;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
@@ -244,12 +246,9 @@ impl<'a> Landing<'a> {
 /// so a repeat spelled differently (`x` then `X`, `d/x` then `D/x`, or `l/x`
 /// then `d/x` through an archive symlink `l` to `d`) is refused instead of
 /// skipped. A listing has no destination to ask, so
-/// [`ArchiveManifest::dispositions_on`] takes this as input.
-///
-/// No production caller passes [`LandingPaths`](Self::LandingPaths) yet: it
-/// takes a caller that has opened its destination and learned that the volume
-/// gives no file identities, and no front end probes for that today. `list`
-/// cannot detect it by itself, so it keeps the default.
+/// [`ArchiveManifest::dispositions_on`] takes this as input, and
+/// [`of_destination`](Self::of_destination) learns it from the destination
+/// the caller names. Without a destination a listing keeps the default.
 ///
 /// # Examples
 ///
@@ -270,6 +269,64 @@ pub enum VolumeIdentity {
     /// only when the archive spells the path exactly as the earlier entry did;
     /// any other spelling of an occupied landing is refused.
     LandingPaths,
+}
+
+impl VolumeIdentity {
+    /// The identity basis of the volume that holds `destination`.
+    ///
+    /// Probes the nearest existing ancestor of `destination`, resolved through
+    /// symlinks, junctions and mount points first so the volume asked is the
+    /// one extraction writes to, not the one that holds a link to it. A volume
+    /// that reports no file id for its directory yields
+    /// [`LandingPaths`](Self::LandingPaths); every Unix file system, NTFS and
+    /// `ReFS` yield [`FileIds`](Self::FileIds). Nothing is created or written.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError::Io`] when no ancestor of `destination` can be resolved
+    /// or probed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::VolumeIdentity;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let dir = std::env::temp_dir();
+    /// let volume = VolumeIdentity::of_destination(&dir.join("not-yet-created"))?;
+    /// # let _ = volume;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn of_destination(destination: &Path) -> Result<Self> {
+        let existing = nearest_existing_ancestor(destination)?;
+        Ok(Self::from_identity(identity_of(&existing)?))
+    }
+
+    const fn from_identity(identity: FileIdentity) -> Self {
+        match identity {
+            FileIdentity::Known(_) => Self::FileIds,
+            FileIdentity::Unknown => Self::LandingPaths,
+        }
+    }
+}
+
+/// The canonical form of the closest ancestor of `path` (or `path` itself)
+/// that exists; a relative `path` is resolved against the working directory.
+fn nearest_existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
+    for candidate in path.ancestors() {
+        let candidate = if candidate.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            candidate
+        };
+        match std::fs::canonicalize(candidate) {
+            Ok(canonical) => return Ok(canonical),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::ErrorKind::NotFound.into())
 }
 
 /// What a listing remembers of the run so far to judge the next entry.
@@ -400,8 +457,8 @@ impl ArchiveManifest {
     /// Only the repeated-name answers differ: under
     /// [`VolumeIdentity::LandingPaths`] a repeat the archive spells differently
     /// from the earlier entry is [`Disposition::Refuse`], as extraction on such
-    /// a volume refuses it. Nothing in the crate chooses `LandingPaths` for a
-    /// caller: it is for a front end that knows its destination volume.
+    /// a volume refuses it. [`VolumeIdentity::of_destination`] learns the
+    /// volume of a destination path.
     ///
     /// # Examples
     ///
@@ -1381,6 +1438,58 @@ mod tests {
             eprintln!("skipping {test}: the test volume does not fold case");
         }
         skipped
+    }
+
+    #[test]
+    fn the_volume_of_a_missing_destination_is_the_volume_of_its_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("a").join("b");
+        assert_eq!(
+            VolumeIdentity::of_destination(&missing).unwrap(),
+            VolumeIdentity::of_destination(dir.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_volume_that_gives_file_ids_is_the_default_basis() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            VolumeIdentity::of_destination(dir.path()).unwrap(),
+            VolumeIdentity::FileIds
+        );
+    }
+
+    #[test]
+    fn an_unknown_identity_selects_the_path_basis() {
+        assert_eq!(
+            VolumeIdentity::from_identity(FileIdentity::Unknown),
+            VolumeIdentity::LandingPaths
+        );
+        let known = identity_of(Path::new(".")).unwrap();
+        assert_eq!(
+            VolumeIdentity::from_identity(known),
+            VolumeIdentity::FileIds
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_resolves_a_symlinked_destination_to_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let resolved = nearest_existing_ancestor(&link.join("new")).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&target).unwrap());
+    }
+
+    #[test]
+    fn a_destination_below_a_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"").unwrap();
+        assert!(VolumeIdentity::of_destination(&file.join("sub")).is_err());
     }
 
     /// The identity-keyed preview and extraction skip the last entry as a

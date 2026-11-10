@@ -30,6 +30,7 @@ Notes on the ratio:
 | `--allow-solid-archives` | off | Solid 7z (memory-exhaustion vector; trusted archives only). |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. `ignore` keeps the central-directory view and raises no structural finding; use only for trusted producers. See [formats.md](formats.md). |
 | `--decode-reuse <off\|memory\|temp-file>` | memory | ZIP only. Where the structural check keeps decoded deflate/bzip2/zstd output so extraction does not decode twice. `memory` keeps up to 256 MiB in RAM, `temp-file` up to 256 MiB in an unnamed temp file (plaintext in the temp dir until the run ends), `off` keeps nothing. No effect under `--zip-consistency ignore`. Invalid value: exit `2`. |
+| `--mark-propagation <never\|when-marked>` | never | Copy the archive file's download-origin mark onto extracted files; see "Download mark". Invalid value: exit `2`. |
 | `--banned-component <C>` | `.git .ssh .gnupg .aws .kube .docker .env` | Replaces the default list. Repeatable and comma-separable; tokens trimmed. A token with `/` or `\`, or equal to `.`/`..`, or a non-empty value with no token (`,`) is an error. |
 | `--allowed-extensions <EXT>` | all | Regular files only. Repeatable or comma-separated; leading dot optional, case-insensitive. A value that can never match (`tar.gz`, `a/b`) or names no extension (`,`, `""`) is an error. Order of checks: path first, then allowlist, then quotas: a skipped file is not charged to size quotas, creates no directories, and counts in `files_skipped`. A skipped entry with an unsafe path is refused, not skipped. |
 
@@ -67,6 +68,17 @@ Extract into a hidden staging directory (`0700`) in the destination's parent and
 - A failed publishing rename of plain `--atomic` (for example `OutputExists` because the destination was filled meanwhile) keeps its cause as `error.kind` and reports the extraction counts in `partial_report` with `writes` `"rolled_back"`.
 - A failed swap is an `IoError` whose message says whether the destination is unchanged or restored and where a backup is left; it reports the extraction counts in `partial_report` with `writes` `"rolled_back"` (the discarded run), which does not mean the destination is intact after a failed restore. `leftover_path` names a staging directory the swap could not remove.
 - Plain (non-atomic) `extract` resolves a symlinked destination via `canonicalize()` and writes through it, like `tar -C`.
+
+## Download mark (`--mark-propagation`)
+
+Archives downloaded from the internet carry a mark (macOS `com.apple.quarantine` attribute, Windows `Zone.Identifier` stream) that Gatekeeper, SmartScreen and Office Protected View read per file. By default extraction drops it (`never`: the archive's mark is not read). With `when-marked`:
+
+- The mark of the archive file is read once and copied onto every extracted file, hardlink copies and `--force` replacements included; on macOS also onto every directory this run creates (never a pre-existing directory, the destination root or the `--atomic` staging root). Symlinks are never marked.
+- macOS: a fresh `com.apple.quarantine` value per object (new identifier, agent `exarch`, source timestamp, flags limited to download/sandbox/hard bits). Windows: a `Zone.Identifier` stream holding only the source `ZoneId` (0-4; no URLs). Linux and other Unix: nothing is copied and the outcome is `unsupported_platform`.
+- The mark is written before an entry's final read-only mode applies (a `0444` entry is marked and ends `0444`). A failed write is counted in `failed` and extraction continues (exit `0`); text output then adds a warning line. Marks never come from archive content: a TAR `com.apple.quarantine` PAX record is ignored.
+- A source mark that exists but is malformed, non-ASCII or too long (macOS value over 256 bytes; Windows stream content past 4096 bytes is ignored) is still a mark: macOS writes flags `0001`, Windows writes `ZoneId=3` when no valid `ZoneId` is in the first 4096 bytes. Only an I/O error while reading the mark gives `unreadable`, marks nothing and prints the warning line; an unmarked archive gives `unmarked`.
+- Text output prints `Download mark: copied to N items, M failed` (or the reason nothing was copied) when the flag is `when-marked`; `--json` always carries `mark_propagation` (see [json-output.md](json-output.md)).
+- A destination volume without extended attributes or streams (FAT, some network shares) makes every write fail: `failed` counts them.
 
 ## `--decode-reuse` cost
 

@@ -343,13 +343,22 @@ impl DirWalker {
             Err(e) => e,
         };
         if err.kind() == std::io::ErrorKind::NotFound && missing == Missing::Create {
+            let mut made_here = false;
             match parent.make_dir(leaf) {
-                Ok(()) => root.created().note_directory(parent, leaf, walked),
+                Ok(()) => {
+                    root.created().note_directory(parent, leaf, walked);
+                    made_here = true;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e.into()),
             }
             err = match parent.open_dir(leaf) {
-                Ok(dir) => return Ok(Hop::plain(dir)),
+                Ok(dir) => {
+                    if made_here {
+                        root.mark_created_dir(&dir);
+                    }
+                    return Ok(Hop::plain(dir));
+                }
                 Err(e) => e,
             };
         }

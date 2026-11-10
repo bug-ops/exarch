@@ -50,6 +50,7 @@ Common flags (full table, grammar, and edge cases: [references/extract.md](refer
 |---|---|---|
 | `--force` | off | Overwrite existing destination files (replaced via temp file + rename). |
 | `--atomic` | off | Stage and rename into place on success; failure leaves the destination unchanged. |
+| `--mark-propagation <never\|when-marked>` | never | Copy the archive's download mark (macOS quarantine, Windows Mark-of-the-Web) onto extracted files; no-op on Linux. |
 | `--include` / `--exclude <GLOB>` | all | Select entries (repeatable; exclude wins). Also on `list` and `verify`. |
 | `--strip-components <N>` / `--flatten` | off | Drop leading path components / land files at top level (mutually exclusive). |
 | `--allowed-extensions <EXT>` | all | Extract only matching regular files (`txt,pdf`). |
@@ -80,7 +81,7 @@ Grammar, zip-ratio warning, name collisions, refused outputs (7z and ZIP-family 
 
 ### list `<ARCHIVE>`
 
-Flags: `-l/--long`, `-H/--human-readable` (requires `-l`), `--read-link-targets` (7z), `--allow-symlinks`, `--allow-hardlinks`, plus the quota, selection, `--zip-consistency` and `--allow-solid-archives` flags of `extract`. Exceeding a quota fails with `QuotaExceeded`; it never truncates. Details and JSON fields: [references/list.md](references/list.md).
+Flags: `-l/--long`, `-H/--human-readable` (requires `-l`), `--read-link-targets` (7z), `--destination <DIR>`, `--allow-symlinks`, `--allow-hardlinks`, plus the quota, selection, `--zip-consistency` and `--allow-solid-archives` flags of `extract`. Exceeding a quota fails with `QuotaExceeded`; it never truncates. Details and JSON fields: [references/list.md](references/list.md).
 
 ### verify `<ARCHIVE>`
 

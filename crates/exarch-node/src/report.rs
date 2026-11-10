@@ -946,6 +946,15 @@ pub struct ExtractionReport {
     pub files_skipped: i64,
     /// The skipped entries by reason.
     pub skipped: SkippedSummary,
+    /// What download-origin mark propagation did.
+    #[napi(
+        ts_type = "'not_requested' | 'unsupported_platform' | 'unmarked' | 'unreadable' | 'propagated'"
+    )]
+    pub mark_propagation: String,
+    /// Files (and, on macOS, directories) that now carry the mark.
+    pub marks_written: i64,
+    /// Files (and directories) whose mark could not be written.
+    pub marks_failed: i64,
     /// Conditions worth surfacing that are not skipped entries; branch on
     /// `kind`, `message` is the human-readable text.
     #[napi(ts_type = "Array<ExtractionWarning>")]
@@ -969,6 +978,9 @@ impl From<CoreReport> for ExtractionReport {
             duration_ms: saturating_millis(report.duration),
             files_skipped: saturating_usize(report.files_skipped()),
             skipped: SkippedSummary::from(&report.skipped),
+            mark_propagation: report.mark.as_str().to_owned(),
+            marks_written: saturating_usize(report.mark.marked()),
+            marks_failed: saturating_usize(report.mark.failed()),
             warnings: report.warnings.iter().map(extraction_warning).collect(),
             total_items: saturating_usize(report.total_items()),
             has_warnings: report.has_warnings(),
@@ -1068,7 +1080,8 @@ pub struct ArchiveManifest {
 }
 
 impl ArchiveManifest {
-    /// Converts a core manifest listed under `config`.
+    /// Converts a core manifest listed under `config`, with dispositions for a
+    /// destination volume that identifies landings as `volume` says.
     ///
     /// # Errors
     ///
@@ -1077,12 +1090,13 @@ impl ArchiveManifest {
     pub fn from_core(
         manifest: exarch_core::ArchiveManifest,
         config: &exarch_core::SecurityConfig,
+        volume: exarch_core::VolumeIdentity,
     ) -> CoreResult<Self> {
         let total_entries = saturating_usize(manifest.total_entries());
         let total_size = ByteSize::new(manifest.total_size());
         let format = manifest.format().as_str().to_owned();
         let dispositions = manifest
-            .dispositions(config)
+            .dispositions_on(config, volume)
             .map(|(entry, disposition)| entry_disposition(&entry.path, disposition))
             .collect::<CoreResult<_>>()?;
         Ok(Self {
@@ -2200,9 +2214,12 @@ mod tests {
             .add_entry(sized_entry("other.txt", 1))
             .unwrap();
 
-        let manifest =
-            ArchiveManifest::from_core(core_manifest, &exarch_core::SecurityConfig::default())
-                .unwrap();
+        let manifest = ArchiveManifest::from_core(
+            core_manifest,
+            &exarch_core::SecurityConfig::default(),
+            exarch_core::VolumeIdentity::default(),
+        )
+        .unwrap();
 
         assert_eq!(manifest.total_entries, 2);
         assert_eq!(manifest.dispositions.len(), 2);
@@ -2246,9 +2263,12 @@ mod tests {
                 .unwrap();
         }
 
-        let manifest =
-            ArchiveManifest::from_core(core_manifest, &exarch_core::SecurityConfig::default())
-                .unwrap();
+        let manifest = ArchiveManifest::from_core(
+            core_manifest,
+            &exarch_core::SecurityConfig::default(),
+            exarch_core::VolumeIdentity::default(),
+        )
+        .unwrap();
 
         assert_eq!(manifest.total_entries, 10);
         assert_eq!(manifest.total_size, 5000);
@@ -2502,9 +2522,12 @@ mod tests {
             .add_entry(sized_entry("big", u64::MAX))
             .unwrap();
 
-        let manifest =
-            ArchiveManifest::from_core(core_manifest, &exarch_core::SecurityConfig::default())
-                .unwrap();
+        let manifest = ArchiveManifest::from_core(
+            core_manifest,
+            &exarch_core::SecurityConfig::default(),
+            exarch_core::VolumeIdentity::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             manifest.total_size, MAX_SAFE,

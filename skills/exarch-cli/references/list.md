@@ -13,6 +13,7 @@
 | `--allow-solid-archives` | off | List solid 7z (higher memory). |
 | `--allow-symlinks` / `--allow-hardlinks` | off | As `extract`: they set the link dispositions of the [selection preview](#selection-preview), so a link shows `[refused]` unless `extract` with the same flags would place it. `--allow-symlinks` implies `--read-link-targets`. |
 | `--read-link-targets` | off | Read 7z symlink targets (decodes the blocks that hold them, in a large solid block most of the archive). Otherwise `link_target` state is `unread`. TAR and ZIP always show targets. |
+| `--destination <DIR>` | none | Destination `extract` would write to. It only affects the [selection preview](#selection-preview), so it changes nothing without a selection flag. With one, on a volume that reports no file ids (Windows without `FileIdInfo`) a differently spelled repeat of a name (`x` then `X`) shows `[refused]` instead of `duplicate`, as `extract` refuses it; on every other volume the output is unchanged. `list` probes the volume of the nearest existing ancestor and creates nothing. A path that cannot be resolved (for example below a file) fails `list` before the archive is read, with `IoError` naming the destination, exit `1`. |
 | `--zip-consistency <enforce\|ignore>` | enforce | Under `enforce` an ambiguous ZIP fails `ZipInconsistency` instead of being listed. |
 | `--include`, `--exclude`, `--strip-components`, `--flatten` | off | Same grammar as `extract` ([extract.md](extract.md)). |
 

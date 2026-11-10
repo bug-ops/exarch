@@ -40,11 +40,13 @@ use std::io::SeekFrom;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::DecodeReuse;
 use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::ListOptions;
+use crate::MarkPropagation;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -64,7 +66,6 @@ use crate::formats::source_fault::SourceRead;
 use crate::formats::source_fault::SourceTap;
 use crate::formats::source_fault::TapSource;
 use crate::formats::spool::TempSpool;
-use crate::formats::tar::open_tar_stream;
 use crate::formats::traits::ArchiveFormat;
 use crate::formats::zip::ZipArchive;
 use crate::inspection::ArchiveManifest;
@@ -72,7 +73,9 @@ use crate::inspection::integrity::TarTrailer;
 use crate::inspection::list::ListPass;
 use crate::inspection::list::list_detected;
 use crate::inspection::list::list_tar_stream;
+use crate::mark::MarkRun;
 use crate::reader::SeekableFormat;
+use crate::reader::decode_tar_stream;
 use crate::staging::extract_staged;
 
 mod destination;
@@ -105,8 +108,38 @@ const fn replays(codec: CompressionCodec) -> bool {
 /// What a list pass kept for extraction.
 enum Kept {
     Nothing,
-    TarSpool(Spool),
-    Zip(Box<ZipArchive<File>>),
+    TarSpool(Spool, SourceFile),
+    Zip(Box<ZipArchive<SourceFile>>, SourceFile),
+}
+
+/// The archive file the list pass opened, kept so the download mark is read
+/// from that same handle at extraction instead of from the path again.
+///
+/// Reads and seeks through a shared reference, so the list pass's reader and
+/// the extraction's mark read use one open file with no extra syscall.
+#[derive(Clone, Debug)]
+struct SourceFile(Arc<File>);
+
+impl SourceFile {
+    fn open(path: &Path) -> Result<Self> {
+        open_archive(path).map(|file| Self(Arc::new(file)))
+    }
+
+    fn file(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Read for SourceFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.0).read(buf)
+    }
+}
+
+impl Seek for SourceFile {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        (&*self.0).seek(pos)
+    }
 }
 
 impl Kept {
@@ -121,8 +154,8 @@ impl Kept {
     fn serves(&self, config: &SecurityConfig) -> bool {
         match self {
             Self::Nothing => true,
-            Self::TarSpool(spool) => DecoderLimits::of(config).covers(spool.decoded_with),
-            Self::Zip(zip) => zip.serves(config),
+            Self::TarSpool(spool, _) => DecoderLimits::of(config).covers(spool.decoded_with),
+            Self::Zip(zip, _) => zip.serves(config),
         }
     }
 }
@@ -163,6 +196,11 @@ pub struct ListedExtractOptions {
     /// What to do with an occupied destination path; see
     /// [`ExtractionOptions::existing_files`].
     pub existing_files: ExistingFiles,
+    /// Whether the archive file's download-origin mark is copied onto the
+    /// extracted files; see [`ExtractionOptions::mark_propagation`].
+    ///
+    /// The mark is read from the handle the listing opened.
+    pub mark_propagation: MarkPropagation,
 }
 
 impl Default for ListedExtractOptions {
@@ -171,6 +209,7 @@ impl Default for ListedExtractOptions {
         Self {
             staging: options.staging,
             existing_files: options.existing_files,
+            mark_propagation: options.mark_propagation,
         }
     }
 }
@@ -187,6 +226,14 @@ impl ListedExtractOptions {
     #[must_use]
     pub const fn with_existing_files(mut self, existing_files: ExistingFiles) -> Self {
         self.existing_files = existing_files;
+        self
+    }
+
+    /// Chooses whether the archive file's download-origin mark is copied onto
+    /// the extracted files.
+    #[must_use]
+    pub const fn with_mark_propagation(mut self, mark_propagation: MarkPropagation) -> Self {
+        self.mark_propagation = mark_propagation;
         self
     }
 }
@@ -268,8 +315,8 @@ impl std::fmt::Debug for ListedArchive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kept = match self.kept {
             Kept::Nothing => "nothing",
-            Kept::TarSpool(_) => "tar spool",
-            Kept::Zip(_) => "zip archive",
+            Kept::TarSpool(..) => "tar spool",
+            Kept::Zip(..) => "zip archive",
         };
         f.debug_struct("ListedArchive")
             .field("archive", &self.archive)
@@ -286,7 +333,7 @@ const _: () = {
 impl ListedArchive {
     #[cfg(test)]
     const fn has_spool(&self) -> bool {
-        matches!(self.kept, Kept::TarSpool(_))
+        matches!(self.kept, Kept::TarSpool(..))
     }
 
     /// Refuses a destination that the write phase would refuse, with the same
@@ -350,6 +397,7 @@ impl ListedArchive {
         let extraction = ExtractionOptions::default()
             .with_staging(options.staging)
             .with_existing_files(options.existing_files)
+            .with_mark_propagation(options.mark_propagation)
             .with_decode_reuse(reuse);
         debug_assert!(
             kept.serves(&config),
@@ -377,7 +425,7 @@ fn extract_kept(
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     let spool = match kept {
-        Kept::Zip(zip) => {
+        Kept::Zip(zip, source) => {
             let zip = (*zip).rebind(config);
             return extract_staged(
                 output_dir,
@@ -385,10 +433,14 @@ fn extract_kept(
                 &config.selection,
                 Some(archive),
                 progress,
-                |dir, options, progress| zip.extract(dir, options, progress),
+                |dir, options, progress| {
+                    let mark = MarkRun::open(options.mark_propagation, source.file());
+                    let extracted = zip.extract(dir.with_mark(mark.as_ref()), options, progress);
+                    MarkRun::stamp(mark.as_deref(), extracted)
+                },
             );
         }
-        Kept::TarSpool(spool) => Some(spool),
+        Kept::TarSpool(spool, source) => Some((spool, source)),
         Kept::Nothing => None,
     };
     extract_staged(
@@ -398,7 +450,17 @@ fn extract_kept(
         Some(archive),
         progress,
         |dir, options, progress| match spool {
-            Some(spool) => replay_spool(spool.file, dir, config, options, progress),
+            Some((spool, source)) => {
+                let mark = MarkRun::open(options.mark_propagation, source.file());
+                let extracted = replay_spool(
+                    spool.file,
+                    dir.with_mark(mark.as_ref()),
+                    config,
+                    options,
+                    progress,
+                );
+                MarkRun::stamp(mark.as_deref(), extracted)
+            }
             None => extract_validated(archive, dir, config, options, progress),
         },
     )
@@ -479,20 +541,22 @@ fn list_with_limit(
     }
     let (manifest, kept) = match format.family() {
         FormatFamily::Tar(Some(codec)) if replays(codec) && fits(archive, codec, limit) => {
-            let decoded = open_tar_stream(archive, Some(codec), DecoderLimits::of(config))?;
+            let file = SourceFile::open(archive)?;
+            let decoded = decode_tar_stream(file.clone(), Some(codec), DecoderLimits::of(config))?;
             let source = decoded.source();
             let mut tee = SpoolTee::new(decoded.stream, limit, config.max_decoder_memory.get());
             let manifest =
                 list_tar_stream(&mut tee, source, Some(codec), format, config, &mut pass)?;
             let kept = tee
                 .finish_spool(config)
-                .map_or(Kept::Nothing, Kept::TarSpool);
+                .map_or(Kept::Nothing, |spool| Kept::TarSpool(spool, file));
             (manifest, kept)
         }
         FormatFamily::Seekable(SeekableFormat::Zip) => {
-            let mut zip = ZipArchive::for_extraction(open_archive(archive)?, config, reuse)?;
+            let file = SourceFile::open(archive)?;
+            let mut zip = ZipArchive::for_extraction(file.clone(), config, reuse)?;
             let manifest = zip.list_with(config, &mut pass)?;
-            (manifest, Kept::Zip(Box::new(zip)))
+            (manifest, Kept::Zip(Box::new(zip), file))
         }
         _ => (
             list_detected(archive, format, config, &mut pass)?,

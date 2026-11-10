@@ -110,6 +110,9 @@ SHARED = [
             "duration_ms",
             "files_skipped",
             "skipped",
+            "mark_propagation",
+            "marks_written",
+            "marks_failed",
             "warnings",
             "total_items",
             "has_warnings",
@@ -215,3 +218,11 @@ def test_the_bindings_expose_the_same_fields(python_class, node_interfaces, fiel
         if python_name not in BUILTIN_ATTRIBUTES:
             assert python_name in python, f"{python_class}.{python_name} is missing from exarch.pyi"
         assert node_name in node, f"{node_interfaces}.{node_name} is missing from index.d.ts"
+
+
+def test_the_mark_states_match_between_the_bindings():
+    python = re.search(r"^_MarkState = Literal\[(.*?)\]", PYI, re.MULTILINE | re.DOTALL)
+    node = re.search(r"^  markPropagation: ([^\n]+)$", DTS, re.MULTILINE)
+    assert python, "exarch.pyi has no _MarkState"
+    assert node, "index.d.ts ExtractionReport has no markPropagation"
+    assert set(re.findall(r'"(\w+)"', python.group(1))) == set(re.findall(r"'(\w+)'", node.group(1)))

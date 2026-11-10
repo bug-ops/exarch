@@ -1,0 +1,63 @@
+name: NetBSD and illumos
+
+# Runs the directory-mode and atomic-swap backup tests in NetBSD and illumos
+# (OmniOS) VMs, the only places those code paths execute on these systems.
+# Until a run is green the documented behavior there stays "expected,
+# unobserved".
+on:
+  schedule:
+    - cron: '30 3 * * 1'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - crates/exarch-core/src/formats/pinned_dir.rs
+      - crates/exarch-core/src/staging/**
+      - .github/scripts/vm-dir-mode-tests.sh
+      - .github/workflows/netbsd-illumos.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  netbsd:
+    name: Directory mode tests (NetBSD, unprivileged)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run directory mode tests in a NetBSD VM
+        uses: vmactions/netbsd-vm@5957cf330aef2e6ddc63c604364c99ce2e02b91d # v1.5.3
+        with:
+          release: '10.2'
+          prepare: |
+            pkgin -y install curl mozilla-rootcerts-openssl
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          run: sh .github/scripts/vm-dir-mode-tests.sh
+
+  illumos:
+    name: Directory mode tests (illumos, unprivileged)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run directory mode tests in an OmniOS VM
+        uses: vmactions/omnios-vm@aeee92416495d9685b2997d954f6b063ae5b832d # v1.3.8
+        with:
+          release: 'r151054-build'
+          prepare: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          run: sh .github/scripts/vm-dir-mode-tests.sh

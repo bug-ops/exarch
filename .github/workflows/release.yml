@@ -13,8 +13,7 @@ env:
   RUSTUP_MAX_RETRIES: 10
 
 permissions:
-  contents: write
-  id-token: write  # Required for trusted publishing (PyPI OIDC, npm provenance)
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -36,16 +35,18 @@ jobs:
 
       - name: Extract version from tag
         id: version
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Releasing version: $VERSION"
 
       - name: Verify version matches Cargo.toml
+        env:
+          TAG_VERSION: ${{ steps.version.outputs.version }}
         run: |
           CARGO_VERSION=$(grep -m 1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          TAG_VERSION="${{ steps.version.outputs.version }}"
           if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
             echo "Error: Cargo.toml version ($CARGO_VERSION) does not match tag version ($TAG_VERSION)"
             exit 1
@@ -64,6 +65,8 @@ jobs:
       id-token: write  # Required for trusted publishing
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -112,13 +115,11 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            maturin-args: --target x86_64-unknown-linux-gnu
 
           # Linux aarch64
           - name: linux-aarch64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            maturin-args: --target aarch64-unknown-linux-gnu
 
           # Linux x86_64 (musl)
           - name: linux-musl-x86_64
@@ -136,19 +137,16 @@ jobs:
           - name: macos-x86_64
             os: macos-15-intel
             target: x86_64-apple-darwin
-            maturin-args: --target x86_64-apple-darwin
 
           # macOS aarch64 (Apple Silicon)
           - name: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
-            maturin-args: --target aarch64-apple-darwin
 
           # Windows x86_64
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            maturin-args: --target x86_64-pc-windows-msvc
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -228,7 +226,10 @@ jobs:
       - name: Build wheels
         if: ${{ !matrix.platform.musl-image }}
         working-directory: crates/exarch-python
-        run: maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.11
+        shell: bash
+        env:
+          TARGET: ${{ matrix.platform.target }}
+        run: maturin build --release --target "$TARGET" --strip --out wheels -i python3.11
 
       - name: Upload wheels
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -281,6 +282,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -301,16 +304,21 @@ jobs:
           shared-key: "cli-${{ matrix.platform.name }}"
 
       - name: Build exarch-cli
-        run: cargo build -p exarch-cli --release --target ${{ matrix.platform.target }}
+        shell: bash
+        env:
+          TARGET: ${{ matrix.platform.target }}
+        run: cargo build -p exarch-cli --release --target "$TARGET"
 
       - name: Package archive (Unix)
         if: matrix.platform.archive == 'tar.gz'
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          TARGET: ${{ matrix.platform.target }}
         run: |
-          VERSION="${{ needs.validate.outputs.version }}"
-          NAME="exarch-${VERSION}-${{ matrix.platform.target }}"
+          NAME="exarch-${VERSION}-${TARGET}"
           STAGE="$(mktemp -d)/${NAME}"
           mkdir -p "$STAGE"
-          cp "target/${{ matrix.platform.target }}/release/exarch" "$STAGE/"
+          cp "target/${TARGET}/release/exarch" "$STAGE/"
           cp LICENSE-MIT LICENSE-APACHE README.md "$STAGE/"
           tar -C "$(dirname "$STAGE")" -czf "${NAME}.tar.gz" "${NAME}"
           if command -v sha256sum >/dev/null 2>&1; then
@@ -322,12 +330,14 @@ jobs:
       - name: Package archive (Windows)
         if: matrix.platform.archive == 'zip'
         shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          TARGET: ${{ matrix.platform.target }}
         run: |
-          $Version = "${{ needs.validate.outputs.version }}"
-          $Name = "exarch-$Version-${{ matrix.platform.target }}"
+          $Name = "exarch-$Env:VERSION-$Env:TARGET"
           $Stage = Join-Path $Env:RUNNER_TEMP $Name
           New-Item -ItemType Directory -Path $Stage | Out-Null
-          Copy-Item "target/${{ matrix.platform.target }}/release/exarch.exe" -Destination $Stage
+          Copy-Item "target/$Env:TARGET/release/exarch.exe" -Destination $Stage
           Copy-Item LICENSE-MIT, LICENSE-APACHE, README.md -Destination $Stage
           Compress-Archive -Path $Stage -DestinationPath "$Name.zip"
           (Get-FileHash "$Name.zip" -Algorithm SHA256).Hash.ToLower() + "  $Name.zip" | Out-File -Encoding ascii "$Name.zip.sha256"
@@ -448,7 +458,10 @@ jobs:
 
       - name: Build native addon
         working-directory: crates/exarch-node
-        run: pnpm run build --target ${{ matrix.platform.target }}
+        shell: bash
+        env:
+          TARGET: ${{ matrix.platform.target }}
+        run: pnpm run build --target "$TARGET"
 
       - name: Upload bindings
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -476,6 +489,8 @@ jobs:
       id-token: write  # Required for trusted publishing (OIDC)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -520,10 +535,13 @@ jobs:
     needs: [validate, publish-crates, publish-python, publish-node, build-cli-binaries]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write  # softprops/action-gh-release creates the release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download Python wheels
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -547,9 +565,9 @@ jobs:
 
       - name: Generate changelog
         id: changelog
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          VERSION="${{ needs.validate.outputs.version }}"
-
           # Get the previous tag
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
 
@@ -624,14 +642,20 @@ jobs:
     needs: [publish-crates, publish-python, publish-node, github-release]
     runs-on: ubuntu-latest
     if: always()
+    permissions: {}
     steps:
       - name: Check all release jobs
+        env:
+          PUBLISH_CRATES_RESULT: ${{ needs.publish-crates.result }}
+          PUBLISH_PYTHON_RESULT: ${{ needs.publish-python.result }}
+          PUBLISH_NODE_RESULT: ${{ needs.publish-node.result }}
+          GITHUB_RELEASE_RESULT: ${{ needs.github-release.result }}
         run: |
           REQUIRED_JOBS=(
-            "${{ needs.publish-crates.result }}"
-            "${{ needs.publish-python.result }}"
-            "${{ needs.publish-node.result }}"
-            "${{ needs.github-release.result }}"
+            "$PUBLISH_CRATES_RESULT"
+            "$PUBLISH_PYTHON_RESULT"
+            "$PUBLISH_NODE_RESULT"
+            "$GITHUB_RELEASE_RESULT"
           )
 
           for result in "${REQUIRED_JOBS[@]}"; do

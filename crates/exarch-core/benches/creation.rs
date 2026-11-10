@@ -26,10 +26,26 @@ use exarch_core::CreationConfig;
 use exarch_core::Durability;
 use exarch_core::EntryPattern;
 use exarch_core::OutputFile;
+use std::collections::BTreeMap;
 use std::fs;
+use std::fs::File;
 use std::hint::black_box;
+use std::io::Cursor;
+use std::io::Seek;
+use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 use tempfile::TempDir;
+use zip::CompressionMethod;
+use zip::DateTime;
+use zip::PreparedZipFile;
+use zip::ZipWriter;
+use zip::write::SimpleFileOptions;
 
 /// Creates a test directory with a specified number of files.
 ///
@@ -515,6 +531,233 @@ fn benchmark_strip_prefix(c: &mut Criterion) {
     group.finish();
 }
 
+const PROTOTYPE_FILES: usize = 2000;
+const PROTOTYPE_FILE_BYTES: usize = 128 * 1024;
+const PROTOTYPE_WORKERS: [usize; 4] = [1, 2, 4, 8];
+const PROTOTYPE_ROOT: &str = "bench_data";
+
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        usize::try_from(self.next() % u64::try_from(bound).unwrap()).unwrap()
+    }
+}
+
+/// Seeded text drawn from a 256-word vocabulary, compressible about 3x by
+/// DEFLATE.
+fn write_compressible_text(rng: &mut Xorshift, vocabulary: &[String], len: usize) -> Vec<u8> {
+    let mut text = Vec::with_capacity(len + 16);
+    while text.len() < len {
+        let word = &vocabulary[rng.below(vocabulary.len())];
+        text.extend_from_slice(word.as_bytes());
+        text.push(if rng.below(12) == 0 { b'\n' } else { b' ' });
+    }
+    text.truncate(len);
+    text
+}
+
+fn create_compressible_directory(temp: &TempDir) -> (PathBuf, Vec<PathBuf>) {
+    let dir = temp.path().join(PROTOTYPE_ROOT);
+    fs::create_dir_all(&dir).unwrap();
+    let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
+    let vocabulary: Vec<String> = (0..256)
+        .map(|_| {
+            let len = 3 + rng.below(6);
+            (0..len)
+                .map(|_| char::from(b'a' + u8::try_from(rng.below(26)).unwrap()))
+                .collect()
+        })
+        .collect();
+    let files = (0..PROTOTYPE_FILES)
+        .map(|i| {
+            let path = dir.join(format!("file_{i:05}.txt"));
+            fs::write(
+                &path,
+                write_compressible_text(&mut rng, &vocabulary, PROTOTYPE_FILE_BYTES),
+            )
+            .unwrap();
+            path
+        })
+        .collect();
+    (dir, files)
+}
+
+fn prototype_options(method: CompressionMethod, level: i64) -> SimpleFileOptions {
+    SimpleFileOptions::default()
+        .compression_method(method)
+        .compression_level(Some(level))
+        .unix_permissions(0o644)
+        .last_modified_time(DateTime::from_date_and_time(2024, 1, 1, 0, 0, 0).unwrap())
+}
+
+fn archive_name(path: &Path) -> String {
+    format!(
+        "{PROTOTYPE_ROOT}/{}",
+        path.file_name().unwrap().to_string_lossy()
+    )
+}
+
+fn add_root_directory<W: Write + Seek>(zip: &mut ZipWriter<W>, options: SimpleFileOptions) {
+    zip.add_directory(
+        format!("{PROTOTYPE_ROOT}/"),
+        options.unix_permissions(0o755),
+    )
+    .unwrap();
+}
+
+/// Streams every file through `start_file`, as `write_zip` does today.
+fn write_streaming<W: Write + Seek>(out: W, files: &[PathBuf], options: SimpleFileOptions) -> W {
+    let mut zip = ZipWriter::new(out);
+    add_root_directory(&mut zip, options);
+    for path in files {
+        zip.start_file(archive_name(path), options).unwrap();
+        std::io::copy(&mut File::open(path).unwrap(), &mut zip).unwrap();
+    }
+    zip.finish().unwrap()
+}
+
+/// Compresses entries on `workers` scoped threads and appends them in walk
+/// order with `add_prepared_file`.
+fn write_prepared<W: Write + Seek>(
+    out: W,
+    files: &[PathBuf],
+    options: SimpleFileOptions,
+    workers: usize,
+) -> W {
+    let mut zip = ZipWriter::new(out);
+    add_root_directory(&mut zip, options);
+    let next = AtomicUsize::new(0);
+    let (tx, rx) = mpsc::channel();
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let next = &next;
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(path) = files.get(index) else { break };
+                    let prepared =
+                        PreparedZipFile::from_path(archive_name(path), path, options).unwrap();
+                    tx.send((index, prepared)).unwrap();
+                }
+            });
+        }
+        drop(tx);
+        let mut pending = BTreeMap::new();
+        let mut expected = 0;
+        for (index, prepared) in rx {
+            pending.insert(index, prepared);
+            while let Some(prepared) = pending.remove(&expected) {
+                zip.add_prepared_file(prepared).unwrap();
+                expected += 1;
+            }
+        }
+    });
+    zip.finish().unwrap()
+}
+
+fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
+    a.iter()
+        .zip(b)
+        .position(|(x, y)| x != y)
+        .or_else(|| (a.len() != b.len()).then(|| a.len().min(b.len())))
+}
+
+/// Prints whether the streaming path and the prepared path agree, and asserts
+/// that the prepared path is independent of the worker count.
+fn report_byte_identity(label: &str, files: &[PathBuf], options: SimpleFileOptions) {
+    let build =
+        |f: &dyn Fn(Cursor<Vec<u8>>) -> Cursor<Vec<u8>>| f(Cursor::new(Vec::new())).into_inner();
+    let streaming = build(&|out| write_streaming(out, files, options));
+    let prepared: Vec<(usize, Vec<u8>)> = PROTOTYPE_WORKERS
+        .iter()
+        .map(|&n| (n, build(&|out| write_prepared(out, files, options, n))))
+        .collect();
+    let (_, base) = &prepared[0];
+    eprintln!(
+        "[{label}] streaming vs prepared(n=1): {:?} (bytes {} vs {})",
+        first_difference(&streaming, base),
+        streaming.len(),
+        base.len()
+    );
+    for (n, bytes) in &prepared[1..] {
+        assert_eq!(
+            first_difference(base, bytes),
+            None,
+            "[{label}] prepared(n=1) differs from prepared(n={n})"
+        );
+    }
+}
+
+/// Opt-in (`EXARCH_BENCH_ZIP_PARALLEL=1`): builds a 256 MiB fixture.
+fn benchmark_zip_parallel_prototype(c: &mut Criterion) {
+    if std::env::var_os("EXARCH_BENCH_ZIP_PARALLEL").is_none() {
+        return;
+    }
+    let temp = TempDir::new().unwrap();
+    let (source_dir, files) = create_compressible_directory(&temp);
+    eprintln!(
+        "zip_parallel_prototype: {} cores, {} files x {} bytes",
+        thread::available_parallelism().unwrap(),
+        PROTOTYPE_FILES,
+        PROTOTYPE_FILE_BYTES
+    );
+    let total_bytes = (PROTOTYPE_FILES * PROTOTYPE_FILE_BYTES) as u64;
+    let level = i64::from(CompressionLevel::default().get());
+    let methods = [
+        ("deflate", CompressionMethod::Deflated, level),
+        ("zstd", CompressionMethod::Zstd, 3),
+    ];
+
+    for (label, method, level) in methods {
+        let options = prototype_options(method, level);
+        report_byte_identity(label, &files, options);
+
+        let mut group = c.benchmark_group(format!("zip_parallel_prototype/{label}"));
+        group.sample_size(10);
+        group.measurement_time(Duration::from_secs(30));
+        group.throughput(Throughput::Bytes(total_bytes));
+        let output = temp.path().join("output.zip");
+
+        if label == "deflate" {
+            let config = CreationConfig::default();
+            group.bench_function("exarch_sequential", |b| {
+                b.iter(|| {
+                    create_unsynced(&output, &[&source_dir], &config);
+                    fs::remove_file(&output).unwrap();
+                });
+            });
+        }
+        group.bench_function("streaming_sequential", |b| {
+            b.iter(|| {
+                write_streaming(File::create(&output).unwrap(), &files, options);
+                fs::remove_file(&output).unwrap();
+            });
+        });
+        for workers in PROTOTYPE_WORKERS {
+            group.bench_with_input(
+                BenchmarkId::new("prepared_workers", workers),
+                &workers,
+                |b, &workers| {
+                    b.iter(|| {
+                        write_prepared(File::create(&output).unwrap(), &files, options, workers);
+                        fs::remove_file(&output).unwrap();
+                    });
+                },
+            );
+        }
+        group.finish();
+    }
+}
+
 criterion_group!(
     benches,
     benchmark_create_tar_formats,
@@ -529,5 +772,6 @@ criterion_group!(
     benchmark_filtered_walking,
     benchmark_multiple_sources,
     benchmark_strip_prefix,
+    benchmark_zip_parallel_prototype,
 );
 criterion_main!(benches);

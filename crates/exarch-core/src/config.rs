@@ -8,6 +8,7 @@ use crate::ConfigSetting;
 use crate::EntryPattern;
 use crate::EntrySelection;
 use crate::Limit;
+use crate::MarkPropagation;
 use crate::PathRewrite;
 use crate::RatioLimit;
 use crate::closed_enum::closed_enum;
@@ -96,10 +97,11 @@ closed_enum! {
         /// directory the run made, explicitly or as a parent, is refused.
         /// The run tracks what it created by file identity, and by landing path
         /// where the host gives no identity (Windows), so there a duplicate that
-        /// differs only in case is refused (a caller whose volume has no file
-        /// identities can model this with
-        /// [`VolumeIdentity::LandingPaths`](crate::VolumeIdentity::LandingPaths);
-        /// the CLI `list` does not and assumes identities). The record is
+        /// differs only in case is refused (`list` models this with
+        /// [`VolumeIdentity::LandingPaths`](crate::VolumeIdentity::LandingPaths)
+        /// when given the destination, see
+        /// [`VolumeIdentity::of_destination`](crate::VolumeIdentity::of_destination),
+        /// and assumes identities otherwise). The record is
         /// bounded at 4 Mi landings; past that every occupant counts as not
         /// created by the run.
         /// Both limits fail closed.
@@ -1661,6 +1663,12 @@ pub struct ExtractionOptions {
     /// Defaults to [`DecodeReuse::Memory`] with [`ReuseLimit::DEFAULT`]. Only
     /// extractions that write into a directory use it; see [`DecodeReuse`].
     pub decode_reuse: DecodeReuse,
+
+    /// Whether the archive file's download-origin mark is copied onto the
+    /// extracted files.
+    ///
+    /// Defaults to [`MarkPropagation::Never`]. See [`MarkPropagation`].
+    pub mark_propagation: MarkPropagation,
 }
 
 impl Default for ExtractionOptions {
@@ -1669,6 +1677,7 @@ impl Default for ExtractionOptions {
             staging: Staging::InPlace,
             existing_files: ExistingFiles::Skip,
             decode_reuse: DecodeReuse::default(),
+            mark_propagation: MarkPropagation::Never,
         }
     }
 }
@@ -1707,6 +1716,25 @@ impl ExtractionOptions {
     #[inline]
     pub const fn with_existing_files(mut self, existing_files: ExistingFiles) -> Self {
         self.existing_files = existing_files;
+        self
+    }
+
+    /// Chooses whether the archive file's download-origin mark is copied onto
+    /// the extracted files.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ExtractionOptions;
+    /// use exarch_core::MarkPropagation;
+    ///
+    /// let opts = ExtractionOptions::default().with_mark_propagation(MarkPropagation::WhenMarked);
+    /// assert_eq!(opts.mark_propagation, MarkPropagation::WhenMarked);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub const fn with_mark_propagation(mut self, mark_propagation: MarkPropagation) -> Self {
+        self.mark_propagation = mark_propagation;
         self
     }
 

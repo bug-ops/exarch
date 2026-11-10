@@ -40,6 +40,7 @@ use exarch_core::ListOptions;
 use exarch_core::ListRequest;
 use exarch_core::ListedArchive;
 use exarch_core::ListedExtractOptions;
+use exarch_core::MarkPropagation;
 use exarch_core::PathComponentName;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
@@ -279,10 +280,12 @@ fn plan_extraction(
     guard: &InterruptGuard,
 ) -> Result<ExtractPlan> {
     let reuse = DecodeReuseArg::resolve(args.decode_reuse);
+    let marks = MarkPropagation::from(args.mark_propagation);
     let options = |staging: CoreStaging| {
         ExtractionOptions::default()
             .with_staging(staging)
             .with_existing_files(mode.existing_files())
+            .with_mark_propagation(marks)
             .with_decode_reuse(reuse)
     };
 
@@ -310,7 +313,8 @@ fn plan_extraction(
         listed: Box::new(listed),
         options: ListedExtractOptions::default()
             .with_staging(mode.staging())
-            .with_existing_files(mode.existing_files()),
+            .with_existing_files(mode.existing_files())
+            .with_mark_propagation(marks),
     })
 }
 

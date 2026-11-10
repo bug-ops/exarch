@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: NetBSD and illumos open directories search-only for mode changes and fall back to the read handle on any error (#1126, #1141).
 - Tests: `dispositions_match_extraction` compares `dispositions()` with the per-entry outcome of extraction over TAR, ZIP and 7z (#1132, #1141).
 - Core: `VolumeIdentity` and `ArchiveManifest::dispositions_on` model a volume without file IDs, where a differently spelled repeat of a landing is refused (#1140, #1146).
+- Core: `MarkPropagation::{Never, WhenMarked}` copies the archive's Mark-of-the-Web or quarantine mark onto extracted files and, on macOS, onto directories the run created; the CLI gains `--mark-propagation`, Python and Node expose the option and the report's `mark` (#1026, #1151).
+- CLI, Python, Node: `list --destination` and the `destination` argument of `list_archive` probe the destination volume so `list` agrees with extraction where files have no IDs (#1144, #1151).
+- CI: a `netbsd-illumos.yml` workflow runs the `0311` backup and search-only open tests in NetBSD and illumos VMs (#1145, #1151).
+- Tests: an opt-in `zip_parallel_prototype` benchmark measures parallel ZIP compression against the sequential writer (#1027, #1151).
+- Docs: specification 026 (Mark-of-the-Web propagation) and the destination probe in specification 019 (#1026, #1144, #1151).
 
 ### Changed
 
@@ -163,6 +168,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `--force` of a symlink entry over a directory is refused with `refusing to replace the existing directory at <path>` instead of a bare `Operation not permitted` (#1139, #1146).
 - CI: the release build and validate jobs run with `contents: read` and without persisted checkout credentials (#1138, #1146).
 - Docs: the leftover `0311` backup on OpenBSD and DragonFly and the unverified NetBSD and illumos fallback are documented (#1137, #1146).
+- CI: the release workflow grants `contents: write` to `github-release` only, keeps `id-token: write` on the publishing jobs, drops persisted checkout credentials and passes expressions to `run:` scripts through `env:` (#1142, #1143, #1151).
 
 ## [0.9.0] - 2026-11-05
 

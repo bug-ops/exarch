@@ -23,6 +23,8 @@ use std::ffi::OsStr;
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
+use std::io::Read;
+use std::io::Write;
 use std::mem::offset_of;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -84,6 +86,8 @@ use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_FLAG_POSIX_SEMANTI
 use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_INFO;
 use windows_sys::Win32::Storage::FileSystem::FILE_DISPOSITION_INFO_EX;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
 use windows_sys::Win32::Storage::FileSystem::FILE_ID_INFO;
 use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
@@ -184,6 +188,56 @@ enum Target<'a> {
     Name(Leaf<'a>),
     /// The directory itself, which a zero-length name reopens.
     Itself,
+    /// The [`ZONE_STREAM`] of the file the root handle is open on.
+    ZoneStream,
+}
+
+/// The alternate data stream that carries Mark-of-the-Web, named relative to
+/// the handle of the file it belongs to; never joined to a path string.
+const ZONE_STREAM: &str = ":Zone.Identifier";
+
+/// Reads the `Zone.Identifier` stream of the file `file` is open on, at most
+/// `limit` bytes plus one so the caller can tell an oversized stream from one
+/// that fits; `None` when the file has no such stream.
+///
+/// # Errors
+///
+/// The OS error of the open or the read, including a volume without streams.
+pub(crate) fn read_zone_stream(file: &File, limit: usize) -> io::Result<Option<Vec<u8>>> {
+    let request = Request {
+        kind: Kind::NonDirectory,
+        ..Request::open(FILE_GENERIC_READ)
+    };
+    // SAFETY: a null descriptor is allowed.
+    let opened = unsafe { create_with(file.as_handle(), Target::ZoneStream, request, null()) };
+    let handle = match opened {
+        Ok(handle) => handle,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let bound = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let mut content = Vec::new();
+    File::from(handle).take(bound).read_to_end(&mut content)?;
+    Ok(Some(content))
+}
+
+/// Creates the `Zone.Identifier` stream of the file `file` is open on, with
+/// `content`; fails if the file already has one.
+///
+/// # Errors
+///
+/// The OS error of the create or the write, including a volume without
+/// streams.
+pub(crate) fn write_zone_stream(file: &File, content: &[u8]) -> io::Result<()> {
+    let request = Request {
+        access: FILE_GENERIC_WRITE,
+        disposition: Disposition::Create,
+        kind: Kind::NonDirectory,
+        attributes: 0,
+    };
+    // SAFETY: a null descriptor is allowed.
+    let handle = unsafe { create_with(file.as_handle(), Target::ZoneStream, request, null()) }?;
+    File::from(handle).write_all(content)
 }
 
 /// Opens the directory `dir` again, with `access`, relative to itself.
@@ -219,6 +273,7 @@ unsafe fn create_with(
     let mut name_units = match name {
         Target::Name(leaf) => wide(leaf.as_os_str()),
         Target::Itself => Vec::new(),
+        Target::ZoneStream => ZONE_STREAM.encode_utf16().collect(),
     };
     let name_bytes = u16::try_from(name_units.len().saturating_mul(size_of::<u16>()))
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidFilename))?;

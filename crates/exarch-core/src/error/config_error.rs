@@ -103,6 +103,8 @@ closed_enum! {
         StripComponents => "strip_components",
         /// `ListOptions::stored_targets`.
         StoredTargets => "stored_targets",
+        /// The download-origin mark policy of an extraction.
+        MarkPropagation => "mark_propagation",
     }
 }
 
@@ -155,6 +157,7 @@ impl ConfigSetting {
             Self::EntryExclude => "entry exclude pattern",
             Self::StripComponents => "strip components",
             Self::StoredTargets => "stored targets",
+            Self::MarkPropagation => "mark propagation",
             Self::MaxFileSize
             | Self::MaxTotalSize
             | Self::MaxFileCount

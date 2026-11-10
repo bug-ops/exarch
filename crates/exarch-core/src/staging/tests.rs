@@ -747,7 +747,13 @@ fn an_unlistable_destination_is_refused_by_name_and_left_untouched() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "netbsd",
+    target_os = "illumos"
+))]
 #[test]
 fn a_destination_whatever_its_mode_is_replaced_and_its_backup_removed() {
     for mode in [0o311, 0o600, 0o644] {

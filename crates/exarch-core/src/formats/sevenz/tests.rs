@@ -478,6 +478,7 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
         &mut copy_buffer,
         test_permit(13),
         ReplacePermit::for_test(),
+        None,
         &mut NoopProgress,
         || {
             let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
@@ -539,6 +540,7 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
         &mut copy_buffer,
         test_permit(13),
         ReplacePermit::for_test(),
+        None,
         &mut NoopProgress,
         || {
             let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
@@ -580,6 +582,7 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
         leaf("bomb.bin"),
         &mut copy_buffer,
         test_permit(50),
+        None,
         &mut NoopProgress,
     );
 
@@ -628,6 +631,7 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
         &mut copy_buffer,
         test_permit(50),
         ReplacePermit::for_test(),
+        None,
         &mut NoopProgress,
     );
 

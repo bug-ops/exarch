@@ -77,9 +77,11 @@ use std::sync::atomic::Ordering;
 
 use super::file_identity::FileIdentity;
 use super::output_root::OutputRoot;
+use super::output_root::Place;
 use super::run_record::RunRecord;
 use crate::ArchiveError;
 use crate::Result;
+use crate::mark::MarkRun;
 use crate::security::fs_view::Occupant;
 use crate::types::DestDir;
 
@@ -93,7 +95,11 @@ pub(crate) use imp::VettedDir;
 #[cfg(unix)]
 pub(crate) use imp::open_directory_at;
 #[cfg(windows)]
+pub(crate) use nt::read_zone_stream;
+#[cfg(windows)]
 pub(crate) use nt::security::DirSecurity;
+#[cfg(windows)]
+pub(crate) use nt::write_zone_stream;
 
 /// Exactly one normal path component: a name inside a [`VettedDir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,6 +389,7 @@ pub(crate) struct PinnedRoot {
     dest: DestDir,
     dir: VettedDir,
     created: Rc<RunRecord>,
+    mark: Option<Rc<MarkRun>>,
 }
 
 impl PinnedRoot {
@@ -397,6 +404,7 @@ impl PinnedRoot {
             dest,
             dir,
             created: Rc::default(),
+            mark: None,
         })
     }
 
@@ -409,27 +417,50 @@ impl PinnedRoot {
     ///
     /// An I/O error if the directory cannot be created or opened.
     pub(crate) fn open_output(output: OutputRoot<'_>) -> Result<Self> {
-        match output {
-            OutputRoot::Path(path) => Self::open(DestDir::new_or_create(path.to_path_buf())?),
-            OutputRoot::Staged(staged) => {
+        let mark = output.mark();
+        let root = match output.place() {
+            Place::Path(path) => Self::open(DestDir::new_or_create(path.to_path_buf())?)?,
+            Place::Staged(staged) => {
                 let dest = DestDir::new(staged.path().to_path_buf())?;
                 #[cfg(unix)]
                 let dir = VettedDir::reopen_at(staged.root()).map_err(ArchiveError::Io)?;
                 #[cfg(not(unix))]
                 let dir = VettedDir::open_path(dest.as_path())?;
-                Ok(Self {
+                Self {
                     dest,
                     dir,
                     created: staged.ledger(),
-                })
+                    mark: None,
+                }
             }
-        }
+        };
+        Ok(Self { mark, ..root })
     }
 
     /// What this run created in the destination, for `ExistingFiles::Refuse`.
     pub(crate) fn created(&self) -> &RunRecord {
         &self.created
     }
+
+    /// The mark this run writes, when the archive file bears one the platform
+    /// defines; `None` means no file is deferred and none is marked.
+    pub(crate) fn marking(&self) -> Option<&MarkRun> {
+        self.mark.as_deref().filter(|run| run.is_marking())
+    }
+
+    /// Marks the directory this run just created, where the platform marks
+    /// directories (macOS: a quarantined `.app` bundle is a directory).
+    #[cfg(target_os = "macos")]
+    pub(super) fn mark_created_dir(&self, dir: &VettedDir) {
+        if let Some(run) = self.marking() {
+            run.mark_dir(dir);
+        }
+    }
+
+    /// Directories carry no mark on this platform.
+    #[cfg(not(target_os = "macos"))]
+    #[expect(clippy::unused_self, reason = "only macOS marks directories")]
+    pub(super) fn mark_created_dir(&self, _dir: &VettedDir) {}
 
     pub(crate) const fn dest(&self) -> &DestDir {
         &self.dest
@@ -502,6 +533,7 @@ mod imp {
     use super::DirHandle;
     use super::EntryStatus;
     use super::Leaf;
+    use super::PendingMode;
     use super::TempLeaf;
     use crate::formats::file_identity::FileIdentity;
     #[cfg(unix)]
@@ -582,6 +614,13 @@ mod imp {
     /// An open directory below the destination.
     #[derive(Debug)]
     pub(crate) struct VettedDir(OwnedFd);
+
+    #[cfg(unix)]
+    impl AsFd for VettedDir {
+        fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+            self.0.as_fd()
+        }
+    }
 
     impl VettedDir {
         /// Opens `path`, which the caller has canonicalized.
@@ -894,6 +933,20 @@ mod imp {
             name: Leaf<'_>,
             mode: Option<SanitizedMode>,
         ) -> io::Result<File> {
+            let (file, pending) = self.create_new_deferred(name, mode)?;
+            pending.apply(&file)?;
+            Ok(file)
+        }
+
+        /// Creates `name` like [`create_new`](Self::create_new) but leaves the
+        /// file owner-only when `mode` is given: the caller applies the mode
+        /// through the returned [`PendingMode`] once it has written whatever
+        /// must precede a restrictive mode (the download-origin mark).
+        pub(crate) fn create_new_deferred(
+            &self,
+            name: Leaf<'_>,
+            mode: Option<SanitizedMode>,
+        ) -> io::Result<(File, PendingMode)> {
             let creation =
                 mode.map_or(Mode::from_bits_truncate(0o666), |_| Mode::RUSR | Mode::WUSR);
             let fd = rustix::fs::openat(
@@ -902,13 +955,7 @@ mod imp {
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 creation,
             )?;
-            let file = File::from(fd);
-            #[cfg(unix)]
-            if let Some(m) = mode {
-                use std::os::unix::fs::PermissionsExt;
-                file.set_permissions(std::fs::Permissions::from_mode(m.as_u32()))?;
-            }
-            Ok(file)
+            Ok((File::from(fd), PendingMode(mode)))
         }
 
         /// Opens `name` for reading without following a symlink and without
@@ -1085,6 +1132,7 @@ mod imp {
 
     use super::EntryStatus;
     use super::Leaf;
+    use super::PendingMode;
     use super::TempLeaf;
     use super::dacl_walk;
     use super::nt;
@@ -1380,8 +1428,18 @@ mod imp {
         pub(crate) fn create_new(
             &self,
             name: Leaf<'_>,
-            _mode: Option<SanitizedMode>,
+            mode: Option<SanitizedMode>,
         ) -> io::Result<File> {
+            self.create_new_deferred(name, mode).map(|(file, _)| file)
+        }
+
+        /// Creates the file `name` like [`create_new`](Self::create_new); there
+        /// is no Unix mode to defer, so the [`PendingMode`] does nothing.
+        pub(crate) fn create_new_deferred(
+            &self,
+            name: Leaf<'_>,
+            mode: Option<SanitizedMode>,
+        ) -> io::Result<(File, PendingMode)> {
             let request = Request {
                 access: FILE_GENERIC_WRITE,
                 disposition: Disposition::Create,
@@ -1389,7 +1447,7 @@ mod imp {
                 attributes: FILE_ATTRIBUTE_NORMAL,
             };
             nt::create_at(self.0.as_handle(), name, request)
-                .map(File::from)
+                .map(|handle| (File::from(handle), PendingMode(mode)))
                 .map_err(|err| self.occupied_as_exists(name, err))
         }
 
@@ -1431,6 +1489,51 @@ mod imp {
 
 #[cfg(not(any(unix, target_os = "wasi", windows)))]
 compile_error!("exarch-core has no directory-handle backend for this target");
+
+/// The mode a file created by [`VettedDir::create_new_deferred`] still has to
+/// be given.
+///
+/// The file is owner-only until [`apply`](Self::apply) runs, so whatever must
+/// be written before a restrictive mode (the download-origin mark of a
+/// read-only entry) can still be. It must be applied whether or not that write
+/// succeeded, or the file would keep the owner-only mode.
+#[derive(Debug)]
+#[must_use = "the file stays owner-only until the mode is applied"]
+pub(crate) struct PendingMode(Option<crate::security::permissions::SanitizedMode>);
+
+impl PendingMode {
+    /// A mode that was already set, so applying it does nothing.
+    pub(crate) const fn applied() -> Self {
+        Self(None)
+    }
+
+    /// Sets the mode through the open descriptor (`fchmod`), so the umask
+    /// cannot reduce it and no path is resolved again. Windows has no Unix
+    /// mode and does nothing.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of the `fchmod`.
+    #[cfg(unix)]
+    pub(crate) fn apply(self, file: &std::fs::File) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        self.0.map_or(Ok(()), |mode| {
+            file.set_permissions(std::fs::Permissions::from_mode(mode.as_u32()))
+        })
+    }
+
+    /// There is no mode to set on this platform.
+    ///
+    /// # Errors
+    ///
+    /// Never fails.
+    #[cfg(not(unix))]
+    #[expect(clippy::unnecessary_wraps, reason = "same signature as the Unix apply")]
+    pub(crate) fn apply(self, _file: &std::fs::File) -> std::io::Result<()> {
+        let Self(_mode) = self;
+        Ok(())
+    }
+}
 
 /// RAII guard that removes a file from its directory when dropped, unless
 /// [`persist`](Self::persist) was called first.
@@ -1734,7 +1837,9 @@ mod tests {
         target_os = "linux",
         target_os = "android",
         target_vendor = "apple",
-        target_os = "freebsd"
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos"
     ))]
     #[test]
     fn a_directory_without_read_access_is_opened_search_only() {

@@ -153,6 +153,7 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 | `--decode-reuse` | memory | Where ZIP structure-check output is kept so compressed entries are not decoded twice: `off`, `memory` (up to 256 MiB) or `temp-file` (up to 256 MiB in an unnamed temporary file). No effect with `--zip-consistency ignore` |
 | `--allow-world-writable` | false | Allow world-writable files in extracted archives |
 | `--preserve-permissions` | false | Preserve file permissions from archive |
+| `--mark-propagation` | never | Copy the archive file's download-origin mark (macOS quarantine attribute, Windows Mark-of-the-Web) onto extracted files: `never` copies nothing, `when-marked` copies it when the archive bears one. A no-op on Linux |
 | `--force` | false | Overwrite existing files |
 | `--atomic` | false | Extract atomically: write to a temp directory and rename into place on success, cleaning up on failure. The destination must be missing or empty (a non-empty one is refused with `OutputExists`). Combined with `--force`, the existing destination is renamed aside first, the new content renamed into its place second, and only once that swap succeeds is the old destination removed — a failure at any point leaves either the old or the new content in place under the destination name. |
 | `--include` | — | Act only on entries matching the pattern (repeatable; a component, a `tmp*` prefix, a `*.rs` suffix or a relative path); a pattern that matches no entry is an error. Also accepted by `list` and `verify` |
@@ -236,6 +237,7 @@ exarch list [OPTIONS] <ARCHIVE>
 | `--long`, `-l` | Show detailed file information |
 | `--human-readable`, `-H` | Show sizes in human-readable format (requires `--long`) |
 | `--read-link-targets` | Read 7z symlink targets, which decodes the blocks that hold them; without it a 7z link shows `(target not read)` |
+| `--destination <DIR>` | Destination `extract` would write to. Only matters together with a selection flag, and only on a volume without file ids (Windows), where a repeated name spelled differently is previewed as `[refused]` instead of `duplicate`; elsewhere it only checks that the path resolves. Nothing is created |
 | `--zip-consistency` | `enforce` (default) rejects ZIP archives whose headers disagree; `ignore` keeps the central directory interpretation |
 | `--include`, `--exclude`, `--strip-components`, `--flatten` | Preview what `extract` would do: each entry is annotated `[lands at <path>]` or `[skipped: <kind>]`, and `--json` adds a `disposition` per entry |
 | `--max-files`, `--max-total-size`, `--max-file-size` | Limits applied while listing |

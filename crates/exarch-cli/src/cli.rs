@@ -12,6 +12,7 @@ use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
 use exarch_core::DecompressionBudget;
 use exarch_core::Limit;
+use exarch_core::MarkPropagation;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
 use exarch_core::PathRewrite;
@@ -440,6 +441,27 @@ impl DecodeReuseArg {
     }
 }
 
+/// Whether `extract` copies the archive file's download-origin mark onto the
+/// extracted files.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkPropagationArg {
+    /// Do not read or copy the archive's mark
+    #[default]
+    Never,
+    /// Copy the mark (Windows Mark-of-the-Web, macOS quarantine) when the
+    /// archive bears one
+    WhenMarked,
+}
+
+impl From<MarkPropagationArg> for MarkPropagation {
+    fn from(arg: MarkPropagationArg) -> Self {
+        match arg {
+            MarkPropagationArg::Never => Self::Never,
+            MarkPropagationArg::WhenMarked => Self::WhenMarked,
+        }
+    }
+}
+
 /// ZIP structure policy flag shared by `extract`, `list` and `verify`, so all
 /// three accept and reject the same archives.
 #[derive(clap::Args, Clone, Copy)]
@@ -530,6 +552,12 @@ pub struct ExtractArgs {
 
     #[arg(long, value_enum, value_name = "MODE", help = decode_reuse_help())]
     pub decode_reuse: Option<DecodeReuseArg>,
+
+    /// Copy the archive file's download-origin mark onto extracted files:
+    /// `never` (default) copies nothing, `when-marked` copies it when the
+    /// archive bears one. Windows and macOS only; a no-op elsewhere.
+    #[arg(long, value_enum, value_name = "MODE", default_value_t = MarkPropagationArg::Never)]
+    pub mark_propagation: MarkPropagationArg,
 
     /// Maximum path depth allowed (minimum: 1; the security policy default
     /// applies when omitted)
@@ -690,6 +718,13 @@ pub struct ListArgs {
     /// (implied by --allow-symlinks)
     #[arg(long)]
     pub read_link_targets: bool,
+
+    /// Destination `extract` would write to. Only matters with a selection
+    /// flag, on a volume without file ids (Windows): a repeated name spelled
+    /// differently is then shown as refused, not as a duplicate. Nothing is
+    /// created
+    #[arg(long, value_name = "DIR")]
+    pub destination: Option<PathBuf>,
 
     #[command(flatten)]
     pub zip: ZipPolicyArgs,

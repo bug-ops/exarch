@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::ArchiveError;
 use crate::IoKind;
+use crate::MarkOutcome;
 use crate::Result;
 use crate::closed_enum::closed_enum;
 use crate::error::QuotaResource;
@@ -520,6 +521,9 @@ pub struct ExtractionReport {
 
     /// Conditions worth surfacing that are not skipped entries.
     pub warnings: Vec<ExtractionWarning>,
+
+    /// What download-origin mark propagation did; see [`MarkOutcome`].
+    pub mark: MarkOutcome,
 }
 
 impl ExtractionReport {

@@ -12,6 +12,7 @@ use exarch_core::ExtractionReport;
 use exarch_core::ExtractionWarning;
 use exarch_core::FfiKind;
 use exarch_core::IoKind;
+use exarch_core::MarkOutcome;
 use exarch_core::PartialWrites;
 use exarch_core::PolicySetting;
 use exarch_core::SecurityConfig;
@@ -19,6 +20,7 @@ use exarch_core::SkipKind;
 use exarch_core::Skips;
 use exarch_core::SubCode;
 use exarch_core::VerificationReport;
+use exarch_core::VolumeIdentity;
 use exarch_core::path_text;
 use serde::Serialize;
 use serde::Serializer;
@@ -55,12 +57,13 @@ impl Dispositions {
         Self::default()
     }
 
-    /// The disposition of each entry of `manifest` under its own selection.
-    pub fn of(manifest: &ArchiveManifest, config: &SecurityConfig) -> Self {
+    /// The disposition of each entry of `manifest` under its own selection,
+    /// on a destination volume that identifies landings as `volume` says.
+    pub fn of(manifest: &ArchiveManifest, config: &SecurityConfig, volume: VolumeIdentity) -> Self {
         if manifest.selection().is_default() {
             return Self::none();
         }
-        let mut judged = manifest.dispositions(config).peekable();
+        let mut judged = manifest.dispositions_on(config, volume).peekable();
         Self(
             manifest
                 .entries()
@@ -432,6 +435,42 @@ impl From<&CreationWarning> for JsonWarning {
     }
 }
 
+/// What download-origin mark propagation did, as the `mark_propagation` field.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum JsonMarkPropagation {
+    /// Propagation was not requested.
+    NotRequested,
+    /// The platform defines no mark.
+    UnsupportedPlatform,
+    /// The archive file bears no mark.
+    Unmarked,
+    /// The archive file's mark could not be read or is malformed.
+    Unreadable,
+    /// The archive file is marked; `marked` objects carry the mark and
+    /// `failed` could not be marked.
+    Propagated {
+        /// Objects that carry the mark.
+        marked: usize,
+        /// Objects whose mark could not be written.
+        failed: usize,
+    },
+}
+
+impl From<MarkOutcome> for JsonMarkPropagation {
+    fn from(outcome: MarkOutcome) -> Self {
+        match outcome {
+            MarkOutcome::UnsupportedPlatform => Self::UnsupportedPlatform,
+            MarkOutcome::Unmarked => Self::Unmarked,
+            MarkOutcome::Unreadable => Self::Unreadable,
+            MarkOutcome::Propagated { marked, failed } => Self::Propagated { marked, failed },
+            // `MarkOutcome` is non-exhaustive; a state this CLI does not know
+            // says only that nothing it can describe happened.
+            MarkOutcome::NotRequested | _ => Self::NotRequested,
+        }
+    }
+}
+
 /// The counters of an extraction, shared by a finished run and the partial
 /// report of a stopped one.
 #[derive(Debug, Serialize)]
@@ -447,6 +486,8 @@ pub struct JsonExtractionCounts {
     /// What the run left out.
     #[serde(flatten)]
     pub skips: JsonSkips,
+    /// What download-origin mark propagation did.
+    pub mark_propagation: JsonMarkPropagation,
     /// The conditions of the run worth surfacing.
     pub warnings: Vec<JsonWarning>,
 }
@@ -459,6 +500,7 @@ impl From<&ExtractionReport> for JsonExtractionCounts {
             symlinks_created: report.symlinks_created,
             bytes_written: report.bytes_written,
             skips: JsonSkips::from(&report.skipped),
+            mark_propagation: report.mark.into(),
             warnings: report.warnings.iter().map(JsonWarning::from).collect(),
         }
     }

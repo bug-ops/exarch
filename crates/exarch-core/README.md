@@ -14,7 +14,7 @@ This crate is part of the [exarch](https://github.com/bug-ops/exarch) workspace.
 
 ```toml
 [dependencies]
-exarch-core = "0.9"
+exarch-core = "0.10"
 ```
 
 > [!IMPORTANT]

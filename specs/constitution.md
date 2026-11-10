@@ -33,7 +33,7 @@ status: permanent
 ## II. Technology Stack
 
 - Language: Rust, MSRV 1.99.1
-- Targets: native platforms and `wasm32-wasip1` for `exarch-core` and `exarch-cli` (CI job `wasm`, wasmtime smoke test; v0.8.0)
+- Targets: native platforms and `wasm32-wasip1` for `exarch-core` and `exarch-cli` (CI job `wasm`, wasmtime smoke test; v0.8.0); FreeBSD, NetBSD and illumos run in `freebsd.yml` and `netbsd-illumos.yml`, Windows volume cases in `windows-volumes.yml`
 - CLI: `clap` 4.x with derive macros
 - Python bindings: `pyo3` 0.29, `maturin`, GIL released during I/O
 - Node.js bindings: `napi-rs` 3.x, async Promises via tokio thread pool

@@ -33,6 +33,7 @@
 
 - `hint`: remediation advice as its own string (several joined by `\n`); never embedded in `message`. A refusal no flag relaxes says so in its hint. A hint names only flags the command has.
 - `conflicts`: every conflicting destination path, uncapped, in path-component order (`a/b` before `a-b` before `a.c`); `message` lists only the first ten.
+- `IoError` with message `Destination is not accessible: <path>: <step>: <cause>`: `extract` could not reach `OUTPUT_DIR`; `<step>` names the failing operation (for example `creating the directory`) and `<path>` is the path you passed. Fix the destination; nothing relaxes it.
 - `io_kind`: stable I/O class (`NotFound`, `PermissionDenied`, `StorageFull`, ..., `Other`), the same token the Python (`io_kind`) and Node (`ioKind`) bindings report.
 - `leftover_path`: path to clean up after a rolled-back run whose staging directory could not be removed, a failed `--atomic --force` swap, or a staged `create` whose reservation file remains.
 - `relaxable_by`: present only when a setting relaxes the refusal: `symlinks`, `hardlinks`, `solid_archives`, `banned_components`, `max_path_depth`, `windows_reserved_names`, `max_tar_metadata_bytes`. The last two have no CLI flag (hint says "Rust API only"). Relaxing one refusal can expose a later check (a symlink that escapes fails `SymlinkEscape` even with `--allow-symlinks`; escape refusals say no flag relaxes them).

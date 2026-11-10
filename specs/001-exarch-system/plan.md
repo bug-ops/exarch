@@ -85,7 +85,7 @@ graph TD
 | `EntryValidator` holds references | `&SecurityConfig`, `&DestDir` | No cloning per entry; measurable perf benefit | Clone per entry (rejected: measurable overhead at 10k+ files) |
 | 7z creation unsupported | Return `InvalidConfiguration` | `sevenz-rust2` write support is experimental | Expose write path (deferred: correctness risk) |
 | ZIP-family aliases rejected for creation | Return `InvalidArchive` with explanation | Silently producing a bare ZIP with `.apk` extension is misleading | Allow it silently (rejected: would confuse callers expecting valid APK structure) |
-| Atomic extraction via temp-dir + rename | `ExtractionOptions::atomic` | All-or-nothing semantics on same filesystem | Copy-then-delete (rejected: not atomic) |
+| Atomic extraction via temp-dir + rename | `Staging::Atomic` | All-or-nothing semantics on same filesystem | Copy-then-delete (rejected: not atomic) |
 | Deny-by-default for symlinks/hardlinks | `AllowedFeatures` all false | Defense in depth; explicit opt-in | Allow-by-default (rejected: too many CVE-pattern escapes) |
 | Solid 7z rejection by default | `allow_solid_archives: false` | Memory exhaustion risk; decompresses entire block | Per-file limit (insufficient: solid block ignores per-file granularity) |
 

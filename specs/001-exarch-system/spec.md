@@ -206,8 +206,8 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | FR-031 | `SecurityConfig` SHALL be annotated `#[non_exhaustive]`; external crates must use `Default::default()` or builder methods — struct literal construction is rejected at compile time | must |
 | FR-032 | `SecurityConfig::validate()` SHALL return an error if any limit field is zero (including `max_file_count` and `max_solid_block_memory`), `max_compression_ratio` is not a positive finite number, or any field contains an invalid value | must |
 | FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size` (`Limit<NonZeroU64>`, unbounded by default, zero refused as `InvalidConfiguration`; #893, #946), `exclude_patterns`, `strip_prefix`, `compression_level` (1-9), `preserve_permissions`, `format` override | must |
-| FR-034 | `ExtractionOptions` SHALL be annotated `#[non_exhaustive]` and SHALL support: `atomic` (temp-dir + rename), `skip_duplicates` (default true); fluent builders `with_atomic` and `with_skip_duplicates` are provided | must |
-| FR-035 | WHEN `ExtractionOptions::atomic` is true, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and atomically rename on success; on failure it SHALL delete the temp dir | must |
+| FR-034 | `ExtractionOptions` SHALL be annotated `#[non_exhaustive]` and SHALL support `staging: Staging` (`InPlace` default, `Atomic`, `AtomicReplace`) and `existing_files: ExistingFiles` (`Skip` default, `Overwrite`, `Refuse`); fluent builders `with_staging` and `with_existing_files` (see [[003-config-api/spec]] FR-034, FR-058) | must |
+| FR-035 | WHEN `Staging::Atomic` is selected, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and rename it onto a missing or empty destination on success; on failure it SHALL delete the temp dir; a destination that holds content SHALL be refused with `OutputExists` before extraction (see [[015-atomic-force-destination-swap-hardening/spec]]) | must |
 | FR-036 | `AllowedFeatures` SHALL be annotated `#[non_exhaustive]` so new flags do not break downstream struct literals | must |
 
 ### 3.4 Progress Reporting
@@ -284,7 +284,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | `SecurityConfig` | Security policy for extraction operations | `max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`, `max_path_depth`, `allowed` (features), `banned_path_components`, `allowed_extensions`, `allow_solid_archives`, `max_solid_block_memory` |
 | `AllowedFeatures` | Feature flags for deny-by-default policy | `symlinks`, `hardlinks`, `absolute_paths`, `world_writable` |
 | `CreationConfig` | Configuration for archive creation | `follow_symlinks`, `include_hidden`, `max_file_size: Limit<NonZeroU64>`, `exclude_patterns`, `strip_prefix`, `compression_level`, `preserve_permissions`, `format` |
-| `ExtractionOptions` | Operational options for extraction (non-security) | `atomic`, `skip_duplicates` |
+| `ExtractionOptions` | Operational options for extraction (non-security) | `staging`, `existing_files`, `decode_reuse` |
 | `SafePath` | Newtype for a validated archive entry path | Wraps `PathBuf`; can only be constructed after traversal/depth/component checks pass |
 | `ValidatedEntry` | Validated archive entry ready for extraction | `safe_path: SafePath`, `entry_type: ValidatedEntryType`, `mode: Option<u32>` |
 | `ValidatedEntryType` | Enum of validated entry types | `File`, `Directory`, `Symlink(SafeSymlink)`, `Hardlink { target: HardlinkTarget }` |
@@ -298,7 +298,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | `ArchiveType` | Enum of supported archive formats | `Tar`, `TarGz`, `TarBz2`, `TarXz`, `TarZst`, `Zip`, `SevenZ` |
 | `ArchiveFormat` | Trait for read-side format dispatch | Methods: `extract`, `list`, `verify` (each takes `self`; the trait is not dyn-usable) |
 | `FormatCreator` | Trait for write-side format dispatch | Methods: `create`; implemented by `TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator` via `creator_for_format()` helper |
-| `ExtractionContext` | Private TAR helper struct grouping six shared extraction parameters | `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates` |
+| `ExtractionContext` | Removed; ZIP keeps a private `ZipExtractionContext` and the other handlers pass the shared per-entry parameters directly | n/a |
 
 ## 6. Edge Cases and Error Handling
 
@@ -309,8 +309,8 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | ZIP-family alias (`.apk`, `.whl`) extraction | Proceeds as ZIP |
 | ZIP-family alias creation without format override | `ArchiveError::InvalidArchive` with explanation naming the alias and referencing `CreationConfig::format` override |
 | 7z creation | `ArchiveError::InvalidConfiguration` |
-| Duplicate entry paths in archive | Logged as warning in `ExtractionReport.warnings` when `skip_duplicates` is true; error when false |
-| Atomic extraction to existing non-empty directory | `ArchiveError::OutputExists` on rename failure; temp dir cleaned up |
+| Duplicate entry paths in archive | Skipped and counted under `ExistingFiles::Skip`; `Refuse` skips a file the run created itself and refuses a file over a directory the run made; an archive's own duplicate hardlink fails as `OutputExists` |
+| Atomic extraction to existing non-empty directory | `ArchiveError::OutputExists` before anything is extracted; nothing is left behind |
 | Path traversal `../` or absolute path | `ArchiveError::PathTraversal` |
 | File exceeds `max_file_size` | `ArchiveError::QuotaExceeded { resource: FileSizeBytes }` |
 | Total size exceeds `max_total_size` | `ArchiveError::QuotaExceeded { resource: TotalSizeBytes }` |

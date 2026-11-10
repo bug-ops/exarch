@@ -123,7 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python, Node: stale solid-ratio, decode-reuse and `modified` unit documentation is corrected and guarded by tests (#1136, #1141).
 - Core: `verify` says extraction fails over a directory occupant unless existing entries are skipped (#1132, #1141).
 - Core: `MarkState` is the token table of `MarkOutcome`, `MarkScope` always stamps the mark outcome, 7z writes reuse `finish_written` behind a `FileWrite` context, and the CLI, Python and Node take mark and occupied-by tokens from core (#1158, #1160, #PR).
-- Python: `CreationReport.compression_ratio`, `CreationReport.compression_percentage`, `VerificationReport.is_safe` and `VerificationReport.has_critical_issues` are properties (#1160, #PR).
+- Breaking: Python `CreationReport.compression_ratio`, `CreationReport.compression_percentage`, `VerificationReport.is_safe` and `VerificationReport.has_critical_issues` are properties (#1160, #PR).
 - Breaking: `ArchiveError::DestinationOccupied::destination` is `Option<PathBuf>`, `FfiDetail::Occupied` gains `by`, `ArchiveError::DestinationNotAccessible` names an unreachable destination, `OutputExistsError.by` and Node `by` report who made the occupant, and Node `path` on `OUTPUT_EXISTS` is optional (#1158, #1159, #1161, #PR).
 - Breaking: under `--force` a file or link over a symlink fails up front as `EXISTING_SYMLINK` instead of `IoError`, and an archive's own duplicate hardlink fails as `OutputExists` with `by: archive` instead of `DUPLICATE_ENTRY` (#1154, #1157, #PR).
 

@@ -128,9 +128,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: under `--force` a file or link over a symlink fails up front as `EXISTING_SYMLINK` instead of `IoError`, and an archive's own duplicate hardlink fails as `OutputExists` with `by: archive` instead of `DUPLICATE_ENTRY` (#1154, #1157, #1170).
 - Breaking: `DestDir::new`, `DestDir::new_or_create` and the atomic, replace and staging paths of extract report an unreachable destination as `ArchiveError::DestinationNotAccessible { path, error }` instead of `ArchiveError::Io`, so release bindings keep the path and the CLI prints `Destination is not accessible: <path>: <cause>` (#1163, #1174).
 - Core: `check_destination(Replaceable)` reuses the opened parent directory across consecutive landings and stops consulting it after four consecutive misses, so its cost no longer grows with path depth (#1169, #1174).
-- Breaking: under `ExistingFiles::Overwrite` a directory occupant is refused as `DestinationOccupied` (`OUTPUT_EXISTS`, entry in `conflicts`) and a symlink occupant as `EXISTING_SYMLINK`, by the write phase, the in-memory sink and `check_destination(Replaceable)` alike, instead of an untyped `IoError` (#1176, #PR).
-- Breaking: `ArchiveError::DestinationNotAccessible` carries a `DestinationStep` and always names the caller's path, and `FfiErrorMessage` gains `raw_os_error` (#1177, #1178, #PR).
-- CLI: `--force` hints distinguish an unknown unreplaced subset from a known one, and the mark propagation JSON counts are one optional pair (#1177, #PR).
+- Breaking: under `ExistingFiles::Overwrite` a directory occupant is refused as `DestinationOccupied` (`OUTPUT_EXISTS`, entry in `conflicts`) and a symlink occupant as `EXISTING_SYMLINK`, by the write phase, the in-memory sink and `check_destination(Replaceable)` alike, instead of an untyped `IoError` (#1176, #1185).
+- Breaking: `ArchiveError::DestinationNotAccessible` carries a `DestinationStep` and always names the caller's path, and `FfiErrorMessage` gains `raw_os_error` (#1177, #1178, #1185).
+- CLI: `--force` hints distinguish an unknown unreplaced subset from a known one, and the mark propagation JSON counts are one optional pair (#1177, #1185).
 
 ### Fixed
 
@@ -188,10 +188,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `list` refuses a hardlink whose target escapes through `..` or a symlink into a later entry, as extraction does (#1167, #1174).
 - CI: the release workflow and the Node jobs of `ci.yml` install Node dependencies with `pnpm install --frozen-lockfile` (#1162, #1174).
 - CI: `windows-volumes.yml` runs the mark propagation tests on FAT32 and exFAT volumes; it is unverified until its first Windows run and does not cover network shares (#1164, #1174).
-- Tests: the racing destination flip test accepts `DestinationNotAccessible`, which turned main red (#1175, #PR).
-- Python: a destination error is raised as the exact builtin `OSError` subclass with errno, cause text and `filename`, so `str(err)` no longer prints `[Errno None] None` and the error pickles; a read-only mount is now a plain `OSError` (`ReadOnlyFilesystem`), not `PermissionError`, and `OutputReservationLeft` prints as `[Errno N] ...` (#1178, #PR).
-- Docs: `ExistingFiles::Refuse` is documented as refusing only a pre-existing occupant or a directory the run made, an in-archive file or symlink repeat is skipped as a duplicate (#1179, #PR).
-- Docs: a manual verification procedure for mark propagation onto an SMB share is recorded in specification 026 as unverified; the real-share run is tracked in #1182 (#1171, #PR).
+- Tests: the racing destination flip test accepts `DestinationNotAccessible`, which turned main red (#1175, #1185).
+- Python: a destination error is raised as the exact builtin `OSError` subclass with errno, cause text and `filename`, so `str(err)` no longer prints `[Errno None] None` and the error pickles; a read-only mount is now a plain `OSError` (`ReadOnlyFilesystem`), not `PermissionError`, and `OutputReservationLeft` prints as `[Errno N] ...` (#1178, #1185).
+- Docs: `ExistingFiles::Refuse` is documented as refusing only a pre-existing occupant or a directory the run made, an in-archive file or symlink repeat is skipped as a duplicate (#1179, #1185).
+- Docs: a manual verification procedure for mark propagation onto an SMB share is recorded in specification 026 as unverified; the real-share run is tracked in #1182 (#1171, #1185).
 
 ## [0.9.0] - 2026-11-05
 

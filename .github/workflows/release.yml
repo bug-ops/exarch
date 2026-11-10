@@ -493,21 +493,31 @@ jobs:
       - name: Prepare npm package
         working-directory: crates/exarch-node
         run: |
-          mkdir -p native
-
           for platform_dir in ../../bindings/bindings-*; do
-            if [ -d "$platform_dir" ]; then
-              cp -v "$platform_dir"/*.node native/ || true
-            fi
+            cp -v "$platform_dir"/*.node .
           done
+          cp -v ../../bindings/bindings-linux-x86_64/index.js ../../bindings/bindings-linux-x86_64/index.d.ts .
 
-          ls -lh native/
+          ls -lh *.node index.js
 
       - name: Install dependencies
         working-directory: crates/exarch-node
         run: pnpm install --frozen-lockfile
 
+      - name: Check whether this version is already on npm
+        id: npm-version
+        working-directory: crates/exarch-node
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "exarch-rs@$VERSION" version >/dev/null 2>&1; then
+            echo "exarch-rs@$VERSION is already published, skipping"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm (Trusted Publishing)
+        if: steps.npm-version.outputs.published != 'true'
         working-directory: crates/exarch-node
         run: pnpm publish --access public --no-git-checks --provenance --ignore-scripts
 

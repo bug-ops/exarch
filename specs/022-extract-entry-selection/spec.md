@@ -12,7 +12,7 @@ tags:
   - rust
 created: 2026-11-06
 status: implemented
-updated: 2026-11-09
+updated: 2026-11-10
 related:
   - "[[plan]]"
   - "[[tasks]]"
@@ -211,7 +211,7 @@ THEN InvalidConfigurationError / INVALID_CONFIGURATION is raised with the settin
 |----|------------|----------|
 | FR-030 | THE SYSTEM SHALL NOT rewrite symlink target text; a symlink SHALL be validated at its rewritten landing with its original target, so a link whose target resolved inside the archive only because of the stripped prefix (`top/link -> ../other/x`, strip 1) is refused as `SymlinkEscape`, never silently re-pointed | must |
 | FR-031 | A hardlink target is an archive entry path; THE SYSTEM SHALL map it through the same selection and rewriting as entry names (an absolute target has its root or drive prefix dropped first where `allow_absolute_paths` is on, and keeps it, to be refused by the path policy, where it is off, #997), and SHALL validate the mapped target as a `SafePath`; under a non-default selection a target that holds a `..` component cannot be matched lexically and SHALL be refused as `PathTraversal`; a root or prefix target is refused by the path policy where absolute paths are not allowed; empty and NUL targets keep their plain typed errors | must |
-| FR-032 | WHEN a hardlink's target is not selected, is stripped away, or is not extracted for any other reason (including a pre-existing destination file the archive does not carry, under a strip), and a hardlink whose target several entries collided on under a strip SHALL be refused with `Violation::HardlinkTargetAmbiguous` (sub-code `LinkTarget`), THE SYSTEM SHALL refuse the hardlink with `Violation::HardlinkTargetNotExtracted { link, target }` (sub-code `LinkTarget`), and the `list` preview (`dispositions`) SHALL reach the same refusal for these cases and for a missing, escaping or directory target through the shared `HardlinkTracker::check_hardlink_target` and `LandingClaims::require_unambiguous` ([[019-verify-and-list-model/spec]] FR-065, #1090); it SHALL NOT create a dangling hardlink, a copy of data it did not extract, or a link to a path outside the extraction | must |
+| FR-032 | WHEN a hardlink's target is not selected, is stripped away, or is not extracted for any other reason (including a pre-existing destination file the archive does not carry, under a strip), and a hardlink whose target several entries collided on under a strip SHALL be refused with `Violation::HardlinkTargetAmbiguous` (sub-code `LinkTarget`), THE SYSTEM SHALL refuse the hardlink with `Violation::HardlinkTargetNotExtracted { link, target }` (sub-code `LinkTarget`), and the `list` preview (`dispositions`) SHALL reach the same refusal for these cases and for a missing, escaping or directory target through `HardlinkTracker::validate_hardlink_in` at the link's own position, then `require_target_present` and `LandingClaims::require_unambiguous` once every entry has landed ([[019-verify-and-list-model/spec]] FR-065, #1090, #1167); it SHALL NOT create a dangling hardlink, a copy of data it did not extract, or a link to a path outside the extraction | must |
 | FR-033 | In-archive link projection (`VirtualTree::project_landing`) and placement checks SHALL run on rewritten landing paths, so an entry placed beneath a symlink is judged where it would really land | must |
 
 ### Quotas, skips and reporting

@@ -46,6 +46,33 @@ pub(crate) fn require_hardlinks_allowed(config: &SecurityConfig) -> Result<()> {
         .ok_or_else(|| Violation::LinksNotAllowed(LinkKind::Hardlink).into())
 }
 
+/// Fails unless a file lands at `target` in `tree`: nothing there is
+/// [`Malformation::HardlinkTargetAbsent`], a directory is
+/// [`Malformation::HardlinkTargetDirectory`].
+///
+/// # Errors
+///
+/// Returns [`Malformation::HardlinkTargetAbsent`] when nothing lands at
+/// `target` in `tree`, and [`Malformation::HardlinkTargetDirectory`] when the
+/// path resolves to a directory.
+pub(crate) fn require_target_present(
+    target: &Path,
+    root: &VirtualRoot,
+    tree: &VirtualTree,
+) -> Result<()> {
+    let target_full = root.as_path().join(target);
+    if !tree.exists(&target_full) {
+        return Err(hardlink_target_missing(target));
+    }
+    if tree.resolves_to_dir(&target_full) {
+        return Err(Malformation::HardlinkTargetDirectory {
+            target: target.to_path_buf(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// A hardlink target that passed `HardlinkTracker` validation.
 ///
 /// The path is relative, non-empty and free of NUL bytes, root and prefix
@@ -292,7 +319,10 @@ impl HardlinkTracker {
     /// of [`validate_hardlink_in`](Self::validate_hardlink_in), then that the
     /// target exists there and is not a directory.
     ///
-    /// Shared by `verify` and the `list` preview so both apply one rule.
+    /// Used by `verify`, which judges a link once the whole tree is known. The
+    /// `list` preview splits the same two steps: the escape checks at the
+    /// link's own position, as extraction does, and
+    /// [`require_target_present`] once every entry has landed.
     ///
     /// # Errors
     ///
@@ -308,17 +338,7 @@ impl HardlinkTracker {
         tree: &VirtualTree,
     ) -> Result<()> {
         self.validate_hardlink_in(link_path, target, root, config, tree)?;
-        let target_full = root.as_path().join(target);
-        if !tree.exists(&target_full) {
-            return Err(hardlink_target_missing(target));
-        }
-        if tree.resolves_to_dir(&target_full) {
-            return Err(Malformation::HardlinkTargetDirectory {
-                target: target.to_path_buf(),
-            }
-            .into());
-        }
-        Ok(())
+        require_target_present(target, root, tree)
     }
 
     /// Returns the number of tracked hardlinks.

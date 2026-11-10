@@ -7,6 +7,7 @@
 //! module derives the landing from the same validation and projection that
 //! `verify` and the sink use.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -47,6 +48,7 @@ use crate::security::fs_view::VirtualTree;
 use crate::security::fs_view::normalized_display;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::require_hardlinks_allowed;
+use crate::security::hardlink::require_target_present;
 use crate::security::validator::Gated;
 use crate::security::validator::route_validated;
 use crate::selection::EntryShape;
@@ -572,7 +574,14 @@ impl ArchiveManifest {
         for entry in self.entries() {
             let screened = screen(entry, selection, config, &root, &tree);
             judged.push(match screened {
-                Ok(Gated::Admit(safe)) if is_hardlink(entry) => Judged::Deferred(safe),
+                Ok(Gated::Admit(safe)) if is_hardlink(entry) => {
+                    match hardlink_escape_check(
+                        entry, &safe, selection, config, &root, &tree, &mut state,
+                    ) {
+                        Ok(()) => Judged::Deferred(safe),
+                        Err(error) => Judged::Done(Err(error)),
+                    }
+                }
                 Ok(Gated::Admit(safe)) => Judged::Done(land(
                     entry, &safe, selection, config, &root, &mut tree, &mut state,
                 )),
@@ -704,6 +713,44 @@ fn screen(
     route_validated(run, original, entry.kind.shape(), root, config, &ctx, tree)
 }
 
+/// The hardlink target extraction resolves for `entry`, after the policy and
+/// the selection's mapping.
+fn mapped_hardlink_target<'a>(
+    entry: &ArchiveEntry,
+    target: &'a LinkTarget,
+    selection: &EntrySelection,
+    config: &SecurityConfig,
+) -> Result<Cow<'a, Path>> {
+    require_hardlinks_allowed(config)?;
+    let LinkTarget::Recorded(target) = target else {
+        return Err(unusable_target(LinkKind::Hardlink, target));
+    };
+    selection.mapped_link_target(&entry.path, target, config.allowed.absolute_paths)
+}
+
+/// Judges whether a hardlink's target resolves inside the destination, against
+/// the entries before it: extraction vets the target at the link's own
+/// position, so a `..` or a symlink hop through an entry that comes later does
+/// not resolve there yet, even though the link itself is created last.
+fn hardlink_escape_check(
+    entry: &ArchiveEntry,
+    safe: &SafePath,
+    selection: &EntrySelection,
+    config: &SecurityConfig,
+    root: &VirtualRoot,
+    tree: &VirtualTree,
+    state: &mut JudgeRun,
+) -> Result<()> {
+    let ManifestEntryKind::Hardlink { target } = &entry.kind else {
+        return Ok(());
+    };
+    let mapped = mapped_hardlink_target(entry, target, selection, config)?;
+    state
+        .hardlinks
+        .validate_hardlink_in(safe, &mapped, root, config, tree)
+        .map(drop)
+}
+
 /// What extraction does with an entry it can act on, or the error it raises
 /// when it cannot be placed.
 fn land(
@@ -727,16 +774,9 @@ fn land(
     let node = match &entry.kind {
         ManifestEntryKind::File { .. } => Node::File,
         ManifestEntryKind::Hardlink { target } => {
-            require_hardlinks_allowed(config)?;
-            let LinkTarget::Recorded(target) = target else {
-                return Err(unusable_target(LinkKind::Hardlink, target));
-            };
-            let mapped =
-                selection.mapped_link_target(&entry.path, target, config.allowed.absolute_paths)?;
+            let mapped = mapped_hardlink_target(entry, target, selection, config)?;
             claims.require_unambiguous(&entry.path, &mapped)?;
-            state
-                .hardlinks
-                .check_hardlink_target(safe, &mapped, root, config, tree)?;
+            require_target_present(&mapped, root, tree)?;
             Node::File
         }
         ManifestEntryKind::Directory => Node::Dir,
@@ -1066,12 +1106,12 @@ mod tests {
         );
     }
 
-    /// The preview of the hardlink `hl` and whether extraction accepts the
-    /// archive, both under hardlinks-allowed.
+    /// The listing's verdict for the first hardlink and the extraction result,
+    /// both under `config`.
     fn hardlink_outcome(
         entries: &[(&[u8], tar::EntryType, &str)],
         config: &SecurityConfig,
-    ) -> (Disposition, bool) {
+    ) -> (Result<Disposition>, Result<crate::ExtractionReport>) {
         let mut builder = tar::Builder::new(Vec::new());
         for (name, kind, link) in entries {
             tar_entry(&mut builder, name, *kind, link);
@@ -1082,15 +1122,12 @@ mod tests {
         let dest = dir.path().join("out");
         std::fs::create_dir(&dest).unwrap();
         let manifest = list_archive(&archive, config).unwrap();
-        let disposition = manifest
-            .dispositions(config)
+        let judged = manifest
+            .judgements(config, VolumeIdentity::default())
             .find(|(entry, _)| matches!(entry.kind, ManifestEntryKind::Hardlink { .. }))
-            .map(|(_, d)| d)
+            .map(|(_, judged)| judged)
             .unwrap();
-        (
-            disposition,
-            extract_archive(&archive, &dest, config).is_ok(),
-        )
+        (judged, extract_archive(&archive, &dest, config))
     }
 
     fn assert_hardlink_agrees(entries: &[(&[u8], tar::EntryType, &str)], accepted: bool) {
@@ -1098,25 +1135,99 @@ mod tests {
         assert_hardlink_agrees_under(entries, &config, accepted);
     }
 
+    /// Both sides accept, or both refuse with the same kind of error.
     fn assert_hardlink_agrees_under(
         entries: &[(&[u8], tar::EntryType, &str)],
         config: &SecurityConfig,
         accepted: bool,
     ) {
-        let (disposition, extracted) = hardlink_outcome(entries, config);
-        assert_eq!(extracted, accepted);
-        assert_eq!(
-            matches!(disposition, Disposition::Extract(_)),
-            accepted,
-            "{disposition:?}"
-        );
-        if !accepted {
-            assert_matches!(disposition, Disposition::Refuse);
+        let (listed, extracted) = hardlink_outcome(entries, config);
+        assert_eq!(extracted.is_ok(), accepted, "{extracted:?}");
+        match (listed, extracted) {
+            (Ok(disposition), Ok(_)) => assert_matches!(disposition, Disposition::Extract(_)),
+            (Err(listed), Err(extracted)) => {
+                let cause = match &extracted {
+                    ArchiveError::PartialExtraction(partial) => partial.cause(),
+                    other => other,
+                };
+                assert_eq!(
+                    std::mem::discriminant(&listed),
+                    std::mem::discriminant(cause),
+                    "{listed:?} vs {cause:?}"
+                );
+            }
+            (listed, extracted) => panic!("{listed:?} vs {extracted:?}"),
         }
     }
 
     const FILE: tar::EntryType = tar::EntryType::Regular;
     const HARD: tar::EntryType = tar::EntryType::Link;
+
+    /// A selection already refuses `..`, so this layout only shows through the
+    /// unselected API listing, which this drives.
+    #[test]
+    fn hardlink_through_a_parent_step_into_a_later_directory_is_refused_through_the_api() {
+        assert_hardlink_agrees(
+            &[
+                (b"b", FILE, ""),
+                (b"e", HARD, "d/../b"),
+                (b"d/h", tar::EntryType::Directory, ""),
+            ],
+            false,
+        );
+    }
+
+    #[test]
+    fn hardlink_through_a_parent_step_into_an_earlier_directory_is_extracted() {
+        assert_hardlink_agrees(
+            &[
+                (b"b", FILE, ""),
+                (b"d/h", tar::EntryType::Directory, ""),
+                (b"e", HARD, "d/../b"),
+            ],
+            true,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardlink_through_a_symlink_to_a_later_file_is_refused() {
+        assert_hardlink_agrees(
+            &[
+                (b"b", FILE, ""),
+                (b"h", tar::EntryType::Symlink, "e"),
+                (b"h2", HARD, "h"),
+                (b"e", FILE, ""),
+            ],
+            false,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardlink_through_a_symlink_to_an_earlier_file_is_extracted() {
+        assert_hardlink_agrees(
+            &[
+                (b"e", FILE, ""),
+                (b"h", tar::EntryType::Symlink, "e"),
+                (b"h2", HARD, "h"),
+            ],
+            true,
+        );
+    }
+
+    #[test]
+    fn hardlink_with_a_leading_parent_step_target_is_refused_alike() {
+        assert_hardlink_agrees(&[(b"a", FILE, ""), (b"d/hl", HARD, "../../a")], false);
+    }
+
+    #[test]
+    fn hardlink_with_an_absolute_target_is_refused_alike_at_its_position() {
+        assert_hardlink_agrees(
+            &[(b"a", FILE, ""), (b"d/hl", HARD, "/a"), (b"b", FILE, "")],
+            false,
+        );
+    }
 
     #[test]
     fn hardlink_to_a_present_target_is_extracted() {

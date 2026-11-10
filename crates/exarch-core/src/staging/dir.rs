@@ -22,6 +22,7 @@ use super::acl::Inheritance;
 #[cfg(unix)]
 use super::acl::ParentAcl;
 use super::adopt::Adoption;
+#[cfg(unix)]
 use super::io_context;
 use crate::ArchiveError;
 #[cfg(unix)]
@@ -310,35 +311,37 @@ pub(super) struct StagingDir<'p> {
 
 impl<'p> StagingDir<'p> {
     /// Creates a fresh `0700` staging directory in `parent`, whose logical
-    /// path is `parent_path`, and prepares it as `seed` says.
+    /// path is `parent_path`, and prepares it as `seed` says. A failure names
+    /// `destination`, the path the caller asked to extract to.
     ///
     /// # Errors
     ///
-    /// An I/O error when no unused name could be created, or when a step
-    /// `seed` makes mandatory failed; the directory is removed then.
-    pub(super) fn create(parent: &'p VettedDir, parent_path: &Path, seed: Seed) -> Result<Self> {
-        let failure = |error: &io::Error| {
-            ArchiveError::Io(io_context(
-                error,
-                "failed to create temp directory",
-                parent_path,
-            ))
-        };
+    /// [`ArchiveError::DestinationNotAccessible`] when no unused name could be
+    /// created; another error when a step `seed` makes mandatory failed. The
+    /// directory is removed then.
+    pub(super) fn create(
+        parent: &'p VettedDir,
+        parent_path: &Path,
+        destination: &Path,
+        seed: Seed,
+    ) -> Result<Self> {
+        let failure =
+            |error: io::Error| ArchiveError::destination_not_accessible(destination, error);
         for _ in 0..CREATE_ATTEMPTS {
             let name = LeafBuf::random(STAGING_PREFIX);
             match parent.make_private_dir(name.as_leaf()) {
                 Ok(()) => {
                     return Self::claim(parent, parent_path, name)
                         .map_err(|refused| {
-                            failure(&refused.error).rolled_back_with(refused.leftover)
+                            failure(refused.error).rolled_back_with(refused.leftover)
                         })?
                         .prepared(seed, parent_path);
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(failure(&e)),
+                Err(e) => return Err(failure(e)),
             }
         }
-        Err(failure(&io::Error::from(io::ErrorKind::AlreadyExists)))
+        Err(failure(io::Error::from(io::ErrorKind::AlreadyExists)))
     }
 
     /// The ledger of a new staging directory. Only a rollback that sweeps

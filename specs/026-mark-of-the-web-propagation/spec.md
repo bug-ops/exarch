@@ -167,6 +167,7 @@ SO THAT scripts can assert protection was preserved
 
 > [!question] Open
 > - The Windows implementation (`src/mark/windows.rs`, `zone.rs`, the `pinned_dir` stream helpers) runs only on the CI Windows runner (NTFS: stream volume check, `ZoneId=3` fallback for a malformed or oversized source stream, read-only entry keeps its mark); the branch for a volume without named streams, and ReFS, SMB and FAT/exFAT hosts, are not executed anywhere and stay tracked in #1150.
+> - #1164: `.github/workflows/windows-volumes.yml` and `tests/mark_removable_volumes.rs` run the volume-without-named-streams branch on FAT32 and exFAT VHDs; they count as coverage only once that workflow has run green, and until then nothing above is verified. Expected: a marked NTFS archive extracted onto such a volume gives `Propagated { marked: 0, failed: <files> }` (FR-017), also under `--force`; an archive that lives on such a volume gives `Unmarked` (FR-010). SMB and network shares are explicitly NOT covered: the loopback admin share is not proven equivalent to a real redirector, so ReFS and SMB stay open under #1150.
 > - Office-only selection (7-Zip mode 2) and a strict mode are not planned.
 
 ## 10. See Also

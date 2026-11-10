@@ -594,6 +594,30 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_destination_not_accessible_names_the_destination_in_filename() {
+        pyo3::Python::initialize();
+        let py_err = convert_error(CoreError::DestinationNotAccessible {
+            path: std::path::PathBuf::from("file.txt/sub"),
+            error: std::io::Error::from(std::io::ErrorKind::NotADirectory),
+        });
+        Python::attach(|py| {
+            let value = py_err.value(py);
+            let filename: String = value
+                .getattr("filename")
+                .expect("filename missing")
+                .extract()
+                .expect("filename not str");
+            assert!(filename.ends_with("sub"), "{filename}");
+            let code: String = value
+                .getattr("code")
+                .expect("code missing")
+                .extract()
+                .expect("code not str");
+            assert_eq!(code, "IO_ERROR");
+        });
+    }
+
     use exarch_core::Compressed;
     use exarch_core::PartialWrites;
     use exarch_core::QuotaResource as CoreQuotaResource;
@@ -961,9 +985,9 @@ mod tests {
     }
 
     /// Regression test for #453 follow-up: `CoreError::Io` carries free-form
-    /// messages (e.g. from `DestDir`'s validation) that can embed a host
-    /// path. In release builds the message must be reduced to the
-    /// `ErrorKind` description so no such path can leak through it.
+    /// messages that can embed a host path. In release builds the message must
+    /// be reduced to the `ErrorKind` description so no such path can leak
+    /// through it.
     #[test]
     #[cfg(not(debug_assertions))]
     fn test_io_error_conversion_redacts_message_in_release() {

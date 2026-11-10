@@ -4957,9 +4957,10 @@ fn test_extract_atomic_force_requires_parent_read_permission_even_for_fresh_dest
         );
         return;
     }
-    assert.failure().stderr(predicate::str::contains(
-        "failed to pin the destination parent",
-    ));
+    assert.failure().stderr(predicate::str::contains(format!(
+        "Destination is not accessible: {}",
+        dest.display()
+    )));
 }
 
 /// Windows-only regression test (v3/v4): a junction at the destination must

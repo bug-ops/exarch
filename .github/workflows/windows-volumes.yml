@@ -1,0 +1,93 @@
+name: Windows Volumes
+
+# Runs the download-mark tests against FAT32 and exFAT volumes, which have no
+# named streams (#1164). An SMB share is NOT covered: the loopback admin share
+# is not proven equivalent to a real network redirector, which is a separate
+# stack, so it would not stand in for a remote volume.
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'crates/exarch-core/src/mark/**'
+      - 'crates/exarch-core/src/formats/pinned_dir.rs'
+      - 'crates/exarch-core/src/formats/pinned_dir/**'
+      - 'crates/exarch-core/src/formats/file_identity.rs'
+      - 'crates/exarch-core/src/formats/output_root.rs'
+      - 'crates/exarch-core/src/formats/run_record.rs'
+      - 'crates/exarch-core/src/formats/handle_resolution.rs'
+      - 'crates/exarch-core/tests/common/**'
+      - 'Cargo.lock'
+      - 'crates/exarch-core/tests/mark_removable_volumes.rs'
+      - '.github/workflows/windows-volumes.yml'
+  schedule:
+    - cron: '0 5 * * 1'
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: short
+  RUSTFLAGS: "-D warnings"
+  RUSTUP_MAX_RETRIES: 10
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mark-volumes:
+    name: Mark propagation on FAT32 and exFAT
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: "windows-volumes"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Create and mount the FAT32 and exFAT volumes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'vhd'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          foreach ($v in @(
+              @{ Name = 'fat32'; Fs = 'fat32'; Letter = 'R'; Var = 'EXARCH_MARK_VOLUME_FAT32' },
+              @{ Name = 'exfat'; Fs = 'exfat'; Letter = 'S'; Var = 'EXARCH_MARK_VOLUME_EXFAT' }
+          )) {
+              $script = Join-Path $dir "$($v.Name).txt"
+              @(
+                  "create vdisk file=`"$dir\$($v.Name).vhd`" maximum=512 type=expandable",
+                  'attach vdisk',
+                  'create partition primary',
+                  "format fs=$($v.Fs) quick label=EXARCH$($v.Name)",
+                  "assign letter=$($v.Letter)"
+              ) | Set-Content -Encoding ascii $script
+              diskpart /s $script
+              if ($LASTEXITCODE -ne 0) { throw "diskpart failed for $($v.Name)" }
+              $root = "$($v.Letter):\"
+              if (-not (Test-Path $root)) { throw "$root is not mounted" }
+              $fs = (Get-Volume -DriveLetter $v.Letter).FileSystem
+              if ($fs -ne $v.Fs) { throw "$root is $fs, expected $($v.Fs)" }
+              "$($v.Var)=$root" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          }
+
+      - name: Run the mark volume tests
+        env:
+          EXARCH_REQUIRE_MARK_VOLUMES: "1"
+        run: cargo test -p exarch-core --all-features --test mark_removable_volumes -- --nocapture

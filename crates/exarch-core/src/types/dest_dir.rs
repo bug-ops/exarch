@@ -3,7 +3,6 @@
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
-use crate::IoContext;
 use crate::Result;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView as _;
@@ -98,10 +97,10 @@ impl DestDir {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The path does not exist
+    /// - The path does not exist, cannot be canonicalized, or is not writable
+    ///   (on Unix): [`ArchiveError::DestinationNotAccessible`], which keeps the
+    ///   path as a structured field so bindings can redact it
     /// - The path exists but is not a directory
-    /// - The path cannot be canonicalized
-    /// - The directory is not writable (on Unix)
     ///
     /// # Examples
     ///
@@ -118,13 +117,13 @@ impl DestDir {
         let path = path.into();
         // Verify path exists
         if !path.exists() {
-            return Err(ArchiveError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                IoContext::new(
+            return Err(ArchiveError::destination_not_accessible(
+                &path,
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
                     "destination directory does not exist",
-                    crate::path_text(&path),
                 ),
-            )));
+            ));
         }
 
         // Verify it's a directory
@@ -136,15 +135,9 @@ impl DestDir {
         }
 
         // Canonicalize to absolute path
-        let canonical = path.canonicalize().map_err(|e| {
-            ArchiveError::Io(std::io::Error::new(
-                e.kind(),
-                IoContext::new(
-                    "failed to canonicalize path",
-                    format!("{}: {e}", crate::path_text(&path)),
-                ),
-            ))
-        })?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| ArchiveError::destination_not_accessible(&path, e))?;
 
         // M-CODE-6: Check write permissions using libc::access() (Unix only)
         #[cfg(unix)]
@@ -167,10 +160,13 @@ impl DestDir {
             let result = unsafe { libc::access(path_cstring.as_ptr(), libc::W_OK) };
 
             if result != 0 {
-                return Err(ArchiveError::Io(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    IoContext::new("directory is not writable", crate::path_text(&canonical)),
-                )));
+                return Err(ArchiveError::destination_not_accessible(
+                    &canonical,
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "directory is not writable",
+                    ),
+                ));
             }
         }
 
@@ -191,23 +187,17 @@ impl DestDir {
     ///
     /// # Errors
     ///
-    /// Returns an error if the directory cannot be created or if validation
-    /// fails.
+    /// Returns [`ArchiveError::DestinationNotAccessible`] naming `path` if the
+    /// directory cannot be created, and any error of [`DestDir::new`] if
+    /// validation fails.
     #[expect(
         clippy::disallowed_methods,
         reason = "creates the destination root itself, before any handle on it exists"
     )]
     pub fn new_or_create(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        std::fs::create_dir_all(&path).map_err(|e| {
-            ArchiveError::Io(std::io::Error::new(
-                e.kind(),
-                IoContext::new(
-                    "failed to create destination directory",
-                    format!("{}: {e}", crate::path_text(&path)),
-                ),
-            ))
-        })?;
+        std::fs::create_dir_all(&path)
+            .map_err(|e| ArchiveError::destination_not_accessible(&path, e))?;
         Self::new(path)
     }
 
@@ -332,8 +322,27 @@ mod tests {
     fn test_dest_dir_nonexistent() {
         let path = PathBuf::from("/nonexistent/directory/that/does/not/exist");
         let result = DestDir::new(path);
-        assert!(result.is_err());
-        assert_matches!(result, Err(ArchiveError::Io(_)));
+        assert_matches!(
+            result,
+            Err(ArchiveError::DestinationNotAccessible { ref path, ref error })
+                if path.ends_with("does/not/exist")
+                    && error.kind() == std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn test_dest_dir_new_or_create_below_regular_file_names_path() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let file = temp.path().join("file.txt");
+        fs::write(&file, "test").expect("failed to write file");
+        let target = file.join("sub");
+
+        let result = DestDir::new_or_create(&target);
+
+        assert_matches!(
+            result,
+            Err(ArchiveError::DestinationNotAccessible { ref path, .. }) if *path == target
+        );
     }
 
     #[test]
@@ -393,7 +402,12 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&readonly_dir, perms).expect("failed to set permissions");
 
-        assert!(result.is_err());
+        assert_matches!(
+            result,
+            Err(ArchiveError::DestinationNotAccessible { ref path, ref error })
+                if path.ends_with("readonly")
+                    && error.kind() == std::io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]
@@ -602,7 +616,12 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&readonly_parent, perms).expect("failed to restore permissions");
 
-        assert!(result.is_err());
+        assert_matches!(
+            result,
+            Err(ArchiveError::DestinationNotAccessible { ref path, ref error })
+                if path.ends_with("readonly_parent/child")
+                    && error.kind() == std::io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]

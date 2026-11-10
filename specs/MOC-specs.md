@@ -22,7 +22,7 @@ status: moc
 |----|---------|-------|--------|-------|
 | 001 | [[001-security-pipeline/spec\|Security Pipeline]] | tasks | current (synced through #1024; selection screening, 7z header size and Windows handle-relative links added) | [[001-security-pipeline/tasks\|none open]] |
 | 002 | [[002-format-handlers/spec\|Format Handlers]] | tasks | current (synced through #1024; #1070 crate-wide index gate, #1071, #1072; sevenz-rust2 0.25, 7z header limit #674, #769, BSD and macOS spool #959) | [[002-format-handlers/tasks\|none open]] |
-| 003 | [[003-config-api/spec\|Configuration API]] | tasks | current (synced through #1024; #1157 Replaceable matrix, #1159, #1161, #1154) | [[003-config-api/tasks\|none]] |
+| 003 | [[003-config-api/spec\|Configuration API]] | tasks | current (synced through #1024; #1157 Replaceable matrix, #1159, #1161, #1154; #1163, #1168, #1169) | [[003-config-api/tasks\|none]] |
 | 004 | [[004-progress-tracking/spec\|Progress Tracking]] | tasks | current (synced through #1024) | [[004-progress-tracking/tasks\|none]] |
 | 005 | [[005-cli/spec\|CLI]] | tasks | current (synced through #1024; #1157 and #1154 hints, #1158 mark tokens, #1161) | [[005-cli/tasks\|none open]] |
 | 006 | [[006-python-bindings/spec\|Python Bindings]] | tasks | current (synced through #1024; #1154 by, #1159, #1160 properties, #1161) | [[006-python-bindings/tasks\|none]] |

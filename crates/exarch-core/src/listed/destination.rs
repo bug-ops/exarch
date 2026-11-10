@@ -99,6 +99,18 @@ enum Slot<'r> {
     Bypass,
 }
 
+#[cfg(test)]
+impl std::fmt::Debug for Slot<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "Empty",
+            Self::Kept(_) => "Kept",
+            Self::Unkept(_) => "Unkept",
+            Self::Bypass => "Bypass",
+        })
+    }
+}
+
 struct CachedParent<'r> {
     dir_rel: PathBuf,
     holder: DirRef<'r>,
@@ -594,6 +606,8 @@ mod tests {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod throttle_tests {
+    use std::assert_matches;
+
     use super::*;
 
     fn populated() -> tempfile::TempDir {
@@ -641,7 +655,7 @@ mod throttle_tests {
             }
         }
 
-        assert!(matches!(cache.slot, Slot::Bypass));
+        assert_matches!(cache.slot, Slot::Bypass);
         assert_eq!(cache.reuses, 0);
     }
 
@@ -659,7 +673,7 @@ mod throttle_tests {
             );
         }
 
-        assert!(matches!(cache.slot, Slot::Kept(_)));
+        assert_matches!(cache.slot, Slot::Kept(_));
         assert_eq!(cache.reuses, 8);
         assert_eq!(cache.misses, 0);
     }
@@ -689,7 +703,7 @@ mod throttle_tests {
             );
         }
 
-        assert!(matches!(cache.slot, Slot::Kept(_)));
+        assert_matches!(cache.slot, Slot::Kept(_));
         assert_eq!(cache.reuses, 1);
     }
 

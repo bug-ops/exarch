@@ -22,6 +22,7 @@ use super::acl::Inheritance;
 #[cfg(unix)]
 use super::acl::ParentAcl;
 use super::adopt::Adoption;
+#[cfg(unix)]
 use super::io_context;
 use crate::ArchiveError;
 #[cfg(unix)]

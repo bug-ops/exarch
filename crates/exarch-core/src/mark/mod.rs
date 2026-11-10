@@ -124,7 +124,67 @@ pub enum MarkOutcome {
     },
 }
 
+closed_enum! {
+    /// The kind of a [`MarkOutcome`], without its counts.
+    ///
+    /// Gives every front end one core vocabulary for the states of mark
+    /// propagation, so none has to spell the tokens by hand.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::MarkOutcome;
+    /// use exarch_core::MarkState;
+    ///
+    /// assert_eq!(MarkOutcome::Unmarked.state(), MarkState::Unmarked);
+    /// assert_eq!(MarkState::Propagated.as_str(), "propagated");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum MarkState {
+        /// The policy was [`MarkPropagation::Never`].
+        NotRequested => "not_requested",
+
+        /// The platform defines no mark, so nothing was read or written.
+        UnsupportedPlatform => "unsupported_platform",
+
+        /// The archive file bears no mark, so no file was marked.
+        Unmarked => "unmarked",
+
+        /// The archive file's mark could not be read because of an I/O error.
+        Unreadable => "unreadable",
+
+        /// The archive file is marked and the mark was written where possible.
+        Propagated => "propagated",
+    }
+}
+
 impl MarkOutcome {
+    /// The kind of this outcome, without its counts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::MarkOutcome;
+    /// use exarch_core::MarkState;
+    ///
+    /// let outcome = MarkOutcome::Propagated {
+    ///     marked: 2,
+    ///     failed: 0,
+    /// };
+    /// assert_eq!(outcome.state(), MarkState::Propagated);
+    /// ```
+    #[must_use]
+    pub const fn state(&self) -> MarkState {
+        match self {
+            Self::NotRequested => MarkState::NotRequested,
+            Self::UnsupportedPlatform => MarkState::UnsupportedPlatform,
+            Self::Unmarked => MarkState::Unmarked,
+            Self::Unreadable => MarkState::Unreadable,
+            Self::Propagated { .. } => MarkState::Propagated,
+        }
+    }
+
     /// The stable name of this state, shared by every front end.
     ///
     /// # Examples
@@ -136,13 +196,7 @@ impl MarkOutcome {
     /// ```
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::NotRequested => "not_requested",
-            Self::UnsupportedPlatform => "unsupported_platform",
-            Self::Unmarked => "unmarked",
-            Self::Unreadable => "unreadable",
-            Self::Propagated { .. } => "propagated",
-        }
+        self.state().as_str()
     }
 
     /// How many objects were marked; zero unless the state is
@@ -186,6 +240,22 @@ impl MarkOutcome {
     pub const fn has_failures(&self) -> bool {
         matches!(self, Self::Propagated { failed, .. } if *failed > 0)
     }
+
+    /// Whether the run left the user without the mark they asked for: an
+    /// object missing its mark, or an archive mark that could not be read.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::MarkOutcome;
+    ///
+    /// assert!(MarkOutcome::Unreadable.is_incomplete());
+    /// assert!(!MarkOutcome::Unmarked.is_incomplete());
+    /// ```
+    #[must_use]
+    pub const fn is_incomplete(&self) -> bool {
+        self.has_failures() || matches!(self, Self::Unreadable)
+    }
 }
 
 /// The archive file's mark as the platform reads it.
@@ -199,8 +269,9 @@ enum SourceState {
 
 /// The mark of one archive file and the counts of what the run marked with it.
 ///
-/// Exists only under [`MarkPropagation::WhenMarked`]; under `Never` no value
-/// is built, so no read and no deferred create can happen.
+/// Exists only under [`MarkPropagation::WhenMarked`], inside a [`MarkScope`];
+/// under `Never` no value is built, so no read and no deferred create can
+/// happen.
 pub(crate) struct MarkRun {
     state: SourceState,
     marked: Cell<usize>,
@@ -215,17 +286,40 @@ impl std::fmt::Debug for MarkRun {
     }
 }
 
-impl MarkRun {
-    /// Reads the mark of `source` when `policy` asks for propagation.
-    ///
-    /// `None` under [`MarkPropagation::Never`], without touching `source`.
-    pub(crate) fn open(policy: MarkPropagation, source: &File) -> Option<Rc<Self>> {
-        match policy {
-            MarkPropagation::Never => None,
-            MarkPropagation::WhenMarked => Some(Rc::new(Self::read(source))),
+/// A [`MarkRun`] opened for one extraction, closed by
+/// [`around`](Self::around), which stamps its outcome into the report.
+///
+/// The scope is the only way to open a run, so an entry point cannot lend the
+/// mark and forget to report it.
+#[must_use = "a scope that is never run reports the mark as not requested"]
+pub(crate) struct MarkScope {
+    run: Option<Rc<MarkRun>>,
+}
+
+impl MarkScope {
+    /// Reads the mark of `source` when `policy` asks for propagation; under
+    /// [`MarkPropagation::Never`] `source` is not touched.
+    pub(crate) fn open(policy: MarkPropagation, source: &File) -> Self {
+        Self {
+            run: match policy {
+                MarkPropagation::Never => None,
+                MarkPropagation::WhenMarked => Some(Rc::new(MarkRun::read(source))),
+            },
         }
     }
 
+    /// Runs `extract`, lending it the run, then records the run's outcome in
+    /// the report it returns, a partial report included.
+    pub(crate) fn around(
+        self,
+        extract: impl FnOnce(Option<&Rc<MarkRun>>) -> Result<ExtractionReport>,
+    ) -> Result<ExtractionReport> {
+        let result = extract(self.run.as_ref());
+        MarkRun::stamp(self.run.as_deref(), result)
+    }
+}
+
+impl MarkRun {
     fn read(source: &File) -> Self {
         if !platform::SUPPORTED {
             return Self::of(SourceState::UnsupportedPlatform);
@@ -288,10 +382,7 @@ impl MarkRun {
 
     /// Records what `run` did in the report `result` carries, a partial report
     /// included; `None` leaves `result` as it is.
-    pub(crate) fn stamp(
-        run: Option<&Self>,
-        result: Result<ExtractionReport>,
-    ) -> Result<ExtractionReport> {
+    fn stamp(run: Option<&Self>, result: Result<ExtractionReport>) -> Result<ExtractionReport> {
         let Some(run) = run else {
             return result;
         };
@@ -320,19 +411,75 @@ mod tests {
     #[test]
     fn never_builds_no_run_and_reads_nothing() {
         let file = tempfile::tempfile().unwrap();
-        assert!(MarkRun::open(MarkPropagation::Never, &file).is_none());
+        let report = MarkScope::open(MarkPropagation::Never, &file)
+            .around(|run| {
+                assert!(run.is_none());
+                Ok(ExtractionReport::new())
+            })
+            .unwrap();
+        assert_eq!(report.mark, MarkOutcome::NotRequested);
     }
 
     #[test]
     fn an_unmarked_file_reads_as_unmarked_or_unsupported() {
         let file = tempfile::tempfile().unwrap();
-        let run = MarkRun::open(MarkPropagation::WhenMarked, &file).unwrap();
         let expected = if platform::SUPPORTED {
             MarkOutcome::Unmarked
         } else {
             MarkOutcome::UnsupportedPlatform
         };
-        assert_eq!(run.outcome(), expected);
+        let report = MarkScope::open(MarkPropagation::WhenMarked, &file)
+            .around(|run| {
+                assert!(run.is_some());
+                Ok(ExtractionReport::new())
+            })
+            .unwrap();
+        assert_eq!(report.mark, expected);
+    }
+
+    #[test]
+    fn around_stamps_a_partial_report() {
+        let file = tempfile::tempfile().unwrap();
+        let err = MarkScope::open(MarkPropagation::WhenMarked, &file)
+            .around(|_| {
+                let mut report = ExtractionReport::new();
+                report.files_extracted = 1;
+                Err(ArchiveError::partial_or(report, ArchiveError::Cancelled))
+            })
+            .unwrap_err();
+        let ArchiveError::PartialExtraction(partial) = err else {
+            panic!("a partial extraction stays partial");
+        };
+        assert_ne!(partial.report().mark, MarkOutcome::NotRequested);
+    }
+
+    #[test]
+    fn every_outcome_has_a_state_token() {
+        let outcomes = [
+            MarkOutcome::NotRequested,
+            MarkOutcome::UnsupportedPlatform,
+            MarkOutcome::Unmarked,
+            MarkOutcome::Unreadable,
+            MarkOutcome::Propagated {
+                marked: 1,
+                failed: 0,
+            },
+        ];
+        assert_eq!(outcomes.len(), MarkState::ALL.len());
+        for (outcome, state) in outcomes.iter().zip(MarkState::ALL) {
+            assert_eq!(outcome.state(), *state);
+            assert_eq!(outcome.as_str(), state.as_str());
+        }
+    }
+
+    #[test]
+    fn only_a_missing_mark_makes_an_outcome_incomplete() {
+        let propagated = |failed| MarkOutcome::Propagated { marked: 1, failed };
+        assert!(MarkOutcome::Unreadable.is_incomplete());
+        assert!(propagated(1).is_incomplete());
+        assert!(!propagated(0).is_incomplete());
+        assert!(!MarkOutcome::Unmarked.is_incomplete());
+        assert!(!MarkOutcome::NotRequested.is_incomplete());
     }
 
     #[test]

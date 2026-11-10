@@ -19,8 +19,8 @@ use crate::SecurityConfig;
 use crate::SkipKind;
 use crate::closed_enum::closed_enum;
 use crate::error::Violation;
-use crate::formats::common::destination_occupied;
 use crate::formats::common::is_extension_allowed;
+use crate::formats::common::occupied_without_destination;
 use crate::formats::common::require_symlink_creation;
 use crate::formats::common::symlink_target_too_large;
 use crate::formats::file_identity::FileIdentity;
@@ -283,8 +283,8 @@ impl VolumeIdentity {
     ///
     /// # Errors
     ///
-    /// [`ArchiveError::Io`] when no ancestor of `destination` can be resolved
-    /// or probed.
+    /// [`ArchiveError::DestinationNotAccessible`] naming `destination` when no
+    /// ancestor of it can be resolved or probed.
     ///
     /// # Examples
     ///
@@ -299,8 +299,33 @@ impl VolumeIdentity {
     /// # }
     /// ```
     pub fn of_destination(destination: &Path) -> Result<Self> {
-        let existing = nearest_existing_ancestor(destination)?;
-        Ok(Self::from_identity(identity_of(&existing)?))
+        nearest_existing_ancestor(destination)
+            .and_then(|existing| identity_of(&existing))
+            .map(Self::from_identity)
+            .map_err(|error| ArchiveError::DestinationNotAccessible {
+                path: destination.to_path_buf(),
+                error,
+            })
+    }
+
+    /// The identity basis for an optional destination: the default
+    /// [`FileIds`](Self::FileIds) when there is none, otherwise
+    /// [`of_destination`](Self::of_destination).
+    ///
+    /// # Errors
+    ///
+    /// As [`of_destination`](Self::of_destination).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::VolumeIdentity;
+    ///
+    /// assert_eq!(VolumeIdentity::of_optional(None)?, VolumeIdentity::FileIds);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn of_optional(destination: Option<&Path>) -> Result<Self> {
+        destination.map_or_else(|| Ok(Self::default()), Self::of_destination)
     }
 
     const fn from_identity(identity: FileIdentity) -> Self {
@@ -376,7 +401,7 @@ impl RunKeys {
         if self.made_here(rel) {
             Ok(Disposition::Skip(SkipKind::Duplicate))
         } else {
-            Err(destination_occupied(Path::new(""), rel))
+            Err(occupied_without_destination(rel))
         }
     }
 }
@@ -738,7 +763,7 @@ fn conflicting_placement(
             keys.duplicate_or_refuse(rel)
         }
         Some(Occupant::Directory) if shape != EntryShape::Directory => {
-            Err(destination_occupied(Path::new(""), rel).occupied_by(OccupiedBy::Archive))
+            Err(occupied_without_destination(rel).occupied_by(OccupiedBy::Archive))
         }
         Some(Occupant::Symlink) if shape == EntryShape::Directory => {
             Err(Violation::ReplacesSymlink {

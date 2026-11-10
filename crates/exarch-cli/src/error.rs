@@ -1124,6 +1124,9 @@ fn dedicated_context(
         ArchiveError::SourceNotAccessible { path, error } => {
             source_not_accessible_context(op, path, error, message)
         }
+        ArchiveError::DestinationNotAccessible { path, .. } => {
+            message.lit("Failed to process '").path(path).lit("'")
+        }
         ArchiveError::OutputExists { path } => message
             .restating_source()
             .lit("Output path already exists: ")
@@ -1140,7 +1143,11 @@ fn dedicated_context(
             OccupiedBy::Archive => {
                 occupied_message(Path::new(""), conflicts, ConflictAdvice::ArchiveConflict)
             }
-            _ => occupied_message(destination, conflicts, advice),
+            _ => occupied_message(
+                destination.as_deref().unwrap_or_else(|| Path::new("")),
+                conflicts,
+                advice,
+            ),
         },
         ArchiveError::InvalidPermissions { mode, .. } => message.text(format!(
             "Invalid permissions {:#o}: blocked by security policy.",
@@ -2186,6 +2193,10 @@ mod tests {
                 path: path(),
                 error: io::Error::from(io::ErrorKind::PermissionDenied),
             },
+            ArchiveError::DestinationNotAccessible {
+                path: path(),
+                error: io::Error::from(io::ErrorKind::NotADirectory),
+            },
             ArchiveError::OutputExists { path: path() },
             ArchiveError::InvalidCompressionLevel {
                 level: exarch_core::RequestedLevel::OutOfRange,
@@ -2205,7 +2216,7 @@ mod tests {
             },
             ArchiveError::Cancelled,
             ArchiveError::DestinationOccupied {
-                destination: path(),
+                destination: Some(path()),
                 conflicts: Box::new([path()]),
                 by: exarch_core::OccupiedBy::Existing,
             },
@@ -2317,7 +2328,7 @@ mod tests {
     #[test]
     fn a_conflict_with_an_entry_the_archive_made_names_the_entry_and_hints_no_flag() {
         let occupied = |by| ArchiveError::DestinationOccupied {
-            destination: PathBuf::from("/tmp/.exarch-mine"),
+            destination: Some(PathBuf::from("/tmp/.exarch-mine")),
             conflicts: Box::new([PathBuf::from("x")]),
             by,
         };

@@ -1094,6 +1094,9 @@ impl VerificationIssue {
             ArchiveError::SourceNotAccessible { path, .. } => {
                 high_invalid_archive(format!("Source not accessible: {}", path.display()))
             }
+            ArchiveError::DestinationNotAccessible { path, .. } => {
+                high_invalid_archive(format!("Destination not accessible: {}", path.display()))
+            }
             ArchiveError::OutputExists { path } => {
                 medium_invalid_archive(format!("Output already exists: {}", path.display()))
             }
@@ -1111,15 +1114,7 @@ impl VerificationIssue {
             }
             ArchiveError::UnmatchedInclude { .. } => high_invalid_archive(error.to_string()),
             ArchiveError::Cancelled => medium_invalid_archive("Operation cancelled".to_owned()),
-            ArchiveError::DestinationOccupied {
-                destination,
-                conflicts,
-                ..
-            } => medium_invalid_archive(format!(
-                "Destination occupied: {} holds {} of the paths to extract",
-                destination.display(),
-                conflicts.len()
-            )),
+            ArchiveError::DestinationOccupied { .. } => medium_invalid_archive(error.to_string()),
             ArchiveError::OutputReservationLeft { path, .. } => high_invalid_archive(format!(
                 "Empty reservation file left at: {}",
                 path.display()

@@ -217,10 +217,12 @@ impl ArchiveError {
             | Self::SourceNotAccessible { path, .. }
             | Self::OutputExists { path }
             | Self::OutputReservationLeft { path, .. }
-            | Self::DestinationOccupied {
-                destination: path, ..
-            }
+            | Self::DestinationNotAccessible { path, .. }
             | Self::UnknownFormat { path } => Some(sanitize_path_for_error(path)),
+
+            Self::DestinationOccupied { destination, .. } => {
+                destination.as_deref().map(sanitize_path_for_error)
+            }
 
             Self::PartialExtraction(partial) => partial.cause().redacted_path(),
 
@@ -262,12 +264,31 @@ mod tests {
         use crate::StagingLeftover;
 
         let occupied = ArchiveError::DestinationOccupied {
-            destination: PathBuf::from("/srv/internal/dest"),
+            destination: Some(PathBuf::from("/srv/internal/dest")),
             conflicts: Box::new([PathBuf::from("a/b")]),
             by: crate::OccupiedBy::Existing,
         };
         assert_eq!(occupied.redacted_path().as_deref(), Some("dest"));
         assert!(!occupied.into_ffi_message().description.contains("internal"));
+
+        let no_destination = ArchiveError::DestinationOccupied {
+            destination: None,
+            conflicts: Box::new([PathBuf::from("a/b")]),
+            by: crate::OccupiedBy::Existing,
+        };
+        assert_eq!(no_destination.redacted_path(), None);
+
+        let unreachable = ArchiveError::DestinationNotAccessible {
+            path: PathBuf::from("/srv/internal/dest"),
+            error: std::io::Error::other("x"),
+        };
+        assert_eq!(unreachable.redacted_path().as_deref(), Some("dest"));
+        assert!(
+            !unreachable
+                .into_ffi_message()
+                .description
+                .contains("internal")
+        );
 
         let left = ArchiveError::OutputReservationLeft {
             path: PathBuf::from("/srv/internal/out.tar"),

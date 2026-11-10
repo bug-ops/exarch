@@ -7903,6 +7903,36 @@ fn test_list_destination_probes_without_creating() {
         )));
 }
 
+/// An unresolvable `list --destination` stays an `IoError` with its `io_kind`
+/// and names the destination (#1161).
+#[test]
+fn test_list_unresolvable_destination_json_is_io_error_naming_it() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("wrapped.tar");
+    write_wrapped_tar(&archive);
+    let file = temp.path().join("file");
+    std::fs::write(&file, b"").expect("failed to write file");
+    let destination = file.join("sub");
+
+    let stdout = exarch_cmd()
+        .args(["list", "--json", "--strip-components", "1", "--destination"])
+        .arg(&destination)
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "IoError", "{json}");
+    assert_eq!(json["error"]["io_kind"], "NotADirectory", "{json}");
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains(&destination.display().to_string()),
+        "{message}"
+    );
+}
+
 /// `verify` applies the same selection and reports an unmatched include as an
 /// archive issue, so it never passes what `extract` would refuse (#967).
 #[test]

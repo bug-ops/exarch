@@ -651,7 +651,17 @@ fn open_output_slot(
 /// caller asked to keep.
 pub(crate) fn destination_occupied(destination: &Path, rel: &Path) -> ArchiveError {
     ArchiveError::DestinationOccupied {
-        destination: destination.to_path_buf(),
+        destination: Some(destination.to_path_buf()),
+        conflicts: Box::new([rel.to_path_buf()]),
+        by: crate::OccupiedBy::Existing,
+    }
+}
+
+/// [`destination_occupied`] for a run with no host destination (the in-memory
+/// sink and the `list` model).
+pub(crate) fn occupied_without_destination(rel: &Path) -> ArchiveError {
+    ArchiveError::DestinationOccupied {
+        destination: None,
         conflicts: Box::new([rel.to_path_buf()]),
         by: crate::OccupiedBy::Existing,
     }

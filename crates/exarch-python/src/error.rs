@@ -292,7 +292,9 @@ impl PyNameCollision {
 fn attach_detail(err: &PyErr, detail: FfiDetail) {
     match detail {
         FfiDetail::None => {}
-        FfiDetail::Occupied { conflicts } => set_attr(err, "conflicts", Some(conflicts.into_vec())),
+        FfiDetail::Occupied { conflicts, .. } => {
+            set_attr(err, "conflicts", Some(conflicts.into_vec()));
+        }
         FfiDetail::Replace(restore) => {
             set_optional_str(err, "restore", Some(restore.kind().as_str()));
             if let FfiRestore::Failed { backup_path } = restore {
@@ -1396,7 +1398,7 @@ mod tests {
     fn test_destination_occupied_names_its_conflicts() {
         pyo3::Python::initialize();
         let err = CoreError::DestinationOccupied {
-            destination: PathBuf::from("/srv/out"),
+            destination: Some(PathBuf::from("/srv/out")),
             conflicts: vec![PathBuf::from("a/b.txt")].into_boxed_slice(),
             by: exarch_core::OccupiedBy::Existing,
         };

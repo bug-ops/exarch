@@ -726,7 +726,7 @@ fn occupied_action(
         arriving,
         || Ok(Some(occupant)),
         || true,
-        || common::destination_occupied(Path::new(""), rel),
+        || common::occupied_without_destination(rel),
     )
 }
 

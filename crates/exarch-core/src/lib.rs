@@ -247,6 +247,7 @@ pub use listed::ListedArchive;
 pub use listed::ListedExtractOptions;
 pub use mark::MarkOutcome;
 pub use mark::MarkPropagation;
+pub use mark::MarkState;
 pub use security::AdmittedSize;
 pub use security::Compressed;
 pub use security::EntryCount;

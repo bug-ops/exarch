@@ -1312,7 +1312,7 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
 fn apply_detail(obj: &mut Object<'_>, detail: FfiDetail) {
     match detail {
         FfiDetail::None => {}
-        FfiDetail::Occupied { conflicts } => {
+        FfiDetail::Occupied { conflicts, .. } => {
             set_property(obj, "conflicts", conflicts.into_vec());
         }
         FfiDetail::Replace(restore) => {
@@ -2387,7 +2387,7 @@ mod tests {
     #[test]
     fn test_destination_occupied_is_output_exists_and_redacts_the_destination() {
         let d = described(CoreError::DestinationOccupied {
-            destination: PathBuf::from("/srv/internal/app/out"),
+            destination: Some(PathBuf::from("/srv/internal/app/out")),
             conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
             by: exarch_core::OccupiedBy::Existing,
         });
@@ -2464,14 +2464,15 @@ mod tests {
     #[test]
     fn test_destination_occupied_lists_the_conflicting_entries() {
         let d = described(CoreError::DestinationOccupied {
-            destination: PathBuf::from("/srv/internal/app/out"),
+            destination: Some(PathBuf::from("/srv/internal/app/out")),
             conflicts: vec![PathBuf::from("a.txt"), PathBuf::from("d/b.txt")].into_boxed_slice(),
             by: exarch_core::OccupiedBy::Existing,
         });
         assert_eq!(
             d.props.detail,
             FfiDetail::Occupied {
-                conflicts: Box::new(["a.txt".to_owned(), "d/b.txt".to_owned()])
+                conflicts: Box::new(["a.txt".to_owned(), "d/b.txt".to_owned()]),
+                by: exarch_core::OccupiedBy::Existing,
             }
         );
         let path = d.props.path.expect("the destination is named");
@@ -2530,7 +2531,7 @@ mod tests {
     #[test]
     fn test_partial_extraction_keeps_the_typed_destination_detail() {
         let source = CoreError::DestinationOccupied {
-            destination: PathBuf::from("out"),
+            destination: Some(PathBuf::from("out")),
             conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
             by: exarch_core::OccupiedBy::Existing,
         };
@@ -2540,7 +2541,8 @@ mod tests {
         assert_eq!(
             d.props.detail,
             FfiDetail::Occupied {
-                conflicts: Box::new(["a.txt".to_owned()])
+                conflicts: Box::new(["a.txt".to_owned()]),
+                by: exarch_core::OccupiedBy::Existing,
             }
         );
     }

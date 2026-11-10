@@ -95,7 +95,7 @@ pub(super) fn check(
     conflicts
         .is_empty()
         .ok_or_else(|| ArchiveError::DestinationOccupied {
-            destination: dest.to_path_buf(),
+            destination: Some(dest.to_path_buf()),
             conflicts: conflicts.into_boxed_slice(),
             by: crate::OccupiedBy::Existing,
         })

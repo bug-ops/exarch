@@ -73,7 +73,7 @@ use crate::inspection::integrity::TarTrailer;
 use crate::inspection::list::ListPass;
 use crate::inspection::list::list_detected;
 use crate::inspection::list::list_tar_stream;
-use crate::mark::MarkRun;
+use crate::mark::MarkScope;
 use crate::reader::SeekableFormat;
 use crate::reader::decode_tar_stream;
 use crate::staging::extract_staged;
@@ -434,9 +434,8 @@ fn extract_kept(
                 Some(archive),
                 progress,
                 |dir, options, progress| {
-                    let mark = MarkRun::open(options.mark_propagation, source.file());
-                    let extracted = zip.extract(dir.with_mark(mark.as_ref()), options, progress);
-                    MarkRun::stamp(mark.as_deref(), extracted)
+                    MarkScope::open(options.mark_propagation, source.file())
+                        .around(|mark| zip.extract(dir.with_mark(mark), options, progress))
                 },
             );
         }
@@ -450,17 +449,10 @@ fn extract_kept(
         Some(archive),
         progress,
         |dir, options, progress| match spool {
-            Some((spool, source)) => {
-                let mark = MarkRun::open(options.mark_propagation, source.file());
-                let extracted = replay_spool(
-                    spool.file,
-                    dir.with_mark(mark.as_ref()),
-                    config,
-                    options,
-                    progress,
-                );
-                MarkRun::stamp(mark.as_deref(), extracted)
-            }
+            Some((spool, source)) => MarkScope::open(options.mark_propagation, source.file())
+                .around(|mark| {
+                    replay_spool(spool.file, dir.with_mark(mark), config, options, progress)
+                }),
             None => extract_validated(archive, dir, config, options, progress),
         },
     )

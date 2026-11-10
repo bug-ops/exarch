@@ -31,7 +31,7 @@ use crate::formats::source_fault::TapSource;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
 use crate::inspection::integrity::TarTrailer;
-use crate::mark::MarkRun;
+use crate::mark::MarkScope;
 use crate::reader::SeekableFormat;
 use crate::reader::Source;
 use crate::reader::decode_tar_stream;
@@ -118,20 +118,21 @@ fn extract_tar(
     codec: Option<CompressionCodec>,
 ) -> Result<ExtractionReport> {
     let file = open_archive(archive_path)?;
-    let mark = MarkRun::open(options.mark_propagation, &file);
+    let scope = MarkScope::open(options.mark_propagation, &file);
     let decoded = decode_tar_stream(file, codec, DecoderLimits::of(config))?;
     let trailer = TarTrailer::for_codec(codec);
     let source = decoded.source();
-    let extracted = extract_tar_stream(
-        decoded.stream,
-        source,
-        trailer,
-        output_dir.with_mark(mark.as_ref()),
-        config,
-        options,
-        progress,
-    );
-    MarkRun::stamp(mark.as_deref(), extracted)
+    scope.around(|mark| {
+        extract_tar_stream(
+            decoded.stream,
+            source,
+            trailer,
+            output_dir.with_mark(mark),
+            config,
+            options,
+            progress,
+        )
+    })
 }
 
 /// Extracts a TAR stream that is already decoded; `source` meters its raw
@@ -162,10 +163,9 @@ fn extract_zip(
     use crate::formats::ZipArchive;
     use crate::formats::traits::ArchiveFormat;
     let file = open_archive(archive_path)?;
-    let mark = MarkRun::open(options.mark_propagation, &file);
+    let scope = MarkScope::open(options.mark_propagation, &file);
     let archive = ZipArchive::for_extraction(file, config, options.decode_reuse)?;
-    let extracted = archive.extract(output_dir.with_mark(mark.as_ref()), options, progress);
-    MarkRun::stamp(mark.as_deref(), extracted)
+    scope.around(|mark| archive.extract(output_dir.with_mark(mark), options, progress))
 }
 
 fn extract_7z(
@@ -178,10 +178,9 @@ fn extract_7z(
     use crate::formats::SevenZArchive;
     use crate::formats::traits::ArchiveFormat;
     let file = open_archive(archive_path)?;
-    let mark = MarkRun::open(options.mark_propagation, &file);
+    let scope = MarkScope::open(options.mark_propagation, &file);
     let archive = SevenZArchive::new(file, config)?;
-    let extracted = archive.extract(output_dir.with_mark(mark.as_ref()), options, progress);
-    MarkRun::stamp(mark.as_deref(), extracted)
+    scope.around(|mark| archive.extract(output_dir.with_mark(mark), options, progress))
 }
 
 /// Creates an archive from source files and directories.

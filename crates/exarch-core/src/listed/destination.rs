@@ -169,3 +169,48 @@ fn vet_symlinked_directory(
     walker.vet_dir(root, rel)?;
     Ok(Occupancy::Free)
 }
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::assert_matches;
+
+    use super::*;
+    use crate::ArchiveEntry;
+    use crate::ArchiveType;
+
+    fn replaceable_over_a_symlink(target: LinkTarget) -> Result<()> {
+        let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
+        manifest
+            .add_entry(ArchiveEntry::new(
+                "x".into(),
+                ManifestEntryKind::Symlink { target },
+            ))
+            .unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("anything", dest.path().join("x")).unwrap();
+        let config = SecurityConfig::default().with_allow_symlinks(true);
+        check(
+            &manifest,
+            &config,
+            dest.path(),
+            DestinationCheck::Replaceable,
+        )
+    }
+
+    #[test]
+    fn an_unread_symlink_target_leaves_the_decision_to_the_write_phase() {
+        replaceable_over_a_symlink(LinkTarget::Unread).unwrap();
+    }
+
+    #[test]
+    fn a_recorded_different_target_is_refused_as_a_symlink() {
+        assert_matches!(
+            replaceable_over_a_symlink(LinkTarget::Recorded("other".into())),
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::ReplacesSymlink { .. },
+                ..
+            })
+        );
+    }
+}

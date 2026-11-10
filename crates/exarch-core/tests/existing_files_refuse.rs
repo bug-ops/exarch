@@ -524,3 +524,79 @@ fn a_sink_refuses_a_hardlink_over_a_directory_of_the_run_under_overwrite() {
 
     assert_names_the_directory(&error);
 }
+
+fn occupied_by(error: &ArchiveError) -> exarch_core::OccupiedBy {
+    match cause(error) {
+        ArchiveError::DestinationOccupied { by, .. } => *by,
+        other => panic!("expected DestinationOccupied, got {other}"),
+    }
+}
+
+#[test]
+fn a_file_over_a_directory_the_archive_made_is_refused_as_the_archives_own() {
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("a.tar");
+    std::fs::write(
+        &archive,
+        tar_archive(&[sink_support::tar_dir("a/"), tar_file("a", b"x")]),
+    )
+    .unwrap();
+    let dest = TempDir::new().unwrap();
+
+    let error = extract_refused(&archive, dest.path(), &SecurityConfig::default());
+
+    assert_eq!(occupied_by(&error), exarch_core::OccupiedBy::Archive);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_in_place_overwrite_names_the_archive_as_the_maker_of_its_own_file() {
+    use exarch_core::Staging;
+
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("a.tar");
+    std::fs::write(
+        &archive,
+        tar_archive(&[
+            tar_file("a", b"payload"),
+            tar_file("b", b"other"),
+            sink_support::tar_hardlink("b", "a"),
+        ]),
+    )
+    .unwrap();
+    let dest = TempDir::new().unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
+
+    let error = ExtractRequest::new(&config)
+        .with_options(overwriting().with_staging(Staging::InPlace))
+        .extract(&archive, dest.path())
+        .unwrap_err();
+
+    assert_eq!(occupied_by(&error), exarch_core::OccupiedBy::Archive);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_in_place_overwrite_names_a_preexisting_file_as_existing() {
+    use exarch_core::Staging;
+
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("a.tar");
+    std::fs::write(
+        &archive,
+        tar_archive(&[
+            tar_file("a", b"payload"),
+            sink_support::tar_hardlink("b", "a"),
+        ]),
+    )
+    .unwrap();
+    let dest = destination_with("b");
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
+
+    let error = ExtractRequest::new(&config)
+        .with_options(overwriting().with_staging(Staging::InPlace))
+        .extract(&archive, dest.path())
+        .unwrap_err();
+
+    assert_eq!(occupied_by(&error), exarch_core::OccupiedBy::Existing);
+}

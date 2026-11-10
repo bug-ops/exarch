@@ -6,8 +6,8 @@
 //! [`ExistingFiles::Skip`]. A directory the run made is never a duplicate, but
 //! the record keeps it too, so a refusal can say that the archive itself made
 //! the occupant. The record tells an entry the run made from one it did not. It
-//! is kept per run, by the pinned destination; files are recorded only under
-//! `Refuse`, directories always.
+//! is kept per run, by the pinned destination; files are recorded under
+//! `Refuse` and `Overwrite`, never under `Skip`, directories always.
 //!
 //! A staged run keeps a [`Recording::Ledger`] instead: every entry the run
 //! creates is recorded whatever `ExistingFiles` says, and the ledger outlives
@@ -126,8 +126,8 @@ struct Created {
 /// What a [`RunRecord`] keeps.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Recording {
-    /// Only what the duplicate check needs: landings created under
-    /// `ExistingFiles::Refuse`.
+    /// Files created under `ExistingFiles::Refuse` (the duplicate check) and
+    /// `Overwrite` (the maker named by a refused hardlink), never under `Skip`.
     #[default]
     Duplicates,
     /// Every entry the run creates, under any `ExistingFiles`.
@@ -138,7 +138,7 @@ impl Recording {
     const fn records(self, existing_files: ExistingFiles) -> bool {
         match self {
             Self::Ledger => true,
-            Self::Duplicates => matches!(existing_files, ExistingFiles::Refuse),
+            Self::Duplicates => !matches!(existing_files, ExistingFiles::Skip),
         }
     }
 }
@@ -290,17 +290,24 @@ mod tests {
     use crate::formats::pinned_dir::support::pinned_at;
 
     #[test]
-    fn only_refuse_records_and_only_what_it_recorded_counts_as_created() {
+    fn skip_records_nothing_and_only_what_it_recorded_counts_as_created() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
         std::fs::write(temp.path().join("foreign"), b"y").unwrap();
         let record = RunRecord::default();
 
-        for ignored in [ExistingFiles::Skip, ExistingFiles::Overwrite] {
-            record.note(ignored, &dir, leaf("made"), "made".as_ref());
-        }
+        record.note(ExistingFiles::Skip, &dir, leaf("made"), "made".as_ref());
         assert!(!record.created_here(&dir, leaf("made"), "made".as_ref()));
+
+        let overwriting = RunRecord::default();
+        overwriting.note(
+            ExistingFiles::Overwrite,
+            &dir,
+            leaf("made"),
+            "made".as_ref(),
+        );
+        assert!(overwriting.created_here(&dir, leaf("made"), "made".as_ref()));
 
         record.note(ExistingFiles::Refuse, &dir, leaf("made"), "made".as_ref());
         assert!(record.created_here(&dir, leaf("made"), "made".as_ref()));
@@ -309,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_noted_by_its_handle_counts_as_created_only_under_refuse() {
+    fn a_file_noted_by_its_handle_counts_as_created_except_under_skip() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         let made = std::fs::File::create(temp.path().join("made")).unwrap();
@@ -363,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ledger_records_whatever_existing_files_says_and_a_duplicate_record_only_refuse() {
+    fn a_ledger_records_whatever_existing_files_says_and_a_duplicate_record_never_skip() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
@@ -376,12 +383,7 @@ mod tests {
         let ledger = RunRecord::new(super::Recording::Ledger);
 
         for record in [&duplicates, &ledger] {
-            record.note(
-                ExistingFiles::Overwrite,
-                &dir,
-                leaf("made"),
-                "made".as_ref(),
-            );
+            record.note(ExistingFiles::Skip, &dir, leaf("made"), "made".as_ref());
             record.note_directory(&dir, leaf("sub"), "sub".as_ref());
         }
 

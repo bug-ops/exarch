@@ -351,6 +351,20 @@ mod replaceable_matrix {
     }
 
     #[test]
+    fn file_over_another_symlink_is_refused_as_a_symlink() {
+        cell(Arrives::File, Planted::OtherLink, Verdict::ReplacesSymlink);
+    }
+
+    #[test]
+    fn hardlink_over_another_symlink_is_refused_as_a_symlink() {
+        cell(
+            Arrives::Hardlink,
+            Planted::OtherLink,
+            Verdict::ReplacesSymlink,
+        );
+    }
+
+    #[test]
     fn file_over_directory_conflicts() {
         cell(Arrives::File, Planted::Dir, Verdict::Conflict);
     }

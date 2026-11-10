@@ -110,3 +110,53 @@ fn a_later_symlinked_parent_refuses_the_hardlink_everywhere() {
             .is_err()
     );
 }
+
+#[test]
+fn a_later_symlinked_parent_inside_the_root_lands_the_hardlink_below_its_target() {
+    use exarch_core::ArchiveReader;
+    use exarch_core::ExistingFiles;
+    use exarch_core::ExtractionOptions;
+    use exarch_core::MemoryEntry;
+    use exarch_core::MemoryExtractRequest;
+    use exarch_core::NoopProgress;
+    use exarch_core::Staging;
+    use exarch_core::extract_reader_to_memory;
+
+    let entries = [
+        tar_file("b", b"x\n"),
+        sink_support::tar_dir("e/"),
+        tar_hardlink("d/h", "b"),
+        tar_symlink("d", "e"),
+    ];
+    let (dir, archive) = write(&entries);
+    let config = config();
+
+    let landing = match hardlink_disposition(&archive, &config) {
+        Disposition::Extract(landing) => landing,
+        other => panic!("expected a landing, got {other:?}"),
+    };
+    assert_eq!(landing.as_path(), Path::new("e/h"));
+    let report = verify_archive(&archive, &config).unwrap();
+    assert_ne!(report.status(), VerificationStatus::Fail);
+
+    for (name, staging) in [("plain", Staging::InPlace), ("atomic", Staging::Atomic)] {
+        let out = dir.path().join(name);
+        let options = ExtractionOptions::default()
+            .with_staging(staging)
+            .with_existing_files(ExistingFiles::Refuse);
+        ExtractRequest::new(&config)
+            .with_options(options)
+            .extract(&archive, &out)
+            .unwrap();
+        assert_eq!(std::fs::read(out.join("e/h")).unwrap(), b"x\n", "{name}");
+    }
+
+    let request = MemoryExtractRequest::default().with_config(config);
+    let (_, sink) = extract_reader_to_memory(
+        ArchiveReader::from_bytes(tar_archive(&entries), None).unwrap(),
+        &request,
+        &mut NoopProgress,
+    )
+    .unwrap();
+    assert_matches!(sink.get(Path::new("e/h")), Some(MemoryEntry::File { .. }));
+}

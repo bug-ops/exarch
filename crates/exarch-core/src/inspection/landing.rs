@@ -1549,7 +1549,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("f");
         std::fs::write(&file, b"").unwrap();
-        assert!(VolumeIdentity::of_destination(&file.join("sub")).is_err());
+        let probed = file.join("sub");
+        assert_matches!(
+            VolumeIdentity::of_destination(&probed),
+            Err(ArchiveError::DestinationNotAccessible { path, .. }) if path == probed
+        );
     }
 
     /// The identity-keyed preview and extraction skip the last entry as a

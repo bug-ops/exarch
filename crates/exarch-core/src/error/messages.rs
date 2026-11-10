@@ -1238,8 +1238,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    fn test_occupied_without_destination_has_no_path_in_release() {
+    fn test_occupied_without_destination_names_no_path() {
         let error = ArchiveError::DestinationOccupied {
             destination: None,
             conflicts: Box::new([PathBuf::from("a")]),

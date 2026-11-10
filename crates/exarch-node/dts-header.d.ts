@@ -355,7 +355,7 @@ export interface ExarchOutputExistsDetail {
   backupPath?: undefined
   /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
   conflicts?: Array<string>
-  /** Who made the occupant of the first conflict: `'existing'` (it was there before the run, or its maker is unknown) or `'archive'` (an earlier entry of the same archive). */
+  /** Who made the occupant of the first conflict: `'existing'` (there before the run, or its maker is unknown: removing it or choosing another destination helps, and overwrite replaces only a file or symlink occupant of a file or symlink entry) or `'archive'` (an earlier entry of the same archive, which no option resolves). */
   by?: 'existing' | 'archive' | (string & {})
   protectedPath?: undefined
   collision?: undefined

@@ -2475,11 +2475,13 @@ class OutputExistsError(ArchiveError, FileExistsError):
             ``existing_files == "refuse"`` found occupied; ``None`` for a
             creation output that exists.
         by: Who made the occupant of the first refused path: ``"existing"``
-            (it was there before the run, or its maker is unknown, so
-            ``existing_files == "overwrite"`` may help) or ``"archive"`` (an
-            earlier entry of the same archive, which no option resolves); a
-            future core value reads as a plain ``str``; ``None`` for a
-            creation output that exists.
+            (it was there before the run, or its maker is unknown: removing
+            it or choosing another destination helps, and
+            ``existing_files == "overwrite"`` replaces only a file or symlink
+            occupant of a file or symlink entry) or ``"archive"`` (an earlier
+            entry of the same archive, which no option resolves); a future
+            core value reads as a plain ``str``; ``None`` for a creation
+            output that exists.
     """
 
     conflicts: list[str] | None

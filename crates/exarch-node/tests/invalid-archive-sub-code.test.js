@@ -121,7 +121,7 @@ describe('InvalidArchive families', () => {
     assert.strictEqual(err.subCode, 'LINK_TARGET');
   });
 
-  it('a hardlink over an existing path is an OUTPUT_EXISTS refusal', async () => {
+  it('a duplicate hardlink within the archive is an archive conflict', async () => {
     const bytes = tarOf(
       { name: 't', data: Buffer.from('x') },
       { name: 'h', type: '1', linkname: 't' },
@@ -132,7 +132,27 @@ describe('InvalidArchive families', () => {
     const err = await extractFailure('dup.tar', bytes, config, options);
     assert.strictEqual(err.code, 'OUTPUT_EXISTS');
     assert.deepStrictEqual(err.conflicts, ['h']);
-    assert.ok(['existing', 'archive'].includes(err.by), String(err.by));
+    assert.strictEqual(err.by, 'archive');
+  });
+
+  it('a hardlink over a file already in the destination is an existing conflict', async () => {
+    const file = path.join(tempDir, 'over.tar');
+    fs.writeFileSync(
+      file,
+      tarOf({ name: 't', data: Buffer.from('x') }, { name: 'h', type: '1', linkname: 't' })
+    );
+    const out = path.join(tempDir, 'out');
+    fs.mkdirSync(out);
+    fs.writeFileSync(path.join(out, 'h'), 'old');
+    const config = new SecurityConfig().withAllowHardlinks(true);
+    const options = new ExtractionOptions().withExistingFiles('overwrite');
+    const err = await extractArchive(file, out, config, options).then(
+      () => assert.fail('extraction unexpectedly succeeded'),
+      (e) => e
+    );
+    assert.strictEqual(err.code, 'OUTPUT_EXISTS');
+    assert.deepStrictEqual(err.conflicts, ['h']);
+    assert.strictEqual(err.by, 'existing');
   });
 
   it('a forged ZIP compressed size is DECLARED_SIZE', async () => {

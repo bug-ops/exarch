@@ -379,7 +379,14 @@ describe('entry selection', () => {
     it('fails a listing whose destination lies below a file', () => {
       const blocker = path.join(tempDir, 'blocker');
       fs.writeFileSync(blocker, '');
-      assert.throws(() => listArchiveSync(archive, null, null, path.join(blocker, 'sub')));
+      assert.throws(
+        () => listArchiveSync(archive, null, null, path.join(blocker, 'sub')),
+        (err) => {
+          assert.strictEqual(err.code, 'IO_ERROR');
+          assert.strictEqual(path.basename(err.path), 'sub');
+          return true;
+        }
+      );
     });
 
     it('reports an entry that cannot be placed as refused', () => {

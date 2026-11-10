@@ -236,6 +236,12 @@ impl Message {
         self
     }
 
+    /// Sets the advice to already built parts.
+    pub fn hint_parts(mut self, parts: Vec<Part>) -> Self {
+        self.hint = Some(parts);
+        self
+    }
+
     /// Sets the advice to text written in the source.
     pub fn hint_lit(mut self, hint: &'static str) -> Self {
         self.hint = Some(vec![Part::Lit(hint)]);
@@ -545,40 +551,51 @@ pub fn chain_text(error: &anyhow::Error) -> String {
 
 /// What a destination conflict tells the user to do, which depends on the
 /// write mode that met it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConflictAdvice {
     /// Existing files are refused: `--force` overwrites them.
     UseForce,
-    /// `--force` cannot replace what the destination holds at these paths,
-    /// all of which existed before the run; only replacing the whole
-    /// destination, removal or another destination resolves them.
-    ForceCannotReplace,
-    /// `--force` was on and the write phase refused an occupant whose maker
-    /// is unknown, so it may be an earlier entry of the archive and
-    /// replacing the whole destination may not help.
-    ForceRefused,
+    /// `--force` does not replace the listed paths, which existed before the
+    /// run; an empty list means every path of the error or that the subset is
+    /// unknown.
+    ForceCannotReplace(Box<[PathBuf]>),
     /// The archive itself writes two entries where only one fits, such as a
     /// file or link where it also makes a directory; no flag changes that.
     ArchiveConflict,
 }
 
 impl ConflictAdvice {
-    fn hint(self) -> String {
-        let force = Flag::Force.long();
+    fn hint(&self) -> Vec<Part> {
         match self {
-            Self::UseForce => format!("Use {force} to overwrite."),
-            Self::ForceCannotReplace => format!(
-                "{force} cannot replace these paths in place; remove them, choose another \
-                 destination, or use {force} with {} to replace the whole destination.",
-                Flag::Atomic.long()
-            ),
-            Self::ForceRefused => format!(
-                "{force} cannot replace these paths; remove them or choose another destination."
-            ),
-            Self::ArchiveConflict => "The archive writes more than one entry at a path where \
-                                     only one fits, such as a file or link where it also makes \
-                                     a directory; no flag allows that."
-                .to_owned(),
+            Self::UseForce => vec![Part::Text(format!(
+                "Use {} to overwrite.",
+                Flag::Force.long()
+            ))],
+            Self::ForceCannotReplace(paths) => {
+                let mut parts = vec![
+                    Part::Lit(Flag::Force.long()),
+                    Part::Lit(" does not replace "),
+                ];
+                if paths.is_empty() {
+                    parts.push(Part::Lit("these paths"));
+                }
+                for (index, path) in paths.iter().take(MAX_LISTED_CONFLICTS).enumerate() {
+                    if index > 0 {
+                        parts.push(Part::Lit(", "));
+                    }
+                    parts.push(Part::Entry(path.clone()));
+                }
+                let remaining = paths.len().saturating_sub(MAX_LISTED_CONFLICTS);
+                if remaining > 0 {
+                    parts.push(Part::Text(format!(" and {remaining} more")));
+                }
+                parts.push(Part::Lit("; remove them or choose another destination."));
+                parts
+            }
+            Self::ArchiveConflict => vec![Part::Lit(
+                "The archive writes more than one entry at a path where only one fits, such as \
+                 a file or link where it also makes a directory; no flag allows that.",
+            )],
         }
     }
 }
@@ -600,7 +617,7 @@ const MAX_LISTED_CONFLICTS: usize = 10;
 fn occupied_message(
     destination: Option<&Path>,
     conflicts: &[PathBuf],
-    advice: ConflictAdvice,
+    advice: &ConflictAdvice,
 ) -> Message {
     let count = conflicts.len();
     let noun = if count == 1 { "file" } else { "files" };
@@ -632,7 +649,7 @@ fn occupied_message(
             .text(remaining.to_string())
             .lit(" more");
     }
-    message.hint(Some(advice.hint()))
+    message.hint_parts(advice.hint())
 }
 
 /// `text` with its first letter in upper case.
@@ -935,7 +952,7 @@ fn dedicated_quota_context(op: Operation, kind: QuotaKind, archive: &Path) -> Op
 ///
 /// A `PartialExtraction` keeps the `writes` outcome core recorded.
 pub fn convert_error(op: Operation, err: ArchiveError, archive: &Path) -> anyhow::Error {
-    convert_error_with_advice(op, err, archive, ConflictAdvice::UseForce)
+    convert_error_with_advice(op, err, archive, &ConflictAdvice::UseForce)
 }
 
 /// [`convert_error`] with the advice a destination conflict gets, for a
@@ -944,7 +961,7 @@ pub fn convert_error_with_advice(
     op: Operation,
     err: ArchiveError,
     archive: &Path,
-    advice: ConflictAdvice,
+    advice: &ConflictAdvice,
 ) -> anyhow::Error {
     // `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so
     // placing it in an anyhow chain directly would cause the inner error text
@@ -999,7 +1016,7 @@ fn context_message(
     op: Operation,
     err: &ArchiveError,
     archive: &Path,
-    advice: ConflictAdvice,
+    advice: &ConflictAdvice,
 ) -> Message {
     dedicated_context(op, err, archive, advice).unwrap_or_else(|| {
         Message::default()
@@ -1059,6 +1076,11 @@ fn refusal_hint(kind: &Violation) -> Option<String> {
             Flag::Exclude.long(),
             Flag::Flatten.long(),
         )),
+        Violation::ReplacesSymlink { .. } => Some(
+            "An existing symlink at that path is never replaced in place; remove it or choose \
+             another destination."
+                .to_owned(),
+        ),
         Violation::DestinationChanged => Some(
             "Another process modified the destination during the replace, so nothing was \
              replaced. Re-run once the destination is no longer in use."
@@ -1083,7 +1105,7 @@ fn dedicated_context(
     op: Operation,
     err: &ArchiveError,
     archive: &Path,
-    advice: ConflictAdvice,
+    advice: &ConflictAdvice,
 ) -> Option<Message> {
     let message = Message::default();
     Some(match err {
@@ -1142,9 +1164,11 @@ fn dedicated_context(
         ArchiveError::SourceNotAccessible { path, error } => {
             source_not_accessible_context(op, path, error, message)
         }
-        ArchiveError::DestinationNotAccessible { path, .. } => {
-            message.lit("Failed to process '").path(path).lit("'")
-        }
+        ArchiveError::DestinationNotAccessible { path, error } => message
+            .restating_source()
+            .lit("Destination is not accessible: ")
+            .path(path)
+            .text(format!(": {error}")),
         ArchiveError::OutputExists { path } => message
             .restating_source()
             .lit("Output path already exists: ")
@@ -1159,7 +1183,7 @@ fn dedicated_context(
             by,
         } => match by {
             OccupiedBy::Archive => {
-                occupied_message(None, conflicts, ConflictAdvice::ArchiveConflict)
+                occupied_message(None, conflicts, &ConflictAdvice::ArchiveConflict)
             }
             _ => occupied_message(destination.as_deref(), conflicts, advice),
         },
@@ -2245,7 +2269,7 @@ mod tests {
                     Operation::Extract,
                     &err,
                     Path::new("a.tar"),
-                    ConflictAdvice::UseForce
+                    &ConflictAdvice::UseForce
                 )
                 .is_some(),
                 "{err:?} took the wildcard arm"
@@ -2255,7 +2279,7 @@ mod tests {
 
     fn occupied_text(conflicts: &[PathBuf]) -> String {
         terminal(
-            &occupied_message(None, conflicts, ConflictAdvice::UseForce)
+            &occupied_message(None, conflicts, &ConflictAdvice::UseForce)
                 .into_context()
                 .parts(),
         )
@@ -2307,32 +2331,54 @@ mod tests {
 
     #[test]
     fn occupied_advice_is_the_hint_and_follows_the_write_mode() {
-        let context = |advice| occupied_message(None, &[PathBuf::from("a")], advice).into_context();
+        let context = |advice: &ConflictAdvice| {
+            occupied_message(None, &[PathBuf::from("a")], advice).into_context()
+        };
         for advice in [
             ConflictAdvice::UseForce,
-            ConflictAdvice::ForceCannotReplace,
-            ConflictAdvice::ForceRefused,
+            ConflictAdvice::ForceCannotReplace(Box::default()),
+            ConflictAdvice::ForceCannotReplace(Box::new([PathBuf::from("a")])),
             ConflictAdvice::ArchiveConflict,
         ] {
-            let context = context(advice);
+            let context = context(&advice);
             assert!(
                 !terminal(&context.parts()).contains("--force"),
                 "{advice:?}"
             );
-            assert_eq!(context.hint().map(|h| raw(&h)), Some(advice.hint()));
+            assert_eq!(
+                context.hint().map(|h| raw(&h)),
+                Some(raw(&advice.hint())),
+                "{advice:?}"
+            );
         }
         assert_eq!(
-            raw(&context(ConflictAdvice::UseForce).hint().unwrap()),
+            raw(&ConflictAdvice::UseForce.hint()),
             "Use --force to overwrite."
         );
-        let cannot = ConflictAdvice::ForceCannotReplace.hint();
-        assert!(cannot.contains("cannot replace"), "{cannot}");
-        assert!(cannot.contains("--atomic"), "{cannot}");
-        assert!(!cannot.contains("Use --force"), "{cannot}");
-        let refused = ConflictAdvice::ForceRefused.hint();
-        assert!(refused.contains("cannot replace"), "{refused}");
-        assert!(!refused.contains("--atomic"), "{refused}");
-        assert!(!refused.contains("Use --force"), "{refused}");
+    }
+
+    #[test]
+    fn the_force_hint_is_neutral_and_names_only_the_paths_it_does_not_replace() {
+        let hint = |paths: &[&str]| {
+            raw(
+                &ConflictAdvice::ForceCannotReplace(paths.iter().map(PathBuf::from).collect())
+                    .hint(),
+            )
+        };
+        assert_eq!(
+            hint(&[]),
+            "--force does not replace these paths; remove them or choose another destination."
+        );
+        assert_eq!(
+            hint(&["x", "d/y"]),
+            "--force does not replace x, d/y; remove them or choose another destination."
+        );
+        let many: Vec<String> = (0..15).map(|i| format!("f{i:02}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let text = hint(&many);
+        assert!(text.contains("f09") && !text.contains("f10"), "{text}");
+        assert!(text.contains("and 5 more"), "{text}");
+        assert!(!text.contains("--atomic"), "{text}");
     }
 
     #[test]
@@ -2352,7 +2398,7 @@ mod tests {
         assert!(!text.contains(".exarch-mine"), "{text}");
         assert!(text.ends_with("  x"), "{text}");
         let hints = chain_hints(&archive, raw);
-        assert_eq!(hints, [ConflictAdvice::ArchiveConflict.hint()]);
+        assert_eq!(hints, [raw(&ConflictAdvice::ArchiveConflict.hint())]);
         assert!(!hints[0].contains("--force"), "{hints:?}");
 
         let existing = convert_error(
@@ -2363,7 +2409,7 @@ mod tests {
         assert!(chain_text(&existing).contains(".exarch-mine"));
         assert_eq!(
             chain_hints(&existing, raw),
-            [ConflictAdvice::UseForce.hint()]
+            [raw(&ConflictAdvice::UseForce.hint())]
         );
     }
 

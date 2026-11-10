@@ -5,6 +5,7 @@ in-memory extractions interpret it identically.
 """
 
 import io
+import os
 import tarfile
 
 import pytest
@@ -294,8 +295,10 @@ def test_list_destination_below_a_file_is_an_io_error(project, temp_dir):
     blocker = temp_dir / "blocker"
     blocker.write_bytes(b"")
 
-    with pytest.raises(OSError):
+    with pytest.raises(NotADirectoryError) as info:
         exarch.list_archive(project, destination=blocker / "sub")
+
+    assert os.path.basename(info.value.filename) == "sub"
 
 
 def test_list_reports_the_disposition_of_every_entry(project):

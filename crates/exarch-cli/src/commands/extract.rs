@@ -227,13 +227,13 @@ impl WriteMode {
         }
     }
 
-    /// The advice for an occupant the write phase refused. Where `--force` is
-    /// already on, the occupant's maker is unknown, so the advice never
-    /// promises that replacing the whole destination resolves it.
-    const fn write_advice(self) -> ConflictAdvice {
+    /// The advice for an occupant the write phase refused; where `--force` is
+    /// already on it names no subset, since the occupant's maker may be the
+    /// archive itself.
+    fn write_advice(self) -> ConflictAdvice {
         match self {
             Self::Safe | Self::Atomic => ConflictAdvice::UseForce,
-            Self::Force | Self::AtomicReplace => ConflictAdvice::ForceRefused,
+            Self::Force | Self::AtomicReplace => ConflictAdvice::ForceCannotReplace(Box::default()),
         }
     }
 
@@ -241,8 +241,9 @@ impl WriteMode {
     /// what the user can do about it.
     ///
     /// A refused run without `--force` is advised to use it only when
-    /// `--force` would replace every occupant; otherwise the error names the
-    /// occupants it cannot replace.
+    /// `--force` would replace every occupant; otherwise the hint names the
+    /// occupants it does not replace. The error keeps the first refusal's
+    /// full conflict list either way.
     fn check_destination(
         self,
         listed: &ListedArchive,
@@ -255,21 +256,23 @@ impl WriteMode {
         let Err(refusal) = listed.check_destination(output_dir, check) else {
             return Ok(());
         };
-        let (error, advice) = match self {
-            Self::Safe => match listed.check_destination(output_dir, DestinationCheck::Replaceable)
-            {
-                Ok(()) => (refusal, ConflictAdvice::UseForce),
-                Err(unreplaceable) => (unreplaceable, ConflictAdvice::ForceCannotReplace),
-            },
-            Self::Force | Self::Atomic | Self::AtomicReplace => {
-                (refusal, ConflictAdvice::ForceCannotReplace)
+        let advice = match (self, &refusal) {
+            (Self::Safe, ArchiveError::DestinationOccupied { .. }) => {
+                match listed.check_destination(output_dir, DestinationCheck::Replaceable) {
+                    Ok(()) => ConflictAdvice::UseForce,
+                    Err(ArchiveError::DestinationOccupied { conflicts, .. }) => {
+                        ConflictAdvice::ForceCannotReplace(conflicts)
+                    }
+                    Err(_) => ConflictAdvice::ForceCannotReplace(Box::default()),
+                }
             }
+            _ => ConflictAdvice::ForceCannotReplace(Box::default()),
         };
         Err(convert_error_with_advice(
             Operation::Extract,
-            error,
+            refusal,
             archive,
-            advice,
+            &advice,
         ))
     }
 }
@@ -301,7 +304,7 @@ impl ExtractPlan {
         output_dir: &Path,
         config: &SecurityConfig,
         progress: &mut dyn ProgressCallback,
-        advice: ConflictAdvice,
+        advice: &ConflictAdvice,
     ) -> Result<ExtractionReport> {
         let result = match self {
             Self::Stream { options } => ExtractRequest::new(config)
@@ -398,7 +401,7 @@ pub fn execute(
         &output_dir,
         &config,
         progress.as_mut(),
-        write_mode.write_advice(),
+        &write_mode.write_advice(),
     );
     drop(progress);
     drop(guard);

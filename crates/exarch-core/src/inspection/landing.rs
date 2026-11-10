@@ -1189,6 +1189,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn hardlink_through_a_symlink_to_a_later_file_is_refused() {
         assert_hardlink_agrees(
@@ -1202,6 +1203,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn hardlink_through_a_symlink_to_an_earlier_file_is_extracted() {
         assert_hardlink_agrees(

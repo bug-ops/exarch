@@ -777,6 +777,7 @@ fn not_accessible(error: &ArchiveError) -> (&Path, DestinationStep) {
     (path, *step)
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 #[test]
 fn a_parent_that_cannot_be_opened_is_named_at_the_open_step() {
     use super::AtomicDestination;

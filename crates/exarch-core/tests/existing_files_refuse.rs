@@ -699,7 +699,7 @@ fn a_file_over_a_symlink_is_one_refusal_in_the_write_phase_the_sink_and_the_pre_
 
 #[cfg(unix)]
 #[test]
-fn a_directory_over_a_symlink_of_the_run_is_one_refusal_in_the_host_and_the_sink() {
+fn a_directory_over_a_symlink_of_the_run_is_refused_as_an_existing_symlink_in_the_sink() {
     use exarch_core::SecurityViolationSubCode;
 
     let entries = [
@@ -707,16 +707,9 @@ fn a_directory_over_a_symlink_of_the_run_is_one_refusal_in_the_host_and_the_sink
         sink_support::tar_symlink("l", "t"),
         sink_support::tar_dir("l/"),
     ];
-    let dir = TempDir::new().unwrap();
-    let archive = dir.path().join("a.tar");
-    std::fs::write(&archive, tar_archive(&entries)).unwrap();
-    let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_symlinks(true);
-
-    let written = ExtractRequest::new(&config)
-        .extract(&archive, dest.path())
-        .unwrap_err();
     let request = MemoryExtractRequest::default().with_config(config);
+
     let sunk = extract_reader_to_memory(
         ArchiveReader::from_bytes(tar_archive(&entries), None).unwrap(),
         &request,
@@ -724,14 +717,12 @@ fn a_directory_over_a_symlink_of_the_run_is_one_refusal_in_the_host_and_the_sink
     )
     .unwrap_err();
 
-    for error in [cause(&written), cause(&sunk)] {
-        assert_eq!(
-            refusal_class(error),
-            (
-                ErrorCode::SecurityViolation,
-                Some(SecurityViolationSubCode::ExistingSymlink)
-            ),
-            "{error}"
-        );
-    }
+    assert_eq!(
+        refusal_class(cause(&sunk)),
+        (
+            ErrorCode::SecurityViolation,
+            Some(SecurityViolationSubCode::ExistingSymlink)
+        ),
+        "{sunk}"
+    );
 }

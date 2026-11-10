@@ -7569,6 +7569,78 @@ fn test_extract_force_conflict_hint_does_not_repeat_force() {
     assert!(!hint.contains("Use --force"), "{hint}");
 }
 
+/// The hint of an `OutputExists` refusal of `members` under `flags`, for a
+/// destination `make_occupant` has prepared.
+fn occupied_hint(
+    members: &[TarMember<'_>],
+    flags: &[&str],
+    make_occupant: impl FnOnce(&std::path::Path),
+) -> String {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let tar = temp.path().join("o.tar");
+    write_tar(&tar, members);
+    let out = temp.path().join("out");
+    std::fs::create_dir_all(&out).expect("create out");
+    make_occupant(&out);
+
+    let stdout = exarch_cmd()
+        .args(["extract", "--json", "--allow-hardlinks"])
+        .args(flags)
+        .arg(&tar)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "OutputExists", "{json}");
+    json["error"]["hint"].as_str().expect("hint").to_owned()
+}
+
+/// A directory at a file's landing is never replaced in place, so neither
+/// mode promises that `--force` resolves it, and both name `--atomic --force`
+/// (#1157).
+#[test]
+fn test_extract_hint_for_a_directory_at_a_file_landing_names_atomic_force() {
+    for flags in [&[][..], &["--force"][..]] {
+        let hint = occupied_hint(&[TarMember::File("x")], flags, |out| {
+            std::fs::create_dir(out.join("x")).expect("create blocking directory");
+        });
+        assert!(hint.contains("--atomic"), "{flags:?}: {hint}");
+        assert!(!hint.contains("Use --force"), "{flags:?}: {hint}");
+    }
+}
+
+/// An occupant `--force` replaces keeps the plain advice (#1157).
+#[test]
+fn test_extract_hint_for_a_replaceable_file_still_says_use_force() {
+    let hint = occupied_hint(&[TarMember::File("x")], &[], |out| {
+        std::fs::write(out.join("x"), "old").expect("write occupant");
+    });
+    assert_eq!(hint, "Use --force to overwrite.");
+}
+
+/// A hardlink entry never replaces a file, so `--force` is no advice; the run
+/// refuses with the typed occupant error, not as a corrupt archive (#1154).
+#[test]
+fn test_extract_hardlink_over_an_existing_file_is_an_occupant_refusal() {
+    let members = [
+        TarMember::File("a"),
+        TarMember::Hardlink {
+            name: "b",
+            target: "a",
+        },
+    ];
+    for flags in [&[][..], &["--force"][..]] {
+        let hint = occupied_hint(&members, flags, |out| {
+            std::fs::write(out.join("b"), "old").expect("write occupant");
+        });
+        assert!(hint.contains("cannot replace"), "{flags:?}: {hint}");
+        assert!(!hint.contains("Use --force"), "{flags:?}: {hint}");
+    }
+}
+
 /// An I/O failure carries the same `io_kind` token the bindings report (#1016).
 #[test]
 fn test_json_io_error_carries_io_kind() {
@@ -7868,7 +7940,8 @@ fn test_list_reports_dispositions_only_under_a_selection() {
 }
 
 /// `list --destination` probes the destination volume without creating it; a
-/// destination that cannot be resolved is a failure (#1144).
+/// destination that cannot be resolved is a failure when a selection needs it
+/// (#1144), and ignored for a plain listing (#1160).
 #[test]
 fn test_list_destination_probes_without_creating() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -7893,6 +7966,13 @@ fn test_list_destination_probes_without_creating() {
     exarch_cmd()
         .arg("list")
         .arg("--destination")
+        .arg(file.join("sub"))
+        .arg(&archive)
+        .assert()
+        .success();
+
+    exarch_cmd()
+        .args(["list", "--strip-components", "1", "--destination"])
         .arg(file.join("sub"))
         .arg(&archive)
         .assert()

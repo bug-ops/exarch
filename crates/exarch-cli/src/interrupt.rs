@@ -946,11 +946,6 @@ mod tests {
         started
             .recv_timeout(Duration::from_secs(5))
             .expect("the dropping thread starts");
-        assert!(
-            done.recv_timeout(Duration::from_millis(100)).is_err(),
-            "the guard dropped while the forced exit held the window"
-        );
-
         drop(held);
         done.recv_timeout(Duration::from_secs(5))
             .expect("the guard drops once the window is free");

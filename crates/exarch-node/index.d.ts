@@ -172,6 +172,7 @@ export interface ExarchNativeError extends Error {
   backupPath?: undefined
   leftoverPath?: undefined
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -196,6 +197,7 @@ export interface ExarchInvalidArchiveDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -215,6 +217,7 @@ export interface ExarchSecurityViolationDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -234,6 +237,7 @@ export interface ExarchInvalidConfigurationDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
+  by?: undefined
   /** Why a destination is too important to replace as a whole. */
   protectedPath?: ProtectedPath
   /** The two creation sources that map to one entry name. */
@@ -258,6 +262,7 @@ export interface ExarchIoDetail {
   /** Where the original destination remains when `restore` is `'failed'`, redacted like an error path. */
   backupPath?: string
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -278,6 +283,7 @@ export interface ExarchQuotaDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -297,6 +303,7 @@ export interface ExarchZipBombDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -323,6 +330,7 @@ export interface ExarchSourceNotAccessibleDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -341,12 +349,14 @@ export interface ExarchOutputExistsDetail {
   nonUtf8EntryPath?: undefined
   errno?: undefined
   strerror?: undefined
-  /** The existing output, or the destination an extraction refused to touch, redacted like an error path. */
-  path: string
+  /** The existing output, or the destination an extraction refused to touch, redacted like an error path; absent when the refusal has no destination (an in-memory extraction). */
+  path?: string
   restore?: undefined
   backupPath?: undefined
   /** The entry names that stopped a `'refuse'` extraction, as the archive spells them. */
   conflicts?: Array<string>
+  /** Who made the occupant of the first conflict: `'existing'` (it was there before the run, or its maker is unknown) or `'archive'` (an earlier entry of the same archive). */
+  by?: 'existing' | 'archive' | (string & {})
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -364,6 +374,7 @@ export interface ExarchSourceNotFoundDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -393,6 +404,7 @@ export interface ExarchPlainCodeDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -552,6 +564,7 @@ export interface HeuristicIssueDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
+  by?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -2272,7 +2285,7 @@ export interface ExtractionReport {
   /** The skipped entries by reason. */
   skipped: SkippedSummary
   /** What download-origin mark propagation did. */
-  markPropagation: 'not_requested' | 'unsupported_platform' | 'unmarked' | 'unreadable' | 'propagated'
+  markPropagation: 'not_requested' | 'unsupported_platform' | 'unmarked' | 'unreadable' | 'propagated' | (string & {})
   /** Files (and, on macOS, directories) that now carry the mark. */
   marksWritten: number
   /** Files (and directories) whose mark could not be written. */

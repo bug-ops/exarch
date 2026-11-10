@@ -770,10 +770,8 @@ fn list_core(
     destination: Option<&str>,
 ) -> CoreResult<ArchiveManifest> {
     let archive_path = boundary_path(archive_path)?;
-    let volume = destination.map(boundary_path).transpose()?.map_or_else(
-        || Ok(exarch_core::VolumeIdentity::default()),
-        |destination| exarch_core::VolumeIdentity::of_destination(destination.as_ref()),
-    )?;
+    let destination = destination.map(boundary_path).transpose()?;
+    let volume = exarch_core::VolumeIdentity::of_optional(destination.as_ref().map(AsRef::as_ref))?;
     ArchiveManifest::from_core(
         exarch_core::ListRequest::new(config)
             .with_options(options)

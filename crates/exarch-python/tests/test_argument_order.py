@@ -58,7 +58,7 @@ def test_verify_archive_bytes_with_progress_takes_options_format_progress():
         "Tar",
         lambda *args: seen.append(args[0]),
     )
-    assert report.is_safe()
+    assert report.is_safe
     assert seen == ["a.txt"]
 
 

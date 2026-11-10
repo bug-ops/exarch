@@ -121,7 +121,7 @@ describe('InvalidArchive families', () => {
     assert.strictEqual(err.subCode, 'LINK_TARGET');
   });
 
-  it('a duplicate hardlink is DUPLICATE_ENTRY', async () => {
+  it('a hardlink over an existing path is an OUTPUT_EXISTS refusal', async () => {
     const bytes = tarOf(
       { name: 't', data: Buffer.from('x') },
       { name: 'h', type: '1', linkname: 't' },
@@ -130,8 +130,9 @@ describe('InvalidArchive families', () => {
     const config = new SecurityConfig().withAllowHardlinks(true);
     const options = new ExtractionOptions().withExistingFiles('overwrite');
     const err = await extractFailure('dup.tar', bytes, config, options);
-    assert.strictEqual(err.code, 'INVALID_ARCHIVE');
-    assert.strictEqual(err.subCode, 'DUPLICATE_ENTRY');
+    assert.strictEqual(err.code, 'OUTPUT_EXISTS');
+    assert.deepStrictEqual(err.conflicts, ['h']);
+    assert.ok(['existing', 'archive'].includes(err.by), String(err.by));
   });
 
   it('a forged ZIP compressed size is DECLARED_SIZE', async () => {

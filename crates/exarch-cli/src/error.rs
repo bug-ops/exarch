@@ -20,7 +20,6 @@ use crate::output::skip_breakdown_lines;
 use crate::output::terminal::TerminalEntry;
 use crate::output::terminal::TerminalPath;
 use crate::output::terminal::TerminalText;
-use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveType;
 use exarch_core::CompressionRatio;
@@ -550,10 +549,16 @@ pub fn chain_text(error: &anyhow::Error) -> String {
 pub enum ConflictAdvice {
     /// Existing files are refused: `--force` overwrites them.
     UseForce,
-    /// `--force` is already on, and a file cannot be replaced by a directory.
+    /// `--force` cannot replace what the destination holds at these paths,
+    /// all of which existed before the run; only replacing the whole
+    /// destination, removal or another destination resolves them.
     ForceCannotReplace,
-    /// The archive itself needs a directory where it also writes a file or
-    /// link; no flag changes that.
+    /// `--force` was on and the write phase refused an occupant whose maker
+    /// is unknown, so it may be an earlier entry of the archive and
+    /// replacing the whole destination may not help.
+    ForceRefused,
+    /// The archive itself writes two entries where only one fits, such as a
+    /// file or link where it also makes a directory; no flag changes that.
     ArchiveConflict,
 }
 
@@ -563,11 +568,16 @@ impl ConflictAdvice {
         match self {
             Self::UseForce => format!("Use {force} to overwrite."),
             Self::ForceCannotReplace => format!(
-                "{force} cannot replace a file with a directory; remove the listed files or \
-                 choose another destination."
+                "{force} cannot replace these paths in place; remove them, choose another \
+                 destination, or use {force} with {} to replace the whole destination.",
+                Flag::Atomic.long()
             ),
-            Self::ArchiveConflict => "The archive writes a file or link at a path where it also \
-                                     makes a directory; no flag allows that."
+            Self::ForceRefused => format!(
+                "{force} cannot replace these paths; remove them or choose another destination."
+            ),
+            Self::ArchiveConflict => "The archive writes more than one entry at a path where \
+                                     only one fits, such as a file or link where it also makes \
+                                     a directory; no flag allows that."
                 .to_owned(),
         }
     }
@@ -587,7 +597,11 @@ const MAX_LISTED_CONFLICTS: usize = 10;
 ///
 /// The advice that depends on the write mode is the message's hint, never part
 /// of its text.
-fn occupied_message(destination: &Path, conflicts: &[PathBuf], advice: ConflictAdvice) -> Message {
+fn occupied_message(
+    destination: Option<&Path>,
+    conflicts: &[PathBuf],
+    advice: ConflictAdvice,
+) -> Message {
     let count = conflicts.len();
     let noun = if count == 1 { "file" } else { "files" };
     let verb = if count == 1 { "exists" } else { "exist" };
@@ -604,9 +618,13 @@ fn occupied_message(destination: &Path, conflicts: &[PathBuf], advice: ConflictA
     };
     // The destination keeps its native spelling; the entry part is rendered
     // the way the archive names it.
-    let destination = destination.join("");
+    let destination = destination.map(|destination| destination.join(""));
     for path in conflicts.iter().take(MAX_LISTED_CONFLICTS) {
-        message = message.lit("\n  ").path(&destination).entry(path);
+        message = message.lit("\n  ");
+        if let Some(destination) = &destination {
+            message = message.path(destination);
+        }
+        message = message.entry(path);
     }
     if remaining > 0 {
         message = message
@@ -1141,13 +1159,9 @@ fn dedicated_context(
             by,
         } => match by {
             OccupiedBy::Archive => {
-                occupied_message(Path::new(""), conflicts, ConflictAdvice::ArchiveConflict)
+                occupied_message(None, conflicts, ConflictAdvice::ArchiveConflict)
             }
-            _ => occupied_message(
-                destination.as_deref().unwrap_or_else(|| Path::new("")),
-                conflicts,
-                advice,
-            ),
+            _ => occupied_message(destination.as_deref(), conflicts, advice),
         },
         ArchiveError::InvalidPermissions { mode, .. } => message.text(format!(
             "Invalid permissions {:#o}: blocked by security policy.",
@@ -1203,15 +1217,6 @@ pub fn is_cancelled(error: &anyhow::Error) -> bool {
         .chain()
         .filter_map(|link| link.downcast_ref::<ArchiveError>())
         .any(ArchiveError::is_cancelled)
-}
-
-/// Adds context to a generic error about archive operations.
-pub fn add_archive_context<T>(
-    op: Operation,
-    result: Result<T, ArchiveError>,
-    archive: &Path,
-) -> anyhow::Result<T> {
-    result.map_err(|e| convert_error(op, e, archive))
 }
 
 #[cfg(test)]
@@ -2250,7 +2255,7 @@ mod tests {
 
     fn occupied_text(conflicts: &[PathBuf]) -> String {
         terminal(
-            &occupied_message(Path::new(""), conflicts, ConflictAdvice::UseForce)
+            &occupied_message(None, conflicts, ConflictAdvice::UseForce)
                 .into_context()
                 .parts(),
         )
@@ -2302,11 +2307,11 @@ mod tests {
 
     #[test]
     fn occupied_advice_is_the_hint_and_follows_the_write_mode() {
-        let context =
-            |advice| occupied_message(Path::new(""), &[PathBuf::from("a")], advice).into_context();
+        let context = |advice| occupied_message(None, &[PathBuf::from("a")], advice).into_context();
         for advice in [
             ConflictAdvice::UseForce,
             ConflictAdvice::ForceCannotReplace,
+            ConflictAdvice::ForceRefused,
             ConflictAdvice::ArchiveConflict,
         ] {
             let context = context(advice);
@@ -2322,7 +2327,12 @@ mod tests {
         );
         let cannot = ConflictAdvice::ForceCannotReplace.hint();
         assert!(cannot.contains("cannot replace"), "{cannot}");
+        assert!(cannot.contains("--atomic"), "{cannot}");
         assert!(!cannot.contains("Use --force"), "{cannot}");
+        let refused = ConflictAdvice::ForceRefused.hint();
+        assert!(refused.contains("cannot replace"), "{refused}");
+        assert!(!refused.contains("--atomic"), "{refused}");
+        assert!(!refused.contains("Use --force"), "{refused}");
     }
 
     #[test]

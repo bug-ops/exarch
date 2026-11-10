@@ -238,11 +238,23 @@ export function abortableCalls(data: Uint8Array): Promise<unknown>[] {
 }
 
 export function pathOfARefusedSource(err: ExarchCoreError): string | undefined {
-  if (err.code === 'SOURCE_NOT_FOUND' || err.code === 'OUTPUT_EXISTS') {
+  if (err.code === 'SOURCE_NOT_FOUND') {
     const path: string = err.path
     return path
   }
+  if (err.code === 'OUTPUT_EXISTS') {
+    const path: string | undefined = err.path
+    return path
+  }
   return err.leftoverPath
+}
+
+export function occupantOf(err: ExarchCoreError): string | undefined {
+  if (err.code === 'OUTPUT_EXISTS') {
+    const by: 'existing' | 'archive' | (string & {}) | undefined = err.by
+    return by
+  }
+  return undefined
 }
 
 export function dispositionOutcome(disposition: EntryDisposition): string {

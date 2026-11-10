@@ -11,8 +11,8 @@ Language conventions are not drift: a Node field is the camelCase of the Python
 one. `RENAMED` lists the deliberate differences. The one difference of value
 rather than name is the unit of `modified`: float seconds in Python, integer
 milliseconds in Node; each stub documents its own, and `ArchiveEntry` below
-shares the name only. A Node report is a plain object, so a Python helper method
-(`is_safe()`, `compression_ratio()`) is the Node property of the same name.
+shares the name only. A Node report is a plain object, so a Python helper
+(`is_safe`, `compression_ratio`) is the Node property of the same name.
 """
 
 import re

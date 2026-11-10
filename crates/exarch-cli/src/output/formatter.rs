@@ -436,37 +436,28 @@ impl From<&CreationWarning> for JsonWarning {
 }
 
 /// What download-origin mark propagation did, as the `mark_propagation` field.
+///
+/// `state` is the core token of the outcome, so a state added to core appears
+/// under its own name; the counts exist only for a propagated mark.
 #[derive(Debug, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum JsonMarkPropagation {
-    /// Propagation was not requested.
-    NotRequested,
-    /// The platform defines no mark.
-    UnsupportedPlatform,
-    /// The archive file bears no mark.
-    Unmarked,
-    /// The archive file's mark could not be read or is malformed.
-    Unreadable,
-    /// The archive file is marked; `marked` objects carry the mark and
-    /// `failed` could not be marked.
-    Propagated {
-        /// Objects that carry the mark.
-        marked: usize,
-        /// Objects whose mark could not be written.
-        failed: usize,
-    },
+pub struct JsonMarkPropagation {
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    marked: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed: Option<usize>,
 }
 
 impl From<MarkOutcome> for JsonMarkPropagation {
     fn from(outcome: MarkOutcome) -> Self {
-        match outcome {
-            MarkOutcome::UnsupportedPlatform => Self::UnsupportedPlatform,
-            MarkOutcome::Unmarked => Self::Unmarked,
-            MarkOutcome::Unreadable => Self::Unreadable,
-            MarkOutcome::Propagated { marked, failed } => Self::Propagated { marked, failed },
-            // `MarkOutcome` is non-exhaustive; a state this CLI does not know
-            // says only that nothing it can describe happened.
-            MarkOutcome::NotRequested | _ => Self::NotRequested,
+        let counts = match outcome {
+            MarkOutcome::Propagated { marked, failed } => Some((marked, failed)),
+            _ => None,
+        };
+        Self {
+            state: outcome.state().as_str(),
+            marked: counts.map(|(marked, _)| marked),
+            failed: counts.map(|(_, failed)| failed),
         }
     }
 }
@@ -604,7 +595,47 @@ impl JsonError {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use exarch_core::MarkState;
     use std::path::PathBuf;
+
+    fn mark_outcome_of(state: MarkState) -> MarkOutcome {
+        match state {
+            MarkState::NotRequested => MarkOutcome::NotRequested,
+            MarkState::UnsupportedPlatform => MarkOutcome::UnsupportedPlatform,
+            MarkState::Unmarked => MarkOutcome::Unmarked,
+            MarkState::Unreadable => MarkOutcome::Unreadable,
+            MarkState::Propagated => MarkOutcome::Propagated {
+                marked: 2,
+                failed: 1,
+            },
+            _ => panic!("a mark state without a sample outcome: {state:?}"),
+        }
+    }
+
+    #[test]
+    fn every_mark_state_reports_its_core_token_in_json() {
+        for &state in MarkState::ALL {
+            let json =
+                serde_json::to_value(JsonMarkPropagation::from(mark_outcome_of(state))).unwrap();
+            assert_eq!(json["state"], state.as_str());
+            let counted = state == MarkState::Propagated;
+            assert_eq!(json.get("marked").is_some(), counted, "{state:?}");
+            assert_eq!(json.get("failed").is_some(), counted, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_propagated_mark_reports_its_counts() {
+        let json = serde_json::to_value(JsonMarkPropagation::from(MarkOutcome::Propagated {
+            marked: 2,
+            failed: 1,
+        }))
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"state": "propagated", "marked": 2, "failed": 1})
+        );
+    }
 
     #[test]
     fn a_utf8_host_path_is_the_exact_string() {
